@@ -40,6 +40,7 @@ D1_PASS_VERDICTS = frozenset({"PASS"})
 _ULTRA_ISSUER_BINDING = "USER_TOP_LEVEL_EXECUTION_DIRECTIVE"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_INVOCATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 # These names are recognized only at the caller's context envelope.  They are
 # never applied recursively: a register ``id``, protocol ``mode`` or nested
 # block ``project`` is legitimate design input and must remain AI-visible.
@@ -55,22 +56,7 @@ _TOP_LEVEL_COORDINATOR_KEYS = {
 }
 
 _ULTRA_DIRECTIVE_RE = re.compile(
-    r"(?:\bexecution\s+mode\s*:\s*ultra\b|\buse\s+ultra(?:[-\s]mode)\b)",
-    re.IGNORECASE,
-)
-_ULTRA_NEGATED_RE = re.compile(
-    r"(?:\b(?:do\s*not|don't|never|avoid|without|cannot|can't|no)\s+"
-    r"(?:use\s+)?ultra(?:[-\s]mode)?\b|\b(?:do\s*not|don't|never|"
-    r"avoid|without)\s+(?:set\s+|select\s+|choose\s+)?execution\s+"
-    r"mode\s*:\s*ultra\b|\b(?:not|no)\s+execution\s+mode\s*:\s*"
-    r"ultra\b|\b(?:use\s+)?(?:default|standard|normal)\s+mode\b|"
-    r"\bexecution\s+mode\s*:\s*(?:default|standard|normal)\b|"
-    r"\buse\s+(?:default|standard|normal)\s+mode\b|\buse\s+default\b)",
-    re.IGNORECASE,
-)
-_ULTRA_CONDITIONAL_RE = re.compile(
-    r"\b(?:if|when|unless|should|could|might|maybe|perhaps|optionally|"
-    r"conditional(?:ly)?)\b",
+    r"(?:execution\s+mode\s*:\s*ultra|(?:please\s+)?use\s+ultra[-\s]mode)\.?",
     re.IGNORECASE,
 )
 
@@ -327,23 +313,25 @@ class RouteDecisionReceipt:
 
 
 def _unambiguous_ultra_text(text: str) -> bool:
-    """Recognize one affirmative user directive, never a keyword hint.
+    """Accept only an entire top-level directive, never prose substrings.
 
-    This helper is intentionally conservative.  A phrase that mentions a
-    negation, a conditional, or a competing/default mode is analysis context,
-    not an execution authorization.
+    Negation/condition/conflict lists are inherently incomplete.  Requiring
+    the whole value to be one directive rejects all surrounding prose,
+    including quotations, prohibitions and default overrides.
     """
-    text = str(text)
-    if len(_ULTRA_DIRECTIVE_RE.findall(text)) != 1:
-        return False
-    if _ULTRA_NEGATED_RE.search(text) or _ULTRA_CONDITIONAL_RE.search(text):
-        return False
-    return True
+    return isinstance(text, str) and bool(_ULTRA_DIRECTIVE_RE.fullmatch(text.strip()))
 
 
 def _typed_ultra_directive(value: Any) -> dict | None:
     """Validate the canonical, top-level user execution directive."""
     if not isinstance(value, Mapping):
+        return None
+    allowed = {
+        "schema", "source", "issuer_binding", "execution_mode", "text",
+        "evidence_sha256", "directive_sha256", "request_digest",
+        "evidence_binding_sha256",
+    }
+    if set(value) - allowed:
         return None
     if value.get("schema") != EXECUTION_MODE_DIRECTIVE_SCHEMA:
         return None
@@ -398,8 +386,7 @@ def mode_intent(*, semantic_request: Mapping[str, Any],
 
 
 def explicit_ultra_evidence(text: str, *, source: str = "user") -> dict | None:
-    """Return a typed user directive, never a bare keyword match."""
-    text = str(text)
+    """Normalize a complete top-level directive; free prose cannot issue it."""
     if str(source).lower() != "user" or not _unambiguous_ultra_text(text):
         return None
     body = {
@@ -462,21 +449,30 @@ def validate_route_receipt(receipt: Mapping[str, Any], *, dag: dict | None = Non
     closed = receipt.get("verify_closed_steps")
     if not isinstance(closed, list) or any(str(x) not in dag["steps"] for x in closed):
         errors.append("ROUTE_RECEIPT_CLOSURE_INVALID")
-    if isinstance(closed, list):
-        mins = receipt.get("minimum_steps")
-        try:
-            joined = dependency_closed_join(
-                mins if isinstance(mins, list) and mins else
-                [str(receipt.get("entry_step")), str(receipt.get("verify_through"))],
-                dag=dag)
-        except ValueError:
-            errors.append("ROUTE_RECEIPT_MINIMUMS_INVALID")
-        else:
-            if receipt.get("verify_through") != joined["step"]:
-                errors.append("ROUTE_RECEIPT_VERIFY_BELOW_MINIMUM")
-            expected = joined["closed_steps"]
-            if set(closed) != set(expected):
-                errors.append("ROUTE_RECEIPT_CLOSURE_NOT_DEPENDENCY_CLOSED")
+    # Re-derive all minima from the trusted product tables.  Receipt fields are
+    # evidence of what was emitted, never authority for lowering the route.
+    try:
+        import task_nature_route as _tnr  # noqa: PLC0415
+        entry, evidence_min, target_min, answer = _minimum_from_maps(
+            str(receipt.get("task_nature")),
+            str(receipt.get("requested_evidence")),
+            str(receipt.get("delivery_target")),
+            _tnr.NATURE_ENTRY, _tnr.EVIDENCE_EXIT, _tnr.DELIVERY_TARGETS)
+        trusted_join = dependency_closed_join(
+            (entry, evidence_min, target_min), dag=dag)
+    except (ImportError, KeyError, TypeError, ValueError):
+        errors.append("ROUTE_RECEIPT_TRUSTED_TABLES_INVALID")
+    else:
+        if receipt.get("entry_step") != entry:
+            errors.append("ROUTE_RECEIPT_ENTRY_NOT_TABLE_BOUND")
+        if receipt.get("answer_step") != answer:
+            errors.append("ROUTE_RECEIPT_ANSWER_NOT_TABLE_BOUND")
+        if receipt.get("verify_through") != trusted_join["step"]:
+            errors.append("ROUTE_RECEIPT_VERIFY_BELOW_MINIMUM")
+        if receipt.get("minimum_steps") != trusted_join["minimums"]:
+            errors.append("ROUTE_RECEIPT_MINIMUMS_NOT_TABLE_BOUND")
+        if closed != trusted_join["closed_steps"]:
+            errors.append("ROUTE_RECEIPT_CLOSURE_NOT_DEPENDENCY_CLOSED")
     body = {k: receipt.get(k) for k in (
         "schema", "entry_step", "answer_step", "verify_through",
         "verify_closed_steps", "minimum_steps", "task_nature", "requested_evidence",
@@ -484,13 +480,23 @@ def validate_route_receipt(receipt: Mapping[str, Any], *, dag: dict | None = Non
         "source_sha256", "dag_sha256")}
     if receipt.get("receipt_sha256") != sha256_json(body):
         errors.append("ROUTE_RECEIPT_DIGEST_MISMATCH")
+    for key in ("semantic_payload_sha256", "source_sha256"):
+        if not _HEX64.fullmatch(str(receipt.get(key) or "")):
+            errors.append(f"ROUTE_RECEIPT_{key.upper()}_INVALID")
     mode = receipt.get("mode_intent")
     if not isinstance(mode, Mapping) or mode.get("authority") not in {
             "PROGRAM_DEFAULT", "USER_EXPLICIT_ULTRA"}:
         errors.append("ROUTE_RECEIPT_MODE_INVALID")
-    elif mode.get("authority") == "PROGRAM_DEFAULT" and mode.get("ultra_match") is not False:
-        errors.append("ROUTE_RECEIPT_UNREQUESTED_ULTRA")
+    elif mode.get("authority") == "PROGRAM_DEFAULT":
+        if set(mode) != {"authority", "request_digest", "ultra_match"}:
+            errors.append("ROUTE_RECEIPT_MODE_SCHEMA_INVALID")
+        if mode.get("ultra_match") is not False:
+            errors.append("ROUTE_RECEIPT_UNREQUESTED_ULTRA")
     elif mode.get("authority") == "USER_EXPLICIT_ULTRA":
+        if set(mode) != {
+                "authority", "request_digest", "ultra_match",
+                "evidence_sha256", "issuer_binding", "ultra_evidence"}:
+            errors.append("ROUTE_RECEIPT_ULTRA_SCHEMA_INVALID")
         # Authority is a typed user evidence contract.  Recomputing the outer
         # receipt digest cannot turn arbitrary metadata into authorization.
         if mode.get("ultra_match") is not True:
@@ -546,13 +552,20 @@ def activate_d1(*, pending: Mapping[str, Any], route_receipt: Mapping[str, Any],
                 ldoc_root_handle: str | None = None,
                 d1_gate: Mapping[str, Any] | None = None) -> dict:
     """Create a route-bound activation receipt after D1 emitted provenance."""
+    route_errors = validate_route_receipt(route_receipt)
+    if route_errors:
+        raise ValueError("D1_ACTIVATION_ROUTE_INVALID: " + ", ".join(route_errors))
     if pending.get("status") != D1_PENDING:
         raise ValueError("D1_ACTIVATION_PENDING_MISSING")
     if pending.get("route_receipt_sha256") != route_receipt.get("receipt_sha256"):
         raise ValueError("D1_ACTIVATION_ROUTE_MISMATCH")
     if pending.get("source_sha256") != source_sha256 or route_receipt.get("source_sha256") != source_sha256:
         raise ValueError("D1_ACTIVATION_SOURCE_MISMATCH")
-    if task_sha256 is not None and pending.get("task_sha256") != str(task_sha256):
+    if not str(task_sha256 or "").strip():
+        raise ValueError("D1_ACTIVATION_TASK_MISSING")
+    if not str(ldoc_root_handle or "").strip():
+        raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISSING")
+    if pending.get("task_sha256") != str(task_sha256):
         raise ValueError("D1_ACTIVATION_TASK_MISMATCH")
     if provenance.get("ran") is not True or not _HEX64.fullmatch(str(provenance.get("digest") or "")):
         raise ValueError("D1_ACTIVATION_PROVENANCE_MISSING")
@@ -564,11 +577,10 @@ def activate_d1(*, pending: Mapping[str, Any], route_receipt: Mapping[str, Any],
             "route_receipt_sha256": route_receipt["receipt_sha256"],
             "source_sha256": source_sha256,
             "d1_provenance_sha256": provenance["digest"],
-            "d1_gate_sha256": d1_gate["gate_sha256"]}
-    if task_sha256 is not None:
-        body["task_sha256"] = str(task_sha256)
-    if ldoc_root_handle is not None:
-        body["ldoc_root_handle"] = str(ldoc_root_handle)
+            "d1_gate_sha256": d1_gate["gate_sha256"],
+            "d1_gate": dict(d1_gate),
+            "task_sha256": str(task_sha256),
+            "ldoc_root_handle": str(ldoc_root_handle)}
     return {**body, "activation_sha256": sha256_json(body)}
 
 
@@ -579,8 +591,20 @@ def require_d1_activation(activation: Mapping[str, Any] | None,
     """Fail closed on missing or foreign route/source activation."""
     if not after_d1:
         return
+    route_errors = validate_route_receipt(route_receipt)
+    if route_errors:
+        raise ValueError("D1_ACTIVATION_ROUTE_INVALID: " + ", ".join(route_errors))
     if not isinstance(activation, Mapping) or activation.get("status") != D1_ACTIVATED:
         raise ValueError("D1_ACTIVATION_REQUIRED")
+    required = {
+        "schema", "status", "route_receipt_sha256", "source_sha256",
+        "d1_provenance_sha256", "d1_gate_sha256", "d1_gate",
+        "task_sha256", "ldoc_root_handle", "activation_sha256",
+    }
+    if set(activation) != required:
+        raise ValueError("D1_ACTIVATION_SCHEMA_FIELDS_INVALID")
+    if activation.get("schema") != D1_ACTIVATION_SCHEMA:
+        raise ValueError("D1_ACTIVATION_SCHEMA_INVALID")
     if activation.get("route_receipt_sha256") != route_receipt.get("receipt_sha256"):
         raise ValueError("D1_ACTIVATION_ROUTE_MISMATCH")
     if activation.get("source_sha256") != route_receipt.get("source_sha256"):
@@ -589,10 +613,27 @@ def require_d1_activation(activation: Mapping[str, Any] | None,
         raise ValueError("D1_ACTIVATION_TASK_MISMATCH")
     if ldoc_root_handle is not None and activation.get("ldoc_root_handle") != str(ldoc_root_handle):
         raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISMATCH")
+    if (not _HEX64.fullmatch(str(activation.get("source_sha256") or ""))
+            or not _HEX64.fullmatch(str(activation.get("d1_provenance_sha256") or ""))
+            or not _HEX64.fullmatch(str(activation.get("d1_gate_sha256") or ""))):
+        raise ValueError("D1_ACTIVATION_DIGEST_FIELD_INVALID")
+    if not str(activation.get("task_sha256") or "").strip():
+        raise ValueError("D1_ACTIVATION_TASK_MISSING")
+    if not str(activation.get("ldoc_root_handle") or "").strip():
+        raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISSING")
+    gate = activation.get("d1_gate")
+    provenance = {"ran": True, "digest": activation["d1_provenance_sha256"]}
+    _validate_d1_gate(
+        gate, route_receipt=route_receipt, provenance=provenance,
+        source_sha256=activation["source_sha256"],
+        task_sha256=activation["task_sha256"],
+        ldoc_root_handle=activation["ldoc_root_handle"])
+    if gate.get("gate_sha256") != activation["d1_gate_sha256"]:
+        raise ValueError("D1_ACTIVATION_GATE_DIGEST_MISMATCH")
     body = {k: activation.get(k) for k in (
         "schema", "status", "route_receipt_sha256", "source_sha256",
-        "d1_provenance_sha256", "d1_gate_sha256", "task_sha256", "ldoc_root_handle")}
-    body = {k: v for k, v in body.items() if v is not None}
+        "d1_provenance_sha256", "d1_gate_sha256", "d1_gate", "task_sha256",
+        "ldoc_root_handle")}
     if activation.get("activation_sha256") != sha256_json(body):
         raise ValueError("D1_ACTIVATION_DIGEST_MISMATCH")
 
@@ -626,6 +667,13 @@ def _validate_d1_gate(gate: Mapping[str, Any] | None, *,
                       task_sha256: str | None, ldoc_root_handle: str | None) -> None:
     if not isinstance(gate, Mapping):
         raise ValueError("D1_ACTIVATION_GATE_MISSING")
+    required = {
+        "schema", "step", "verdict", "current_call", "invocation_id",
+        "report_sha256", "route_receipt_sha256", "source_sha256", "task_sha256",
+        "ldoc_root_handle", "d1_provenance_sha256", "waiver_receipt", "gate_sha256",
+    }
+    if set(gate) != required:
+        raise ValueError("D1_ACTIVATION_GATE_SCHEMA_FIELDS_INVALID")
     if gate.get("schema") != D1_GATE_SCHEMA or gate.get("step") != "D1":
         raise ValueError("D1_ACTIVATION_GATE_INVALID")
     if (gate.get("verdict") not in D1_PASS_VERDICTS
@@ -633,15 +681,32 @@ def _validate_d1_gate(gate: Mapping[str, Any] | None, *,
         raise ValueError("D1_ACTIVATION_GATE_NOT_PASS")
     if gate.get("current_call") is not True:
         raise ValueError("D1_ACTIVATION_GATE_NOT_CURRENT")
+    invocation_id = gate.get("invocation_id")
+    if not isinstance(invocation_id, str) or not _INVOCATION_ID.fullmatch(invocation_id):
+        raise ValueError("D1_ACTIVATION_GATE_INVOCATION_INVALID")
+    if not _HEX64.fullmatch(str(gate.get("report_sha256") or "")):
+        raise ValueError("D1_ACTIVATION_GATE_REPORT_DIGEST_INVALID")
+    if not _HEX64.fullmatch(str(gate.get("route_receipt_sha256") or "")):
+        raise ValueError("D1_ACTIVATION_GATE_ROUTE_DIGEST_INVALID")
+    if not _HEX64.fullmatch(str(gate.get("source_sha256") or "")):
+        raise ValueError("D1_ACTIVATION_GATE_SOURCE_DIGEST_INVALID")
+    if not str(gate.get("task_sha256") or "").strip():
+        raise ValueError("D1_ACTIVATION_GATE_TASK_MISSING")
+    if not str(gate.get("ldoc_root_handle") or "").strip():
+        raise ValueError("D1_ACTIVATION_GATE_LDOC_ROOT_MISSING")
+    if not _HEX64.fullmatch(str(gate.get("d1_provenance_sha256") or "")):
+        raise ValueError("D1_ACTIVATION_GATE_PROVENANCE_DIGEST_INVALID")
+    if not _HEX64.fullmatch(str(gate.get("gate_sha256") or "")):
+        raise ValueError("D1_ACTIVATION_GATE_DIGEST_INVALID")
     checks = {
         "route_receipt_sha256": route_receipt.get("receipt_sha256"),
         "source_sha256": source_sha256,
-        "task_sha256": str(task_sha256) if task_sha256 is not None else None,
-        "ldoc_root_handle": str(ldoc_root_handle) if ldoc_root_handle is not None else None,
+        "task_sha256": str(task_sha256),
+        "ldoc_root_handle": str(ldoc_root_handle),
         "d1_provenance_sha256": provenance.get("digest"),
     }
     for key, expected in checks.items():
-        if expected is not None and gate.get(key) != expected:
+        if gate.get(key) != expected:
             raise ValueError(f"D1_ACTIVATION_GATE_{key.upper()}_MISMATCH")
     if gate.get("verdict") == "PASS_WITH_WAIVERS":
         waiver = gate.get("waiver_receipt")
@@ -714,3 +779,31 @@ def admit_canonical_step(*, step: str, pending: Mapping[str, Any] | None,
     if source_sha256 is not None and activation.get("source_sha256") != source_sha256:
         raise ValueError("D1_ACTIVATION_SOURCE_MISMATCH")
     return D1_ACTIVATED
+
+
+def admit_route_closure(*, pending: Mapping[str, Any],
+                        activation: Mapping[str, Any],
+                        route_receipt: Mapping[str, Any],
+                        task_sha256: str, source_sha256: str,
+                        ldoc_root_handle: str) -> list[str]:
+    """Admit every trusted closure member in canonical order.
+
+    This is deliberately separate from the scalar runner exit: a receipt that
+    claims only Step 1 cannot hide Step 4 or any other table-derived proof
+    obligation, and each admitted member crosses the same D1 activation gate.
+    """
+    errors = validate_route_receipt(route_receipt)
+    if errors:
+        raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(errors))
+    dag = canonical_dag()
+    admitted = []
+    for step in route_receipt["verify_closed_steps"]:
+        admit_canonical_step(
+            step=step, pending=pending, activation=activation,
+            route_receipt=route_receipt, task_sha256=task_sha256,
+            source_sha256=source_sha256, ldoc_root_handle=ldoc_root_handle)
+        admitted.append(step)
+    if admitted != [step for step in dag["steps"]
+                    if step in route_receipt["verify_closed_steps"]]:
+        raise ValueError("ROUTE_CLOSURE_ADMISSION_ORDER_INVALID")
+    return admitted

@@ -5091,6 +5091,8 @@ def _receipt_current_pointer(project: Path, kind: str) -> Path:
 
 _RECEIPT_ENVELOPE_SCHEMA = "vibeic.run_receipt_envelope.v1"
 _RECEIPT_POINTER_SCHEMA = "vibeic.current_receipt_pointer.v2"
+_RECEIPT_HISTORY_SCHEMA = "vibeic.receipt_history_entry.v1"
+_RECEIPT_HISTORY_HEAD_SCHEMA = "vibeic.receipt_history_head.v1"
 _RECEIPT_UNSET = object()
 
 
@@ -5119,6 +5121,22 @@ def _receipt_lock_path(project: Path, kind: str) -> Path:
             f"{kind}.current.lock")
 
 
+def _receipt_history_dir(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            str(kind) / "history")
+
+
+def _receipt_history_path(project: Path, kind: str, sequence: int) -> Path:
+    if int(sequence) < 1:
+        raise ValueError("RECEIPT_HISTORY_SEQUENCE_INVALID")
+    return _receipt_history_dir(project, kind) / f"{int(sequence)}.json"
+
+
+def _receipt_history_head(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.history.head.json")
+
+
 def _read_json_regular(path: Path) -> dict:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"receipt is not a regular file: {path}")
@@ -5131,22 +5149,122 @@ def _read_json_regular(path: Path) -> dict:
     return value
 
 
+def _read_receipt_history(project: Path, kind: str) -> tuple[dict, list[dict]]:
+    """Verify the append-only sequence and every immutable run envelope."""
+    head_path = _receipt_history_head(project, kind)
+    head = _read_json_regular(head_path)
+    if set(head) != {
+            "schema", "kind", "sequence", "receipt_digest", "run_id",
+            "head_sha256"}:
+        raise ValueError("RECEIPT_HISTORY_HEAD_SCHEMA_INVALID")
+    if head.get("schema") != _RECEIPT_HISTORY_HEAD_SCHEMA or head.get("kind") != kind:
+        raise ValueError("RECEIPT_HISTORY_HEAD_INVALID")
+    head_body = {key: head.get(key) for key in (
+        "schema", "kind", "sequence", "receipt_digest", "run_id")}
+    if head.get("head_sha256") != _receipt_sha256_json(head_body):
+        raise ValueError("RECEIPT_HISTORY_HEAD_DIGEST_MISMATCH")
+    head_sequence = head.get("sequence")
+    if (isinstance(head_sequence, bool) or not isinstance(head_sequence, int)
+            or head_sequence < 1):
+        raise ValueError("RECEIPT_HISTORY_HEAD_SEQUENCE_INVALID")
+    history_dir = _receipt_history_dir(project, kind)
+    if history_dir.is_symlink() or not history_dir.is_dir():
+        raise ValueError("RECEIPT_HISTORY_MISSING")
+    indexed = []
+    for path in history_dir.glob("*.json"):
+        if path.is_symlink():
+            raise ValueError("RECEIPT_HISTORY_LINKED")
+        try:
+            indexed.append(int(path.stem))
+        except ValueError:
+            raise ValueError("RECEIPT_HISTORY_FILENAME_INVALID") from None
+    if sorted(indexed) != list(range(1, head_sequence + 1)):
+        raise ValueError("RECEIPT_HISTORY_SEQUENCE_GAP")
+    entries = []
+    previous_digest = None
+    for sequence in range(1, head_sequence + 1):
+        entry_path = _receipt_history_path(project, kind, sequence)
+        entry = _read_json_regular(entry_path)
+        required = {
+            "schema", "kind", "sequence", "run_id", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest",
+            "history_sha256",
+        }
+        if set(entry) != required:
+            raise ValueError("RECEIPT_HISTORY_ENTRY_SCHEMA_INVALID")
+        body = {key: entry.get(key) for key in (
+            "schema", "kind", "sequence", "run_id", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest")}
+        if entry.get("history_sha256") != _receipt_sha256_json(body):
+            raise ValueError("RECEIPT_HISTORY_ENTRY_DIGEST_MISMATCH")
+        entry_sequence = entry.get("sequence")
+        if (entry.get("kind") != kind or isinstance(entry_sequence, bool)
+                or not isinstance(entry_sequence, int)
+                or entry_sequence != sequence):
+            raise ValueError("RECEIPT_HISTORY_ENTRY_SEQUENCE_INVALID")
+        if entry.get("predecessor_digest") != previous_digest:
+            raise ValueError("RECEIPT_HISTORY_PREDECESSOR_INVALID")
+        envelope_path = _receipt_store_path(project, kind, str(entry["receipt_digest"]))
+        envelope = _read_json_regular(envelope_path)
+        if set(envelope) != {
+                "schema", "kind", "run_id", "sequence", "predecessor_digest",
+                "payload_digest_field", "payload_digest", "payload"}:
+            raise ValueError("RECEIPT_HISTORY_ENVELOPE_SCHEMA_INVALID")
+        envelope_body = {key: envelope.get(key) for key in (
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "payload")}
+        if _receipt_sha256_json(envelope_body) != entry["receipt_digest"]:
+            raise ValueError("RECEIPT_HISTORY_ENVELOPE_DIGEST_MISMATCH")
+        for key in ("kind", "run_id", "sequence", "predecessor_digest",
+                    "payload_digest_field", "payload_digest"):
+            if envelope.get(key) != entry.get(key):
+                raise ValueError("RECEIPT_HISTORY_ENVELOPE_BINDING_MISMATCH")
+        payload = envelope.get("payload")
+        field = envelope.get("payload_digest_field")
+        if (not isinstance(payload, dict) or not isinstance(field, str)
+                or payload.get(field) != envelope.get("payload_digest")):
+            raise ValueError("RECEIPT_HISTORY_PAYLOAD_DIGEST_MISMATCH")
+        previous_digest = entry["receipt_digest"]
+        entries.append(entry)
+    if not entries:
+        raise ValueError("RECEIPT_HISTORY_EMPTY")
+    if (head.get("sequence") != entries[-1]["sequence"]
+            or head.get("receipt_digest") != entries[-1]["receipt_digest"]
+            or head.get("run_id") != entries[-1]["run_id"]):
+        raise ValueError("RECEIPT_HISTORY_HEAD_CURRENT_MISMATCH")
+    return head, entries
+
+
 def _read_current_receipt(project: Path, kind: str) -> dict:
     """Read and verify the current pointer and its immutable predecessor chain."""
     project = Path(project).resolve()
     pointer_path = _receipt_current_pointer(project, kind)
     pointer = _read_json_regular(pointer_path)
+    if set(pointer) != {
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest",
+            "receipt_path"}:
+        raise ValueError("RECEIPT_CURRENT_POINTER_SCHEMA_INVALID")
     if pointer.get("schema") != _RECEIPT_POINTER_SCHEMA or pointer.get("kind") != kind:
         raise ValueError("RECEIPT_CURRENT_POINTER_INVALID")
-    try:
-        sequence = int(pointer["sequence"])
-    except (KeyError, TypeError, ValueError):
-        raise ValueError("RECEIPT_CURRENT_SEQUENCE_INVALID") from None
+    sequence = pointer.get("sequence")
+    if (isinstance(sequence, bool) or not isinstance(sequence, int)
+            or sequence < 1):
+        raise ValueError("RECEIPT_CURRENT_SEQUENCE_INVALID")
+    history_head, history_entries = _read_receipt_history(project, kind)
+    if (pointer.get("sequence") != history_head.get("sequence")
+            or pointer.get("receipt_digest") != history_head.get("receipt_digest")
+            or pointer.get("run_id") != history_head.get("run_id")):
+        raise ValueError("RECEIPT_CURRENT_HISTORY_MISMATCH")
     receipt_digest = str(pointer.get("receipt_digest") or "")
     immutable = _receipt_store_path(project, kind, receipt_digest)
     if Path(str(pointer.get("receipt_path") or "")).resolve() != immutable.resolve():
         raise ValueError("RECEIPT_CURRENT_PATH_MISMATCH")
     envelope = _read_json_regular(immutable)
+    if set(envelope) != {
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "payload"}:
+        raise ValueError("RECEIPT_ENVELOPE_SCHEMA_INVALID")
     if envelope.get("schema") != _RECEIPT_ENVELOPE_SCHEMA:
         raise ValueError("RECEIPT_ENVELOPE_INVALID")
     body = {key: envelope.get(key) for key in (
@@ -5165,9 +5283,9 @@ def _read_current_receipt(project: Path, kind: str) -> dict:
             or envelope["payload"].get(payload_field) != envelope.get("payload_digest")):
         raise ValueError("RECEIPT_PAYLOAD_DIGEST_MISMATCH")
 
-    # A pointer may never be moved back to an older immutable receipt.  Scan
-    # the append-only directory and require the advertised sequence to be the
-    # largest sequence in the predecessor chain.
+    # A pointer may never be moved back to an older immutable receipt.  The
+    # append-only history above is the authority for the maximum sequence; the
+    # top-level scan also rejects unindexed newer envelopes.
     store = immutable.parent
     sequences = []
     for candidate in store.glob("*.json"):
@@ -5183,7 +5301,8 @@ def _read_current_receipt(project: Path, kind: str) -> dict:
                 sequences.append(int(item.get("sequence")))
             except (TypeError, ValueError):
                 raise ValueError("RECEIPT_SEQUENCE_INVALID") from None
-    if not sequences or sequence != max(sequences):
+    if (not sequences or sequence != max(sequences)
+            or len(history_entries) != sequence):
         raise ValueError("RECEIPT_CURRENT_POINTER_ROLLBACK")
     predecessor = envelope.get("predecessor_digest")
     if sequence == 1:
@@ -5262,6 +5381,25 @@ def _publish_current_receipt(project: Path, kind: str, value: dict,
             envelope_digest = _receipt_sha256_json(envelope_body)
             immutable = _receipt_store_path(project, kind, envelope_digest)
             _write_bound_route_record(immutable, envelope_body)
+            history_body = {
+                "schema": _RECEIPT_HISTORY_SCHEMA, "kind": str(kind),
+                "sequence": sequence, "run_id": run_id,
+                "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest, "receipt_digest": envelope_digest,
+            }
+            history_entry = {**history_body,
+                             "history_sha256": _receipt_sha256_json(history_body)}
+            _write_bound_route_record(
+                _receipt_history_path(project, kind, sequence), history_entry)
+            head_body = {
+                "schema": _RECEIPT_HISTORY_HEAD_SCHEMA, "kind": str(kind),
+                "sequence": sequence, "receipt_digest": envelope_digest,
+                "run_id": run_id,
+            }
+            _atomic_write_json(
+                _receipt_history_head(project, kind),
+                {**head_body, "head_sha256": _receipt_sha256_json(head_body)})
             # Re-read the compare point immediately before replacing the
             # pointer.  Cooperative publishers therefore cannot overwrite a
             # concurrent advancement with a stale predecessor.
@@ -5288,7 +5426,8 @@ def _publish_current_receipt(project: Path, kind: str, value: dict,
 
 
 def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
-                       runner: Path, runner_budget) -> tuple[dict, dict, dict]:
+                       runner: Path, runner_budget,
+                       *, run_scope: str | None = None) -> tuple[dict, dict, dict]:
     """Run/consume D1 and return (frontdoor, pending, activation).
 
     D1 is a two-stage admission: the pending record is visible before the
@@ -5300,6 +5439,9 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
     import route_decision as rd                            # noqa: PLC0415
 
     project = Path(project).resolve()
+    run_scope = str(run_scope or uuid.uuid4().hex)
+    if not run_scope or "/" in run_scope or "\\" in run_scope:
+        raise ValueError("D1_RUN_SCOPE_INVALID")
     source_sha = str(route_receipt.get("source_sha256") or "")
     if not source_sha:
         raise ValueError("D1_ACTIVATION_SOURCE_MISSING")
@@ -5309,7 +5451,7 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
         source_sha256=source_sha, task_sha256=task_sha)
     _publish_current_receipt(project, "d1_pending", pending,
                              digest_field="activation_sha256",
-                             run_id=f"{task_sha}:d1-pending")
+                             run_id=f"{task_sha}:d1-pending:{run_scope}")
     pending_current = _read_current_receipt(project, "d1_pending")
     if pending_current["receipt"].get("activation_sha256") != pending.get("activation_sha256"):
         raise ValueError("D1_PENDING_CURRENT_POINTER_MISMATCH")
@@ -5341,7 +5483,7 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
         d1_gate=d1_gate)
     _publish_current_receipt(project, "d1_activation", activation,
                              digest_field="activation_sha256",
-                             run_id=(f"{task_sha}:d1-activation:"
+                             run_id=(f"{task_sha}:d1-activation:{run_scope}:"
                                      f"{d1_gate.get('invocation_id')}"))
     activation_current = _read_current_receipt(project, "d1_activation")
     if (activation_current["receipt"].get("activation_sha256")
@@ -6164,10 +6306,11 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             receipt_errors = rd.validate_route_receipt(route_receipt)
             if receipt_errors:
                 raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(receipt_errors))
+            run_scope = uuid.uuid4().hex
             _publish_current_receipt(
                 proj, "route_decision", route_receipt,
                 digest_field="receipt_sha256",
-                run_id=f"{route_task['task_sha256']}:route")
+                run_id=f"{route_task['task_sha256']}:route:{run_scope}")
             current_route = _read_current_receipt(proj, "route_decision")
             if (current_route["receipt"].get("receipt_sha256")
                     != route_receipt.get("receipt_sha256")):
@@ -6181,8 +6324,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             # Every accepted response is normalized into the Program receipt,
             # and every newly executed route crosses the same two-stage D1
             # barrier.  Response shape cannot opt into a legacy bypass.
-            phase1_frontdoor, _pending, activation = _activate_route_d1(
-                proj, route_task, route_receipt, runner, runner_budget)
+            phase1_frontdoor, pending, activation = _activate_route_d1(
+                proj, route_task, route_receipt, runner, runner_budget,
+                run_scope=run_scope)
             if entry == "D1":
                 nature_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
                 candidates = [str(x) for x in nature_row.get("then") or []]
@@ -6195,6 +6339,13 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             rd.require_d1_activation(
                 activation, route_receipt, task_sha256=route_task["task_sha256"],
                 ldoc_root_handle=_sha256_text(str((proj / "phase1" / "generated_docs").resolve())))
+            admitted_steps = rd.admit_route_closure(
+                pending=pending, activation=activation,
+                route_receipt=route_receipt,
+                task_sha256=route_task["task_sha256"],
+                source_sha256=route_receipt["source_sha256"],
+                ldoc_root_handle=_sha256_text(
+                    str((proj / "phase1" / "generated_docs").resolve())))
             if effective_entry is None:
                 # A D1-only proof still has a receipt and activation but no
                 # downstream runner span to launch.
@@ -6249,6 +6400,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "route_receipt": route_receipt,
                 "d1_activation": activation,
                 "effective_entry": effective_entry,
+                "admitted_steps": admitted_steps,
                 "candidate_origin": (
                     "PROGRAM" if got.get("ok") else
                     ("AI_BACKUP_PENDING" if awaiting_backup else "NONE")),

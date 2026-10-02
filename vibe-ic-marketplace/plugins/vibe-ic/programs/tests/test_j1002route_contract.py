@@ -35,6 +35,23 @@ def _keys(value):
             yield from _keys(child)
 
 
+def _activated(receipt: dict, *, source: str, task: str,
+               ldoc: str = "root-test", invocation: str = "call-test"):
+    pending = rd.write_d1_pending(
+        Path("/dev/null"), route_receipt=receipt, source_sha256=source,
+        task_sha256=task)
+    provenance = {"ran": True, "digest": "e" * 64}
+    gate = rd.make_d1_gate(
+        verdict="PASS", route_receipt=receipt, provenance=provenance,
+        source_sha256=source, task_sha256=task, ldoc_root_handle=ldoc,
+        invocation_id=invocation, report_sha256="a" * 64)
+    activation = rd.activate_d1(
+        pending=pending, route_receipt=receipt, provenance=provenance,
+        source_sha256=source, task_sha256=task, ldoc_root_handle=ldoc,
+        d1_gate=gate)
+    return pending, activation
+
+
 def test_semantic_payload_is_invariant_under_opaque_coordinator_identity():
     prompt = "Design a two-input neutral combinational module."
     left = tnr.semantic_routing_payload(
@@ -91,6 +108,48 @@ def test_answer_location_cannot_weaken_verification():
     assert receipt["answer_step"] == "1"
     assert receipt["verify_through"] == "4"
     assert receipt["verify_through"] != receipt["answer_step"]
+
+
+def test_trusted_tables_keep_behaviour_and_gds_step4_in_closure():
+    receipt = _route("ship verified design", evidence="behaviour", target="gds",
+                     source="5" * 64)
+    assert receipt["verify_through"] == "37"
+    assert receipt["minimum_steps"] == ["D1", "4", "37"]
+    assert "4" in receipt["verify_closed_steps"]
+    assert rd.validate_route_receipt(receipt) == []
+
+
+def test_rehashed_step4_to_step1_route_downgrade_is_rejected():
+    receipt = _route("ship verified design", evidence="behaviour", target="gds",
+                     source="6" * 64)
+    downgraded = dict(receipt)
+    downgraded["verify_through"] = "1"
+    downgraded["minimum_steps"] = ["D1", "1", "37"]
+    downgraded["verify_closed_steps"] = [
+        step for step in receipt["verify_closed_steps"] if step != "4"]
+    body = {key: downgraded.get(key) for key in (
+        "schema", "entry_step", "answer_step", "verify_through",
+        "verify_closed_steps", "minimum_steps", "task_nature",
+        "requested_evidence", "delivery_target", "mode_intent",
+        "semantic_payload_sha256", "source_sha256", "dag_sha256")}
+    downgraded["receipt_sha256"] = rd.sha256_json(body)
+    errors = rd.validate_route_receipt(downgraded)
+    assert "ROUTE_RECEIPT_VERIFY_BELOW_MINIMUM" in errors
+    assert "ROUTE_RECEIPT_MINIMUMS_NOT_TABLE_BOUND" in errors
+    assert "ROUTE_RECEIPT_CLOSURE_NOT_DEPENDENCY_CLOSED" in errors
+
+
+def test_every_trusted_closure_member_crosses_runner_admission():
+    source = "7" * 64
+    receipt = _route("ship verified design", evidence="behaviour", target="gds",
+                     source=source)
+    pending, activation = _activated(receipt, source=source, task="task-closure")
+    admitted = rd.admit_route_closure(
+        pending=pending, activation=activation, route_receipt=receipt,
+        task_sha256="task-closure", source_sha256=source,
+        ldoc_root_handle="root-test")
+    assert admitted == receipt["verify_closed_steps"]
+    assert "4" in admitted
 
 
 def test_unrequested_ultra_is_never_inferred_from_metadata():
@@ -154,6 +213,11 @@ def test_forged_ultra_authority_without_typed_evidence_is_rejected():
     "Use ultra mode, but default mode is preferred.",
     "Do not set execution mode: ultra.",
     "Execution mode: default; ultra mode is unavailable.",
+    "I do not want ultra mode.",
+    "Refuse ultra mode.",
+    "anything except ultra mode; use ultra mode.",
+    "prohibited: use ultra mode.",
+    "do not ever use ultra mode.",
 ])
 def test_negated_conditional_or_conflicting_ultra_text_cannot_authorize(text):
     assert rd.explicit_ultra_evidence(text) is None
@@ -181,7 +245,7 @@ def test_d1_pending_admits_only_d1_until_route_bound_activation():
     gate = rd.make_d1_gate(
         verdict="PASS", route_receipt=receipt, provenance=provenance,
         source_sha256="d" * 64, task_sha256="task-a", ldoc_root_handle="root-a",
-        invocation_id="call-a", report_sha256="r" * 64)
+        invocation_id="call-a", report_sha256="a" * 64)
     activation = rd.activate_d1(
         pending=pending, route_receipt=receipt, provenance=provenance,
         source_sha256="d" * 64, task_sha256="task-a",
@@ -190,7 +254,7 @@ def test_d1_pending_admits_only_d1_until_route_bound_activation():
         step="1", pending=pending, activation=activation,
         route_receipt=receipt, source_sha256="d" * 64,
         task_sha256="task-a", ldoc_root_handle="root-a") == rd.D1_ACTIVATED
-    with pytest.raises(ValueError, match="ROUTE_MISMATCH|SOURCE_MISMATCH"):
+    with pytest.raises(ValueError, match="ROUTE_INVALID|ROUTE_MISMATCH|SOURCE_MISMATCH"):
         foreign = dict(receipt)
         foreign["receipt_sha256"] = "f" * 64
         rd.admit_canonical_step(
@@ -209,6 +273,69 @@ def test_d1_fail_or_missing_provenance_cannot_activate():
             pending=pending, route_receipt=receipt,
             provenance={"ran": False}, source_sha256="f" * 64,
             task_sha256="task-f", ldoc_root_handle="root-f")
+
+
+def test_d1_synthetic_activation_without_provenance_or_typed_gate_fails():
+    source = "0" * 64
+    receipt = _route("typed D1", source=source)
+    pending = rd.write_d1_pending(
+        Path("/dev/null"), route_receipt=receipt, source_sha256=source,
+        task_sha256="task-missing")
+    with pytest.raises(ValueError, match="D1_ACTIVATION_PROVENANCE_MISSING"):
+        rd.activate_d1(
+            pending=pending, route_receipt=receipt, provenance={"ran": True},
+            source_sha256=source, task_sha256="task-missing",
+            ldoc_root_handle="root-missing")
+    provenance = {"ran": True, "digest": "1" * 64}
+    with pytest.raises(ValueError, match="D1_ACTIVATION_GATE_MISSING"):
+        rd.activate_d1(
+            pending=pending, route_receipt=receipt, provenance=provenance,
+            source_sha256=source, task_sha256="task-missing",
+            ldoc_root_handle="root-missing")
+
+
+@pytest.mark.parametrize("field", [
+    "d1_gate", "d1_provenance_sha256", "d1_gate_sha256",
+    "task_sha256", "ldoc_root_handle", "activation_sha256",
+])
+def test_d1_activation_missing_field_cannot_be_self_rehashed(field):
+    source = "8" * 64
+    receipt = _route("typed D1", source=source)
+    pending, activation = _activated(receipt, source=source, task="task-schema")
+    forged = dict(activation)
+    forged.pop(field)
+    body = {key: forged[key] for key in (
+        "schema", "status", "route_receipt_sha256", "source_sha256",
+        "d1_provenance_sha256", "d1_gate_sha256", "d1_gate",
+        "task_sha256", "ldoc_root_handle") if key in forged}
+    with pytest.raises(ValueError, match="D1_ACTIVATION_SCHEMA_FIELDS_INVALID"):
+        rd.require_d1_activation(
+            forged, receipt, task_sha256="task-schema", ldoc_root_handle="root-test")
+
+
+@pytest.mark.parametrize(
+    ("invocation_id", "report_sha256", "error"),
+    [("", "a" * 64, "INVOCATION"),
+     (" bad", "a" * 64, "INVOCATION"),
+     ("call-report", "z" * 64, "REPORT")],
+)
+def test_d1_gate_requires_valid_current_invocation_and_report_digest(
+        invocation_id, report_sha256, error):
+    source = "9" * 64
+    receipt = _route("typed D1", source=source)
+    pending = rd.write_d1_pending(
+        Path("/dev/null"), route_receipt=receipt, source_sha256=source,
+        task_sha256="task-gate")
+    provenance = {"ran": True, "digest": "b" * 64}
+    gate = rd.make_d1_gate(
+        verdict="PASS", route_receipt=receipt, provenance=provenance,
+        source_sha256=source, task_sha256="task-gate", ldoc_root_handle="root-gate",
+        invocation_id=invocation_id, report_sha256=report_sha256)
+    with pytest.raises(ValueError, match=error):
+        rd.activate_d1(
+            pending=pending, route_receipt=receipt, provenance=provenance,
+            source_sha256=source, task_sha256="task-gate",
+            ldoc_root_handle="root-gate", d1_gate=gate)
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "NOT_MEASURED", "BLOCKED"])
@@ -378,7 +505,7 @@ def test_current_pointer_mutated_predecessor_or_rollback_is_refused(tmp_path):
     rollback["receipt_digest"] = rd.sha256_json(first_envelope)
     rollback["receipt_path"] = str(first_path)
     pointer_path.write_text(json.dumps(rollback))
-    with pytest.raises(ValueError, match="POINTER_ROLLBACK"):
+    with pytest.raises(ValueError, match="HISTORY_MISMATCH|POINTER_ROLLBACK"):
         bd._read_current_receipt(tmp_path, "route_decision")
 
     # A separate current pointer mutation exercises the predecessor binding.
@@ -393,6 +520,36 @@ def test_current_pointer_mutated_predecessor_or_rollback_is_refused(tmp_path):
     pointer_path.write_text(json.dumps(pointer))
     with pytest.raises(ValueError, match="PREDECESSOR.*MISMATCH|POINTER_ROLLBACK"):
         bd._read_current_receipt(corrupt_root, "route_decision")
+
+
+@pytest.mark.parametrize("mutation", ["corrupt", "missing", "sequence"])
+def test_newer_receipt_corruption_blocks_a_b_a_rollback(tmp_path, mutation):
+    root = tmp_path / mutation
+    first = _route("first run", source="c" * 64)
+    second = _route("second run", source="d" * 64)
+    first_path = bd._publish_current_receipt(
+        root, "route_decision", first, digest_field="receipt_sha256", run_id="run-a")
+    second_path = bd._publish_current_receipt(
+        root, "route_decision", second, digest_field="receipt_sha256", run_id="run-b")
+    if mutation == "corrupt":
+        second_path.write_text("{}")
+    elif mutation == "missing":
+        second_path.unlink()
+    else:
+        changed = json.loads(second_path.read_text())
+        changed["sequence"] = 99
+        second_path.write_text(json.dumps(changed))
+    pointer_path = bd._receipt_current_pointer(root, "route_decision")
+    current = json.loads(pointer_path.read_text())
+    first_envelope = json.loads(first_path.read_text())
+    for key in ("run_id", "sequence", "predecessor_digest", "payload_digest",
+                "payload_digest_field"):
+        current[key] = first_envelope[key]
+    current["receipt_digest"] = first_path.stem
+    current["receipt_path"] = str(first_path)
+    pointer_path.write_text(json.dumps(current))
+    with pytest.raises(ValueError, match="HISTORY|ENVELOPE|SEQUENCE|CURRENT|regular file"):
+        bd._read_current_receipt(root, "route_decision")
 
 
 def test_semantic_payload_preserves_legitimate_critical_path_and_answer():
@@ -497,6 +654,35 @@ steps:
     assert dag["required_inputs_from"]["1"] == ["D1"]
     assert rd.dependency_closed_join(["1"], dag=dag)["closed_steps"] == ["D1", "1"]
     assert rd.dependency_closed_join(["2"], dag=dag)["closed_steps"] == ["D1", "1", "2"]
+
+
+def test_multiline_dependency_mutation_changes_closure_and_dag_digest(tmp_path):
+    common = """
+steps:
+  - id: D1
+    blocks_on: []
+    required_inputs:
+      - from: external
+  - id: 1
+    blocks_on: []
+    required_inputs:
+      - from: D1
+        path: |
+          phase1/generated_docs/L1.json
+          OR phase1/generated_docs/L5.json
+  - id: 2
+    required_inputs: []
+"""
+    flow_blocks_d1 = tmp_path / "blocks-d1.yaml"
+    flow_blocks_1 = tmp_path / "blocks-1.yaml"
+    flow_blocks_d1.write_text(common + "    blocks_on:\n      - D1\n")
+    flow_blocks_1.write_text(common + "    blocks_on:\n      - 1\n")
+    first = rd.canonical_dag(flow_blocks_d1)
+    second = rd.canonical_dag(flow_blocks_1)
+    assert first["sha256"] != second["sha256"]
+    assert rd.dependency_closed_join(["2"], dag=first)["closed_steps"] == ["D1", "2"]
+    assert rd.dependency_closed_join(["2"], dag=second)["closed_steps"] == [
+        "D1", "1", "2"]
 
 
 def test_reverse_mutation_of_receipt_is_rejected():
