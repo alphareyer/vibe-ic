@@ -568,7 +568,8 @@ class Controller:
                        status='NOT_MEASURED', reason='NOT_STARTED', processes=[],
                        evidence=None, started_ns=time.monotonic_ns())
         def frozen_binding():
-            actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*') if p.is_file()}
+            actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*')
+                      if p.is_file() and p.name != 'issued_manifest.json'}
             if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
                 raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         try:
@@ -579,6 +580,17 @@ class Controller:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 target.chmod(0o444)
+            # Bind the worker's typed route and parameters to the exact frozen
+            # input copy.  This manifest is metadata, not a mutable project
+            # input, and is excluded from the byte-for-byte frozen census.
+            manifest = inputs / 'issued_manifest.json'
+            manifest.write_text(json.dumps({
+                'step_id': context.step_id,
+                'parameters': dict(context.objective),
+                'files': {name: digest(inputs / _relative(name))
+                          for name in context.inputs},
+            }, sort_keys=True) + '\n')
+            manifest.chmod(0o444)
             frozen_binding()
             for component in arm.components:
                 if cancel.is_set():
