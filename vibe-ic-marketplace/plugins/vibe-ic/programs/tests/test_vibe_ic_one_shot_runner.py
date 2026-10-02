@@ -3,7 +3,7 @@
 
 Wave 83 — coverage for previously untested orchestrator.
 
-Top-level chain that runs Phase 1 → Phase 2 (= 2a + 2b) → Analog A1..A8 →
+Top-level chain that runs Phase 1 → Phase 2 (= 2a + 2b) → Analog A1..A9 →
 Phase 3. Auto-detects entry-point and skips phases that are not
 applicable. Tests exercise control-flow only (children invoke external
 tools).

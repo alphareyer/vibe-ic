@@ -32,7 +32,7 @@ This runner is the **top-level chain**:
 
 **Flag-to-sub-phase skip mapping:**
 - `--skip-phase1` ≡ force Path B
-- `--skip-analog` ≡ skip A1..A8
+- `--skip-analog` ≡ skip A1..A9
 - `--skip-phase3` ≡ equivalent to `/vibe-ic-phase2`
 - `--skip-hardware` ≡ skip fpga compile/burn/<half-duplex-tester> (forwarded to phase2)
 

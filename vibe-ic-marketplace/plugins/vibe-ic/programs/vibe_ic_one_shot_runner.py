@@ -7,7 +7,7 @@ Top-level chain that runs the entire spec → silicon pipeline:
         ↓
     Phase 2 (= 2a + 2b) → input/docs → 13 L docs → RTL → SOF → <half-duplex-tester>
         ↓
-    Analog A1..A8        → analog/<block> hardmacros (skipped if no analog)
+    Analog A1..A9        → analog/<block> hardmacros (skipped if no analog)
         ↓
     Phase 3              → synth → PnR → GDS → DRC → LVS
 
@@ -2172,7 +2172,7 @@ def main() -> int:
         print(f"[flow] {flow_top_note}", flush=True)
         advisories.append(f"flow {flow_top_note}")
 
-    # ---------------- Analog A1..A8 ----------------
+    # ---------------- Analog A1..A9 ----------------
     # FX_ADC_PHASE_ORDER — DISPATCHED BEFORE PHASE 2, reported after it.
     #
     # The A-track reads phase-1 artefacts (L5_ADI_SPEC / the block list) and,
@@ -2230,7 +2230,7 @@ def main() -> int:
         if args.pdk and str(args.pdk).strip().lower() != "auto":
             _analog_args += ["--pdk", str(args.pdk).strip()]
         _phase_started["analog"] = time.time()
-        rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
+        rc = _run_phase("ANALOG A1..A9", runner, _analog_args, env=_phase_env)
         rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
         verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
         _analog_row = ("analog", verdict, rc)
@@ -2475,7 +2475,8 @@ def main() -> int:
     # M1-d4. `mixed_signal_top_lvs_run` is the ONLY writer of
     # phase3/mixed_signal/top_merged.gds (M1's declared required_output) and of
     # reports/analog/mixed_signal/top_lvs.json (the artefact
-    # mixed_signal_merge_check demands for a PASS) — and no runner invoked it.
+    # mixed_signal_merge_check demands for a PASS). Before this top-level
+    # dispatch was wired, no runner invoked it; this remains the sole dispatch.
     # Measured on a synthetic A+D fixture with every input present: M1 came
     # back MISSING from flow_compliance_check because top_merged.gds never
     # existed, so its gate never even ran. Declaring the producer in the step's

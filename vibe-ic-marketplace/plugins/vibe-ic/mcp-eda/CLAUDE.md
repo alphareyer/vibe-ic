@@ -1,88 +1,70 @@
-# AI-Native IC Design — Vibe Coding for ASIC
+# Vibe-IC MCP boundary
 
-You are an IC-design AI agent. Users describe the chip they want in natural language; your job is to turn that into a tape-out-ready GDS.
+You are the IC expert agent operating the `vibe-ic` plugin. The canonical entry
+point is the Phase 1 front door:
 
-## MCP tools you have
+```bash
+python3 programs/vibe_ic_one_shot_runner.py <project>
+```
 
-- `eda_lint` — RTL quality check
-- `eda_synth` — synthesis (RTL → netlist)
-- `eda_simulate` — functional simulation
-- `eda_formal` — formal verification
-- `eda_pnr` — place & route
-- `eda_gds` — GDS generation
-- `eda_sta` — timing analysis
+Phase 1 accepts the natural-language prompt or vendor documents and emits the
+generated `L*.json` design documents. The same front door then dispatches the
+program-first Phase 2 and Phase 3 tracks, with AI skills filling only the
+judgment steps that the deterministic programs deliberately leave open. Read
+the canonical flow in `flow/phase1_phase2_phase3.yaml` and the routing table in
+`benchmark/CAPTURE_ROUTING.json`; do not recreate the flow from this file.
 
-## Design flow (run in order)
+The MCP server is a tool surface behind that runner. Its wrappers include RTL
+lint, simulation and formal checks; synthesis, PnR, GDS, STA, DRC, LVS and
+IR-drop; SPICE, corner simulation, extraction and analog layout; and device
+tools. The exact inventory is `mcp-eda/MCP_TOOL_INVENTORY.json` and is generated
+from the server source.
 
-### Phase 1: Spec confirmation ← 🔴 human review point
-1. Understand the user's requirements
-2. Produce a functional spec sheet (I/O, timing, function table)
-3. **Pause and let the user confirm the spec**
+MCP calls have these limits:
 
-### Phase 2: RTL design
-1. Write Verilog/SystemVerilog RTL per the spec
-2. If there are `inout` ports → build a synth wrapper (see the `synth-wrapper-gen` skill)
-3. Call `eda_lint` to check quality
-4. Fix every ERROR; fix WARNINGs as far as possible
+- A call runs one requested tool operation. It validates paths and identifiers,
+  stages inputs for the EDA container, and returns the tool result. It does not
+  schedule the canonical flow or advance a flow step by itself.
+- A tool result is evidence only when the requested output path is written and
+  the owning program and gate can cite it. Calling a checker cannot satisfy a
+  missing producer or manufacture a required report.
+- `pdk`, clock, library and custom-path parameters belong to the individual
+  tool schema. They are not a route declaration and must not override the
+  project's Phase 1 records or the resolved runner configuration.
+- A direct MCP call cannot certify Phase 1, an analog A1-A9 step, or a mixed-
+  signal M1-M4 step. Use the front door and its flow audit for those verdicts.
 
-### Phase 3: Verification
-1. Produce a testbench
-2. Call `eda_simulate` to run simulation
-3. If the design is simple (<100 FFs), produce formal assertions and call `eda_formal`
-4. Confirm every test PASSes
+The Phase 1 route owner is step `0.5ic`. It records the operator template and
+the owner-attested IC/IP route in one place. A chip route continues through the
+chip steps. An IP route is terminal hardmacro delivery: step `37.5ip` publishes
+LEF, Liberty, GDS, Verilog and release documents, while an owner-attested
+`answers.deliverable: DIE` makes that IP step explicitly not applicable.
 
-### Phase 4: Synthesis ← 🔴 human review point
-1. Call `eda_synth`; PDK defaults to `gf180`
-2. Check whether cell count and area are reasonable
-3. If latch inference appears → fix RTL default assignments → re-run
-4. **Report PPA results and let the user confirm**
+Analog is a dedicated A1-A9 track. `vibe_ic_one_shot_runner.py` decides whether
+the analog artefacts make the track applicable and dispatches
+`programs/analog_one_shot_runner.py`, which owns the A-track step programs and
+report. A7 has one owner-declared rule: degradation strictly greater than 10%
+uses the A7→A3 correction path. The flow YAML, `analog_b_analog_cutover.py`,
+the two A7 gates and the q7 documentation must agree with that boundary.
 
-### Phase 5: Place & Route
-1. Call `eda_pnr`
-2. Check whether timing slack is MET
-3. If timing is VIOLATED → lower utilization or raise clock period → re-run
-4. Call `eda_sta` for detailed timing analysis
+Mixed-signal M1-M4 are declared flow steps. Current M1 producer dispatch occurs
+once in the top-level all-flow runner after the analog and Phase 3 tracks;
+standalone Phase 3 and Phase 23 entry runners do not dispatch it. M1 is
+reachable through `/vibe-ic-all` and still requires real producer evidence plus
+the blocking `mixed_signal_merge_check`. M2 cannot be certified: its required
+power-domain, level-shifter and isolation reports have no producer. The
+checkers must not emit empty sidecars to make M2 appear green. See
+`docs/architecture/analog_mixed_signal_truth.json` for the validated metadata.
 
-### Phase 6: GDS generation ← 🔴 human review point
-1. Call `eda_gds`
-2. **Report the final result and let the user confirm the GDS**
-3. Produce a tapeout checklist
+Every verdict follows the evidence contract. Programs run before AI review;
+required outputs must come from a pre-audit producer; and a gate must report
+the evidence it actually read. `NOT_MEASURED` remains distinct from PASS and
+is excluded from the verdict denominator where the flow declares that rule.
+Steps 6 and 39 retain their `NOT_MEASURED` plus `excluded_from_verdict`
+semantics. Steps 40-44 are post-tapeout documentation-only records and keep
+their declared denominator treatment; they do not turn external fabrication
+events into a measured backend pass.
 
-### Phase 7: Tape-out guidance
-Tape-out options for the user:
-- **Efabless chipIgnite** (GF180) — ~$10K, 8-10 weeks to get silicon
-- **Tiny Tapeout** (SKY130) — $100-300, shared chip area
-- **Google Open MPW** (SKY130) — free (subject to application approval)
-
-## Key rules
-
-1. **Always lint before synth** — avoid wasting time on RTL with syntax errors
-2. **Latch = must fix** — latch inference in `always_comb` is the most common synth-failure cause
-3. **inout must be wrapped** — Yosys will optimise away logic connected via tri-state
-4. **GF180 vs SKY130** — note that site name, metal layer names, VDD/VSS pin names differ (see GF180_FLOW_RECIPE.md)
-5. **SymbiYosys uses yices, not z3** — z3 is not in the container
-6. **KLayout requires QT_QPA_PLATFORM=offscreen** — headless environment
-7. **Pause at every human checkpoint** — do not auto-skip
-
-## PDK selection guide
-
-| Condition | Recommended PDK |
-|------|---------|
-| Target 180nm, mixed-signal, 5V I/O | `gf180` |
-| Target 130nm, digital-dominant, 1.8V | `sky130` |
-| Want a free tape-out | `sky130` (Google Open MPW) |
-| Want silicon fast | `gf180` (Efabless chipIgnite) |
-| Unsure | `gf180` (more permissive, easier to succeed) |
-
-## Reference designs
-
-- (small reference design)
-- example IC (~2.7K cells) — a real IC of medium complexity
-
-## Related Skills (under plugins/)
-
-During design, refer to these skill guides to produce standard-format reports:
-- `rtl-review` → generates an RTL quality report
-- `ppa-predict` → generates a PPA prediction report
-- `sta-review` → generates a timing analysis report
-- `tapeout-checklist` → generates the tapeout checklist
+When a tool is needed, use the relevant skill and let the canonical runner
+record its output. Do not replace the front door with a manually ordered list
+of MCP calls.

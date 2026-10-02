@@ -16,7 +16,7 @@ post column was inherited from the pre column:
     analog_a7_post_layout_resim_check  rc 0  PASS — 1/1 block(s) clean
 
 Both gates certified it. The consumer of this artefact is a DEGRADATION gate:
-it computes `|post - pre| / |pre|` and tiers the answer at 20 % / 30 %. Fed a
+it computes `|post - pre| / |pre|` and applies the shared 10 % A7→A3 floor. Fed a
 copied column it can only ever compute 0 %, which is its MOST ACCEPTABLE tier —
 so the copy scored strictly better than every honest comparison. The existing
 zero-compared rule cannot see it either: a copy is not `items_compared == 0`,
@@ -340,21 +340,20 @@ def test_the_flat_pre_post_schema_is_covered_too(tmp_path):
 
 # ═══ 3. NON-WEAKENING — the rules that already worked still work ═══════════
 
-def test_a_genuine_degradation_is_still_reported_as_before(tmp_path):
-    """THE NON-WEAKENING CONTROL the fix is judged against: the 20 %/30 % tiers
-    this gate exists for still bite. A 25 % drift is a MODERATE degradation and
-    is named as one."""
+def test_a_genuine_degradation_over_the_owner_floor_fails(tmp_path):
+    """The owner q7 floor is 10%. A real 25% drift must take the A7→A3
+    correction path instead of remaining an advisory warning."""
     project = _tree(tmp_path, _drifted_specs(25.0))
     cp = _run(DECLARED_GATE, project)
-    assert cp.returncode == 0, _both(cp)
+    assert cp.returncode == 1, _both(cp)
     out = _both(cp)
-    assert "LAYOUT_MODERATE_DEGRADATION" in out, out
-    assert "25.0% degradation" in out, out
+    assert "LAYOUT_SEVERE_DEGRADATION" in out, out
+    assert "canonical 10.0%" in out, out
     assert "ALL_ZERO_DELTA_UNEVIDENCED" not in out, out
 
 
-def test_a_severe_degradation_is_still_severe(tmp_path):
-    """...and past 30 % it is still an ERROR that fails the gate."""
+def test_a_larger_degradation_is_still_severe(tmp_path):
+    """A larger real drift remains an ERROR under the same single floor."""
     project = _tree(tmp_path, _drifted_specs(45.0))
     cp = _run(DECLARED_GATE, project)
     assert cp.returncode == 1, _both(cp)

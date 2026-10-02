@@ -125,6 +125,11 @@ is not counted. A file in which NO metric is comparable FAILs
 `PRE_VS_POST_ZERO_COMPARED` — a comparison gate must never report PASS having
 compared nothing.
 
+`overall_status` is the compatibility field owned by this artifact-producing
+skill and consumed by this handoff. The deterministic comparison gate reads the
+numeric rows and writes its own PASS/FAIL report; it does not rewrite
+`pre_vs_post.json` or replace `NEEDS_RELAYOUT` with a generic error token.
+
 ### Naming the post-layout measurement (required when every delta is zero)
 
 If **every** compared metric's post value is exactly equal to its pre value,
@@ -166,10 +171,14 @@ artefact that says it has is worse than an absent one.
 
 ## Degradation thresholds
 
-Enforced by `programs/analog_pre_vs_post_layout_check.py` (single source of
-truth — `≤20%` OK / `>20%` WARNING / `>30%` ERROR→NEEDS_RELAYOUT). Quote the
-program's verdict; do not restate a conflicting cutoff. If the policy must
-change, change it in the program (one place) so SKILL.md and runtime never drift.
+The deterministic gate owns the executable verdict (single source of truth —
+`≤10%` PASS / `>10%` FAIL). The artifact's documented `overall_status` field
+keeps its compatibility vocabulary: `OK` for the passing band and
+`NEEDS_RELAYOUT` above 10%. `NEEDS_RELAYOUT` follows the owner-declared A7
+closed loop back to A3 for netlist/sizing correction; it is not replaced by a
+generic `ERROR`. Quote the program's gate verdict and preserve the artifact
+field. If the policy must change, change it in the program (one place) so
+SKILL.md and runtime never drift.
 
 ## Do not
 
@@ -179,11 +188,11 @@ change, change it in the program (one place) so SKILL.md and runtime never drift
 
 ## Handoff
 
-Branch on the `overall_status` field emitted by
-`programs/analog_pre_vs_post_layout_check.py` (deterministic, not a judgment call):
+Branch on the skill-owned `overall_status` field in `pre_vs_post.json`
+(deterministic handoff vocabulary, not a judgment call):
 
-- `OK` / `WARNING` → `analog-hardmacro-gen` (Step A8)
-- `NEEDS_RELAYOUT` → back to `analog-layout` (Step A5)
+- `OK` → `analog-hardmacro-gen` (Step A8)
+- `NEEDS_RELAYOUT` / `>10%` → the declared A7→A3 correction path
 - `post_layout_corner_results.json` → `analog_pre_vs_post_layout_check` gate
 
 ## Compliance gate (mandatory)

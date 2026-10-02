@@ -21,11 +21,18 @@ That single runner drives the whole chain:
 |-------|-----------|
 | **Phase 1** | NL prompt *or* vendor docs → `generated_docs/L*.json` (`L1-L23` emitted; the taxonomy in `programs/l_doc_taxonomy.py` extends to `L27`, with `L26`/`L27` opt-in only) |
 | **Phase 2** (`2a` + `2b`) | RTL gen → hygiene lint → testbench gen → yosys synth → SDC/QSF → spec conformance → RTL repair/retry loop (`rtl_repair_retry`) → final audit |
-| **Analog** | `A1..A8` from the top-level runner; `programs/analog_one_shot_runner.py` implements the full `A1-A9` (through `A9_hw_verify`) |
+| **Analog** | The top-level runner dispatches the dedicated `programs/analog_one_shot_runner.py`, which owns the canonical `A1-A9` track (through `A9_hw_verify`) |
 | **Phase 3** | synth → PnR → CTS → GDS → DRC / LVS / STA / IR-drop |
 
-Mixed-signal `M1-M4` is a **reporting** track (`final_report_generate.py`,
-`benchmark_verify_report.py`, `flow_dashboard*.py`), not a phase the runner schedules.
+Mixed-signal `M1-M4` are declared flow steps. The current `M1` producer,
+`programs/mixed_signal_top_lvs_run.py`, is dispatched once by
+`vibe_ic_one_shot_runner.py` after the analog and Phase 3 tracks, so a fresh M1
+run is reachable through `/vibe-ic-all`; the standalone Phase 3 and Phase 23
+entry runners do not dispatch it. M1 still needs a real producer result and the
+blocking `mixed_signal_merge_check` verdict. M2 remains unable to certify: its
+three required evidence files have no producer, and its checkers must not
+manufacture empty reports. The machine-readable scheduling contract is
+[`docs/architecture/analog_mixed_signal_truth.json`](docs/architecture/analog_mixed_signal_truth.json).
 
 Flags: `--top-name --container --max-rtl-repair-retries --skip-phase1 --skip-analog --skip-phase3
 --skip-hardware --die-um --util --pdk --allow-oss-pdk-fallback --ic-name

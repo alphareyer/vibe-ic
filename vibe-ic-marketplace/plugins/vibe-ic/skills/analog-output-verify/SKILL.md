@@ -27,7 +27,7 @@ track is enforced by a program — do not re-assert them by eye:
 | A4 | `programs/analog_a4_corner_sweep_check.py` + `programs/analog_corner_sweep_check.py` | anti-stub + simulator/netlist provenance + worst-corner margin + `design_content` disclosure; the reachable 9-corner floor (3 process × 3 temp) |
 | A5 | `programs/analog_a5_layout_check.py` | `layout.mag`/`<block>.gds` exists with real placed geometry, for **EVERY** declared block (partial coverage → `INCOMPLETE`, never PASS). DRC/LVS sign-off is **A6's** verdict, not A5's: those flags are A6's declared outputs and A6 declares `blocks_on: [A5]`, so requiring them here was a dependency cycle that made A5 red on every correct single-pass run. A6 enforces the same rules over richer evidence. |
 | A6 | `programs/analog_per_block_pv_completeness_check.py` + `programs/analog_a6_block_pv_check.py` | full per-block deliverable set + DRC=0 / LVS=match evidence |
-| A7 | `programs/analog_pre_vs_post_layout_check.py` (+ `analog_a7_post_layout_resim_check.py`) | post-vs-pre degradation bands (≤20% INFO / >20% WARN / >30% FAIL) |
+| A7 | `programs/analog_pre_vs_post_layout_check.py` (+ `analog_a7_post_layout_resim_check.py`) | post-vs-pre degradation (≤10% PASS / >10% FAIL; owner loop A7→A3) |
 | A8 | `programs/analog_a8_hardmacro_gen_check.py` + `programs/analog_hardmacro_check.py` | LEF+lib+GDS+Verilog present & non-stub |
 | A8 outline | `programs/analog_lef_gds_outline_check.py` | **LEF `SIZE w BY h ;` matches the GDS bounding box** (the "LEF matches GDS outline" + "cross-check LEF outline vs A5 extents" spot-check, now a numeric gate; honest FAIL on mismatch / missing-half / garbage GDS) |
 | A9 | `programs/analog_hw_spice_correlation_check.py` | HW-vs-SPICE error bands (<5% PASS / 5-15% WARN / >15% FAIL) |
@@ -86,7 +86,7 @@ the programs **cannot** make.
 ## When to escalate
 
 - A4 corner FAIL → invoke `analog-sizing-loop` to retune
-- A7 vs A4 delta > 30% → invoke `analog-extraction-resim` debug
+- A7 post-layout degradation > 10% → follow the declared A7→A3 correction path
 - A9 vs A7 delta > 15% → invoke `analog-hw-tuning-loop`
 
 ## Output
@@ -111,4 +111,3 @@ tool invocations.
 **Your task is not complete until the audit returns PASS.** If it fails,
 re-read the listed missing elements, patch your output, and re-run the
 audit.
-

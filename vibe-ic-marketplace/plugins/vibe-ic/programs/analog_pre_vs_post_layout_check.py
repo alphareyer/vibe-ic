@@ -5,9 +5,8 @@ Validates that post-layout analog specs don't degrade beyond acceptable
 limits compared to pre-layout SPICE results.
 
 For each spec in pre_vs_post.json:
-  - ≤20 % degradation → INFO (acceptable)
-  - >20 % degradation → WARNING
-  - >30 % degradation → ERROR (layout severely impacts performance)
+  - ≤10 % degradation → INFO (acceptable)
+  - >10 % degradation → ERROR (layout exceeds the A7 re-entry floor)
 
 Self-skips when:
   - No analog/ directory, or no analog/*/pre_vs_post.json files found
@@ -56,7 +55,7 @@ declares was the one that could not tell the trees apart.
 
 WHY THE RULE WAS ADDED HERE RATHER THAN THE FLOW BEING REPOINTED AT THE OTHER
 GATE. Re-pointing the declaration would have DELETED this gate's own value
-rules from the step — the 20 %/30 % degradation tiers and
+rules from the step — the 10 % degradation floor and
 `PRE_VS_POST_ZERO_COMPARED` — and handed the step's declared
 `--json reports/phase2/gates/pre_vs_post.json` contract to a program with a
 different report schema. It would also not have established the invariant:
@@ -140,6 +139,11 @@ _DELTA_KEYS: tuple = ("delta_pct", "delta_percent", "delta_pc", "change_pct")
 #: `delta_pct` to 4 decimal places and agrees to ~1e-4, so 0.5 points is three
 #: orders of magnitude of headroom.
 _DELTA_TOLERANCE_PP = 0.5
+
+# Canonical q7 owner threshold. A7's runner gate imports this constant; the
+# flow YAML carries the same declaration for routing and analog_b_analog_cutover
+# reads that declaration when it proves closed-loop behaviour.
+MAX_DEGRADATION_PCT = 10.0
 
 
 def _first_key(item: dict, keys: tuple):
@@ -311,7 +315,7 @@ def run_audit(project: Path) -> AuditResult:
                         file=str(pvp_path),
                     ))
 
-            if pct > 30:
+            if pct > MAX_DEGRADATION_PCT:
                 errors += 1
                 block_errors += 1
                 result.findings.append(Finding(
@@ -320,17 +324,8 @@ def run_audit(project: Path) -> AuditResult:
                     message=(
                         f"Block '{block}' spec '{name}': "
                         f"pre={pre_val}, post={post_val} "
-                        f"({pct:.1f}% degradation — layout severely impacts performance)"
-                    ),
-                ))
-            elif pct > 20:
-                result.findings.append(Finding(
-                    rule="LAYOUT_MODERATE_DEGRADATION",
-                    severity="WARNING",
-                    message=(
-                        f"Block '{block}' spec '{name}': "
-                        f"pre={pre_val}, post={post_val} "
-                        f"({pct:.1f}% degradation)"
+                        f"({pct:.2f}% degradation — exceeds the canonical "
+                        f"{MAX_DEGRADATION_PCT:.1f}% A7→A3 floor)"
                     ),
                 ))
             else:
@@ -469,9 +464,9 @@ def run_audit(project: Path) -> AuditResult:
     # word only when NO block was certified design-bound. A project with both
     # has a design-bound comparison to report and the structure-only subset is
     # named beside it.
-    verdict_tier = ("PASS_STRUCTURE_ONLY"
-                    if (result.passed and structure_only and not design_bound)
-                    else "PASS")
+    verdict_tier = ("FAIL" if not result.passed else
+                    ("PASS_STRUCTURE_ONLY"
+                     if (structure_only and not design_bound) else "PASS"))
     result.summary = {
         "skipped": False,
         "blocks_checked": len(pvp_files),

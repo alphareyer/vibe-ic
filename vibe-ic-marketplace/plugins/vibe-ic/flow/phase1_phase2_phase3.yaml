@@ -1346,7 +1346,7 @@ steps:
     blocks_on: []
 
   - id: 0.5ic
-    name: "Submission Template Ingest — the operator's slot geometry and fixtures (chip/IC path only)"
+    name: "Submission Template Ingest — common IC/IP route authority and operator fixtures"
     stage: stage_phase1
 
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
@@ -1509,11 +1509,13 @@ steps:
         - program_exit_zero: "tapeout_declaration_check . --json reports/phase1/tapeout_declaration.json"
     blocks_on: []
     notes: >-
-      Chip/IC path only: an IP is delivered as a hardmacro (37.5ip) and is never
-      submitted to a shuttle, so it has no slot and no operator fixtures. The
-      report must record WHICH slot was declared and the DIE_AREA read from it,
-      because a die that was chosen and a die that was defaulted are the same
-      number with different provenance, and only one of them can be checked.
+      Common IC/IP route authority: ingest the operator template when the
+      design is chip-bound, and record the owner-attested IP/hardmacro route
+      when it is not. An IP delivery has no shuttle slot or operator fixture;
+      the report records that route explicitly. For a chip route, the report
+      records WHICH slot was declared and the DIE_AREA read from it, because
+      a die that was chosen and a die that was defaulted are the same number
+      with different provenance, and only one of them can be checked.
 
   - id: 1
     name: "Spec-to-RTL"
@@ -4229,6 +4231,12 @@ steps:
         - files_exist: ["phase3/analog/*/pre_vs_post.json"]
         - program_exit_zero: "analog_pre_vs_post_layout_check . --json reports/phase2/gates/pre_vs_post.json"
     blocks_on: [A6]
+    notes: |
+      Owner q7 single authority: a post-layout performance degradation
+      strictly greater than 10% follows the declared closed loop to A3.
+      `analog_pre_vs_post_layout_check` owns the executable threshold and the
+      A7 runner gate imports it; `analog_b_analog_cutover` reads this flow
+      declaration when checking for an extra re-entry.
 
   - id: A8
     name: "Hardmacro Generation (LEF + Liberty + GDS + Verilog)"
@@ -8731,27 +8739,21 @@ steps:
   # is why step 15 can place an analog hard macro and nothing this flow
   # produces digitally can be placed by anyone.
   - id: 37.5ip
-    name: "Digital Hardmacro Generation — LEF + Liberty + GDS + Verilog (delivered on EVERY route)"
+    name: "Digital Hardmacro/IP Delivery — LEF + Liberty + GDS + Verilog + release docs (owner-attested DIE excluded)"
     stage: stage4
     condition:
-      # `any_of` over ALL THREE routers — this step runs on every route a
-      # design can take. OWNER RULING 2026-09-02: "an IC runs BOTH 37.5ic and
-      # 37.5ip; only a pure-IP route skips 37.5ic." A chip ships its own IP
-      # deliverable set — the four views plus the six integration documents —
-      # ALONGSIDE its chip documents, because a die is also a block somebody
-      # re-uses, characterises and hands on, and until this changed a design
-      # that declared itself a die got NO `.lef`, NO `.lib` and NO datasheet
-      # anywhere in its run.
+      # `any_of` over the route markers makes this the hardmacro/IP delivery
+      # terminal for every selected route that owes a reusable kit. The
+      # owner-attested DIE exclusion below is authoritative: a fabricated die
+      # has no IP delivery obligation in this step.
       #
       # THE ROUTERS STAY MUTUALLY EXCLUSIVE. Nothing here relaxes that:
       # `tapeout_declaration_check` still refuses a tree carrying two of the
       # three, step 0.5ic's `required_outputs` is still their OR, and exactly
-      # one still exists on any run where 0.5ic passed. What changed is only
-      # WHICH of them this step accepts — all three instead of one — and the
-      # asymmetry is deliberate and one-directional: 37.5ic below still names
-      # the TWO chip routers and still excludes `NO_TEMPLATE.txt`, so a pure
-      # IP is still not asked for a pad ring, a seal ring or a tape-out
-      # precheck it has no die for.
+      # one still exists on any run where 0.5ic passed. The IP terminal remains
+      # separate from the chip terminal: 37.5ic below owns the chip-only
+      # pad/seal/tape-out work, while this step owns the reusable hardmacro
+      # views and release documents.
       any_of: true
       files_exist:
         - "input/submission_template/NO_TEMPLATE.txt"
@@ -8759,13 +8761,11 @@ steps:
         - "input/submission_template/slots/*.yaml"
       # AND THE OWNER'S OWN DECLARATION, ahead of the routers (R-0915,
       # 2026-09-20, derived from deliverable=DIE / R-0915-95): "a DIE owes NO
-      # IP delivery set". The 2026-09-02 ruling above widened this step to
-      # every route on the reading that a die also ships the IP deliverable
-      # set; the owner has now decided the other way for a declared DIE, and
-      # this is where that decision is recorded rather than in a producer's
-      # silence. A die therefore reaches this row as SKIPPED-BY-CONDITION with
-      # the declaration cited — not run, and not laundered into a producer
-      # SKIP that would leave `digital_hardmacro_check` refusing an absent kit.
+      # IP delivery set". This is where that decision is recorded rather than
+      # in a producer's silence. A die therefore reaches this row as
+      # SKIPPED-BY-CONDITION with the declaration cited — not run, and not
+      # laundered into a producer SKIP that would leave
+      # `digital_hardmacro_check` refusing an absent kit.
       #
       # `corroborated_by: owner_attestation` is load-bearing and is NOT the
       # default used by 15.5ic/26.5ic/37.5ic: `deliverable` is owner-answered
@@ -8877,6 +8877,14 @@ steps:
         # tier would reinstate the very defect this clause was added for. That
         # distinction is why this is a second clause and not a `files_exist`.
         - program_exit_zero: "release_docs_check . --arm ip --json reports/phase3/release_docs.json"
+    notes: |
+      HARDMACRO/IP delivery: publish the reusable LEF, Liberty, GDS and
+      Verilog views together with their release documents. The governing
+      condition remains the route markers plus the owner-attested
+      `answers.deliverable` declaration; when that declaration is `DIE`, this
+      IP delivery step is not applicable and is recorded as such. A DIE is
+      therefore excluded by an explicit owner answer, never by a missing kit
+      being mistaken for success.
     # 0.5ic writes the NO_TEMPLATE.txt this step's condition reads.
     blocks_on: [37, 0.5ic]
 

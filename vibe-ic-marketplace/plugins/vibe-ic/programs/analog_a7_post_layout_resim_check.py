@@ -83,10 +83,14 @@ from _analog_a_check_common import (
     artefact_missing_for_block, emit_pass, emit_fail,
     emit_incomplete,
 )
+from analog_pre_vs_post_layout_check import MAX_DEGRADATION_PCT
 
 GATE = "analog_a7_post_layout_resim_check"
 SKILL = "analog-extraction-resim"
-DEFAULT_MAX_DELTA_PCT = 10.0
+# Keep the runner gate on the same q7 owner threshold as the flow-declared
+# gate. The flow YAML remains the routing declaration; this import prevents a
+# second executable cutoff from silently drifting.
+DEFAULT_MAX_DELTA_PCT = MAX_DEGRADATION_PCT
 
 # ── A RE-SIMULATION IS A RE-SIMULATION OF SOMETHING ───────────────────────
 # THE RULE, with no tool, step or block name in it:
