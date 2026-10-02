@@ -83,6 +83,13 @@ PROGRAMS_DIR = Path(__file__).resolve().parent
 _EXECUTION_ISSUER = object()
 
 
+def _configure_execution_policy(args):
+    """Register and configure policy from this canonical front-door module."""
+    import execution_policy as _execution
+    _execution._register_frontdoor_issuer(_EXECUTION_ISSUER)
+    return _execution.configure(args, _issuer=_EXECUTION_ISSUER)
+
+
 def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
     """Publish the front door's own account with its actual dispatch generation."""
     from benchmark_dispatch import _bind_runner_report
@@ -640,9 +647,12 @@ def _run_phase(label: str, runner: Path, args: List[str],
     # phase runner re-enters THIS orchestrator's project lock instead of
     # being refused by it.
     import execution_policy as _execution
-    args = _execution.child_arguments(args)
+    supports_execution_policy = runner.name != "analog_one_shot_runner.py"
+    args = _execution.child_arguments(
+        args, supports_execution_policy=supports_execution_policy)
     cp = subprocess.run([sys.executable, str(runner), *args], env=env,
-                         pass_fds=_execution.child_pass_fds())
+                         pass_fds=(_execution.child_pass_fds()
+                                   if supports_execution_policy else ()))
     return cp.returncode
 
 
@@ -1579,8 +1589,7 @@ def main() -> int:
     import execution_policy as _execution
     _execution.add_arguments(p)
     args = p.parse_args()
-    _execution._register_frontdoor_issuer(_EXECUTION_ISSUER)
-    _execution.configure(args, _issuer=_EXECUTION_ISSUER)
+    _configure_execution_policy(args)
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect

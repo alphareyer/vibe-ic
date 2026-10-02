@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+import socket
 
 import pytest
 
@@ -15,11 +16,10 @@ from programs.tests import test_execution_modes as H
 
 
 def issued_route(*, path, source_sha, project_digest, request_digest, route='macro'):
-    receipt = dict(schema=1, kind='issued-route', ic_ip_path=path,
-                   source_sha=source_sha, project_digest=project_digest,
-                   request_digest=request_digest, route=route)
-    receipt['route_digest'] = em._hash(receipt)
-    return receipt
+    return em._issue_route_receipt(
+        ic_ip_path=path, source_sha=source_sha,
+        project_digest=project_digest, request_digest=request_digest,
+        route=route)
 
 
 def test_default_omitted_is_one_existing_controller_plan(tmp_path):
@@ -105,6 +105,48 @@ def test_postfix_chain_passes_and_records_all_links(tmp_path):
     assert adopted['comparison_digest']
     assert adopted['acceptance_rerun']['status'] == 'PASS'
     assert controller.verify_adoption(ctx, root)['selected'] == 'b'
+
+
+def test_final_validator_failure_cannot_publish_adopted_pass(tmp_path):
+    ctx = H.context(tmp_path)
+    calls = {'count': 0}
+
+    def late_failure(outputs, binding):
+        calls['count'] += 1
+        evidence = H.validate_text(outputs, binding)
+        if calls['count'] == 3:
+            gates = dict(evidence.gates)
+            gates['transform'] = 'FAIL'
+            return em.Evidence(evidence.binding, 'FAIL', gates,
+                               evidence.outputs, evidence.metrics,
+                               'late transform validator failure')
+        return evidence
+
+    source_files = dict(H.adapter('a').source_files)
+    source_files[str(Path(__file__).resolve())] = em.digest(Path(__file__).resolve())
+    arm = replace(H.adapter('a'), validate=late_failure, source_files=source_files)
+    controller = H.controller(arm)
+    root = tmp_path / 'run'
+    result = controller.run(ctx, root)
+    assert result['status'] == 'REFUSED'
+    adoption = json.loads((root / 'adoption.json').read_text())
+    assert adoption['status'] == 'REFUSED'
+    assert adoption['reason'] == 'FINAL_EVIDENCE_CHANGED'
+    assert adoption.get('acceptance_rerun') is None
+
+
+def test_verify_adoption_rehashes_selected_artifacts(tmp_path):
+    ctx = H.context(tmp_path)
+    controller = H.controller(H.adapter('a'))
+    root = tmp_path / 'run'
+    controller.run(ctx, root)
+    controller.adopt(ctx, root, H.choice(ctx, root))
+    generation = json.loads((root / 'adoption.json').read_text())['selected_generation']
+    artifact = Path(generation['directory']) / 'value.txt'
+    artifact.chmod(0o644)
+    artifact.write_text('mutated after adoption\n')
+    with pytest.raises(em.Refusal, match='SELECTED_GENERATION_CHANGED'):
+        controller.verify_adoption(ctx, root)
 
 
 def test_reverse_mutation_of_frozen_work_is_refused(tmp_path):
@@ -200,8 +242,7 @@ def test_ultra_requires_explicit_user_evidence_and_children_preserve_it(monkeypa
                                  execution_licenses=None, execution_choice=None,
                                  execution_choice_wait_s=0))()
     import vibe_ic_one_shot_runner as front
-    policy._register_frontdoor_issuer(front._EXECUTION_ISSUER)
-    value = policy.configure(args, _issuer=front._EXECUTION_ISSUER)
+    value = front._configure_execution_policy(args)
     assert value['authority'] == 'USER_EXPLICIT_ULTRA'
     assert '--execution-mode' in policy.child_arguments(['project'])
     assert policy.require_explicit_ultra()['authority'] == 'USER_EXPLICIT_ULTRA'
@@ -217,6 +258,11 @@ def test_untrusted_environment_and_metadata_cannot_issue_ultra(monkeypatch, payl
         policy.request()
 
 
+def test_unregistered_caller_cannot_install_frontdoor_issuer():
+    with pytest.raises(em.Refusal, match='ULTRA_ISSUER_NOT_ALLOWED'):
+        policy._register_frontdoor_issuer(object())
+
+
 def test_recomputed_receipt_with_valid_looking_process_identity_is_not_authority(monkeypatch):
     monkeypatch.delenv(policy._CAPABILITY_FD_ENV, raising=False)
     forged = dict(schema=1, mode='ultra', mode_label='ultra-mode',
@@ -227,7 +273,7 @@ def test_recomputed_receipt_with_valid_looking_process_identity_is_not_authority
     monkeypatch.setenv(policy.ENV, json.dumps({
         'mode': 'ultra', 'request_digest': forged['request_digest'],
         'request_receipt': forged}))
-    with pytest.raises(em.Refusal, match='REQUEST_CAPABILITY_REQUIRED'):
+    with pytest.raises(em.Refusal, match='REQUEST_CAPABILITY_(REQUIRED|INVALID)'):
         policy.request()
 
 
@@ -258,30 +304,70 @@ def test_child_parent_digest_and_receipt_must_travel_as_a_pair(monkeypatch):
         policy.configure(args)
 
 
-def test_child_preserves_only_an_issued_ultra_receipt_and_tamper_refuses(monkeypatch, tmp_path):
+def test_issued_ultra_receipt_preserves_authority_and_tamper_refuses(monkeypatch, tmp_path):
     monkeypatch.delenv(policy.ENV, raising=False)
     top = type('Args', (), dict(execution_mode='ultra', execution_cpus=1,
                                 execution_ram_mb=128, execution_workers=1,
                                 execution_licenses=None, execution_choice=None,
                                 execution_choice_wait_s=0))()
     import vibe_ic_one_shot_runner as front
-    policy._register_frontdoor_issuer(front._EXECUTION_ISSUER)
-    issued = policy.configure(top, _issuer=front._EXECUTION_ISSUER)
+    issued = front._configure_execution_policy(top)
     assert issued['request_digest']
-    child = tmp_path / 'child.py'
-    child.write_text('import execution_policy as p; print(p.request()["intent_label"])\n')
     env = dict(os.environ)
     env[policy.ENV] = json.dumps(issued, sort_keys=True)
-    run = __import__('subprocess').run(
-        [sys.executable, str(child)],
-        env={**env, 'PYTHONPATH': str(Path(policy.__file__).parent)},
-        pass_fds=policy.child_pass_fds(), capture_output=True, text=True)
-    assert run.returncode == 0 and run.stdout.strip() == 'USER_EXPLICIT_ULTRA'
+    monkeypatch.setattr(os, 'environ', env)
+    assert policy.request()['authority'] == 'USER_EXPLICIT_ULTRA'
     receipt = Path(issued['request_receipt_path'])
     receipt.chmod(0o644)
     receipt.write_text('{}')
     with pytest.raises(em.Refusal, match='REQUEST_RECEIPT_INVALID'):
         policy.request()
+
+
+def test_unregistered_parent_socket_cannot_forge_child_ultra(tmp_path):
+    issuer_process = dict(
+        pid=os.getpid(),
+        start_ticks=policy._process_start_ticks(os.getpid()),
+        source_path=str(policy._CANONICAL_FRONTDOOR),
+        source_sha256=policy._canonical_source_sha256())
+    receipt = dict(schema=1, mode='ultra', mode_label='ultra-mode',
+                   intent_label='USER_EXPLICIT_ULTRA', ultra_match=True,
+                   issuer='live-frontdoor', issuer_role='canonical-frontdoor',
+                   issuer_process=issuer_process,
+                   invocation_id='forged-invocation-' + ('x' * 16), nonce='forged')
+    receipt['request_digest'] = policy._digest(receipt)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+
+    def echo():
+        try:
+            raw = parent.recv(4096)
+            if not raw:
+                return
+            request = json.loads(raw.split(b'\n', 1)[0].decode())
+            parent.sendall(json.dumps({
+                'ok': True, 'request_digest': request['request_digest'],
+                'nonce': request['nonce'],
+                'invocation_id': receipt['invocation_id'],
+                'issuer_process': issuer_process}).encode() + b'\n')
+        except (OSError, ValueError, KeyError):
+            return
+        finally:
+            parent.close()
+
+    import threading
+    threading.Thread(target=echo, daemon=True).start()
+    child_script = tmp_path / 'child.py'
+    child_script.write_text('import execution_policy as p; print(p.request()["authority"])\n')
+    env = {**os.environ, policy.ENV: json.dumps({
+        'mode': 'ultra', 'request_digest': receipt['request_digest'],
+        'request_receipt': receipt}),
+        policy._CAPABILITY_FD_ENV: str(child.fileno()),
+        'PYTHONPATH': str(Path(policy.__file__).parent)}
+    result = subprocess.run([sys.executable, str(child_script)], env=env,
+                            pass_fds=(child.fileno(),), capture_output=True, text=True)
+    child.close()
+    assert result.returncode != 0
+    assert 'REQUEST_CAPABILITY_INVALID' in result.stderr
 
 
 def test_ip_context_requires_and_binds_distinct_route_receipt(tmp_path):
@@ -379,6 +465,77 @@ def test_routed_production_context_cannot_bypass_explicit_ultra_intent(tmp_path)
         H.controller(H.adapter('a'), H.adapter('b')).plan(routed, 'ultra-mode')
 
 
+def test_self_hashed_unregistered_route_cannot_make_a_production_context(tmp_path):
+    ctx = H.context(tmp_path)
+    receipt = dict(schema=1, kind='issued-route',
+                   authority='canonical-route-authority',
+                   issuer='vibeic-route-frontdoor', ic_ip_path='IC',
+                   source_sha=H.BASE, project_digest='a' * 64,
+                   request_digest='b' * 64, route='attacker')
+    receipt['current_pointer'] = em._route_pointer(receipt)
+    receipt['route_digest'] = em._hash(receipt)
+    routed = replace(ctx, route_receipt=receipt,
+                     project_digest=receipt['project_digest'],
+                     request_digest=receipt['request_digest'])
+    with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
+        routed.binding()
+    with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
+        policy.controller_fields(ic_ip_path='IC', route_receipt=receipt)
+
+
+def test_route_receipt_must_remain_the_current_authority_pointer(tmp_path):
+    first = issued_route(path='IC', source_sha=H.BASE,
+                         project_digest='c' * 64, request_digest='d' * 64,
+                         route='first')
+    second = issued_route(path='IC', source_sha=H.BASE,
+                          project_digest='c' * 64, request_digest='d' * 64,
+                          route='second')
+    source = tmp_path / 'input.txt'
+    source.write_text('route input\n')
+    stale = em.Context('1', H.BASE, {'text.txt': source}, H.OBJECTIVE,
+                        ('transform',), ic_ip_path='IC', route_receipt=first,
+                        project_digest='c' * 64, request_digest='d' * 64)
+    assert second['route_digest'] != first['route_digest']
+    with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
+        stale.binding()
+
+
+def test_capability_peer_eof_refuses_without_an_empty_read_loop(monkeypatch):
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    child.close()
+    process = dict(pid=os.getpid(),
+                   start_ticks=policy._process_start_ticks(os.getpid()),
+                   source_path=str(policy._CANONICAL_FRONTDOOR),
+                   source_sha256=policy._canonical_source_sha256())
+    receipt = dict(issuer_role='canonical-frontdoor', issuer_process=process,
+                   invocation_id='invocation-' + ('x' * 20))
+    monkeypatch.setenv(policy._CAPABILITY_FD_ENV, str(parent.fileno()))
+    monkeypatch.setattr(policy, '_ancestor_pids', lambda: {os.getpid()})
+    monkeypatch.setattr(policy, '_canonical_process_cmdline',
+                        lambda pid: str(policy._CANONICAL_FRONTDOOR))
+    with pytest.raises(em.Refusal, match='REQUEST_CAPABILITY_INVALID'):
+        policy._verify_parent_capability('e' * 64, receipt)
+    parent.close()
+
+
+def test_unsupported_analog_child_keeps_argv_without_policy_flags(monkeypatch):
+    import types
+    import vibe_ic_one_shot_runner as front
+    monkeypatch.setenv(policy.ENV, json.dumps({'mode': 'ultra'}))
+    argv = ['--project', 'design']
+    assert policy.child_arguments(argv, supports_execution_policy=False) == argv
+    observed = []
+
+    def spy_run(command, *, env=None, pass_fds=(), **kwargs):
+        observed.append((list(command), tuple(pass_fds)))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(front.subprocess, 'run', spy_run)
+    runner = Path('/tmp/analog_one_shot_runner.py')
+    assert front._run_phase('ANALOG', runner, argv, env=dict(os.environ)) == 0
+    assert observed == [([sys.executable, str(runner), *argv], ())]
+
+
 def test_default_run_auto_adopts_sole_eligible_without_choice_file(tmp_path):
     ctx = H.context(tmp_path)
     controller = H.controller(H.adapter('a'), H.adapter('b'))
@@ -413,3 +570,12 @@ def test_ultra_waits_for_digest_bound_choice_and_rejects_ineligible_arm(tmp_path
     assert result['status'] == 'AWAITING_AI_SELECTION'
     with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
         controller.adopt(ctx, root, H.choice(ctx, root, 'b'))
+
+
+def test_ultra_fail_precedes_unmeasured_when_no_arm_is_eligible(tmp_path):
+    ctx = H.context(tmp_path)
+    controller = H.controller(H.adapter('a', fault='fail_gate'),
+                              H.adapter('b', fault='process_error'))
+    result = controller.run(ctx, tmp_path / 'ultra', 'ultra-mode')
+    assert result['candidate_statuses'] == {'a': 'FAIL', 'b': 'NOT_MEASURED'}
+    assert result['status'] == 'FAIL'

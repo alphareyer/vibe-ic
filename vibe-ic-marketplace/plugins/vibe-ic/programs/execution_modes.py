@@ -48,6 +48,8 @@ _COMPLETION_KEY = secrets.token_bytes(32)
 _ISSUED_AUTHORITY: dict[str, str] = {}
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
+_ROUTE_ISSUED: dict[str, dict] = {}
+_ROUTE_CURRENT: dict[str, str] = {}
 
 
 class Refusal(RuntimeError):
@@ -75,6 +77,56 @@ def digest(path: Path) -> str:
 def _hash(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True,
                                     separators=(',', ':')).encode()).hexdigest()
+
+
+def _route_pointer(receipt: Mapping[str, object]) -> str:
+    return _hash({key: receipt.get(key) for key in (
+        'ic_ip_path', 'source_sha', 'project_digest', 'request_digest')})
+
+
+def _register_issued_route(receipt: Mapping[str, object]) -> dict:
+    """Register a route receipt issued by the canonical route authority.
+
+    A caller-supplied self-hash is only a claim.  The controller accepts an
+    issued route after it has been recorded in this process's authority ledger
+    and is still the current receipt for its binding key.
+    """
+    value = dict(receipt)
+    if (value.get('schema') != 1 or value.get('kind') != 'issued-route' or
+            value.get('authority') != 'canonical-route-authority' or
+            value.get('issuer') != 'vibeic-route-frontdoor' or
+            not isinstance(value.get('route_digest'), str) or
+            value.get('current_pointer') != _route_pointer(value)):
+        raise Refusal('ROUTE_AUTHORITY_INVALID', 'canonical issued route required')
+    route_digest = value['route_digest']
+    if _hash({key: value[key] for key in value if key != 'route_digest'}) != route_digest:
+        raise Refusal('ROUTE_RECEIPT_DIGEST_MISMATCH', str(value.get('ic_ip_path')))
+    pointer = value['current_pointer']
+    _ROUTE_ISSUED[route_digest] = json.loads(json.dumps(value))
+    _ROUTE_CURRENT[pointer] = route_digest
+    return json.loads(json.dumps(value))
+
+
+def _issue_route_receipt(*, ic_ip_path: str, source_sha: str,
+                         project_digest: str, request_digest: str,
+                         route: str = '') -> dict:
+    value = dict(schema=1, kind='issued-route', authority='canonical-route-authority',
+                 issuer='vibeic-route-frontdoor', ic_ip_path=ic_ip_path,
+                 source_sha=source_sha, project_digest=project_digest,
+                 request_digest=request_digest, route=route)
+    value['current_pointer'] = _route_pointer(value)
+    value['route_digest'] = _hash(value)
+    return _register_issued_route(value)
+
+
+def _verify_route_authority(receipt: Mapping[str, object]) -> None:
+    route_digest = receipt.get('route_digest')
+    pointer = receipt.get('current_pointer')
+    if (not isinstance(route_digest, str) or
+            not isinstance(pointer, str) or
+            _ROUTE_CURRENT.get(pointer) != route_digest or
+            _ROUTE_ISSUED.get(route_digest) != dict(receipt)):
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(pointer))
 
 
 def _seal(value: dict) -> dict:
@@ -158,7 +210,8 @@ class Context:
             raise Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
         route_kind = self.route_receipt.get('kind')
         if route_kind == 'neutral-test':
-            if self.ic_ip_path != 'IC' or self.project_digest or self.request_digest:
+            if (self.ic_ip_path != 'IC' or self.project_digest or
+                    self.request_digest or self.intent_label != 'PROGRAM_DEFAULT'):
                 raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
         elif route_kind == 'issued-route':
             required = ('schema', 'route_digest', 'project_digest', 'source_sha',
@@ -179,6 +232,7 @@ class Context:
                 raise Refusal('ROUTE_PROJECT_MISMATCH', self.step_id)
             if self.route_receipt['request_digest'] != self.request_digest:
                 raise Refusal('ROUTE_REQUEST_MISMATCH', self.step_id)
+            _verify_route_authority(self.route_receipt)
         else:
             raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
         if not self.inputs or not self.objective or not self.required_gates:
@@ -590,7 +644,15 @@ class Controller:
                               receipt_sha256=eligible[0]['receipt_sha256'],
                               reviewer='program-default-controller',
                               rationale='Planner priority selected the sole default arm.')
-                adopted = self.adopt(context, output, choice)
+                try:
+                    adopted = self.adopt(context, output, choice)
+                except Refusal as exc:
+                    refusal = json.loads((output / 'adoption.json').read_text())
+                    refusal.update(candidate_statuses=candidate_statuses,
+                                   mode=plan['mode'], mode_intent=plan['mode_intent'],
+                                   selected=None, reason=exc.code)
+                    _write(output / 'result.json', refusal)
+                    return refusal
                 adopted.update(candidate_statuses=candidate_statuses,
                                mode=plan['mode'], mode_intent=plan['mode_intent'])
                 self._write_adoption(output, adopted)
@@ -605,9 +667,11 @@ class Controller:
                            comparison_digest=comparison['digest'])
             _write(output / 'result.json', summary)
             return summary
+        terminal_status = ('AWAITING_AI_SELECTION' if comparison['eligible_arms']
+                           else ('FAIL' if 'FAIL' in candidate_statuses.values()
+                                 else 'NOT_MEASURED'))
         summary = dict(run_id=run_id,
-                       status=('AWAITING_AI_SELECTION'
-                               if comparison['eligible_arms'] else 'NOT_MEASURED'),
+                       status=terminal_status,
                        candidate_statuses=candidate_statuses,
                        mode=plan['mode'], mode_intent=plan['mode_intent'], selected=None,
                        frozen_work_digest=plan['frozen_work_digest'],
@@ -1007,6 +1071,18 @@ class Controller:
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
             self._generation_current(generation)
+            # The validator is the final consumer of the selected result.  It
+            # may observe a late transform/validator failure after the earlier
+            # admission checks, so its third (post-selection) answer must be
+            # checked before an adoption receipt can claim PASS.  Never stamp
+            # PASS from the fact that the callback returned normally.
+            final_evidence = asdict(arm.validate(
+                Path(receipt['output_root']), context.binding()))
+            if (final_evidence != receipt['evidence'] or
+                    final_evidence.get('verdict') != 'PASS' or
+                    any(final_evidence.get('gates', {}).get(gate) != 'PASS'
+                        for gate in context.required_gates)):
+                raise Refusal('FINAL_EVIDENCE_CHANGED', str(arm_id))
             adoption.update(status='ADOPTED', selected=arm_id,
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
@@ -1015,9 +1091,7 @@ class Controller:
                                         artifact_outputs=receipt['evidence']['outputs']),
                             acceptance_rerun=dict(acceptance_digest=plan['acceptance_digest'],
                                                   binding=context.binding(),
-                                                  evidence=asdict(arm.validate(
-                                                      Path(receipt['output_root']),
-                                                      context.binding())),
+                                                  evidence=final_evidence,
                                                   status='PASS'))
             self._write_adoption(root, adoption)
         except Refusal as exc:
@@ -1069,4 +1143,36 @@ class Controller:
             raise Refusal('PROGRAM_ADOPTION_WINNER_MISMATCH', context.step_id)
         if adoption.get('status') != 'ADOPTED':
             raise Refusal('PROGRAM_ADOPTION_NOT_ADOPTED', context.step_id)
+        generation = adoption.get('selected_generation')
+        if not isinstance(generation, dict):
+            raise Refusal('PROGRAM_ADOPTION_GENERATION_MISSING', context.step_id)
+        if (generation.get('run_id') != plan.get('run_id') or
+                generation.get('arm_id') != winner.get('arm_id') or
+                generation.get('outputs') != winner.get('artifact_outputs')):
+            raise Refusal('PROGRAM_ADOPTION_GENERATION_UNBOUND', context.step_id)
+        # Rehash every selected output on every verification.  The immutable
+        # adoption receipt is not evidence that the selected bytes still match
+        # the issued generation; a post-adoption mutation must refuse.
+        self._generation_current(generation)
+        arm_id = winner.get('arm_id')
+        receipt_path = root / str(arm_id) / 'receipt.json'
+        if not receipt_path.is_file() or digest(receipt_path) != winner.get('receipt_sha256'):
+            raise Refusal('PROGRAM_ADOPTION_WINNER_MISMATCH', context.step_id)
+        receipt = json.loads(receipt_path.read_text())
+        arm = next((candidate for candidate in self.registry.adapters(context.step_id)
+                    if candidate.arm_id == arm_id), None)
+        if (arm is None or receipt.get('run_id') != plan.get('run_id') or
+                receipt.get('status') != 'ELIGIBLE' or
+                Path(receipt.get('output_root', '')).resolve() != root / str(arm_id) / 'outputs' or
+                Path(receipt.get('input_root', '')).resolve() != root / str(arm_id) / 'inputs'):
+            raise Refusal('PROGRAM_ADOPTION_EXECUTION_INVALID', context.step_id)
+        self._execution_authority(root, plan, receipt, arm)
+        self._current_admission(context, plan, arm)
+        self._eligible(receipt, context, arm)
+        final_evidence = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
+        if (final_evidence != receipt.get('evidence') or
+                final_evidence.get('verdict') != 'PASS' or
+                any(final_evidence.get('gates', {}).get(gate) != 'PASS'
+                    for gate in context.required_gates)):
+            raise Refusal('FINAL_EVIDENCE_CHANGED', str(arm_id))
         return adoption
