@@ -1,7 +1,13 @@
 """Explicit fail-closed frontend producer entry points."""
-import argparse, json, subprocess, shutil
+import argparse, json, os, subprocess, shutil
 import hashlib
 from pathlib import Path
+
+
+def _flow_contract(step):
+    import _flow_yaml
+    return next((dict(row) for row in _flow_yaml.load().get('steps', ())
+                 if str(row.get('id')) == str(step)), None)
 
 def _write(step, output, producer, **details):
     output=Path(output); output.mkdir(parents=True, exist_ok=True)
@@ -16,12 +22,22 @@ def _verify_manifest(project, step):
         raise ValueError(f'{step}: issued manifest is required')
     try: record=json.loads(manifest.read_text())
     except (OSError,ValueError) as exc: raise ValueError(f'{step}: issued manifest invalid') from exc
-    for rel, expected in (record.get('files') or {}).items():
-        path=Path(project)/rel
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected: raise ValueError(f'{step}: issued input mutation: {rel}')
     if record.get('step_id') != step: raise ValueError(f'{step}: issued route mismatch')
     if not isinstance(record.get('parameters'), dict):
         raise ValueError(f'{step}: issued parameters missing')
+    if os.environ.get('VIBEIC_ISSUED_MANIFEST_SHA256'):
+        observed = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        if observed != os.environ['VIBEIC_ISSUED_MANIFEST_SHA256']:
+            raise ValueError(f'{step}: issued manifest binding mismatch')
+    root = Path(project).resolve()
+    for rel, expected in (record.get('files') or {}).items():
+        if not isinstance(rel, str) or Path(rel).is_absolute() or '..' in Path(rel).parts:
+            raise ValueError(f'{step}: issued input path is unsafe: {rel!r}')
+        path=root / rel
+        if (not path.resolve().is_relative_to(root) or path.is_symlink() or not path.is_file() or
+                hashlib.sha256(path.read_bytes()).hexdigest() != expected):
+            raise ValueError(f'{step}: issued input mutation: {rel}')
+    return record
 
 def _require(project, output, step, producer, **kwargs):
     if project is None or output is None: raise ValueError(f'{step}: project and output are required')
@@ -49,27 +65,116 @@ def _cli(step, project, output, modules, args=()):
 def produce_d1(project,output,**k):
     import design_one_shot_runner as d
     return _record('D1',project,output,'design_one_shot_runner.step_phase1',d.step_phase1,**k)
+
+
+def _output_paths(root, required):
+    """Resolve the canonical YAML output contract to concrete regular files."""
+    found = {}
+    for spec in required:
+        alternatives = [part.strip() for part in str(spec).split(' OR ')]
+        matches = []
+        for alternative in alternatives:
+            candidate = root / alternative
+            if any(ch in alternative for ch in '*?['):
+                matches.extend(sorted(p for p in root.glob(alternative)
+                                     if p.is_file() and not p.is_symlink()))
+            elif candidate.is_file() and not candidate.is_symlink():
+                matches.append(candidate)
+        for path in matches:
+            found[str(path.relative_to(root))] = str(spec)
+    return found
+
+
+def _write_step_binding(root, step, paths):
+    """Emit the small step-scoped write record consumed by the strict checker."""
+    contract = _flow_contract(step)
+    if not contract:
+        raise ValueError(f'{step}: canonical flow row is unavailable')
+    folder = 'phase1/stage_phase1/0.5ic_submission_template_ingest'
+    step_root = root / 'steps' / folder
+    step_root.mkdir(parents=True, exist_ok=True)
+    produced = []
+    for rel, spec in sorted(paths.items()):
+        path = root / rel
+        stat = path.stat()
+        produced.append({'rel': rel, 'size': stat.st_size, 'mtime': stat.st_mtime,
+                         'kind': 'file', 'spec': spec})
+    row = {'id': str(step), 'n_required_outputs': len(contract.get('required_outputs') or ()),
+           'n_produced': len(produced), 'produced': produced, 'findings': []}
+    (step_root / 'written.json').write_text(json.dumps(row, sort_keys=True) + '\n')
+    (root / 'steps' / 'index.json').write_text(json.dumps(
+        {'steps': [{'id': str(step), 'name': 'submission template and tapeout declaration',
+                    'folder': folder}]}, sort_keys=True) + '\n')
+
+
 def produce_05ic(project,output,template=None,no_template_reason=None,**k):
     if bool(template) == bool(no_template_reason):
         raise ValueError('0.5ic: exactly one of template or no_template_reason is required')
-    _verify_manifest(project, '0.5ic')
+    manifest = _verify_manifest(project, '0.5ic')
+    bound=manifest.get('parameters') or {}
+    for key, value in (('template', template), ('no_template_reason', no_template_reason),
+                       ('slot', k.get('slot'))):
+        if value is not None and key in bound and bound[key] != value:
+            raise ValueError(f'0.5ic: {key} disagrees with issued manifest')
     project, output = Path(project), Path(output)
     staged = output / 'project'; output.mkdir(parents=True, exist_ok=True)
     if staged.exists(): shutil.rmtree(staged)
     shutil.copytree(project, staged, ignore=shutil.ignore_patterns('issued_manifest.json','frontend_outputs'))
     args1=['python3',str(Path(__file__).with_name('submission_template_ingest.py')),str(staged)]
-    args1 += ['--template',str(template)] if template else ['--no-template-reason',str(no_template_reason)]
+    if template:
+        template_path=Path(template)
+        if template_path.is_absolute():
+            try:
+                template_path=staged / template_path.resolve().relative_to(project.resolve())
+            except ValueError as exc:
+                raise ValueError('0.5ic: template must be inside the frozen project') from exc
+        elif '..' in template_path.parts or str(template_path) == '.':
+            raise ValueError('0.5ic: template path is unsafe')
+        args1 += ['--template',str(template_path)]
+    else:
+        args1 += ['--no-template-reason',str(no_template_reason)]
+    slot=bound.get('slot', k.get('slot'))
+    if template and slot:
+        args1 += ['--slot', str(slot)]
     answers=staged/'input/step_0_5ic_answers.json'
     if not answers.is_file(): raise ValueError('0.5ic: answers file is required')
-    args2=['python3',str(Path(__file__).with_name('tapeout_declaration_gen.py')),str(staged),'--answers',str(answers)]
+    try:
+        answers_doc=json.loads(answers.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError('0.5ic: answers file is invalid') from exc
+    if not isinstance(answers_doc, dict):
+        raise ValueError('0.5ic: answers file must be a JSON object')
+    if template:
+        staged_template=Path(args1[args1.index('--template') + 1])
+        if not staged_template.is_absolute():
+            staged_template=staged / staged_template
+        if not staged_template.is_dir():
+            raise ValueError('0.5ic: template directory is unavailable')
+    else:
+        try:
+            from _submission_template import MIN_REASON_CHARS
+        except ImportError as exc:
+            raise ValueError('0.5ic: route validator unavailable') from exc
+        if (not isinstance(no_template_reason, str) or
+                len(no_template_reason.strip()) < MIN_REASON_CHARS):
+            raise ValueError('0.5ic: no_template_reason is too short')
+    args2=['python3',str(Path(__file__).with_name('tapeout_declaration_gen.py')),str(staged),
+           '--answers','input/step_0_5ic_answers.json']
     records=[]
     for argv in (args1,args2):
-        cp=subprocess.run(argv,capture_output=True,text=True); records.append({'argv':argv,'rc':cp.returncode,'stdout':cp.stdout,'stderr':cp.stderr})
+        cp=subprocess.run(argv, cwd=staged, capture_output=True, text=True)
+        records.append({'argv':argv,'rc':cp.returncode,'stdout':cp.stdout,'stderr':cp.stderr})
         if cp.returncode != 0: raise RuntimeError(f'0.5ic producer failed rc={cp.returncode}')
-    for rel in ('reports/phase1/submission_template.json','reports/phase1/tapeout_declaration.json','input/submission_template/tapeout_declaration.json'):
-        src=staged/rel
-        if src.is_file():
-            dst=output/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(src,dst)
+    contract = _flow_contract('0.5ic')
+    paths = _output_paths(staged, contract.get('required_outputs') or ())
+    expected = {str(spec) for spec in contract.get('required_outputs') or ()}
+    if set(paths.values()) != expected:
+        missing = sorted(expected - set(paths.values()))
+        raise RuntimeError(f'0.5ic producer outputs incomplete: {missing}')
+    for rel in paths:
+        src=staged/rel; dst=output/rel; dst.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(src,dst)
+    _write_step_binding(output, '0.5ic', paths)
     return output/'reports/phase1/tapeout_declaration.json'
 def produce_1(project,output,ic_class=None,force_regen=False,**k):
     if not ic_class: raise ValueError('1: ic_class is required')
@@ -175,13 +280,19 @@ REQUIRED_PARAMETERS={'D1':(), '0.5ic':(), '1':('ic_class',), '2':('top','clock',
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest=Path(project)/'input'/'issued_manifest.json'
+    if not manifest.is_file():
+        manifest=Path(project)/'issued_manifest.json'
     if manifest.is_file():
         try:
             bound=json.loads(manifest.read_text()).get('parameters') or {}
         except (OSError,ValueError) as exc: raise ValueError(f'{step_id}: issued manifest invalid') from exc
+        if any(key in kwargs and kwargs[key] != value for key, value in bound.items()
+               if key in kwargs):
+            raise ValueError(f'{step_id}: caller parameters disagree with issued manifest')
         merged=dict(bound); merged.update(kwargs); kwargs=merged
     missing=[key for key in REQUIRED_PARAMETERS[step_id] if kwargs.get(key) in (None,'')]
-    if step_id == '0.5ic' and not (kwargs.get('template') or kwargs.get('no_template_reason')): missing=['template_or_no_template_reason']
+    if step_id == '0.5ic' and bool(kwargs.get('template')) == bool(kwargs.get('no_template_reason')):
+        missing=['template_or_no_template_reason']
     if missing: raise ValueError(f'{step_id}: missing parameters: {", ".join(missing)}')
     return PRODUCERS[step_id](project,output,**kwargs)
 def main():
