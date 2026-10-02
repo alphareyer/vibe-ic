@@ -16,6 +16,7 @@ Test cases:
   10. Multi-file design parsed correctly
 """
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -684,6 +685,115 @@ class TestReturnCodes:
 """)
         res, _ = run_cli(tmp_path, files, 'top')
         assert res.returncode == 1
+
+
+def _nested_parameter_design(width_expr: str, consumer: str = "binary") -> dict:
+    """The issue-2860 three-module hierarchy, with one parameter spelling varied."""
+    if consumer == "gray":
+        compare = "assign reached = count == 6'b11_0000;"
+    else:
+        compare = "assign reached = count == 6'd32;"
+    return {
+        "counter_source.sv": """
+module counter_source(input wire clk, output reg [5:0] count);
+initial count = 0;
+always @(posedge clk) count <= count + 6'd1;
+endmodule
+""",
+        "count_sink.sv": f"""
+module count_sink(input wire [5:0] count, output wire reached);
+{compare}
+endmodule
+""",
+        "count_bridge.sv": f"""
+module count_bridge #(
+    parameter integer N = 63,
+    parameter integer WIDTH = {width_expr}
+) (
+    input wire clk,
+    output wire reached
+);
+wire [WIDTH-1:0] count;
+counter_source src(.clk(clk), .count(count));
+count_sink dst(.count(count), .reached(reached));
+endmodule
+""",
+    }
+
+
+def _population(report):
+    return (
+        report["summary"]["total_interfaces"],
+        report["summary"]["matches"],
+        report["summary"]["unknowns"],
+        report["summary"]["mismatches"],
+        report["discovery"],
+    )
+
+
+def test_nested_parameter_expression_keeps_complete_hierarchy_population(tmp_path):
+    nested_res, nested = run_cli(
+        tmp_path / "nested", _nested_parameter_design("$clog2(N + 1)"),
+        "count_bridge")
+    literal_res, literal = run_cli(
+        tmp_path / "literal", _nested_parameter_design("6"), "count_bridge")
+    assert nested_res.returncode == 0, nested_res.stderr
+    assert literal_res.returncode == 0, literal_res.stderr
+    assert _population(nested)[:4] == (3, 1, 2, 0)
+    assert _population(nested)[:4] == _population(literal)[:4]
+    assert nested["discovery"]["complete"] is True
+    assert nested["discovery"]["modules_discovered"] == 3
+    assert nested["discovery"]["instances_discovered"] == 2
+
+
+def test_nested_spacing_and_genuine_encoding_mismatch_are_preserved(tmp_path):
+    res, report = run_cli(
+        tmp_path, _nested_parameter_design("$clog2( N + 1 )", "gray"),
+        "count_bridge")
+    assert res.returncode == 1
+    assert report["summary"]["mismatches"] == 1
+    assert report["summary"]["total_interfaces"] == 3
+    assert report["discovery"]["complete"] is True
+
+
+@pytest.mark.skipif(shutil.which("iverilog") is None,
+                    reason="native Icarus is supplied by the EDA image")
+def test_nested_literal_and_mismatch_inputs_compile_natively(tmp_path):
+    for label, files in (
+            ("nested", _nested_parameter_design("$clog2(N + 1)")),
+            ("literal", _nested_parameter_design("6")),
+            ("mismatch", _nested_parameter_design("$clog2(N + 1)", "gray"))):
+        rtl = tmp_path / label
+        rtl.mkdir()
+        paths = []
+        for name, text in files.items():
+            path = rtl / name
+            path.write_text(text)
+            paths.append(str(path))
+        result = subprocess.run(
+            ["iverilog", "-g2012", "-s", "count_bridge", "-o",
+             str(rtl / "sim.vvp"), *paths],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+
+def test_malformed_header_refuses_zero_population(tmp_path):
+    rtl = {"bad.sv": "module count_bridge #(parameter W=(1+2) (input wire clk);\n"}
+    res, report = run_cli(tmp_path, rtl, "count_bridge")
+    assert res.returncode == 2
+    assert report["summary"]["verdict"] == "INCONCLUSIVE"
+    assert report["discovery"]["complete"] is False
+    assert report["discovery"]["issues"]
+    assert "incomplete hierarchy discovery" in res.stderr
+
+
+def test_unresolved_top_refuses_zero_population(tmp_path):
+    rtl = {"known.sv": "module known(input wire a); endmodule\n"}
+    res, report = run_cli(tmp_path, rtl, "missing_top")
+    assert res.returncode == 2
+    assert report["summary"]["verdict"] == "INCONCLUSIVE"
+    assert any("top module 'missing_top'" in item
+               for item in report["discovery"]["issues"])
 
 
 if __name__ == '__main__':

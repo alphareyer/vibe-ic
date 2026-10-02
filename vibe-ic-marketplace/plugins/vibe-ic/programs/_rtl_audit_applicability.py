@@ -97,6 +97,28 @@ def _census(root: Path) -> tuple[list[Path], list[dict[str, Any]], list[str]]:
     return files, records, texts
 
 
+def source_census(root: Path, *, files: Iterable[Path] | None = None) -> dict[str, Any]:
+    """Return the complete, byte-bound source manifest for ``root``.
+
+    Consumers use the same function as producers, then compare the complete
+    record list and canonical digest.  An optional explicit file selection is
+    accepted only when it is exactly the directory census; a partial list is
+    an incomplete proof rather than a smaller subject.
+    """
+    root = Path(root).absolute()
+    sources, records, _ = _census(root)
+    if files is not None:
+        selected = sorted(Path(path).absolute() for path in files)
+        if selected != sources:
+            raise ValueError("source_set_incomplete")
+    return {
+        "root": str(root),
+        "files": records,
+        "sha256": hashlib.sha256(
+            json.dumps(records, sort_keys=True).encode()).hexdigest(),
+    }
+
+
 def _quoted(path: Path) -> str:
     # The Yosys command language is not a shell, but still has command syntax.
     if any(c in str(path) for c in ('"', "\\", ";", "\n", "\r")):

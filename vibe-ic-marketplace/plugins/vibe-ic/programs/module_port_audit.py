@@ -82,6 +82,12 @@ class ModuleInstance:
     is_implicit: bool       # True if .* was used
     line: int
     file: str
+    # Positional actuals are kept separately from named connections.  A caller
+    # may use them only after resolving the child formal order and direction;
+    # an unqualified signal in this list is not evidence of a driver by itself.
+    positional_actuals: List[str] = field(default_factory=list)
+    has_mixed_connections: bool = False
+    malformed_connections: bool = False
 
 
 @dataclass
@@ -93,6 +99,271 @@ class ModuleDef:
     instances: List[ModuleInstance]  # sub-module instantiations
     file: str
     line: int
+    # Formal order is needed to resolve positional actuals.  Dict insertion
+    # order is not sufficient for non-ANSI declarations whose body order can
+    # differ from the old-style header order.
+    port_order: List[str] = field(default_factory=list)
+    body: str = ""
+    discovery_issues: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Balanced source helpers
+# ---------------------------------------------------------------------------
+def extract_balanced(text: str, open_at: int, *, opener: str = '(',
+                     closer: str = ')') -> Optional[Tuple[str, int]]:
+    """Return the contents and closing index of one balanced delimiter pair.
+
+    Regexes with ``[^)]*`` silently truncate legal parameter expressions such
+    as ``$clog2(N+1)``.  This small source-backed helper is shared by the
+    hierarchy parser and the encoding audit; it understands nested delimiters
+    and quoted strings, and returns ``None`` for malformed input so consumers
+    can disclose incomplete discovery instead of certifying an empty census.
+    """
+    if open_at < 0 or open_at >= len(text) or text[open_at] != opener:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(open_at, len(text)):
+        ch = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:index], index
+            if depth < 0:
+                return None
+    return None
+
+
+def split_top_level(text: str, separator: str = ',') -> List[str]:
+    """Split source at separators outside nested (), [] and {} groups."""
+    parts: List[str] = []
+    current: List[str] = []
+    stack: List[str] = []
+    pairs = {')': '(', ']': '[', '}': '{'}
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            current.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            current.append(ch)
+        elif ch in '([{':
+            stack.append(ch)
+            current.append(ch)
+        elif ch in ')]}':
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+            else:
+                # Keep malformed text visible to the caller.  It will be
+                # treated as unsupported rather than partially classified.
+                stack.append(ch)
+            current.append(ch)
+        elif ch == separator and not stack:
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append(''.join(current))
+    return parts
+
+
+def lexical_mask(src: str, *, attributes: bool = False) -> str:
+    """Blank comments and strings without moving any source offset.
+
+    Structural keywords/delimiters inside literals are never syntax. An
+    unfinished token refuses discovery rather than truncating the file.
+    """
+    out = list(src)
+    i = 0
+    while i < len(src):
+        start = i
+        if src.startswith('//', i):
+            end = src.find('\n', i + 2)
+            i = len(src) if end < 0 else end
+        elif src.startswith('/*', i):
+            end = src.find('*/', i + 2)
+            if end < 0:
+                raise ValueError('unterminated_comment')
+            i = end + 2
+        elif src[i] == '"':
+            i += 1
+            while i < len(src) and src[i] != '"':
+                i += 2 if src[i] == '\\' else 1
+            if i >= len(src):
+                raise ValueError('unterminated_string')
+            i += 1
+        elif attributes and src.startswith('(*', i):
+            end = lexical_mask(src[i + 2:]).find('*)')
+            if end < 0:
+                raise ValueError('unterminated_attribute')
+            i += 2 + end + 2
+        else:
+            i += 1
+            continue
+        for j in range(start, i):
+            out[j] = '\n' if src[j] == '\n' else ' '
+    return ''.join(out)
+
+
+def mask_attributes_only(src: str) -> str:
+    """Blank SystemVerilog attributes while preserving comments and strings.
+
+    ``parse_port_list_ansi`` is also a small public parser helper used by
+    callers that deliberately provide raw text.  Its historical contract is
+    that comment stripping belongs to the caller, so use this narrower mask
+    there instead of changing how raw comments are tokenized.
+    """
+    out = list(src)
+    i = 0
+    state = 'code'
+    while i < len(src):
+        if state == 'code' and src.startswith('//', i):
+            state = 'line_comment'
+            i += 2
+            continue
+        if state == 'line_comment':
+            if src[i] == '\n':
+                state = 'code'
+            i += 1
+            continue
+        if state == 'code' and src.startswith('/*', i):
+            state = 'block_comment'
+            i += 2
+            continue
+        if state == 'block_comment':
+            if src.startswith('*/', i):
+                state = 'code'
+                i += 2
+            else:
+                i += 1
+            continue
+        if state == 'code' and src[i] == '"':
+            state = 'string'
+            i += 1
+            continue
+        if state == 'string':
+            if src[i] == '\\':
+                i += 2
+            elif src[i] == '"':
+                state = 'code'
+                i += 1
+            else:
+                i += 1
+            continue
+        if state == 'code' and src.startswith('(*', i):
+            start = i
+            i += 2
+            depth = 1
+            while i < len(src) and depth:
+                if src.startswith('(*', i):
+                    depth += 1
+                    i += 2
+                elif src.startswith('*)', i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                raise ValueError('unterminated_attribute')
+            for j in range(start, i):
+                out[j] = '\n' if src[j] == '\n' else ' '
+            continue
+        i += 1
+    return ''.join(out)
+
+
+def module_regions(src: str, issues: Optional[List[str]] = None):
+    """Yield complete (name, header start, body start, body end) regions.
+
+    Balanced headers and lexical keyword boundaries cover both single-line
+    and multi-line modules. Unsupported identifiers remain disclosed.
+    """
+    issues = issues if issues is not None else []
+    try:
+        mask = lexical_mask(src, attributes=True)
+    except ValueError as exc:
+        issues.append(str(exc))
+        return
+    cursor = 0
+    token_re = re.compile(r'\b(module|endmodule)\b')
+    while (match := token_re.search(mask, cursor)) is not None:
+        if match.group() != 'module':
+            issues.append('endmodule_without_module')
+            cursor = match.end()
+            continue
+        name_match = re.match(r'\s+(?:automatic\s+|static\s+)?([A-Za-z_]\w*)\b',
+                              mask[match.end():])
+        if name_match is None:
+            issues.append('unsupported_module_identifier')
+            cursor = match.end()
+            continue
+        name = name_match.group(1)
+        index = match.end() + name_match.end()
+        while True:
+            while index < len(mask) and mask[index].isspace():
+                index += 1
+            if not re.match(r'import\b', mask[index:]):
+                break
+            semi = mask.find(';', index)
+            if semi < 0:
+                break
+            index = semi + 1
+        if index < len(mask) and mask[index] == '#':
+            index += 1
+            while index < len(mask) and mask[index].isspace():
+                index += 1
+            result = extract_balanced(mask, index)
+            if result is None:
+                issues.append(f'unbalanced parameter list in module {name}')
+                cursor = index + 1
+                continue
+            index = result[1] + 1
+        while index < len(mask) and mask[index].isspace():
+            index += 1
+        if index < len(mask) and mask[index] == '(':
+            result = extract_balanced(mask, index)
+            if result is None:
+                issues.append(f'unbalanced port list in module {name}')
+                cursor = index + 1
+                continue
+            index = result[1] + 1
+        while index < len(mask) and mask[index].isspace():
+            index += 1
+        if index >= len(mask) or mask[index] != ';':
+            issues.append(f'incomplete header in module {name}')
+            cursor = index + 1
+            continue
+        body_start = index + 1
+        end = token_re.search(mask, body_start)
+        if end is None or end.group() != 'endmodule':
+            issues.append(f'missing endmodule in module {name}')
+            cursor = body_start
+            continue
+        yield name, match.start(), body_start, end.start()
+        cursor = end.end()
 
 
 @dataclass
@@ -252,7 +523,8 @@ def header_ends_on(line: str) -> bool:
     return ';' in _IMPORT_CLAUSE_RE.sub('', line)
 
 
-def parse_port_list_ansi(header: str, file_path: str, base_line: int) -> Dict[str, PortDecl]:
+def parse_port_list_ansi(header: str, file_path: str, base_line: int,
+                         issues: Optional[List[str]] = None) -> Dict[str, PortDecl]:
     """
     Parse ANSI-style port declarations from a module header.
     e.g., module foo (input wire [7:0] data, output reg valid);
@@ -306,13 +578,13 @@ def parse_port_list_ansi(header: str, file_path: str, base_line: int) -> Dict[st
 
     # Split by comma, handling multi-line declarations
     # We need to track the current direction/type across comma-separated ports
-    current_dir = 'input'
+    current_dir = 'UNKNOWN'
     current_width_expr = ''
     current_width = 1
     current_line_offset = 0
 
     # Split by commas but respect nested brackets
-    parts = _split_by_comma(port_text)
+    parts = split_top_level(mask_attributes_only(port_text))
 
     # NOTE: `header` is expected to be comment-free. Both production entry
     # points (`scan_rtl_directory`, `scan_rtl_files`) call `strip_comments` on
@@ -382,6 +654,9 @@ def parse_port_list_ansi(header: str, file_path: str, base_line: int) -> Dict[st
                 current_width_expr = ''
                 current_width = 1
             name = m.group('name')
+            duplicate = name in ports
+            if duplicate and issues is not None:
+                issues.append(f'duplicate header port: {name}')
             line_num = base_line + lines_before_ports + current_line_offset
             ports[name] = PortDecl(
                 name=name,
@@ -392,6 +667,10 @@ def parse_port_list_ansi(header: str, file_path: str, base_line: int) -> Dict[st
                 file=file_path,
                 data_type=(m.group('type') or '').strip(),
             )
+            if duplicate:
+                ports[name].direction = 'UNKNOWN'
+        elif issues is not None:
+            issues.append(f'unsupported header port: {part_stripped}')
 
         current_line_offset += newlines_in_part
 
@@ -421,7 +700,8 @@ def _split_by_comma(text: str) -> List[str]:
     return parts
 
 
-def parse_non_ansi_ports(body: str, file_path: str, base_line: int) -> Dict[str, PortDecl]:
+def parse_non_ansi_ports(body: str, file_path: str, base_line: int,
+                         issues: Optional[List[str]] = None) -> Dict[str, PortDecl]:
     """
     Parse non-ANSI port declarations found in the module body.
     e.g., input [7:0] data; output reg valid;
@@ -429,59 +709,26 @@ def parse_non_ansi_ports(body: str, file_path: str, base_line: int) -> Dict[str,
     task/endtask blocks, which are local parameters, not module ports.
     """
     ports: Dict[str, PortDecl] = {}
-    lines = body.split('\n')
-    func_task_depth = 0  # nesting depth inside function/task blocks
-    for lineno, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        # Track function/task block boundaries
-        if re.match(r'\b(function|task)\b', stripped):
-            func_task_depth += 1
-        if re.match(r'\b(endfunction|endtask)\b', stripped):
-            func_task_depth = max(0, func_task_depth - 1)
-            continue
-        # Skip input/output declarations inside function/task blocks
-        if func_task_depth > 0:
-            continue
-        m = re.match(
-            r'\s*(input|output|inout)\s+'
-            # `\s*`, not `\s+`: `output reg[7:0] q` is legal Verilog and
-            # common in real RTL — the width bracket binds to the net type
-            # without needing a space. Requiring one made the whole anchored
-            # match fail, the port vanished from the module's declared set,
-            # and EVERY instantiation connecting it read as
-            #     Port '.q' ... does not exist in module port declarations
-            #
-            # MEASURED by a minimal pair — the same file, one space moved:
-            #     output  reg[7:0] data_out   -> ERROR mismatch
-            #     output reg [7:0] data_out   -> clean
-            # and over the 107-directory corpus this accounts for 7 of the
-            # 7 rc=1 results: every failure this gate reported was its own
-            # parser, not a design defect.
-            r'(?:(?:wire|reg|logic|signed|unsigned)\s*)*'
-            # Packed dimensions, one or more — see the ANSI site. Outer group
-            # captures, inner does not, so the numbered groups below keep their
-            # positions.
-            r'((?:\[[^\]]+\]\s*)+)?'
-            r'([^;]+?)\s*;',
-            line
-        )
-        if m:
-            direction = m.group(1)
-            width_expr = (m.group(2) or '').strip()
-            width = eval_width_expr(width_expr)
-            name_list = m.group(3)
-            for name in name_list.split(','):
-                name = name.strip()
-                name = re.sub(r'\[.*', '', name).strip()
-                if name and re.match(r'^\w+$', name):
-                    ports[name] = PortDecl(
-                        name=name,
-                        direction=direction,
-                        width=width,
-                        width_expr=width_expr,
-                        line=base_line + lineno,
-                        file=file_path
-                    )
+    mask = lexical_mask(body, attributes=True)
+    mask = re.sub(r'\b(function|task)\b.*?\b(endfunction|endtask)\b',
+                  lambda m: ''.join('\n' if c == '\n' else ' ' for c in m.group()),
+                  mask, flags=re.DOTALL)
+    for declaration in re.finditer(r'\b(input|output|inout)\b([^;]*);', mask):
+        direction = declaration.group(1)
+        text = declaration.group(2).strip()
+        # The ANSI declaration parser owns type/range/name continuation rules.
+        parsed = parse_port_list_ansi(
+            'module _ (' + direction + ' ' + text + ');', file_path,
+            base_line + body[:declaration.start()].count('\n'))
+        if len(parsed) != len(split_top_level(text)) and issues is not None:
+            issues.append('incomplete body port declaration')
+        for name, port in parsed.items():
+            if name in ports:
+                port.direction = 'UNKNOWN'
+                if issues is not None:
+                    issues.append(f'duplicate body port declaration: {name}')
+            ports[name] = port
+
     return ports
 
 
@@ -507,10 +754,11 @@ def parse_instantiations(body: str, file_path: str, base_line: int) -> List[Modu
         'assert', 'assume', 'cover', 'property', 'sequence', 'disable',
     }
 
-    # Strategy: find patterns like:  module_name [#(...)] instance_name (...)  ;
-    # We use a multi-step approach:
-    # 1. Find all semicolon-terminated statements that contain .port( patterns
-    # 2. Parse them for module_name, instance_name, and connections
+    # Strategy: find semicolon-terminated statements and parse the module,
+    # optional parameter override, instance and balanced connection list in
+    # order.  The old implementation selected only statements containing a
+    # named ``.port(...)`` token, so an ordinary positional instance was absent
+    # from the census before any direction resolution could happen.
 
     # Build the full text with line tracking
     lines = body.split('\n')
@@ -520,12 +768,6 @@ def parse_instantiations(body: str, file_path: str, base_line: int) -> List[Modu
     statements = _collect_statements(body)
 
     for stmt_text, stmt_start_line in statements:
-        # Must contain at least one .name( pattern or .*
-        if not re.search(r'\.\s*\w+\s*\(', stmt_text) and '.*' not in stmt_text:
-            continue
-
-        # Try to parse: module_name [#(...)] instance_name (...)
-        # First strip any parameter block #(...)
         cleaned = stmt_text.strip()
 
         # Match module_name
@@ -538,19 +780,16 @@ def parse_instantiations(body: str, file_path: str, base_line: int) -> List[Modu
 
         rest = cleaned[m_mod.end():]
 
-        # Skip optional parameter override #(...)
+        # Skip optional parameter override #(...), preserving nested calls such
+        # as ``#(.WIDTH($clog2(N+1)))``.
         if rest.startswith('#'):
             rest = rest[1:].lstrip()
             if rest.startswith('('):
-                depth = 0
-                for i, ch in enumerate(rest):
-                    if ch == '(':
-                        depth += 1
-                    elif ch == ')':
-                        depth -= 1
-                        if depth == 0:
-                            rest = rest[i + 1:].lstrip()
-                            break
+                balanced = extract_balanced(rest, 0)
+                if balanced is None:
+                    continue
+                _, close_at = balanced
+                rest = rest[close_at + 1:].lstrip()
 
         # Match instance_name
         m_inst = re.match(r'(\w+)\s*\(', rest)
@@ -562,53 +801,87 @@ def parse_instantiations(body: str, file_path: str, base_line: int) -> List[Modu
 
         rest = rest[m_inst.end() - 1:]  # include the opening paren
 
-        # Extract port connection list from parentheses
+        # Extract the complete, balanced port connection list.
         if not rest.startswith('('):
             continue
-        depth = 0
-        conn_end = -1
-        for i, ch in enumerate(rest):
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    conn_end = i
-                    break
-        if conn_end == -1:
+        balanced = extract_balanced(rest, 0)
+        if balanced is None:
             continue
-
-        conn_text = rest[1:conn_end]
+        conn_text, conn_end = balanced
 
         # Parse connections
         connections: List[PortConnection] = []
+        positional_actuals: List[str] = []
         is_implicit = False
+        has_named = False
+        has_positional = False
+        malformed_connections = rest[conn_end + 1:].strip() != ';'
 
-        if '.*' in conn_text:
-            is_implicit = True
-
-        # Find all .port_name(wire_expr) patterns
-        for m_conn in re.finditer(r'\.(\w+)\s*\(([^)]*)\)', conn_text):
-            port_name = m_conn.group(1)
-            wire_expr = m_conn.group(2).strip()
-            # Calculate approximate line number
-            text_before = conn_text[:m_conn.start()]
+        named_ports: Set[str] = set()
+        items = [] if not conn_text.strip() else split_top_level(conn_text)
+        item_offset = 0
+        for item in items:
+            item_start = conn_text.find(item, item_offset)
+            if item_start < 0:
+                item_start = item_offset
+            item_offset = item_start + len(item) + 1
+            item_stripped = item.strip()
+            if not item_stripped:
+                # Empty positional actuals are meaningful placeholders.  Keep
+                # them so later positions are not shifted, but never treat an
+                # empty expression as a driver.
+                positional_actuals.append('')
+                has_positional = True
+                continue
+            text_before = conn_text[:item_start]
             conn_line = base_line + stmt_start_line + text_before.count('\n')
-            connections.append(PortConnection(
-                port_name=port_name,
-                wire_expr=wire_expr,
-                line=conn_line,
-                file=file_path
-            ))
+            if item_stripped == '.*':
+                is_implicit = True
+                has_named = True
+                continue
+            if item_stripped.startswith('.'):
+                named = re.match(r'^\.\s*(\w+)\s*(.*)$',
+                                 item_stripped, re.DOTALL)
+                if named is None:
+                    malformed_connections = True
+                    continue
+                tail = named.group(2).strip()
+                if tail:
+                    actual = extract_balanced(tail, 0)
+                    if actual is None or tail[actual[1] + 1:].strip():
+                        malformed_connections = True
+                        continue
+                    wire_expr = actual[0].strip()
+                else:
+                    wire_expr = named.group(1)
+                has_named = True
+                if named.group(1) in named_ports:
+                    malformed_connections = True
+                named_ports.add(named.group(1))
+                connections.append(PortConnection(
+                    port_name=named.group(1),
+                    wire_expr=wire_expr,
+                    line=conn_line,
+                    file=file_path
+                ))
+                continue
+            # A positional actual is retained verbatim.  Consumers resolve
+            # only simple identifiers and simple concatenations; arbitrary
+            # expressions remain conservative and cannot bless a wire.
+            has_positional = True
+            positional_actuals.append(item_stripped)
 
-        if connections or is_implicit:
+        if connections or positional_actuals or is_implicit:
             instances.append(ModuleInstance(
                 module_name=mod_name,
                 instance_name=inst_name,
                 connections=connections,
                 is_implicit=is_implicit,
                 line=base_line + stmt_start_line,
-                file=file_path
+                file=file_path,
+                positional_actuals=positional_actuals,
+                has_mixed_connections=has_named and has_positional,
+                malformed_connections=malformed_connections,
             ))
 
     return instances
@@ -620,40 +893,24 @@ def _collect_statements(body: str) -> List[Tuple[str, int]]:
     Returns list of (statement_text, start_line_offset).
     """
     statements = []
-    lines = body.split('\n')
-    current_stmt = []
-    start_line = 0
-    paren_depth = 0
-    bracket_depth = 0
-
-    for lineno, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        if not current_stmt:
-            start_line = lineno
-
-        current_stmt.append(line)
-
-        for ch in line:
-            if ch == '(':
-                paren_depth += 1
-            elif ch == ')':
-                paren_depth -= 1
-            elif ch == '[':
-                bracket_depth += 1
-            elif ch == ']':
-                bracket_depth -= 1
-
-        if ';' in line and paren_depth <= 0 and bracket_depth <= 0:
-            stmt_text = '\n'.join(current_stmt)
-            statements.append((stmt_text, start_line))
-            current_stmt = []
-            paren_depth = 0
-            bracket_depth = 0
-
+    mask = lexical_mask(body, attributes=True)
+    start = 0
+    stack = []
+    for index, ch in enumerate(mask):
+        if ch in '([{':
+            stack.append(ch)
+        elif ch in ')]}':
+            if stack and stack[-1] == {')': '(', ']': '[', '}': '{'}[ch]:
+                stack.pop()
+            else:
+                stack.append(ch)
+        elif ch == ';' and not stack:
+            text = mask[start:index + 1]
+            leading = len(text) - len(text.lstrip())
+            statements.append((text, mask[:start + leading].count('\n')))
+            start = index + 1
     return statements
+
 
 
 def parse_modules(src: str, file_path: str) -> List[ModuleDef]:
@@ -662,87 +919,37 @@ def parse_modules(src: str, file_path: str) -> List[ModuleDef]:
     Returns a list of ModuleDef with ports and sub-module instantiations.
     """
     modules: List[ModuleDef] = []
-    lines = src.split('\n')
-
-    # Find module boundaries
-    module_regions: List[Tuple[int, int, str]] = []  # (start_line, end_line, header)
-    i = 0
-    while i < len(lines):
-        m = re.match(r'\s*module\s+(\w+)', lines[i])
-        if m:
-            mod_name = m.group(1)
-            start_line = i
-            # Find the end of module header (first ; that is not an import)
-            #
-            # SystemVerilog allows a package import list between the module name
-            # and the parameter list:
-            #
-            #     module aes_core
-            #       import aes_pkg::*;        <- the first `;` in the file
-            #       import aes_reg_pkg::*;
-            #     #( ... ) ( input logic clk_i, ... );
-            #
-            # Stopping at the first `;` made the header those two lines, which
-            # contain no ports at all — so every instantiated port "did not
-            # exist in the module". Measured on the corpus: 920 errors on
-            # opentitan_aes alone, every one of them false (#559).
-            header_lines = []
-            j = i
-            while j < len(lines):
-                header_lines.append(lines[j])
-                if header_ends_on(lines[j]):
-                    break
-                j += 1
-            header_end = j
-            # Find endmodule
-            end_line = header_end
-            for k in range(header_end + 1, len(lines)):
-                if re.match(r'\s*endmodule\b', lines[k]):
-                    end_line = k
-                    break
-            module_regions.append((start_line, end_line, mod_name))
-            i = end_line + 1
-        else:
-            i += 1
-
-    for start_line, end_line, mod_name in module_regions:
-        # Extract header (everything from 'module' to first ';')
-        header_lines = []
-        for j in range(start_line, min(end_line + 1, len(lines))):
-            header_lines.append(lines[j])
-            if header_ends_on(lines[j]):
-                break
-        header = '\n'.join(header_lines)
-
-        # Extract body (everything between header end and endmodule)
-        header_end = start_line + len(header_lines)
-        body = '\n'.join(lines[header_end:end_line])
-
-        # Parse ports from ANSI header
-        ports = parse_port_list_ansi(header, file_path, start_line + 1)
-
-        # Also check for non-ANSI port declarations in body
-        non_ansi_ports = parse_non_ansi_ports(body, file_path, header_end + 1)
+    issues: List[str] = []
+    for mod_name, start, body_start, body_end in module_regions(src, issues):
+        header = lexical_mask(src[start:body_start], attributes=True)
+        body = lexical_mask(src[body_start:body_end], attributes=True)
+        start_line = src[:start].count('\n') + 1
+        body_line = src[:body_start].count('\n') + 1
+        local_issues = []
+        ports = parse_port_list_ansi(header, file_path, start_line, local_issues)
+        non_ansi_ports = parse_non_ansi_ports(body, file_path, body_line, local_issues)
         for name, port in non_ansi_ports.items():
-            if name not in ports:
-                ports[name] = port
-
-        # Parse parameters
-        parameters: List[str] = []
-        for pm in re.finditer(r'\bparameter\s+(?:\w+\s+)?(\w+)\s*=', header + '\n' + body):
-            parameters.append(pm.group(1))
-
-        # Parse instantiations from body
-        instances = parse_instantiations(body, file_path, header_end + 1)
-
+            if name in ports:
+                existing = ports[name]
+                if existing.direction == 'UNKNOWN':
+                    ports[name] = port
+                elif (existing.direction, existing.width_expr) != (
+                        port.direction, port.width_expr):
+                    existing.direction = 'UNKNOWN'
+                    local_issues.append(f'ambiguous declaration: {name}')
+            else:
+                local_issues.append(f'body port absent from header: {name}')
+        if any(p.direction == 'UNKNOWN' for p in ports.values()):
+            local_issues.append(f'unresolved port directions in module {mod_name}')
+        parameters = [m.group(1) for m in re.finditer(
+            r'\bparameter\s+(?:\w+\s+)?(\w+)\s*=', header + '\n' + body)]
         modules.append(ModuleDef(
-            name=mod_name,
-            ports=ports,
-            parameters=parameters,
-            instances=instances,
-            file=file_path,
-            line=start_line + 1
-        ))
+            name=mod_name, ports=ports, parameters=parameters,
+            instances=parse_instantiations(body, file_path, body_line),
+            file=file_path, line=start_line, port_order=list(ports), body=body,
+            discovery_issues=local_issues))
+    for mod in modules:
+        mod.discovery_issues.extend(issues)
 
     return modules
 

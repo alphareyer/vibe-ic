@@ -15111,10 +15111,10 @@ def _rtl_absent_refusal_detail(project: Path,
     return detail, extras
 
 
-def step_reference_tb(project: Path, top_name: str = "chip_top",
-                      ic_class: Optional[str] = None,
-                      container: str = _pin.default_container_name(),
-                      rtl_handoff: Optional[str] = None) -> StepResult:
+def _step_reference_tb_without_pulse_gate(project: Path, top_name: str = "chip_top",
+                                           ic_class: Optional[str] = None,
+                                           container: str = _pin.default_container_name(),
+                                           rtl_handoff: Optional[str] = None) -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
@@ -15403,6 +15403,99 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
                       f"transcript_tail={out[-1500:]}",
                       [str(transcript)],
                       extras={"tb_frontend": tb_frontend})
+
+
+def _run_pulse_width_rearm_normal_gate(project: Path, top_name: str,
+                                       ic_class: Optional[str],
+                                       container: str) -> Tuple[int, Dict[str, Any], Path]:
+    """Run the source-bound pulse consumer before the ordinary reference TB."""
+    report_path = project / "reports/phase2/gates/pulse_width_rearm_conformance.json"
+    report_path.unlink(missing_ok=True)
+    rtl_dir = _pl.rtl_dir(project)
+    rtl_files = _select_asic_rtl_sources(rtl_dir) if rtl_dir.is_dir() else []
+    bound_top = top_name
+    try:
+        uses_aid, _ = _class_uses_aid_reference_tb(ic_class)
+        if uses_aid and PROTOCOL_TB.is_file() and rtl_files:
+            bound_top = _resolve_reference_tb_top(
+                rtl_files, PROTOCOL_TB.read_text(errors="replace"), top_name)
+    except Exception:
+        bound_top = top_name
+    from pulse_width_rearm_conformance_check import run_project as _pwr_run_project
+    rc, report = _pwr_run_project(
+        project, rtl_files, bound_top, report_path=report_path,
+        runtime_identity={"container": container,
+                          "configured_image": os.environ.get("VIBEIC_EDA_IMAGE", "")})
+    return rc, report, report_path
+
+
+def step_reference_tb(project: Path, top_name: str = "chip_top",
+                      ic_class: Optional[str] = None,
+                      container: str = _pin.default_container_name(),
+                      rtl_handoff: Optional[str] = None) -> StepResult:
+    """Normal reference-TB consumer with the source-bound pulse gate in front."""
+    t0 = time.time()
+    try:
+        pulse_rc, pulse_report, pulse_path = _run_pulse_width_rearm_normal_gate(
+            project, top_name, ic_class, container)
+    except (ImportError, OSError, ValueError) as exc:
+        return StepResult(
+            "reference_tb", "NOT_MEASURED", time.time() - t0,
+            f"pulse-width/rearm normal consumer could not run: {exc}",
+            reason_class="execution_error")
+    pulse_verdict = pulse_report.get("verdict")
+    pulse_measured = pulse_report.get("measured") is True
+    if pulse_verdict == "FAIL" and pulse_measured:
+        return StepResult(
+            "reference_tb", "FAIL", time.time() - t0,
+            "pulse-width/rearm normal consumer measured FAIL; it precedes "
+            "the ordinary reference TB verdict",
+            [str(pulse_path)], extras={"pulse_width_rearm": pulse_report})
+    # The ordinary TB is reachable only after a measured native PASS, or when
+    # the pulse contract explicitly says it is not applicable.  Every other
+    # state (including SKIP, unmeasured PASS, unknown verdicts, and a non-zero
+    # native return code) is an absence of evidence, never permission to run a
+    # second consumer that could turn the overall step green.
+    ordinary_allowed = (
+        (pulse_verdict == "PASS" and pulse_measured and pulse_rc == 0) or
+        (pulse_verdict == "NOT_APPLICABLE" and pulse_rc == 0))
+    def adopt_generation() -> bool:
+        if pulse_report.get("normal_consumer") is not True:
+            return True
+        from pulse_width_rearm_conformance_check import adopt_project_receipt
+        rtl_dir = _pl.rtl_dir(project)
+        rtl_files = _select_asic_rtl_sources(rtl_dir) if rtl_dir.is_dir() else []
+        adopt_rc, _ = adopt_project_receipt(project, rtl_files, pulse_path, pulse_report)
+        return adopt_rc == 0
+
+    if ordinary_allowed:
+        ordinary_allowed = adopt_generation()
+    if not ordinary_allowed:
+        reason = str(pulse_report.get("reason") or
+                     f"native pulse gate verdict={pulse_verdict!r}, "
+                     f"measured={pulse_report.get('measured')!r}, rc={pulse_rc}")
+        reason_class = "tool_absent" if "unavailable" in reason or "not found" in reason else "inconclusive"
+        return StepResult(
+            "reference_tb", "NOT_MEASURED", time.time() - t0,
+            f"pulse-width/rearm normal consumer has no usable native evidence: {reason}",
+            [str(pulse_path)], extras={"pulse_width_rearm": pulse_report},
+            reason_class=reason_class)
+    result = _step_reference_tb_without_pulse_gate(
+        project, top_name, ic_class, container, rtl_handoff)
+    if result.status == "PASS" and not adopt_generation():
+        return StepResult(
+            "reference_tb", "NOT_MEASURED", time.time() - t0,
+            "pulse-width/rearm input generation changed during the ordinary reference TB: " +
+            str(pulse_report.get("reason", "")),
+            [str(pulse_path)], extras={"pulse_width_rearm": pulse_report},
+            reason_class="inconclusive")
+    if pulse_path.is_file():
+        if str(pulse_path) not in result.output_files:
+            result.output_files.append(str(pulse_path))
+        result.extras["pulse_width_rearm"] = pulse_report
+        result.detail = (result.detail + "; " if result.detail else "") + \
+            f"pulse-width/rearm normal consumer {pulse_verdict}"
+    return result
 
 
 # -------------------------------------------------------------------------

@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1399
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1399)
+- **Total programs (excluding helpers / shims):** 1403
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1403)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1390 |
+| `any` | 1394 |
 
 ## Alphabetical listing
 
@@ -817,6 +817,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `mixed_signal_cosim_check` | any | — | deterministic gate for mixed-signal co-simulation |
 | `mixed_signal_interface_si_check` | any | — | M3 interface signal-integrity gate. |
 | `mixed_signal_merge_check` | any | v0.2.84 | M1 gate (v0.2.84: SUBSTANCE, not presence). |
+| `mixed_signal_power_domain_run` | any | — | M2: placed protection-cell evidence from UPF + routed Verilog/DEF. |
 | `mixed_signal_signoff_check` | any | — | gate M4 (hardened, anti-fabrication). |
 | `mixed_signal_top_lvs_run` | any | — | REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub). |
 | `modbus_protocol_synth` | any | v0.1.84 | Modbus-class protocol synth helper. |
@@ -1058,6 +1059,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `published_absence_claim_is_rechecked_against_the_tree` | any | — | A published reason string that names a path as ABSENT, and it exists. |
 | `published_record_staleness_check` | any | — | a landed gate rule does not reach the records the gate already published. |
 | `pulse_decoder_edge_check` | any | — | Enforce rising-edge-driven classification in LOW-pulse decoders (PPM/PWM/AID/DALI/1-Wire/NEC-IR/UART-break style). |
+| `pulse_width_rearm_conformance_check` | any | — | Independent functional consumer for an explicit pulse-width/rearm contract. |
+| `pulse_width_rearm_contract` | any | — | Source-bound pulse-width timeout/rearm contract extraction. |
 | `pvt_matrix_check` | any | — | PVT-matrix substance gate (ORGANIC-20260606 #442). |
 | `pytest_aggregate_carries_its_runtime_identity` | any | — | a failure count names the runtime that produced it, or it may not be subtracted from another. |
 | `pytest_per_file_junit` | any | — | run the whole selection once, then recover with ONE pytest session per selected file only when that aggregate record is lost, so a file t... |
@@ -1119,6 +1122,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `rtl_interface_recover` | any | — | recover a module's PORT INTERFACE from RTL text. |
 | `rtl_precheck_gate` | any | v0.66 | aggregate every RTL static auditor into a single pass/fail gate. Intended to be called BEFORE any SOF/GDS burn so a developer can't ship ... |
 | `rtl_provenance` | any | — | provenance ledger for ``phase2/stage1/rtl/``. |
+| `rtl_repair_contract` | any | — | Source-bound contracts for bounded RTL repair. |
 | `rtl_response_byte_oracle_check` | any | — | P0.2 deterministic gate |
 | `rtl_review_aggregate` | any | v0.1.50 | rtl-review skill backing aggregator (Pattern-B → program). |
 | `rtl_scan_scope` | any | — | shared authoritative-RTL scan-scope policy (ORGANIC #545). |
@@ -1471,7 +1475,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1390 programs)
+### `any` (1394 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2259,6 +2263,7 @@ _(no programs in this group)_
 - `mixed_signal_cosim_check` — deterministic gate for mixed-signal co-simulation
 - `mixed_signal_interface_si_check` — M3 interface signal-integrity gate.
 - `mixed_signal_merge_check` — M1 gate (v0.2.84: SUBSTANCE, not presence).  _[v0.2.84]_
+- `mixed_signal_power_domain_run` — M2: placed protection-cell evidence from UPF + routed Verilog/DEF.
 - `mixed_signal_signoff_check` — gate M4 (hardened, anti-fabrication).
 - `mixed_signal_top_lvs_run` — REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub).
 - `modbus_protocol_synth` — Modbus-class protocol synth helper.  _[v0.1.84]_
@@ -2500,6 +2505,8 @@ _(no programs in this group)_
 - `published_absence_claim_is_rechecked_against_the_tree` — A published reason string that names a path as ABSENT, and it exists.
 - `published_record_staleness_check` — a landed gate rule does not reach the records the gate already published.
 - `pulse_decoder_edge_check` — Enforce rising-edge-driven classification in LOW-pulse decoders (PPM/PWM/AID/DALI/1-Wire/NEC-IR/UART-break style).
+- `pulse_width_rearm_conformance_check` — Independent functional consumer for an explicit pulse-width/rearm contract.
+- `pulse_width_rearm_contract` — Source-bound pulse-width timeout/rearm contract extraction.
 - `pvt_matrix_check` — PVT-matrix substance gate (ORGANIC-20260606 #442).
 - `pytest_aggregate_carries_its_runtime_identity` — a failure count names the runtime that produced it, or it may not be subtracted from another.
 - `pytest_per_file_junit` — run the whole selection once, then recover with ONE pytest session per selected file only when that aggregate record is lost, so a file t...
@@ -2560,6 +2567,7 @@ _(no programs in this group)_
 - `rtl_interface_recover` — recover a module's PORT INTERFACE from RTL text.
 - `rtl_precheck_gate` — aggregate every RTL static auditor into a single pass/fail gate. Intended to be called BEFORE any SOF/GDS burn so a developer can't ship ...  _[v0.66]_
 - `rtl_provenance` — provenance ledger for ``phase2/stage1/rtl/``.
+- `rtl_repair_contract` — Source-bound contracts for bounded RTL repair.
 - `rtl_response_byte_oracle_check` — P0.2 deterministic gate
 - `rtl_review_aggregate` — rtl-review skill backing aggregator (Pattern-B → program).  _[v0.1.50]_
 - `rtl_scan_scope` — shared authoritative-RTL scan-scope policy (ORGANIC #545).

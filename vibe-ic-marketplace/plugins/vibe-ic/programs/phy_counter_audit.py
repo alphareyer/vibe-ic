@@ -404,6 +404,16 @@ def main():
     if not args.out_dir:
         ap.error('--out-dir is required when no <project> positional given')
 
+    source_manifest = None
+    source_error = None
+    try:
+        source_root = _applicability.source_root(
+            [Path(p) for p in args.rtl_files])
+        source_manifest = _applicability.source_census(
+            source_root, files=[Path(p) for p in args.rtl_files])
+    except (OSError, ValueError, UnicodeError) as exc:
+        source_error = str(exc)
+
     all_findings: List[Finding] = []
     for f in args.rtl_files:
         p = Path(f)
@@ -418,11 +428,34 @@ def main():
 
     report = generate_report(all_findings)
     report['files_scanned'] = list(args.rtl_files)
+    if source_manifest is not None:
+        try:
+            if _applicability.source_census(source_root) != source_manifest:
+                source_error = 'source_changed_during_audit'
+        except (OSError, ValueError, UnicodeError) as exc:
+            source_error = str(exc)
+    report['report_schema'] = 'vibeic.phy_counter_audit.v2'
+    report['source'] = source_manifest
+    report['discovery'] = {
+        'complete': source_error is None,
+        'issues': ([source_error] if source_error else []),
+    }
+    if source_error:
+        report['source_error'] = source_error
     if not all_findings:
         applicability = _applicability.from_files(
             'phy_counter_audit', [Path(p) for p in args.rtl_files])
         report['applicability'] = applicability
         report['summary']['verdict'] = applicability['state']
+    if source_error and report['summary']['verdict'] != 'FAIL':
+        report['summary']['verdict'] = _applicability.UNKNOWN
+    if report['summary']['verdict'] == _applicability.UNKNOWN:
+        producer_returncode = 2
+    elif report['summary']['verdict'] == 'FAIL':
+        producer_returncode = 1
+    else:
+        producer_returncode = 0
+    report['producer_returncode'] = producer_returncode
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -448,9 +481,7 @@ def main():
     print(f"Verdict: {verdict}")
     print(f"Report: {report_file}")
 
-    if verdict == _applicability.UNKNOWN:
-        return 2
-    return 1 if warnings > 0 else 0
+    return producer_returncode
 
 
 if __name__ == '__main__':

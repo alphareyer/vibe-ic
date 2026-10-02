@@ -42,6 +42,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _rtl_audit_applicability as _applicability
+from module_port_audit import (
+    extract_balanced, split_top_level, lexical_mask, module_regions,
+    parse_port_list_ansi, parse_non_ansi_ports)
 from typing import List, Dict, Set, Tuple, Optional
 
 
@@ -94,23 +97,52 @@ class InterfaceAuditResult:
     severity: str           # "ERROR" | "WARN" | "INFO"
 
 
+# Discovery is a separate evidence dimension from the encoding result.  A
+# zero-population report is certifiable only when the requested top and every
+# source module/instance header were completely discovered.
+_DISCOVERY_ISSUES: List[str] = []
+_DISCOVERED_MODULE_COUNT = 0
+_DISCOVERED_INSTANCE_COUNT = 0
+
+
+def _discovery_issue(message: str) -> None:
+    if message not in _DISCOVERY_ISSUES:
+        _DISCOVERY_ISSUES.append(message)
+
+
 # ---------------------------------------------------------------------------
 # Comment stripper (shared pattern across programs)
 # ---------------------------------------------------------------------------
 def strip_comments(src: str) -> str:
-    """Remove // line comments and /* block */ comments, preserving newlines."""
+    """Remove comments while preserving quoted strings and newlines."""
     out = []
     i = 0
     while i < len(src):
-        if src[i:i+2] == '/*':
+        if src[i] == '"':
+            j = i + 1
+            while j < len(src):
+                if src[j] == '\\':
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(src[i:j])
+            i = j
+        elif src[i:i+2] == '/*':
             end = src.find('*/', i+2)
             if end == -1:
+                # Keep the malformed suffix visible; lexical parsing will
+                # disclose it as incomplete rather than certify a prefix.
+                out.append(src[i:])
                 break
             out.append(''.join('\n' if c == '\n' else ' ' for c in src[i:end+2]))
             i = end + 2
         elif src[i:i+2] == '//':
             end = src.find('\n', i)
             if end == -1:
+                out.append(' ' * (len(src) - i))
                 break
             out.append(' ' * (end - i))
             i = end
@@ -124,122 +156,93 @@ def strip_comments(src: str) -> str:
 # Module parser
 # ---------------------------------------------------------------------------
 def parse_modules(src: str, filepath: str) -> List[ModuleInfo]:
-    """Extract all module definitions from a Verilog/SV source file."""
-    modules = []
-    # Match module ... endmodule blocks
-    mod_pattern = re.compile(
-        r'\bmodule\s+(\w+)\s*'       # module name
-        r'(?:#\s*\([^)]*\)\s*)?'     # optional parameters
-        r'\(([^)]*)\)\s*;'           # port list
-        r'(.*?)'                     # body
-        r'\bendmodule\b',
-        re.DOTALL
-    )
-    for m in mod_pattern.finditer(src):
-        mod_name = m.group(1)
-        port_text = m.group(2)
-        body = m.group(3)
+    """Extract complete module definitions using lexical balanced regions."""
+    modules: List[ModuleInfo] = []
+    issues: List[str] = []
+    regions = list(module_regions(src, issues))
+    for issue in issues:
+        _discovery_issue(f"{issue} ({filepath})")
+    for mod_name, header_start, body_start, body_end in regions:
+        header = src[header_start:body_start]
+        body = lexical_mask(src[body_start:body_end], attributes=True)
+        # The shared region scanner already proved the header and endmodule
+        # boundary. Locate the ANSI port group while skipping parameters/imports.
+        masked = lexical_mask(header, attributes=True)
+        name_match = re.search(r'\b' + re.escape(mod_name) + r'\b', masked)
+        index = name_match.end() if name_match else 0
+        while True:
+            while index < len(masked) and masked[index].isspace():
+                index += 1
+            if not re.match(r'import\b', masked[index:]):
+                break
+            semi = masked.find(';', index)
+            if semi < 0:
+                _discovery_issue(f"unterminated import in module '{mod_name}' ({filepath})")
+                break
+            index = semi + 1
+        if index < len(masked) and masked[index] == '#':
+            index += 1
+            while index < len(masked) and masked[index].isspace():
+                index += 1
+            result = extract_balanced(masked, index)
+            if result is None:
+                _discovery_issue(f"unbalanced parameter list in module '{mod_name}' ({filepath})")
+                continue
+            index = result[1] + 1
+        while index < len(masked) and masked[index].isspace():
+            index += 1
+        port_text = ''
+        if index < len(masked) and masked[index] == '(':
+            result = extract_balanced(masked, index)
+            if result is None:
+                _discovery_issue(f"unbalanced port list in module '{mod_name}' ({filepath})")
+                continue
+            port_text = header[index + 1:result[1]]
         ports = _parse_port_list(port_text, body, mod_name)
-        modules.append(ModuleInfo(
-            name=mod_name, file=filepath, ports=ports, body=body))
+        if any(p.direction == 'UNKNOWN' for p in ports):
+            _discovery_issue(f"unresolved port direction in module '{mod_name}' ({filepath})")
+        modules.append(ModuleInfo(name=mod_name, file=filepath,
+                                  ports=ports, body=body))
     return modules
 
 
 def _parse_port_list(port_text: str, body: str, mod_name: str) -> List[PortInfo]:
-    """Parse ports from ANSI-style port declarations."""
-    ports = []
-    # ANSI-style: input wire [7:0] name, input clk, output reg [5:0] data
-    # Split by comma, but handle multi-line
-    port_text = re.sub(r'\s+', ' ', port_text.strip())
-    if not port_text:
-        return ports
-
-    # Split on commas that are not inside brackets
-    items = _split_ports(port_text)
-
-    current_dir = "input"  # default if not specified
-    for item in items:
-        item = item.strip()
-        if not item:
-            continue
-        # Match: [input|output|inout] [wire|reg|logic] [signed] [width] name
-        pm = re.match(
-            r'(input|output|inout)\s+'
-            r'(?:wire|reg|logic)?\s*'
-            r'(?:signed\s+)?'
-            r'(\[[^\]]+\]\s*)?'
-            r'(\w+)',
-            item)
-        if pm:
-            current_dir = pm.group(1)
-            width = (pm.group(2) or "").strip()
-            name = pm.group(3)
-            ports.append(PortInfo(name=name, direction=current_dir,
-                                  width=width, module=mod_name))
-        else:
-            # Might be a continuation with same direction: just a name
-            nm = re.match(r'(\[[^\]]+\]\s*)?(\w+)', item)
-            if nm:
-                width = (nm.group(1) or "").strip()
-                name = nm.group(2)
-                ports.append(PortInfo(name=name, direction=current_dir,
-                                      width=width, module=mod_name))
-
-    # Also check body for non-ANSI port declarations
-    for dm in re.finditer(
-        r'\b(input|output|inout)\s+(?:wire|reg|logic)?\s*'
-        r'(?:signed\s+)?'
-        r'(\[[^\]]+\]\s*)?'
-        r'(\w+)\s*;',
-        body
-    ):
-        direction = dm.group(1)
-        width = (dm.group(2) or "").strip()
-        name = dm.group(3)
-        # Only add if not already in ports (avoid duplicates)
-        if not any(p.name == name for p in ports):
-            ports.append(PortInfo(name=name, direction=direction,
-                                  width=width, module=mod_name))
-
-    return ports
+    """Preserve formal order and resolve old-style direction placeholders."""
+    clean_ports = lexical_mask(port_text, attributes=True)
+    issues: List[str] = []
+    parsed = parse_port_list_ansi(f'module {mod_name} ({clean_ports});', '', 1, issues)
+    items = split_top_level(clean_ports) if clean_ports.strip() else []
+    if len(parsed) != len(items):
+        _discovery_issue(f'incomplete or duplicate port population in {mod_name}')
+    body_ports = parse_non_ansi_ports(body, '', 1, issues)
+    for issue in issues:
+        _discovery_issue(f'{issue} in {mod_name}')
+    for name, declared in body_ports.items():
+        existing = parsed.get(name)
+        if existing is None:
+            _discovery_issue(f'body port {mod_name}.{name} missing from header')
+        elif existing.direction == 'UNKNOWN':
+            parsed[name] = declared
+        elif (existing.direction, existing.width_expr) != (
+                declared.direction, declared.width_expr):
+            existing.direction = 'UNKNOWN'
+            _discovery_issue(f'ambiguous direction/declaration for {mod_name}.{name}')
+    return [PortInfo(name=port.name, direction=port.direction,
+                     width=port.width_expr, module=mod_name)
+            for port in parsed.values()]
 
 
 def _split_ports(text: str) -> List[str]:
-    """Split port list by commas, respecting bracket depth."""
-    parts = []
-    depth = 0
-    current = []
-    for ch in text:
-        if ch == '[':
-            depth += 1
-        elif ch == ']':
-            depth -= 1
-        elif ch == ',' and depth == 0:
-            parts.append(''.join(current))
-            current = []
-            continue
-        current.append(ch)
-    if current:
-        parts.append(''.join(current))
-    return parts
+    """Backward-compatible wrapper around the shared balanced splitter."""
+    return split_top_level(text)
 
 
 # ---------------------------------------------------------------------------
 # Instance parser
 # ---------------------------------------------------------------------------
 def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
-    """Find module instantiations in a module body."""
-    instances = []
-    # Pattern: module_type [#(...)] inst_name ( .port(sig), ... );
-    # We match the instance and then extract port connections
-    inst_pattern = re.compile(
-        r'\b(\w+)\s+'                # module type
-        r'(?:#\s*\([^)]*\)\s+)?'     # optional parameter override
-        r'(\w+)\s*\('               # instance name
-        r'([^;]*?)'                 # connection list
-        r'\)\s*;',
-        re.DOTALL
-    )
+    """Find named-port module instantiations using balanced delimiters."""
+    instances: List[InstanceInfo] = []
     # Keywords that look like instances but aren't
     non_instance = {
         'module', 'endmodule', 'input', 'output', 'inout', 'wire', 'reg',
@@ -252,28 +255,100 @@ def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
         'union', 'packed', 'signed', 'unsigned', 'return',
     }
 
-    for m in inst_pattern.finditer(body):
+    cursor = 0
+    candidate_re = re.compile(r'\b(\w+)\s+')
+    while True:
+        m = candidate_re.search(body, cursor)
+        if m is None:
+            break
         mod_type = m.group(1)
-        inst_name = m.group(2)
-        conn_text = m.group(3)
-
         if mod_type in non_instance:
+            cursor = m.end()
             continue
-        # Must have named port connections (.port(sig) pattern)
-        if '.' not in conn_text:
+        index = m.end()
+        while index < len(body) and body[index].isspace():
+            index += 1
+        if index < len(body) and body[index] == '#':
+            index += 1
+            while index < len(body) and body[index].isspace():
+                index += 1
+            if index >= len(body) or body[index] != '(':
+                cursor = m.end()
+                continue
+            params = extract_balanced(body, index)
+            if params is None:
+                _discovery_issue(
+                    f"unbalanced parameter override in {parent_module}.{mod_type}")
+                cursor = m.end()
+                continue
+            _, close_at = params
+            index = close_at + 1
+            while index < len(body) and body[index].isspace():
+                index += 1
+        inst_match = re.match(r'(\w+)\s*', body[index:])
+        if inst_match is None:
+            cursor = m.end()
+            continue
+        inst_name = inst_match.group(1)
+        index += inst_match.end()
+        while index < len(body) and body[index].isspace():
+            index += 1
+        if index >= len(body) or body[index] != '(':
+            cursor = m.end()
+            continue
+        conn_result = extract_balanced(body, index)
+        if conn_result is None:
+            _discovery_issue(
+                f"unbalanced connection list in {parent_module}.{inst_name}")
+            cursor = m.end()
+            continue
+        conn_text, close_at = conn_result
+        if not conn_text.strip():
+            cursor = close_at + 1
             continue
 
-        connections = {}
-        for cm in re.finditer(r'\.(\w+)\s*\(\s*([^)]*?)\s*\)', conn_text):
-            port = cm.group(1)
-            sig = cm.group(2).strip()
-            # Take the base signal name (strip bit selects)
-            sm = re.match(r'(\w+)', sig)
+        connections: Dict[str, str] = {}
+        malformed = False
+        for item in split_top_level(conn_text):
+            item = item.strip()
+            if not item:
+                continue
+            if item == '.*':
+                _discovery_issue(
+                    f"wildcard instance connections in {parent_module}.{inst_name}")
+                continue
+            if not item.startswith('.'):
+                # Positional interfaces require formal order/direction.  This
+                # auditor has no such encoding consumer model, so disclose the
+                # unsupported hierarchy shape rather than silently dropping it.
+                _discovery_issue(
+                    f"positional instance connections in {parent_module}.{inst_name}")
+                continue
+            port_match = re.match(r'^\.\s*(\w+)\s*(.*)$', item, re.DOTALL)
+            if port_match is None:
+                malformed = True
+                continue
+            port = port_match.group(1)
+            tail = port_match.group(2).strip()
+            if not tail:
+                # `.port` is a legal implicit same-name connection.
+                connections[port] = port
+                continue
+            if not tail.startswith('('):
+                malformed = True
+                continue
+            actual_result = extract_balanced(tail, 0)
+            if actual_result is None or tail[actual_result[1] + 1:].strip():
+                malformed = True
+                continue
+            sig = actual_result[0].strip()
+            sm = re.fullmatch(r'(\w+)(?:\s*\[[^\]]+\])?', sig)
             if sm:
                 connections[port] = sm.group(1)
-            elif sig == '':
-                # Unconnected port
+            elif not sig:
                 connections[port] = ''
+            else:
+                malformed = True
 
         if connections:
             instances.append(InstanceInfo(
@@ -281,6 +356,10 @@ def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
                 module_type=mod_type,
                 parent_module=parent_module,
                 connections=connections))
+        if malformed:
+            _discovery_issue(
+                f"unsupported connection syntax in {parent_module}.{inst_name}")
+        cursor = close_at + 1
     return instances
 
 
@@ -723,7 +802,11 @@ def run_audit(
     Run the full encoding audit on an RTL directory.
     Returns list of audit results for each cross-module interface.
     """
+    global _DISCOVERED_MODULE_COUNT, _DISCOVERED_INSTANCE_COUNT
     _NOTHING_EXAMINED.clear()
+    _DISCOVERY_ISSUES.clear()
+    _DISCOVERED_MODULE_COUNT = 0
+    _DISCOVERED_INSTANCE_COUNT = 0
     rtl_path = Path(rtl_dir)
     if not rtl_path.exists():
         print(f"ERROR: RTL directory not found: {rtl_dir}", file=sys.stderr)
@@ -731,7 +814,7 @@ def run_audit(
         return []
 
     # Collect all .v and .sv files
-    vfiles = sorted(rtl_path.glob('*.v')) + sorted(rtl_path.glob('*.sv'))
+    vfiles = sorted(rtl_path.rglob('*.v')) + sorted(rtl_path.rglob('*.sv'))
     if not vfiles:
         print(f"WARNING: no .v/.sv files found in {rtl_dir}", file=sys.stderr)
         _NOTHING_EXAMINED.append(f"no .v/.sv files in {rtl_dir}")
@@ -745,13 +828,27 @@ def run_audit(
         src = strip_comments(vf.read_text(errors='replace'))
         mods = parse_modules(src, str(vf))
         for mod in mods:
+            if mod.name in all_modules:
+                _discovery_issue(f'duplicate module definition: {mod.name}')
             all_modules[mod.name] = mod
             insts = parse_instances(mod.body, mod.name)
             all_instances.extend(insts)
+    _DISCOVERED_MODULE_COUNT = len(all_modules)
+    _DISCOVERED_INSTANCE_COUNT = len(all_instances)
 
     if top_module and top_module not in all_modules:
-        print(f"WARNING: top module '{top_module}' not found in parsed modules. "
-              f"Available: {list(all_modules.keys())}", file=sys.stderr)
+        _discovery_issue(
+            f"top module '{top_module}' not found in parsed modules; "
+            f"available: {list(all_modules.keys())}")
+
+    for inst in all_instances:
+        if inst.module_type not in all_modules:
+            _discovery_issue(
+                f"instance '{inst.inst_name}' in '{inst.parent_module}' "
+                f"references unresolved module '{inst.module_type}'")
+    if _DISCOVERY_ISSUES:
+        print("WARNING: incomplete hierarchy discovery: " +
+              "; ".join(_DISCOVERY_ISSUES), file=sys.stderr)
 
     # Build interface map
     interfaces = build_interface_map(all_modules, all_instances)
@@ -817,16 +914,28 @@ def main():
                     help='Minimum severity to report (default: INFO)')
     args = ap.parse_args()
 
+    source_manifest = None
+    source_error = None
+    try:
+        source_manifest = _applicability.source_census(Path(args.rtl_dir))
+    except (OSError, ValueError, UnicodeError) as exc:
+        source_error = str(exc)
     results = run_audit(args.rtl_dir, args.top_module)
+    if source_manifest is not None:
+        try:
+            if _applicability.source_census(Path(args.rtl_dir)) != source_manifest:
+                source_error = 'source_changed_during_audit'
+        except (OSError, ValueError, UnicodeError) as exc:
+            source_error = str(exc)
 
     sev_order = {'ERROR': 2, 'WARN': 1, 'INFO': 0}
     min_sev = sev_order[args.severity]
     filtered = [r for r in results if sev_order[r.severity] >= min_sev]
 
     # Summary
-    mismatches = sum(1 for r in filtered if r.status == 'MISMATCH')
-    matches = sum(1 for r in filtered if r.status == 'MATCH')
-    unknowns = sum(1 for r in filtered if r.status == 'UNKNOWN')
+    mismatches = sum(1 for r in results if r.status == 'MISMATCH')
+    matches = sum(1 for r in results if r.status == 'MATCH')
+    unknowns = sum(1 for r in results if r.status == 'UNKNOWN')
     print(f"interface_encoding_audit: {mismatches} MISMATCH, "
           f"{matches} MATCH, {unknowns} UNKNOWN "
           f"({len(filtered)} interfaces analyzed)")
@@ -847,33 +956,64 @@ def main():
     out_path.mkdir(parents=True, exist_ok=True)
     report_file = out_path / 'encoding_audit_report.json'
     report = {
+        'report_schema': 'vibeic.interface_encoding_audit.v2',
         'summary': {
-            'total_interfaces': len(filtered),
+            'total_interfaces': len(results),
             'mismatches': mismatches,
             'matches': matches,
             'unknowns': unknowns,
             'top_module': args.top_module,
             'rtl_dir': args.rtl_dir,
         },
-        'interfaces': [asdict(r) for r in filtered]
+        'interfaces': [asdict(r) for r in results],
+        'discovery': {
+            'complete': (not _DISCOVERY_ISSUES and not _NOTHING_EXAMINED and
+                         source_error is None),
+            'modules_discovered': _DISCOVERED_MODULE_COUNT,
+            'instances_discovered': _DISCOVERED_INSTANCE_COUNT,
+            'issues': (list(_DISCOVERY_ISSUES) + list(_NOTHING_EXAMINED) +
+                       ([f'source census: {source_error}']
+                        if source_error else [])),
+        },
+        'source': source_manifest,
     }
-    if not filtered:
+    if not results:
         applicability = _applicability.assess(
             'interface_encoding_audit', Path(args.rtl_dir),
             top_module=args.top_module)
         report['applicability'] = applicability
-        if applicability['state'] == _applicability.NOT_APPLICABLE:
+        if (not _DISCOVERY_ISSUES and not _NOTHING_EXAMINED and
+                applicability['state'] == _applicability.NOT_APPLICABLE):
             report['summary']['verdict'] = _applicability.NOT_APPLICABLE
+    if mismatches:
+        report['summary']['verdict'] = 'FAIL'
+    elif _DISCOVERY_ISSUES:
+        report['summary']['verdict'] = 'INCONCLUSIVE'
+    elif source_error or _NOTHING_EXAMINED or unknowns:
+        report['summary']['verdict'] = 'INCONCLUSIVE'
+    elif 'verdict' not in report['summary']:
+        report['summary']['verdict'] = 'FAIL' if mismatches else (
+            'PASS' if results else 'INCONCLUSIVE')
+    if mismatches:
+        producer_returncode = 1
+    elif _DISCOVERY_ISSUES or _NOTHING_EXAMINED or source_error:
+        producer_returncode = 2
+    else:
+        # Preserve the CLI's established advisory status for encoding UNKNOWN
+        # and zero interfaces.  The receipt consumer independently refuses both
+        # populations; the report's INCONCLUSIVE verdict is never audit PASS.
+        producer_returncode = 0
+    report['producer_returncode'] = producer_returncode
     report_file.write_text(json.dumps(report, indent=2))
     print(f"\nJSON report written to: {report_file}")
 
-    if _NOTHING_EXAMINED and report.get('applicability', {}).get('state') != \
-            _applicability.NOT_APPLICABLE:
+    if producer_returncode == 2:
         print(f"VACUOUS_PASS: interface_encoding_audit examined nothing "
-              f"(reason: {_NOTHING_EXAMINED[0]}) — this is not a clean audit",
+              f"or could not prove its source/discovery closure — this is not "
+              f"a clean audit",
               file=sys.stderr)
         return 2
-    return 1 if mismatches > 0 else 0
+    return producer_returncode
 
 
 if __name__ == '__main__':

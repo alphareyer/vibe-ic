@@ -14,42 +14,13 @@ trust the ``all_crossings_protected`` boolean written into that file; it
 recomputes that fact from the crossing list + the level_shifter.json /
 isolation.json sidecar artefacts and FAILs on any unprotected crossing.
 
-WHERE THE THREE SIDECARS COME FROM (M2-d4, corrected 2026-07)
--------------------------------------------------------------
-NOT from this plugin.  power_domain.json / level_shifter.json /
-isolation.json are INPUTS to this checker, and no program shipped here writes
-any of them — they record the power intent and the cells the UPF-driven
-implementation flow actually inserted, so they are supplied by that flow (or
-hand-authored).  Earlier revisions of this docstring said "the producing step"
-as though such a step existed; it does not, and a checker that names a
-producer nobody ships sends the reader looking for a file that will not be
-there.  Absent input is the honest rc=2 SKIP below, never a vacuous PASS.
+Sidecar production is supplied by `mixed_signal_power_domain_run`: one
+native Yosys connectivity export, literal UPF and placed routed DEF cells.
+The canonical M2 gate first checks its native/source binding with
+`--check-only`, then runs this independent sidecar audit and the UPF strategy
+check. Missing producer input remains rc=2 here and cannot pass canonical M2.
+See `flow/mixed_signal_m2.md` for supported input and verification scope.
 
-The sibling gate ``power_domain_signal_crossing_check`` needs no sidecar at
-all: it DERIVES the crossings from the UPF power-domain definitions + power
-states and audits the UPF strategy.  Note what that does NOT currently buy on
-the flow-audit path: all three sidecars are M2's ``required_outputs``, and
-``flow_compliance_check.check_step`` returns MISSING on an all-absent
-``required_outputs`` list BEFORE it evaluates the gate — so on a project with
-UPF but no sidecars the derivation gate is never reached by the audit.  Run it
-directly to get that coverage.  Closing the gap properly needs the emitter
-nobody has written yet (see the M2 block in the flow yaml).
-
-Domain model (chip-AGNOSTIC, matches the phase3 PERC cross-voltage-domain
-model in phase3_one_shot_runner._xdomain_levelshifter_check):
-
-  * A crossing needs a LEVEL SHIFTER when source/sink rail voltages differ
-    (vdd_from != vdd_to), because a signal driven at one VDD into a gate
-    powered at a different VDD is a real silicon hazard.
-  * A crossing needs an ISOLATION CELL when either endpoint domain is
-    power-gate-able (can be switched off independently) so the always-on
-    side never floats / sees an X.
-  * A crossing that is neither voltage-mismatched nor power-gate-bordered
-    needs no protection cell and is trivially "protected".
-
-A crossing is PROTECTED iff every protection it *requires* is present:
-  required_level_shifter  => a level_shifter.json entry references its net
-  required_isolation      => an isolation.json entry references its net
 
 Behaviour
 ---------

@@ -117,6 +117,7 @@ from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (he
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import module_port_audit as _module_ports  # noqa: E402
 
 
 @dataclass
@@ -255,6 +256,37 @@ def find_declarations(src: str) -> List[Tuple[str, str, int]]:
             n = re.sub(r'\[.*', '', n).strip()
             if n and n not in VERILOG_KEYWORDS and re.match(r'^\w+$', n):
                 decls.append((kind, n, lineno))
+    # A legal compact module may put several body statements, including the
+    # declaration and ``endmodule``, on one physical line.  The line-oriented
+    # fast path above intentionally skips that line while it is in the header;
+    # recover body declarations from semicolon-delimited statements without
+    # treating ``input wire`` ports as local declarations.
+    try:
+        header_spans = [(start, body_start)
+                        for _name, start, body_start, _end in
+                        _module_ports.module_regions(src, [])]
+    except (AttributeError, TypeError, ValueError):
+        header_spans = []
+
+    def in_header(offset: int) -> bool:
+        return any(start <= offset < end for start, end in header_spans)
+
+    statement_re = re.compile(
+        r'(?:(?<=;)|^)\s*(wire|reg|logic)\s+'
+        r'(?:(?:signed|unsigned)\s+)?'
+        r'(?:\[[^\]]+\]\s*){0,2}([^;=]+?)\s*;', re.DOTALL)
+    seen = set(decls)
+    for match in statement_re.finditer(src):
+        if in_header(match.start(1)):
+            continue
+        line = src.count('\n', 0, match.start(1)) + 1
+        for raw_name in match.group(2).split(','):
+            name = re.sub(r'\[.*', '', raw_name).strip()
+            if name and name not in VERILOG_KEYWORDS and re.fullmatch(r'\w+', name):
+                item = (match.group(1), name, line)
+                if item not in seen:
+                    decls.append(item)
+                    seen.add(item)
     return decls
 
 
@@ -307,27 +339,78 @@ def collect_rhs_set(src: str) -> Set[str]:
 
 def collect_instance_connections(src: str) -> Dict[str, str]:
     """
-    For each `.port(signal)` connection in a module instance, return mapping
-    port_name -> signal_name. We use this conservatively: any signal that
-    appears in .port(signal) is considered both 'driven' and 'read' because
-    we don't know the port direction without cross-module analysis.
+    Resolve instance actuals through the balanced module parser.
+
+    A regex over the whole file cannot tell a declaration, a nested expression,
+    or a malformed/duplicate connection from a real instance.  Only a complete
+    instance with unambiguous connections contributes driver credit.  When the
+    child definition is available, only output/inout formals drive a parent
+    signal; an unresolved child retains the historical conservative credit for
+    a valid named connection.
     """
-    connected = {}
-    for m in re.finditer(r'\.(\w+)\s*\(\s*([^)]+)\s*\)', src):
-        port, sig = m.group(1), m.group(2).strip()
-        # ORGANIC #544 — a concat connection `.o({w_hi, w_lo})` drives EVERY
-        # identifier inside the braces (the instance output fans out to all
-        # of them). The old `^(\w+)` match failed on the leading `{` and
-        # left w_hi/w_lo looking undriven. Register each concat member.
-        if sig.startswith("{"):
-            for tok in re.findall(r'[a-zA-Z_]\w*', sig):
-                if tok not in VERILOG_KEYWORDS and not tok.startswith("'"):
-                    connected[tok] = port
-            continue
-        # Take simple identifier from the signal side
-        sm = re.match(r'^(\w+)', sig)
-        if sm:
-            connected[sm.group(1)] = port
+    connected: Dict[str, str] = {}
+    try:
+        module_defs = _module_ports.parse_modules(
+            _module_ports.strip_preproc_directives(
+                _module_ports.strip_comments(src)), '<rtl-hygiene>')
+    except (AttributeError, TypeError, ValueError):
+        module_defs = []
+    defs = {mod.name: mod for mod in module_defs}
+
+    def _simple_actuals(actual: str) -> Set[str]:
+        actual = actual.strip()
+        if not actual:
+            return set()
+        if actual.startswith('{') and actual.endswith('}'):
+            inner = actual[1:-1]
+            parts = _module_ports.split_top_level(inner)
+            names: Set[str] = set()
+            for part in parts:
+                part = part.strip()
+                if not re.fullmatch(r'[A-Za-z_]\w*', part):
+                    return set()
+                names.add(part)
+            return names
+        if re.fullmatch(r'[A-Za-z_]\w*', actual):
+            return {actual}
+        return set()
+
+    for parent in module_defs:
+        for inst in parent.instances:
+            seen: Dict[str, int] = {}
+            for conn in inst.connections:
+                seen[conn.port_name] = seen.get(conn.port_name, 0) + 1
+            duplicate_ports = {name for name, count in seen.items() if count > 1}
+            # Duplicate, mixed, and malformed lists are deliberately opaque:
+            # no actual in the instance is safe to credit as a driver.
+            if inst.malformed_connections or duplicate_ports or inst.has_mixed_connections:
+                continue
+
+            child = defs.get(inst.module_name)
+            if child is not None and child.discovery_issues:
+                continue
+            for conn in inst.connections:
+                formal = child.ports.get(conn.port_name) if child else None
+                if child is not None and (
+                        formal is None or formal.direction not in {'output', 'inout'}):
+                    continue
+                for signal in _simple_actuals(conn.wire_expr):
+                    connected[signal] = conn.port_name
+
+            if (not inst.positional_actuals or inst.is_implicit or
+                    inst.has_mixed_connections or inst.malformed_connections):
+                continue
+            if child is None:
+                continue
+            formal_order = child.port_order or list(child.ports)
+            for position, actual in enumerate(inst.positional_actuals):
+                if position >= len(formal_order):
+                    continue
+                formal = child.ports.get(formal_order[position])
+                if formal is None or formal.direction not in {'output', 'inout'}:
+                    continue
+                for signal in _simple_actuals(actual):
+                    connected[signal] = formal.name
     return connected
 
 

@@ -2310,8 +2310,9 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
     reasons: list[str] = _public_input_reasons(task)
     try:
         raw = path.read_text(errors="replace")
-        record = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
+        record = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"non-finite JSON constant {value}")))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         return None, [f"AI repair record is absent or unreadable: {exc}"]
     if not isinstance(record, dict):
         return None, ["AI repair record is not a JSON object"]
@@ -2336,6 +2337,33 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
         reasons.append("AI repair record oracle_accessed must be false")
     if len(str(record.get("rationale") or "").strip()) < 40:
         reasons.append("AI repair record rationale must explain the repair")
+    contract = record.get("repair_contract")
+    public = task.get("public_original_input") or {}
+    if public.get("status") != "PRESENT" or not public.get("source_sha256"):
+        reasons.append("source-bounded repair requires immutable public original input")
+    if not isinstance(contract, dict):
+        reasons.append("AI repair record lacks repair_contract")
+    else:
+        if contract.get("schema") != "vibeic.source_bounded_completion.v1":
+            reasons.append("repair_contract schema is invalid")
+        bindings = {
+            "prompt_sha256": task.get("prompt_sha256"),
+            "source_sha256": public.get("source_sha256"),
+            "parent_rtl_sha256": task.get("rtl_sha256"),
+            "candidate_sha256": repaired_hash,
+            "challenge_sha256": challenge.get("sha256"),
+        }
+        for key, value in bindings.items():
+            if contract.get(key) != value:
+                reasons.append(f"repair_contract {key} is stale or wrong")
+        if not isinstance(contract.get("preservation"), dict):
+            reasons.append("repair_contract lacks preservation declaration")
+        if not isinstance(contract.get("elaboration_matrix"), dict):
+            reasons.append("repair_contract lacks elaboration matrix")
+        if contract.get("author") != record.get("author"):
+            reasons.append("repair_contract author differs from repair record")
+        if contract.get("oracle_accessed") is not False:
+            reasons.append("repair_contract oracle_accessed must be false")
     if reasons:
         return None, reasons
     return {**record, "path": str(path), "sha256": _sha256_text(raw)}, []
@@ -6165,7 +6193,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if isinstance(task, dict):
             task["phase1_provenance"] = current
     def _run_and_collect(job) -> _ResumeRunnerOutcome:
-        pid, proj, supplied_rtl, entry, exit_step = job
+        pid, proj, supplied_rtl, entry, exit_step, *extra = job
+        collect_kwargs = extra[0] if extra else {}
         # AI backup/repair has already authored the candidate. Re-enter at the
         # first RTL-validation step so program-first does not author again and
         # overwrite the hash whose semantics the AI just repaired. The routed
@@ -6183,6 +6212,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         try:
             got = _collect_runner_result(
                 process, argv, fmt, pid, proj, supplied_rtl=supplied_rtl,
+                **collect_kwargs,
                 required_top=_required_scorer_top(_entry(bench)))
             payload = json.dumps(got)
         except Exception as exc:                          # noqa: BLE001
@@ -6710,7 +6740,11 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     if gate_rc is not None:
         return gate_rc
     repair_outcomes = iter(_ordered_parallel_map(
-        [(p["id"], p["project"], True, None, p["result"].get("exit"))
+        [(p["id"], p["project"], True, None, p["result"].get("exit"),
+          ({"repair_contract": ((p.get("repair_provenance") or {}).get("repair_contract")),
+            "require_repair_contract": True}
+           if p["task"].get("candidate_origin") == "AI_REPAIR" or p["kind"] == "run"
+           else {}))
          for p in repair_run_plans],
         _run_and_collect, jobs))
     for plan in repair_plans:
@@ -6910,6 +6944,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                         "author": {"kind": "AI", "model": "required"},
                         "oracle_accessed": False,
                         "rationale": "required",
+                        "repair_contract": {
+                            "schema": "vibeic.source_bounded_completion.v1",
+                            "prompt_sha256": task.get("prompt_sha256"),
+                            "source_sha256": (task.get("public_original_input") or {}).get(
+                                "source_sha256"),
+                            "parent_rtl_sha256": task.get("rtl_sha256"),
+                            "candidate_sha256": "sha256 of corrected working RTL",
+                            "challenge_sha256": (verdict.get("verified_challenge") or {}).get(
+                                "sha256"),
+                            "author": {"kind": "AI", "model": "same as outer author"},
+                            "oracle_accessed": False,
+                            "preservation": "complete exact-path declaration required",
+                            "elaboration_matrix": "complete exact-path declaration required",
+                        },
                     },
                     "verified_prompt_evidence":
                         (verdict.get("override") or {}).get(
@@ -6931,6 +6979,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         got = bio.collect(
             fmt, pid, Path(str(task.get("project") or "")),
             supplied_rtl=supplied_rtl,
+            repair_contract=((task.get("repair_provenance") or {}).get("repair_contract")
+                             if task.get("candidate_origin") == "AI_REPAIR" else None),
+            require_repair_contract=(task.get("candidate_origin") == "AI_REPAIR"),
             required_top=_required_scorer_top(_entry(bench)))
         if (not got.get("ok")
                 or _sha256_text(str(got.get("completion") or ""))
@@ -7890,7 +7941,10 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
                 or _sha256_text((staged / "input" / "phase1_prompt.md").read_text())
                 != task["prompt_sha256"]):
             refuse("Program changed bound prompt or Phase-1 inputs")
-        got = _collect_runner_result(process, argv, fmt, pid, staged, supplied_rtl=True)
+        got = _collect_runner_result(
+            process, argv, fmt, pid, staged, supplied_rtl=True,
+            repair_contract=provenance.get("repair_contract"),
+            require_repair_contract=True)
         _write_immutable_json(archive / "runner_result.json", {
             "argv": argv, "rc": process.rc, "error": process.error,
             "runner_diagnostics": got.get("runner_diagnostics"),

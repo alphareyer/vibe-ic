@@ -5,7 +5,7 @@ RTL for SIXTEEN canonical design shapes, keyed on STATED STRUCTURE.
 WHAT IT DOES
 ------------
 Given the natural-language design description of an RTLLM-style task, this program
-detects which — if any — of sixteen canonical design SHAPES the spec describes,
+detects which — if any — of seventeen canonical design SHAPES the spec describes,
 and deterministically emits the corresponding RTL. It is the "program-first"
 capture of designs that the flow otherwise defers to an LLM authoring pass
 (spec-to-rtl). The shapes and their keys:
@@ -18,6 +18,7 @@ capture of designs that the flow otherwise defers to an LLM authoring pass
     combinational_long_divider -> div_16bit        (A/B/result/odd, no clk, combinational)
     traffic_light_fsm          -> traffic_light    (pass_request/clock/red/yellow/green)
     radix2_signed_divider      -> radix2_div       (sign/dividend/divisor/opn_valid/res_valid)
+    unsigned_iterative_restoring_divider -> <stated module> (source-bound unsigned contract)
     ieee754_single_multiplier  -> float_multi      (a/b/z 32-bit, "IEEE 754")
     async_gray_fifo            -> asyn_fifo        (wclk/rclk/wrstn/rrstn, gray-code CDC)
     lfsr4_xnor_left            -> LFSR             (synchronous reset, XNOR feedback)
@@ -37,7 +38,7 @@ input's own:
 
 FAIL-CLOSED CONTRACT
 --------------------
-`detect_shape(desc_text)` returns exactly one of the sixteen shape keys ONLY when the
+`detect_shape(desc_text)` returns exactly one of the seventeen shape keys ONLY when the
 STRUCTURE tightly matches, and returns None otherwise. Each detector requires ALL
 of: (1) the exact "Module name:" token, (2) the declared input/output PORT signature
 (names, and for the few shapes where it matters, widths), and (3) at least one
@@ -83,15 +84,17 @@ Pure Python 3, stdlib only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROGRAMS_DIR))
 
+from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope  # noqa: E402
 from _design_module_set import strip_comments  # noqa: E402 - vibe-ic#731
 
 
@@ -100,6 +103,13 @@ def module_name_of(desc_text: str) -> Optional[str]:
     """The 'Module name:' token, or None. Structural: this is the TB instance name."""
     m = re.search(r"Module\s*name\s*[:：]\s*\n?\s*([A-Za-z_]\w*)", desc_text, re.I)
     return m.group(1) if m else None
+
+
+def _module_name_candidates(desc_text: str) -> List[str]:
+    """Return every explicit Module name declaration in source order."""
+    return re.findall(
+        r"Module\s*name\s*[:：]\s*\n?\s*([A-Za-z_]\w*)",
+        desc_text or "", re.I)
 
 
 def _low(text: str) -> str:
@@ -114,6 +124,852 @@ def _has_all(text: str, *subs: str) -> bool:
 def _has_any(text: str, *subs: str) -> bool:
     low = text.lower()
     return any(s.lower() in low for s in subs)
+
+
+# ------------------------------------------------------------------------ source-bound unsigned restoring division
+#
+# This shape is intentionally composed from the input's own names and quoted
+# contract.  A partial match routes to AI authoring; it never falls back to a
+# benchmark-specific spelling or to a guessed width/latency.
+_UNSIGNED_DIVISION_SHAPE = "unsigned_iterative_restoring_divider"
+_UNSIGNED_DIVISION_ROLE_WORDS = {
+    "dividend": ("dividend", "numerator"),
+    "divisor": ("divisor", "denominator"),
+    "quotient": ("quotient", "quot"),
+    "remainder": ("remainder", "residue", "rem"),
+}
+
+
+def _source_port_records(desc_text: str) -> List[Dict[str, str]]:
+    """Return source-declared input/output port records with their exact lines."""
+    records: List[Dict[str, str]] = []
+    direction: Optional[str] = None
+    for raw in (desc_text or "").splitlines():
+        stripped = raw.strip()
+        low = stripped.lower()
+        if re.match(r"^inputs?\s*(ports?|signals?)?\s*[:：]?\s*$", low):
+            direction = "in"
+            continue
+        if re.match(r"^outputs?\s*(ports?|signals?)?\s*[:：]?\s*$", low):
+            direction = "out"
+            continue
+        if re.match(r"^[A-Za-z][A-Za-z /]*[:：]\s*$", stripped):
+            direction = None
+            continue
+        if not direction:
+            continue
+        m = re.match(r"^([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*[:：]\s*(.*)$",
+                     stripped)
+        if not m:
+            continue
+        records.append({"name": m.group(1), "vector": m.group(2) or "",
+                        "text": m.group(3), "line": stripped,
+                        "direction": direction})
+    return records
+
+
+def _unique_role_record(records: List[Dict[str, str]], role: str,
+                        directions: Optional[set] = None) -> Optional[Dict[str, str]]:
+    words = _UNSIGNED_DIVISION_ROLE_WORDS[role]
+    matches = [r for r in records
+               if (directions is None or r["direction"] in directions)
+               and any(re.search(r"\b" + re.escape(word) + r"\b",
+                                 (r["name"] + " " + r["text"]).lower())
+                       for word in words)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _width_from_parameter(desc_text: str) -> Optional[int]:
+    normalized = " ".join((desc_text or "").split())
+    patterns = (
+        r"(?i:\bparameter)\s+WIDTH\s+has\s+(?:a\s+)?default\s+(?:value\s+)?of\s+(\d+)\b",
+        r"(?i:\bparameter)\s+WIDTH\s*(?:=|:)\s*(\d+)\b",
+        r"\bWIDTH\s+(?i:defaults?|default(?:s)?\s+to)\s+(\d+)\b",
+    )
+    values = {int(m.group(1)) for p in patterns
+              for m in re.finditer(p, normalized)}
+    return next(iter(values)) if len(values) == 1 and next(iter(values)) > 0 else None
+
+
+def _width_expression_matches(vector: str, width: int) -> bool:
+    expr = re.sub(r"\s+", "", vector.strip("[]"))
+    return expr in {"WIDTH-1:0", f"{width - 1}:0"}
+
+
+def _contains_any(text: str, patterns: Tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+class _DivisionProposition(NamedTuple):
+    """A bounded source proposition, including its enclosing document frame."""
+    text: str
+    owner: str
+    frame: str
+    structural: bool
+    port_role: Optional[str]
+
+
+# Frame classification and operand recognition share this bounded grammar.
+# Unknown target operand modalities cannot establish the restricted contract.
+_DIVISION_MODAL_BE = (r"(?:may|might|could|can|cannot)\s+"
+                      r"(?:(?:not|never)\s+)?"
+                      r"(?:(?:possibly|sometimes|occasionally|well)\s+){0,2}be")
+_DIVISION_ELIDED_START = (r"(?:(?:also|then|later|still|nevertheless)\s+){0,2}"
+                          r"(?:is|are|was|were|has|have|had|does|do|did|not|no|"
+                          r"waived|removed|obsolete|optional|retracted|cancelled|"
+                          r"canceled|inapplicable|deprecated|superseded|belongs)\b")
+
+
+def _division_frame(text: str) -> Tuple[str, str]:
+    """Classify attribution and assertion framing, independently of polarity.
+
+    This is a small grammar for the supported contract language, not general
+    natural-language inference. Unrecognised positive qualifiers are refused
+    by _division_target_assertion rather than added to a word blacklist.
+    """
+    owner = "external" if re.search(
+        r"\b(?:reference|comparison|another|other)\s+"
+        r"(?:model|implementation|design|unit|manual|divisor|denominator)\b|"
+        r"\b(?:obsolete|old)\s+reference\b", text) else "target"
+    if re.search(r"[?？]", text):
+        return owner, "question"
+    if re.search(r"\b(?:examples?|sample|hypothetical|hypothesis|consider|such\s+as)\b|"
+                 r"\be\.g\.", text):
+        return owner, "illustration"
+    if re.search(r"\b(?:if|when|provided|assuming|suppose|unless|whether|in\s+case|"
+                 r"as\s+long\s+as)\b|"
+                 r"\bonly\s+(?:describes?|in)\b|"
+                 r"\b(?:in|on)\s+(?:\w+\s+){0,3}(?:mode|channel)\b", text):
+        return owner, "conditional"
+    # A modal allowance remains a target assertion even when its possibility
+    # is emphasized. Other qualified facts still cannot authorize a contract.
+    qualification = re.sub(r"\b" + _DIVISION_MODAL_BE + r"\b", "can be", text)
+    if re.search(r"\b(?:probably|presumably|possibly|likely|uncertain|unknown|"
+                 r"previously|formerly|historically)\b|"
+                 r"\b(?:previous|prior|old)\s+(?:rule|requirement)\b", qualification):
+        return owner, "qualified"
+    return owner, "assertion"
+
+
+def _division_clauses(sentence: str) -> List[str]:
+    """A requirement complement owns its coordinated operand predicates."""
+    if re.match(r"^(?:(?:the|this|that)\s+)?(?:requirements?|guarantees?|"
+                r"constraints?|statements?|rules?|property|properties)\s+that\b", sentence):
+        return [sentence]
+    return re.split(r"(?:;\s*|,\s*(?:and|but|yet|however)\s+)"
+                    r"(?!\s*" + _DIVISION_ELIDED_START + r")", sentence)
+
+
+def _division_propositions(desc_text: str,
+                           records: List[Dict[str, str]]) -> List[_DivisionProposition]:
+    """Keep list/section frames while separating propositions and quotations.
+
+    Newlines are soft wraps unless they introduce a heading, list item or
+    structural port record. The shared sentence_scope still owns punctuation.
+    A colon heading governs its list; a Markdown heading governs its section
+    until the next heading at that level. Quotes remain explicit excluded
+    propositions, so positive and contradictory evidence share one scope.
+    """
+    text = (desc_text or "").lower().replace("\r\n", "\n").replace("\u2011", "-")
+    quote_re = re.compile(
+        r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
+        r'"[^"]*(?:"|\Z)|“[^”]*(?:”|\Z)|«[^»]*(?:»|\Z)|‘[^’]*(?:’|\Z)|'
+        r"(?<!\w)'[^'\n]*'(?!\w)|`[^`\n]*(?:`|\Z)")
+    quotes = list(quote_re.finditer(text))
+    clean = quote_re.sub(lambda m: "".join("\n" if c == "\n" else " "
+                                          for c in m.group()), text)
+    propositions: List[_DivisionProposition] = []
+    # Frames are inherited, not reconstructed from the sentence containing a
+    # value. This is what prevents a list marker from erasing an Examples title.
+    sections: List[Tuple[int, Tuple[str, str]]] = []
+    colon_frames: List[Tuple[int, Tuple[str, str]]] = []
+    bullet_frames: List[Tuple[int, Tuple[str, str]]] = []
+    pending: List[str] = []
+    pending_frame = ("target", "assertion")
+    pending_structural = False
+    pending_role: Optional[str] = None
+
+    def flush() -> None:
+        if not pending:
+            return
+        block = "\n".join(pending)
+        scope = re.sub(r"\be\.g\.", "e_g_", block)
+        scope = re.sub(r"\b\d+\.(?=\d)", lambda m: m.group().replace(".", "_"), scope)
+        spans = set()
+        for token in re.finditer(r"\w+|>=|≥|>", scope):
+            spans.add(sentence_scope(scope, token.start(), token.end(),
+                                     before=len(scope), after=len(scope),
+                                     extra_breaks=LINE_END_BREAKS +
+                                     ("。", "！", "？")))
+        for lo, hi in sorted(spans):
+            sentence = block[lo:hi].strip().rstrip(".!。！")
+            question = scope[hi:hi + 1] in {"?", "？"}
+            # Split independent clauses, retaining the enclosing sentence's
+            # conditional framing. An unrelated output denial is its own
+            # proposition and cannot retract an operand declaration.
+            _, frame = _division_frame(sentence)
+            if pending_frame[1] != "assertion":
+                frame = pending_frame[1]
+            if question:
+                frame = "question"
+            # Keep coordinated predicates with an elided subject together;
+            # the withdrawal resolver supplies their common referent.
+            clauses = _division_clauses(sentence)
+            for clause in clauses:
+                clause = clause.strip().removeprefix("and ")
+                if not clause:
+                    continue
+                clause_owner, clause_frame = _division_frame(clause)
+                # Attribution belongs to the proposition, not its neighbours.
+                # Conditional/question/illustrative framing governs the sentence.
+                propositions.append(_DivisionProposition(
+                    clause, pending_frame[0] if pending_frame[0] != "target" else clause_owner,
+                    frame if frame in {"conditional", "question", "illustration"}
+                    else (pending_frame[1] if pending_frame[1] != "assertion" else clause_frame),
+                    pending_structural, pending_role))
+        pending.clear()
+
+    for raw, line in zip(text.splitlines(), clean.splitlines()):
+        stripped = line.strip()
+        markdown = re.match(r"\s*(#{1,6})\s+(.+)", stripped)
+        if markdown:
+            flush()
+            level = len(markdown.group(1))
+            while sections and sections[-1][0] >= level:
+                sections.pop()
+            sections.append((level, _division_frame(markdown.group(2))))
+            colon_frames.clear()
+            bullet_frames.clear()
+            continue
+        bullet = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)", line)
+        if not stripped:
+            flush()
+            continue
+        indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
+        while bullet_frames and bullet_frames[-1][0] >= indent:
+            bullet_frames.pop()
+        if stripped.endswith((":", "：", "?", "？")) and not bullet:
+            flush()
+            while colon_frames and colon_frames[-1][0] >= indent:
+                colon_frames.pop()
+            colon_frames.append((indent, _division_frame(stripped)))
+            continue
+        # An unindented bullet belongs to its colon heading. A sibling colon
+        # heading or a prose paragraph closes that frame; a deeper heading
+        # inherits it. Blanks and masked quotations never change ancestry.
+        while colon_frames and colon_frames[-1][0] > indent:
+            colon_frames.pop()
+        structural = bool(re.match(r"(?: {4}|\t|\s*>)", raw)) and not bullet
+        port = next((r for r in records if raw.strip() == r["line"].lower()), None)
+        structural = structural or port is not None
+        port_role = None
+        if port is not None:
+            for role in ("divisor", "dividend"):
+                if any(re.search(r"\b" + word + r"\b", port["text"].lower())
+                       for word in _UNSIGNED_DIVISION_ROLE_WORDS[role]):
+                    port_role = role
+                    break
+        if not bullet and not line[:1].isspace():
+            colon_frames.clear()
+        frames = [frame for _, frame in sections]
+        frames.extend(frame for _, frame in bullet_frames)
+        frames.extend(frame for _, frame in colon_frames)
+        enclosing = ("external" if any(owner != "target" for owner, _ in frames) else "target",
+                     next((frame for _, frame in frames if frame != "assertion"), "assertion"))
+        if (bullet or structural or pending_structural or enclosing != pending_frame):
+            flush()
+        pending_frame, pending_structural, pending_role = enclosing, structural, port_role
+        pending.append(bullet.group(1) if bullet else stripped)
+        if bullet or structural:
+            flush()
+        if bullet:
+            # Blank lines do not close a list. Only a sibling, a dedent or a
+            # new section closes an ancestor's attribution and framing.
+            bullet_frames.append((indent, _division_frame(bullet.group(1))))
+    flush()
+    # Quotation content is represented for the same evidence filter as every
+    # other proposition. It cannot authorize or contradict the target contract.
+    for quote in quotes:
+        content = quote.group().strip('"“”«»‘’\'`~').strip()
+        propositions.append(_DivisionProposition(content, "external", "quotation", False, None))
+    return propositions
+
+
+def _division_target_evidence(proposition: _DivisionProposition) -> bool:
+    """Apply identical owner and framing scope to positive and negative facts."""
+    return (proposition.owner == "target" and proposition.frame == "assertion"
+            and (not proposition.structural or proposition.port_role is not None))
+
+
+def _division_target_assertion(proposition: _DivisionProposition,
+                               match: re.Match, denied: Callable[[str], bool]) -> bool:
+    if not _division_target_evidence(proposition) or proposition.structural:
+        return False
+    prefix, suffix = proposition.text[:match.start()].strip(), proposition.text[match.end():].strip()
+    # Accept only an operand-subject assertion and supported target qualifiers.
+    # Arbitrary suffixes cannot turn a reference/mode/sample into a contract.
+    return (not prefix and not denied(proposition.text)
+            and bool(re.fullmatch(r"(?:[.!]?|in\s+(?:this|the\s+target)\s+(?:design|unit)|"
+                                  r"\((?:a\s+)?required\s+input\s+constraint\))", suffix)))
+
+
+def _division_operand(role: str = "both") -> str:
+    """One bounded operand grammar, including qualifiers on either operand."""
+    word = {"dividend": r"(?:dividend|numerator)",
+            "divisor": r"(?:divisor|denominator)",
+            "both": r"(?:dividend|numerator|divisor|denominator)"}[role]
+    return r"(?:the\s+)?" + word + r"(?:\s+(?:inputs?|values?))?\b"
+
+
+_DIVISION_ORDERED = r"(?:at\s+least\s+|>=\s*|≥\s*)"
+_DIVISION_SMALLER = r"(?:less|smaller)\s+than\s+"
+
+
+def _division_invariants() -> Dict[str, re.Pattern]:
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
+    both = (r"(?:both\s+operands|the\s+operands|(?:both\s+)?" + dividend +
+            r"\s+and\s+" + divisor + r"|(?:both\s+)?" + divisor +
+            r"\s+and\s+" + dividend + r")")
+    nonzero = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
+    ordered = _DIVISION_ORDERED + divisor
+    return {
+        "nonzero": re.compile(r"\b(?:" + both + "|" + divisor + r")\s+"
+                              r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + nonzero +
+                              r"|>\s*0\b)"),
+        "ordering": re.compile(r"\b" + dividend +
+                               r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?" + ordered),
+    }
+
+
+class _DivisionComparison(NamedTuple):
+    match: re.Match
+    relation: str
+    mode: str
+
+
+def _division_comparisons(text: str) -> List[_DivisionComparison]:
+    """Normalize required, relaxed and possible comparisons with one grammar."""
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
+    link = (r"(?P<link>need\s+not\s+be|(?:is|are)\s+(?:no\s+longer|not)\s+"
+            r"required\s+to\s+be|" + _DIVISION_MODAL_BE +
+            r"|(?:is|are)(?:\s+not)?|must\s+be|shall\s+be)")
+    pattern = re.compile(r"\b" + dividend + r"\s*(?:" + link + r"\s*)?"
+                         r"(?P<comparison>" + _DIVISION_ORDERED + "|" +
+                         _DIVISION_SMALLER + ")" + divisor)
+    facts = []
+    for match in pattern.finditer(text):
+        predicate = match.group("comparison").strip()
+        mode = match.group("link") or ""
+        facts.append(_DivisionComparison(
+            match, "less" if predicate.startswith(("less", "smaller")) else "ordered",
+            "relaxed" if "required" in mode or mode.startswith("need") else
+            "possible" if re.match(r"(?:may|might|could|can)\b", mode) else "required"))
+    return facts
+
+
+def _division_comparison_conflicts(fact: _DivisionComparison,
+                                   denied: Callable[[re.Match], bool]) -> bool:
+    return ((fact.relation == "ordered" and
+             (fact.mode == "relaxed" or denied(fact.match))) or
+            (fact.relation == "less" and not denied(fact.match)))
+
+
+class _DivisionComplement(NamedTuple):
+    domains: set
+    withdrawal: str
+    unknown: bool
+
+
+def _division_complement_operand_subject(body: str) -> bool:
+    """Bind predicate subjects; an operand on an output's RHS is not an input."""
+    subjects = re.split(r"\s*,?\s*\b(?:and|but|yet)\b\s+|\s*[;,]\s*", body)
+    return any(re.match(r"^(?:both\s+operands|the\s+operands|(?:both\s+)?" +
+                        _division_operand() + r")", subject.strip()) for subject in subjects)
+
+
+def _division_requirement_complement(body: str, invariants: Dict[str, re.Pattern]
+                                     ) -> Optional[_DivisionComplement]:
+    """Consume every coordinated domain predicate, keeping withdrawal polarity.
+
+    An unparsed target operand complement cannot leave an earlier guarantee
+    live. Unrelated output/reset complements do not borrow operand antecedents.
+    """
+    facts = sorted((match.start(), match.end(), domain)
+                   for domain, pattern in invariants.items()
+                   for match in pattern.finditer(body))
+    if not _division_complement_operand_subject(body):
+        return None
+    domains, end = set(), 0
+    for start, stop, domain in facts:
+        if not re.fullmatch(r"\s*(?:(?:,\s*)?(?:and|but|yet)\s+)?", body[end:start]):
+            return _DivisionComplement({"nonzero", "ordering"}, body, True)
+        domains.add(domain)
+        end = stop
+    tail = body[end:].strip()
+    if not domains or (tail and not re.match(_DIVISION_ELIDED_START, tail)):
+        return _DivisionComplement({"nonzero", "ordering"}, body, True)
+    return _DivisionComplement(domains, tail, False)
+
+
+def _division_withdraws(tail: str, denied: Callable[[str], bool]) -> bool:
+    """Each elided withdrawal predicate owns its polarity and common subject."""
+    clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|\s*[;,]\s*", tail)
+    for clause in clauses:
+        clause = clause.strip()
+        if not re.match(_DIVISION_ELIDED_START, clause):
+            continue
+        for predicate in re.finditer(r"\b(?:waived|removed|obsolete|optional|retracted|"
+                                     r"cancelled|canceled|inapplicable|deprecated|superseded)\b", clause):
+            if not denied(clause[:predicate.start()]):
+                return True
+        if re.search(r"\b(?:does|do|did)\s+not\s+apply\b|"
+                     r"\bno\s+longer\s+(?:apply|applies|required)\b", clause):
+            return True
+    return False
+
+
+def _division_plural_requirement(text: str, antecedents: set
+                                 ) -> Optional[Tuple[set, str]]:
+    """Resolve a coordinated operand set or plural demonstrative requirement."""
+    operand = _division_operand()
+    operands = r"(?:both\s+)?" + operand + r"(?:\s+and\s+" + operand + r")+"
+    kind = r"(?:requirements|guarantees|constraints|statements|rules|properties)\b"
+    subject = re.match(r"^(?:" + operands + r"\s+" + kind +
+                       r"|(?:the\s+)?" + kind + r"\s+for\s+" + operands +
+                       r"|(?:all\s+of\s+)?(?:these|those)\s+" + kind + r")", text)
+    if subject is None:
+        return None
+    names = subject.group()
+    # An intervening output/timing requirement clears operand antecedents.
+    # A demonstrative must not reinterpret that known unrelated subject.
+    domains = ({"nonzero", "ordering"} if re.search(operand, names) else antecedents)
+    return domains, text[subject.end():]
+
+
+class _DivisionPermission(NamedTuple):
+    match: re.Match
+    direction: str
+
+
+def _division_zero_permissions(text: str) -> List[_DivisionPermission]:
+    """Normalize forward and reverse zero permissions on either operand."""
+    operand, zero = _division_operand(), r"(?:zero|0)\b"
+    forward = re.compile(r"\b" + operand + r"\s+(?:"
+                         r"(?:is|are)\s+(?:not\s+)?(?:allowed|permitted)\s+to\s+"
+                         r"(?:be|equal)\s+|(?:accepts?|permits?|allows?)\s+)" + zero)
+    reverse = re.compile(r"\b" + zero + r"\s+is\s+(?:not\s+)?(?:also\s+)?"
+                         r"(?:permitted|allowed|valid|accepted)\s+"
+                         r"(?:(?:as|for)\s+)?(?:a\s+)?" + operand)
+    return ([_DivisionPermission(m, "forward") for m in forward.finditer(text)] +
+            [_DivisionPermission(m, "reverse") for m in reverse.finditer(text)])
+
+
+def _division_permission_conflicts(fact: _DivisionPermission,
+                                   denied: Callable[[re.Match], bool]) -> bool:
+    return not denied(fact.match)
+
+
+def _division_retracted_domains(propositions: List[_DivisionProposition],
+                                events: List[set], denied: Callable[[str], bool],
+                                invariants: Dict[str, re.Pattern]) -> set:
+    """Resolve the subject and polarity of a target-domain withdrawal."""
+    retracted = set()
+    previous = set()
+    antecedents = set()
+    carried_subject = None
+    operand_role = r"(?:dividend|numerator|divisor|denominator)"
+    referent = re.compile(r"^(?:(?:that|this|these|those|all|both|the)"
+                          r"(?:\s+(?:of\s+(?:the\s+)?)?(?:preceding|above))?\s+"
+                          r"(?:(?P<domain>non[- ]?zero|divisor|denominator|ordering|"
+                          + operand_role + r"\s+and\s+(?:the\s+)?" + operand_role + r"|"
+                          r"dividend|numerator|(?:both\s+)?operands?)"
+                          r"(?:\s+(?:input|value))?\s+)?"
+                          r"(?P<kind>statements?|guarantees?|requirements?|"
+                          r"property|properties|rules?|constraints?)|"
+                          r"this\s+is|(?P<pronoun>they|it))\b")
+    withdrawal = re.compile(r"\b(?:waived|removed|obsolete|optional|retracted|"
+                            r"cancelled|canceled|inapplicable|deprecated|superseded)\b|"
+                            r"\bbelongs\s+to\b")
+    inapplicable = re.compile(r"\b(?:does|do|did)\s+not\s+apply\b|"
+                              r"\bno\s+longer\s+(?:apply|applies|required)\b")
+    for proposition, domains in zip(propositions, events):
+        plural = _division_plural_requirement(proposition.text, antecedents)
+        if plural is not None and _division_target_evidence(proposition):
+            matching, tail = plural
+            if _division_withdraws(tail, denied):
+                retracted.update(matching)
+        subject = referent.search(proposition.text)
+        if (subject is None and carried_subject is not None
+                and _division_target_evidence(proposition)
+                and re.match(_DIVISION_ELIDED_START, proposition.text)):
+            subject = carried_subject
+        if not subject:
+            carried_subject = None
+            if _division_target_evidence(proposition) and domains:
+                antecedents.update(domains)
+                previous = domains
+            elif (_division_target_evidence(proposition) and not re.search(
+                    r"\b(?:statements?|guarantees?|requirements?|property|properties|"
+                    r"rules?|constraints?)\b", proposition.text)):
+                # An unrelated target observation is not a new requirement
+                # subject. Preserve plural domains, but not a singular referent.
+                previous = set()
+            else:
+                antecedents = set()
+                previous = set()
+            continue
+        if proposition.frame != "assertion" or proposition.structural:
+            carried_subject = None
+            antecedents = set()
+            previous = set()
+            continue
+        # Every coordinated predicate has its own polarity. The referent is
+        # inherited only by an elided verb phrase, never by another subject.
+        carried_subject = subject
+        # Split the predicates after the subject, so a compound operand
+        # referent is not mistaken for two independently owned clauses.
+        tail = (proposition.text[subject.end():] if referent.search(proposition.text)
+                else proposition.text)
+        embedded_domains = None
+        complement = re.match(r"\s+that\s+", tail)
+        if complement:
+            # Bind an explicit requirement complement to the SAME arithmetic
+            # predicates used for admission. An unrelated output/property
+            # complement must never borrow the preceding operand requirements.
+            body = tail[complement.end():]
+            resolved = _division_requirement_complement(body, invariants)
+            if resolved is None:
+                carried_subject = None
+                continue
+            embedded_domains, tail = resolved.domains, resolved.withdrawal
+            # An active unknown operand constraint cannot be established by
+            # this emitter. Negating its withdrawal does not resolve its intent.
+            if resolved.unknown and _division_target_evidence(proposition):
+                retracted.update(embedded_domains)
+                continue
+        clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|"
+                           r"\s*[;,]\s*", tail)
+        for clause in clauses:
+            explicit = referent.search(clause)
+            if explicit:
+                subject = explicit
+            elif not re.match(_DIVISION_ELIDED_START, clause.strip()):
+                carried_subject = None
+                continue
+            carried_subject = subject
+            named, kind = subject.group("domain", "kind")
+            matching = ({"nonzero", "ordering"} if named and (
+                            "operand" in named or " and " in named) else
+                        {"ordering" if named in {"ordering", "dividend", "numerator"} else "nonzero"}
+                        if named else antecedents if (kind and kind.endswith("s"))
+                        or subject.group("pronoun") == "they" else previous)
+            if embedded_domains is not None:
+                matching = embedded_domains
+            for predicate in withdrawal.finditer(clause):
+                retires = not denied(clause[:predicate.start()])
+                reassigned = (predicate.group().startswith("belongs") and retires)
+                if retires and (_division_target_evidence(proposition) or reassigned):
+                    retracted.update(matching)
+            if _division_target_evidence(proposition) and inapplicable.search(clause):
+                retracted.update(matching)
+        if not _division_target_evidence(proposition):
+            # A following demonstrative must not borrow a target antecedent
+            # through an intervening requirement owned by another design.
+            antecedents = set()
+            previous = set()
+            carried_subject = None
+    return retracted
+
+
+def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
+                            denied: Callable[[str], bool]) -> Tuple[bool, bool, bool]:
+    propositions = _division_propositions(desc_text, records)
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
+    both = (r"(?:both\s+operands|the\s+operands|(?:both\s+)?(?:the\s+)?" + dividend +
+            r"\s+and\s+(?:the\s+)?" + divisor + r"|(?:both\s+)?(?:the\s+)?" + divisor +
+            r"\s+and\s+(?:the\s+)?" + dividend + r")")
+    value = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
+    invariants = _division_invariants()
+    positive, ordering = invariants["nonzero"], invariants["ordering"]
+    operand = (r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
+               r"(?:\s+(?:inputs?|values?))?")
+    allowance = re.compile(operand + r"\s+(?:" +
+                           _DIVISION_MODAL_BE + r"\s+(?:zero|0|non[- ]?zero|positive)\b|"
+                           r"(?:is|are)\s+(?:allowed|permitted)\s+to\s+be\s+(?:zero|0)\b|"
+                           r"(?:is|are)\s+(?:zero|0)\b|"
+                           r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + r")")
+    relaxed = r"(?:need\s+not\s+be|(?:is|are)\s+(?:no\s+longer|not)\s+required\s+to\s+be)\s+"
+    relaxed_invariants = {
+        "nonzero": re.compile(operand + r"\s+" + relaxed + value),
+    }
+    positives, contradictions, events = set(), set(), []
+    zero_allowed = False
+    for proposition in propositions:
+        current = set()
+        for name, pattern in (("nonzero", positive), ("ordering", ordering)):
+            for match in pattern.finditer(proposition.text):
+                if _division_target_assertion(proposition, match, denied):
+                    current.add(name)
+                    positives.add(name)
+        events.append(current)
+        comparisons = _division_comparisons(proposition.text)
+        unresolved_modal = re.search(operand + r"\s+(?:may|might|could|can)\b",
+                                     proposition.text)
+        if (unresolved_modal and proposition.owner == "target"
+                and proposition.frame in {"assertion", "qualified"}
+                and not any(match.start() == unresolved_modal.start()
+                            for match in allowance.finditer(proposition.text))
+                and not any(fact.match.start() == unresolved_modal.start()
+                            for fact in comparisons)
+                and not denied(proposition.text[unresolved_modal.start():])):
+            # A target operand allowance outside the bounded grammar is
+            # unresolved, never evidence that the restrictive domain survives.
+            contradictions.update({"nonzero", "ordering"})
+        if not _division_target_evidence(proposition):
+            continue
+        for domain, pattern in relaxed_invariants.items():
+            for match in pattern.finditer(proposition.text):
+                # The denial is inside the requirement predicate itself.
+                # Do not spread it from another subject or quoted/reference prose.
+                if not denied(proposition.text[:match.start()]):
+                    contradictions.add(domain)
+        def predicate_denied(match: re.Match) -> bool:
+            # A denial of the requirement directly governs its complement;
+            # a separate subject's output denial does not govern this operand.
+            prefix = proposition.text[:match.start()]
+            requirement_denied = re.search(
+                r"\bno\s+(?:requirement|guarantee)\s+that\s+(?:the\s+)?$", prefix)
+            return bool(requirement_denied) or denied(match.group())
+
+        for fact in comparisons:
+            if _division_comparison_conflicts(fact, predicate_denied):
+                contradictions.add("ordering")
+        for fact in _division_zero_permissions(proposition.text):
+            if _division_permission_conflicts(fact, predicate_denied):
+                contradictions.add("nonzero")
+                zero_allowed = True
+
+        for match in allowance.finditer(proposition.text):
+            matched = match.group()
+            is_denied_here = predicate_denied(match)
+            has_zero = bool(re.search(r"\b(?:be|is|are)\s+(?:zero|0)\b", matched))
+            # A denied zero allowance is a prohibition, not a contradiction.
+            if (has_zero and not is_denied_here) or (not has_zero and (
+                    is_denied_here or re.search(r"\b(?:may|might|could|can)\b", matched))):
+                contradictions.add("nonzero")
+                zero_allowed = zero_allowed or has_zero
+        explicit_zero = re.search(
+            r"\b(?:zero|0)\s+is\s+(?:also\s+)?(?:permitted|allowed|valid|accepted)"
+            r"\s+(?:(?:as|for)\s+)?(?:(?:a|the)\s+)?(?:divisor|denominator)\b|"
+            r"\b(?:zero|0)\s+is\s+(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+"
+            r"(?:divisor|denominator)\s+(?:input|value)\b|"
+            r"\b(?:a\s+)?(?:divisor|denominator)\s+of\s+(?:zero|0)\s+is\s+"
+            r"(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+(?:input|value)\b", proposition.text)
+        port_zero = re.search(
+            r"\b(?:zero|0)\s+is\s+(?:a\s+)?(?:permitted|allowed|valid|accepted)\s+"
+            r"(?:input|value)\b", proposition.text) if proposition.port_role in {"divisor", "dividend"} else None
+        if any(match and not predicate_denied(match) for match in (explicit_zero, port_zero)):
+            contradictions.add("nonzero")
+            zero_allowed = True
+    contradictions.update(_division_retracted_domains(
+        propositions, events, denied, invariants))
+    return ("nonzero" in positives and "nonzero" not in contradictions,
+            "ordering" in positives and "ordering" not in contradictions, zero_allowed)
+
+
+def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List[str]]:
+    """Parse the complete unsigned iterative-divider source contract.
+
+    The returned quotes are verbatim source lines, and the hash covers the
+    complete description.  A non-empty unresolved list is an explicit AI
+    backup route, never permission to guess.
+    """
+    low = " ".join((desc_text or "").lower().split())
+    if not (re.search(r"\brestoring\b", low)
+            and re.search(r"\bdivision\b", low)
+            and re.search(r"\biterative\b", low)):
+        return None, []
+    records = _source_port_records(desc_text)
+    unresolved: List[str] = []
+    module_candidates = _module_name_candidates(desc_text)
+    module = module_candidates[0] if module_candidates else None
+    if not module:
+        unresolved.append("module name")
+    elif len(set(module_candidates)) != 1:
+        unresolved.append("conflicting module name declarations")
+    width = _width_from_parameter(desc_text)
+    if width is None:
+        unresolved.append("uppercase WIDTH default")
+    if not re.search(r"\bunsigned\b", low):
+        unresolved.append("explicit unsigned operand domain")
+    if (_contains_any(low, (
+            r"\bnot\s+unsigned\b", r"\bunsigned\s+is\s+not\b",
+            r"\b(?:signed|signedness)\b"))):
+        unresolved.append("unsigned operand domain (signed is unsupported)")
+    def domain_denied(text: str) -> bool:
+        # The extraction boundary owns its polarity consult. Pass this exact
+        # predicate to assertion, contradiction and retraction analysis; never
+        # apply a whole-document denial to unrelated propositions.
+        text = re.sub(r"\bcannot\b", "can not", text)
+        return is_denied(re.sub(r"\bnon[- ]zero\b", "nonzero", text),
+                         ignore_bracketed=False) is not None
+
+    nonzero, ordered, zero_allowed = _division_domain_status(desc_text, records, domain_denied)
+    if not nonzero:
+        unresolved.append("nonzero operand domain")
+    if not ordered:
+        unresolved.append("dividend >= divisor domain")
+    if zero_allowed:
+        unresolved.append("zero divisor is unsupported")
+
+    clock_candidates = [r for r in records if r["direction"] == "in"
+                        and re.search(r"\b(?:posedge|rising[- ]edge)\b", r["text"], re.I)
+                        and re.search(r"\bclock\b", r["text"], re.I)]
+    reset_candidates = [r for r in records if r["direction"] == "in"
+                        and re.search(r"\bactive[- ]low\b", r["text"], re.I)
+                        and re.search(r"\b(?:async|asynchronous)\b", r["text"], re.I)
+                        and re.search(r"\breset\b", r["text"], re.I)]
+    request_candidates = [r for r in records if r["direction"] == "in"
+                          and re.search(r"\bone[- ]cycle\b", r["text"], re.I)
+                          and re.search(r"\b(?:start|request|launch|go)\b",
+                                        r["name"] + " " + r["text"], re.I)]
+    if len(clock_candidates) != 1:
+        unresolved.append("one posedge clock port")
+    if len(reset_candidates) != 1:
+        unresolved.append("one active-low asynchronous reset port")
+    if len(request_candidates) != 1:
+        unresolved.append("one one-cycle request port")
+
+    selected: Dict[str, Dict[str, str]] = {}
+    if len(clock_candidates) == 1:
+        selected["clock"] = clock_candidates[0]
+    if len(reset_candidates) == 1:
+        selected["reset"] = reset_candidates[0]
+    if len(request_candidates) == 1:
+        selected["start"] = request_candidates[0]
+    for role, directions in (("dividend", {"in"}), ("divisor", {"in"}),
+                             ("quotient", {"out"}), ("remainder", {"out"})):
+        record = _unique_role_record(records, role, directions)
+        if record is None:
+            unresolved.append(f"one unambiguous {role} port")
+        else:
+            selected[role] = record
+    valid_candidates = [r for r in records if r["direction"] == "out"
+                        and re.search(r"\b(?:valid|done|completion|complete)\b",
+                                      r["name"] + " " + r["text"], re.I)]
+    if len(valid_candidates) != 1:
+        unresolved.append("one completion-valid output port")
+    else:
+        selected["valid"] = valid_candidates[0]
+
+    # Every declared port must have one and only one contract role.  This
+    # prevents an unconsumed enable, a duplicate operand record, and an
+    # ambiguous role from being silently dropped by the emitter.
+    selected_ids = {id(record) for record in selected.values()}
+    if len(records) != len(selected_ids) or any(id(record) not in selected_ids
+                                                for record in records):
+        unresolved.append("unsupported extra declared port/control")
+    if len({record["name"] for record in selected.values()}) != len(selected):
+        unresolved.append("interface roles must bind to distinct ports")
+
+    for role in ("clock", "reset", "start", "valid"):
+        record = selected.get(role)
+        if record is not None and record["vector"]:
+            unresolved.append(f"{role} control must be scalar")
+
+    selected_valid = selected.get("valid")
+    if (selected_valid is not None
+            and not re.search(r"\bone[- ]cycle\b", selected_valid["text"], re.I)):
+        unresolved.append("one-cycle valid output semantics")
+
+    reset_text = " ".join(record["text"] for record in records
+                            if re.search(r"\b(?:reset|rst)\w*\b",
+                                         record["name"] + " " + record["text"], re.I))
+    request_text = " ".join(record["text"] for record in records
+                              if re.search(r"\b(?:start|request|launch|go)\w*\b",
+                                           record["name"] + " " + record["text"], re.I))
+    valid_text = " ".join(record["text"] for record in records
+                            if re.search(r"\b(?:valid|done|completion|complete)\w*\b",
+                                         record["name"] + " " + record["text"], re.I))
+    if _contains_any(reset_text, (
+            r"\b(?:not|isn't|is\s+not)\s+active[- ]low\b",
+            r"\bactive[- ]high\b",
+            r"\b(?:not|isn't|is\s+not)\s+(?:async|asynchronous)\b",
+            r"\bsynchronous\s+reset\b")):
+        unresolved.append("reset polarity/edge semantics are contradictory")
+    if _contains_any(request_text, (
+            r"\b(?:not|isn't|is\s+not)\s+one[- ]cycle\b",
+            r"\b(?:may|can|could|might)\s+remain\s+asserted\b",
+            r"\b(?:level[- ]sensitive|held\s+until)\b")):
+        unresolved.append("one-cycle request semantics are contradictory")
+    if _contains_any(valid_text, (
+            r"\bremains?\s+asserted\b",
+            r"\bstays?\s+(?:high|asserted)\b",
+            r"\buntil\s+(?:the\s+)?next\s+request\b",
+            r"\b(?:not|isn't|is\s+not)\s+one[- ]cycle\b",
+            r"\b(?:multiple|more\s+than\s+one)\s+cycles?\b")):
+        unresolved.append("one-cycle valid semantics are contradictory")
+    if _contains_any(low, (
+            r"\bcompletion\b[^.\n]{0,80}\bWIDTH\s*\+\s*2\b",
+            r"\blatency\b[^.\n]{0,80}\bWIDTH\s*\+\s*2\b",
+            r"\b(?:an|one|the|this)\s+extra\s+input[- ]only\s+cycle\b")):
+        unresolved.append("source-declared latency is contradictory")
+
+    if width is not None:
+        for role in ("dividend", "divisor", "quotient", "remainder"):
+            record = selected.get(role)
+            if record is None or not _width_expression_matches(record["vector"], width):
+                unresolved.append(f"{role} width WIDTH")
+
+    required_phrases = (
+        (r"restoring\s+division", "restoring division algorithm"),
+        (r"shifted\s+partial\s+remainder", "shifted partial remainder"),
+        (r"negative\s+trial\s+restores?\s+the\s+shifted\s+partial\s+remainder",
+         "negative trial restoration"),
+        (r"on\s+reset\s+all\s+outputs\s+clear", "reset output clearing"),
+        (r"new\s+inputs\s+are\s+accepted\s+after\s+the\s+previous\s+result",
+         "post-result request acceptance"),
+        (r"completion\s+takes\s+width\s+cycles\s+for\s+power[- ]of[- ]two\s+width\s+and\s+width\s*\+\s*1\s+cycles\s+otherwise",
+         "source-declared completion latency"),
+        (r"no\s+extra\s+input[- ]only\s+cycle", "no input-only cycle"),
+    )
+    for pattern, label in required_phrases:
+        if not re.search(pattern, low):
+            unresolved.append(label)
+
+    if unresolved:
+        return None, sorted(set(unresolved))
+    assert width is not None
+    assert len(clock_candidates) == len(reset_candidates) == len(request_candidates) == 1
+    assert len(valid_candidates) == 1
+    latency = width if (width & (width - 1)) == 0 else width + 1
+    quote_records = {role: selected[role]["line"]
+                     for role in ("dividend", "divisor", "quotient", "remainder", "valid")}
+    quote_records.update(clock=clock_candidates[0]["line"],
+                         reset=reset_candidates[0]["line"],
+                         request=request_candidates[0]["line"])
+    return {
+        "module": module,
+        "clock": clock_candidates[0]["name"],
+        "reset": reset_candidates[0]["name"],
+        "start": request_candidates[0]["name"],
+        "dividend": selected["dividend"]["name"],
+        "divisor": selected["divisor"]["name"],
+        "quotient": selected["quotient"]["name"],
+        "remainder": selected["remainder"]["name"],
+        "valid": selected["valid"]["name"],
+        "width": width,
+        "latency": latency,
+        "source_sha256": hashlib.sha256(desc_text.encode("utf-8")).hexdigest(),
+        "quotes": quote_records,
+    }, []
+
+
+def _is_unsigned_iterative_divider(desc: str, mod: Optional[str], ports: set) -> bool:
+    if not desc or not mod:
+        return False
+    contract, unresolved = _unsigned_division_observation(desc)
+    return contract is not None and not unresolved
 
 
 def _port_tokens(desc_text: str) -> set:
@@ -389,6 +1245,7 @@ _DETECTORS: List[Tuple[str, object]] = [
     ("combinational_long_divider", _is_div_16bit),
     ("traffic_light_fsm", _is_traffic_light),
     ("radix2_signed_divider", _is_radix2_div),
+    (_UNSIGNED_DIVISION_SHAPE, _is_unsigned_iterative_divider),
     ("ieee754_single_multiplier", _is_float_multi),
     ("async_gray_fifo", _is_asyn_fifo),
     ("lfsr4_xnor_left", _is_lfsr4_xnor_left),
@@ -401,7 +1258,7 @@ _DETECTORS: List[Tuple[str, object]] = [
 
 
 def detect_shape(desc_text: str) -> Optional[str]:
-    """Return one of the SIXTEEN template shape keys, or a CONTRACT-composed shape
+    """Return one of the canonical template shape keys, a source-bound composed shape,
     key, or None (FAIL-CLOSED) if the input states no shape tightly.
 
     Detection reads the STRUCTURE: module-name token + port role set +
@@ -440,6 +1297,11 @@ def route_to_ai_reason(desc_text: str) -> Optional[Dict]:
     """
     if detect_shape(desc_text) is not None:
         return None
+    _, unsigned_unresolved = _unsigned_division_observation(desc_text or "")
+    if unsigned_unresolved:
+        return {"route": "ai_author",
+                "kind": "unsupported_unsigned_iterative_divider",
+                "unresolved": unsigned_unresolved}
     mod = module_name_of(desc_text or "")
     ports = _port_tokens(desc_text or "") - _NOISE
     matched = [key for key, det in _DETECTORS if det(desc_text or "", mod, ports)]
@@ -1709,6 +2571,151 @@ _SHAPE_MODULE: Dict[str, str] = {
 }
 
 
+def _emit_unsigned_iterative_divider(contract: Dict) -> str:
+    """Emit the source-bound WIDTH-bit unsigned restoring divider.
+
+    The first trial is performed on the request edge, so the request does not
+    create an input-only bubble.  Non-power-of-two WIDTHs use the source's
+    declared WIDTH+1 completion convention by publishing the already-computed
+    result on the following edge; all arithmetic still takes exactly WIDTH
+    restoring trials.
+    """
+    m = contract["module"]
+    clk, rst, start = contract["clock"], contract["reset"], contract["start"]
+    dividend, divisor = contract["dividend"], contract["divisor"]
+    quotient, remainder, valid = (contract["quotient"], contract["remainder"],
+                                   contract["valid"])
+    width = contract["width"]
+    digest = contract["source_sha256"]
+    # Reserve the complete declared interface before allocating any local.
+    # A collision changes only the internal identifier, never a source port.
+    taken = {m, clk, rst, start, dividend, divisor, quotient, remainder, valid}
+
+    def allocate(wanted: str) -> str:
+        name, index = wanted, 1
+        while name in taken:
+            index += 1
+            name = f"{wanted}_{index}"
+        taken.add(name)
+        return name
+
+    WIDTH = allocate("WIDTH")
+    (COUNT_WIDTH, EXTRA_FINAL_CYCLE, dividend_reg, divisor_reg, quotient_reg,
+     partial_remainder, count, busy, finish_pending, shifted_remainder,
+     trial_ge_divisor, iteration_remainder, start_shifted_remainder,
+     start_ge_divisor, start_remainder) = (allocate(name) for name in (
+         "COUNT_WIDTH", "EXTRA_FINAL_CYCLE", "dividend_reg", "divisor_reg",
+         "quotient_reg", "partial_remainder", "count", "busy", "finish_pending",
+         "shifted_remainder", "trial_ge_divisor", "iteration_remainder",
+         "start_shifted_remainder", "start_ge_divisor", "start_remainder"))
+    return f'''// Source-bound unsigned restoring divider.
+// Input contract SHA-256: {digest}
+// {WIDTH}={width}; completion is {WIDTH} cycles for power-of-two {WIDTH} and
+// {WIDTH}+1 otherwise. The first restoring trial occurs on the request edge.
+module {m} #(
+    parameter {WIDTH} = {width}
+) (
+    input  wire                   {clk},
+    input  wire                   {rst},
+    input  wire                   {start},
+    input  wire [{WIDTH}-1:0]       {dividend},
+    input  wire [{WIDTH}-1:0]       {divisor},
+    output reg  [{WIDTH}-1:0]       {quotient},
+    output reg  [{WIDTH}-1:0]       {remainder},
+    output reg                    {valid}
+);
+    localparam integer {COUNT_WIDTH} = ({WIDTH} < 2) ? 1 : $clog2({WIDTH} + 1);
+    localparam integer {EXTRA_FINAL_CYCLE} = (({WIDTH} & ({WIDTH} - 1)) != 0);
+
+    reg [{WIDTH}-1:0] {dividend_reg};
+    reg [{WIDTH}-1:0] {divisor_reg};
+    reg [{WIDTH}-1:0] {quotient_reg};
+    reg [{WIDTH}:0]   {partial_remainder};
+    reg [{COUNT_WIDTH}-1:0] {count};
+    reg {busy};
+    reg {finish_pending};
+
+    // Every negative trial keeps the SHIFTED remainder. This is the restoring
+    // operation; restoring the previous (unshifted) state is incorrect on the
+    // final trial and changes the mathematical remainder.
+    wire [{WIDTH}:0] {shifted_remainder} =
+        {{{partial_remainder}[{WIDTH}-1:0], {dividend_reg}[{WIDTH}-1]}};
+    wire {trial_ge_divisor} = {shifted_remainder} >= {{1'b0, {divisor_reg}}};
+    wire [{WIDTH}:0] {iteration_remainder} = {trial_ge_divisor}
+        ? {shifted_remainder} - {{1'b0, {divisor_reg}}}
+        : {shifted_remainder};
+
+    // The request edge is also iteration zero: no input-only cycle is inserted.
+    wire [{WIDTH}:0] {start_shifted_remainder} = {dividend}[{WIDTH}-1];
+    wire {start_ge_divisor} = {start_shifted_remainder} >= {{1'b0, {divisor}}};
+    wire [{WIDTH}:0] {start_remainder} = {start_ge_divisor}
+        ? {start_shifted_remainder} - {{1'b0, {divisor}}}
+        : {start_shifted_remainder};
+
+    always @(posedge {clk} or negedge {rst}) begin
+        if (!{rst}) begin
+            {dividend_reg}     <= {{{WIDTH}{{1'b0}}}};
+            {divisor_reg}      <= {{{WIDTH}{{1'b0}}}};
+            {quotient_reg}     <= {{{WIDTH}{{1'b0}}}};
+            {partial_remainder} <= {{({WIDTH} + 1){{1'b0}}}};
+            {count}            <= {{{COUNT_WIDTH}{{1'b0}}}};
+            {busy}             <= 1'b0;
+            {finish_pending}   <= 1'b0;
+            {quotient}       <= {{{WIDTH}{{1'b0}}}};
+            {remainder}      <= {{{WIDTH}{{1'b0}}}};
+            {valid}          <= 1'b0;
+        end else begin
+            {valid} <= 1'b0;
+            if ({finish_pending}) begin
+                // {WIDTH}+1 convention: the result was computed on the last
+                // trial, and this edge is the single-cycle valid pulse.
+                {valid} <= 1'b1;
+                {finish_pending} <= 1'b0;
+            end else if ({busy}) begin
+                {dividend_reg}      <= {dividend_reg} << 1;
+                {partial_remainder} <= {iteration_remainder};
+                {quotient_reg}      <= ({quotient_reg} << 1) | {trial_ge_divisor};
+                // The request edge already consumed the first trial, so the
+                // remaining {busy} iterations end at {WIDTH}-2.
+                if ({count} == {WIDTH} - 2) begin
+                    {quotient}  <= ({quotient_reg} << 1) | {trial_ge_divisor};
+                    {remainder} <= {iteration_remainder}[{WIDTH}-1:0];
+                    {busy} <= 1'b0;
+                    if ({EXTRA_FINAL_CYCLE})
+                        {finish_pending} <= 1'b1;
+                    else
+                        {valid} <= 1'b1;
+                end else begin
+                    {count} <= {count} + 1'b1;
+                end
+            end else if ({start}) begin
+                // Latch the legal request and perform its first trial now.
+                {dividend_reg}      <= {dividend} << 1;
+                {divisor_reg}       <= {divisor};
+                {quotient_reg}      <= {start_ge_divisor};
+                {partial_remainder} <= {start_remainder};
+                // The request edge already performed iteration zero; the next
+                // {busy} edge is therefore counted from zero through {WIDTH}-1.
+                {count}             <= {{{COUNT_WIDTH}{{1'b0}}}};
+                if ({WIDTH} == 1) begin
+                    {quotient}  <= {start_ge_divisor};
+                    {remainder} <= {start_remainder}[{WIDTH}-1:0];
+                    {busy} <= 1'b0;
+                    if ({EXTRA_FINAL_CYCLE})
+                        {finish_pending} <= 1'b1;
+                    else
+                        {valid} <= 1'b1;
+                end else begin
+                    {busy} <= 1'b1;
+                end
+            end
+        end
+    end
+endmodule
+'''
+
+
+
 # ================================================== architecture-directive layer
 # WHY THIS LAYER EXISTS (measured, 2026-09-06, lane cz2035p, base 764d6b3e5)
 # ------------------------------------------------------------------------
@@ -2869,6 +3876,12 @@ def emit_rtl(shape: str, desc_text: str = "") -> str:
     """
     if shape in _TEMPLATES:
         return _TEMPLATES[shape]
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        contract, unresolved = _unsigned_division_observation(desc_text or "")
+        if contract is None or unresolved:
+            raise ValueError(f"{shape!r} needs its complete source contract: "
+                             + ", ".join(unresolved))
+        return _emit_unsigned_iterative_divider(contract)
     if shape in _CONTRACT_SHAPES:
         c = extract_handshake_contract(desc_text or "")
         if c is None or c.kind != _CONTRACT_SHAPES[shape]:
@@ -2881,6 +3894,11 @@ def emit_rtl(shape: str, desc_text: str = "") -> str:
 def module_of_shape(shape: str, desc_text: str = "") -> str:
     if shape in _SHAPE_MODULE:
         return _SHAPE_MODULE[shape]
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        contract, unresolved = _unsigned_division_observation(desc_text or "")
+        if contract is None or unresolved:
+            raise ValueError(f"{shape!r} needs its complete source contract")
+        return contract["module"]
     if shape in _CONTRACT_SHAPES:
         return module_name_of(desc_text or "") or "chip_top"
     raise KeyError(f"unknown shape: {shape!r}")
@@ -2936,8 +3954,99 @@ def declared_watchdog(project: Path) -> Optional[Dict]:
 def _emit_and_write(shape: str, out_path: Path, desc_text: str = "") -> str:
     rtl = emit_rtl(shape, desc_text)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(rtl)
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        # Exclusive creation protects both CLI paths, including dangling
+        # symlinks and an output created after detection. Never follow or
+        # truncate an occupied source-bound candidate destination.
+        with out_path.open("x", encoding="utf-8") as output:
+            output.write(rtl)
+    else:
+        out_path.write_text(rtl)
     return str(out_path)
+
+
+def _source_contract_metadata(shape: str, desc_text: str) -> Dict:
+    """JSON-safe provenance for a composed source-bound shape."""
+    if shape != _UNSIGNED_DIVISION_SHAPE:
+        return {}
+    contract, unresolved = _unsigned_division_observation(desc_text)
+    if contract is None or unresolved:
+        raise ValueError("unsigned divider source contract is incomplete")
+    return {
+        "source_sha256": contract["source_sha256"],
+        "contract": {
+            "interface": {k: contract[k] for k in (
+                "clock", "reset", "start", "dividend", "divisor",
+                "quotient", "remainder", "valid")},
+            "width": contract["width"],
+            "domain": "unsigned_nonzero_dividend_ge_divisor",
+            "reset": "active_low_asynchronous_clears_outputs",
+            "request": "one_cycle_start_latched_operands",
+            "latency": {"power_of_two_cycles": "WIDTH",
+                        "otherwise_cycles": "WIDTH+1",
+                        "resolved_cycles": contract["latency"],
+                        "no_input_only_cycle": True},
+            "quotes": contract["quotes"],
+        },
+    }
+
+
+def _publish_source_bound_project(project: Path) -> Dict:
+    """Emit the source-bound shape from a held project snapshot.
+
+    The live project is read only through an isolated snapshot.  Publication
+    is committed with the runner's fd-bound transaction, which rechecks the
+    original manifest before replacing any top-level subtree.  A source edit,
+    ancestor symlink, or output race therefore refuses and leaves the live
+    project unchanged.
+    """
+    import tempfile
+    import design_one_shot_runner as runner
+
+    binding = runner._Phase1ProjectBinding.open(project)
+    stage_binding = None
+    transaction = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="vibeic-canonical-cli-") as td:
+            stage = Path(td) / project.name
+            baseline = runner._phase1_snapshot_to_stage(binding, stage)
+            stage_binding = runner._Phase1ProjectBinding.open(stage)
+            desc, _src = _read_project_desc(stage)
+            shape = detect_shape(desc)
+            if shape != _UNSIGNED_DIVISION_SHAPE:
+                raise ValueError("SOURCE_BOUND_SHAPE_CHANGED_DURING_SNAPSHOT")
+            module = module_of_shape(shape, desc)
+            rtl = emit_rtl(shape, desc)
+            out = stage / "phase2" / "stage1" / "rtl" / f"{module}.v"
+            publication = runner._publish_phase1_rtl_no_clobber(
+                stage, out, rtl, project_binding=stage_binding)
+            try:
+                publication.require_current_chain()
+            finally:
+                publication.close()
+            final = runner._phase1_tree_manifest_fd(
+                stage_binding.project_fd, stage)
+            transaction = runner._phase1_commit_staged_tree(
+                binding, stage_binding, baseline, final)
+            binding.require_current()
+            result = {
+                "verdict": "EMIT",
+                "shape": shape,
+                "module": module,
+                "written": str(project / out.relative_to(stage)),
+            }
+            result.update(_source_contract_metadata(shape, desc))
+            cleanup_warning = transaction.finalize()
+            transaction = None
+            if cleanup_warning:
+                result["cleanup_warning"] = cleanup_warning
+            return result
+    finally:
+        if transaction is not None:
+            transaction.rollback()
+        if stage_binding is not None:
+            stage_binding.close()
+        binding.close()
 
 
 def _publish_declared_watchdog(project: Path) -> Optional[Dict]:
@@ -3012,9 +4121,17 @@ def main(argv=None) -> int:
         module = module_of_shape(shape, desc)
         written = None
         if a.out:
-            written = _emit_and_write(shape, Path(a.out), desc)
-        print(json.dumps({"verdict": "EMIT", "shape": shape,
-                          "module": module, "written": written}))
+            try:
+                written = _emit_and_write(shape, Path(a.out), desc)
+            except FileExistsError:
+                print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                                  "module": module,
+                                  "reason": "occupied output preserved"}))
+                return 2
+        result = {"verdict": "EMIT", "shape": shape,
+                  "module": module, "written": written}
+        result.update(_source_contract_metadata(shape, desc))
+        print(json.dumps(result))
         return 0
 
     # ---- project mode ------------------------------------------------------
@@ -3043,13 +4160,34 @@ def main(argv=None) -> int:
                           "module": module_name_of(desc),
                           "defer_reason": route_to_ai_reason(desc)}))
         return 2
+    if a.emit and shape == _UNSIGNED_DIVISION_SHAPE:
+        try:
+            print(json.dumps(_publish_source_bound_project(proj)))
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            reason = ("occupied output preserved"
+                      if getattr(exc, "reason", None) ==
+                      "RTL_OUTPUT_ALREADY_EXISTS"
+                      else "SOURCE_BOUND_PROJECT_REFUSED: " + str(exc))
+            print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                              "module": module_name_of(desc),
+                              "reason": reason}))
+            return 2
     module = module_of_shape(shape, desc)
     written = None
     if a.emit:
-        written = _emit_and_write(
-            shape, proj / "phase2" / "stage1" / "rtl" / f"{module}.v", desc)
-    print(json.dumps({"verdict": "EMIT", "shape": shape,
-                      "module": module, "written": written}))
+        try:
+            written = _emit_and_write(
+                shape, proj / "phase2" / "stage1" / "rtl" / f"{module}.v", desc)
+        except FileExistsError:
+            print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                              "module": module,
+                              "reason": "occupied output preserved"}))
+            return 2
+    result = {"verdict": "EMIT", "shape": shape,
+              "module": module, "written": written}
+    result.update(_source_contract_metadata(shape, desc))
+    print(json.dumps(result))
     return 0
 
 

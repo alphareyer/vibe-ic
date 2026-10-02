@@ -1,0 +1,9 @@
+upf_version 2.1
+set_design_top boundary
+create_power_domain SWITCHED -elements {u_src}
+create_supply_net rail_hi -domain SWITCHED -voltage 1.8
+add_power_state SWITCHED -state {OFF}
+create_power_domain LIVE -elements {u_shift u_iso u_sink enable result}
+create_supply_net rail_lo -domain LIVE -voltage 1.0
+set_level_shifter SHIFT -domain SWITCHED -applies_to outputs -rule both
+set_isolation CLAMP -domain SWITCHED -applies_to outputs -clamp_value 0

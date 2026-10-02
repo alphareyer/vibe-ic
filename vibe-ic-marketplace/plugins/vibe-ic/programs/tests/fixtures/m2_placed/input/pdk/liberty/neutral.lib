@@ -1,0 +1,21 @@
+library(neutral) {
+  cell(plain) {
+    area : 1;
+    pin(A) { direction : input; }
+    pin(Y) { direction : output; function : "A"; }
+  }
+  cell(shift_cell) {
+    area : 1;
+    is_level_shifter : true;
+    level_shifter_type : HL;
+    pin(A) { direction : input; level_shifter_data_pin : true; }
+    pin(Y) { direction : output; function : "A"; }
+  }
+  cell(clamp_cell) {
+    area : 1;
+    is_isolation_cell : true;
+    pin(A) { direction : input; isolation_cell_data_pin : true; }
+    pin(EN) { direction : input; isolation_cell_enable_pin : true; }
+    pin(Y) { direction : output; function : "A & EN"; }
+  }
+}

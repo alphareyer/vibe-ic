@@ -115,6 +115,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -134,6 +135,11 @@ try:
     import _provenance as _prov  # ORGANIC #770
 except ImportError:  # packaged
     from . import _provenance as _prov  # type: ignore
+
+try:
+    from pulse_width_rearm_contract import extract_contract as _extract_pulse_contract
+except ImportError:  # packaged
+    from .pulse_width_rearm_contract import extract_contract as _extract_pulse_contract
 
 try:
     from _prose_polarity import is_denied as _prose_is_denied
@@ -272,6 +278,19 @@ class ChecklistItem:
     # ("wires", "division") is never a blocking coverage token. Default False (a
     # resolved, named operand keeps its historical blocking power).
     unresolved_operand: bool = False
+    # Issue 2856 — a source-declared pulse maximum/rearm obligation.  These
+    # fields keep the exact source identity beside the checklist item; the
+    # independent native consumer reads the same contract and emits its own
+    # simulation receipt.
+    source_quote: str = ""
+    source_sha256: str = ""
+    source_quote_sha256: str = ""
+    source_hash_valid: Optional[bool] = None
+    pulse_input_signal: str = ""
+    pulse_accept_output: str = ""
+    pulse_clock_signal: str = ""
+    pulse_max_width_cycles: Optional[int] = None
+    pulse_rearm_policy: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1900,6 +1919,41 @@ def extract_checklist(spec_text: str) -> List[ChecklistItem]:
             # additive; a malformed extractor result is dropped, not propagated.
             continue
 
+    # Issue 2856 — source-declared pulse-width timeout/rearm.  This is kept in
+    # the canonical obligation extractor rather than inferred from a pulse-like
+    # signal name: a contract exists only when the source explicitly identifies
+    # the input, accept output, clock, maximum, reject-on-timeout action, and the
+    # inactive-plus-new-start-edge rearm rule.  A generic protocol with no such
+    # declaration therefore contributes no pulse obligation (no heuristic
+    # imposition).  The source quote and hashes are retained for the independent
+    # native consumer and for cross-station provenance.
+    _pwr_parse = _extract_pulse_contract(spec_text)
+    if _pwr_parse.contract is not None:
+        _pc = _pwr_parse.contract
+        _hash_note = ""
+        if _pc.source_hash_valid is False:
+            _hash_note = "; declared source hash does not match source bytes"
+        items.append(ChecklistItem(
+            kind="pulse_width_rearm",
+            requirement=(f"pulse input '{_pc.input_signal}' accepts at most "
+                         f"{_pc.max_width_cycles} active clock cycles; an overlong "
+                         "pulse is rejected and rearm requires an inactive level "
+                         "followed by a new rising edge"),
+            evidence=_pc.source_quote[:300] + _hash_note,
+            coverage_tokens=[_pc.input_signal, _pc.accept_output,
+                             _pc.clock_signal, "overlong", "rearm", "inactive",
+                             "rising"],
+            provenance="STRUCTURAL",
+            source_quote=_pc.source_quote,
+            source_sha256=_pc.source_sha256,
+            source_quote_sha256=_pc.source_quote_sha256,
+            source_hash_valid=_pc.source_hash_valid,
+            pulse_input_signal=_pc.input_signal,
+            pulse_accept_output=_pc.accept_output,
+            pulse_clock_signal=_pc.clock_signal,
+            pulse_max_width_cycles=_pc.max_width_cycles,
+            pulse_rearm_policy="inactive_then_new_rising_edge"))
+
     return items
 
 
@@ -1911,6 +1965,13 @@ def _item_key(it: ChecklistItem) -> tuple:
     Other kinds key on (kind, normalised requirement)."""
     if it.kind == "enum_boundary":
         return ("enum_boundary",)
+    if it.kind == "pulse_width_rearm":
+        # The same source obligation in prompt/fact-graph/L-docs merges while
+        # preserving its station list.  A changed source identity remains a
+        # separate item rather than silently choosing one source.
+        return (it.kind, it.pulse_input_signal.lower(),
+                it.pulse_accept_output.lower(), it.pulse_clock_signal.lower(),
+                it.pulse_max_width_cycles, it.source_sha256)
     return (it.kind, it.requirement.strip().lower())
 
 
@@ -2473,11 +2534,36 @@ def _is_single_signal_concat_assignment(spec_text: str, brace_match) -> bool:
 # ---------------------------------------------------------------------------
 # Coverage attribution against the authored TESTBENCH
 # ---------------------------------------------------------------------------
+def _pulse_receipt_admissible(item: ChecklistItem, rtl_text: Optional[str],
+                              receipt: Optional[dict]) -> bool:
+    if not isinstance(receipt, dict) or not rtl_text:
+        return False
+    contract = receipt.get("contract") or {}
+    counts = receipt.get("counts") or {}
+    stimulus = receipt.get("stimulus") or {}
+    return bool(
+        receipt.get("program") == "pulse_width_rearm_conformance_check" and
+        receipt.get("verdict") == "PASS" and
+        receipt.get("measured") is True and
+        receipt.get("source_file_sha256") == item.source_sha256 and
+        contract.get("source_sha256") == item.source_sha256 and
+        contract.get("source_quote_sha256") == item.source_quote_sha256 and
+        receipt.get("rtl_subject_sha256", receipt.get("rtl_sha256")) == hashlib.sha256(
+            rtl_text.encode("utf-8")).hexdigest() and
+        counts == {"legal": 1, "boundary_bad": 0, "bad": 0,
+                   "final": 1, "max": item.pulse_max_width_cycles} and
+        isinstance(stimulus.get("tb_sha256"), str) and
+        isinstance(receipt.get("result_channel_sha256"), str) and
+        bool(receipt.get("raw_simulation_tail")))
+
+
 def attribute_coverage(items: List[ChecklistItem], tb_text: Optional[str],
                        enum_members_all: List[str],
                        rtl_ports_lower: Optional[set] = None,
                        ambiguous_ports: Optional[set] = None,
-                       rtl_signed_operands: Optional[dict] = None) -> None:
+                       rtl_signed_operands: Optional[dict] = None,
+                       pulse_receipt: Optional[dict] = None,
+                       rtl_text: Optional[str] = None) -> None:
     """Set .covered / .coverage_note for each checklist item based on whether
     the authored TB exercises it. No TB => everything UNCOVERED.
 
@@ -2528,6 +2614,48 @@ def attribute_coverage(items: List[ChecklistItem], tb_text: Optional[str],
                 f"TB stimulates outside-the-set value(s) {sorted(outside)}"
                 if outside else
                 "TB only stimulates listed members; no outside-the-set value")
+            continue
+        # Issue 2856 — static attribution for the explicit pulse contract.  A
+        # TB merely mentioning the input or the word "timeout" is not enough:
+        # it must show both sides of the discriminating waveform (overlong
+        # active suffix, then inactive plus a new rising edge) and compare the
+        # declared acceptance output.  The actual functional PASS/FAIL remains
+        # the native consumer's simulation result; this branch only records
+        # whether the authored TB exercised the obligation at all.
+        if it.kind == "pulse_width_rearm":
+            if it.source_hash_valid is False:
+                it.covered = False
+                it.coverage_note = (
+                    "source_sha256 does not match the exact source bytes; "
+                    "coverage is not admissible")
+                continue
+            if not _pulse_receipt_admissible(it, rtl_text, pulse_receipt):
+                it.covered = False
+                it.coverage_note = (
+                    "bound native pulse-width/rearm PASS receipt is missing, "
+                    "stale, or does not match source/RTL/stimulus bytes")
+                continue
+            input_hit = bool(re.search(r"\b" + re.escape(it.pulse_input_signal.lower()) +
+                                       r"\b", tb_low))
+            output_hit = bool(re.search(r"\b" + re.escape(it.pulse_accept_output.lower()) +
+                                        r"\b", tb_low))
+            max_hit = (str(it.pulse_max_width_cycles) in tb_low or
+                       bool(re.search(r"max[_ -]?width|maximum[_ -]?width|overlong|timeout",
+                                      tb_low)))
+            overlong = bool(re.search(r"overlong|too\s+long|timeout|invalid\s+pulse|"
+                                      r"max(?:imum)?\s*[+>]", tb_low))
+            inactive = bool(re.search(r"inactive|deassert|\b0\b|low", tb_low))
+            new_edge = bool(re.search(r"new\s+(?:start\s+)?(?:rising\s+)?edge|"
+                                      r"rising\s+edge|posedge", tb_low))
+            result_check = bool(re.search(r"assert|\$fatal|\$error|===|!==|==", tb_low))
+            it.covered = bool(input_hit and output_hit and max_hit and overlong and
+                              inactive and new_edge and result_check)
+            it.coverage_note = (
+                "TB exercises overlong active suffix, inactive-plus-new-edge rearm, "
+                "and checks the acceptance output"
+                if it.covered else
+                "TB does not show the complete source pulse timeout/rearm waveform "
+                "and acceptance check")
             continue
         # #760: the overflow/saturation/truncation item is a VALUE-REGION
         # requirement, not a vocabulary one. Mark covered iff the TB structurally
@@ -2784,8 +2912,10 @@ def attribute_failure(failure_text: str, items: List[ChecklistItem],
 # Driver
 # ---------------------------------------------------------------------------
 def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
-        failure_text: Optional[str], strict: bool) -> dict:
+        failure_text: Optional[str], strict: bool,
+        pulse_receipt: Optional[dict] = None) -> dict:
     """`stations` maps STATION_ORDER keys -> text (only the provided ones)."""
+    raw_stations = dict(stations)
     # The verbatim user prompt is the highest-authority station.  Preserve an
     # explicit interface absence across the station merge: generated L-doc
     # boilerplate such as "reset behavior verification" must not turn a source
@@ -2802,6 +2932,29 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
     items = [it for it in extract_chain(stations)
              if not _is_non_requirement_artifact(it)
              and not (reset_explicitly_absent and it.kind == "reset")]
+
+    # `_requirement_text` intentionally normalises JSON for the broad checklist,
+    # but a source-bound pulse receipt must hash the exact bytes the checker
+    # consumed. Rebind that item's provenance from the original station text.
+    for it in items:
+        if it.kind != "pulse_width_rearm":
+            continue
+        for station in reversed(STATION_ORDER):
+            raw = raw_stations.get(station)
+            if not raw:
+                continue
+            parsed_raw = _extract_pulse_contract(raw)
+            if parsed_raw.contract is None:
+                continue
+            c = parsed_raw.contract
+            if (c.input_signal == it.pulse_input_signal and
+                    c.accept_output == it.pulse_accept_output and
+                    c.max_width_cycles == it.pulse_max_width_cycles):
+                it.source_quote = c.source_quote
+                it.source_sha256 = c.source_sha256
+                it.source_quote_sha256 = c.source_quote_sha256
+                it.source_hash_valid = c.source_hash_valid
+                break
 
     # --- Reset coverage tokens from the design's REAL reset port(s) ----------
     # The shipped reset item hard-codes ['reset','rst','por'] which never match
@@ -2858,7 +3011,8 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
         # signedness item is attributed structurally against. `rtl_signed_names`
         # is already computed above for the #2152 retarget; the widths come from
         # the same RTL declarations.
-        _rtl_signed_operand_widths(rtl_text) if rtl_text else None)
+        _rtl_signed_operand_widths(rtl_text) if rtl_text else None,
+        pulse_receipt, rtl_text)
 
     # ── ORGANIC #770 — provenance / confidence tagging ──────────────────────
     # Tag each item STRUCTURAL vs PROSE_HEURISTIC and compute whether the RTL

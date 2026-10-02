@@ -2512,6 +2512,34 @@ def main() -> int:
         verdict = rep.get("verdict") or {0: "PASS", 2: "SKIP"}.get(rc, "FAIL")
         plan.append(("mixed_signal", verdict, rc))
         reports["mixed_signal"] = rep
+        # Default M2 follows the fixed M1 producer. One native Yosys arm
+        # reads the routed design; the canonical M2 gate independently checks
+        # its bound outputs. A failed M1 cannot dispatch a downstream producer.
+        if rc == 0 and verdict == "PASS":
+            _m2_json = project / "reports/analog/mixed_signal/power_domain_producer_audit.json"
+            _m2_json.unlink(missing_ok=True)
+            _m2_rc = _run_phase(
+                "MIXED-SIGNAL M2 (placed power-domain protection paths)",
+                PROGRAMS_DIR / "mixed_signal_power_domain_run.py",
+                [str(project), "--top", phase3_top,
+                 "--container", args.container, "--json", str(_m2_json)],
+                env=_phase_env)
+            _m2_rep = _read_report(_m2_json)
+            # An exit status cannot stand in for a tool measurement. Missing
+            # or contradictory producer output is never a passing M2 row.
+            if (_m2_rc == 0
+                    and _m2_rep.get("program") == "mixed_signal_power_domain_run"
+                    and _m2_rep.get("verdict") == "PASS"):
+                _m2_verdict = "PASS"
+            else:
+                _m2_verdict = "NOT_READY" if _m2_rc == 2 else "FAIL"
+                if _m2_rc == 0:
+                    _m2_rc = 1
+        else:
+            _m2_rc, _m2_verdict = 2, "NOT_READY"
+            _m2_rep = {"verdict": _m2_verdict, "reason": "M1 did not pass; M2 not dispatched"}
+        plan.append(("mixed_signal_M2", _m2_verdict, _m2_rc))
+        reports["mixed_signal_M2"] = _m2_rep
     else:
         plan.append(("mixed_signal", "SKIPPED", 0))
 
@@ -2543,7 +2571,7 @@ def main() -> int:
 
     # ---------------- Aggregate ----------------
     digital_rows = [(n, v, rc) for n, v, rc in plan
-                    if n not in ("analog", "mixed_signal")
+                    if n not in ("analog", "mixed_signal", "mixed_signal_M2")
                     and v != "SKIPPED"]
     _ca_verdicts = _completion_audit_verdicts(project)
     _audit_axis = _completion_audit_axis(

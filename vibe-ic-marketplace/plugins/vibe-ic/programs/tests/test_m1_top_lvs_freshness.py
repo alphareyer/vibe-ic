@@ -159,16 +159,38 @@ def test_no_compare_claimed_when_netgen_did_not_rewrite_the_report(tmp_path):
 # ── provenance of a reused merge ──────────────────────────────────────────
 
 def test_a_reused_merged_gds_is_disclosed_by_name(tmp_path):
-    """The merge is skipped when top_merged.gds exists — deliberate, because
-    it is expensive. A merged GDS produced by something else, somewhere else,
-    is exactly what two rounds of M1 were judged on, so say which it was."""
+    """An unbound carried merge cannot stand in for this invocation.
+
+    Current declared inputs reach KLayout, which refuses here. Magic/netgen
+    could report a match, but that cannot certify the unregenerated layout.
+    The native current-input positive is retained in the bounded M1 fixture.
+    """
     p = _carried_forward(_project(tmp_path))
     ms, rp = _ms(p), _rpt(p)
+    pnr = p / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "routed.def").write_text(
+        f"DESIGN {TOP} ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+        "COMPONENTS 1 ;\n- u_ldo ldo + FIXED ( 0 0 ) N ;\n"
+        "END COMPONENTS\nEND DESIGN\n")
+    (p / f"phase2/stage2/synth/{TOP}_synth.v").write_text(
+        f"module {TOP}(input en, output vout);\n"
+        "ldo u_ldo (.en(en), .vout(vout));\nendmodule\n")
+    import os
+    os.utime(p / f"phase3/stage4/gds/{TOP}.gds", None)
+    calls = []
 
     def fake(container, cmd, timeout=600, **_):
+        calls.append(cmd)
         if cmd.startswith("command -v") or cmd.startswith("test -f") \
                 or cmd.startswith("test -d"):
             return 0, "", ""
+        if "M1_TOOL_IDENTITY" in cmd:
+            return 0, json.dumps({"executable": "/tools/klayout",
+                                  "sha256": "d" * 64,
+                                  "version": "KLayout fixture"}), ""
+        if "klayout -b" in cmd:
+            return 1, "", "KLayout did not produce a current merged layout"
         if "magic" in cmd:
             (ms / f"{TOP}_merged_extracted.sp").write_text(
                 f".subckt {TOP} a b\n.ends\n")
@@ -185,10 +207,11 @@ def test_a_reused_merged_gds_is_disclosed_by_name(tmp_path):
         rep = TL.run(p, TOP, "x", "sky130A")
     finally:
         TL._docker_exec = orig
-    assert rep["verdict"] == "PASS"
-    assert rep["merge_provenance"].startswith("reused:")
-    top_lvs = json.loads((rp / "top_lvs.json").read_text())
-    assert top_lvs["merge_provenance"].startswith("reused:")
+    assert rep["verdict"] == "FAIL" and rep["rc"] == 1, rep
+    assert "KLayout merge did not complete in THIS run" in rep["reason"], rep
+    assert any("klayout -b" in cmd for cmd in calls), calls
+    assert rep.get("compared") is False, rep
+    assert (ms / "top_merged.gds").read_bytes() == b"\x00\x06merged"
 
 
 # ── unit: _ran_fresh ──────────────────────────────────────────────────────

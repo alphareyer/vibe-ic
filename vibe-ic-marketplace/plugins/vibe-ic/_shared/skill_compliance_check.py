@@ -545,6 +545,21 @@ def _d(obj: Any, *keys: str, default: Any = None) -> Any:
     return default if cur is None else cur
 
 
+def _interface_receipt_verdict(payload: Dict[str, Any]) -> str:
+    summary = payload.get('summary', {})
+    if (summary.get('mismatches') or payload.get('producer_returncode') == 1 or
+            any(isinstance(row, dict) and row.get('status') == 'MISMATCH'
+                for row in payload.get('interfaces', []))):
+        return STATE_FAIL
+    if (payload.get('producer_returncode') != 0 or
+            summary.get('verdict') != STATE_PASS or summary.get('unknowns') or
+            _d(payload, 'discovery', 'complete') is not True or
+            any(isinstance(row, dict) and row.get('status') == 'UNKNOWN'
+                for row in payload.get('interfaces', []))):
+        return STATE_NOT_MEASURED
+    return STATE_PASS
+
+
 AUDIT_RECEIPTS: Dict[str, ReceiptSpec] = {
     # programs/interface_encoding_audit.py — main() writes
     #   out_dir/'encoding_audit_report.json' with {'summary': {...},
@@ -556,8 +571,7 @@ AUDIT_RECEIPTS: Dict[str, ReceiptSpec] = {
         identify=lambda d: (isinstance(d.get('summary'), dict)
                             and 'mismatches' in d['summary']
                             and isinstance(d.get('interfaces'), list)),
-        verdict=lambda d: (STATE_FAIL if _d(d, 'summary', 'mismatches',
-                                            default=0) else STATE_PASS),
+        verdict=_interface_receipt_verdict,
         subject=lambda d: {
             'top_module': _d(d, 'summary', 'top_module', default=''),
             'rtl_dir': _d(d, 'summary', 'rtl_dir', default=''),
@@ -1028,6 +1042,155 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             'A payload from another producer is no evidence at all.',
             state=STATE_NOT_MEASURED)]
 
+    # These three RTL receipts carry a closed evidence contract. Fixture
+    # labels are descriptive and never exempt a receipt from validation.
+    if auditor in {'interface_encoding_audit', 'crc_bitorder_check',
+                   'phy_counter_audit'}:
+        summary = payload.get('summary')
+        if not isinstance(summary, dict):
+            summary = {}
+        producer_rc = payload.get('producer_returncode')
+        discovery = payload.get('discovery')
+        source = payload.get('source')
+
+        if auditor == 'interface_encoding_audit':
+            measured_failure = (
+                producer_rc == 1 or (type(summary.get('mismatches')) is int and
+                                    summary['mismatches'] > 0) or
+                any(isinstance(row, dict) and row.get('status') == 'MISMATCH'
+                    for row in payload.get('interfaces', [])))
+            unknown = (summary.get('verdict') == 'INCONCLUSIVE' or
+                       (type(summary.get('unknowns')) is int and
+                        summary['unknowns'] > 0) or
+                       any(isinstance(row, dict) and row.get('status') == 'UNKNOWN'
+                           for row in payload.get('interfaces', [])))
+        elif auditor == 'crc_bitorder_check':
+            measured_failure = (
+                producer_rc == 1 or summary.get('summary_status') == 'WARN' or
+                payload.get('summary_status') == 'WARN' or
+                any(isinstance(row, dict) and row.get('status') == 'WARN'
+                    for row in payload.get('findings', [])))
+            unknown = (summary.get('verdict') == 'INCONCLUSIVE' or
+                       payload.get('summary_status') in ('UNKNOWN', 'INCONCLUSIVE'))
+        else:
+            measured_failure = (
+                producer_rc == 1 or summary.get('verdict') == 'FAIL' or
+                (type(summary.get('bus_sampled_warnings')) is int and
+                 summary['bus_sampled_warnings'] > 0) or
+                any(isinstance(row, dict) and row.get('severity') == 'WARNING'
+                    for row in payload.get('findings', [])))
+            unknown = summary.get('verdict') in ('UNKNOWN', 'INCONCLUSIVE')
+
+        # A measured design failure remains FAIL even if discovery/source
+        # evidence is subsequently bad.  The evidence state is only
+        # NOT_MEASURED when no measured failure exists to report.
+        if type(producer_rc) is not int or producer_rc not in (0, 1, 2):
+            status_error = 'missing_or_invalid_producer_returncode'
+        else:
+            status_error = None
+        if producer_rc == 2 or unknown:
+            status_error = status_error or 'producer_inconclusive_or_unknown'
+        if (not isinstance(discovery, dict) or discovery.get('complete') is not True or
+                discovery.get('issues') != []):
+            status_error = status_error or 'incomplete_discovery'
+        if auditor == 'interface_encoding_audit':
+            rows = payload['interfaces']
+            counts_ok = all(type(summary.get(k)) is int and summary[k] >= 0
+                            for k in ('total_interfaces', 'matches', 'mismatches', 'unknowns'))
+            counts_ok = counts_ok and (
+                summary['total_interfaces'] == len(rows) and
+                all(summary[key] == sum(isinstance(row, dict) and
+                                        row.get('status') == status for row in rows)
+                    for key, status in (('matches', 'MATCH'),
+                                        ('mismatches', 'MISMATCH'), ('unknowns', 'UNKNOWN'))))
+            if not counts_ok or summary.get('verdict') not in ('PASS', STATE_NOT_APPLICABLE):
+                status_error = status_error or 'invalid_or_nonpassing_interface_population'
+        elif auditor == 'crc_bitorder_check':
+            if payload.get('summary_status') not in ('PASS', STATE_NOT_APPLICABLE):
+                status_error = status_error or 'nonpassing_crc_verdict'
+        elif summary.get('verdict') not in ('PASS', STATE_NOT_APPLICABLE):
+            status_error = status_error or 'nonpassing_counter_verdict'
+
+        def contains_unknown(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(contains_unknown(child) for child in value.values())
+            if isinstance(value, list):
+                return any(contains_unknown(child) for child in value)
+            return value == 'UNKNOWN'
+
+        if contains_unknown(payload.get('interfaces', payload.get('findings', []))):
+            status_error = status_error or 'unknown_audit_item'
+
+        source_error = None
+        if not isinstance(source, dict):
+            source_error = 'missing_source_manifest'
+        else:
+            records = source.get('files')
+            if (not isinstance(source.get('root'), str) or
+                    not isinstance(source.get('sha256'), str) or
+                    not isinstance(records, list) or
+                    not all(isinstance(rec, dict) and
+                            isinstance(rec.get('path'), str) and
+                            isinstance(rec.get('sha256'), str) and
+                            type(rec.get('size_bytes')) is int
+                            for rec in records)):
+                source_error = 'malformed_source_manifest'
+            else:
+                canonical = sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+                if canonical != source.get('sha256'):
+                    source_error = 'source_manifest_digest_mismatch'
+                elif auditor == 'interface_encoding_audit':
+                    if (not isinstance(summary.get('rtl_dir'), str) or
+                            str(Path(summary['rtl_dir']).absolute()) != source['root']):
+                        source_error = 'native_subject_source_mismatch'
+                else:
+                    scanned = payload.get('files_scanned')
+                    if (not isinstance(scanned, list) or
+                            not all(isinstance(path, str) for path in scanned) or
+                            sorted(str(Path(path).absolute()) for path in scanned) !=
+                            sorted(str(Path(source['root']) / rec['path']) for rec in records)):
+                        source_error = 'native_subject_source_mismatch'
+
+        selected_root = ctx.rtl_source_root
+        configured_root = spec.get('rtl_source_root')
+        conflict = False
+        if isinstance(configured_root, str) and configured_root:
+            configured = Path(configured_root)
+            if not configured.is_absolute() and ctx.output_path is not None:
+                configured = ctx.output_path.parent / configured
+            conflict = (selected_root is not None and
+                        selected_root.absolute() != configured.absolute())
+            selected_root = configured if selected_root is None else selected_root
+        if conflict:
+            source_error = source_error or 'consumer_source_root_conflict'
+        if source_error is None:
+            if selected_root is None:
+                source_error = 'consumer_source_root_undeclared'
+            else:
+                sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'programs'))
+                import _rtl_audit_applicability as rtl_applicability
+                try:
+                    measured_source = rtl_applicability.source_census(selected_root)
+                except (OSError, ValueError, UnicodeError) as exc:
+                    measured_source = None
+                    source_error = str(exc)
+                if source_error is None and measured_source != source:
+                    source_error = 'source_manifest_stale_or_wrong_root'
+
+        if measured_failure:
+            return [Finding(
+                cid, 'FAIL', f'FAIL: `{auditor}` measured a design failure.',
+                f'{trace} — producer_returncode={producer_rc}; '
+                f'discovery/source status retained for diagnosis '
+                f'({status_error or "complete"}; {source_error or "fresh"}).',
+                state=STATE_FAIL)]
+        if status_error or source_error:
+            return [Finding(
+                cid, 'FAIL', f'NOT_MEASURED: `{auditor}` receipt is not a '
+                'complete, fresh producer proof.',
+                f'{trace} — {status_error or "complete"}; {source_error or "fresh"}.',
+                state=STATE_NOT_MEASURED)]
+
     applicability = payload.get('applicability')
     if isinstance(applicability, dict) and \
             applicability.get('state') == STATE_NOT_APPLICABLE:
@@ -1361,9 +1524,8 @@ def main():
                          'Receipts are never looked for outside these roots.')
     ap.add_argument('--rtl-source-root', metavar='DIR',
                     help='Independently select the complete RTL source directory '
-                         'for structural NOT_APPLICABLE remeasurement. A receipt '
-                         'cannot select its own subject. Optional for measured '
-                         'PASS/FAIL receipts; required for structural absence.')
+                         'for RTL audit receipt freshness and structural absence '
+                         'remeasurement. A receipt cannot select its own subject.')
     args = ap.parse_args()
 
     out_path = Path(args.output_file)

@@ -9444,7 +9444,8 @@ def _write_staged_pdk_read_disclosure(
     staged_rel = detail["source"]
     adopted_from = None
     if adopted_target:
-        adopted_from = "input_doc_prose" if adopted_line else "staged_pdk_path"
+        adopted_from = ("command_line" if adopted_source == "command_line" else
+                        "input_doc_prose" if adopted_line else "staged_pdk_path")
 
     # ORGANIC-20260803 — what was READ but yielded no name. A refusal that
     # cannot show what it looked at is indistinguishable from not looking.
@@ -9467,6 +9468,9 @@ def _write_staged_pdk_read_disclosure(
                      if truncated else ""))
     elif adopted_from == "staged_pdk_path":
         reason = "the staged path supplied L19.fields.pdk_target"
+    elif adopted_from == "command_line":
+        reason = ("the explicit --pdk choice supplied L19.fields.pdk_target; "
+                  "the staged identifier remains visible for conflict checks")
     else:
         reason = ("the design's own prose already declared a target, which "
                   "takes precedence; the staged read is recorded so a "
@@ -9477,9 +9481,9 @@ def _write_staged_pdk_read_disclosure(
         "meaning": (
             "what the Phase-1 pdk_target extractor read from the PDK "
             "enablement this design STAGES under its own input tree, and "
-            "what it did with it. The prose evidence source is authoritative "
-            "when it yields anything; this source is consulted only when "
-            "prose is silent."),
+            "what it did with it. An explicit --pdk choice takes precedence, "
+            "then the design's prose; the staged identifier supplies the "
+            "target only when neither states one."),
         "staged_pdk_roots": roots,
         "enablement_files_read": len(files),
         # A count equal to the cap means the listing is truncated, not
@@ -9866,12 +9870,15 @@ def _emit_l19_to_l23_skeletons(project: Path) -> List["LDocResult"]:
     # evidence survives into L19.extraction_evidence in schema-valid shape.
     _pdk_tgt, _pdk_ev, _pdk_src, _pdk_line = (
         _extract_pdk_target_with_provenance(project))
+    _selected_pdk = _CLI_PDK or _pdk_tgt
     # ORGANIC #513 — disclose the staged-PDK read (what was seen, what was
     # adopted, and why) outside generated_docs/. Fail-open: a disclosure
     # that cannot be written must never take the L-doc emit down.
     try:
         _write_staged_pdk_read_disclosure(
-            project, _pdk_tgt, _pdk_src, _pdk_line)
+            project, _selected_pdk,
+            "command_line" if _CLI_PDK else _pdk_src,
+            None if _CLI_PDK else _pdk_line)
     except Exception as e:                                  # noqa: BLE001
         print(f"      staged-PDK read disclosure FAILED (fail-open): {e}",
               file=sys.stderr)
@@ -9888,9 +9895,9 @@ def _emit_l19_to_l23_skeletons(project: Path) -> List["LDocResult"]:
             evidence = skeleton.pop("evidence", []) if isinstance(skeleton.get("evidence"), list) else {}
             if not isinstance(evidence, dict):
                 evidence = {}
-            if code == "L19" and _pdk_tgt and isinstance(
+            if code == "L19" and _selected_pdk and isinstance(
                     skeleton.get("fields"), dict):
-                skeleton["fields"]["pdk_target"] = _pdk_tgt
+                skeleton["fields"]["pdk_target"] = _selected_pdk
                 # ORGANIC-20260803b — a design may declare MORE THAN ONE
                 # target process, and `pdk_target` is one scalar. Measured on
                 # a real design whose L1 declares
@@ -9913,6 +9920,8 @@ def _emit_l19_to_l23_skeletons(project: Path) -> List["LDocResult"]:
                 # name three paragraphs away is a mention.
                 _alts = _declared_pdk_alternates(
                     project, _pdk_src, _pdk_line, _pdk_tgt)
+                if _CLI_PDK and _pdk_tgt and not _alts:
+                    _alts = [_pdk_tgt]
                 if _alts:
                     skeleton["fields"]["pdk_target_alternates"] = _alts
                 skeleton["extraction_status"] = "PARTIALLY_EXTRACTED"
@@ -9936,10 +9945,16 @@ def _emit_l19_to_l23_skeletons(project: Path) -> List["LDocResult"]:
                 elif _pdk_src:
                     _label = (f"pdk_target (staged PDK enablement path: "
                               f"{_src_key})")
-                evidence.setdefault(_src_key, []).append({
-                    "literal": _pdk_ev or _pdk_tgt,
-                    "label": _label,
-                })
+                if _pdk_tgt:
+                    evidence.setdefault(_src_key, []).append({
+                        "literal": _pdk_ev or _pdk_tgt,
+                        "label": _label,
+                    })
+                if _CLI_PDK:
+                    evidence.setdefault("command_line", []).append({
+                        "literal": f"--pdk {_CLI_PDK}",
+                        "label": "pdk_target (explicit run choice)",
+                    })
             r = _write_l_doc(project, doc_name, skeleton, evidence)
             out.append(r)
         except Exception as e:
@@ -21054,7 +21069,7 @@ def _v1_6_295_propagate_class_path_to_layer_docs(
 
 
 # ORGANIC-20260803b — the run's PDK, set from `--pdk` in main(). None means
-# "not stated"; every extraction then behaves exactly as it did before.
+# "not stated"; document/staged selection then behaves as before.
 _CLI_PDK: Optional[str] = None
 
 # A frequency or a period literal, with its unit, anywhere on a line.
@@ -63856,10 +63871,9 @@ def main() -> int:
                         "ic_name.")
     p.add_argument("--pdk", default=None,
                    help="ORGANIC-20260803b — the process this design is "
-                        "being built in. Consulted ONLY to resolve a design "
-                        "document whose own timing table is keyed BY PDK "
-                        "(a `| <pdk> | <period> |` row per target). Omitted "
-                        "or 'auto' leaves every extraction byte-identical.")
+                        "being built in. Selects the exact L19 PDK and "
+                        "PDK-keyed timing rows. Must agree with declared "
+                        "document targets; omitted or 'auto' uses documents.")
     args = p.parse_args()
 
     # ORGANIC #541 — CLI --ic-name is authoritative for docs-mode.
@@ -63867,10 +63881,10 @@ def main() -> int:
     if args.ic_name and args.ic_name.strip():
         _CLI_IC_NAME_OVERRIDE = args.ic_name.strip()
 
-    # ORGANIC-20260803b — the run's PDK, for PDK-keyed spec rows only.
+    # Invocation-local owner choice; absence must not inherit an earlier run.
     global _CLI_PDK
-    if args.pdk and args.pdk.strip().lower() not in ("", "auto"):
-        _CLI_PDK = args.pdk.strip()
+    _CLI_PDK = (args.pdk.strip() if args.pdk and
+                args.pdk.strip().lower() not in ("", "auto") else None)
 
     project = args.project.resolve()
     if not project.is_dir():
@@ -63879,6 +63893,17 @@ def main() -> int:
     if not (project / "input" / "docs").is_dir():
         print(f"ERROR: input/docs/ missing under {project}", file=sys.stderr)
         return 2
+
+    if _CLI_PDK:
+        # Use the existing family/revision rule, preserving genuine conflicts.
+        from phase3_one_shot_runner import _declares_resolved_pdk, _pdk_tokens
+        target, _, source, line = _extract_pdk_target_with_provenance(project)
+        targets = _declared_pdk_alternates(project, source, line, target) or [target]
+        if target and not _declares_resolved_pdk(
+                _CLI_PDK, _pdk_tokens(" ".join(targets))):
+            print(f"ERROR: --pdk {_CLI_PDK!r} conflicts with declared "
+                  f"PDK targets {targets!r} at {source}:{line}", file=sys.stderr)
+            return 2
 
     # Step 1: text extraction
     print(f"[1/15] Extracting text from input/docs/ ...")

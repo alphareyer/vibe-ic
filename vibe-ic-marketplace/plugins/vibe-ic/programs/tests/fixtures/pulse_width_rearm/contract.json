@@ -1,0 +1,15 @@
+{
+  "pulse_width_rearm_contract": {
+    "source_quote": "Pulse input `pulse_i` is accepted for at most 4 active clock cycles; an overlong pulse times out and is rejected. Acquisition re-arms only after the input is inactive and a new rising edge starts a pulse.",
+    "input_signal": "pulse_i",
+    "accept_output": "accept_o",
+    "clock_signal": "clk",
+    "reset_signal": "rst_n",
+    "reset_active_low": true,
+    "max_width_cycles": 4,
+    "start_edge": "rising",
+    "timeout_action": "reject",
+    "rearm_requires_inactive": true,
+    "rearm_requires_new_start_edge": true
+  }
+}

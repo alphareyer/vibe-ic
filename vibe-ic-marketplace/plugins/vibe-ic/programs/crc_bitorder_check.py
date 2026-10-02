@@ -446,18 +446,40 @@ def main():
     # only the conservative structural absence proof can decide the audit;
     # otherwise emit UNKNOWN, not a pass over an empty finding population.
 
+    source_manifest = None
+    source_error = None
+    try:
+        source_root = _applicability.source_root(
+            [Path(p) for p in args.rtl_files])
+        source_manifest = _applicability.source_census(
+            source_root, files=[Path(p) for p in args.rtl_files])
+    except (OSError, ValueError, UnicodeError) as exc:
+        source_error = str(exc)
+
     all_findings: List[CrcLoadFinding] = []
     if args.crc_signal:
         for f in args.rtl_files:
             all_findings += analyze_file(f, args.crc_signal)
+    if source_manifest is not None:
+        try:
+            if _applicability.source_census(source_root) != source_manifest:
+                source_error = 'source_changed_during_audit'
+        except (OSError, ValueError, UnicodeError) as exc:
+            source_error = str(exc)
 
     report = build_report(args.crc_signal or '', args.rtl_files, all_findings)
-
-    # Write JSON report
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     report_path = out / 'crc_bitorder_report.json'
     report_dict = asdict(report)
+    report_dict['report_schema'] = 'vibeic.crc_bitorder_check.v2'
+    report_dict['source'] = source_manifest
+    if source_error:
+        report_dict['source_error'] = source_error
+    report_dict['discovery'] = {
+        'complete': source_error is None,
+        'issues': ([source_error] if source_error else []),
+    }
     if not args.crc_signal:
         applicability = _applicability.from_files(
             'crc_bitorder_check', [Path(p) for p in args.rtl_files])
@@ -465,6 +487,16 @@ def main():
         report_dict['summary_status'] = applicability['state']
         report_dict['summary_message'] = (
             applicability.get('criterion') or applicability.get('reason'))
+    if source_error and report_dict['summary_status'] != 'WARN':
+        report_dict['summary_status'] = _applicability.UNKNOWN
+        report_dict['summary_message'] = source_error
+    if report_dict['summary_status'] == _applicability.UNKNOWN:
+        producer_returncode = 2
+    elif report_dict['summary_status'] == 'WARN':
+        producer_returncode = 1
+    else:
+        producer_returncode = 0
+    report_dict['producer_returncode'] = producer_returncode
     report_path.write_text(json.dumps(report_dict, indent=2))
 
     # Console summary
@@ -479,9 +511,7 @@ def main():
     print(f"\nReport written to: {report_path}")
 
     # An unknown applicability decision did not measure the obligation.
-    if report_dict['summary_status'] == _applicability.UNKNOWN:
-        return 2
-    return 1 if report.summary_status == 'WARN' else 0
+    return producer_returncode
 
 
 if __name__ == '__main__':

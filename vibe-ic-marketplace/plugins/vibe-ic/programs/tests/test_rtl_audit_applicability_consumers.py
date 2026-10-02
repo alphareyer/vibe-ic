@@ -272,12 +272,16 @@ endmodule
     rtl, _, receipts, runs = _produce(tmp_path, text, crc_signal="checksum")
     run, data = _consume(tmp_path, receipts, rtl)
     assert _states(data) == {
-        cid: (("FAIL", "FAIL") if cid == bad_auditor else ("INFO", "PASS"))
+        cid: (("FAIL", "FAIL") if cid == bad_auditor else
+              ("FAIL", "NOT_MEASURED") if cid == NAMED[0] else ("INFO", "PASS"))
         for cid in NAMED
     }
+    # The interface population also contains unclassified clock/indication
+    # connections. Preserve their UNKNOWN evidence instead of certifying a
+    # partial population from the one MATCH; a measured mismatch still wins.
     assert [r.returncode for r in runs] == [1 if cid == bad_auditor else 0 for cid in NAMED]
-    assert run.returncode == (1 if bad_auditor else 0)
-    assert data["verdict"] == ("FAIL" if bad_auditor else "PASS")
+    assert run.returncode == 1
+    assert data["verdict"] == "FAIL"
 
 
 def test_source_change_during_actual_elaboration_cannot_bind_old_bytes(tmp_path, monkeypatch):

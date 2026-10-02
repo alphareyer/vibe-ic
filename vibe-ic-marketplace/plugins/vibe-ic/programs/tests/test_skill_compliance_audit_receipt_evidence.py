@@ -46,6 +46,8 @@ _RTL_REVIEW_YML = _PLUGIN / "skills" / "rtl-review" / "compliance.yaml"
 
 sys.path.insert(0, str(_PLUGIN / "_shared"))
 import skill_compliance_check as scc  # noqa: E402
+sys.path.insert(0, str(_PLUGIN / 'programs'))
+import _rtl_audit_applicability as rtl_applicability  # noqa: E402
 
 _NAMED = ("X_interface_encoding_audit",
           "X_crc_bitorder_check",
@@ -90,7 +92,9 @@ def _receipt_set(*, encoding_mismatches=0, encoding_total=2,
                         "unknowns": 0,
                         "top_module": "syn_top",
                         "rtl_dir": "syn/rtl"},
-            "interfaces": [{"wire_name": f"w{i}"} for i in range(encoding_total)],
+            "interfaces": [{"wire_name": f"w{i}",
+                            "status": "MISMATCH" if i < encoding_mismatches else "MATCH"}
+                           for i in range(encoding_total)],
         },
         "crc_bitorder_report.json": {
             "_fixture": _SYNTHETIC,
@@ -121,13 +125,37 @@ def _drive(tmp_path, doc_text, receipts, yml=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     doc = tmp_path / "review.md"
     doc.write_text(doc_text)
+    # Synthetic receipts still satisfy the real status/freshness contract.
+    # The fixture label is not a validation bypass in the consumer.
+    rtl = tmp_path / 'rtl'
+    rtl.mkdir(exist_ok=True)
+    source = rtl / 'fixture.sv'
+    source.write_text('module syn_top; endmodule\n')
+    manifest = rtl_applicability.source_census(rtl)
     for name, payload in (receipts or {}).items():
         if payload is not None:
+            payload['source'] = manifest
+            payload['discovery'] = {'complete': True, 'issues': []}
+            payload['producer_returncode'] = 0
+            if (name == 'encoding_audit_report.json' and
+                    isinstance(payload.get('summary'), dict) and
+                    'mismatches' in payload['summary']):
+                summary = payload['summary']
+                summary['rtl_dir'] = str(rtl)
+                summary['verdict'] = 'FAIL' if summary['mismatches'] else 'PASS'
+                payload['producer_returncode'] = int(bool(summary['mismatches']))
+            elif name == 'crc_bitorder_report.json':
+                payload['files_scanned'] = [str(source)]
+                payload['producer_returncode'] = int(payload.get('summary_status') == 'WARN')
+            elif name == 'phy_counter_audit_report.json' and isinstance(payload.get('summary'), dict):
+                payload['files_scanned'] = [str(source)]
+                payload['producer_returncode'] = int(payload['summary']['verdict'] == 'FAIL')
             (tmp_path / name).write_text(json.dumps(payload, indent=2))
     out = tmp_path / "audit.json"
     r = subprocess.run(
         [sys.executable, str(_CHECKER),
          "--requirements", str(yml or _RTL_REVIEW_YML),
+         "--rtl-source-root", str(rtl),
          "--json", str(out), str(doc)],
         capture_output=True, text=True)
     data = json.loads(out.read_text()) if out.exists() else {}
