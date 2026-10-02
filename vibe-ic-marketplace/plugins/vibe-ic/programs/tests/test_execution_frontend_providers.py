@@ -127,3 +127,26 @@ def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
         calls.clear()
         with __import__('pytest').raises(ValueError): w.produce_05ic(tmp_path,tmp_path/'out',**kwargs)
         assert calls == []
+
+def test_05ic_real_producers_order_and_outputs(tmp_path, monkeypatch):
+    import execution_frontend_worker as w
+    import hashlib
+    project=tmp_path/'project'; answers=project/'input/step_0_5ic_answers.json'; answers.parent.mkdir(parents=True)
+    answers.write_text(json.dumps({'route':'IP','answers':{}}))
+    (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'0.5ic','parameters':{},'files':{'input/step_0_5ic_answers.json':hashlib.sha256(answers.read_bytes()).hexdigest()}}))
+    calls=[]
+    class Result:
+        returncode=0; stdout=''; stderr=''
+    def fake(argv, **kw):
+        calls.append(list(argv));
+        if 'submission_template_ingest.py' in argv[1]:
+            p=Path(argv[2]); (p/'input/submission_template').mkdir(parents=True,exist_ok=True); (p/'input/submission_template/NO_TEMPLATE.txt').write_text('NO_TEMPLATE\n')
+            (p/'reports/phase1').mkdir(parents=True,exist_ok=True); (p/'reports/phase1/submission_template.json').write_text(json.dumps({'schema':'submission_template/1','passed':True}))
+        else:
+            p=Path(argv[2]); (p/'input/submission_template').mkdir(parents=True,exist_ok=True); (p/'input/submission_template/tapeout_declaration.json').write_text(json.dumps({'schema':'tapeout_declaration/1'})); (p/'reports/phase1').mkdir(parents=True,exist_ok=True); (p/'reports/phase1/tapeout_declaration.json').write_text(json.dumps({'schema':'tapeout_declaration/1','passed':True}))
+        return Result()
+    monkeypatch.setattr(w.subprocess,'run',fake)
+    out=tmp_path/'out'; w.produce_05ic(project,out,no_template_reason='design-neutral IP delivery does not target a shuttle slot')
+    assert ['submission_template_ingest.py' in x[1] for x in calls] == [True,False]
+    assert (out/'reports/phase1/submission_template.json').is_file() and (out/'reports/phase1/tapeout_declaration.json').is_file()
+    assert not (out/'canonical.json').exists()
