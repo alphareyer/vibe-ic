@@ -120,6 +120,11 @@ def produce_8(project,output,**k):
         return {n for n in names if n in {'issued_manifest.json', 'out', 'frontend_outputs'}
                 or (Path(src) / n).resolve() == output.resolve()}
     shutil.copytree(project, staged, ignore=_ignore)
+    # Canonical consumer addresses the staged project root; expose immutable
+    # staged inputs there while keeping the private reconstruction directory.
+    for rel in ('phase1', 'phase2'):
+        src = staged / rel; dst = output / rel
+        if src.is_dir() and not dst.exists(): shutil.copytree(src, dst)
     report = output / 'reports/phase2/sdc_check.json'
     report.parent.mkdir(parents=True, exist_ok=True)
     l8 = k.get('l8') or next(staged.rglob('L8_TIMING_WAVEFORM.json'), None)
