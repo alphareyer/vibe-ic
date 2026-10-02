@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import math
 from pathlib import Path
 import sys
 
@@ -69,12 +71,32 @@ def test_missing_and_incomplete_rows_never_return_pass(tmp_path):
     assert analog.produce("M4", tmp_path).status == "NOT_IMPLEMENTED"
 
 
+def test_missing_project_and_bound_resources_are_not_measured_for_implemented_rows(tmp_path):
+    missing_project = tmp_path / "does-not-exist"
+    for step in analog.IMPLEMENTED_STEPS:
+        assert analog.produce(step, missing_project).status == "NOT_MEASURED"
+    assert analog.produce("A3", tmp_path, inputs=None, pdk=None, model=None, tool=None).status == "NOT_MEASURED"
+    assert analog.produce("M2", missing_project).status == "NOT_IMPLEMENTED"
+    assert analog.produce("M3", missing_project).status == "CANNOT_CERTIFY"
+    assert analog.produce("M4", missing_project).status == "NOT_IMPLEMENTED"
+
+
 @pytest.mark.parametrize(
     ("degradation", "fallback"),
     ((9.99, None), (10.00, None), (10.01, "A3")),
 )
 def test_a7_boundary_uses_strict_shared_threshold(degradation, fallback):
     assert analog.a7_fallback_for_degradation(degradation) == fallback
+
+
+@pytest.mark.parametrize("degradation", (math.nan, math.inf, -math.inf))
+def test_a7_nonfinite_values_are_rejected_and_explicitly_unmeasured(degradation):
+    with pytest.raises(ValueError, match="A7_DEGRADATION_NONFINITE"):
+        analog.a7_fallback_for_degradation(degradation)
+    result = analog.a7_degradation_result(degradation)
+    assert result.status == "NOT_MEASURED"
+    assert result.reason == "A7_DEGRADATION_NONFINITE"
+    assert "A3" not in result.reason
 
 
 def test_controller_plan_stays_not_measured_without_runtime_qualification(tmp_path):
@@ -108,3 +130,26 @@ def test_catalog_reverse_control_rejects_a_false_m2_producer_and_bad_a7_route():
     defects = analog.validate_catalog(bad)
     assert "M2:FALSE_PRODUCER" in defects
     assert "A7:FALLBACK_AUTHORITY" in defects
+
+
+def test_catalog_reverse_control_rejects_an_explicit_empty_catalog():
+    assert "CATALOG_EMPTY" in analog.validate_catalog({})
+
+
+@pytest.mark.parametrize(
+    ("step", "field", "value", "needle"),
+    (
+        ("A1", "canonical_inputs", ("mutated-input",), "A1:CANONICAL_INPUTS_MISMATCH"),
+        ("A1", "canonical_outputs", ("mutated-output",), "A1:CANONICAL_OUTPUTS_MISMATCH"),
+        ("A1", "mandatory_gates", ("mutated-gate",), "A1:MANDATORY_GATES_MISMATCH"),
+        ("A1", "condition", {"kind": "always"}, "A1:CONDITION_MISMATCH"),
+        ("A1", "certification", "PASS", "A1:CERTIFICATION_MISMATCH"),
+        ("A1", "producer_entrypoints", ("missing_symbol.run",), "A1:PRODUCER_ENTRYPOINTS_MISMATCH"),
+        ("M2", "producer_entrypoints", ("fake_m2.run",), "M2:PRODUCER_ENTRYPOINTS_MISMATCH"),
+    ),
+)
+def test_catalog_reverse_control_rejects_mutated_contract_fields(step, field, value, needle):
+    bad = copy.deepcopy(analog.coverage())
+    bad[step][field] = value
+    defects = analog.validate_catalog(bad)
+    assert needle in defects

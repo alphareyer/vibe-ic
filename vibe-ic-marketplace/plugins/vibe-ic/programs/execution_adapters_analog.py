@@ -10,9 +10,11 @@ because their canonical producer contracts are incomplete.
 """
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -204,30 +206,212 @@ def coverage() -> dict[str, dict]:
     }
 
 
+def _fresh_rows() -> tuple[dict, ...]:
+    """Read the immutable source catalog for validation controls.
+
+    ``coverage()`` is a public, mutable mapping.  Validation must compare a
+    candidate against the checked-in source contract instead of comparing it
+    with another projection of that same candidate.
+    """
+    payload = json.loads(COVERAGE_FILE.read_text(encoding="utf-8"))
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("analog coverage rows must be a list")
+    return tuple(rows)
+
+
+def _freeze(value: object) -> object:
+    """Make JSON-shaped values comparable across list/tuple projections."""
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(key), _freeze(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _yaml_gate_programs(node: object) -> tuple[str, ...]:
+    """Extract blocking and advisory gate program names in YAML order."""
+    found: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if key in ("program_exit_zero", "advisory_program_exit_zero"):
+                command = value.get("command") if isinstance(value, Mapping) else value
+                if isinstance(command, str) and command.split():
+                    found.append(command.split()[0])
+            elif key != "optional_program_exit_zero":
+                found.extend(_yaml_gate_programs(value))
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            found.extend(_yaml_gate_programs(value))
+    return tuple(found)
+
+
+def _yaml_inputs(row: Mapping[str, object]) -> tuple[str, ...]:
+    """Project the flow's input declarations into the catalog vocabulary."""
+    inputs: list[str] = []
+    for item in row.get("required_inputs", ()) or ():
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("from") == "A8" and item.get("outputs") == "all":
+            inputs.append("A8.outputs=all")
+        elif item.get("from") == "external":
+            inputs.append("external: PDK device models")
+        elif isinstance(item.get("path"), str):
+            inputs.append(item["path"])
+    return tuple(inputs)
+
+
+def _module_symbols(module: str) -> set[str] | None:
+    """Return top-level Python symbols without importing a producer/gate."""
+    path = PROGRAMS / (module + ".py")
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def _validate_symbols(step_id: str, row: Mapping[str, object], errors: list[str]) -> None:
+    """Require every declared producer and gate to be a real source symbol."""
+    for entrypoint in row.get("producer_entrypoints", ()) or ():
+        if not isinstance(entrypoint, str) or entrypoint.count(".") != 1:
+            errors.append(step_id + ":PRODUCER_SYMBOL_INVALID")
+            continue
+        module, symbol = entrypoint.split(".")
+        symbols = _module_symbols(module)
+        if symbols is None or symbol not in symbols:
+            errors.append(step_id + ":PRODUCER_SYMBOL_MISSING:" + entrypoint)
+    for gate in row.get("mandatory_gates", ()) or ():
+        if not isinstance(gate, str):
+            errors.append(step_id + ":GATE_SYMBOL_INVALID")
+            continue
+        symbols = _module_symbols(gate)
+        if symbols is None or "main" not in symbols:
+            errors.append(step_id + ":GATE_SYMBOL_MISSING:" + gate)
+
+
 def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) -> tuple[str, ...]:
-    """Return named defects in a catalog; an empty tuple is the green control."""
-    rows = dict(catalog or coverage())
-    errors = []
+    """Return named defects in a candidate against all 13 source contracts.
+
+    The explicit ``None`` check is deliberate: an empty mapping is a supplied
+    catalog and must fail rather than silently falling back to ``coverage()``.
+    """
+    rows = coverage() if catalog is None else dict(catalog)
+    errors: list[str] = []
+    if catalog is not None and not rows:
+        errors.append("CATALOG_EMPTY")
     if tuple(rows) != STEP_IDS:
         errors.append("CANONICAL_ROW_ORDER")
+
+    try:
+        expected_rows = {row["step_id"]: row for row in _fresh_rows()}
+    except (OSError, ValueError, KeyError, TypeError):
+        return tuple(errors + ["CANONICAL_SOURCE_UNREADABLE"])
+
     for step_id in STEP_IDS:
-        row = rows.get(step_id, {})
-        producer = row.get("producer_entrypoints") or ()
-        dispatch = row.get("dispatch") is True
+        expected = expected_rows.get(step_id)
+        actual = rows.get(step_id)
+        if expected is None:
+            errors.append(step_id + ":CANONICAL_ROW_MISSING")
+            continue
+        if not isinstance(actual, Mapping):
+            errors.append(step_id + ":ROW_INVALID")
+            continue
+
+        # These are the public fields whose mutation can change the route or
+        # make a row look complete while detaching it from the source flow.
+        fields = (
+            "canonical_inputs", "canonical_outputs", "mandatory_gates",
+            "condition", "certification", "producer_entrypoints", "source_files",
+            "engine_family", "applicability", "dispatch", "known_gap",
+            "source_family", "fallback",
+        )
+        for field in fields:
+            default = None if field == "fallback" else ""
+            expected_value = expected.get(field, default)
+            actual_value = actual.get(field, default)
+            if _freeze(actual_value) != _freeze(expected_value):
+                errors.append(step_id + ":" + field.upper() + "_MISMATCH")
+        if actual.get("step_id") != step_id:
+            errors.append(step_id + ":STEP_ID_MISMATCH")
+        if actual.get("provider_module") != __name__:
+            errors.append(step_id + ":PROVIDER_MODULE_MISMATCH")
+
+        producer = actual.get("producer_entrypoints") or ()
+        dispatch = actual.get("dispatch") is True
         if dispatch and not producer:
             errors.append(step_id + ":DISPATCH_WITHOUT_PRODUCER")
         if step_id in ("M2", "M4") and (dispatch or producer):
             errors.append(step_id + ":FALSE_PRODUCER")
         if step_id == "M3" and dispatch:
             errors.append("M3:INTERFACE_SI_UNCERTIFIED")
-        if step_id == "M3" and "reports/analog/mixed_signal/interface_si.json" not in tuple(row.get("canonical_outputs") or ()):
-            errors.append("M3:INTERFACE_SI_CONTRACT_MISSING")
-        if step_id == "M4" and "reports/analog/mixed_signal/signoff.json" not in tuple(row.get("canonical_outputs") or ()):
-            errors.append("M4:SIGNOFF_CONTRACT_MISSING")
-    fallback = rows.get("A7", {}).get("fallback") or {}
-    if fallback.get("to") != "A3" or fallback.get("when_degradation_strictly_greater_than_pct") != 10.0:
+        for source_file in actual.get("source_files", ()) or ():
+            if (not isinstance(source_file, str)
+                    or not (PROGRAMS / source_file).is_file()
+                    or (PROGRAMS / source_file).is_symlink()):
+                errors.append(step_id + ":SOURCE_FILE_MISSING:" + str(source_file))
+        _validate_symbols(step_id, actual, errors)
+
+    # Bind the adapter view to both machine-readable execution authorities.
+    try:
+        import yaml
+        flow = yaml.safe_load(FLOW_FILE.read_text(encoding="utf-8"))
+        flow_rows = {
+            row.get("id"): row for row in flow.get("steps", ())
+            if isinstance(row, Mapping) and row.get("id") in STEP_IDS
+        }
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
+        flow_rows = {}
+        errors.append("YAML_BINDING_UNREADABLE")
+    try:
+        portfolio = json.loads((PROGRAMS / "data" / "execution_modes_portfolio.json").read_text(encoding="utf-8"))
+        portfolio_rows = {
+            row.get("id"): row for row in portfolio.get("steps", ())
+            if isinstance(row, Mapping) and row.get("id") in STEP_IDS
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        portfolio_rows = {}
+        errors.append("PORTFOLIO_BINDING_UNREADABLE")
+
+    for step_id in STEP_IDS:
+        expected = expected_rows.get(step_id, {})
+        yaml_row = flow_rows.get(step_id)
+        if yaml_row is None:
+            errors.append(step_id + ":YAML_ROW_MISSING")
+        else:
+            yaml_condition = {"kind": yaml_row.get("condition_kind")}
+            yaml_condition.update(yaml_row.get("condition") or {})
+            bindings = (
+                ("canonical_inputs", _yaml_inputs(yaml_row)),
+                ("canonical_outputs", tuple(yaml_row.get("required_outputs") or ())),
+                ("mandatory_gates", _yaml_gate_programs(yaml_row.get("gate"))),
+                ("condition", yaml_condition),
+            )
+            for field, value in bindings:
+                if _freeze(value) != _freeze(expected.get(field, ())):
+                    errors.append(step_id + ":YAML_" + field.upper() + "_MISMATCH")
+        portfolio_row = portfolio_rows.get(step_id)
+        if portfolio_row is None:
+            errors.append(step_id + ":PORTFOLIO_ROW_MISSING")
+        else:
+            for field in ("mandatory_gate_programs", "required_output_contract"):
+                if _freeze(portfolio_row.get(field)) != _freeze(expected.get(
+                        "mandatory_gates" if field == "mandatory_gate_programs" else "canonical_outputs", ())):
+                    errors.append(step_id + ":PORTFOLIO_" + field.upper() + "_MISMATCH")
+
+    fallback = rows.get("A7", {}).get("fallback") if isinstance(rows.get("A7"), Mapping) else None
+    if _freeze(fallback) != _freeze({
+        "when_degradation_strictly_greater_than_pct": 10.0,
+        "to": "A3",
+    }):
         errors.append("A7:FALLBACK_AUTHORITY")
-    return tuple(errors)
+    return tuple(dict.fromkeys(errors))
 
 
 def choose(step_id: str) -> AnalogProvider | None:
@@ -238,18 +422,44 @@ def a7_fallback_for_degradation(degradation_pct: float) -> str | None:
     """Apply the shared A7 authority: only degradation strictly above 10% trips."""
     if type(degradation_pct) not in (int, float):
         raise TypeError("degradation_pct must be numeric")
+    # Arbitrarily large integers are finite by construction.  ``math.isfinite``
+    # converts integers through float and would raise OverflowError for them.
+    if isinstance(degradation_pct, float) and not math.isfinite(degradation_pct):
+        raise ValueError("A7_DEGRADATION_NONFINITE")
     return "A3" if degradation_pct > MAX_DEGRADATION_PCT else None
 
 
-def produce(step_id: str, project: str | Path, **_: object) -> ProviderResult:
+def a7_degradation_result(degradation_pct: float) -> ProviderResult:
+    """Expose explicit NOT_MEASURED semantics for an invalid A7 measurement."""
+    if type(degradation_pct) not in (int, float):
+        return ProviderResult("A7", "NOT_MEASURED", "A7_DEGRADATION_INVALID")
+    if isinstance(degradation_pct, float) and not math.isfinite(degradation_pct):
+        return ProviderResult("A7", "NOT_MEASURED", "A7_DEGRADATION_NONFINITE")
+    route = a7_fallback_for_degradation(degradation_pct)
+    if route == "A3":
+        return ProviderResult("A7", "NOT_MEASURED", "A7_DEGRADATION_ABOVE_THRESHOLD;fallback=A3")
+    return ProviderResult("A7", "NOT_MEASURED", "A7_DEGRADATION_WITHIN_THRESHOLD")
+
+
+def produce(step_id: str, project: str | Path, **kwargs: object) -> ProviderResult:
     provider = choose(step_id)
     if provider is None:
         return ProviderResult(str(step_id), "NOT_IMPLEMENTED", "unknown analog provider row")
-    if not isinstance(project, (str, Path)) or not Path(project).is_dir():
-        return ProviderResult(step_id, "NOT_IMPLEMENTED", "project input is absent")
     if not provider.dispatch:
         status = "NOT_IMPLEMENTED" if not provider.producer_entrypoints else "CANNOT_CERTIFY"
         return ProviderResult(step_id, status, provider.known_gap or "no complete producer")
+    missing: list[str] = []
+    if not isinstance(project, (str, Path)) or not Path(project).is_dir():
+        missing.append("project")
+    for key, value in kwargs.items():
+        lowered = key.lower()
+        if any(token in lowered for token in ("input", "pdk", "model", "tool")) and value in (None, "", (), [], {}):
+            missing.append(key)
+    if missing:
+        return ProviderResult(
+            step_id, "NOT_MEASURED", "missing " + ", ".join(dict.fromkeys(missing)) + "; producer was not executed",
+            provider.canonical_outputs,
+        )
     return ProviderResult(
         step_id, "NOT_MEASURED",
         "source-bound producer route recorded; canonical runner and gates were not executed",
@@ -309,6 +519,7 @@ def register_factories(registry: em.Registry, *, source_sha: str | None = None) 
 
 __all__ = [
     "ANALOG_STEPS", "COVERAGE_FILE", "IMPLEMENTED_STEPS", "MIXED_SIGNAL_STEPS",
-    "PROVIDERS", "ProviderResult", "STEP_IDS", "a7_fallback_for_degradation",
+    "PROVIDERS", "ProviderResult", "STEP_IDS", "a7_degradation_result",
+    "a7_fallback_for_degradation",
     "choose", "coverage", "produce", "register_factories", "validate_catalog",
 ]
