@@ -138,7 +138,13 @@ def _provider_identity(adapter: 'Adapter', *, cwd: Path | None = None,
     """
     from execution_provider_catalog import (source_closure, implementation_closure,
         proven_dispatcher_closure, python_entrypoint, _python_search, RELEASE_IDS, BACKEND_IDS)
-    roots, executed, search_paths = [], set(), []
+    roots, executed, search_paths, closure = [], set(), [], set()
+    observed = {}
+
+    def bound_digest(path):
+        if path not in observed:
+            observed[path] = digest(path)
+        return observed[path]
     family = ('execution_release_worker.py' if adapter.step_id in RELEASE_IDS else
               'execution_backend_worker.py' if adapter.step_id in BACKEND_IDS else None)
     worker = Path(__file__).resolve().parent / family if family else None
@@ -146,19 +152,55 @@ def _provider_identity(adapter: 'Adapter', *, cwd: Path | None = None,
         executable = Path(shutil.which(component.argv[0]) or component.argv[0]).resolve()
         files = [executable]
         interpreter = Path(_sys.executable).resolve()
-        python = executable.name.startswith('python') or digest(executable) == digest(interpreter)
-        if python and digest(executable) != digest(interpreter):
+        python = executable.name.startswith('python') or bound_digest(executable) == bound_digest(interpreter)
+        if python and bound_digest(executable) != bound_digest(interpreter):
             raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', 'unsupported Python interpreter layout')
         try:
-            if python:
+            if python and len(component.argv) > 1 and component.argv[1] == '-c':
+                # Source-owned inline controls bind their literal code and every
+                # resolved helper. Inline canonical dispatch remains unsupported.
+                if worker is not None or len(component.argv) < 3 or cwd is None:
+                    raise ValueError('inline Python needs execution cwd and a supported producer')
+                code = component.argv[2]
+                tree = ast.parse(code)
+                search = _python_search(cwd / '__inline__.py', cwd)
+                search_paths.append([str(p) for p in search])
+                component_closure = implementation_closure(cwd / '__inline__.py', cwd=cwd,
+                    search=search, source_text=code)
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = getattr(node.func, 'id', None) or getattr(node.func, 'attr', None)
+                    if name in {'exec', 'eval', '__import__', 'import_module', 'run_module'}:
+                        raise ValueError('unsupported dynamic inline Python dependency')
+                    if name == 'run_path':
+                        # A bounded runpy launcher may execute its first issued
+                        # argv member after removing the inline-code sentinel.
+                        statements = [ast.unparse(n) for n in tree.body]
+                        prefix = ['import runpy, sys', 'sys.argv = sys.argv[1:]',
+                                  "runpy.run_path(sys.argv[0], run_name='__main__')"]
+                        final_exit = (len(tree.body) == 4 and
+                            isinstance(tree.body[-1], ast.Expr) and
+                            isinstance(tree.body[-1].value, ast.Call) and
+                            ast.unparse(tree.body[-1].value.func) == 'sys.exit' and
+                            len(tree.body[-1].value.args) == 1 and
+                            isinstance(tree.body[-1].value.args[0], ast.Constant) and
+                            type(tree.body[-1].value.args[0].value) is int and
+                            not tree.body[-1].value.keywords)
+                        if (statements[:3] != prefix or
+                            (len(statements) != 3 and not final_exit) or
+                            len(component.argv) < 4):
+                            raise ValueError('unsupported inline runpy entrypoint')
+                        target = Path(component.argv[3])
+                        target = (target if target.is_absolute() else cwd / target).resolve()
+                        component_closure.update(implementation_closure(target, cwd=cwd, search=search))
+                component_closure.add(executable)
+                files = [executable, 'python-inline:' + _hash(code)]
+                closure.update(component_closure)
+            elif python:
                 entry = python_entrypoint(component.argv, cwd)
                 search_paths.append([str(p) for p in _python_search(entry, cwd)])
                 files.append(entry)
-                # Preserve the existing declaration boundary; declaration-only
-                # failures remain terminal before any output arm is created.
-                for path in source_closure(files):
-                    if adapter.source_files.get(str(path)) != digest(path):
-                        raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
                 tree = ast.parse(entry.read_text())
                 alias = worker is not None and (entry == worker or
                     entry.read_bytes() == worker.read_bytes() or any(
@@ -170,26 +212,29 @@ def _provider_identity(adapter: 'Adapter', *, cwd: Path | None = None,
                 if alias:
                     component_closure = proven_dispatcher_closure(entry, worker, cwd=cwd)
                     files = [executable, worker]
+                    identity_closure = implementation_closure(worker, cwd=cwd)
                 else:
                     component_closure = implementation_closure(entry, cwd=cwd)
+                    identity_closure = component_closure
                 component_closure.add(executable)
+                closure.update(identity_closure | {executable})
             else:
                 for token in component.argv[1:2]:
                     path = Path(token)
                     if path.is_absolute() and path.is_file():
                         files.append(path.resolve())
                 component_closure = source_closure(files)
+                closure.update(component_closure)
         except (OSError, SyntaxError, ValueError) as exc:
             raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(exc)) from exc
         executed.update(component_closure)
         roots.append(tuple(str(p) for p in files))
-    closure = source_closure(Path(p) for files in roots for p in files)
     for path in executed | closure:
-        if adapter.source_files.get(str(path)) != digest(path):
+        if adapter.source_files.get(str(path)) != bound_digest(path):
             raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
-    identity = tuple(roots), tuple((str(path), digest(path)) for path in sorted(closure))
+    identity = tuple(roots), tuple((str(path), bound_digest(path)) for path in sorted(closure))
     if include_execution:
-        return identity + ({'files': {str(path): digest(path) for path in sorted(executed | closure)},
+        return identity + ({'files': {str(path): bound_digest(path) for path in sorted(executed | closure)},
                             'search_paths': search_paths},)
     return identity
 
@@ -538,12 +583,17 @@ class Controller:
             except Refusal as exc:
                 # The existing declaration check remains a terminal boundary.
                 # New execution-proof failures stay visible and cannot dedup.
-                from execution_provider_catalog import source_closure
+                from execution_provider_catalog import source_closure, implementation_closure
                 for component in arm.components:
                     for token in component.argv[:2]:
                         path = Path(shutil.which(token) or token)
                         if path.is_absolute() and path.is_file():
-                            for dependency in source_closure([path]):
+                            declared = source_closure([path])
+                            try:
+                                actual = implementation_closure(path, cwd=cwd) if path.suffix == '.py' else {path}
+                            except (ValueError, SyntaxError, OSError):
+                                actual = {path}
+                            for dependency in declared & actual:
                                 if arm.source_files.get(str(dependency)) != digest(dependency):
                                     raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(dependency))
                 identities[arm.arm_id] = None

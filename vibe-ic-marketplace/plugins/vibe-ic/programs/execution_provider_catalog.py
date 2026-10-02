@@ -235,8 +235,16 @@ def _python_search(entry: Path, cwd: Path | None) -> list[Path]:
             if cwd is None:
                 raise ValueError('relative PYTHONPATH needs execution cwd')
             path = cwd / path
+        if path.is_file():
+            raise ValueError(f'unsupported Python search-path importer: {path}')
         search.append(path.resolve())
     return search
+
+
+@lru_cache(maxsize=1)
+def _python_trusted_roots() -> tuple[Path, ...]:
+    import sysconfig
+    return tuple(Path(sysconfig.get_path(key)).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib'))
 
 
 def _python_module(name: str, search: list[Path], package: str = '',
@@ -254,35 +262,47 @@ def _python_module(name: str, search: list[Path], package: str = '',
         name = '.'.join(parts[:len(parts) - level + 1] + ([name] if name else []))
     if not name or any(not part.isidentifier() for part in name.split('.')):
         raise ValueError(f'unresolved Python module: {name}')
-    from importlib.machinery import BuiltinImporter, FrozenImporter, PathFinder
-    import sysconfig
+    from importlib.machinery import BuiltinImporter, FrozenImporter, EXTENSION_SUFFIXES
     top = name.split('.')[0]
     if BuiltinImporter.find_spec(top) is not None or FrozenImporter.find_spec(top) is not None:
         return []
-    trusted = {Path(sysconfig.get_path(key)).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')}
+    trusted = _python_trusted_roots()
     directories = search
     result = []; prefix = []
     parts = name.split('.')
     for index, part in enumerate(parts):
         prefix.append(part)
-        spec = PathFinder.find_spec(part, [str(d) for d in directories])
-        if spec is None:
-            if result:
-                raise ValueError(f'incomplete local Python module: {name}')
+        target = None; is_package = False; namespace = False
+        suffixes = [*EXTENSION_SUFFIXES, '.py', '.pyc']
+        for directory in directories:
+            package_dir = directory / part
+            if package_dir.is_dir():
+                namespace = True
+                for suffix in suffixes:
+                    candidate = package_dir / ('__init__' + suffix)
+                    if candidate.is_file():
+                        target = candidate; is_package = True; break
+            if target is None:
+                for suffix in suffixes:
+                    candidate = directory / (part + suffix)
+                    if candidate.is_file():
+                        target = candidate; break
+            if target is not None:
+                break
+        if target is None:
+            if result or namespace:
+                raise ValueError(f'incomplete or namespace Python package: {name}')
             return []
-        if spec.origin is None:
-            raise ValueError(f'unsupported namespace Python package: {name}')
-        target = Path(spec.origin)
-        if not result and any(target.resolve().is_relative_to(root) for root in trusted):
+        resolved_target = target.resolve()
+        if not result and any(resolved_target.is_relative_to(root) for root in trusted):
             return []
         if target.is_symlink() or target.suffix != '.py':
             raise ValueError(f'unsupported local Python module: {name}')
-        is_package = spec.submodule_search_locations is not None
         owner = '.'.join(prefix) if is_package else '.'.join(prefix[:-1])
-        result.append((target.resolve(), owner))
+        result.append((resolved_target, owner))
         if not is_package and index < len(parts) - 1:
             raise ValueError(f'non-package dotted Python module: {name}')
-        directories = [Path(d) for d in spec.submodule_search_locations or []]
+        directories = [target.parent] if is_package else []
     return result
 
 
@@ -316,7 +336,7 @@ def _python_import_specs(text: str) -> tuple:
 
 
 def implementation_closure(entry: Path, *, cwd: Path | None = None,
-                           search: list[Path] | None = None) -> set[Path]:
+                           search: list[Path] | None = None, source_text: str | None = None) -> set[Path]:
     """Bind actual local dotted/relative imports using active search paths.
 
     This is separate from the legacy declaration scanner ``source_closure``;
@@ -332,10 +352,11 @@ def implementation_closure(entry: Path, *, cwd: Path | None = None,
         path, package = pending.pop()
         if path in seen:
             continue
-        if not path.is_file():
+        if not path.is_file() and not (path == entry and source_text is not None):
             raise ValueError(f'missing Python source: {path}')
         seen.add(path)
-        for name, level, names, optional_relative in _python_import_specs(path.read_text()):
+        text = source_text if path == entry and source_text is not None else path.read_text()
+        for name, level, names, optional_relative in _python_import_specs(text):
             # An unqualified module's relative import raises before executing
             # any helper. Its explicit ImportError fallback is scanned too.
             if level and not package and optional_relative:
@@ -354,7 +375,7 @@ def implementation_closure(entry: Path, *, cwd: Path | None = None,
                             child_init = base.parent / alias / '__init__.py'
                             if child.is_file() or child_init.is_file():
                                 pending.extend(_python_module(base_package + '.' + alias, search))
-    return seen
+    return seen - {entry} if source_text is not None else seen
 
 
 def proven_dispatcher_closure(entry: Path, dispatcher: Path, *,
