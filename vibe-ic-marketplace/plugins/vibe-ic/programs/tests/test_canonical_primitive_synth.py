@@ -772,6 +772,105 @@ def test_unsigned_divider_r5_loads_by_path_outside_programs(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
 
 
+
+@pytest.mark.parametrize("heading", [
+    "Reference model only:", "Examples:", "If an optional guard is installed:",
+], ids=["reference", "example", "conditional"])
+@pytest.mark.parametrize("layout", ["blank", "nested", "deep_numbered", "nested_blank" ])
+def test_unsigned_divider_r6_inherits_list_frames(heading, layout, tmp_path):
+    if layout == "blank":
+        domain = heading + "\n\n- The divisor is nonzero.\n\n- Dividend is at least divisor."
+    elif layout == "deep_numbered":
+        domain = "1. " + heading + "\n  1. Input constraints:\n    1. The divisor is nonzero.\n    2. Dividend is at least divisor."
+    else:
+        gap = "\n" if layout == "nested_blank" else ""
+        domain = "- " + heading + "\n" + gap + "  - The divisor is nonzero.\n" + gap + "  - Dividend is at least divisor."
+    _r5_assert_publication(domain, False, tmp_path)
+
+
+@pytest.mark.parametrize("domain", [
+    "- The divisor is nonzero.\n\n- Dividend is at least divisor.",
+    "- Target constraints:\n\n  - The divisor is nonzero.\n  - Dividend is at least divisor.",
+    "- Reference model only:\n  - The divisor may be zero.\n- Target constraints:\n  - The divisor is nonzero.\n  - Dividend is at least divisor.",
+    "- Examples:\n  - If a guard is installed:\n    - The divisor may be zero.\n\n- The divisor is nonzero.\n- Dividend is at least divisor.",
+    "Reference model only:\n\n- The divisor may be zero.\nTarget constraints:\n- The divisor is nonzero.\n- Dividend is at least divisor.",
+    "Reference model only:\n\n- The divisor may be zero.\nThe divisor is nonzero. Dividend is at least divisor.",
+], ids=["ordinary_blank", "target_parent", "sibling_target", "dedent_two_levels",
+        "heading_switch", "paragraph_switch"])
+def test_unsigned_divider_r6_closes_list_frames(domain, tmp_path):
+    _r5_assert_publication(domain, True, tmp_path)
+
+
+@pytest.mark.parametrize("withdrawal", [
+    "The nonzero constraint does not apply to this design.",
+    "This divisor requirement does not apply to this design.",
+    "The denominator constraint is waived.",
+    "The nonzero requirement was removed.",
+    "The preceding requirement is cancelled.",
+    "That requirement has been retracted.",
+], ids=["named_nonzero", "named_divisor", "denominator", "named_removed",
+        "preceding_cancelled", "retracted"])
+def test_unsigned_divider_r6_retracts_nonzero_domain(withdrawal, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. " + withdrawal +
+                           " Dividend is at least divisor.", False, tmp_path)
+
+
+@pytest.mark.parametrize("withdrawal", [
+    "The ordering constraint does not apply to this design.",
+    "This ordering requirement is cancelled.",
+    "The ordering constraint was removed.",
+], ids=["named_ordering", "ordering_cancelled", "ordering_removed"])
+def test_unsigned_divider_r6_retracts_ordering_domain(withdrawal, tmp_path):
+    _r5_assert_publication("Dividend is at least divisor. The divisor is nonzero. "
+                           + withdrawal, False, tmp_path)
+
+
+@pytest.mark.parametrize("other", [
+    "The output requirement is cancelled.",
+    "The ordering constraint is not waived.",
+    "The nonzero constraint does not apply to the reference model.",
+    'A rejected example says "the nonzero constraint does not apply to this design".',
+    "\n- Reference model only:\n  - The nonzero constraint is cancelled.\n",
+], ids=["unrelated_domain", "other_domain_preserved", "external_owner", "quotation",
+        "nested_external"])
+def test_unsigned_divider_r6_scopes_named_withdrawals(other, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + other, True, tmp_path)
+
+
+@pytest.mark.parametrize("preservation", [
+    "That requirement is not waived.",
+    "That requirement was not removed.",
+    "That statement is not obsolete.",
+    "That constraint is not optional.",
+    "That statement has not been retracted.",
+    "The preceding requirement is not cancelled.",
+    "This divisor requirement has never been removed.",
+    "The nonzero constraint is not waived.",
+    "That statement still applies to this design.",
+], ids=["not_waived", "not_removed", "not_obsolete", "not_optional", "not_retracted",
+        "not_cancelled", "never_removed", "named_not_waived", "still_applies"])
+def test_unsigned_divider_r6_preserves_negated_withdrawals(preservation, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. " + preservation +
+                           " Dividend is at least divisor.", True, tmp_path)
+
+
+@pytest.mark.parametrize("preservation", [
+    "That ordering constraint is not waived.",
+    "The ordering requirement was not removed.",
+    "That ordering constraint has not been retracted.",
+], ids=["ordering_not_waived", "ordering_not_removed", "ordering_not_retracted"])
+def test_unsigned_divider_r6_preserves_negated_ordering_withdrawals(preservation, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + preservation, True, tmp_path)
+
+
+def test_unsigned_divider_r6_preserved_referent_can_be_withdrawn(tmp_path):
+    _r5_assert_publication("The divisor is nonzero. That requirement is not waived. "
+                           "That requirement was removed. Dividend is at least divisor.",
+                           False, tmp_path)
+
+
 def _r2_unsigned_divider_variants():
     desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
     return [

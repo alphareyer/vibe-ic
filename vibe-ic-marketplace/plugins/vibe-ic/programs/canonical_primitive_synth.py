@@ -260,6 +260,7 @@ def _division_propositions(desc_text: str,
     # value. This is what prevents a list marker from erasing an Examples title.
     sections: List[Tuple[int, Tuple[str, str]]] = []
     list_frame: Optional[Tuple[str, str]] = None
+    bullet_frames: List[Tuple[int, Tuple[str, str]]] = []
     pending: List[str] = []
     pending_frame = ("target", "assertion")
     pending_structural = False
@@ -313,6 +314,7 @@ def _division_propositions(desc_text: str,
                 sections.pop()
             sections.append((level, _division_frame(markdown.group(2))))
             list_frame = None
+            bullet_frames.clear()
             continue
         bullet = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)", line)
         if stripped.endswith((":", "：", "?", "？")) and not bullet:
@@ -321,8 +323,10 @@ def _division_propositions(desc_text: str,
             continue
         if not stripped:
             flush()
-            list_frame = None
             continue
+        indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
+        while bullet_frames and bullet_frames[-1][0] >= indent:
+            bullet_frames.pop()
         structural = bool(re.match(r"(?: {4}|\t|\s*>)", raw)) and not bullet
         port = next((r for r in records if raw.strip() == r["line"].lower()), None)
         structural = structural or port is not None
@@ -336,6 +340,7 @@ def _division_propositions(desc_text: str,
         if not bullet and not line[:1].isspace():
             list_frame = None
         frames = [frame for _, frame in sections]
+        frames.extend(frame for _, frame in bullet_frames)
         if bullet and list_frame:
             frames.append(list_frame)
         enclosing = ("external" if any(owner != "target" for owner, _ in frames) else "target",
@@ -346,6 +351,10 @@ def _division_propositions(desc_text: str,
         pending.append(bullet.group(1) if bullet else stripped)
         if bullet or structural:
             flush()
+        if bullet:
+            # Blank lines do not close a list. Only a sibling, a dedent or a
+            # new section closes an ancestor's attribution and framing.
+            bullet_frames.append((indent, _division_frame(bullet.group(1))))
     flush()
     # Quotation content is represented for the same evidence filter as every
     # other proposition. It cannot authorize or contradict the target contract.
@@ -375,27 +384,40 @@ def _division_target_assertion(proposition: _DivisionProposition,
 
 def _division_retracted_domains(propositions: List[_DivisionProposition],
                                 events: List[set], denied: Callable[[str], bool]) -> set:
-    """Resolve demonstrative withdrawals against the preceding proposition."""
+    """Resolve the subject and polarity of a target-domain withdrawal."""
     retracted = set()
     previous = set()
-    referent = re.compile(r"^(?:(?:that|this|the\s+preceding)\s+"
-                          r"(?:statement|guarantee|requirement|property|rule|constraint|"
-                          r"ordering\s+constraint)|this\s+is)\b")
+    referent = re.compile(r"^(?:(?:that|this|the(?:\s+preceding)?)\s+"
+                          r"(?:(?P<domain>non[- ]?zero|divisor|denominator|ordering)\s+)?"
+                          r"(?:statement|guarantee|requirement|property|rule|constraint)|"
+                          r"this\s+is)\b")
+    withdrawal = re.compile(r"\b(?:waived|removed|obsolete|optional|retracted|"
+                            r"cancelled|canceled|inapplicable|deprecated|superseded)\b|"
+                            r"\bbelongs\s+to\b")
+    inapplicable = re.compile(r"\b(?:does|do|did)\s+not\s+apply\b|"
+                              r"\bno\s+longer\s+applies\b")
     for proposition, domains in zip(propositions, events):
-        reassigned = (referent.search(proposition.text) and
-                      re.search(r"\bbelongs\s+to\b", proposition.text) and
+        subject = referent.search(proposition.text)
+        predicate = withdrawal.search(proposition.text)
+        # Consult denial on the predicate's prefix: "not removed" preserves
+        # the fact, whereas "does not apply" positively withdraws it. Looking
+        # for any denial in the entire sentence conflates those two meanings.
+        retires = bool(predicate and not denied(proposition.text[:predicate.start()]))
+        reassigned = (subject and retires and predicate.group() == "belongs to" and
                       proposition.frame == "assertion" and not proposition.structural)
         if not _division_target_evidence(proposition) and not reassigned:
             previous = set()
             continue
-        if referent.search(proposition.text) and (
-                denied(proposition.text)
-                or re.search(r"\b(?:waived|optional)\b|\bbelongs\s+to\b", proposition.text)):
-            if "ordering" in proposition.text:
-                retracted.add("ordering")
-            else:
-                retracted.update(previous)
-        previous = domains
+        if subject:
+            named = subject.group("domain")
+            matching = ({"ordering" if named == "ordering" else "nonzero"}
+                        if named else previous)
+            if retires or inapplicable.search(proposition.text):
+                retracted.update(matching)
+            # A preserved referent still denotes the preceding requirement.
+            # An unrelated sentence cannot establish that same link.
+        else:
+            previous = domains
     return retracted
 
 
