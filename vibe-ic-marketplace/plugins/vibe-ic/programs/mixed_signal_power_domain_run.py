@@ -357,14 +357,22 @@ def derive(paths, libs, top, native):
         for sender, receiver in zip(nodes, nodes[1:]):
             a, b = cell_domains[sender], cell_domains[receiver]
             av, bv = domains[a], domains[b]
-            if a == b or av["voltage"] == bv["voltage"]:
+            if a == b:
                 continue
-            conversion = "LH" if av["voltage"] < bv["voltage"] else "HL"
-            adjacent = [n for n in (sender, receiver) if n in chain]
-            if not any("level_shifter" in masters[cells[n]["type"]]["kinds"]
-                       and masters[cells[n]["type"]]["conversion"] in (conversion, "HL_LH")
-                       for n in adjacent) or not {a, b} & ls_strategy:
-                raise Refusal("MISSING_LEVEL_SHIFTER", sender + "->" + receiver)
+            if av["voltage"] != bv["voltage"]:
+                conversion = "LH" if av["voltage"] < bv["voltage"] else "HL"
+                adjacent = [n for n in (sender, receiver) if n in chain]
+                if not any("level_shifter" in masters[cells[n]["type"]]["kinds"]
+                           and masters[cells[n]["type"]]["conversion"] in (conversion, "HL_LH")
+                           for n in adjacent) or not {a, b} & ls_strategy:
+                    raise Refusal("MISSING_LEVEL_SHIFTER", sender + "->" + receiver)
+            # OFF capability requires isolation even at equal voltage and
+            # even if this chain later returns to the original domain.
+            if (av["off_capable"] or bv["off_capable"]) and (
+                    not any("isolation_cell" in masters[cells[n]["type"]]["kinds"]
+                            and not domains[cell_domains[n]]["off_capable"] for n in chain)
+                    or not {a, b} & iso_strategy):
+                raise Refusal("MISSING_ISOLATION_CELL", sender + "->" + receiver)
         a, b = cell_domains[drv], cell_domains[recv]
         if a == b:
             continue

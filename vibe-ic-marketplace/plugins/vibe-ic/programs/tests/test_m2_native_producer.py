@@ -284,3 +284,51 @@ def test_b07_canonical_domain_alias_still_ambiguous(tmp_path):
     path = project / UPF
     path.write_text(path.read_text() + "create_power_domain PD_SWITCHED -elements {u_src}\n")
     assert_m2_refused(project)
+
+
+def same_voltage_island(project):
+    # Ordered declarations bind OFF to an existing intermediate domain.
+    # A constant, connected enable is valid structural control evidence.
+    replace_input(project, NETLIST, ".EN(enable)", ".EN(1'b1)")
+    (project / UPF).write_text("\n".join([
+        "upf_version 2.1", "set_design_top boundary",
+        "create_power_domain HIGH -elements {u_src u_sink enable result}",
+        "create_supply_net rail_high -domain HIGH -voltage 1.9",
+        "create_power_domain LOW -elements {u_shift u_iso}",
+        "create_supply_net rail_low -domain LOW -voltage 1.9",
+        "add_power_state LOW -state {OFF}",
+        "set_isolation ISO -domain LOW -applies_to outputs -clamp_value 0",
+    ]) + "\n")
+
+
+def test_n02_same_voltage_off_capable_island_requires_always_on_isolation(tmp_path):
+    project = fixture(tmp_path)
+    same_voltage_island(project)
+    result = invoke(project)
+    cells = json.loads((project / REPORTS / "power_domain_tool/netlist.json").read_text())["modules"]["boundary"]["cells"]
+    assert cells["u_src"]["connections"]["Y"] == cells["u_shift"]["connections"]["A"]
+    assert cells["u_shift"]["connections"]["Y"] == cells["u_iso"]["connections"]["A"]
+    assert cells["u_iso"]["connections"]["Y"] == cells["u_sink"]["connections"]["A"]
+    assert cells["u_iso"]["connections"]["EN"] == ["1"]
+    assert result == 1
+    assert invoke(project, "--check-only") == 1
+    assert m2_gate(project) == "FAIL"
+
+
+def test_n02_same_voltage_always_on_island_and_constant_control_pass(tmp_path):
+    project = fixture(tmp_path)
+    same_voltage_island(project)
+    replace_input(project, UPF, "add_power_state LOW -state {OFF}\n", "")
+    assert invoke(project) == 0
+    assert invoke(project, "--check-only") == 0
+    assert m2_gate(project) == "PASS"
+
+
+def test_n02_same_voltage_island_with_always_on_isolation_passes(tmp_path):
+    project = fixture(tmp_path)
+    same_voltage_island(project)
+    replace_input(project, UPF, "{u_src u_sink enable result}", "{u_src u_iso u_sink enable result}")
+    replace_input(project, UPF, "{u_shift u_iso}", "{u_shift}")
+    assert invoke(project) == 0
+    assert invoke(project, "--check-only") == 0
+    assert m2_gate(project) == "PASS"
