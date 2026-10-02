@@ -196,7 +196,7 @@ def _typed_derived_report(path: Path) -> bool:
         _exact_dict(row, {'severity', 'rule', 'file', 'line', 'message'},
                     'derived clock finding')
         if (type(row['line']) is not int or
-                row['severity'] not in {'ERROR', 'WARNING', 'INFO'} or
+                row['severity'] not in {'ERROR', 'WARN', 'INFO'} or
                 any(not isinstance(row[k], str)
                     for k in ('severity', 'rule', 'file', 'message'))):
             raise ValueError('derived clock finding: invalid types')

@@ -308,6 +308,48 @@ def produce_p0(project,output,top=None,claim=None,**k):
 
 PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':produce_3,'4':produce_4,'5':produce_5,'6':produce_6,'7':produce_7,'8':produce_8,'10':produce_10,'11':produce_11,'FS1':produce_fs1,'DT1':produce_dt1,'12':produce_12,'13':produce_13,'DT2':produce_dt2,'DT3':produce_dt3,'P0':produce_p0}
 REQUIRED_PARAMETERS={'D1':(), '0.5ic':(), '1':('ic_class',), '2':('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
+
+
+def _step8_controller_request(project, output, parameters):
+    """Legacy requests are data, never issuance. Delegate to the live issuer.
+
+    This compatibility entry returns diagnostic reports from a new Controller
+    run. AI selection and production adoption remain at their explicit boundary.
+    """
+    import execution_modes as em
+    import execution_frontend_providers as providers
+    project, output = Path(project), Path(output)
+    manifest = _verify_manifest(project, '8')
+    if parameters != manifest['parameters']:
+        raise ValueError('8: caller parameters differ from request')
+    # Resolve and check the entire requested input census before creating work.
+    _step8_inputs(project, manifest)
+    files = {rel: project / rel for rel in manifest['files']}
+    registry = em.Registry()
+    providers.register_factories(registry)
+    arm = registry.adapters('8')[0]
+    portfolio = em.load_portfolio()
+    row = next(s for s in portfolio['steps'] if s['id'] == '8')
+    ctx = em.Context('8', arm.source_sha, files,
+                     {'metric': 'source_boundary', **parameters},
+                     tuple(row['mandatory_gate_programs']))
+    controller = em.Controller(registry, em.Budget(1, 512, 1), portfolio)
+    import uuid
+    root = output / ('issued-run-' + uuid.uuid4().hex)
+    controller.run(ctx, root)
+    receipt = json.loads((root / arm.arm_id / 'receipt.json').read_text())
+    if receipt['status'] != 'ELIGIBLE':
+        raise RuntimeError(f"8: issued diagnostic execution refused: {receipt['reason']}")
+    for rel, expected in receipt['evidence']['outputs'].items():
+        source = Path(receipt['output_root']) / rel
+        if em.digest(source) != expected:
+            raise RuntimeError(f'8: issued output changed: {rel}')
+        target = output / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    return output / 'reports/phase2/sdc_check.json'
+
+
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest=Path(project)/'input'/'issued_manifest.json'
@@ -324,6 +366,8 @@ def run_row(step_id,project,output,**kwargs):
     if step_id == '0.5ic' and not (kwargs.get('template') or kwargs.get('no_template_reason')): missing=['template_or_no_template_reason']
     if missing: raise ValueError(f'{step_id}: missing parameters: {", ".join(missing)}')
     if step_id == '8':
+        if not _strict_issuance():
+            return _step8_controller_request(project, output, kwargs)
         token = _STEP8_DISPATCH.set(True)
         try:
             return PRODUCERS[step_id](project,output,**kwargs)
