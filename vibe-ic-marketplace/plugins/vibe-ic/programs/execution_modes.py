@@ -367,10 +367,51 @@ def _route_pointer(receipt: Mapping[str, object]) -> str:
         'intent_label', 'mode_intent')})
 
 
+def _canonical_issuer_consumer():
+    """Bind the public issuer implementation and a private transport consumer.
+
+    BLOCKING: module slots are locators, never authority. The private consumer
+    executes the tracked verifier and requires the isolated launcher's live
+    transport on every call, including planning and adoption.
+    """
+    import execution_authority as module
+    from types import FunctionType, ModuleType
+    source = Path(__file__).with_name('execution_authority.py').resolve()
+    namespace = dict(__file__=str(source), __name__='_canonical_execution_issuer')
+    content = source.read_bytes()
+    exec(compile(content, str(source), 'exec', dont_inherit=True), namespace)
+    functions = {name: value for name, value in namespace.items()
+                 if type(value) is FunctionType and value.__globals__ is namespace}
+    originals = {name: vars(module).get(name) for name in functions}
+    constants = {name: namespace[name] for name in ('HERE', 'ROOT', 'FD_ENV', 'SOCKET_ENV')}
+    consume = functions['consume']
+
+    def require():
+        _tracked_clean_file(source)
+        if (source.read_bytes() != content or type(module) is not ModuleType or
+                _sys.modules.get('execution_authority') is not module or
+                vars(module).get('__file__') != str(source) or
+                any(vars(module).get(name) != value for name, value in constants.items())):
+            raise Refusal('ISSUER_IMPLEMENTATION_UNTRUSTED', str(source))
+        for name, expected in functions.items():
+            actual = vars(module).get(name)
+            if (actual is not originals[name] or type(actual) is not FunctionType or
+                    actual.__globals__ is not vars(module) or
+                    actual.__code__ != expected.__code__ or
+                    actual.__defaults__ != expected.__defaults__ or
+                    actual.__kwdefaults__ != expected.__kwdefaults__ or actual.__closure__):
+                raise Refusal('ISSUER_IMPLEMENTATION_UNTRUSTED', name)
+        return consume()
+
+    return require
+
+
+_consume_canonical_issuer = _canonical_issuer_consumer()
+
+
 def _verify_route_authority(receipt: Mapping[str, object]) -> None:
-    from execution_authority import consume
     try:
-        issued = consume()['route']
+        issued = _consume_canonical_issuer()['route']
     except Refusal as exc:
         raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
     if dict(receipt) != issued:
@@ -841,9 +882,8 @@ class Controller:
                 raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', 'neutral fixture has no execution authority')
             if type(context) is neutral_type:
                 return binding_method(context)
-        from execution_authority import consume
         try:
-            issued = consume()
+            issued = _consume_canonical_issuer()
         except Refusal as exc:
             raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', str(exc)) from exc
         binding = concrete.binding(context)
@@ -860,8 +900,7 @@ class Controller:
         body = {k: v for k, v in plan.items() if k != 'execution_issuance'}
         if context.route_receipt.get('kind') == 'neutral-test':
             return dict(kind='neutral-protocol-only', plan_digest=_hash(body))
-        from execution_authority import consume
-        issued = consume()
+        issued = _consume_canonical_issuer()
         return dict(kind='canonical-controller-issuance',
                     invocation_id=issued['request']['invocation_id'],
                     request_digest=issued['request']['request_digest'],

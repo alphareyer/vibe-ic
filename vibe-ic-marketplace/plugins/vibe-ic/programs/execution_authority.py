@@ -6,10 +6,13 @@ locator secret, never an environment assertion or a Python module token.
 """
 from __future__ import annotations
 import argparse
+import ast
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import struct
@@ -51,45 +54,130 @@ def read_line(sock):
     return json.loads(pending.split(b'\n', 1)[0])
 
 
+def source_closure():
+    """Verify the issuer's complete tracked local importer closure."""
+    pending = [HERE / name for name in ('execution_authority.py', '_delivery_route.py',
+               'execution_policy.py', 'execution_modes.py', 'vibe_ic_one_shot_runner.py')]
+    objects = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'ls-tree', '-r', '--format=%(objectname) %(path)', 'HEAD'], text=True)
+    by_path = dict((path, blob) for blob, path in
+                   (line.split(' ', 1) for line in objects.splitlines()))
+    blobs = {}
+    while pending:
+        path = pending.pop()
+        relative = str(path.relative_to(ROOT))
+        if relative in blobs:
+            continue
+        content = path.read_bytes()
+        blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+        if path.is_symlink() or by_path.get(relative) != blob:
+            raise ValueError('canonical importer is not a tracked object: ' + relative)
+        blobs[relative] = blob
+        for node in ast.walk(ast.parse(content, filename=str(path))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
+                     [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
+            for name in names:
+                dependency = HERE / (name.split('.')[0] + '.py')
+                if dependency.is_file():
+                    pending.append(dependency)
+    flow = HERE.parent / 'flow/phase1_phase2_phase3.yaml'
+    blobs[str(flow.relative_to(ROOT))] = tracked(flow)
+    return blobs
+
+
+def validate_payload(payload, credential):
+    """Reject absent identities and bind the response to the sealed capability."""
+    if not isinstance(payload, dict) or set(payload) != {'request', 'route', 'source_blobs', 'issuer_blob'}:
+        raise ValueError('issuer payload shape invalid')
+    request, route = payload['request'], payload['route']
+    if not isinstance(request, dict) or not isinstance(route, dict):
+        raise ValueError('issuer request/route shape invalid')
+    for document, fields, width in ((request, ('request_digest', 'invocation_id'), 64),
+            (route, ('route_digest', 'request_digest', 'project_digest', 'invocation_id'), 64),
+            (route, ('source_sha', 'source_tree'), 40)):
+        for name in fields:
+            if not isinstance(document.get(name), str) or not re.fullmatch('[0-9a-f]{%d}' % width, document[name]):
+                raise ValueError('missing or invalid issuer identity: ' + name)
+    if (request.get('schema') != 1 or route.get('schema') != 1 or
+            request.get('issuer') != 'canonical-isolated-launcher' or
+            route.get('issuer') != 'canonical-isolated-launcher' or
+            route.get('kind') != 'issued-route' or route.get('authority') != 'canonical-route-authority' or
+            request.get('mode') not in ('default', 'ultra') or
+            request.get('request_digest') != sha({k: v for k, v in request.items() if k != 'request_digest'}) or
+            route.get('route_digest') != sha({k: v for k, v in route.items() if k != 'route_digest'})):
+        raise ValueError('issuer request/route identity invalid')
+    intent = 'USER_EXPLICIT_ULTRA' if request['mode'] == 'ultra' else 'PROGRAM_DEFAULT'
+    if (request.get('intent_label') != intent or request.get('mode_label') != request['mode'] + '-mode' or
+            request.get('ultra_match') is not (request['mode'] == 'ultra') or
+            route.get('intent_label') != intent or route.get('mode_intent') != request['mode'] or
+            route.get('request_digest') != request['request_digest'] or
+            route.get('invocation_id') != request['invocation_id'] or
+            route.get('route') not in ('ic', 'ip') or route.get('ic_ip_path') != route['route'].upper() or
+            route.get('current_pointer') != sha({k: route[k] for k in
+                ('source_sha', 'project_digest', 'request_digest', 'ic_ip_path')})):
+        raise ValueError('issuer request/route binding invalid')
+    for name, value in (('invocation_id', request['invocation_id']),
+                        ('request_digest', request['request_digest']), ('route_digest', route['route_digest'])):
+        if credential.get(name) != value:
+            raise ValueError('capability belongs to another invocation')
+    head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    tree = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    if head != route['source_sha'] or tree != route['source_tree']:
+        raise ValueError('source invocation drift')
+    closure = source_closure()
+    if (not payload['source_blobs'] or payload['source_blobs'] != closure or
+            payload['issuer_blob'] != closure[str((HERE / 'execution_authority.py').relative_to(ROOT))]):
+        raise ValueError('issuer source closure invalid')
+    project = Path(route['project'])
+    if not project.is_absolute() or str(project.resolve()) != route['project']:
+        raise ValueError('issuer project identity invalid')
+    owner = project / 'input/step_0_5ic_answers.json'
+    if hashlib.sha256(owner.read_bytes()).hexdigest() != route['project_digest']:
+        raise ValueError('owner route changed')
+    return payload
+
+
 def consume():
     """Verify the live isolated issuer and return its original issued payload."""
     from execution_modes import Refusal
     try:
         fd = int(os.environ[FD_ENV])
         credential = json.loads(os.pread(fd, 4096, 0))
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        if (fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals or
+                set(credential) != {'pid', 'start_ticks', 'token', 'fd', 'invocation_id', 'request_digest', 'route_digest'} or
+                type(credential['pid']) is not int or credential['pid'] <= 0 or
+                type(credential['fd']) is not int or credential['fd'] < 0 or
+                not isinstance(credential['start_ticks'], str) or not credential['start_ticks'].isdigit() or
+                any(not isinstance(credential[name], str) or not re.fullmatch('[0-9a-f]{64}', credential[name])
+                    for name in ('token', 'invocation_id', 'request_digest', 'route_digest'))):
+            raise ValueError('sealed invocation capability required')
+        held = os.fstat(fd)
+        original = os.stat(f"/proc/{credential['pid']}/fd/{credential['fd']}")
+        if (held.st_dev, held.st_ino) != (original.st_dev, original.st_ino):
+            raise ValueError('capability is not the issuer-owned descriptor')
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(2)
             client.connect(os.environ[SOCKET_ENV])
-            pid = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+            pid, uid, _ = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             argv = [s.decode() for s in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if s]
             exe = Path(os.readlink(f'/proc/{pid}/exe')).resolve()
             if (len(argv) < 5 or Path(argv[0]).resolve() != exe or
                     argv[1:4] != ['-I', '-S', str(HERE / 'execution_authority.py')] or
-                    pid != credential['pid'] or
+                    pid != credential['pid'] or uid != os.getuid() or
                     Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19] != credential['start_ticks']):
                 raise ValueError('not the isolated canonical launcher')
             entry_blob = tracked(HERE / 'execution_authority.py')
             nonce = secrets.token_hex(32)
-            client.sendall(json.dumps(dict(token=credential['token'], nonce=nonce)).encode() + b'\n')
+            client.sendall(json.dumps({name: credential[name] for name in
+                ('token', 'invocation_id', 'request_digest', 'route_digest')} | dict(nonce=nonce)).encode() + b'\n')
             result = read_line(client)
-            if (result.get('nonce') != nonce or result.get('ok') is not True or
-                    result['payload']['issuer_blob'] != entry_blob):
+            if (not isinstance(result, dict) or result.get('nonce') != nonce or result.get('ok') is not True or
+                    not isinstance(result.get('payload'), dict) or result['payload'].get('issuer_blob') != entry_blob):
                 raise ValueError('live authority challenge refused')
             # All canonical entry objects and the exact source commit remain
             # current. Rehashed caller files cannot change the issuer's ledger.
-            payload = result['payload']
-            head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-            if head != payload['route']['source_sha']:
-                raise ValueError('source invocation drift')
-            for relative, blob in payload['source_blobs'].items():
-                content = (ROOT / relative).read_bytes()
-                current = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-                if current != blob:
-                    raise ValueError('canonical source drift')
-            owner = Path(payload['route']['project']) / 'input/step_0_5ic_answers.json'
-            if hashlib.sha256(owner.read_bytes()).hexdigest() != payload['route']['project_digest']:
-                raise ValueError('owner route changed')
-            return payload
+            return validate_payload(result['payload'], credential)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         raise Refusal('REQUEST_CAPABILITY_INVALID', str(exc)) from exc
 
@@ -106,27 +194,7 @@ def main():
     # Install only this tracked program directory after canonical code entry.
     sys.path.insert(0, str(HERE))
     # Verify the complete local importer closure before importing route code.
-    import ast
-    pending = [HERE / 'execution_authority.py', HERE / '_delivery_route.py', HERE / 'execution_policy.py', HERE / 'execution_modes.py', HERE / 'vibe_ic_one_shot_runner.py']
-    objects = [line.split(' ', 1) for line in subprocess.check_output(['git', '-C', str(ROOT), 'ls-tree', '-r', '--format=%(objectname) %(path)', 'HEAD'], text=True).splitlines()]
-    by_path = {path: blob for blob,path in objects}
-    source_blobs = {}
-    while pending:
-        path = pending.pop()
-        if str(path.relative_to(ROOT)) in source_blobs:
-            continue
-        relative = str(path.relative_to(ROOT))
-        content = path.read_bytes()
-        blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-        if by_path.get(relative) != blob:
-            raise ValueError('canonical importer is not a tracked object: ' + relative)
-        source_blobs[relative] = blob
-        tree_ast = ast.parse(path.read_text())
-        for node in ast.walk(tree_ast):
-            names = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
-            for name in names:
-                dependency = HERE / (name.split('.')[0] + '.py')
-                if dependency.is_file(): pending.append(dependency)
+    source_blobs = source_closure()
     import _delivery_route
     refusal = _delivery_route.admit(args.project, args.route)
     if refusal:
@@ -135,8 +203,6 @@ def main():
     project_digest = hashlib.sha256(owner.read_bytes()).hexdigest()
     source = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     tree = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
-    flow = HERE.parent / 'flow/phase1_phase2_phase3.yaml'
-    source_blobs[str(flow.relative_to(ROOT))] = tracked(flow)
     token = secrets.token_hex(32)
     invocation = secrets.token_hex(32)
     request = dict(schema=1, mode=args.execution_mode,
@@ -161,15 +227,21 @@ def main():
     server.bind(socket_path)
     server.listen(16)
     fd = os.memfd_create('vibeic-issued-capability', os.MFD_ALLOW_SEALING)
-    credential = dict(pid=os.getpid(), start_ticks=Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19], token=token)
+    credential = dict(pid=os.getpid(), start_ticks=Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19],
+                      token=token, fd=fd, invocation_id=invocation,
+                      request_digest=request['request_digest'], route_digest=route['route_digest'])
     os.write(fd, json.dumps(credential).encode())
-    import fcntl
     fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
     def respond(client):
         with client:
             try:
                 challenge = read_line(client)
-                ok = secrets.compare_digest(challenge.get('token', ''), token)
+                ok = (isinstance(challenge, dict) and
+                      all(isinstance(challenge.get(name), str) and
+                          secrets.compare_digest(challenge[name], credential[name]) for name in
+                          ('token', 'invocation_id', 'request_digest', 'route_digest')) and
+                      isinstance(challenge.get('nonce'), str) and
+                      re.fullmatch('[0-9a-f]{64}', challenge['nonce']) is not None)
                 client.sendall(json.dumps(dict(ok=ok, nonce=challenge.get('nonce'), payload=payload if ok else None)).encode() + b'\n')
             except (OSError, ValueError, TypeError):
                 pass
