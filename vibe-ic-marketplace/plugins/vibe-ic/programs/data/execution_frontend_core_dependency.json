@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "source_api_reference": {
+    "commit": "9b1207289b55e3215b28497161649d9f158070df",
+    "tree": "4583e3b3a44e55db4573edec180234cce6148e05",
+    "ref": "next/codex1002-execution-receipts",
+    "status": "NOT_ACCEPTED"
+  },
+  "accepted_core_sha": null,
+  "production_reachability": "NOT_MEASURED",
+  "controller_methods": [
+    "plan",
+    "run",
+    "adopt",
+    "verify_adoption"
+  ],
+  "context_fields": [
+    "ic_ip_path",
+    "route_receipt",
+    "project_digest",
+    "intent_label",
+    "request_digest"
+  ],
+  "adapter_fields": [
+    "source_tree_sha",
+    "route"
+  ],
+  "policy_method": "execution_policy.controller_fields(*, ic_ip_path, route_receipt)",
+  "rebind_requirement": "After independent Core R3 acceptance, pin exact Core commit, compose the Step8 manifest and source-tree extensions, then replay production front door and all retained controls. Standalone software fixtures do not qualify this boundary."
+}

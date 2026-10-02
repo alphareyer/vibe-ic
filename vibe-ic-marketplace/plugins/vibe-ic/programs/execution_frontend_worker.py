@@ -1,9 +1,12 @@
 """Explicit fail-closed frontend producer entry points."""
 import argparse, json, os, subprocess, shutil
 import hashlib
+import time
+from contextvars import ContextVar
 from pathlib import Path
 
 _STEP8_PRODUCER_TIMEOUT_S = 30
+_STEP8_DISPATCH = ContextVar('step8_dispatch', default=False)
 
 def _canonical_route(step: str) -> tuple[str, ...]:
     # Kept in the worker boundary so a caller cannot replace the route by
@@ -65,7 +68,11 @@ def _verify_manifest(project, step):
         if not isinstance(rel, str) or not isinstance(expected, str) or len(expected) != 64:
             raise ValueError(f'{step}: issued file digest schema mismatch')
         path=Path(project)/rel
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected: raise ValueError(f'{step}: issued input mutation: {rel}')
+        if (Path(rel).is_absolute() or '..' in Path(rel).parts or
+                path.is_symlink() or not path.is_file() or
+                not path.resolve().is_relative_to(Path(project).resolve()) or
+                hashlib.sha256(path.read_bytes()).hexdigest() != expected):
+            raise ValueError(f'{step}: issued input mutation: {rel}')
     if record.get('step_id') != step: raise ValueError(f'{step}: issued route mismatch')
     if strict:
         expected_sha = os.environ.get('VIBEIC_MANIFEST_SHA256')
@@ -73,6 +80,21 @@ def _verify_manifest(project, step):
         if expected_sha != actual_sha:
             raise ValueError(f'{step}: issued manifest authority mismatch')
     return record
+
+
+def _step8_inputs(project, manifest):
+    """Require every canonical input, nonempty and covered by the manifest."""
+    import _flow_yaml
+    row = next(s for s in _flow_yaml.load()['steps'] if str(s['id']) == '8')
+    for contract in row['required_inputs']:
+        matches = list(Path(project).glob(contract['path']))
+        if not matches:
+            raise ValueError(f"8: required input missing: {contract['path']}")
+        for path in matches:
+            rel = str(path.relative_to(project))
+            if (path.is_symlink() or not path.is_file() or not path.stat().st_size or
+                    manifest['files'].get(rel) != hashlib.sha256(path.read_bytes()).hexdigest()):
+                raise ValueError(f'8: required input empty or unbound: {rel}')
 
 def _require(project, output, step, producer, **kwargs):
     if project is None or output is None: raise ValueError(f'{step}: project and output are required')
@@ -161,9 +183,15 @@ def produce_6(project,output,top=None,container=None,**k):
 def produce_7(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'7','emit_step7_asic_sdc+stamp_pvt_corner_coverage',top=top,pdk=pdk,container=container,**k)
 def produce_8(project,output,**k):
     """Run the complete Step-8 contract against the staged project."""
-    _verify_manifest(project, '8')
+    if not _STEP8_DISPATCH.get():
+        raise ValueError('8: direct helper execution is unissued')
+    manifest = _verify_manifest(project, '8')
+    if not _strict_issuance():
+        raise ValueError('8: legacy helper execution is unissued')
+    _step8_inputs(Path(project), manifest)
     project, output = Path(project), Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    (output / 'canonical.json').unlink(missing_ok=True)
     # Stage only immutable design inputs; all reports are private outputs.
     staged = output / 'project'
     if staged.exists(): shutil.rmtree(staged)
@@ -207,9 +235,19 @@ def produce_8(project,output,**k):
          str(output / 'reports/phase2/gates/derived_clock_sdc.json')],
     ]
     records=[]
-    for argv in commands:
+    for program, argv in zip(('sdc_syntax_check', 'sdc_validator_check',
+                              'derived_clock_sdc_required_check'), commands):
         if l8 is None and '--l8' in argv:
             return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='L8 fixture missing', records=records)
+        target = Path(argv[-1])
+        def fingerprint():
+            if not target.is_file() or target.is_symlink():
+                return None
+            stat = target.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                    stat.st_ctime_ns, hashlib.sha256(target.read_bytes()).hexdigest())
+        before = fingerprint()
+        started_ns = time.time_ns()
         try:
             cp=subprocess.run(argv, capture_output=True, text=True,
                               timeout=_STEP8_PRODUCER_TIMEOUT_S)
@@ -217,11 +255,24 @@ def produce_8(project,output,**k):
             raise RuntimeError(
                 f'Step8 producer timed out after {_STEP8_PRODUCER_TIMEOUT_S}s: '
                 f'{argv[0]}') from exc
-        records.append({'argv':argv, 'rc':cp.returncode, 'stdout':cp.stdout, 'stderr':cp.stderr})
+        ended_ns = time.time_ns()
+        after = fingerprint()
+        if (after is None or not after[2] or after == before or
+                not started_ns <= after[3] <= ended_ns):
+            raise RuntimeError(f'Step8 producer output missing, empty or stale: {target}')
+        records.append({'program': program, 'argv':argv, 'rc':cp.returncode,
+                        'stdout':cp.stdout, 'stderr':cp.stderr,
+                        'started_ns':started_ns, 'ended_ns':ended_ns,
+                        'output':str(target.relative_to(output)),
+                        'output_mtime_ns':after[3], 'output_sha256':after[5]})
         if cp.returncode != 0:
+            _write('8', output, 'sdc_syntax_check+sdc_validator_check',
+                   issued_manifest_sha256=os.environ['VIBEIC_MANIFEST_SHA256'],
+                   reason='measured producer failure', records=records)
             raise RuntimeError(f'Step8 producer failed rc={cp.returncode}: {argv[0]}')
     _write('8', output, 'sdc_syntax_check+sdc_validator_check',
-           reason='all producers executed', records=records)
+           reason='all producers executed', records=records,
+           issued_manifest_sha256=os.environ['VIBEIC_MANIFEST_SHA256'])
     # Bind the required output to this worker's observation.  The canonical
     # checker refuses a project-wide glob match without the run's own ledger.
     # A minimal index is enough for the ledger reader; the ledger itself is
@@ -272,6 +323,12 @@ def run_row(step_id,project,output,**kwargs):
     missing=[key for key in REQUIRED_PARAMETERS[step_id] if kwargs.get(key) in (None,'')]
     if step_id == '0.5ic' and not (kwargs.get('template') or kwargs.get('no_template_reason')): missing=['template_or_no_template_reason']
     if missing: raise ValueError(f'{step_id}: missing parameters: {", ".join(missing)}')
+    if step_id == '8':
+        token = _STEP8_DISPATCH.set(True)
+        try:
+            return PRODUCERS[step_id](project,output,**kwargs)
+        finally:
+            _STEP8_DISPATCH.reset(token)
     return PRODUCERS[step_id](project,output,**kwargs)
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--step',required=True); ap.add_argument('--inputs',required=True); ap.add_argument('--outputs',required=True); a=ap.parse_args(); run_row(a.step,a.inputs,a.outputs)
