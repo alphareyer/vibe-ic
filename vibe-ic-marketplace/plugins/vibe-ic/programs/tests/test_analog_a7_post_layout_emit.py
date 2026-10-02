@@ -242,6 +242,37 @@ def test_the_producer_writes_a_comparison_the_a7_gate_certifies(stub):
     assert cp.returncode == 0, cp.stdout + cp.stderr
 
 
+def test_a7_gate_rejects_current_layout_mutation(stub):
+    """The fixed producer record cannot certify bytes changed after A7."""
+    project = _project(stub)
+    _rcx(stub, RCX_RC)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 0
+    gds = project / "phase3/analog/blk/blk.gds"
+    gds.write_bytes(gds.read_bytes() + b"MUTATION_AFTER_A7")
+    cp = subprocess.run(
+        [sys.executable, str(PROGRAMS /
+         "analog_a7_post_layout_resim_check.py"), str(project),
+         "--block", "blk"], capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert "A7_LAYOUT_MUTATED" in (cp.stdout + cp.stderr)
+
+
+def test_a7_gate_rejects_a_producer_record_without_layout_binding(stub):
+    project = _project(stub)
+    _rcx(stub, RCX_RC)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 0
+    record_path = project / "phase3/analog/blk/a7_post_layout.json"
+    record = json.loads(record_path.read_text())
+    del record["layout_sha256"]
+    record_path.write_text(json.dumps(record))
+    cp = subprocess.run(
+        [sys.executable, str(PROGRAMS /
+         "analog_a7_post_layout_resim_check.py"), str(project),
+         "--block", "blk"], capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert "A7_LAYOUT_PROVENANCE_INVALID" in (cp.stdout + cp.stderr)
+
+
 def test_rcx_inventory_accepts_only_the_layouts_declared_grid_snap(stub):
     """A5's Magic grid is 0.01 um; a 2.25326 um cap draws as 2.25 um.
 

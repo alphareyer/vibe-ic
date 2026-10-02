@@ -26,6 +26,7 @@ not a subject of these tests.
 chip-AGNOSTIC: monkeypatched container + synthetic fixtures.
 """
 import json
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -212,6 +213,84 @@ def test_a_reused_merged_gds_is_disclosed_by_name(tmp_path):
     assert any("klayout -b" in cmd for cmd in calls), calls
     assert rep.get("compared") is False, rep
     assert (ms / "top_merged.gds").read_bytes() == b"\x00\x06merged"
+
+
+def _write_a8_manifest(p, *, source_sha=None, view_shas=None):
+    hm = p / "phase3/analog/hardmacro/ldo"
+    source = p / "phase3/analog/ldo/ldo.gds"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"\x00\x06source")
+    (hm / "ldo.lef").write_text("VERSION 5.8 ;\n")
+    (hm / "ldo.lib").write_text("library(ldo) {}\n")
+    files = {suffix: hm / f"ldo{suffix}"
+             for suffix in (".lef", ".lib", ".gds", ".v")}
+    actual = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "vibe-ic/analog_a8_views/1",
+        "producer": "analog_a8_hardmacro_emit",
+        "block": "ldo",
+        "source_gds": str(source.relative_to(p)),
+        "source_gds_sha256": source_sha or actual(source),
+        "views": {suffix: {"path": str(path.relative_to(p)),
+                            "sha256": (view_shas or {}).get(suffix,
+                                        actual(path))}
+                  for suffix, path in files.items()},
+    }
+    (hm / "a8_views_provenance.json").write_text(json.dumps(manifest))
+
+
+def test_m1_accepts_a_valid_a8_manifest_bound_to_consumed_views(tmp_path):
+    p = _project(tmp_path)
+    _write_a8_manifest(p)
+    _carried_forward(p)
+    ms, rp = _ms(p), _rpt(p)
+
+    def fake(container, cmd, timeout=600, **_):
+        if cmd.startswith("command -v") or cmd.startswith("test -f") \
+                or cmd.startswith("test -d"):
+            return 0, "", ""
+        if "magic" in cmd:
+            (ms / f"{TOP}_merged_extracted.sp").write_text(
+                f".subckt {TOP} a b\n.ends\n")
+            (ms / "ext2spice_merged.log").write_text(
+                "MAGIC_EXT2SPICE_DONE\n")
+            return 0, "MAGIC_EXT2SPICE_DONE", ""
+        if "netgen" in cmd:
+            (rp / "top_lvs.rpt").write_text(
+                "Netgen 1.5\nFinal result: Circuits match uniquely.\n")
+            return 0, "Final result: Circuits match uniquely.", ""
+        return 0, "", ""
+
+    TL._docker_exec, orig = fake, TL._docker_exec
+    try:
+        rep = TL.run(p, TOP, "x", "sky130A")
+    finally:
+        TL._docker_exec = orig
+    assert rep["verdict"] == "PASS" and rep["rc"] == 0
+    assert rep["macro_views_consumed"][0]["a8_view_hashes"][".gds"]
+
+
+def test_m1_refuses_a_mismatched_a8_manifest_before_lvs(tmp_path):
+    p = _project(tmp_path)
+    _write_a8_manifest(p, source_sha="0" * 64,
+                       view_shas={suffix: "1" * 64
+                                  for suffix in (".lef", ".lib", ".gds", ".v")})
+    rep = TL.run(p, TOP, "x", "sky130A")
+    assert rep["verdict"] == "SKIP" and rep["rc"] == 2
+    assert "A8_VIEW_PROVENANCE_INVALID" in rep["reason"]
+
+
+def test_m1_refuses_the_reviewer_manifest_shape_without_required_views(tmp_path):
+    p = _project(tmp_path)
+    hm = p / "phase3/analog/hardmacro/ldo"
+    (hm / "a8_views_provenance.json").write_text(json.dumps({
+        "source_gds_sha256": "0" * 64,
+        "views": {"gds": {"sha256": "1" * 64},
+                  "verilog": {"sha256": "2" * 64}},
+    }))
+    rep = TL.run(p, TOP, "x", "sky130A")
+    assert rep["verdict"] == "SKIP" and rep["rc"] == 2
+    assert "A8_VIEW_PROVENANCE_INVALID" in rep["reason"]
 
 
 # ── unit: _ran_fresh ──────────────────────────────────────────────────────

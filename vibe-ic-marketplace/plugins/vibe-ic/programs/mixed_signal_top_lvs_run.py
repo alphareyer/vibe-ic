@@ -91,6 +91,151 @@ import _progress_run as _pr  # noqa: E402
 
 TOOLS_IN_CONTAINER = "/foss/tools"
 PDKS_IN_CONTAINER = "/foss/pdks"
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_A8_MANIFEST_SCHEMA = "vibe-ic/analog_a8_views/1"
+_A8_VIEW_SUFFIXES = (".lef", ".lib", ".gds", ".v")
+
+
+def _project_path(project: Path, value: object) -> Path | None:
+    """Resolve a manifest path while keeping it inside this project."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    root = project.resolve()
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _a8_manifest_failure(project: Path, gds: Path, verilog: Path
+                          ) -> str | None:
+    """Validate a present A8 producer manifest against M1's exact inputs.
+
+    A8 manifests are additive evidence. A legacy hardmacro package without one
+    remains supported by this M1 producer; once a manifest is present, however,
+    every source/view path and digest is required before any LVS work runs.
+    """
+    manifest_path = gds.parent / "a8_views_provenance.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"A8_VIEW_PROVENANCE_INVALID: manifest is not valid JSON ({exc})"
+    if not isinstance(doc, dict):
+        return "A8_VIEW_PROVENANCE_INVALID: manifest top-level is not an object"
+    if doc.get("producer") != "analog_a8_hardmacro_emit":
+        return ("A8_VIEW_PROVENANCE_INVALID: unexpected producer "
+                f"{doc.get('producer')!r}")
+    if doc.get("schema") != _A8_MANIFEST_SCHEMA:
+        return ("A8_VIEW_PROVENANCE_INVALID: unsupported manifest schema "
+                f"{doc.get('schema')!r}")
+    if doc.get("block") != gds.stem:
+        return ("A8_VIEW_PROVENANCE_INVALID: manifest block does not match "
+                f"consumed GDS {gds.name!r}")
+
+    source = _project_path(project, doc.get("source_gds"))
+    source_sha = doc.get("source_gds_sha256")
+    if source is None or not source.is_file():
+        return ("A8_VIEW_PROVENANCE_INVALID: source_gds is missing, outside "
+                "the project, or absent on disk")
+    if not isinstance(source_sha, str) or not _SHA256_RE.fullmatch(source_sha):
+        return ("A8_VIEW_PROVENANCE_INVALID: source_gds_sha256 is not a "
+                "64-hex digest")
+    try:
+        actual_source_sha = _sha256(source)
+    except OSError as exc:
+        return f"A8_VIEW_PROVENANCE_INVALID: cannot hash source_gds ({exc})"
+    if actual_source_sha != source_sha.lower():
+        return ("A8_VIEW_PROVENANCE_INVALID: source_gds_sha256 does not match "
+                f"current {source.relative_to(project.resolve())}")
+
+    views = doc.get("views")
+    if not isinstance(views, dict):
+        return "A8_VIEW_PROVENANCE_INVALID: views is missing or not an object"
+    root = project.resolve()
+    for suffix in _A8_VIEW_SUFFIXES:
+        entry = views.get(suffix)
+        if not isinstance(entry, dict):
+            return ("A8_VIEW_PROVENANCE_INVALID: missing view entry "
+                    f"{suffix}")
+        view = _project_path(project, entry.get("path"))
+        view_sha = entry.get("sha256")
+        if view is None or not view.is_file():
+            return ("A8_VIEW_PROVENANCE_INVALID: view path for "
+                    f"{suffix} is missing, outside the project, or absent")
+        if not isinstance(view_sha, str) or not _SHA256_RE.fullmatch(view_sha):
+            return ("A8_VIEW_PROVENANCE_INVALID: view hash for "
+                    f"{suffix} is not a 64-hex digest")
+        try:
+            actual_view_sha = _sha256(view)
+        except OSError as exc:
+            return ("A8_VIEW_PROVENANCE_INVALID: cannot hash view "
+                    f"{suffix} ({exc})")
+        if actual_view_sha != view_sha.lower():
+            return ("A8_VIEW_PROVENANCE_INVALID: view hash for "
+                    f"{suffix} does not match current {view.relative_to(root)}")
+        if suffix == ".gds" and view != gds.resolve():
+            return ("A8_VIEW_PROVENANCE_INVALID: manifest .gds view does not "
+                    "name the GDS consumed by M1")
+        if suffix == ".v" and view != verilog.resolve():
+            return ("A8_VIEW_PROVENANCE_INVALID: manifest .v view does not "
+                    "name the Verilog consumed by M1")
+    return None
+
+
+def _a8_view_bindings(project: Path, macro_gds: list[Path],
+                      macro_v: list[Path]) -> tuple[list[dict], str | None]:
+    """Census the exact canonical macro files M1 will consume.
+
+    ``current_merge_inputs`` has already selected and checked these files. The
+    census only adds A8 manifest evidence to those resolved inputs; it does not
+    rescan alternate GDS/Verilog locations or alter M1's merge decision.
+    """
+    modules: dict[str, Path] = {}
+    for path in macro_v:
+        names = re.findall(r"\bmodule\s+([A-Za-z_][\w$]*)\b",
+                           _uncomment(path.read_text(errors="replace")))
+        if len(names) == 1:
+            modules[names[0]] = path
+    bindings: list[dict] = []
+    for gds in macro_gds:
+        verilog = modules.get(gds.stem)
+        if verilog is None:
+            return [], ("A8_VIEW_PROVENANCE_INVALID: canonical macro GDS "
+                        f"{gds.name} has no consumed Verilog module view")
+        failure = _a8_manifest_failure(project, gds, verilog)
+        if failure:
+            return [], failure
+        row = {
+            "gds": str(gds.relative_to(project)),
+            "gds_sha256": _sha256(gds),
+            "verilog": str(verilog.relative_to(project)),
+            "verilog_sha256": _sha256(verilog),
+        }
+        manifest = gds.parent / "a8_views_provenance.json"
+        if manifest.is_file():
+            doc = json.loads(manifest.read_text(encoding="utf-8"))
+            row["a8_provenance"] = str(manifest.relative_to(project))
+            row["a8_source_gds_sha256"] = doc["source_gds_sha256"]
+            row["a8_view_hashes"] = {
+                key: value["sha256"] for key, value in doc["views"].items()
+                if isinstance(value, dict) and "sha256" in value}
+        bindings.append(row)
+    return bindings, None
 
 #: DECIDE PER MACRO, never append (vibe-ic#597).
 #:
@@ -935,6 +1080,11 @@ def run(project: Path, top: str, container: str, pdk: str,
     receipt_path.unlink(missing_ok=True)
     try:
         digital_gds, macro_gds, macro_v, netlist, placement, input_hashes = current_merge_inputs(project, top)
+        macro_view_bindings, provenance_failure = _a8_view_bindings(
+            project, macro_gds, macro_v)
+        if provenance_failure:
+            return {"verdict": "SKIP", "rc": 2,
+                    "reason": provenance_failure}
         tool = _tool_identity(container)
     except (InputRefusal, OSError, UnicodeError) as exc:
         return {"verdict": "FAIL", "rc": 1, "compared": False,
@@ -1119,6 +1269,7 @@ def run(project: Path, top: str, container: str, pdk: str,
         "lvs_report": str(lvs_rpt.relative_to(project)),
         "tool": "magic ext2spice + netgen (PDK setup)",
         "merge_provenance": merge_provenance,
+        "macro_views_consumed": macro_view_bindings,
         "m1_receipt_sha256": _digest(receipt_path),
         "lvs_artifacts": {str(p.relative_to(project)): _digest(p)
                           for p in (spice_out, ext_log, tcl, lvs_tcl, lvs_rpt)},
@@ -1136,6 +1287,7 @@ def run(project: Path, top: str, container: str, pdk: str,
         "merged_gds": str(merged.relative_to(project)),
         "macros_merged": [str(g.relative_to(project)) for g in macro_gds],
         "top_lvs": top_lvs["verdict"],
+        "macro_views_consumed": macro_view_bindings,
         "note": ("top-level merged-GDS LVS executed (Magic extraction + "
                  "netgen vs gate netlist + hardmacro stubs) — the merge "
                  "claim is LVS-substantiated, not presence-only"),
