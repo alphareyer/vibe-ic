@@ -997,7 +997,7 @@ def run_sta_script(project: Path, image: str, mounts: list[tuple[Path, str]],
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
     completed = run_container([docker, 'run', '--rm', '--network', 'none',
                                *_dmem.docker_memory_flags(), *volumes,
-                               '--entrypoint', 'sta', image, '-no_init', '-no_splash',
+                               image, '--skip', 'sta', '-no_init', '-no_splash',
                                '-exit', str(script)], supervised=True, log=log)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(completed.stdout + '\n' + completed.stderr)

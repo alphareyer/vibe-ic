@@ -176,6 +176,14 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
                                     f"Cannot parse si_crosstalk.json: {exc}"))
             return findings, stats
 
+        import _opensta_current as current
+        try:
+            current.si_binding(project_dir)
+            stats['current_binding'] = 'CURRENT'
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            stats['current_binding'] = 'NOT_MEASURED'
+            findings.append(Finding('ERROR', 'SI_CURRENT_INPUTS_UNBOUND', str(exc)))
+
         for key in ("max_crosstalk_noise", "violations_count"):
             if key not in data:
                 findings.append(Finding("ERROR", "MISSING_FIELD",

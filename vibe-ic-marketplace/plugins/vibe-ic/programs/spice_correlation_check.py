@@ -2947,7 +2947,32 @@ def _write_declared_correlation_refusal(project: Path, status: str,
     return out
 
 
-def run_installed_pdk_path_correlation(
+def run_installed_pdk_path_correlation(project: Path, liberty_path: str,
+                                       container: str = _DEFAULT_CONTAINER,
+                                       max_stages: int = 12) -> dict:
+    """Ordinary Step 30 uses the existing extracted OpenSTA path-SPICE route.
+
+    No mode flag, staged report or schematic fallback can certify this row.
+    Missing matched physical inputs are NOT_MEASURED and remain blocking.
+    """
+    import librelane_contract as lc
+    import path_spice_tool as pst
+    import librelane_postroute as lp
+    project = Path(project)
+    try:
+        image = lc.resolve_image(project)
+        folder, _ = lp.stapostpnr_state(project)
+        config = json.loads((folder / 'config.json').read_text())
+        pdk = config['PDK']
+        root = lc.pdk_root_resolution(project, pdk, image=image)['path']
+        doc = pst.run_current_step30(project, image, Path(root), pdk)
+        return {'status': 'RAN', 'verdict': doc['verdict'], 'report': doc}
+    except (lc.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        return _persist_declared_refusal(project, {'status': 'ERROR',
+            'measurement': 'NOT_MEASURED', 'reason': str(exc)})
+
+
+def _run_schematic_pdk_path_correlation(
     project: Path,
     liberty_path: str,
     container: str = _DEFAULT_CONTAINER,
@@ -3733,199 +3758,25 @@ def _analog_not_applicable_for_class(
 
 def run_audit(project: Path, run_spice: bool = True,
               container: str = _DEFAULT_CONTAINER) -> AuditResult:
+    """BLOCKING Step-30 consumption of current executed path correlation."""
+    import path_spice_tool as pst
     result = AuditResult()
-
-    extracted = _pl.extracted_dir(project)
-    sta_dir = _pl.sta_dir(project)
-
-    if not extracted.is_dir() or not list(extracted.glob("*.spef")):
-        result.findings.append(Finding(
-            rule="SKIP_NO_SPEF",
-            severity="INFO",
-            message="No SPEF files found (step 22 Parasitic Extraction not "
-                    "reached); skipping SPICE gate",
-        ))
-        result.summary = {"skipped": True, "reason": "no_spef"}
-        return result
-
-    if not sta_dir.is_dir() or not list(sta_dir.glob("*.rpt")):
-        result.findings.append(Finding(
-            rule="SKIP_NO_STA",
-            severity="INFO",
-            message="No STA reports found (step 23 post-route STA not "
-                    "reached); skipping SPICE gate",
-        ))
-        result.summary = {"skipped": True, "reason": "no_sta"}
-        return result
-
-    # ── Canonical Step-30: run REAL ngspice cell-delay↔liberty correlation ──
-    # When the design ships a commercial-PDK ngspice bridge shim and no correlation
-    # report exists yet, characterise a representative extracted cell in real
-    # ngspice and correlate it against the liberty NLDM arc. Honest skip (no
-    # numbers fabricated) when the shim/liberty/simulator are unavailable.
-    driver_report = None
-    if run_spice and _check_spice_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            driver_report = run_commercial_pdk_cell_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice correlation driver could not run: {e}",
-            ))
-        if driver_report is not None:
-            c = driver_report.get("correlation", {})
-            result.findings.append(Finding(
-                rule="SPICE_CORRELATION_RAN",
-                severity="INFO",
-                message=(
-                    f"Real ngspice cell correlation on "
-                    f"{driver_report.get('cell')} ({driver_report.get('corner')}): "
-                    f"{c.get('samples')} arcs, max |Δ|={c.get('max_abs_pct')}% "
-                    f"vs liberty NLDM → {c.get('verdict')}"),
-            ))
-
-    # ── Step-30 (additive): REAL ngspice FULL critical-PATH correlation ──
-    # Stitch the STA critical-path cells' extracted transistor subckts into one
-    # ngspice deck and correlate the end-to-end SPICE path delay against the
-    # STA-reported path delay. Honest skip (no numbers) when inputs/simulator
-    # are unavailable or the stitched deck fails to swing.
-    path_report = None
-    if run_spice and _check_path_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            path_report = run_commercial_pdk_path_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_PATH_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice path-correlation driver could not run: {e}",
-            ))
-    else:
-        path_report = _check_path_correlation_json(project)
-    if path_report is not None:
-        pc = path_report.get("correlation", {})
-        sev = "ERROR" if pc.get("verdict") in (
-            "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
-        result.findings.append(Finding(
-            rule=("SPICE_PATH_" + ("MISMATCH" if sev == "ERROR"
-                                   else "CORRELATED")),
-            severity=sev,
-            message=(
-                f"Real ngspice path correlation "
-                f"({pc.get('stages_correlated')}/"
-                f"{pc.get('stages_total_combinational')} combinational stages): "
-                f"SPICE={pc.get('spice_path_delay_ns')}ns vs "
-                f"STA={pc.get('sta_path_delay_ns')}ns "
-                f"({pc.get('pct_error')}%) → {pc.get('verdict')}"),
-        ))
-
-    # ── Step-30 (additive): REAL ngspice TOP-N critical-PATH correlation ──
-    # Extend the proven per-path stitch from the #1 path to the top-N max-delay
-    # paths (OpenSTA report_checks -group_count N -endpoint_count 1) so the
-    # correlation spans the timing-critical CONE. Per-path honest SKIP (with a
-    # reason) for any path that can't be sensitised; the aggregate discloses N
-    # found / correlated / skipped. Honest skip of the whole gate when inputs /
-    # simulator are unavailable.
-    topN_report = None
-    if run_spice and _check_topN_path_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            topN_report = run_commercial_pdk_topN_path_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_TOPN_PATH_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice top-N path-correlation driver "
-                        f"could not run: {e}",
-            ))
-    else:
-        topN_report = _check_topN_path_correlation_json(project)
-    if topN_report is not None:
-        agg = topN_report.get("aggregate", {})
-        sev = "ERROR" if agg.get("verdict") in (
-            "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
-        result.findings.append(Finding(
-            rule=("SPICE_TOPN_PATH_" + ("MISMATCH" if sev == "ERROR"
-                                        else "CORRELATED")),
-            severity=sev,
-            message=(
-                f"Real ngspice top-N path correlation "
-                f"({agg.get('n_correlated')}/{agg.get('n_paths')} paths "
-                f"correlated, {agg.get('n_skipped')} skipped): "
-                f"worst |Δ|={agg.get('worst_abs_pct_error')}% "
-                f"mean |Δ|={agg.get('mean_abs_pct_error')}% "
-                f"vs STA → {agg.get('verdict')}"),
-        ))
-
-    spice_results = _find_spice_results(project)
-    spice_decks = _find_spice_decks(project)
-    corr_json = _check_spice_correlation_json(project)
-
-    if not spice_results and not spice_decks and not corr_json:
-        # A design whose class declares it has no analog content has nothing
-        # to correlate -- a DESIGN-DECLARED N/A, disclosed on the vacuous
-        # tier, never a silent pass and never a FAIL. Asked only on the
-        # no-evidence path: a pure-digital project that DID run SPICE is
-        # still correlated below, and a genuinely-analog class still FAILs.
-        _na = _analog_not_applicable_for_class(project)
-        if _na is not None:
-            _na_class, _na_reason = _na
-            result.findings.append(Finding(
-                rule="SKIP_ANALOG_NOT_APPLICABLE",
-                severity="INFO",
-                message=("No post-layout SPICE correlation is applicable: "
-                         + _na_reason),
-            ))
-            # The reason NAMES the class it keyed on. A disclosure that says
-            # only "not applicable" cannot be audited: the reader has to go
-            # re-derive which record exempted the design, which is the work
-            # the disclosure exists to save. Token prefix stays stable for
-            # consumers; the class rides after the colon.
-            result.summary = {
-                "skipped": True,
-                "reason": f"analog_not_applicable_for_class:{_na_class}",
-                "ic_class": _na_class,
-                "spice_decks": 0, "spice_results": 0}
-            return result
+    try:
+        doc = pst.validate_current_step30(project)
+        verdict = doc.get('verdict')
+        result.passed = verdict == 'PASS'
+        result.summary = {'skipped': False, 'pass': result.passed,
+                          'measurement': 'MEASURED' if verdict in ('PASS', 'FAIL') else 'NOT_MEASURED',
+                          'current_binding': 'CURRENT', 'verdict': verdict,
+                          'corner': doc.get('corner'), 'arms': doc.get('arms')}
+        if not result.passed:
+            result.findings.append(Finding(rule='SPICE_CURRENT_' + str(verdict), severity='ERROR',
+                                           message='Current tool correlation: ' + str(doc.get('arms'))))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         result.passed = False
-        result.findings.append(Finding(
-            rule="NO_SPICE_VERIFICATION",
-            severity="ERROR",
-            message=(
-                "Post-layout SPICE verification was not performed. "
-                "SPEF extraction exists (Step 20) and STA ran (Step 21), "
-                "but no SPICE decks or results found in spice/, sim_spice/, "
-                "or analog_sim/. Run eda_spice on critical paths and analog blocks."
-            ),
-        ))
-        result.summary = {
-            "skipped": False,
-            "spice_decks": 0,
-            "spice_results": 0,
-            "pass": False,
-        }
-        return result
-
-    corr_stats = check_critical_path_correlation(project, result.findings)
-    analog_stats = check_analog_coverage(project, result.findings)
-
-    has_errors = any(f.severity == "ERROR" for f in result.findings)
-    if has_errors:
-        result.passed = False
-
-    result.summary = {
-        "skipped": False,
-        "spice_decks": len(spice_decks),
-        "spice_results": len(spice_results),
-        "correlation": corr_stats,
-        "analog": analog_stats,
-        "pass": result.passed,
-    }
+        result.summary = {'skipped': False, 'pass': False, 'measurement': 'NOT_MEASURED',
+                          'current_binding': 'REFUSED', 'reason': str(exc)}
+        result.findings.append(Finding(rule='SPICE_CURRENT_INPUTS_UNBOUND', severity='ERROR', message=str(exc)))
     return result
 
 

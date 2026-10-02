@@ -349,7 +349,7 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
         volumes += ['-e', f'{key}={value}']
     return subprocess.run([docker, 'run', '--rm', '--network', 'none',
                            *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
-                           '--entrypoint', argv[0], image, *argv[1:]],
+                           image, '--skip', *argv],
                           capture_output=True, text=True)
 
 
@@ -734,6 +734,11 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     if not (opc and libname):
         raise Refusal('LL_LIBERTY_OPCOND_UNDECLARED', inputs['liberties'][0])
     out_dir.mkdir(parents=True, exist_ok=True)
+    # These files belong only to this Step-30 invocation. A failed tool may
+    # not reuse a deck or STA report left by its predecessor.
+    for stale in out_dir.glob('path_*'):
+        if stale.is_file():
+            stale.unlink()
     cell_sources = [host(p) for p in (config.get('CELL_SPICE_MODELS') or [])]
     spice_sources = cell_sources + [host(p) for p in (config.get('PAD_SPICE_MODELS') or [])]
     mounts = [(pdk_root / pdk, guest)]
@@ -773,11 +778,14 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
             'spef': str(spef_path), 'spef_sha256': digest(spef_path), 'cells': cells,
             'models': models, 'sta_rc': sta.returncode, 'prepared': prepared,
+            'sta_execution': {'tool': 'OpenSTA', 'rc': sta.returncode,
+                'argv': ['sta', '-no_init', '-no_splash', '-exit', str(tcl)],
+                'script': str(tcl), 'log': str(out_dir / 'sta.log')},
             'image': image, 'project': project, 'mounts': mounts, 'header': header,
             'liberty_text': '\n'.join(lib_texts)}
 
 
-def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
+def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
     """Every prepared deck through the simulator (concurrently), measured
     and compared with its STA path."""
     from concurrent.futures import ThreadPoolExecutor
@@ -786,7 +794,7 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
     def one(item: Dict[str, Any]) -> Dict[str, Any]:
         parsed, deck = item['parsed'], item['deck']
         row: Dict[str, Any] = {'path': item['path'], 'deck': str(deck) if deck else None}
-        if parsed is None or deck is None or deck.stat().st_size == 0:
+        if arm.get('sta_rc') != 0 or parsed is None or deck is None or deck.stat().st_size == 0:
             row.update(status='NOT_MEASURED', reason='no STA path or no deck',
                        wps_fail=item['wps_fail'])
             return row
@@ -795,7 +803,13 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
                         step_s=step)
         deck.with_suffix('.log').write_text(sim.stdout + '\n' + sim.stderr)
         got = measure(deck, simulator, parsed, header)
-        row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9)
+        row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9,
+                   simulator_execution={'tool': simulator, 'rc': sim.returncode,
+                       'argv': [simulator, str(deck.with_suffix('.run.sp'))],
+                       'script': str(deck.with_suffix('.run.sp')),
+                       'log': str(deck.with_suffix('.log'))})
+        if sim.returncode != 0:
+            got = {'status': 'NOT_MEASURED', 'reason': 'simulator exited non-zero'}
         sta_ns = parsed['path_delay_ns']
         stages = path_stages(parsed['rows'])
         tol = (_scc.derive_liberty_path_tolerance(arm['liberty_text'], stages, sta_ns)
@@ -1001,3 +1015,154 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
                            for s, a in arms.items()}}
     write_json(project / 'reports/phase3/spice_path_tool.json', document)
     return document
+
+
+def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
+    """Current routed subject and the existing tool's extracted corner inputs."""
+    import _opensta_current as current
+    import librelane_contract as lc
+    import librelane_postroute as lp
+    project = Path(project).resolve(strict=True)
+    folder, _ = lp.stapostpnr_state(project)
+    if not folder.resolve().is_relative_to(project / 'phase3/librelane'):
+        raise Refusal('CURRENT_STEP30_STAGE_MISMATCH', str(folder))
+    lc.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
+    record = _load(project / lp.STEP23_RECORD)
+    corner = ((record.get('judgment') or {}).get('worst_setup') or {}).get('corner')
+    if not corner:
+        raise Refusal('CURRENT_STEP30_CORNER_MISSING', str(record))
+    inputs = post_pnr_timing_inputs(project, folder / 'state_out.json', corner)
+    config = _load(folder / 'config.json')
+    top = config.get('DESIGN_NAME')
+    host = lambda path: Path(str(path).replace(f'/pdk/{pdk}/', str(pdk_root / pdk) + '/', 1))
+    libs = [host(path) for path in inputs['liberties']]
+    subject, _tool = current.tool_subject(project, top, corner=corner)
+    roles = {row['role']: row for row in subject['inputs']}
+    for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc'), ('spef', 'spef')]:
+        if current.digest(project / inputs[key]) != roles[role]['sha256']:
+            raise Refusal('CURRENT_STEP30_TOOL_SUBJECT_MISMATCH', role)
+    subject['inputs'] += [current.file_record(path, role, project) for role, path in [
+        ('sta_state', folder / 'state_out.json'), ('sta_config', folder / 'config.json'),
+        ('sta_receipt', folder / 'vibeic_receipt.json'), ('step23_record', project / lp.STEP23_RECORD),
+        ('sta_corner_log', folder / corner / 'sta.log')]]
+    sources = {str(path.resolve()): current.digest(path) for path in
+               (pdk_root / pdk / 'libs.tech/ngspice').rglob('*') if path.is_file()}
+    for name in ('CELL_SPICE_MODELS', 'PAD_SPICE_MODELS', 'CELL_GDS'):
+        for path in config.get(name) or []:
+            source = host(path).resolve(strict=True)
+            if not source.is_relative_to((pdk_root / pdk).resolve()):
+                raise Refusal('CURRENT_STEP30_PDK_PATH_MISMATCH', str(source))
+            sources[str(source)] = current.digest(source)
+    if not sources:
+        raise Refusal('CURRENT_STEP30_MODELS_MISSING', str(pdk_root))
+    return subject, {'image': image, 'pdk_root': str(pdk_root), 'pdk': pdk,
+                     'corner': corner, 'sources': sources}
+
+
+def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
+    """Ordinary Step 30: existing write_path_spice route, one native simulator.
+
+    The existing tool owns its decks, local Liberty tolerance and SPEF-response
+    control. This boundary owns current material and downstream result identity.
+    """
+    import _opensta_current as current
+    project = Path(project).resolve(strict=True)
+    report = project / 'reports/phase3/spice_correlation.json'
+    receipt_path = report.with_suffix('.current.json')
+    for path in (report, receipt_path):
+        path.unlink(missing_ok=True)
+    subject, context = current_context(project, image, pdk_root, pdk)
+    tool = run_step30(project, image, pdk_root, pdk, paths=1, simulators=('ngspice',))
+    if current_context(project, image, pdk_root, pdk) != (subject, context):
+        raise Refusal('CURRENT_STEP30_INPUT_CHANGED_DURING_RUN', str(project))
+    executions, outputs = [], []
+    for arm in tool['detail'].values():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            if data.get('sta_execution'):
+                executions.append(data['sta_execution'])
+            for row in data.get('paths') or []:
+                if row.get('simulator_execution'):
+                    executions.append(row['simulator_execution'])
+                if row.get('deck'):
+                    outputs.append(('deck:' + variant, Path(row['deck'])))
+    # A known measured FAIL remains a failed measurement; absence is named.
+    if not executions:
+        raise Refusal('CURRENT_STEP30_EXECUTION_MISSING', str(tool.get('arms')))
+    execution_files = []
+    for index, execution in enumerate(executions):
+        if type(execution.get('rc')) is not int or execution['rc'] != 0:
+            raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
+        for role in ('script', 'log'):
+            execution_files.append(current.file_record(execution[role], f'{role}:{index}', project))
+    first_deck = next((path for role, path in outputs if role == 'deck:base'), None)
+    first_sim = next((ex for ex in executions if ex['tool'] == 'ngspice'), None)
+    if first_deck is None or first_sim is None:
+        raise Refusal('CURRENT_STEP30_CORRELATION_PRODUCT_MISSING', str(project))
+    canonical_deck = project / 'phase3/stage3/spice/correlation.spice'
+    canonical_log = canonical_deck.with_suffix('.log')
+    canonical_deck.parent.mkdir(parents=True, exist_ok=True)
+    canonical_deck.write_bytes(first_deck.read_bytes())
+    canonical_log.write_bytes(Path(first_sim['log']).read_bytes())
+    outputs += [('canonical_deck', canonical_deck), ('canonical_log', canonical_log)]
+    doc = {**tool, 'program': 'spice_correlation_check.current_write_path_spice',
+           'current_subject': subject, 'current_context': context}
+    write_json(report, doc)
+    outputs += [('tool_result', project / 'reports/phase3/spice_path_tool.json'), ('correlation', report)]
+    receipt = {**subject, 'schema': 'step30-current-v1', 'step': '30', 'context': context,
+               'execution': executions, 'execution_files': execution_files,
+               'outputs': [current.file_record(path, role, project) for role, path in outputs]}
+    write_json(receipt_path, receipt)
+    validate_current_step30(project)
+    return doc
+
+
+def validate_current_step30(project: Path):
+    """Consumer verification, including the declared correlation result/decks."""
+    import _opensta_current as current
+    project = Path(project).resolve(strict=True)
+    report = project / 'reports/phase3/spice_correlation.json'
+    receipt = _load(report.with_suffix('.current.json'))
+    if (receipt.get('schema') != 'step30-current-v1' or receipt.get('step') != '30'
+            or receipt.get('project') != str(project) or receipt.get('stage') != 'post_route_extracted'):
+        raise Refusal('CURRENT_STEP30_PROJECT_STAGE_MISMATCH', str(report))
+    context = receipt['context']
+    subject, now = current_context(project, context['image'], Path(context['pdk_root']), context['pdk'])
+    if now != context or any(receipt.get(k) != subject[k] for k in subject):
+        raise Refusal('CURRENT_STEP30_INPUT_BYTES_CHANGED', str(report))
+    current.check_files(receipt['execution_files'], project)
+    executions = receipt['execution']
+    if not executions or not any(e.get('tool') == 'ngspice' for e in executions):
+        raise Refusal('CURRENT_STEP30_SIMULATOR_NOT_RUN', str(report))
+    if not any(e.get('tool') == 'OpenSTA' for e in executions):
+        raise Refusal('CURRENT_STEP30_WRITE_PATH_SPICE_NOT_RUN', str(report))
+    expected_files = {}
+    for i, ex in enumerate(executions):
+        if type(ex.get('rc')) is not int or ex['rc'] != 0 or not ex.get('argv'):
+            raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(ex))
+        expected_files.update({f'{role}:{i}': ex[role] for role in ('script', 'log')})
+    if {r['role']: r['path'] for r in receipt['execution_files']} != expected_files:
+        raise Refusal('CURRENT_STEP30_EXECUTION_CONSUMPTION_MISSING', str(report))
+    current.check_files(receipt['outputs'], project)
+    outputs = {r['role']: r['path'] for r in receipt['outputs']}
+    if outputs.get('correlation') != str(report) or outputs.get('tool_result') != str(project / 'reports/phase3/spice_path_tool.json'):
+        raise Refusal('CURRENT_STEP30_RESULT_CONSUMPTION_MISSING', str(report))
+    tool = _load(project / 'reports/phase3/spice_path_tool.json')
+    doc = _load(report)
+    if any(doc.get(k) != v for k, v in tool.items()):
+        raise Refusal('CURRENT_STEP30_ADOPTION_MISMATCH', str(report))
+    decks = {r['path'] for r in receipt['outputs'] if r['role'].startswith('deck:')}
+    named = {r['deck'] for arm in tool['detail'].values() for variant in ('base', 'mutated')
+             for r in (arm.get(variant) or {}).get('paths') or [] if r.get('deck')}
+    if not named or decks != named or not all(Path(p).is_relative_to(project / 'phase3/tool_arms/30') for p in decks):
+        raise Refusal('CURRENT_STEP30_DECK_CONSUMPTION_MISSING', str(report))
+    canonical = project / 'phase3/stage3/spice/correlation.spice'
+    canonical_log = canonical.with_suffix('.log')
+    if outputs.get('canonical_deck') != str(canonical) or outputs.get('canonical_log') != str(canonical_log):
+        raise Refusal('CURRENT_STEP30_CANONICAL_CONSUMPTION_MISSING', str(report))
+    first = next((r['deck'] for arm in tool['detail'].values()
+                  for r in (arm.get('base') or {}).get('paths') or [] if r.get('deck')), None)
+    first_sim = next((ex for ex in executions if ex['tool'] == 'ngspice'), None)
+    if first is None or first_sim is None or digest(canonical) != digest(Path(first)) or digest(canonical_log) != digest(Path(first_sim['log'])):
+        raise Refusal('CURRENT_STEP30_CANONICAL_ADOPTION_MISMATCH', str(report))
+    return doc
