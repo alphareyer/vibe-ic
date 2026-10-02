@@ -154,6 +154,24 @@ def test_catalog_authorities_are_bound_to_declared_git_blobs_and_schema(monkeypa
     assert "COVERAGE_SCHEMA_MISMATCH" in defects
 
 
+@pytest.mark.parametrize(
+    ("label", "authority"),
+    (("COVERAGE", analog.COVERAGE_FILE),
+     ("FLOW", analog.FLOW_FILE),
+     ("PORTFOLIO", analog.PORTFOLIO_FILE)),
+)
+def test_each_canonical_authority_blob_mutation_is_rejected(monkeypatch, label, authority):
+    original = analog._git_blob
+
+    def mutated(commit, path):
+        blob = original(commit, path)
+        return blob + b"\n" if path == authority else blob
+
+    monkeypatch.setattr(analog, "_git_blob", mutated)
+    defects = analog.validate_catalog()
+    assert label + "_AUTHORITY_BLOB_MISMATCH" in defects
+
+
 def test_registration_ignores_caller_source_sha_and_issues_clean_commit_tree():
     registry = em.Registry()
     analog.register_factories(registry, source_sha="a" * 40)
