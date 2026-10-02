@@ -36,6 +36,16 @@ def test_an_explicit_direct_is_the_projects_opt_out(tmp_path, monkeypatch):
     assert LC.selected_mode(tmp_path, "S1") == "direct"
 
 
+def test_analog_a6_a8_default_to_librelane_and_direct_is_an_opt_out(tmp_path):
+    assert {step: LC.selected_mode(tmp_path, step)
+            for step in ("A6", "A7", "A8")} == {
+                "A6": "librelane", "A7": "librelane", "A8": "librelane"}
+    _switch(tmp_path, {step: "direct" for step in ("A6", "A7", "A8")})
+    assert {step: LC.selected_mode(tmp_path, step)
+            for step in ("A6", "A7", "A8")} == {
+                "A6": "direct", "A7": "direct", "A8": "direct"}
+
+
 def test_an_invalid_mode_is_refused_from_either_source(tmp_path, monkeypatch):
     _switch(tmp_path, {"S1": "maybe"})
     with pytest.raises(LC.Refusal) as exc:

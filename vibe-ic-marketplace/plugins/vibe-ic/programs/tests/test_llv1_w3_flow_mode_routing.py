@@ -50,7 +50,7 @@ LAYER = {
     "37": "librelane", "DT2": "librelane", "DT3": "librelane",
 }
 #: Steps a call site asks about that the flag deliberately does not decide.
-OUT_OF_LAYER = {"A6", "A7"}
+OUT_OF_LAYER = {"A6", "A7", "A8"}
 #: Call sites whose step is a runtime value no literal names, keyed by the
 #: SITE: (file, enclosing function, argument variable). Each entry says where
 #: its population comes from. Every entry must be used by exactly one site in
@@ -309,8 +309,9 @@ def test_a_switch_naming_a_step_the_flag_decides_refuses(tmp_path, mode):
             LC.selected_mode(tmp_path, step)
         assert exc.value.code == "IMPL_SWITCH_CONFLICT"
         assert "'21'" in str(exc.value)
-    # A step no layer decides is not the flag's: it answers as before.
-    assert LC.selected_mode(tmp_path, "A6") == "direct"
+    # Analog A6 is outside the digital implementation layer, but its own
+    # production default now selects the native LibreLane arm.
+    assert LC.selected_mode(tmp_path, "A6") == "librelane"
 
 
 def test_a_switch_naming_only_out_of_layer_steps_is_honoured(tmp_path):

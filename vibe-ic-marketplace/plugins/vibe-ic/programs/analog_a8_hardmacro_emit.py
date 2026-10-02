@@ -42,6 +42,7 @@ magicrc the design's own PDK root provides.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -516,6 +517,30 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
     (hdir / f"{block}.v").write_text(interface_verilog(block, rails, signals))
     (hdir / f"{block}.lib").write_text(interface_liberty(block, rails, signals))
     census = lef_pin_census(lef.read_text(errors="replace"))
+    # Bind all four views to the exact sign-off GDS bytes consumed here. The
+    # A8 gate remains a reader; this manifest is emitted only by this producer
+    # and lets A8/M1 reject a copied or subsequently mutated view.
+    def digest(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    views = {suffix: hdir / f"{block}{suffix}"
+             for suffix in (".lef", ".lib", ".gds", ".v")}
+    manifest = {
+        "schema": "vibe-ic/analog_a8_views/1",
+        "producer": "analog_a8_hardmacro_emit",
+        "block": block,
+        "source_gds": str(gds.relative_to(project)),
+        "source_gds_sha256": digest(gds),
+        "views": {suffix: {"path": str(path.relative_to(project)),
+                           "sha256": digest(path)}
+                  for suffix, path in views.items()},
+    }
+    write_json(hdir / "a8_views_provenance.json", manifest)
+
     return {"block": block, "emitted": True, "rc": 0,
             "lef_bytes": lef.stat().st_size,
             "obs_rects_carved_for_pin_access": n_carved,
@@ -529,7 +554,11 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
             "lef_pins": census,
             "declared_ports": len(rails) + len(signals),
             "rails": rails, "signals": signals,
-            "magicrc": rcfile}
+            "magicrc": rcfile,
+            "source_gds": str(gds.relative_to(project)),
+            "source_gds_sha256": manifest["source_gds_sha256"],
+            "views_provenance": str(
+                (hdir / "a8_views_provenance.json").relative_to(project))}
 
 
 def declared_blocks(project: Path) -> List[str]:

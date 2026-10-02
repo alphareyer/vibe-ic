@@ -325,6 +325,10 @@ def test_the_analog_runner_invokes_this_producer_at_a8_and_only_there(
     argv = at_a8[0]
     assert str(proj) in argv, argv
     assert "--block" in argv and "blk_a" in argv, argv
+    a8_views = [c for c in rec.calls
+                if Path(c[1]).name == "analog_a8_hardmacro_emit.py"]
+    assert len(a8_views) == 1, rec.calls
+    assert "--block" in a8_views[0] and "blk_a" in a8_views[0]
 
     for other in ("A5_layout", "A7_post_layout_resim", "A9_hw_verify"):
         assert not dispatched(other), (

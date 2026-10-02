@@ -4268,6 +4268,10 @@ steps:
       # the path a real analog run takes, and the audit then measures a tree
       # it did not touch.
       - analog_hardmacro_gds_emit
+      # Default runner callsite for the remaining LEF/Liberty/Verilog views.
+      # This is a producer declaration only; the acceptance gate below stays
+      # read-only and never manufactures a missing view.
+      - analog_a8_hardmacro_emit
     required_outputs:
       - "phase3/analog/hardmacro/*/*.lef"
       - "phase3/analog/hardmacro/*/*.lib"

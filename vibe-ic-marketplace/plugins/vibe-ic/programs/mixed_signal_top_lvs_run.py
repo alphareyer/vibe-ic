@@ -64,6 +64,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -695,6 +696,37 @@ def run(project: Path, top: str, container: str, pdk: str,
         (project / "phase3" / "analog" / "hardmacro").rglob("*.gds"))
     macro_v = sorted(
         (project / "phase3" / "analog" / "hardmacro").rglob("*.v"))
+    # M1's schematic side must consume the Verilog view paired with each exact
+    # GDS view that it merges. Record byte hashes below so the handoff proves
+    # the two sides came from the same A8 package, rather than merely finding
+    # some macro file somewhere under the tree.
+    macro_view_bindings = []
+    for gds in macro_gds:
+        v = gds.with_suffix(".v")
+        if not v.is_file():
+            continue
+        try:
+            g_sha = hashlib.sha256(gds.read_bytes()).hexdigest()
+            v_sha = hashlib.sha256(v.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        row = {"gds": str(gds.relative_to(project)),
+               "gds_sha256": g_sha,
+               "verilog": str(v.relative_to(project)),
+               "verilog_sha256": v_sha}
+        prov = gds.parent / "a8_views_provenance.json"
+        if prov.is_file():
+            row["a8_provenance"] = str(prov.relative_to(project))
+            try:
+                doc = json.loads(prov.read_text(encoding="utf-8"))
+                row["a8_source_gds_sha256"] = doc.get("source_gds_sha256")
+                row["a8_view_hashes"] = {
+                    k: val.get("sha256") for k, val in
+                    (doc.get("views") or {}).items()
+                    if isinstance(val, dict)}
+            except (OSError, ValueError):
+                row["a8_provenance"] = str(prov.relative_to(project))
+        macro_view_bindings.append(row)
     netlist = _pl.synth_dir(project) / f"{top}_synth.v"
     if not netlist.is_file():
         nl = sorted(_pl.synth_dir(project).glob("*.v"))
@@ -705,6 +737,8 @@ def run(project: Path, top: str, container: str, pdk: str,
         missing_inputs.append("digital GDS")
     if not macro_gds:
         missing_inputs.append("hardmacro GDS (A8)")
+    if macro_gds and len(macro_view_bindings) != len(macro_gds):
+        missing_inputs.append("paired hardmacro Verilog view (A8)")
     if not netlist.is_file():
         missing_inputs.append("gate netlist")
     if missing_inputs:
@@ -917,6 +951,7 @@ def run(project: Path, top: str, container: str, pdk: str,
         "lvs_report": str(lvs_rpt.relative_to(project)),
         "tool": "magic ext2spice + netgen (PDK setup)",
         "merge_provenance": merge_provenance,
+        "macro_views_consumed": macro_view_bindings,
     }
     (rpt_dir / "top_lvs.json").write_text(
         json.dumps(top_lvs, indent=2) + "\n")
@@ -926,6 +961,7 @@ def run(project: Path, top: str, container: str, pdk: str,
         "merged_gds": str(merged.relative_to(project)),
         "macros_merged": [str(g.relative_to(project)) for g in macro_gds],
         "top_lvs": top_lvs["verdict"],
+        "macro_views_consumed": macro_view_bindings,
         "note": ("top-level merged-GDS LVS executed (Magic extraction + "
                  "netgen vs gate netlist + hardmacro stubs) — the merge "
                  "claim is LVS-substantiated, not presence-only"),

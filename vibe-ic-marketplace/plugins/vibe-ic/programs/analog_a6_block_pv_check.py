@@ -79,6 +79,7 @@ chip-AGNOSTIC. No vendor / IC / tool-specific data hard-coded.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from xml.etree import ElementTree
@@ -499,6 +500,76 @@ def _witness_disagreements(bdir: Path, rel: str, block: str,
     return out
 
 
+def _layout_binding_findings(project: Path, block: str,
+                             drc_ev: str, lvs_ev: str) -> List[dict]:
+    """Check hashes stamped by the real A6 producers against current layout.
+
+    Legacy hand-written fixtures have no binding and retain their existing
+    parser coverage. Native/LibreLane producer records do carry one; a changed
+    layout therefore invalidates both DRC and LVS evidence instead of allowing
+    a stale clean report to certify the new bytes.
+    """
+    bdir = _block_dir(project, block)
+    if bdir is None:
+        return []
+    layouts = [p for p in (sorted(bdir.glob(f"{block}.gds")) +
+                           sorted(bdir.glob("layout.gds")) +
+                           sorted(bdir.glob("*.gds")))]
+    layout = layouts[0] if layouts else bdir / "layout.mag"
+    if not layout.is_file():
+        return []
+    try:
+        actual = hashlib.sha256(layout.read_bytes()).hexdigest()
+    except OSError:
+        return []
+    out: List[dict] = []
+
+    def add(rule: str, rel_path: str, detail: str) -> None:
+        out.append({"block": block, "rule": rule, "rel_path": rel_path,
+                    "detail": detail})
+
+    # The native producer embeds the binding in both report consumers.
+    for name in (drc_ev, lvs_ev):
+        path = bdir / name if name else None
+        if path is None or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        recorded = None
+        if path.suffix == ".json":
+            try:
+                doc = json.loads(text)
+                recorded = doc.get("layout_sha256") if isinstance(doc, dict) else None
+            except ValueError:
+                continue
+        else:
+            match = re.search(r"^layout_sha256:\s*([0-9a-f]{64})\s*$",
+                              text, re.M)
+            recorded = match.group(1) if match else None
+        if recorded and recorded != actual:
+            add("A6_PV_LAYOUT_MUTATED", f"{str(path.relative_to(project))}",
+                f"report binds layout_sha256={recorded[:12]}, current "
+                f"{layout.name} is {actual[:12]}")
+
+    # The LibreLane arm has a separate JSON record even when its summary is
+    # not selected as the gate witness. Its GDS hash is still authoritative
+    # provenance for the arm that ran.
+    arm = bdir / "a6_librelane_drc.json"
+    if arm.is_file():
+        try:
+            doc = json.loads(arm.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = {}
+        recorded = doc.get("gds_sha256") if isinstance(doc, dict) else None
+        if recorded and recorded != actual:
+            add("A6_PV_LAYOUT_MUTATED", str(arm.relative_to(project)),
+                f"LibreLane record binds gds_sha256={recorded[:12]}, current "
+                f"{layout.name} is {actual[:12]}")
+    return out
+
+
 def _check_block(project: Path, block: str) -> Tuple[str, List[dict]]:
     """Return (status, findings) where status is PASS or FAIL.
     A block whose directory exists but lacks real DRC/LVS evidence is
@@ -583,6 +654,7 @@ def _check_block(project: Path, block: str) -> Tuple[str, List[dict]]:
 
     findings.extend(_witness_disagreements(
         bdir, rel, block, drc_count, drc_ev, lvs_ok, lvs_ev))
+    findings.extend(_layout_binding_findings(project, block, drc_ev, lvs_ev))
 
     return ("FAIL" if findings else "PASS"), findings
 

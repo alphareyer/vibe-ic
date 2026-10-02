@@ -30,6 +30,7 @@ chip-AGNOSTIC: no chip / vendor / SKU literal; discovers engines on PATH.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -66,6 +67,20 @@ def _find_gds(bdir: Path, block: str) -> Optional[Path]:
         if hits:
             return hits[0]
     return None
+
+
+def _layout_source(bdir: Path, block: str) -> Optional[Path]:
+    """Return the fixed A5 layout view this producer actually grades."""
+    return _find_gds(bdir, block) or (
+        bdir / "layout.mag" if (bdir / "layout.mag").is_file() else None)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _layout_identity(bdir: Path, netlist: Path) -> Tuple[str, str]:
@@ -713,6 +728,9 @@ def _write_drc_report(bdir: Path, block: str, violations: int,
         f"rules_skip: {meta.get('rules_skip', 0)}",
         f"violations: {violations}",
         f"result: {verdict}",
+        *([f"layout_path: {meta['layout_path']}",
+           f"layout_sha256: {meta['layout_sha256']}"]
+          if meta.get("layout_path") and meta.get("layout_sha256") else []),
         "",
     ]
     # WHICH ENGINE GRADED WHICH RULE. The count above is now two engines'
@@ -780,6 +798,9 @@ def _write_lvs_report(bdir: Path, block: str, verdict: str,
         "method": meta.get("method", "klayout_pdk_lvs"),
         "layout_devices": meta.get("layout_devices"),
         "source_devices": meta.get("source_devices"),
+        **({"layout_path": meta["layout_path"],
+            "layout_sha256": meta["layout_sha256"]}
+           if meta.get("layout_path") and meta.get("layout_sha256") else {}),
         # An absent count is absent for a REASON, and the reason belongs next
         # to it. Without this the artefact carries `null` and a reader cannot
         # tell an engine that does not produce the number from a block that
@@ -1220,6 +1241,10 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
     netlist_finder = netlist_finder or (lambda b, blk: _find_source_netlist(b, blk))
     gds = gds_finder(bdir, block)
     netlist = netlist_finder(bdir, block)
+    layout = _layout_source(bdir, block)
+    layout_meta = ({"layout_path": str(layout.relative_to(project)),
+                    "layout_sha256": _sha256(layout)}
+                   if layout is not None else {})
 
     drc_result: Optional[Dict[str, Any]] = None
     lvs_result: Optional[Dict[str, Any]] = None
@@ -1251,7 +1276,7 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
         if violations is None:
             reasons.append(f"DRC engine unavailable: {meta.get('reason', '?')}")
         else:
-            meta = dict(meta or {})
+            meta = dict(meta or {}, **layout_meta)
             if raw.is_file():
                 meta["raw_report"] = str(raw.relative_to(project))
             # THE RULES THE SIGN-OFF DECK DOES NOT GRADE. See
@@ -1317,8 +1342,9 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
                     g, nl, blk, ctn, _work, layermap))
         verdict, meta = runner(str(gds), str(netlist), block, container)
         _ident, _why = _layout_identity(bdir, netlist)
-        meta = dict(meta or {}, layout_netlist_identity={"state": _ident,
-                                                          "detail": _why})
+        meta = dict(meta or {}, **layout_meta,
+                    layout_netlist_identity={"state": _ident,
+                                             "detail": _why})
         if verdict is None:
             reasons.append(f"LVS engine unavailable: {meta.get('reason', '?')}")
         else:
