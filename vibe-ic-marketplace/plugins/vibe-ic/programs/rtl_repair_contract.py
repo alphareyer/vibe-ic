@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import os
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -218,8 +219,7 @@ def validate_preservation_declaration(
         if source is None:
             # A basename match is useful for a normal one-file repair while
             # still refusing an ambiguous source set.
-            matches = [value for key, value in original.items() if Path(key).name == Path(path).name]
-            source = matches[0] if len(matches) == 1 else None
+            source = None
         if source is None:
             refuse(f"declared original source {path!r} is absent", "SOURCE_MISSING")
             continue
@@ -244,17 +244,15 @@ def validate_preservation_declaration(
             refuse(f"source {path!r}: {error}", "DECLARATION_INCOMPLETE")
         candidate = emitted.get(path)
         if candidate is None:
-            matches = [value for key, value in emitted.items() if Path(key).name == Path(path).name]
-            candidate = matches[0] if len(matches) == 1 else None
+            candidate = None
         if candidate is None:
             refuse(f"candidate source {path!r} is absent", "CANDIDATE_MISSING")
             continue
         candidate_expected = row.get("candidate_sha256", declaration.get("candidate_sha256"))
-        if candidate_expected is not None:
-            if not isinstance(candidate_expected, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_expected):
-                refuse(f"source {path!r} has an invalid candidate hash", "CANDIDATE_HASH_INVALID")
-            elif sha256_text(candidate) != candidate_expected:
-                refuse(f"candidate source {path!r} is stale", "CANDIDATE_HASH_MISMATCH")
+        if not isinstance(candidate_expected, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_expected):
+            refuse(f"source {path!r} lacks an immutable candidate hash", "CANDIDATE_HASH_MISSING")
+        elif sha256_text(candidate) != candidate_expected:
+            refuse(f"candidate source {path!r} is stale", "CANDIDATE_HASH_MISMATCH")
         fragments = row.get("preserved_executable_fragments")
         if fragments is None:
             fragments = row.get("preserved_fragments")
@@ -262,6 +260,10 @@ def validate_preservation_declaration(
             refuse(f"source {path!r} has no preserved executable fragments",
                    "DECLARATION_INCOMPLETE")
             continue
+        keys = [(x.get("id", x.get("name")), x.get("quote", x.get("text")))
+                for x in fragments if isinstance(x, Mapping)]
+        if len(keys) != len(set(keys)):
+            refuse(f"source {path!r} contains duplicate preserved fragments", "FRAGMENT_DUPLICATE")
         for fidx, fragment in enumerate(fragments):
             if not isinstance(fragment, Mapping):
                 refuse(f"source {path!r} fragment {fidx} is not an object", "FRAGMENT_UNSUPPORTED")
@@ -298,7 +300,17 @@ def validate_preservation_declaration(
                 refuse(f"source {path!r} fragment {fidx} renames are not an object",
                        "FRAGMENT_UNSUPPORTED")
                 continue
-            found = _fragment_match(candidate, quote, renames)
+            # A preserved executable fragment must remain at its bound source
+            # span.  Searching the whole candidate would accept moved or
+            # duplicated logic and is not source-preservation evidence.
+            candidate_span = candidate[span[0]:span[1]] if span[1] <= len(candidate) else ""
+            found = _fragment_match(candidate_span, quote, renames)
+            if found and candidate_span.count(quote) > 1:
+                refuse(f"source {path!r} fragment {fidx} is duplicated", "FRAGMENT_DUPLICATE")
+            if renames:
+                vals = [str(v) for v in renames.values()]
+                if len(vals) != len(set(vals)):
+                    refuse(f"source {path!r} fragment {fidx} rename map is non-injective", "RENAME_NONINJECTIVE")
             status = "PRESERVED" if found else "REMOVED"
             row_out = {"id": fragment.get("id", fragment.get("name", str(fidx))),
                        "status": status, "source_span": [span[0], span[1]]}
@@ -413,6 +425,9 @@ def validate_matrix_declaration(
         return report
     source_text = ("\n".join(original_source[key] for key in sorted(original_source))
                    if isinstance(original_source, Mapping) else original_source)
+    if isinstance(declaration.get("source_path"), str) and isinstance(original_source, Mapping):
+        if declaration["source_path"] not in original_source:
+            refuse("declared source_path is absent from the bound source map", "SOURCE_PATH_INVALID")
     expected_source = declaration.get("source_sha256", declaration.get("original_sha256"))
     expected_hashes = ([expected_source] if isinstance(expected_source, str)
                        else expected_source if isinstance(expected_source, list) else [])
@@ -518,6 +533,8 @@ def validate_matrix_declaration(
             param_seen.add(param)
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 refuse(f"configuration {name!r} has an invalid value for {param!r}", "MAPPING_UNSUPPORTED")
+            elif isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+                refuse(f"configuration {name!r} has a non-finite value for {param!r}", "MAPPING_UNSUPPORTED")
             elif isinstance(value, str) and (not value.strip() or not _SAFE_VALUE.fullmatch(value.strip())):
                 refuse(f"configuration {name!r} has an unsafe parameter expression", "MAPPING_UNSUPPORTED")
     for macro, modes in macro_presence.items():
@@ -528,7 +545,7 @@ def validate_matrix_declaration(
     for item in declaration.get("supported_parameters", []) if isinstance(declaration.get("supported_parameters"), list) else []:
         if isinstance(item, Mapping) and item.get("required") is True and isinstance(item.get("name"), str):
             required_params.add(item["name"])
-    for param in required_params - param_seen:
+    for param in supported_params - param_seen:
         refuse(f"required public parameter {param!r} has no configuration mapping", "MATRIX_INCOMPLETE")
     if report["verdict"] == "REFUSED":
         return report
@@ -563,18 +580,25 @@ def run_elaboration_matrix(
         # A deleted supported branch is a candidate finding. Keep the declared
         # matrix rows visible, but do not pretend to have run invalid evidence.
         return report
-    if shutil.which("iverilog") is None:
+    compiler = shutil.which("iverilog")
+    if compiler is None:
         report["verdict"] = "NOT_MEASURED"
         report["findings"].append({"code": "TOOL_UNAVAILABLE", "message": "iverilog is unavailable"})
         return report
     rows = _matrix_rows(declaration)
+    compiler = str(Path(compiler).resolve())
+    if not (compiler.startswith("/usr/bin/") or compiler.startswith("/usr/local/bin/") or compiler.startswith("/foss/")):
+        report["verdict"] = "REFUSED"
+        report["findings"].append({"code": "COMPILER_IDENTITY_UNTRUSTED", "message": compiler})
+        return report
+    compiler_sha256 = hashlib.sha256(Path(compiler).read_bytes()).hexdigest()
     macro_bindings = declaration.get("macro_bindings", {})
     parameter_bindings = declaration.get("parameter_bindings", {})
     with tempfile.TemporaryDirectory(prefix="rtl_matrix_") as td:
         for row in rows:
             name = str(row.get("name", row.get("id")))
             params = _parameter_values(row)
-            command = ["iverilog", "-g2012"]
+            command = [compiler, "-g2012"]
             command.extend(_macro_flags(row, macro_bindings))
             for param, value in params.items():
                 command.extend([f"-P{top}.{parameter_bindings.get(param, param)}={value}"])
@@ -593,7 +617,12 @@ def run_elaboration_matrix(
                                                  "stderr": (exc.stderr or ""), "verdict": "NOT_MEASURED",
                                                  "candidate_sha256": sha256_text(candidate_source)})
                 continue
-            row_report = {"name": name, "command": command, "returncode": rc,
+            if hashlib.sha256(candidate_path.read_bytes()).hexdigest() != sha256_text(candidate_source):
+                report["verdict"] = "REFUSED"
+                report["findings"].append({"code": "CANDIDATE_CHANGED_DURING_EXECUTION", "configuration": name})
+                continue
+            row_report = {"name": name, "command": command, "compiler": compiler,
+                          "compiler_sha256": compiler_sha256, "name": name, "returncode": rc,
                           "stdout": stdout, "stderr": stderr,
                           "candidate_sha256": sha256_text(candidate_source),
                           "verdict": "PASS" if rc == 0 else "FAIL"}

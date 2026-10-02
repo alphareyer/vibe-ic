@@ -331,7 +331,7 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
             supplied_rtl: bool = False,
             required_top: Optional[str] = None,
             repair_contract=None,
-            require_repair_contract: bool = False) -> Dict[str, Any]:
+            require_repair_contract: bool = True) -> Dict[str, Any]:
     """The answer artefact, in the shape the scorer reads — or a refusal.
 
     Always step 1's RTL (`phase2/stage1/rtl/*`) — measured: every open RTL
@@ -527,8 +527,12 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                 contract = {"elaboration_matrix": contract}
             original_root = project / "input" / "public_original" / "files"
             original_sources: Dict[str, str] = {}
+            symlink_refused = False
             if original_root.is_dir():
                 for source_path in sorted(original_root.rglob("*")):
+                    if source_path.is_symlink() or any(parent.is_symlink() for parent in source_path.parents):
+                        symlink_refused = True
+                        break
                     if source_path.is_file():
                         original_sources[str(source_path.relative_to(original_root))] = \
                             source_path.read_text(errors="replace")
@@ -558,12 +562,22 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                 candidate_path = matrix_candidate_path or (Path(temp_dir) / "candidate.sv")
                 if matrix_candidate_path is None:
                     candidate_path.write_text(text)
-                repair_report = validate_normal_repair_contract(
-                    original_sources, candidate_sources, contract,
-                    candidate_path=candidate_path,
-                    original_source=source_for_matrix,
-                    top=top,
-                    require=True)
+                repair_report = ({"verdict": "REFUSED", "findings": [{
+                    "code": "SOURCE_SYMLINK", "message": "public source manifest contains a symlink"}]}
+                    if symlink_refused else validate_normal_repair_contract(
+                        original_sources, candidate_sources, contract,
+                        candidate_path=candidate_path,
+                        original_source=source_for_matrix,
+                        top=top,
+                        require=True))
+        # Ordinary benchmark dispatch must consume both independently-bound
+        # contracts immediately before completion; a single opt-in half is not
+        # sufficient evidence for a repair candidate.
+        if require_repair_contract and isinstance(contract, dict):
+            if not contract.get("preservation") or not contract.get("elaboration_matrix"):
+                repair_report = {"verdict": "REFUSED", "findings": [{
+                    "code": "DECLARATION_INCOMPLETE",
+                    "message": "normal benchmark completion requires preservation and elaboration_matrix contracts"}]}
         bundle["repair_contract"] = repair_report
         if repair_report.get("verdict") != "PASS":
             return {"id": problem_id, "ok": False,
