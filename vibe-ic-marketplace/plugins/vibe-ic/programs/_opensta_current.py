@@ -288,7 +288,8 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     subject['tool_image'] = image
     subject['tool_corner'] = corner
     return subject, {'state': folder / 'state_out.json', 'corner': corner,
-                     'liberties': inputs['liberties'], 'image': image, 'mounts': mounts}
+                     'liberties': inputs['liberties'], 'image': image,
+                     'mounts': [(Path(host), guest) for host, guest in mounts]}
 
 
 def tool_subject(project, top, *, corner=None, coupling=False):

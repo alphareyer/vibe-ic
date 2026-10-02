@@ -16,6 +16,7 @@ import power_report_check as PG
 import si_crosstalk_check as SG
 import spice_correlation_check as SC
 import path_spice_tool as PST
+import _opensta_current as C
 from _ppa import power
 
 SPEF = '''*SPEF "IEEE 1481-1998"
@@ -114,6 +115,14 @@ def project(tmp_path):
 def pdk(lib):
     return SimpleNamespace(name='neutral', liberty=str(lib), macro_libs=[], macro_lefs=[],
                            tech_lef='', cell_lef='')
+
+
+def test_current_tool_mounts_fit_native_transport(tmp_path):
+    p, _, _ = project(tmp_path)
+    _, tool = C.tool_subject(p, 'neutral')
+    assert tool['mounts']
+    assert all(isinstance(host, Path) and host.is_dir() and guest.startswith('/pdk/')
+               for host, guest in tool['mounts'])
 
 
 def fake_windows(monkeypatch, p):
