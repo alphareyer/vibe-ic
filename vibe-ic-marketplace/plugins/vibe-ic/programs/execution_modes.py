@@ -89,6 +89,10 @@ def _authority_store():
     lock = threading.Lock()
 
     def issue(path: Path, value: dict) -> None:
+        caller = inspect.currentframe().f_back.f_code
+        if caller not in {Controller.run.__code__, Controller._run_arm.__code__,
+                          Controller._selected_generation.__code__}:
+            raise Refusal('ISSUED_AUTHORITY_INVALID', 'Controller observation required')
         payload = json.loads(json.dumps(value, sort_keys=True))
         name = str(path.resolve())
         with lock:
@@ -756,8 +760,9 @@ class Controller:
         # This completion is issued from observed Popen.wait results. Gate
         # evidence remains separately reconsumed; a source-issued process rc0
         # does not grant PASS or replace a failed/unmeasured output consumer.
-        completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
-                      'adapter', 'processes', 'input_root', 'output_root')}
+        completion = {k: receipt.get(k) for k in ('run_id', 'arm_id', 'binding',
+                      'adapter', 'processes', 'input_root', 'output_root',
+                      'evidence', 'manifest', 'manifest_sha256')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           ended_ns=receipt['ended_ns'], run_root=str(root))
         _issue_authority(directory / 'issued-completion.json', completion)
@@ -770,7 +775,8 @@ class Controller:
         if issued_plan != plan or plan.get('run_root') != str(root):
             raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
         completion = _issued(root / arm.arm_id / 'issued-completion.json')
-        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')
+        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes',
+                  'input_root', 'output_root', 'evidence', 'manifest', 'manifest_sha256')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
                 completion.get('actual_status') != receipt.get('status') or

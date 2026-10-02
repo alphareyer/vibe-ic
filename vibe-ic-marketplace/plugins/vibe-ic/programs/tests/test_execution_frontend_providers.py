@@ -172,3 +172,61 @@ def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
         calls.clear()
         with __import__('pytest').raises(ValueError): w.produce_05ic(tmp_path,tmp_path/'out',**kwargs)
         assert calls == []
+
+
+@__import__('pytest').mark.parametrize('case', ['missing', 'empty', 'stale'])
+def test_step8_issued_run_refuses_rc0_without_fresh_output(tmp_path, monkeypatch, case):
+    import execution_frontend_worker as w
+    project=tmp_path/'project'
+    sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
+    sdc.write_text('create_clock -period 10 [get_ports clk]\n'
+                   'set_input_delay 1 -clock clk [all_inputs]\n'
+                   'set_output_delay 1 -clock clk [all_outputs]\n')
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
+    l8.write_text(json.dumps({'clocks': {'clk': {'period_ns': 10}}}))
+    _issued_worker_fixture(project, monkeypatch)
+    out=tmp_path/'out'; report=out/'reports/phase2/sdc_check.json'
+    if case == 'stale':
+        w.run_row('8', project, out)
+        prior=report.read_bytes()
+    elif case == 'empty':
+        report.parent.mkdir(parents=True); report.write_bytes(b'')
+    calls=[]
+    def no_output(argv, **kw):
+        calls.append(argv)
+        return w.subprocess.CompletedProcess(argv, 0, '', '')
+    monkeypatch.setattr(w.subprocess, 'run', no_output)
+    with __import__('pytest').raises(RuntimeError, match='missing, empty or stale'):
+        w.run_row('8', project, out)
+    assert len(calls)==1
+    assert not (out/'canonical.json').exists()
+    if case == 'stale':
+        assert report.read_bytes()==prior
+
+
+def test_step8_empty_pvt_is_not_execution_evidence(tmp_path, monkeypatch):
+    import execution_frontend_worker as w
+    project=tmp_path/'project'
+    sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
+    sdc.write_text('create_clock -period 10 [get_ports clk]\n')
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
+    l8.write_text('{}')
+    manifest=_issued_worker_fixture(project, monkeypatch)
+    matrix=sdc.with_name('pvt_matrix.json'); matrix.write_bytes(b'')
+    doc=json.loads(manifest.read_text()); doc['files'][str(matrix.relative_to(project))]=em.digest(matrix)
+    manifest.write_text(json.dumps(doc,sort_keys=True)+'\n')
+    monkeypatch.setenv('VIBEIC_MANIFEST_SHA256', em.digest(manifest))
+    calls=[]
+    monkeypatch.setattr(w.subprocess,'run',lambda *a, **k: calls.append(a))
+    with __import__('pytest').raises(ValueError, match='empty or unbound'):
+        w.run_row('8',project,tmp_path/'out')
+    assert calls==[]
+
+
+def test_unaccepted_core_cannot_enter_production_step8(tmp_path):
+    import design_one_shot_runner as runner
+    with __import__('pytest').raises(em.Refusal, match='CORE_REBIND_REQUIRED'):
+        p.validate_core_dependency('9b1207289b55e3215b28497161649d9f158070df')
+    result=runner.step_sdc_validation(tmp_path)
+    assert result.status=='NOT_MEASURED'
+    assert 'CORE_REBIND_REQUIRED' in result.detail
