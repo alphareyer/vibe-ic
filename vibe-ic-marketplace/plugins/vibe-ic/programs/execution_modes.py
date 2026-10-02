@@ -15,6 +15,7 @@ import hmac
 import inspect
 import json
 import math
+import fnmatch
 import os
 from pathlib import Path
 import re
@@ -218,7 +219,7 @@ class Registry:
             raise Refusal('UNSAFE_ARM_ID', adapter.arm_id)
         if not adapter.source_files or not adapter.tool_version or not (
                 adapter.engine_families and adapter.components and
-                adapter.required_outputs and callable(adapter.validate)):
+                callable(adapter.validate)):
             raise Refusal('ADAPTER_INCOMPLETE', adapter.arm_id)
         if not adapter.qualification_evidence:
             raise Refusal('QUALIFICATION_UNBOUND', adapter.arm_id)
@@ -336,7 +337,9 @@ class Controller:
         if not ready:
             return dict(mode=selected_mode, binding=binding, arms=[], portfolio=rows,
                         status='NOT_MEASURED', reason='NO_RUNNABLE_ADAPTER')
-        if any(dict(a.objective) != dict(context.objective) for a in ready):
+        if any(dict(a.objective) != dict(context.objective) and not (
+                context.step_id == '0.5ic' and
+                a.objective.get('parameters_from') == 'issued_manifest') for a in ready):
             raise Refusal('UNEQUAL_OBJECTIVES', context.step_id)
         if any(not set(step['required_output_contract']).issubset(a.output_contract)
                for a in ready):
@@ -546,6 +549,7 @@ class Controller:
                         env={**os.environ, 'OMP_NUM_THREADS': str(arm.cpus),
                              'OPENBLAS_NUM_THREADS': str(arm.cpus),
                              'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
+                             'VIBEIC_ISSUED_MANIFEST_SHA256': receipt['manifest_sha256'],
                              'VIBEIC_ARM_ID': arm.arm_id})
                     record['pid'] = process.pid
                     stop = None
@@ -705,7 +709,12 @@ class Controller:
             raise Refusal('GATE_NOT_MEASURED', arm.arm_id)
         outputs = Path(receipt['output_root']).resolve()
         hashes = evidence.get('outputs', {})
-        if not hashes or not set(arm.required_outputs).issubset(hashes):
+        def output_contract_satisfied(spec):
+            return any(any(fnmatch.fnmatch(name, alternative.strip())
+                           for alternative in str(spec).split(' OR '))
+                       for name in hashes)
+        if not hashes or not all(output_contract_satisfied(spec)
+                                 for spec in arm.required_outputs):
             raise Refusal('OUTPUT_INCOMPLETE', arm.arm_id)
         for name, expected in hashes.items():
             path = outputs / _relative(name)

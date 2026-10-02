@@ -6,18 +6,21 @@ NOT_MEASURED and never fabricate an output or PASS.
 """
 from dataclasses import dataclass
 from pathlib import Path
-import hashlib, json, shutil, sys
+import ast
+import hashlib, json, shlex, shutil, subprocess, sys, tempfile
+import fnmatch
 from typing import Callable
 
 ROWS = ('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 ROUTES = {'D1':('design_one_shot_runner.step_phase1',),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main','cdc_async_input_check.main','clock_domain_reg_crossing_check.main','reset_dependency_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb','design_one_shot_runner.step_l10_unit_tb_run','verilator_coverage_measure.main'),'5':('formal_harness_gen.generate','formal_property_run.run','design_one_shot_runner.step_full_stack_functional_tb'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.produce',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main'),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
 def _contracts():
-    try:
-        import _flow_yaml
-        rows={str(s['id']): tuple(s.get('required_outputs') or ('canonical.json',)) for s in _flow_yaml.load().get('steps',())}
-        return {r:rows.get(r,('canonical.json',)) for r in ROWS}
-    except Exception:
-        return {r:('canonical.json',) for r in ROWS}
+    import _flow_yaml
+    rows={str(s['id']): tuple(s.get('required_outputs') or ())
+          for s in _flow_yaml.load().get('steps',())}
+    missing=[r for r in ROWS if r not in rows]
+    if missing:
+        raise ValueError(f'canonical flow output contract missing: {missing}')
+    return {r:rows[r] for r in ROWS}
 CANONICAL_ROWS = _contracts()
 ENGINES = {r: ('source-bound',) for r in ROWS}; ENGINES.update({'2':('yosys','verilator'),'4':('iverilog','verilator'),'5':('yosys','sby'),'6':('quartus',),'11':('fault','yosys'),'DT1':('yosys',),'DT2':('yosys','openroad'),'DT3':('yosys','openroad')})
 APPLICABILITY = {r:'IC+IP' for r in ROWS}; APPLICABILITY['0.5ic']='IC+IP route authority'; APPLICABILITY['6']='IC only; FPGA evidence optional'
@@ -43,6 +46,10 @@ def _produce(step_id, project, **kwargs):
     from execution_frontend_worker import run_row
     out = project / 'frontend_outputs' / step_id.replace('.', '_')
     artifact = run_row(step_id, project, out, **kwargs)
+    if step_id == '0.5ic':
+        return ProviderResult(step_id, 'NOT_MEASURED',
+                              'real 0.5ic producers executed; canonical gates remain consumer-owned',
+                              (str(Path(artifact).relative_to(out)),))
     if not Path(artifact).is_file() or Path(artifact).name == 'canonical.json':
         return ProviderResult(step_id, 'NOT_MEASURED', 'real producer did not emit a canonical flow artifact', ())
     try: rel=Path(artifact).relative_to(project)
@@ -58,6 +65,112 @@ def _tree_sha(path):
 
 def _factory(step_id):
     return lambda project, **kwargs: _produce(step_id, project, **kwargs)
+
+
+def _source_closure(seeds):
+    """Bind local Python imports reachable from the public frontend sources."""
+    root=Path(__file__).resolve().parent
+    todo=[Path(seed).resolve() for seed in seeds]
+    seen={}
+    while todo:
+        path=todo.pop()
+        if path in seen or not path.is_file() or path.is_symlink():
+            continue
+        seen[path]=None
+        try: tree=ast.parse(path.read_text())
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            names=[]
+            if isinstance(node, ast.Import):
+                names=[alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names=[node.module]
+            for name in names:
+                candidate=root / (name.replace('.', '/') + '.py')
+                if candidate.is_file():
+                    todo.append(candidate)
+    return tuple(sorted(seen))
+
+
+def _gate_commands(node):
+    if isinstance(node, str):
+        return []
+    if isinstance(node, dict):
+        result=[]
+        for key, value in node.items():
+            if key == 'program_exit_zero' and isinstance(value, str):
+                result.append(value)
+            else:
+                result.extend(_gate_commands(value))
+        return result
+    if isinstance(node, list):
+        result=[]
+        for value in node:
+            result.extend(_gate_commands(value))
+        return result
+    return []
+
+
+def _gate_reports(contract):
+    result={}
+    for command in _gate_commands(contract.get('gate', {})):
+        try: tokens=shlex.split(command)
+        except ValueError: continue
+        if not tokens or '--json' not in tokens:
+            continue
+        index=tokens.index('--json')
+        if index + 1 < len(tokens):
+            result[Path(tokens[0]).name]=tokens[index + 1]
+    return result
+
+
+def _concrete_outputs(root, required):
+    found={}
+    for spec in required:
+        for alternative in (part.strip() for part in str(spec).split(' OR ')):
+            if any(ch in alternative for ch in '*?['):
+                paths=root.glob(alternative)
+            else:
+                paths=(root / alternative,)
+            for path in paths:
+                if path.is_file() and not path.is_symlink():
+                    found[str(path.relative_to(root))]=str(spec)
+    return found
+
+
+def _gate_verdict(program, path):
+    try:
+        doc=json.loads(path.read_text())
+        if program == 'submission_template_check':
+            verdict=doc['check']['verdict']
+        else:
+            verdict=doc['verdict']
+        if verdict not in ('PASS','FAIL'):
+            return 'NOT_MEASURED'
+        return verdict
+    except (OSError, ValueError, TypeError, KeyError):
+        return 'NOT_MEASURED'
+
+
+def _run_gate(program, root, source_dir):
+    """Run one declared gate into a private report, preserving its typed result."""
+    script=source_dir / (program + '.py')
+    if not script.is_file():
+        return 'NOT_MEASURED'
+    with tempfile.TemporaryDirectory(prefix='frontend-gate-') as tmp:
+        report=Path(tmp) / (program + '.json')
+        try:
+            cp=subprocess.run([sys.executable, str(script), str(root), '--json', str(report)],
+                              capture_output=True, text=True)
+        except OSError:
+            return 'NOT_MEASURED'
+        verdict=_gate_verdict(program, report) if report.is_file() else 'NOT_MEASURED'
+        if cp.returncode == 0 and verdict == 'PASS':
+            return 'PASS'
+        if cp.returncode != 0 and verdict == 'FAIL':
+            return 'FAIL'
+        return 'NOT_MEASURED'
 
 PROVIDERS = {r: FrontendProvider(r, _factory(r), CANONICAL_ROWS[r][:1], CANONICAL_ROWS[r][1:], DOWNSTREAM[r], APPLICABILITY[r], ENGINES[r], i) for i,r in enumerate(ROWS)}
 
@@ -75,18 +188,44 @@ def register_factories(registry):
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
     import execution_modes as em
     from execution_modes import Adapter, Component, Evidence, digest
-    source = str(Path(__file__).resolve()); worker = str(Path(__file__).with_name('execution_frontend_worker.py').resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
-    tracked = [Path(source), Path(worker)]
-    if any(__import__('subprocess').run(['git','-C',str(repo),'diff','--quiet','HEAD','--',str(path)], capture_output=True).returncode != 0 for path in tracked):
-        raise ValueError('frontend provider source is dirty; refusing registration')
+    source_path=Path(__file__).resolve(); worker_path=source_path.with_name('execution_frontend_worker.py')
+    source=str(source_path); worker=str(worker_path)
+    py_path=Path(shutil.which('python3') or sys.executable).resolve(); py=str(py_path)
+    repo=next(p for p in source_path.parents if (p/'.git').exists())
+    sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     for row,p in PROVIDERS.items():
         def validate(project, facts, _row=row):
             import _flow_yaml, flow_compliance_check
             contract=next(s for s in _flow_yaml.load()['steps'] if str(s['id']) == _row)
             root=Path(project)
             required=tuple(contract.get('required_outputs') or ())
-            artifacts={p:digest(root/p) for p in required if '*' not in p and (root/p).is_file()}
-            if required and len(artifacts) < len([p for p in required if '*' not in p]): raise ValueError('canonical flow artifacts missing')
+            concrete=_concrete_outputs(root, required)
+            artifacts={rel:digest(root/rel) for rel in concrete}
+            if _row == '0.5ic':
+                try:
+                    gate_result=flow_compliance_check.check_step(
+                        root, contract, {}, strict_step_binding=True)
+                    step_status=str(getattr(gate_result, 'status', gate_result))
+                except Exception:
+                    step_status='NOT_MEASURED'
+                report_paths=_gate_reports(contract)
+                gates={}
+                names=tuple(contract.get('mandatory_gate_programs') or report_paths)
+                for name in names:
+                    gates[name]=_run_gate(name, root, Path(__file__).resolve().parent)
+                if step_status == 'FAIL' or any(value == 'FAIL' for value in gates.values()):
+                    verdict='FAIL'
+                elif (step_status == 'PASS' and gates and
+                      all(value == 'PASS' for value in gates.values()) and
+                      all(any(fnmatch.fnmatch(rel, alt.strip())
+                              for rel in artifacts
+                              for alt in str(spec).split(' OR '))
+                          for spec in required)):
+                    verdict='PASS'
+                else:
+                    verdict='NOT_MEASURED'
+                return Evidence(facts, verdict, gates, artifacts,
+                                detail='real producers, canonical YAML outputs, and mandatory gates validated')
             gate_result=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
             gate = getattr(gate_result, 'status', gate_result)
             # The canonical checker returns a typed StepResult whose overall
@@ -113,15 +252,28 @@ def register_factories(registry):
             gates={n:('PASS' if str(gate) == 'PASS' else str(gate)) for n in names}
             verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
-        required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
-        bound_files={source:digest(Path(source)),worker:digest(Path(worker)),py:digest(Path(py))}
-        if row == '8':
-            for name in ('sdc_syntax_check.py','sdc_validator_check.py'):
-                path=Path(source).with_name(name); bound_files[str(path)]=digest(path)
+        required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract'])
         if row == '0.5ic':
-            for name in ('submission_template_ingest.py','tapeout_declaration_gen.py'):
-                path=Path(source).with_name(name); bound_files[str(path)]=digest(path)
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
+            seeds=[source_path, worker_path]
+            seeds.extend(source_path.with_name(name) for name in (
+                'submission_template_ingest.py','tapeout_declaration_gen.py',
+                '_flow_yaml.py','flow_compliance_check.py',
+                'submission_template_check.py','tapeout_declaration_check.py'))
+            closure=_source_closure(seeds)
+            closure += (source_path.parent.parent / 'flow' / 'phase1_phase2_phase3.yaml',)
+        else:
+            closure=(source_path, worker_path)
+        if row == '8':
+            closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py'))
+        bound_files={str(path):digest(path) for path in closure if path.is_file()}
+        bound_files[py]=digest(py_path)
+        if any(subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD','--',str(path)],
+                              capture_output=True).returncode != 0
+                   for path in (Path(name) for name in bound_files if Path(name).is_relative_to(repo))):
+            raise ValueError('frontend provider source is dirty; refusing registration')
+        objective=({'parameters_from':'issued_manifest'} if row == '0.5ic'
+                    else {'metric':'source_boundary'})
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():

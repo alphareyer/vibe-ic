@@ -62,6 +62,48 @@ def test_step8_public_controller_eligible_and_adopted(tmp_path):
     sdc.write_text(sdc.read_text()+'\n# mutation\n')
     with __import__('pytest').raises(Exception): controller.adopt(ctx,run,choice)
 
+
+def test_05ic_public_controller_eligible_and_adopted(tmp_path):
+    import hashlib, subprocess
+    project=tmp_path/'project'; (project/'input').mkdir(parents=True)
+    fixture=Path(__file__).parent/'fixtures/r0929_dieid_basis_self_tapeout_die/input/step_0_5ic_answers.json'
+    answers=json.loads(fixture.read_text())
+    answers['answer_provenance']['synthesis_area_budget']={
+        'answered_by':'owner', 'citation':'bounded frontend fixture owner declaration'}
+    answers_path=project/'input/step_0_5ic_answers.json'
+    answers_path.write_text(json.dumps(answers, sort_keys=True))
+    template=project/'input/submission_template_source'; template.mkdir(parents=True)
+    slot=template/'s1.yaml'
+    slot.write_text('DIE_AREA: [0, 0, 1000, 2000]\n'
+                    'CORE_AREA: [26, 26, 974, 1974]\n'
+                    'SEAL_RING_WIDTH: 26\nFP_SIZING: absolute\n'
+                    'pads: [pad_n0, pad_n1, pad_s0]\n')
+    registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
+    row=next(s for s in portfolio['steps'] if str(s['id'])=='0.5ic')
+    sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
+    ctx=em.Context('0.5ic',sha,
+                   {'input/step_0_5ic_answers.json':answers_path,
+                    'input/submission_template_source/s1.yaml':slot},
+                   {'template':'input/submission_template_source','slot':'s1'},
+                   tuple(row['mandatory_gate_programs']))
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
+    result=controller.run(ctx,run)
+    assert result['candidate_statuses']['frontend_0_5ic']=='ELIGIBLE'
+    receipt=json.loads((run/'frontend_0_5ic/receipt.json').read_text())
+    assert receipt['evidence']['verdict']=='PASS'
+    assert receipt['evidence']['gates']=={
+        'submission_template_check':'PASS','tapeout_declaration_check':'PASS'}
+    assert set(receipt['evidence']['outputs'])=={
+        'input/submission_template/slots/s1.yaml',
+        'reports/phase1/submission_template.json',
+        'input/submission_template/tapeout_declaration.json',
+        'reports/phase1/tapeout_declaration.json'}
+    choice={'arm_id':'frontend_0_5ic',
+            'receipt_sha256':em.digest(run/'frontend_0_5ic/receipt.json'),
+            'rationale':'both declared producers and mandatory gates passed',
+            'reviewer':'test', 'binding':ctx.binding()}
+    assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
+
 @__import__('pytest').mark.parametrize('row,required', [
     ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
     ('3', ('top',)), ('4', ('top','container')), ('5', ('top','container')),
