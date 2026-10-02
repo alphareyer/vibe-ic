@@ -101,7 +101,9 @@ def register_factories(registry):
                 validator_ok = (validator_doc.get('verdict') == 'PASS' and type(validator_doc.get('exit_code')) is int and validator_doc.get('exit_code') == 0 and isinstance(validator_doc.get('issues'), list))
             except (OSError, ValueError, TypeError):
                 syntax_ok = False
-            gate = 'PASS' if str(gate) == 'PASS' and syntax_ok and validator_ok else 'FAIL'
+            reasons = getattr(gate_result, 'reasons', ()) or ()
+            measured_gate_fail = any('sdc_syntax_check' in str(r) and ('FAIL' in str(r) or 'rc=' in str(r)) for r in reasons)
+            gate = 'PASS' if syntax_ok and validator_ok and not measured_gate_fail else 'FAIL'
             def gate_names(node):
                 if isinstance(node,str): return [node.split()[0]] if node else []
                 if isinstance(node,dict): return sum((gate_names(v) for v in node.values()),[])
