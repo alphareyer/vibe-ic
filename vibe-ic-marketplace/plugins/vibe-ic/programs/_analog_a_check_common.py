@@ -130,9 +130,10 @@ def _numeric(value: Any) -> Optional[float]:
 def parse_pre_vs_post(data: Any) -> PrePostParseResult:
     """Normalize one pre/post artifact and validate its authoritative fields.
 
-    The returned ``delta_pct`` is always computed from the pair (or, for a
-    legacy delta-only row, the stated value is retained because no pair exists
-    to recompute).  When both are present, a mismatch is an error.  If
+    The returned ``delta_pct`` is always computed from a finite pre/post pair;
+    a delta-only row is an error because no pair exists to recompute.  When
+    both are present, a mismatch is an error.  Nonfinite numeric fields are
+    errors rather than absent fields.  If
     ``overall_status`` is present it must be ``OK`` through the 10.0% boundary
     or ``NEEDS_RELAYOUT`` above it.  Consumers may report these errors in their
     own gate vocabulary, but they must not ignore them.
@@ -177,15 +178,37 @@ def parse_pre_vs_post(data: Any) -> PrePostParseResult:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name", item.get("spec", key_name or "?")))
-        pre_raw = next((item[k] for k in PRE_VS_POST_PRE_KEYS if k in item), None)
-        post_raw = next((item[k] for k in PRE_VS_POST_POST_KEYS if k in item), None)
-        stated_raw = next((item[k] for k in PRE_VS_POST_DELTA_KEYS if k in item), None)
+        pre_key = next((k for k in PRE_VS_POST_PRE_KEYS if k in item), None)
+        post_key = next((k for k in PRE_VS_POST_POST_KEYS if k in item), None)
+        stated_key = next((k for k in PRE_VS_POST_DELTA_KEYS if k in item), None)
+        pre_raw = item.get(pre_key) if pre_key is not None else None
+        post_raw = item.get(post_key) if post_key is not None else None
+        stated_raw = item.get(stated_key) if stated_key is not None else None
         pre = _numeric(pre_raw)
         post = _numeric(post_raw)
         stated = _numeric(stated_raw)
         metric = str(item.get("metric") or "")
         implied: Optional[float] = None
         has_pair = pre is not None and post is not None
+        if pre_key is not None and pre is None:
+            errors.append({
+                "rule": "PRE_VS_POST_NONFINITE_VALUE",
+                "name": name,
+                "detail": f"{pre_key}={pre_raw!r} is not a finite number",
+            })
+        if post_key is not None and post is None:
+            errors.append({
+                "rule": "PRE_VS_POST_NONFINITE_VALUE",
+                "name": name,
+                "detail": f"{post_key}={post_raw!r} is not a finite number",
+            })
+        if stated_key is not None and stated is None:
+            errors.append({
+                "rule": "PRE_VS_POST_NONFINITE_DELTA",
+                "name": name,
+                "detail": (f"{stated_key}={stated_raw!r} is not a finite "
+                           "number"),
+            })
         if has_pair:
             pairs.append((pre, post))
             try:
@@ -212,11 +235,13 @@ def parse_pre_vs_post(data: Any) -> PrePostParseResult:
                                    f"(tolerance "
                                    f"{PRE_VS_POST_DELTA_TOLERANCE_PP} points)"),
                     })
-        elif stated is not None:
-            # Legacy cut-over fixtures and early producer records carried only
-            # the stated field.  They remain measurable, but cannot claim pair
-            # consistency; a forged field is rejected whenever a pair exists.
-            implied = abs(stated)
+        elif pre_key is None or post_key is None:
+            errors.append({
+                "rule": "PRE_VS_POST_PAIR_REQUIRED",
+                "name": name,
+                "detail": ("finite pre and post values are required; a "
+                           "delta-only record cannot certify A7 re-entry"),
+            })
         if implied is not None:
             rows.append(PrePostRow(name, pre, post, implied, stated, metric,
                                    has_pair))

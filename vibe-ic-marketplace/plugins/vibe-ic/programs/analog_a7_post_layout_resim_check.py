@@ -244,18 +244,11 @@ def _check_block(project: Path, block: str, max_delta_pct: float
         }]
 
     parsed = parse_pre_vs_post(data)
-    # Delta-only records are retained for the cut-over reader, but A7
-    # certification requires the measured pair itself.
+    # Every consumer requires the measured pair itself; a stated delta alone
+    # is not evidence for a closed-loop re-entry.
     deltas = [float(row.delta_pct) for row in parsed.rows
               if row.has_pair and row.delta_pct is not None]
     pairs = list(parsed.pairs)
-    if parsed.container_key is None or not deltas:
-        return "FAIL", [{
-            "block": block, "rule": "A7_POSTSIM_NO_SPECS",
-            "rel_path": rel,
-            "detail": ("neither `specs[]`/`comparisons` nor a flat `pre`/`post` "
-                       "pair with numeric values is present"),
-        }]
     parse_findings = []
     for error in parsed.errors:
         parser_rule = str(error.get("rule", "PARSE_ERROR"))
@@ -264,6 +257,12 @@ def _check_block(project: Path, block: str, max_delta_pct: float
                 "A7_POSTSIM_DELTA_INCONSISTENT",
             "PRE_VS_POST_STATUS_INCONSISTENT":
                 "A7_POSTSIM_STATUS_INCONSISTENT",
+            "PRE_VS_POST_NONFINITE_VALUE":
+                "A7_POSTSIM_NONFINITE_VALUE",
+            "PRE_VS_POST_NONFINITE_DELTA":
+                "A7_POSTSIM_NONFINITE_DELTA",
+            "PRE_VS_POST_PAIR_REQUIRED":
+                "A7_POSTSIM_PAIR_REQUIRED",
         }.get(parser_rule, "A7_POSTSIM_" + parser_rule)
         parse_findings.append({
             "block": block,
@@ -273,6 +272,13 @@ def _check_block(project: Path, block: str, max_delta_pct: float
         })
     if parse_findings:
         return "FAIL", parse_findings
+    if parsed.container_key is None or not deltas:
+        return "FAIL", [{
+            "block": block, "rule": "A7_POSTSIM_NO_SPECS",
+            "rel_path": rel,
+            "detail": ("neither `specs[]`/`comparisons` nor a flat `pre`/`post` "
+                       "pair with numeric values is present"),
+        }]
 
     if not deltas:
         return "FAIL", [{

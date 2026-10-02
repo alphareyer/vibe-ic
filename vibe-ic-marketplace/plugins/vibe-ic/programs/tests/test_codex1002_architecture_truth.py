@@ -113,6 +113,35 @@ def _write_boundary_tree(root: Path, pct: float) -> None:
         json.dumps({"blocks": ["ldo"]}))
 
 
+def _write_cutover_arm(root: Path, artifact: dict | None = None) -> Path:
+    block = root / "phase3" / "analog" / "blk"
+    files = {
+        "blk.sp": "x",
+        "blk.gds": "g",
+        "hardmacro/blk.gds": "g",
+        "hardmacro/blk.lef": "l",
+        "hardmacro/blk.lib": "b",
+        "hardmacro/blk.v": "v",
+    }
+    for rel, text in files.items():
+        path = block / rel if not rel.startswith("hardmacro/") else \
+            root / "phase3" / "analog" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    if artifact is not None:
+        pvp = block / "pre_vs_post.json"
+        pvp.write_text(json.dumps(artifact))
+    return root
+
+
+def _cutover_drive() -> dict:
+    return {
+        "blocks": ["blk"],
+        "runner": [{"block": "blk", "step": "A7", "status": "PASS"}],
+        "compliance": {"A7": {"status": "PASS"}},
+    }
+
+
 @pytest.mark.parametrize("pct, expected", [(9.99, 0), (10.00, 0), (10.01, 1)])
 def test_a7_boundary_is_one_10_percent_rule_for_both_gates(
         tmp_path: Path, pct: float, expected: int) -> None:
@@ -227,6 +256,68 @@ def test_a7_forged_stated_delta_is_rejected_by_both_gates(
                              "--json", str(report)],
                             capture_output=True, text=True)
         assert cp.returncode == 1, (program, cp.stdout, cp.stderr)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")],
+                         ids=["NaN", "+Inf", "-Inf"])
+def test_a7_nonfinite_stated_delta_is_an_error_in_all_three_consumers(
+        tmp_path: Path, bad: float) -> None:
+    import subprocess
+    import analog_a7_post_layout_resim_check as runner_gate
+    import analog_b_analog_cutover as cutover
+    import analog_pre_vs_post_layout_check as flow_gate
+
+    _write_boundary_tree(tmp_path, 9.0)
+    pvp = tmp_path / "phase3/analog/ldo/pre_vs_post.json"
+    doc = json.loads(pvp.read_text(encoding="utf-8"))
+    doc["specs"][0]["delta_pct"] = bad
+    doc["overall_status"] = "OK"
+    pvp.write_text(json.dumps(doc), encoding="utf-8")
+    for program in (runner_gate.__file__, flow_gate.__file__):
+        report = tmp_path / (Path(program).stem + ".json")
+        cp = subprocess.run([sys.executable, program, str(tmp_path),
+                             "--json", str(report)],
+                            capture_output=True, text=True)
+        assert cp.returncode == 1, (program, bad, cp.stdout, cp.stderr)
+
+    direct = _write_cutover_arm(tmp_path / "direct")
+    tool = _write_cutover_arm(tmp_path / "tool", doc)
+    record = cutover.compare(cutover.manifest(direct), direct, tool, "A7",
+                             _cutover_drive(), _cutover_drive(), None,
+                             PLUGIN / "flow" / "phase1_phase2_phase3.yaml")
+    assert record["b3"]["parse_errors"]["tool"]["blk"]
+    assert record["b3"]["fallback_to"] is None
+    assert record["result"] == "FAIL"
+
+
+@pytest.mark.parametrize("delta", [5.0, 20.0], ids=["delta5", "delta20"])
+def test_a7_delta_only_record_is_rejected_by_all_three_consumers(
+        tmp_path: Path, delta: float) -> None:
+    import subprocess
+    import analog_a7_post_layout_resim_check as runner_gate
+    import analog_b_analog_cutover as cutover
+    import analog_pre_vs_post_layout_check as flow_gate
+
+    _write_boundary_tree(tmp_path, 9.0)
+    doc = {"specs": [{"name": "vout", "delta_pct": delta}],
+           "overall_status": "OK" if delta <= 10.0 else "NEEDS_RELAYOUT"}
+    pvp = tmp_path / "phase3/analog/ldo/pre_vs_post.json"
+    pvp.write_text(json.dumps(doc), encoding="utf-8")
+    for program in (runner_gate.__file__, flow_gate.__file__):
+        report = tmp_path / (Path(program).stem + ".json")
+        cp = subprocess.run([sys.executable, program, str(tmp_path),
+                             "--json", str(report)],
+                            capture_output=True, text=True)
+        assert cp.returncode == 1, (program, delta, cp.stdout, cp.stderr)
+
+    direct = _write_cutover_arm(tmp_path / "direct")
+    tool = _write_cutover_arm(tmp_path / "tool", doc)
+    record = cutover.compare(cutover.manifest(direct), direct, tool, "A7",
+                             _cutover_drive(), _cutover_drive(), None,
+                             PLUGIN / "flow" / "phase1_phase2_phase3.yaml")
+    assert record["b3"]["parse_errors"]["tool"]["blk"]
+    assert record["b3"]["fallback_to"] is None
+    assert record["result"] == "FAIL"
 
 
 def test_a7_threshold_mutation_is_rejected_by_the_consistency_contract() -> None:

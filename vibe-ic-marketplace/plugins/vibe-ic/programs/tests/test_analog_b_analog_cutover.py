@@ -45,8 +45,8 @@ _T = {"A6": "FAIL", "A7": "PASS", "A8": "PASS", "A9": "PASS"}
 
 
 def _pvp(delta: float) -> str:
-    return json.dumps({"specs": [{"name": "vout@ngspice()",
-                                  "delta_pct": delta}]})
+    return _pvp_pair(100.0, 100.0 - abs(delta), -abs(delta),
+                     "NEEDS_RELAYOUT" if abs(delta) > 10.0 else "OK")
 
 
 def _pvp_pair(pre: float, post: float, stated: float,
