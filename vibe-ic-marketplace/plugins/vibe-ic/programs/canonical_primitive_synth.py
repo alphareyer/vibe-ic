@@ -209,6 +209,17 @@ class _DivisionProposition(NamedTuple):
     port_role: Optional[str]
 
 
+# Frame classification and operand recognition share this bounded grammar.
+# Unknown target operand modalities cannot establish the restricted contract.
+_DIVISION_MODAL_BE = (r"(?:may|might|could|can|cannot)\s+"
+                      r"(?:(?:not|never)\s+)?"
+                      r"(?:(?:possibly|sometimes|occasionally|well)\s+){0,2}be")
+_DIVISION_ELIDED_START = (r"(?:(?:also|then|later|still|nevertheless)\s+){0,2}"
+                          r"(?:is|are|was|were|has|have|had|does|do|did|not|no|"
+                          r"waived|removed|obsolete|optional|retracted|cancelled|"
+                          r"canceled|inapplicable|deprecated|superseded|belongs)\b")
+
+
 def _division_frame(text: str) -> Tuple[str, str]:
     """Classify attribution and assertion framing, independently of polarity.
 
@@ -232,7 +243,7 @@ def _division_frame(text: str) -> Tuple[str, str]:
         return owner, "conditional"
     # A modal allowance remains a target assertion even when its possibility
     # is emphasized. Other qualified facts still cannot authorize a contract.
-    qualification = re.sub(r"\b(may|can|could|might)\s+possibly\s+be\b", r"\1 be", text)
+    qualification = re.sub(r"\b" + _DIVISION_MODAL_BE + r"\b", "can be", text)
     if re.search(r"\b(?:probably|presumably|possibly|likely|uncertain|unknown|"
                  r"previously|formerly|historically)\b|"
                  r"\b(?:previous|prior|old)\s+(?:rule|requirement)\b", qualification):
@@ -295,8 +306,7 @@ def _division_propositions(desc_text: str,
             # Keep coordinated predicates with an elided subject together;
             # the withdrawal resolver supplies their common referent.
             clauses = re.split(r"(?:;\s*|,\s*(?:and|but|yet|however)\s+)"
-                               r"(?!\s*(?:is|are|was|were|has|have|had|does|do|did|"
-                               r"not|no|still)\b)", sentence)
+                               r"(?!\s*" + _DIVISION_ELIDED_START + r")", sentence)
             for clause in clauses:
                 clause = clause.strip().removeprefix("and ")
                 if not clause:
@@ -401,12 +411,15 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
     retracted = set()
     previous = set()
     antecedents = set()
-    referent = re.compile(r"^(?:(?:that|this|these|those|all|both|the(?:\s+(?:preceding|above))?)\s+"
+    carried_subject = None
+    referent = re.compile(r"^(?:(?:that|this|these|those|all|both|the)"
+                          r"(?:\s+(?:preceding|above))?\s+"
                           r"(?:(?P<domain>non[- ]?zero|divisor|denominator|ordering|"
-                          r"dividend|numerator|(?:both\s+)?operands?)\s+)?"
+                          r"(?:dividend|numerator)(?:\s+and\s+(?:the\s+)?"
+                          r"(?:divisor|denominator))?|(?:both\s+)?operands?)\s+)?"
                           r"(?P<kind>statements?|guarantees?|requirements?|"
                           r"property|properties|rules?|constraints?)|"
-                          r"this\s+is)\b")
+                          r"this\s+is|(?P<pronoun>they|it))\b")
     withdrawal = re.compile(r"\b(?:waived|removed|obsolete|optional|retracted|"
                             r"cancelled|canceled|inapplicable|deprecated|superseded)\b|"
                             r"\bbelongs\s+to\b")
@@ -414,7 +427,12 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
                               r"\bno\s+longer\s+(?:apply|applies)\b")
     for proposition, domains in zip(propositions, events):
         subject = referent.search(proposition.text)
+        if (subject is None and carried_subject is not None
+                and _division_target_evidence(proposition)
+                and re.match(_DIVISION_ELIDED_START, proposition.text)):
+            subject = carried_subject
         if not subject:
+            carried_subject = None
             if _division_target_evidence(proposition) and domains:
                 antecedents.update(domains)
                 previous = domains
@@ -429,24 +447,33 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
                 previous = set()
             continue
         if proposition.frame != "assertion" or proposition.structural:
+            carried_subject = None
             antecedents = set()
             previous = set()
             continue
         # Every coordinated predicate has its own polarity. The referent is
         # inherited only by an elided verb phrase, never by another subject.
-        clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+(?:also\s+)?|"
-                           r"\s*[;,]\s*", proposition.text)
+        carried_subject = subject
+        # Split the predicates after the subject, so a compound operand
+        # referent is not mistaken for two independently owned clauses.
+        tail = (proposition.text[subject.end():] if referent.search(proposition.text)
+                else proposition.text)
+        clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|"
+                           r"\s*[;,]\s*", tail)
         for clause in clauses:
             explicit = referent.search(clause)
             if explicit:
                 subject = explicit
-            elif not re.match(r"^(?:is|are|was|were|has|have|had|does|do|did|"
-                              r"not|no|still)\b", clause) and not withdrawal.match(clause):
+            elif not re.match(_DIVISION_ELIDED_START, clause.strip()):
+                carried_subject = None
                 continue
+            carried_subject = subject
             named, kind = subject.group("domain", "kind")
-            matching = ({"nonzero", "ordering"} if named and "operand" in named else
+            matching = ({"nonzero", "ordering"} if named and (
+                            "operand" in named or " and " in named) else
                         {"ordering" if named in {"ordering", "dividend", "numerator"} else "nonzero"}
-                        if named else antecedents if kind and kind.endswith("s") else previous)
+                        if named else antecedents if (kind and kind.endswith("s"))
+                        or subject.group("pronoun") == "they" else previous)
             for predicate in withdrawal.finditer(clause):
                 retires = not denied(clause[:predicate.start()])
                 reassigned = (predicate.group().startswith("belongs") and retires)
@@ -459,6 +486,7 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
             # through an intervening requirement owned by another design.
             antecedents = set()
             previous = set()
+            carried_subject = None
     return retracted
 
 
@@ -476,13 +504,12 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                           r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?"
                           r"(?:at\s+least\s+|>=\s*|≥\s*)(?:the\s+)?" + divisor + r"\b")
     operand = r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
-    allowance = re.compile(operand + r"\s+(?:"
-                           r"(?:may|might|could|can)\s+be\s+(?:zero|0|non[- ]?zero|positive)\b|"
+    allowance = re.compile(operand + r"\s+(?:" +
+                           _DIVISION_MODAL_BE + r"\s+(?:zero|0|non[- ]?zero|positive)\b|"
                            r"(?:is|are)\s+(?:zero|0)\b|"
                            r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + r")")
     less = re.compile(r"\b(?:the\s+)?" + dividend +
-                      r"\s+(?:(?:is|(?:may|can|could|might)\s+"
-                      r"(?:(?:possibly|sometimes)\s+)?be)\s+)?"
+                      r"\s+(?:(?:is|" + _DIVISION_MODAL_BE + r")\s+)?"
                       r"(?:less|smaller)\s+than\s+(?:the\s+)?" + divisor)
     positives, contradictions, events = set(), set(), []
     zero_allowed = False
@@ -494,30 +521,48 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                     current.add(name)
                     positives.add(name)
         events.append(current)
+        unresolved_modal = re.search(operand + r"\s+(?:may|might|could|can)\b",
+                                     proposition.text)
+        if (unresolved_modal and proposition.owner == "target"
+                and proposition.frame in {"assertion", "qualified"}
+                and not re.search(r"\b" + _DIVISION_MODAL_BE + r"\b",
+                                  proposition.text[unresolved_modal.start():])
+                and not denied(proposition.text[unresolved_modal.start():])):
+            # A target operand allowance outside the bounded grammar is
+            # unresolved, never evidence that the restrictive domain survives.
+            contradictions.update({"nonzero", "ordering"})
         if not _division_target_evidence(proposition):
             continue
-        is_denied_here = denied(proposition.text)
+        def predicate_denied(match: re.Match) -> bool:
+            # A denial of the requirement directly governs its complement;
+            # a separate subject's output denial does not govern this operand.
+            prefix = proposition.text[:match.start()]
+            requirement_denied = re.search(
+                r"\bno\s+(?:requirement|guarantee)\s+that\s+(?:the\s+)?$", prefix)
+            return bool(requirement_denied) or denied(match.group())
+
         for match in allowance.finditer(proposition.text):
             matched = match.group()
+            is_denied_here = predicate_denied(match)
             has_zero = bool(re.search(r"\b(?:be|is|are)\s+(?:zero|0)\b", matched))
             # A denied zero allowance is a prohibition, not a contradiction.
             if (has_zero and not is_denied_here) or (not has_zero and (
                     is_denied_here or re.search(r"\b(?:may|might|could|can)\b", matched))):
                 contradictions.add("nonzero")
                 zero_allowed = zero_allowed or has_zero
-        explicit_zero = bool(re.search(
+        explicit_zero = re.search(
             r"\b(?:zero|0)\s+is\s+(?:also\s+)?(?:permitted|allowed|valid|accepted)"
             r"\s+(?:as\s+)?(?:a\s+)?(?:divisor|denominator)\b|"
             r"\b(?:a\s+)?(?:divisor|denominator)\s+of\s+(?:zero|0)\s+is\s+"
-            r"(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+(?:input|value)\b", proposition.text))
-        port_zero = proposition.port_role in {"divisor", "dividend"} and bool(re.search(
+            r"(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+(?:input|value)\b", proposition.text)
+        port_zero = re.search(
             r"\b(?:zero|0)\s+is\s+(?:a\s+)?(?:permitted|allowed|valid|accepted)\s+"
-            r"(?:input|value)\b", proposition.text))
-        if (explicit_zero or port_zero) and not is_denied_here:
+            r"(?:input|value)\b", proposition.text) if proposition.port_role in {"divisor", "dividend"} else None
+        if any(match and not predicate_denied(match) for match in (explicit_zero, port_zero)):
             contradictions.add("nonzero")
             zero_allowed = True
-        if (less.search(proposition.text) and not is_denied_here) or (
-                ordering.search(proposition.text) and is_denied_here):
+        if (any(not predicate_denied(match) for match in less.finditer(proposition.text))
+                or any(predicate_denied(match) for match in ordering.finditer(proposition.text))):
             contradictions.add("ordering")
     contradictions.update(_division_retracted_domains(propositions, events, denied))
     return ("nonzero" in positives and "nonzero" not in contradictions,
@@ -557,6 +602,7 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
         # The extraction boundary owns its polarity consult. Pass this exact
         # predicate to assertion, contradiction and retraction analysis; never
         # apply a whole-document denial to unrelated propositions.
+        text = re.sub(r"\bcannot\b", "can not", text)
         return is_denied(re.sub(r"\bnon[- ]zero\b", "nonzero", text),
                          ignore_bracketed=False) is not None
 

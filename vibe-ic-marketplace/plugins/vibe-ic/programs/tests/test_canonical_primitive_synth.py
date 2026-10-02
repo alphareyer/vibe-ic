@@ -3069,3 +3069,839 @@ def test_unsigned_divider_r8_exact_independent(case, emit, domain, ports, tmp_pa
                                       "-o", str(tmp_path / "sim.out"), str(rtl)],
                                      capture_output=True, text=True)
         assert compile_run.returncode == 0, compile_run.stdout + compile_run.stderr
+
+
+# Exact independent R8 review inputs retained verbatim for R9.
+_R9_SPEC = 'Design an unsigned iterative arithmetic unit using the restoring division algorithm.\nModule name: extra_scope_unit\nParameter WIDTH has a default value of 9.\n{interface}\n{domain}\nOn reset all outputs clear. New inputs are accepted after the previous result.\nAt each restoring iteration append the next dividend bit to the shifted partial remainder and subtract the divisor; a negative trial restores the shifted partial remainder and produces quotient bit zero.\nCompletion takes WIDTH cycles for power-of-two WIDTH and WIDTH+1 cycles otherwise; no extra input-only cycle.\n'
+_R9_CASES = [('semicolon_also_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived; '
+  'also removed.',
+  '0eb8d6c785656421432e2a361537b55d29e443b12029715eb3845f68498fe4c7'),
+ ('comma_also_was_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived, '
+  'and also was removed.',
+  '7ac6bd4f1c1fe7c124564dda4a05f17a260e6583fc63dcaeb3a19c4a8de28639'),
+ ('semicolon_and_was_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived; '
+  'and was removed.',
+  '28944bd6ed0eb3993312f38b9e584842825db36d29a15b4fc7b18e3ca51f3b4e'),
+ ('elided_later_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived '
+  'and later removed.',
+  '448409f7c13682be4f45695d2e58989a77bdd6e84a9393b8a0e4f022ad12aff3'),
+ ('elided_then_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived '
+  'but then removed.',
+  '3330411a1eadf2b9608c74bccc815f185d3c20e58d62c2f3a40268e1359bf0de'),
+ ('elided_nevertheless_removed',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived; '
+  'has nevertheless been removed.',
+  'a6229489aea70f09bc5bb8f1102e8e1e168f130d7b5d6408618ae25dbd032b6f'),
+ ('named_dividend_and_divisor',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The dividend and divisor requirements are '
+  'removed.',
+  'f79137bb13c5da17f544945f7533f3a2ece1b0e2d866e2614cbaea589d39d470'),
+ ('named_both_operands_plural',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Both operands requirements are removed.',
+  'f4efb99f2b6a2273d87b236d641d44ca0e237b6f1c062e37a57b6cc5afa0fef1'),
+ ('all_above_requirements',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. All above requirements are removed.',
+  '43a8642f79e5c71fd4d9a1198e9d80bcca64e6514769d04cf7f3c0607aea78bf'),
+ ('plural_after_unrelated_paragraph',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The quotient may be zero.\n'
+  '\n'
+  'These requirements are removed.',
+  'e5da1f049c2194c17a06222bfc32d90e3d29fe869c011b48ef56f8118147f123'),
+ ('withdrawal_next_paragraph',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. \n\nBoth requirements are removed.',
+  '7c2420b340a9e3bd60f15832847d02f824c43be9abf2d6ff65466d3d3bd952a4'),
+ ('withdrawal_unicode_stop',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. These requirements are not waived。They '
+  'are removed.',
+  'd3a44d22ee576356f788601b1ff9eeb14af5d98b5409f4b6bd2659cf66bdff32'),
+ ('modal_might_occasional',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend might occasionally be less than '
+  'divisor.',
+  '954788a469fa13dc48f4fbc633b15c46da8d587d012df13af7c1619382b21044'),
+ ('modal_could_well',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend could well be smaller than '
+  'divisor.',
+  '478f75744cd8a4fb113538fc25224f898591f11593c83de8762d2ccb7fd66bf5'),
+ ('modal_can_sometimes',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend can sometimes be smaller than '
+  'divisor.',
+  '7d4ce535238502442ce80a78d52d61f11612d19f252187f14f0a5457c32c9b0e'),
+ ('modal_may_possibly',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend may possibly be less than '
+  'divisor.',
+  'abeafe9e29f7f8cfb28c6ade8865e8e0622deba3c5d06933c07a40d92b660c7b'),
+ ('modal_could_possible_zero',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The divisor could possibly be zero.',
+  '11820d3e382dec101a36cf7641e7da199b70be66c4ffbc085b1dd308668a5f9b'),
+ ('modal_can_possible_zero',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The divisor can possibly be zero.',
+  'ba29bc7a3e565ff5ba5d587f8cb9c9c50f6bbbc92fa831b4f11fce563b636076'),
+ ('modal_might_sometimes_zero',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The divisor might sometimes be zero.',
+  'a868bbba5d182b4ffe080f06e928ec73c4ede29d797291c5bd8650dc2e3276ba'),
+ ('mixed_output_subject',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement is not waived, '
+  'and the quotient requirement is removed; the ordering requirement is removed.',
+  '5277c00f5a1291e35b44e302384fc3c16050c27ba60a2d2606e0b3887cdda125'),
+ ('withdrawal_heading',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. \n'
+  'Target input constraints:\n'
+  '- The divisor requirements are removed.',
+  '97c3553f18db786e6a4307d6268104fef826d338fe09a5bfac67946c8480bfdf'),
+ ('both_operand_negated',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Both operand requirements are not waived.',
+  'e8e943f5c13bb5cc81962de7d37b883f7f857bf08dac4de1935e9c033b8c3b5c'),
+ ('both_negated_predicates',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived '
+  'and also not removed.',
+  'e795fabfaa363916226834776f8674f20ed976dbde8fd52de6a9c78f04d0c1bd'),
+ ('semicolon_negated_predicate',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived; '
+  'was not removed.',
+  'ad4c7f73970fb19f424f6baa54b8347c5056240b9940ce465378f744187644b2'),
+ ('unrelated_output_withdrawal',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The quotient requirements are removed.',
+  '88251123788f7749877cc1c491025704fede9205a2d35a86298763249d3eae93'),
+ ('unrelated_after_named_predicate',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement is not waived and '
+  'the quotient requirement is removed.',
+  '75786e88505a256b82b7e411f41fe9253e1f6ec51e95d659e034bcd0c95f12d4'),
+ ('unrelated_elided_output',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The quotient requirement was not waived; '
+  'was removed.',
+  '858aa4defa22699a4748d69bccc5dfd9d18e59aedff7cd00183128c5cef0bcb2'),
+ ('external_operand_removal',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The reference model dividend requirements '
+  'are removed.',
+  '127a70b5450c449f249e3f045cc6c446cf0fe9096ffa39e3b99aa64841f0ac59'),
+ ('quoted_plural_removal',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. A discarded note says "Both requirements '
+  'are removed".',
+  '8e2b057bca352d4e9a04dbbcece6186d4038783ac258abae9692b9c9679fc921'),
+ ('conditional_plural_removal',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. If another design is used, both '
+  'requirements are removed.',
+  'a656e05747582b8b430b0d776d8ced165552a253858d22b0c39a18715f707030'),
+ ('negated_modal_less',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend cannot be less than divisor.',
+  '057e54132f772d6531780767a04bc6e728e32834eef30558dea0a992012b1d51'),
+ ('negated_possible_less',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. Dividend could not possibly be less than '
+  'divisor.',
+  '2f1ec2c189d8b8ba941549559d4a029857cfb118f4eec048f9dca734f7810b6e'),
+ ('negated_possible_zero',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The divisor could not possibly be zero.',
+  '45f2003275c4b6350af6dcbcdff5f555a4b7601770cf415296a1fc5117b97c27'),
+ ('unrelated_requirements_plural',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The output timing requirement is '
+  'retained. These requirements are removed.',
+  '36ad317fa31e02a81e810ea4214ce528fe07cc02f05e96c24dd701031136f425'),
+ ('unrelated_rules_plural',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The output timing rules are described '
+  'below. Those rules are removed.',
+  '43025fcf3a056901636804ee0b8a23d55b92fb80e60c5001766294b69be26218'),
+ ('unrelated_negation_same_clause',
+  'DEFER',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor. The quotient is not negative and dividend '
+  'could be smaller than divisor.',
+  'fd99fbe6c641ffb117ee4abace8ff722a04e7751231fd03ce4cabe79c4214616'),
+ ('dividend_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'WIDTH[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '18ce9c8e10defe4c2c0a149b01dff9240a9150fbf92166b46b3d92f40d2d7a0e'),
+ ('dividend_identifier_WIDTH_1',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'WIDTH_1[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '8da527263ac10933203d188f12f790ba7539132fc9ac5fc511cec15a0bf8e92f'),
+ ('dividend_identifier_COUNT_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'COUNT_WIDTH[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '2822932314fae60a34e15266854a3a79a1107ae01bdfb2ef75b789a9f671055c'),
+ ('dividend_identifier_EXTRA_FINAL_CYCLE',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'EXTRA_FINAL_CYCLE[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '4f74e7d9405dcdc724d4eae21dd1a9fd235a5841c35133dcf85b437478043096'),
+ ('dividend_identifier_busy',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'busy[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '753ce19fdf5218e1408a537c064f1a318aa64425b1d8081c9a0f9b0d8fa122de'),
+ ('dividend_identifier_count',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'count[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '3611c576d813879b6f6e9c48e9de9a6edec060a0f3a52067e9d9111efba79d6e'),
+ ('dividend_identifier_finish_pending',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'finish_pending[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '998549376ec92f11ef37ba7159318ce25355d5e6af32f39d59fca58985842774'),
+ ('dividend_identifier_shifted_remainder',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'shifted_remainder[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '0898306390a6fd4b83c4d4559c9163e800845852b1405cc7e355ef2a0e625aa9'),
+ ('dividend_identifier_start_remainder',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'start_remainder[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '5d91ac827a1230776cfeb64412d757537d3976b52e52c86bafec1739633a9bb0'),
+ ('divisor_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'WIDTH[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  'cd8d8c1974fa6d5774bef87d3c2b01e3514c7ea602bff2072842cd266e43c7db'),
+ ('quotient_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'WIDTH[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  'a96ea5985729fd99e86d487b3de5bb0ca53376b3b884e77e793416b4ce212d5e'),
+ ('remainder_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'WIDTH[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  'bfe74e31823afcbc29b7fd5df4633940272ed9399615f6e9c4789deb31cad022'),
+ ('valid_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'WIDTH: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '514cc020d908c987142a46c182696b20cb6d36717bc38d416347c444eea88310'),
+ ('start_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'WIDTH: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '4af4e819dc5932d9e67060ac477361a86b6575d1d601edb098000d7bf57bacc6'),
+ ('rst_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'WIDTH: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '044140116fcf4a86b3eaa573167c538535cbb1dde6e9044a2fe9ad526ba92d36'),
+ ('clk_identifier_WIDTH',
+  'EMIT',
+  'Input ports:\n'
+  'WIDTH: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '1fcb2d08c79b35926da08b7fc99ae9dc7e81d8d1377b8da88d12b08f2a7c2303'),
+ ('ordinary_BASE',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero. Dividend is at least divisor.',
+  '4b013241290b48968bb24105c9d16ea8f846fcadcbd1dddc942d93224d32335b'),
+ ('ordinary_bullet_domains',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  '- The divisor is nonzero.\n- Dividend is at least divisor.',
+  'd584c11aac3ecc2c649d58134930552d3a3ab3e6062a8ab743045d1daa3d187a'),
+ ('ordinary_paragraph_domains',
+  'EMIT',
+  'Input ports:\n'
+  'clk: posedge clock.\n'
+  'rst: active-low asynchronous reset.\n'
+  'start: one-cycle request.\n'
+  'dividend[WIDTH-1:0]: unsigned dividend.\n'
+  'divisor[WIDTH-1:0]: unsigned divisor.\n'
+  'Output ports:\n'
+  'quotient[WIDTH-1:0]: unsigned quotient.\n'
+  'remainder[WIDTH-1:0]: unsigned remainder.\n'
+  'valid: one-cycle completion.',
+  'The divisor is nonzero.\n\nDividend is at least divisor.',
+  '2c1202af82a2aab9d696059a3bd97fbc52e886d632e5b48960eb105752570a57')]
+
+
+@pytest.mark.parametrize("case,expected,interface,domain,source_sha256", _R9_CASES,
+                         ids=[row[0] for row in _R9_CASES])
+def test_unsigned_divider_r9_exact_independent(case, expected, interface, domain,
+                                              source_sha256, tmp_path):
+    import hashlib
+    description = _R9_SPEC.format(interface=interface, domain=domain)
+    assert hashlib.sha256(description.encode()).hexdigest() == source_sha256
+    source, rtl = tmp_path / "description.txt", tmp_path / "candidate.v"
+    source.write_text(description)
+    command = subprocess.run([sys.executable, str(PROGRAMS / "canonical_primitive_synth.py"),
+                              "--from-desc", str(source), "--out", str(rtl)],
+                             capture_output=True, text=True)
+    response = json.loads(command.stdout)
+    assert response["verdict"] == expected, response
+    emit = expected == "EMIT"
+    assert command.returncode == (0 if emit else 2), command.stderr
+    assert rtl.is_file() == emit
+    project = tmp_path / "project"
+    input_doc = project / "phase1/input_doc/design_description.txt"
+    input_doc.parent.mkdir(parents=True)
+    input_doc.write_bytes(source.read_bytes())
+    consumer = _load_runner()._try_canonical_primitive_rtl(project, time.time())
+    outputs = list(project.glob("phase2/stage1/rtl/*.v"))
+    actual = "EMIT" if consumer is not None and consumer.status == "PASS" and outputs else "DEFER"
+    assert actual == expected, {"observed": actual, "expected": expected, "case": case}
+    assert bool(outputs) == emit
+    if emit:
+        assert len(outputs) == 1 and outputs[0].read_bytes() == rtl.read_bytes()
+        compiler = subprocess.run(["iverilog", "-g2012", "-s", "extra_scope_unit",
+                                   "-o", str(tmp_path / "sim.out"), str(rtl)],
+                                  capture_output=True, text=True)
+        assert compiler.returncode == 0, compiler.stdout + compiler.stderr
