@@ -15,14 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json
 
 
-def measure(gds: Path, specs: dict, die: list[float]) -> dict:
+def measure(gds: Path, specs: dict, die: list[float], *, cell: str | None = None) -> dict:
     import klayout.db as k
 
     layout = k.Layout()
     layout.read(str(gds))
-    top = layout.top_cell()
+    # Stream-out may retain unused library roots. The declared design is the
+    # measured subject; choosing an arbitrary root would measure another cell.
+    top = layout.cell(cell) if cell else layout.top_cell()
     if top is None:
-        raise ValueError('GDS has no top cell')
+        raise ValueError('GDS has no declared top cell')
+    if top.cell_index() not in {c.cell_index() for c in layout.top_cells()}:
+        raise ValueError('declared design is not a GDS root')
     x1, y1, x2, y2 = [float(x) for x in die]
     area = (x2 - x1) * (y2 - y1)
     if area <= 0:
@@ -66,10 +70,11 @@ def main(argv=None) -> int:
     parser.add_argument('--specs', required=True)
     parser.add_argument('--die', required=True)
     parser.add_argument('--out', required=True)
+    parser.add_argument('--cell')
     args = parser.parse_args(argv)
     try:
         result = measure(Path(args.gds), json.loads(Path(args.specs).read_text()),
-                         json.loads(args.die))
+                         json.loads(args.die), cell=args.cell)
     except Exception as exc:
         result = {'status': 'NOT_MEASURED', 'reason': str(exc)}
     write_json(Path(args.out), result)

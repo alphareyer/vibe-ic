@@ -601,7 +601,8 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
            '-v', f'{programs.resolve()}:{programs.resolve()}:ro',
            image, '--skip', 'python3', str(programs / 'die_density_ratio_emit.py'),
            '--gds', str(gds), '--specs', str(specs_path),
-           '--die', json.dumps(die), '--out', str(report)]
+           '--die', json.dumps(die), '--out', str(report),
+           '--cell', str(cfg.get('DESIGN_NAME') or '')]
     result = _run_logged(cmd, root / 'density_ratios.log')
     if not report.is_file():
         raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED',
@@ -1033,7 +1034,8 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         doc = _load(path)
-        if doc.get('default_stream'):
+        if doc.get('default_stream') or (project / DEFAULT_STREAM_REL).is_file() \
+                or (project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.StreamOut.json').is_file():
             validate_default_stream(project)
     except (OSError, ValueError, Refusal, KeyError, TypeError):
         return {'status': 'UNREADABLE', 'source': RECORD_REL}
@@ -1130,6 +1132,7 @@ def validate_default_stream(project: Path) -> dict:
         raise Refusal('LL_FILLER_STATE_CHANGED', str(filler_state))
     fin, fout = _current_stage(project, filler_state, 'KLayout.Filler')
     if (Path(fin['gds']).resolve() != Path(record['prefill']).resolve()
+            or record['prefill_sha256'] != record['stream_sha256']
             or digest(Path(fin['gds'])) != filler['gds_in_sha256']
             or Path(fout['gds']).resolve() != Path(filler['filled_gds']).resolve()
             or digest(Path(fout['gds'])) != filler['filled_sha256']
