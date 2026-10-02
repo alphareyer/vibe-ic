@@ -339,12 +339,14 @@ def test_step30_ordinary_caller_adopts_the_existing_tool_product(tmp_path, monke
 
 
 @pytest.mark.parametrize('mutation', ['netlist', 'spef', 'sdc', 'liberty', 'corner', 'models',
-    'execution', 'report_replay', 'wrong_project', 'wrong_stage', 'wrong_path', 'consumption'])
+    'execution', 'report_replay', 'wrong_project', 'wrong_stage', 'wrong_path', 'consumption', 'declared_result'])
 def test_step30_gate_refuses_current_byte_and_consumer_mutations(tmp_path, monkeypatch, mutation):
     p, folder, lib = project(tmp_path)
     assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
     assert SC.main([str(p), '--no-spice', '--json', str(p / 'spice-gate.json')]) == 0
-    if mutation in ('netlist', 'spef', 'sdc', 'liberty', 'models'):
+    if mutation == 'declared_result':
+        (p / 'phase3/stage3/spice/correlation.json').unlink()
+    elif mutation in ('netlist', 'spef', 'sdc', 'liberty', 'models'):
         path = {'netlist': p / 'phase3/stage3/pnr/neutral_pnr.v',
                 'spef': p / 'phase3/stage3/extracted/neutral.spef',
                 'sdc': p / 'phase3/stage3/pnr/constraint.sdc', 'liberty': lib,

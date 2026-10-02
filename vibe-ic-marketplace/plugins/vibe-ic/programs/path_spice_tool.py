@@ -1110,6 +1110,9 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     doc = {**tool, 'program': 'spice_correlation_check.current_write_path_spice',
            'current_subject': subject, 'current_context': context}
     write_json(report, doc)
+    declared_result = canonical_deck.with_suffix('.json')
+    write_json(declared_result, doc)
+    outputs += [('declared_result', declared_result)]
     outputs += [('tool_result', project / 'reports/phase3/spice_path_tool.json'), ('correlation', report)]
     receipt = {**subject, 'schema': 'step30-current-v1', 'step': '30', 'context': context,
                'execution': executions, 'execution_files': execution_files,
@@ -1160,6 +1163,9 @@ def validate_current_step30(project: Path):
         raise Refusal('CURRENT_STEP30_DECK_CONSUMPTION_MISSING', str(report))
     canonical = project / 'phase3/stage3/spice/correlation.spice'
     canonical_log = canonical.with_suffix('.log')
+    declared_result = canonical.with_suffix('.json')
+    if outputs.get('declared_result') != str(declared_result) or _load(declared_result) != doc:
+        raise Refusal('CURRENT_STEP30_DECLARED_RESULT_CONSUMPTION_MISSING', str(report))
     if outputs.get('canonical_deck') != str(canonical) or outputs.get('canonical_log') != str(canonical_log):
         raise Refusal('CURRENT_STEP30_CANONICAL_CONSUMPTION_MISSING', str(report))
     first = next((r['deck'] for arm in tool['detail'].values()
