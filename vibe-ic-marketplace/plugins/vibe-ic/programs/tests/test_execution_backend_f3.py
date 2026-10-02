@@ -21,7 +21,7 @@ from execution_adapters_backend import (
     validate,
     validate_streamout_receipt,
 )
-from execution_provider_catalog import BACKEND_IDS, coverage_rows
+from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table
 
 BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
 
@@ -45,6 +45,19 @@ def test_all_backend_rows_register_one_reachable_provider():
                for a in registry._adapters.values())
 
 
+def test_machine_readable_owned_coverage_has_exact_dispositions():
+    table = coverage_table()
+    assert table["row_count"] == 37
+    assert table["backend_row_count"] == 23
+    assert table["release_row_count"] == 14
+    assert sum(row["disposition"] == "implemented" for row in table["rows"]) == 31
+    assert sum(row["disposition"] == "unavailable" for row in table["rows"]) == 1
+    assert sum(row["disposition"] == "external" for row in table["rows"]) == 5
+    assert {row["step_id"] for row in table["rows"]} == set(BACKEND_IDS) | {
+        "14", "16", "35", "36", "37.4", "37.5ip", "37.5ic", "38", "39",
+        "40", "41", "42", "43", "44"}
+
+
 def test_default_call_path_is_source_only_and_unmeasured():
     registry = register_backend_adapters(source_sha=BASE, available=False)
     adapter = registry.adapters("15")[0]
@@ -52,6 +65,22 @@ def test_default_call_path_is_source_only_and_unmeasured():
     assert adapter.availability_reason == "NATIVE_EXECUTION_NOT_MEASURED"
     assert adapter.tool_id == "librelane"
     assert adapter.engine_families == ("openroad",)
+
+
+def test_backend_argv_binds_complete_typed_parameter_envelope():
+    registry = register_backend_adapters(
+        source_sha=BASE, available=False,
+        parameters={"pdk_name": "gf180mcuD", "image_id": "vibeic-eda:review",
+                    "pdk_root": "/pdk", "top": "chip_top", "die_um": [100, 100],
+                    "util": 0.55})
+    argv = registry.adapters("15")[0].components[0].argv
+    params = json.loads(argv[argv.index("--params-json") + 1])
+    assert params["pdk_name"] == "gf180mcuD"
+    assert params["image_id"] == "vibeic-eda:review"
+    assert params["pdk_root"] == "/pdk"
+    assert params["top"] == "chip_top"
+    assert params["die_um"] == [100, 100] and params["util"] == 0.55
+    assert "input_contract" in params and "source_sha" in params
 
 
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):

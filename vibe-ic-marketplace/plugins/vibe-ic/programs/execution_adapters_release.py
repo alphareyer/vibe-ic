@@ -24,8 +24,17 @@ SOFTWARE_IDS = tuple(s for s in RELEASE_IDS
 ALL_IDS = RELEASE_IDS
 EXECUTION_DEPENDENCIES = (
     "digital_hardmacro_gen.py", "phase3_one_shot_runner.py",
+    "ip_release_docs_gen.py", "digital_hardmacro_check.py", "release_docs_check.py",
+    "_release_docs_build.py", "_release_docs_contract.py",
     "tapeout_checklist_gen.py", "foundry_handoff_pack_gen.py",
 )
+
+RELEASE_PARAMETER_DEFAULTS = {
+    "pdk_name": None, "pdk_root": None, "design_name": None,
+    "source_sha": None, "module_role": None, "container": "",
+    "cell_lef": "", "metal_prefix": "met", "full_lef": False,
+    "pinonly": False,
+}
 
 
 def _site_path(site: str) -> Path:
@@ -69,8 +78,12 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
         report = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return em.Evidence(binding, "NOT_MEASURED", {}, {}, detail=str(exc))
-    measured_fail = report.get("design_verdict") == "FAIL" or report.get("qualification") == "FAIL" or any(
-        row.get("verdict") == "FAIL" for row in report.get("gate_records", ()) if isinstance(row, dict))
+    measured_fail = (report.get("producer_verdict") == "FAIL" or
+                     report.get("design_verdict") == "FAIL" or
+                     report.get("qualification") == "FAIL" or any(
+                         row.get("verdict") == "FAIL"
+                         for row in report.get("gate_records", ())
+                         if isinstance(row, dict)))
     if report.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
                            detail="RELEASE_RESULT_UNBOUND")
@@ -121,7 +134,9 @@ def validate_hardmacro_receipt(receipt: Mapping[str, object], *, route: str = "n
 
 def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str, object], *,
              path: str, available: bool, route_receipt: Mapping[str, object] | None,
-             declaration: Mapping[str, object] | None) -> em.Adapter:
+             declaration: Mapping[str, object] | None,
+             parameters: Mapping[str, object] | None = None,
+             native_qualified: bool = False) -> em.Adapter:
     from execution_provider_catalog import _applicability
     step_id = str(spec["step_id"])
     app = _applicability(step_id, release=True,
@@ -131,9 +146,18 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     worker = HERE / "execution_release_worker.py"
     source_files = _source_files(spec)
     contract = {name: ("release-evidence.json",) for name in spec["canonical_outputs"]}
-    params = {"route": path, "row": step_id, "runtime_status": "NOT_MEASURED",
-              "external_handoff": step_id in EXTERNAL_IDS,
-              "input_contract": ROWS[step_id].get("canonical", {}).get("required_inputs")}
+    params = dict(RELEASE_PARAMETER_DEFAULTS)
+    params["source_sha"] = source_sha
+    if parameters:
+        for key, value in parameters.items():
+            if key not in params:
+                raise em.Refusal("RELEASE_PARAMETER_UNDECLARED", str(key))
+            if isinstance(value, Path):
+                value = str(value)
+            params[key] = value
+    params.update({"route": path, "row": step_id, "runtime_status": "NOT_MEASURED",
+                   "external_handoff": step_id in EXTERNAL_IDS,
+                   "input_contract": ROWS[step_id].get("canonical", {}).get("required_inputs")})
     external = step_id in EXTERNAL_IDS
     unavailable = step_id in UNAVAILABLE_IDS
     role = "complementary" if external else "producer"
@@ -151,7 +175,9 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
         validate=validate, required_outputs=("release-evidence.json",), output_contract=contract,
         objective=dict(objective), applicability=applicability,
         applicability_reason="" if applicability == "applicable" else str(app),
-        qualified=True, qualification_evidence=("current-tree source component bound; producer sites=" + ",".join(spec["producer_sites"]) +
+        qualified=native_qualified, qualification_evidence=(
+                                                 "current-tree native qualification receipt bound" if native_qualified else
+                                                 "source-bound component; producer sites=" + ",".join(spec["producer_sites"]) +
                                                  "; native qualification NOT_MEASURED" if not external else
                                                  "external handoff classification only; no software producer"),
         available=available and not unavailable and not external, availability_reason=reason,
@@ -165,7 +191,8 @@ def register_release_adapters(registry: em.Registry | None = None, *, source_sha
                               objective: Mapping[str, object] | None = None,
                               path: str = "IC", available: bool = False,
                               route_receipt: Mapping[str, object] | None = None,
-                              declaration: Mapping[str, object] | None = None) -> em.Registry:
+                              declaration: Mapping[str, object] | None = None,
+                              parameters: Mapping[str, object] | None = None) -> em.Registry:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise em.Refusal("INVALID_SOURCE_SHA", source_sha)
     registry = registry or em.Registry()
@@ -174,7 +201,7 @@ def register_release_adapters(registry: em.Registry | None = None, *, source_sha
     for step_id in ALL_IDS:
         registry.register(_adapter(rows[step_id], source_sha, objective, path=path,
                                    available=available, route_receipt=route_receipt,
-                                   declaration=declaration))
+                                   declaration=declaration, parameters=parameters))
     return registry
 
 

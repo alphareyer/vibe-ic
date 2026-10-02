@@ -26,6 +26,16 @@ HERE = Path(__file__).resolve().parent
 POLICY = HERE / "data/execution_backend_policy.json"
 ROWS = BACKEND_ROWS
 
+# Every producer receives the complete typed parameter envelope. ``None`` is
+# intentional for source-only registrations: the key is bound in argv while
+# the worker still refuses to run until a current project supplies the value.
+BACKEND_PARAMETER_DEFAULTS = {
+    "pdk_name": None, "image_id": None, "pdk_root": None, "top": None,
+    "container": "", "die_um": None, "util": None, "state_in": None,
+    "overlay": {}, "streamout_route": None, "simulators": None,
+    "spice_paths": 1, "timeout_s": 60,
+}
+
 # These are imported by the actual dispatcher/producer call paths.  Binding
 # only the catalog entrypoint would let a changed runner or LibreLane contract
 # execute under an old adapter identity.
@@ -152,6 +162,28 @@ def _provider_route(step_id: str, params: Mapping[str, object] | None = None) ->
     return str(spec["tool_id"]), tuple(spec["engine_families"])
 
 
+def _typed_parameters(spec: Mapping[str, object], source_sha: str,
+                      supplied: Mapping[str, object] | None = None) -> dict:
+    """Build the exact typed producer parameter envelope carried in argv."""
+    params = dict(BACKEND_PARAMETER_DEFAULTS)
+    if str(spec["step_id"]) == "30" and params["simulators"] is None:
+        params["simulators"] = "ngspice"
+    if supplied:
+        for key, value in supplied.items():
+            if key not in params:
+                raise em.Refusal("BACKEND_PARAMETER_UNDECLARED", str(key))
+            if isinstance(value, Path):
+                value = str(value)
+            params[key] = value
+    params.update({
+        "route": "librelane" if str(spec["step_id"]) != "30" else "path_spice",
+        "input_contract": BACKEND_ROWS[str(spec["step_id"])]
+        ["canonical_row"].get("required_inputs", ()),
+        "source_sha": source_sha,
+    })
+    return params
+
+
 def _step37_route_specs() -> tuple[dict, ...]:
     """Expose one streamout producer family; direct Magic is fallback refusal."""
     spec = next(row for row in coverage_rows() if row["step_id"] == "37")
@@ -196,7 +228,9 @@ def _step37_validator(route: str):
 
 
 def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str, object], *,
-             path: str, available: bool) -> em.Adapter:
+             path: str, available: bool,
+             parameters: Mapping[str, object] | None = None,
+             native_qualified: bool = False) -> em.Adapter:
     applicability = spec["applicability"].get(path, "inapplicable: path not declared")
     applicable = applicability == "applicable"
     applicability_kind = ("applicable" if applicable else
@@ -208,9 +242,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     # canonical OR/glob clauses into concrete output members before hashing
     # them in that receipt; wildcard strings never enter Adapter.required_outputs.
     output_contract = {name: ("backend_result.json",) for name in spec["canonical_outputs"]}
-    params = {"route": "librelane" if spec["step_id"] != "30" else "path_spice",
-              "input_contract": BACKEND_ROWS[str(spec["step_id"])]
-              ["canonical_row"].get("required_inputs", ())}
+    params = _typed_parameters(spec, source_sha, parameters)
     validator = _step37_validator("librelane") if spec["step_id"] == "37" else validate
     return em.Adapter(
         arm_id=str(spec["arm_id"]), tool_id=str(spec["tool_id"]), step_id=str(spec["step_id"]),
@@ -224,8 +256,9 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
         # Qualification here means the current-tree source component is
         # callable.  The worker's evidence verdict still remains
         # NOT_MEASURED until native receipts and gates exist.
-        qualified=True, qualification_evidence=(
-            "current-tree source component bound; native execution NOT_MEASURED; producer site=" + str(producer)),
+        qualified=native_qualified, qualification_evidence=(
+            "current-tree native qualification receipt bound" if native_qualified else
+            "source-bound component; native qualification NOT_MEASURED; producer site=" + str(producer)),
         available=available, availability_reason="" if available else "NATIVE_EXECUTION_NOT_MEASURED",
         cpus=1, ram_mb=256, output_contract=output_contract,
         own_no_tool_reason="One complete producer owns all row outputs and gates; checker components are complementary.",
@@ -236,7 +269,8 @@ def register_backend_adapters(registry: em.Registry | None = None, *, source_sha
                               objective: Mapping[str, object] | None = None,
                               path: str = "IC", available: bool = False,
                               route_receipt: Mapping[str, object] | None = None,
-                              declaration: Mapping[str, object] | None = None) -> em.Registry:
+                              declaration: Mapping[str, object] | None = None,
+                              parameters: Mapping[str, object] | None = None) -> em.Registry:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise em.Refusal("INVALID_SOURCE_SHA", source_sha)
     registry = registry or em.Registry()
@@ -253,7 +287,8 @@ def register_backend_adapters(registry: em.Registry | None = None, *, source_sha
                                                      declaration=dict(declaration or {}))
         if spec["applicability"].get(path, "").startswith("inapplicable"):
             continue
-        registry.register(_adapter(spec, source_sha, objective, path=path, available=available))
+        registry.register(_adapter(spec, source_sha, objective, path=path, available=available,
+                                   parameters=parameters))
     return registry
 
 

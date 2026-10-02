@@ -72,6 +72,22 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
+def _provider_identity(adapter: 'Adapter') -> tuple:
+    """Return the implementation identity used for Ultra de-duplication.
+
+    ``engine_families`` is a disclosure field and may be edited by a caller;
+    it is not a proof that two arms execute different providers.  The first
+    executable plus the complete source digest map bind the actual provider
+    bytes.  This deliberately ignores arm labels and per-run input/output
+    paths, so a relabelled wrapper cannot become a second Ultra arm.
+    """
+    argv0 = adapter.components[0].argv[0] if adapter.components else ''
+    resolved = shutil.which(argv0) or argv0
+    return (str(adapter.tool_id), str(Path(resolved).resolve()),
+            tuple(sorted((str(Path(path).resolve()), str(value))
+                         for path, value in adapter.source_files.items())))
+
+
 def _seal(value: dict) -> dict:
     payload = json.loads(json.dumps(value))
     signature = hmac.new(_COMPLETION_KEY, _hash(payload).encode(), hashlib.sha256).hexdigest()
@@ -292,10 +308,14 @@ class Controller:
             return 'WRONG_SOURCE'
         if adapter.applicability != 'applicable':
             return 'APPLICABILITY_' + adapter.applicability.upper()
-        if not adapter.qualified:
-            return 'NOT_QUALIFIED'
         if not adapter.available:
             return 'UNAVAILABLE'
+        # A source-bound component may be executed when its tool/input/image
+        # is explicitly available, but registration alone never grants native
+        # qualification.  Native qualification remains a separate receipt
+        # fact and is represented by ``qualified=True`` only when bound.
+        if not adapter.qualified:
+            return 'READY_SOURCE_BOUND'
         if adapter.license_id and self.budget.licenses.get(adapter.license_id, 0) < 1:
             return 'LICENSE_UNAVAILABLE'
         if (adapter.cpus > min(self.budget.cpus, len(os.sched_getaffinity(0))) or
@@ -321,7 +341,8 @@ class Controller:
                  'own_no_tool_reason': a.own_no_tool_reason,
                  'cpus': a.cpus, 'ram_mb': a.ram_mb,
                  'license_id': a.license_id} for a in adapters]
-        ready = [a for a, row in zip(adapters, rows) if row['admission'] == 'READY']
+        ready = [a for a, row in zip(adapters, rows)
+                 if row['admission'] in ('READY', 'READY_SOURCE_BOUND')]
         external = [a for a in adapters if a.role == 'producer' and a.tool_id != 'vibeic']
         own = [a for a in ready if a.tool_id == 'vibeic']
         # An unavailable, unknown or failed external producer is still suitable;
@@ -331,7 +352,7 @@ class Controller:
                     any(not a.own_no_tool_reason for a in own)):
             ready = [a for a in ready if a.tool_id != 'vibeic']
             for row in rows:
-                if row['tool_id'] == 'vibeic' and row['admission'] == 'READY':
+                if row['tool_id'] == 'vibeic' and row['admission'] in ('READY', 'READY_SOURCE_BOUND'):
                     row['admission'] = 'OWN_TOOL_NOT_JUSTIFIED'
         if not ready:
             return dict(mode=selected_mode, binding=binding, arms=[], portfolio=rows,
@@ -385,7 +406,9 @@ class Controller:
         if selected_mode == 'ultra-mode':
             distinct = []
             for arm in ready:
-                if any(set(arm.engine_families) & set(a.engine_families) for a in distinct):
+                if any(set(arm.engine_families) & set(a.engine_families) or
+                       _provider_identity(arm) == _provider_identity(a)
+                       for a in distinct):
                     for row in rows:
                         if row['arm_id'] == arm.arm_id:
                             row['admission'] = 'SAME_ENGINE_FAMILY'
@@ -578,6 +601,7 @@ class Controller:
         completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
                       'adapter', 'processes', 'input_root', 'output_root')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
+                          evidence=receipt.get('evidence'),
                           ended_ns=receipt['ended_ns'], run_root=str(root))
         _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
         _write(directory / 'issued-completion.json', _seal(completion))
@@ -590,7 +614,8 @@ class Controller:
         if issued_plan != plan or plan.get('run_root') != str(root):
             raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
         completion = _issued(root / arm.arm_id / 'issued-completion.json')
-        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')
+        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root',
+                  'output_root')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
                 any(completion.get(k) != receipt.get(k) for k in fields)):
@@ -602,7 +627,7 @@ class Controller:
             raise Refusal('ISSUED_EXECUTION_INCOMPLETE', arm.arm_id)
 
     def _current_admission(self, context: Context, plan: dict, arm: Adapter) -> None:
-        if self._admission(arm, context) != 'READY':
+        if self._admission(arm, context) not in ('READY', 'READY_SOURCE_BOUND'):
             raise Refusal('CURRENT_ADMISSION_REJECTED', arm.arm_id)
         override = plan.get('superiority')
         if override:
@@ -735,6 +760,11 @@ class Controller:
             fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
             if fresh != receipt['evidence']:
                 raise Refusal('EVIDENCE_CHANGED', str(arm_id))
+            completion = _issued(root / arm.arm_id / 'issued-completion.json')
+            if (completion.get('actual_status') != receipt.get('status') or
+                    completion.get('actual_reason') != receipt.get('reason') or
+                    completion.get('evidence') != receipt.get('evidence')):
+                raise Refusal('EXECUTION_AUTHORITY_MISMATCH', arm.arm_id)
             # A source validator can legitimately pause. Its return is not a
             # lease on the earlier input/executable/output bytes. Recheck after
             # it returns, then capture and bind the selected artifact generation.

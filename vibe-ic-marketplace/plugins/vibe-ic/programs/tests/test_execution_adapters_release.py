@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -40,8 +41,23 @@ def test_complete_release_coverage_and_no_fake_external_producers():
     assert set(ALL_IDS) == set(RELEASE_IDS)
     registry = register_release_adapters(source_sha=BASE, available=False)
     assert {a.step_id for a in registry._adapters.values()} == set(RELEASE_IDS)
-    assert all(a.qualified is True for a in registry._adapters.values())
+    assert all(a.qualified is False for a in registry._adapters.values())
     assert all(_spec(s)["disposition"] == "external" for s in EXTERNAL_IDS)
+
+
+def test_release_argv_binds_hardmacro_identity_and_declared_producer():
+    registry = register_release_adapters(
+        source_sha=BASE, available=False,
+        parameters={"pdk_name": "gf180mcuD", "pdk_root": "/pdk",
+                    "design_name": "macro_top", "module_role": "hardmacro"})
+    adapter = registry.adapters("37.5ip")[0]
+    argv = adapter.components[0].argv
+    params = json.loads(argv[argv.index("--params-json") + 1])
+    assert params["pdk_name"] == "gf180mcuD"
+    assert params["pdk_root"] == "/pdk"
+    assert params["design_name"] == "macro_top"
+    assert params["source_sha"] == BASE
+    assert "step_ip_release_docs_gen" in adapter.qualification_evidence
 
 
 def test_375ip_condition_boundary_uses_route_and_owner_declaration():
@@ -168,6 +184,44 @@ def test_release_reverse_mutations_refuse_missing_symbol_and_output(tmp_path):
     receipt["qualification"] = "FAIL"
     (tmp_path / "release-evidence.json").write_text(json.dumps(receipt))
     assert validate(tmp_path, binding).verdict == "FAIL"
+    receipt["qualification"] = "PASS"
+    receipt["producer_verdict"] = "FAIL"
+    (tmp_path / "release-evidence.json").write_text(json.dumps(receipt))
+    assert validate(tmp_path, binding).verdict == "FAIL"
+
+
+def test_public_controller_rejects_removed_release_producer_call(tmp_path):
+    source = tmp_path / "floorplan.def"
+    source.write_text("VERSION 5.8 ;\n")
+    sdc = tmp_path / "clock.sdc"
+    sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
+    row = _spec("16")
+    context = em.Context("16", BASE,
+                         {"project/phase3/stage3/pnr/floorplan.def": source,
+                          "project/phase2/stage2/constraints/clock.sdc": sdc},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+    original = register_release_adapters(source_sha=BASE, available=True).adapters("16")[0]
+    worker = PROGRAMS / "execution_release_worker.py"
+    mutant = tmp_path / "execution_release_worker.py"
+    text = worker.read_text()
+    changed = text.replace("records = produce(str(step_id), project, params)", "records = []", 1)
+    assert changed != text
+    mutant.write_text(changed.replace(
+        "from __future__ import annotations",
+        "from __future__ import annotations\nimport sys\nsys.path.insert(0, " + repr(str(PROGRAMS)) + ")", 1))
+    mutant_sources = {k: v for k, v in original.source_files.items()
+                      if k != str(worker.resolve())}
+    mutant_sources[str(mutant.resolve())] = em.digest(mutant)
+    component = replace(original.components[0], argv=tuple(
+        str(mutant.resolve()) if x == str(worker.resolve()) else x
+        for x in original.components[0].argv))
+    mutant_adapter = replace(original, source_files=mutant_sources,
+                             components=(component,))
+    registry = em.Registry(); registry.register(mutant_adapter)
+    summary = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1)).run(
+        context, tmp_path / "mutant-run", "default-mode")
+    assert summary["candidate_statuses"][mutant_adapter.arm_id] in {"NOT_MEASURED", "FAIL"}
 
 
 def test_release_external_rows_are_visible_classifications_without_runtime_success():

@@ -65,7 +65,7 @@ RELEASE_SITES = {
     "35": ("dfm_screen_check.py:main",),
     "36": ("tapeout_checklist_gen.py:main",),
     "37.4": ("signoff_metrics_aggregate.py:aggregate",),
-    "37.5ip": ("digital_hardmacro_gen.py:run", "phase3_one_shot_runner.py:_write_ip_release_docs_context"),
+    "37.5ip": ("digital_hardmacro_gen.py:run", "phase3_one_shot_runner.py:step_ip_release_docs_gen"),
     "37.5ic": ("tapeout_precheck.py:main", "tapeout_docs_gen.py:main", "ic_release_docs_gen.py:main"),
     "38": ("foundry_handoff_pack_gen.py:main",),
     # 39 has a checker but no software producer when FPGA hardware is absent.

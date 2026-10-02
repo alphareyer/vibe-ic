@@ -59,20 +59,29 @@ def produce(step: str, project: Path, params: dict) -> list[dict]:
     elif step == "37.4":
         records.append(_call("signoff_metrics_aggregate", [project]))
     elif step == "37.5ip":
-        # Call the canonical producer even when Magic/OpenSTA is unavailable.
-        # Its refusal/capability code is evidence; this worker never fabricates
-        # a LEF, Liberty, GDS or Verilog view.
+        # Call both declared canonical producers even when Magic/OpenSTA is
+        # unavailable. Their refusal/capability records are evidence; this
+        # worker never fabricates a LEF, Liberty, GDS or Verilog view.
         import digital_hardmacro_gen as hardmacro
         import phase3_one_shot_runner as runner
-        pdk_root = str(params.get("pdk_root", ""))
+        pdk_root = str(params.get("pdk_root") or "")
         try:
-            context = runner._write_ip_release_docs_context(
+            ip_result = runner.step_ip_release_docs_gen(
                 project, params.get("design_name"), params.get("pdk_name"),
                 params.get("source_sha"), params.get("module_role"))
-            records.append({"program": "phase3_one_shot_runner._write_ip_release_docs_context",
-                            "rc": 0, "output": str(context.relative_to(project))})
+            status = str(ip_result.status)
+            rc = 0 if status == "PASS" else 1 if status == "FAIL" else 2
+            records.append({"program": "phase3_one_shot_runner.step_ip_release_docs_gen",
+                            "rc": rc, "status": status,
+                            "verdict": status if status in {"PASS", "FAIL"} else "NOT_MEASURED",
+                            "detail": ip_result.detail, "extras": ip_result.extras,
+                            "outputs": ip_result.output_files})
+            context_name = (ip_result.extras or {}).get("run_context")
+            if context_name:
+                records.append({"program": "phase3_one_shot_runner._write_ip_release_docs_context",
+                                "rc": 0, "output": str(context_name)})
         except BaseException as exc:
-            records.append({"program": "phase3_one_shot_runner._write_ip_release_docs_context",
+            records.append({"program": "phase3_one_shot_runner.step_ip_release_docs_gen",
                             "rc": None, "verdict": "NOT_MEASURED", "reason": str(exc)})
         try:
             rc, report = hardmacro.run(
