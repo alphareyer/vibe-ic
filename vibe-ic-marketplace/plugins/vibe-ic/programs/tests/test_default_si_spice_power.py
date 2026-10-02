@@ -230,6 +230,40 @@ def test_measured_si_fail_is_not_promoted_by_an_advisory_screen(tmp_path, monkey
     assert gate(p, '27') == 1
 
 
+def test_power_audit_error_cannot_be_outvoted_by_current_numbers(tmp_path, monkeypatch):
+    import eda_report_audit as audit
+    p, folder, lib = project(tmp_path)
+    assert produce(p, folder, lib, monkeypatch, '33')
+    assert gate(p, '33') == 0
+    real = audit._check_tool_authenticity
+    def signature_error(files, mode, result):
+        authentic = real(files, mode, result)
+        result.findings.append(audit.Finding(rule='POWER_NO_TOOL_SIGNATURE',
+            severity='ERROR', message='Reverse control: authenticated scalar cannot outvote an error'))
+        return authentic
+    monkeypatch.setattr(audit, '_check_tool_authenticity', signature_error)
+    assert gate(p, '33') == 1
+    doc = json.loads((p / 'power-gate.json').read_text())
+    assert doc['passed'] is False
+    assert any(f['severity'] == 'ERROR' for f in doc['findings'])
+
+
+def test_native_shaped_short_power_source_is_checked_by_receipt(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    source = folder / 'nom_typ/power.rpt'
+    source.write_text(POWER.replace('# OpenSTA report_power', '# report_power'))
+    assert source.stat().st_size < 2048
+    seal(folder, json.loads((folder / 'input_fingerprint.json').read_text()))
+    assert produce(p, folder, lib, monkeypatch, '33')
+    assert gate(p, '33') == 0
+    doc = json.loads((p / 'power-gate.json').read_text())
+    assert doc['summary']['design_binding'] is True
+    assert doc['summary']['current_binding'] == 'CURRENT'
+    assert not any(f['severity'] == 'ERROR' for f in doc['findings'])
+    source.write_text(source.read_text() + '\n ')
+    assert gate(p, '33') == 1
+
+
 def test_step30_copied_correlation_cannot_certify_without_execution(tmp_path):
     p, folder, lib = project(tmp_path)
     write(p / 'phase3/stage3/spice/correlation.spice', '* copied deck\n.end\n')
