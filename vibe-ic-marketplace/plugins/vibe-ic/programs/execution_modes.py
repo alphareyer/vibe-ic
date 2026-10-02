@@ -272,6 +272,49 @@ def _source_method(context_type: type, source: Path, method: str) -> Callable:
     return actual
 
 
+def _python_entry(arguments: tuple[str, ...]) -> tuple[str, list[str]]:
+    """Resolve the script using Python option semantics, never file existence.
+
+    Only a bounded script invocation is supported. Unknown options, module,
+    inline, stdin and exit-only invocations have no admitted entry here.
+    Option values remain reproduction inputs, not implementation entries.
+    """
+    values = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == '--':
+            index += 1
+            break
+        if not argument.startswith('-'):
+            break
+        if argument == '--check-hash-based-pycs':
+            index += 1
+            if index >= len(arguments) or arguments[index] not in ('always', 'default', 'never'):
+                raise Refusal('ENTRY_SOURCE_UNBOUND', 'invalid Python option value')
+            values.append(arguments[index])
+        else:
+            options = argument[1:]
+            if not options or argument.startswith('--'):
+                raise Refusal('ENTRY_SOURCE_UNBOUND', argument)
+            for offset, option in enumerate(options):
+                if option in 'WX':
+                    value = options[offset + 1:]
+                    if not value:
+                        index += 1
+                        if index >= len(arguments):
+                            raise Refusal('ENTRY_SOURCE_UNBOUND', argument)
+                        value = arguments[index]
+                    values.append(value)
+                    break
+                if option not in 'bBdEiIOPqsSuvx':
+                    raise Refusal('ENTRY_SOURCE_UNBOUND', argument)
+        index += 1
+    if index >= len(arguments) or arguments[index] == '-':
+        raise Refusal('ENTRY_SOURCE_UNBOUND', 'Python script entry required')
+    return arguments[index], values
+
+
 def _invocation_sources(component: Component) -> dict:
     """Bind executable, entry and every static file argument before execution.
 
@@ -286,8 +329,21 @@ def _invocation_sources(component: Component) -> dict:
     executable = Path(binary).resolve()
     if not executable.is_relative_to(_REPO_ROOT) and executable != Path(_sys.executable).resolve():
         raise Refusal('EXECUTABLE_SOURCE_UNBOUND', str(executable))
+    option_values = []
+    if executable == Path(_sys.executable).resolve():
+        if _sys.implementation.name != 'cpython':
+            raise Refusal('ENTRY_SOURCE_UNBOUND', 'unsupported interpreter semantics')
+        entry_argument, option_values = _python_entry(component.argv[1:])
+        entry = Path(entry_argument)
+        if (not entry.is_absolute() or entry.is_symlink() or not entry.is_file()):
+            raise Refusal('ENTRY_SOURCE_UNBOUND', entry_argument)
+        entry = entry.resolve()
+    elif executable.name.lower().startswith(('python', 'pypy')) or executable.name in ('sh', 'bash', 'dash'):
+        raise Refusal('ENTRY_SOURCE_UNBOUND', 'unsupported interpreter semantics')
+    else:
+        entry = executable
     files = []
-    for argument in component.argv[1:]:
+    for argument in (*component.argv[1:], *option_values):
         if '{inputs}' in argument or '{outputs}' in argument:
             continue
         value = argument.split('=', 1)[1] if argument.startswith('-') and '=' in argument else argument
@@ -296,10 +352,6 @@ def _invocation_sources(component: Component) -> dict:
             if path.is_symlink() or not path.is_absolute():
                 raise Refusal('ENTRY_SOURCE_UNBOUND', value)
             files.append(path.resolve())
-    interpreter = executable.name.lower().startswith(('python', 'pypy')) or executable.name in ('sh', 'bash', 'dash')
-    if interpreter and (not files or any(v in ('-', '-c', '-m') for v in component.argv[1:])):
-        raise Refusal('ENTRY_SOURCE_UNBOUND', component.name)
-    entry = files[0] if interpreter else executable
     implementation = _source_closure({str(entry): digest(entry)}) if entry.suffix == '.py' else {entry}
     arguments = set(files)
     closure = arguments | _source_closure({str(p): digest(p) for p in arguments})
@@ -443,6 +495,65 @@ class Context:
                     if self.route_receipt else None,
                     intent_label=self.intent_label,
                     request_digest=self.request_digest)
+
+
+def _context_implementation_authority():
+    # Capture the concrete class before any external module-slot replacement.
+    # Its attribute dispatch and field descriptors are part of the authority,
+    # alongside binding's tracked source; a borrowed method is insufficient.
+    concrete = Context
+    members = dict(vars(concrete))
+    source = Path(__file__).resolve()
+
+    def require() -> type:
+        current = vars(concrete)
+        if (current.keys() != members.keys() or
+                any(current[name] is not value for name, value in members.items())):
+            raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', concrete.__name__)
+        _source_method(concrete, source, 'binding')
+        return concrete
+
+    return require
+
+
+_require_context_type = _context_implementation_authority()
+
+
+def _source_protocol_context(context_type: type, fixture, concrete: type) -> Callable:
+    """Verify the whole permitted fixture class before any context field read.
+
+    The fixture's module slot is a locator, not class authority. The tracked
+    declaration, exact base, member set, function globals and class closures
+    must all agree; external descriptors or dispatch hooks are refused.
+    """
+    source = Path(__file__).parent / 'tests/test_execution_modes.py'
+    if type(context_type) is not type or context_type.__bases__ != (concrete,):
+        raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
+    _tracked_clean_file(source)
+    definition = next((node for node in ast.parse(source.read_bytes()).body
+                       if isinstance(node, ast.ClassDef) and node.name == context_type.__name__), None)
+    if definition is None:
+        raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
+    methods = [node.name for node in definition.body if isinstance(node, ast.FunctionDef)]
+    if any(not isinstance(node, ast.FunctionDef) and not (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and
+            isinstance(node.value.value, str)) for node in definition.body):
+        raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', 'unsupported fixture declaration')
+    members = vars(context_type)
+    if (set(members) != {'__module__', '__doc__', *methods} or
+            members['__module__'] != fixture.__name__ or
+            members['__doc__'] != ast.get_docstring(definition, clean=False) or
+            context_type.__qualname__ != definition.name):
+        raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
+    for name in methods:
+        method = _source_method(context_type, source, name)
+        if method.__globals__ is not vars(fixture):
+            raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', name)
+        cells = dict(zip(method.__code__.co_freevars, method.__closure__ or ()))
+        if any(name != '__class__' or cell.cell_contents is not context_type
+               for name, cell in cells.items()):
+            raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', name)
+    return members['binding']
 
 
 @dataclass(frozen=True)
@@ -712,22 +823,20 @@ class Controller:
         exact implementation may exercise a test-only portfolio with default,
         empty transport fields; it cannot turn caller labels into a request.
         """
+        concrete = _require_context_type()
         context_type = type(context)
         fixture = _sys.modules.get('programs.tests.test_execution_modes')
         neutral_type = getattr(fixture, 'NeutralContext', None) if fixture else None
-        neutral = (neutral_type is not None and context_type is neutral_type and
-                   (self.portfolio.get('meta', {}).get('test_only') is True or
-                    not self.registry.adapters(context.step_id)))
-        if context_type is not Context and not neutral:
+        neutral = neutral_type is not None and context_type is neutral_type
+        if context_type is not concrete and not neutral:
             raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
         if neutral:
-            source = Path(inspect.getsourcefile(neutral_type)).resolve()
-            expected = Path(__file__).parent / 'tests/test_execution_modes.py'
-            if source != expected.resolve():
-                raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', str(source))
-            binding_method = _source_method(neutral_type, source, 'binding')
+            binding_method = _source_protocol_context(neutral_type, fixture, concrete)
+            if (self.portfolio.get('meta', {}).get('test_only') is not True and
+                    self.registry.adapters(context.step_id)):
+                raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
             if context.route_receipt.get('kind') != 'neutral-test':
-                context = Context(**{name: getattr(context, name) for name in Context.__dataclass_fields__})
+                context = concrete(**{name: getattr(context, name) for name in concrete.__dataclass_fields__})
             elif context.intent_label != 'PROGRAM_DEFAULT' or context.request_digest or context.project_digest:
                 raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', 'neutral fixture has no execution authority')
             if type(context) is neutral_type:
@@ -737,7 +846,7 @@ class Controller:
             issued = consume()
         except Refusal as exc:
             raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', str(exc)) from exc
-        binding = Context.binding(context)
+        binding = concrete.binding(context)
         if (dict(context.route_receipt) != issued['route'] or
                 context.request_digest != issued['request']['request_digest'] or
                 context.intent_label != issued['request']['intent_label']):
