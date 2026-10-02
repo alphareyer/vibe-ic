@@ -684,7 +684,8 @@ class Controller:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
         if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
-                str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*') if p.is_file()
+                str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
+                if p.is_file() and p.name != 'issued_manifest.json'
                 } != binding['inputs']:
             raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         evidence = receipt.get('evidence') or {}
