@@ -91,6 +91,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from _prose_polarity import is_denied, sentence_scope
+
 PROGRAMS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROGRAMS_DIR))
 
@@ -228,13 +230,41 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
             r"\bnot\s+unsigned\b", r"\bunsigned\s+is\s+not\b",
             r"\b(?:signed|signedness)\b"))):
         unresolved.append("unsigned operand domain (signed is unsupported)")
-    nonzero_positive = re.search(
-        r"\b(?:both\s+operands|the\s+operands?|the\s+divisor|divisor|"
-        r"dividend)\s+(?:are|is|must\s+be)\s+non[- ]?zero\b", low)
+    # The restoring template is only sound for a domain that excludes zero
+    # for BOTH operands.  A dividend-only statement is insufficient: the
+    # ordering relation does not imply a nonzero divisor (0 <= 0 is legal).
+    # Keep the positive forms deliberately explicit and role-bound so a
+    # modal, negated, or relational-only sentence cannot authorize emission.
+    both_nonzero_positive = re.search(
+        r"\b(?:both\s+operands|the\s+operands|"
+        r"dividend\s+and\s+divisor|divisor\s+and\s+dividend)\s+"
+        r"(?:are|must\s+be|shall\s+be)\s+non[- ]?zero\b", low)
+    divisor_nonzero_positive = re.search(
+        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
+        r"(?:is|must\s+be|shall\s+be)\s+non[- ]?zero\b", low)
+    def _positive_grounding_is_undeniated(match: Optional[re.Match]) -> bool:
+        if match is None:
+            return False
+        lo, hi = sentence_scope(low, match.start(), match.end())
+        return is_denied(low[lo:hi]) is None
+
+    nonzero_positive = (_positive_grounding_is_undeniated(both_nonzero_positive)
+                        or _positive_grounding_is_undeniated(
+                            divisor_nonzero_positive))
     nonzero_uncertain = _contains_any(low, (
         r"\b(?:do\s+not|don't|does\s+not)\s+assume\b[^.\n]{0,60}"
-        r"\bnon[- ]?zero\b",
+            r"\bnon[- ]?zero\b",
         r"\b(?:may|can|could|might)\s+be\s+zero\b",
+        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
+            r"(?:may|can|could|might)\s+be\s+non[- ]?zero\b",
+        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
+            r"(?:is|are)\s+zero\b",
+        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
+            r"(?:is|are)\s+not\s+non[- ]?zero\b",
+        r"\b(?:both\s+operands|the\s+operands)\s+"
+            r"(?:may|can|could|might)\s+be\s+non[- ]?zero\b",
+        r"\b(?:both\s+operands|the\s+operands)\s+"
+            r"(?:are|is)\s+not\s+non[- ]?zero\b",
         r"\bzero\s+(?:divisor|denominator)\b"))
     if not nonzero_positive or nonzero_uncertain:
         unresolved.append("nonzero operand domain")

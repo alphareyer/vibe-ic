@@ -384,6 +384,54 @@ def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains
         "unsupported_unsigned_iterative_divider")
 
 
+@pytest.mark.parametrize("domain", [
+    # Exact R3 blocker: ordering does not ground divisor != 0.
+    "The dividend is nonzero, and dividend is at least divisor.",
+    # Relational-only and a one-operand claim remain insufficient.
+    "The dividend is at least divisor.",
+    "The dividend is nonzero; the divisor is unspecified.",
+    # Modal and negated claims are not positive grounding.
+    "The divisor may be nonzero, and dividend is at least divisor.",
+    "Do not assume the divisor is nonzero; dividend is at least divisor.",
+    "The divisor is not nonzero, and dividend is at least divisor.",
+], ids=[
+    "exact_dividend_only",
+    "relational_only",
+    "divisor_unspecified",
+    "divisor_modal",
+    "divisor_negated_assumption",
+    "divisor_negated",
+])
+def test_unsigned_divider_requires_explicit_divisor_nonzero_grounding(domain):
+    """The template may emit only with explicit divisor nonzero grounding."""
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.", domain)
+    reason = rcs.route_to_ai_reason(desc)
+    assert rcs.detect_shape(desc) is None
+    assert reason is not None and reason["kind"] == (
+        "unsupported_unsigned_iterative_divider")
+    assert "nonzero operand domain" in reason["unresolved"]
+
+
+@pytest.mark.parametrize("domain", [
+    "The divisor is nonzero, and dividend is at least divisor.",
+    "The dividend is at least divisor, and the divisor is nonzero.",
+    "Both operands are nonzero, and dividend is at least divisor.",
+    "Both operands must be nonzero; dividend >= divisor.",
+], ids=[
+    "divisor_before_relation",
+    "divisor_after_relation",
+    "both_operands_are",
+    "both_operands_must_be",
+])
+def test_unsigned_divider_accepts_explicit_divisor_or_both_operand_grounding(domain):
+    """Positive grounding survives word order and both-operand wording."""
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.", domain)
+    assert rcs.detect_shape(desc) == "unsigned_iterative_restoring_divider"
+    assert rcs.route_to_ai_reason(desc) is None
+
+
 def _r2_unsigned_divider_variants():
     desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
     return [
