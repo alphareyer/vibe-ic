@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -209,11 +210,18 @@ def interface_verilog(block: str, rails: List[str], signals: List[str]) -> str:
     return "\n".join(lines)
 
 
-def interface_liberty(block: str, rails: List[str], signals: List[str]) -> str:
-    """Interface Liberty: the PG pins a digital flow must connect, and one pin
-    per analog port. No timing arc is asserted — an analog macro has none to
-    declare at this level, and inventing one would be a lie a signoff tool
-    would then act on."""
+def interface_liberty(block: str, rails: List[str], signals: List[str],
+                      measurement: Optional[Dict[str, object]] = None) -> str:
+    """Interface Liberty: PG pins, analog pins, and an optional measured
+    leakage value.
+
+    The no-measurement form is retained for callers that use this pure
+    formatter in unit tests.  ``emit_block`` never publishes that form: a
+    production hardmacro must carry a source-bound native measurement or
+    refuse before writing the package.  Pure analog blocks do not acquire a
+    fabricated synchronous timing arc; a measured leakage scalar is the
+    supported non-degenerate contract.
+    """
     out = [f'library ({block}_interface) {{',
            '  delay_model : table_lookup;',
            '  time_unit : "1ns";',
@@ -223,6 +231,11 @@ def interface_liberty(block: str, rails: List[str], signals: List[str]) -> str:
            f'  cell ({block}) {{',
            '    is_macro_cell : true;',
            '    interface_timing : false;']
+    if measurement is not None:
+        value = measurement["liberty_value"]
+        unit = measurement["liberty_power_unit"]
+        out += [f'    leakage_power_unit : "{unit}";',
+                f'    cell_leakage_power : {value:.12g};']
     for i, p in enumerate(rails):
         out += [f'    pg_pin ({p}) {{',
                 f'      pg_type : "{"primary_power" if i == 0 else "primary_ground"}";',
@@ -445,6 +458,161 @@ def carve_pin_access(lef_text: str, clearance: float) -> Tuple[str, int]:
     return "\n".join(out_lines) + "\n", changed
 
 
+# ── native measurement admission ─────────────────────────────────────────
+
+_A8_MEASUREMENT = "a8_measurement.json"
+_A8_MEASUREMENT_SCHEMA = "vibe-ic/analog_a8_native_measurement/1"
+_POWER_TO_UW = {
+    "w": 1_000_000.0,
+    "mw": 1_000.0,
+    "uw": 1.0,
+    "nw": 0.001,
+    "pw": 0.000001,
+}
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _project_file(project: Path, raw: object, *, field: str
+                  ) -> Tuple[Optional[Path], str]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None, f"{field} is absent"
+    p = Path(raw)
+    cand = p if p.is_absolute() else project / p
+    try:
+        resolved = cand.resolve()
+        resolved.relative_to(project.resolve())
+    except (OSError, ValueError):
+        return None, f"{field} is outside the project or unreadable: {raw!r}"
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        return None, f"{field} does not name a non-empty project file: {raw!r}"
+    return resolved, ""
+
+
+def load_native_measurement(project: Path, block: str, gds: Path,
+                            topology: Dict) -> Tuple[Optional[Dict[str, object]], str]:
+    """Admit only a typed, native ngspice measurement bound to this input.
+
+    ``cell_leakage_power`` is the only A8 scalar this producer currently
+    supports for a pure analog macro.  Timing arcs are deliberately absent:
+    a settling result is not a synchronous cell delay.  Every source file is
+    resolved inside the project and its digest is recomputed at emission time;
+    a stale or hand-written record therefore refuses instead of becoming a
+    plausible Liberty value.
+    """
+    bdir = project / "phase3" / "analog" / block
+    path = bdir / _A8_MEASUREMENT
+    if not path.is_file():
+        return None, (f"no {_A8_MEASUREMENT}: a native ngspice measurement is "
+                      "required for the Liberty leakage contract")
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{_A8_MEASUREMENT} is unreadable JSON: {exc}"
+    if not isinstance(rec, dict):
+        return None, f"{_A8_MEASUREMENT} must contain an object"
+    if rec.get("schema") != _A8_MEASUREMENT_SCHEMA:
+        return None, (f"{_A8_MEASUREMENT} schema is not "
+                      f"{_A8_MEASUREMENT_SCHEMA!r}")
+    if rec.get("block") != block:
+        return None, (f"{_A8_MEASUREMENT} names block {rec.get('block')!r}, "
+                      f"not {block!r}")
+    if rec.get("status") != "MEASURED":
+        return None, (f"{_A8_MEASUREMENT} status is {rec.get('status')!r}; "
+                      "only MEASURED native evidence is admissible")
+    if rec.get("provenance") != "real_ngspice":
+        return None, (f"{_A8_MEASUREMENT} provenance is "
+                      f"{rec.get('provenance')!r}, not real_ngspice")
+    if rec.get("metric") != "cell_leakage_power":
+        return None, (f"unsupported A8 measurement metric {rec.get('metric')!r}; "
+                      "no timing arc or unmeasured power field is invented")
+    try:
+        value = float(rec["value"])
+    except (KeyError, TypeError, ValueError):
+        return None, f"{_A8_MEASUREMENT} has no numeric measured value"
+    unit = str(rec.get("unit") or "").strip().lower()
+    if unit not in _POWER_TO_UW:
+        return None, f"unsupported measured power unit {rec.get('unit')!r}"
+    if not (value > 0.0) or not math.isfinite(value):
+        return None, (f"measured cell_leakage_power must be finite and > 0; "
+                      f"got {rec.get('value')!r} {rec.get('unit')!r}")
+
+    required = (
+        ("source_layout", bdir / "layout.mag"),
+        ("source_gds", gds),
+        ("source_netlist", None),
+        ("native_log", None),
+    )
+    source_netlist_path: Optional[Path] = None
+    native_log_path: Optional[Path] = None
+    for field, expected in required:
+        hit, why = _project_file(project, rec.get(field), field=field)
+        if hit is None:
+            return None, why
+        if field == "source_layout" and hit != expected.resolve():
+            return None, (f"{field} points to {hit.relative_to(project)!s}; "
+                          f"expected {expected.relative_to(project)!s}")
+        if field == "source_gds" and hit != expected.resolve():
+            return None, (f"{field} points to {hit.relative_to(project)!s}; "
+                          f"expected {expected.relative_to(project)!s}")
+        digest_field = f"{field}_sha256"
+        stated = rec.get(digest_field)
+        actual = _sha256(hit)
+        if not isinstance(stated, str) or stated.lower() != actual:
+            return None, (f"{digest_field} is stale/missing for "
+                          f"{hit.relative_to(project)}")
+        if field == "source_netlist":
+            source_netlist_path = hit
+        elif field == "native_log":
+            native_log_path = hit
+
+    # A3's design netlist is not post-layout evidence.  Reusing it under a
+    # different field name would let a Liberty value describe a circuit that
+    # the measured layout never produced, so the producer refuses that
+    # identity rather than accepting a plausible but wrong source.
+    if source_netlist_path == (bdir / f"{block}.sp").resolve():
+        return None, ("source_netlist names the A3 input netlist; a native "
+                      "post-layout extracted netlist is required")
+
+    # The digest proves which log was consumed; this small semantic check
+    # proves it is an ngspice measurement log rather than an arbitrary
+    # non-empty text file.  The native contract emits `.meas op pwr` as
+    # `pwr = ...`; no value is invented from this check.
+    try:
+        log_text = native_log_path.read_text(errors="replace") \
+            if native_log_path is not None else ""
+    except OSError as exc:
+        return None, f"native_log is unreadable: {exc}"
+    if not re.search(r"(?im)^\s*pwr\s*=\s*[-+0-9.eE]+", log_text):
+        return None, ("native_log has no ngspice `.meas` pwr result; a typed "
+                      "value without its measured terminal-power receipt is "
+                      "not admissible")
+
+    if str(rec.get("simulator") or "").lower().find("ngspice") < 0:
+        return None, "native measurement does not identify ngspice"
+    image = rec.get("image_digest")
+    if not isinstance(image, str) or not image.startswith("sha256:"):
+        return None, "native measurement lacks a pinned image digest"
+    # The input declaration is part of the typed record.  It is not used as a
+    # substitute for the files above, but it keeps the producer/consumer
+    # contract explicit for a later stale-input audit.
+    if rec.get("declared_ports") != list(topology.get("ports") or []):
+        return None, ("native measurement declared_ports do not equal the "
+                      "block's topology ports")
+
+    out = dict(rec)
+    out["liberty_value"] = value * _POWER_TO_UW[unit]
+    out["liberty_power_unit"] = "1uW"
+    out["measurement_sha256"] = _sha256(path)
+    return out, ""
+
+
 def emit_block(project: Path, block: str, container: str, pdk_root: str,
                ) -> Dict:
     bdir = project / "phase3" / "analog" / block
@@ -461,6 +629,12 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
     if not (rails + signals):
         return {"block": block, "emitted": False, "rc": 1,
                 "reason": "topology.json declares no ports"}
+    topology = json.loads(topo.read_text())
+    measurement, measurement_reason = load_native_measurement(
+        project, block, gds, topology)
+    if measurement is None:
+        return {"block": block, "emitted": False, "rc": 1,
+                "reason": measurement_reason}
     tech = layout_tech(bdir)
     rcfile = magicrc_for(pdk_root, container, tech)
     if rcfile is None:
@@ -515,18 +689,12 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
         lef.write_text(carved)
     (hdir / f"{block}.gds").write_bytes(gds.read_bytes())
     (hdir / f"{block}.v").write_text(interface_verilog(block, rails, signals))
-    (hdir / f"{block}.lib").write_text(interface_liberty(block, rails, signals))
+    (hdir / f"{block}.lib").write_text(
+        interface_liberty(block, rails, signals, measurement))
     census = lef_pin_census(lef.read_text(errors="replace"))
     # Bind all four views to the exact sign-off GDS bytes consumed here. The
     # A8 gate remains a reader; this manifest is emitted only by this producer
     # and lets A8/M1 reject a copied or subsequently mutated view.
-    def digest(path: Path) -> str:
-        h = hashlib.sha256()
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
-
     views = {suffix: hdir / f"{block}{suffix}"
              for suffix in (".lef", ".lib", ".gds", ".v")}
     manifest = {
@@ -534,10 +702,24 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
         "producer": "analog_a8_hardmacro_emit",
         "block": block,
         "source_gds": str(gds.relative_to(project)),
-        "source_gds_sha256": digest(gds),
+        "source_gds_sha256": _sha256(gds),
         "views": {suffix: {"path": str(path.relative_to(project)),
-                           "sha256": digest(path)}
+                           "sha256": _sha256(path)}
                   for suffix, path in views.items()},
+        "native_measurement": {
+            "path": str((bdir / _A8_MEASUREMENT).relative_to(project)),
+            "sha256": measurement["measurement_sha256"],
+            "metric": measurement["metric"],
+            "value": measurement["value"],
+            "unit": measurement["unit"],
+            "provenance": measurement["provenance"],
+            "source_netlist": measurement["source_netlist"],
+            "source_netlist_sha256": measurement["source_netlist_sha256"],
+            "native_log": measurement["native_log"],
+            "native_log_sha256": measurement["native_log_sha256"],
+            "simulator": measurement["simulator"],
+            "image_digest": measurement["image_digest"],
+        },
     }
     write_json(hdir / "a8_views_provenance.json", manifest)
 
