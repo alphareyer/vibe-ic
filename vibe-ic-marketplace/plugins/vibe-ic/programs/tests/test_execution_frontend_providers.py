@@ -58,3 +58,47 @@ def test_step8_public_controller_eligible_and_adopted(tmp_path):
     assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
     sdc.write_text(sdc.read_text()+'\n# mutation\n')
     with __import__('pytest').raises(Exception): controller.adopt(ctx,run,choice)
+
+@__import__('pytest').mark.parametrize('row,required', [
+    ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
+    ('3', ('top',)), ('4', ('top','container')), ('5', ('top','container')),
+])
+def test_rows_2_to_5_missing_typed_params_call_nothing(tmp_path, monkeypatch, row, required):
+    import execution_frontend_worker as w
+    calls=[]
+    monkeypatch.setattr(w.subprocess, 'run', lambda *a, **k: calls.append(('cli',a,k)) or type('R',(),{'returncode':0,'stdout':'','stderr':''})())
+    kwargs={name:'x' for name in required}
+    for missing in required:
+        bad=dict(kwargs); bad.pop(missing)
+        calls.clear()
+        with __import__('pytest').raises(ValueError): w.run_row(row,tmp_path,tmp_path/'out',**bad)
+        assert calls == [], (row, missing, calls)
+
+def test_rows_2_to_5_spy_order_and_argv(tmp_path, monkeypatch):
+    import execution_frontend_worker as w
+    import design_one_shot_runner as d
+    import p0_tool_frontend_check as p0
+    import formal_harness_gen as fh, formal_property_run as fp
+    calls=[]
+    monkeypatch.setattr(p0, 'check', lambda project: calls.append(('p0.check', str(project))) or {'ok':True})
+    monkeypatch.setattr(w.subprocess, 'run', lambda argv, **kw: calls.append(('cli', list(argv))) or type('R',(),{'returncode':0,'stdout':'','stderr':''})())
+    for name in ('step_professional_tb_gen','step_reference_tb','step_l10_unit_tb_run','step_full_stack_functional_tb'):
+        monkeypatch.setattr(d, name, lambda *a, _name=name, **k: calls.append((_name, a, k)) or {'ok':True})
+    monkeypatch.setattr(fh, 'generate', lambda *a, **k: calls.append(('formal_harness_gen.generate', a, k)) or {'ok':True})
+    monkeypatch.setattr(fp, 'run', lambda *a, **k: calls.append(('formal_property_run.run', a, k)) or {'ok':True})
+    monkeypatch.setattr(w, '_write', lambda step,out,producer,**kw: calls.append(('write',step,producer,kw)) or (Path(out).mkdir(parents=True,exist_ok=True) or Path(out)/'report.json'))
+    base={'top':'chip_top','clock':'clk','timeout':7,'baseline_rtl_dir':'base','candidate_rtl_dir':'cand','container':'img'}
+    (tmp_path/'input').mkdir(exist_ok=True)
+    (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'3','parameters':base,'files':{}}))
+    w.produce_2(tmp_path,tmp_path/'o2',**base)
+    assert [x[0] for x in calls[:2]] == ['p0.check','cli']
+    assert '--baseline-rtl-dir' in calls[1][1] and '--candidate-rtl-dir' in calls[1][1] and '--timeout' in calls[1][1]
+    calls.clear(); w.produce_3(tmp_path,tmp_path/'o3',top='chip_top')
+    assert [x[0] for x in calls[:4]] == ['cli','cli','cli','cli']
+    assert all('--json' in x[1] for x in calls if x[0]=='cli')
+    (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'4','parameters':base,'files':{}}))
+    calls.clear(); w.produce_4(tmp_path,tmp_path/'o4',top='chip_top',container='img')
+    assert [x[0] for x in calls[:4]] == ['step_professional_tb_gen','step_reference_tb','step_l10_unit_tb_run','cli']
+    (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'5','parameters':base,'files':{}}))
+    calls.clear(); w.produce_5(tmp_path,tmp_path/'o5',top='chip_top',container='img')
+    assert [x[0] for x in calls] == ['formal_harness_gen.generate','formal_property_run.run','step_full_stack_functional_tb','write']
