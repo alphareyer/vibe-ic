@@ -2285,11 +2285,11 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
     write_json(requested, step_ids)
-    script = '''import json,sys
+    script = '''import json,sys,hashlib
 from pathlib import Path
 from librelane.flows.chip import Chip
 from librelane.steps import Step
-design, requested, output, pdk, project = sys.argv[1:]
+design, requested, output, pdk, project, image = sys.argv[1:]
 flow = Chip(config=design, pdk=pdk, pdk_root="/pdk", design_dir=project)
 raw = flow.config.to_raw_dict()
 for step_id in json.loads(Path(requested).read_text()):
@@ -2307,6 +2307,21 @@ for step_id in json.loads(Path(requested).read_text()):
                          if key in names and key not in selected})
     selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
     Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")
+    if step_id == "KLayout.Density":
+        def walk(value):
+            if isinstance(value, dict):
+                for nested in value.values(): yield from walk(nested)
+            elif isinstance(value, (tuple, list)):
+                for nested in value: yield from walk(nested)
+            elif str(value).startswith("/"): yield Path(str(value))
+        # Image-owned common templates are real inputs too. Read them in the
+        # same pinned resolver container, never by guessing a host path.
+        owned = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                 for path in walk(selected) if path.is_file()
+                 and not path.is_relative_to("/pdk")
+                 and not path.is_relative_to(project)}
+        Path(output, step_id + ".image_files.json").write_text(
+            json.dumps({"image": image, "sha256": owned}, indent=2) + "\\n")
     # LibreLane's Meta refuses unknown keys, so the step's declared views live beside it.
     Path(output, step_id + ".views.json").write_text(json.dumps({
         "step": step_id,
@@ -2324,7 +2339,7 @@ Path(output, "flow_gates.json").write_text(json.dumps({
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
            '--entrypoint', 'python3', image, '-c', script, str(design),
-           str(requested), str(root), pdk, str(project.resolve())]
+           str(requested), str(root), pdk, str(project.resolve()), image]
     result = run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S, log=root / 'resolution.log')
     (root / 'resolution.log').write_text(result.stdout + '\n' + result.stderr)
     if result.returncode:
@@ -2588,6 +2603,16 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        # are inputs too: an edited deck must re-run the step.
                        'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
+        if step_id == 'KLayout.Density':
+            image_files = config.with_name('KLayout.Density.image_files.json')
+            if image_files.is_file():
+                owned = _load(image_files)
+                if owned.get('image') != image or not isinstance(owned.get('sha256'), dict) \
+                        or any(not re.fullmatch('[0-9a-f]{64}', str(sha))
+                               for sha in owned['sha256'].values()):
+                    raise Refusal('LL_DENSITY_IMAGE_INPUT_UNBOUND', str(image_files))
+                fingerprint['image_files'] = owned
+                fingerprint['image_files_sha256'] = digest(image_files)
         if step_id == 'OpenROAD.STAPostPNR':
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])

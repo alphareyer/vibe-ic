@@ -234,6 +234,15 @@ def count_row(project: Path, folder: Path, step: str, key: str,
                 # Resolver directory variables are not file inputs in
                 # run_chain's fingerprint; the PDK mount is bound above.
                 continue
+            if step == 'KLayout.Density' and not translated.is_file():
+                material = config_root / 'KLayout.Density.image_files.json'
+                owned = _read(material)
+                _require(owned == fp.get('image_files') and owned.get('image') == image
+                         and digest(material) == fp.get('image_files_sha256')
+                         and re.fullmatch('[0-9a-f]{64}', str(
+                             _member(owned, 'sha256').get(str(path)))),
+                         f'LL_CONFIG_IMAGE_MATERIAL_UNBOUND: {path}')
+                continue
             _require(translated.is_file(), f'LL_CONFIG_MATERIAL_MISSING: {path}')
             sha = (fp.get('config_files') or {}).get(str(path)) or \
                   (fp.get('config_files') or {}).get(str(translated))
