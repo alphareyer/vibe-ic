@@ -115,28 +115,22 @@ def test_adoption_commits_the_exact_validated_artifact_generation(tmp_path):
 def test_registered_source_manifest_is_immutable_against_caller_rehash(tmp_path):
     ctx = H.context(tmp_path)
     arm = H.adapter()
-    tool = tmp_path / 'execution_modes_tool.py'
-    tool.write_bytes(Path(next(p for p in arm.source_files if p.endswith('execution_modes_tool.py'))).read_bytes())
-    source = {p: value for p, value in arm.source_files.items()
-              if not p.endswith('execution_modes_tool.py')}
-    source[str(tool)] = M.digest(tool)
-    components = tuple(replace(component, argv=(component.argv[0], str(tool), *component.argv[2:]))
-                       for component in arm.components)
-    arm = replace(arm, source_files=source, components=components)
     registry = M.Registry()
     registry.register(arm)
-    original = dict(arm.source_files)
-    path = tool
-    before = path.read_bytes()
-    try:
-        path.write_bytes(before + b'\nMUTATED_TRANSITIVE_SOURCE\n')
-        arm.source_files[str(path)] = M.digest(path)
-        controller = M.Controller(registry, M.Budget(2, 512), H.controller().portfolio)
-        result = controller.run(ctx, tmp_path / 'run')
-        assert result['status'] == 'NOT_MEASURED'
-        assert result.get('candidate_statuses', {}).get('a') == 'NOT_MEASURED'
-    finally:
-        path.write_bytes(before)
+    frozen = dict(registry.adapters('1')[0].source_files)
+    # The old attack rehashed a caller-owned dict. Registration now owns its
+    # own tracked snapshot, so changing this dict cannot replace any authority.
+    tool = tmp_path / 'execution_modes_tool.py'
+    tool.write_text('MUTATED_TRANSITIVE_SOURCE\n')
+    arm.source_files.clear()
+    arm.source_files[str(tool)] = M.digest(tool)
+    assert dict(registry.adapters('1')[0].source_files) == frozen
+    with pytest.raises(TypeError):
+        registry.adapters('1')[0].source_files[str(tool)] = M.digest(tool)
+    controller = M.Controller(registry, M.Budget(2, 512), H.controller().portfolio)
+    result = controller.run(ctx, tmp_path / 'run')
+    assert result['status'] == 'ADOPTED'
+    assert (Path(result['selected_generation']['directory']) / 'value.txt').read_text() == 'ONE INPUT\n'
 
 
 @pytest.mark.parametrize('arm_id', ['issued-plan.json', 'refusal.json', 'selected'])

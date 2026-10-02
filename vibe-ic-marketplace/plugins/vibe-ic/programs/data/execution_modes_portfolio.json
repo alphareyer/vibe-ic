@@ -1,7 +1,6 @@
 {
   "schema_version": "execution-modes-portfolio/v1",
   "meta": {
-    "source_commit": "88f33d965e160280101da1d2e6881652e29ee18d",
     "inventory_sha256": "d364f39fc37b77f5ba711cea7cab879345de56c157784cf847a66108ebc518bc",
     "inventory_counts": {
       "steps": 70,
@@ -24,7 +23,8 @@
       "default-mode",
       "ultra-mode"
     ],
-    "canonical_flow_sha256": "d4b1c7b7bae7fe058ef309a8e1fa3786eb53bbecb728ba52bceb2f1147f99d79"
+    "canonical_flow_sha256": "d4b1c7b7bae7fe058ef309a8e1fa3786eb53bbecb728ba52bceb2f1147f99d79",
+    "canonical_flow_git_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
   },
   "tools": {
     "vibeic": {
@@ -801,7 +801,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "D1",
           "programs": [
@@ -848,7 +847,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=D1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1008,7 +1008,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "0.5ic",
           "programs": [
@@ -1021,7 +1020,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=0.5ic",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1118,7 +1118,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "1",
           "programs": [
@@ -1137,7 +1136,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1232,7 +1232,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "2",
           "programs": [
@@ -1311,7 +1310,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=2",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1530,7 +1530,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "3",
           "programs": [
@@ -1541,7 +1540,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1673,7 +1673,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "4",
           "programs": [
@@ -1704,7 +1703,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=4",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1858,7 +1858,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "5",
           "programs": [
@@ -1887,7 +1886,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=5",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2000,7 +2000,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "6",
           "programs": [
@@ -2013,7 +2012,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=6",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2139,7 +2139,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "7",
           "programs": [
@@ -2152,7 +2151,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=7",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2252,7 +2252,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "8",
           "programs": [
@@ -2262,7 +2261,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=8",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2376,7 +2376,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "9",
           "programs": [
@@ -2394,7 +2393,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=9",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2552,7 +2552,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "10",
           "programs": [
@@ -2560,7 +2559,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=10",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2671,7 +2671,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "11",
           "programs": [
@@ -2682,7 +2681,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=11",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2798,7 +2798,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "FS1",
           "programs": [
@@ -2807,7 +2806,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=FS1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2916,7 +2916,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "DT1",
           "programs": [
@@ -2925,7 +2924,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=DT1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3032,7 +3032,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "12",
           "programs": [
@@ -3040,7 +3039,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=12",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3148,7 +3148,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "13",
           "programs": [
@@ -3167,7 +3166,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=13",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3290,7 +3290,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A1",
           "programs": [
@@ -3298,7 +3297,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3374,7 +3374,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A2",
           "programs": [
@@ -3388,7 +3387,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=A2",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3496,7 +3496,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A3",
           "programs": [
@@ -3511,7 +3510,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=A3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3620,7 +3620,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A4",
           "programs": [
@@ -3631,7 +3630,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A4",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3787,7 +3787,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A5",
           "programs": [
@@ -3801,7 +3800,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=A5",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3924,7 +3924,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A6",
           "programs": [
@@ -3938,7 +3937,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=A6",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4062,7 +4062,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A7",
           "programs": [
@@ -4079,7 +4078,8 @@
                 1965
               ]
             }
-          ]
+          ],
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4234,7 +4234,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A8",
           "programs": [
@@ -4246,7 +4245,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A8",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4378,7 +4378,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A9",
           "programs": [
@@ -4418,7 +4417,8 @@
                 721
               ]
             }
-          ]
+          ],
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4594,7 +4594,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "14",
           "programs": [
@@ -4623,7 +4622,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=14",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4724,7 +4724,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "15",
           "programs": [
@@ -4736,7 +4735,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=15",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4867,7 +4867,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "15.5ic",
           "programs": [
@@ -4884,7 +4883,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=15.5ic",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4997,7 +4997,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "16",
           "programs": [
@@ -5005,7 +5004,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=16",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5098,7 +5098,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "17",
           "programs": [
@@ -5107,7 +5106,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=17",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5219,7 +5219,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "18",
           "programs": [
@@ -5227,7 +5226,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=18",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5338,7 +5338,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "19",
           "programs": [
@@ -5346,7 +5345,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=19",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5457,7 +5457,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "20",
           "programs": [
@@ -5466,7 +5465,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=20",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5577,7 +5577,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "21",
           "programs": [
@@ -5589,7 +5588,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=21",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5737,7 +5737,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "22",
           "programs": [
@@ -5746,7 +5745,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=22",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5902,7 +5902,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "DT2",
           "programs": [
@@ -5911,7 +5910,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=DT2",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6020,7 +6020,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "DT3",
           "programs": [
@@ -6029,7 +6028,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=DT3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6123,7 +6123,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "32",
           "programs": [
@@ -6132,7 +6131,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=32",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6260,7 +6260,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "23",
           "programs": [
@@ -6282,7 +6281,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=23",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6437,7 +6437,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "24",
           "programs": [
@@ -6446,7 +6445,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=24",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6606,7 +6606,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "25",
           "programs": [
@@ -6615,7 +6614,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=25",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6729,7 +6729,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "26",
           "programs": [
@@ -6738,7 +6737,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=26",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6881,7 +6881,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "26.5ic",
           "programs": [
@@ -6896,7 +6895,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=26.5ic",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7005,7 +7005,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "27",
           "programs": [
@@ -7015,7 +7014,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=27",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7144,7 +7144,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "28",
           "programs": [
@@ -7152,7 +7151,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=28",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7264,7 +7264,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "29",
           "programs": [
@@ -7273,7 +7272,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=29",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7400,7 +7400,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "30",
           "programs": [
@@ -7408,7 +7407,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=30",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7548,7 +7548,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "33",
           "programs": [
@@ -7558,7 +7557,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=33",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7687,7 +7687,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "34",
           "programs": [
@@ -7697,7 +7696,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=34",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7856,7 +7856,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "35",
           "programs": [
@@ -7865,7 +7864,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=35",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8006,7 +8006,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "37",
           "programs": [
@@ -8024,7 +8023,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=37",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8164,7 +8164,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "37.3",
           "programs": [
@@ -8172,7 +8171,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=37.3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8284,7 +8284,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "31",
           "programs": [
@@ -8306,7 +8305,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=31",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8481,7 +8481,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "36",
           "programs": [
@@ -8493,7 +8492,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=36",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8575,7 +8575,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "37.4",
           "programs": [
@@ -8583,7 +8582,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=37.4",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8680,7 +8680,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "37.5ip",
           "programs": [
@@ -8702,7 +8701,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=37.5ip",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8839,7 +8839,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "37.5ic",
           "programs": [
@@ -8859,7 +8858,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=37.5ic",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8980,7 +8980,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "38",
           "programs": [
@@ -8989,7 +8988,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=38",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9083,7 +9083,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "39",
           "programs": [
@@ -9097,7 +9096,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=39",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9241,7 +9241,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "M1",
           "programs": [
@@ -9256,7 +9255,8 @@
             }
           ],
           "review_row": "review70_final.json#/rows/step_id=M1",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9400,7 +9400,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "M2",
           "programs": [
@@ -9411,7 +9410,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M2",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9524,7 +9524,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "M3",
           "programs": [
@@ -9533,7 +9532,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9689,7 +9689,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "M4",
           "programs": [
@@ -9697,7 +9696,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M4",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9821,7 +9821,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "40",
           "programs": [
@@ -9829,7 +9828,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=40",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9908,7 +9908,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "41",
           "programs": [
@@ -9916,7 +9915,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=41",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10023,7 +10023,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "42",
           "programs": [
@@ -10031,7 +10030,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=42",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10122,7 +10122,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "43",
           "programs": [
@@ -10130,7 +10129,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=43",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10237,7 +10237,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "44",
           "programs": [
@@ -10245,7 +10244,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=44",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10352,7 +10352,6 @@
         "source": {
           "repo": "https://github.com/vibeic/vibe-ic",
           "ref": "origin/main",
-          "sha": "88f33d965e160280101da1d2e6881652e29ee18d",
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "P0",
           "programs": [
@@ -10360,7 +10359,8 @@
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=P0",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "fdefb86832ed75f09ae5a9ae24b5a41137ccd884"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",

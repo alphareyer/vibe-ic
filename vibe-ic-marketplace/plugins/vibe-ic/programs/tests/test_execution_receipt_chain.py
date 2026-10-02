@@ -17,32 +17,63 @@ from programs.tests._route_fixture import stage_owner_route
 from programs.tests import test_execution_modes as H
 
 
-def _live_frontdoor_fixture(front, args):
-    """Test-only harness enters the policy seam without a production mint API."""
-    token = object()
-    policy._REGISTERED_ISSUER = None
-    policy._ISSUER_CONTEXT = None
-    previous = policy._ACTIVE_ENTRY_CAPABILITY
-    policy._ACTIVE_ENTRY_CAPABILITY = token
+_launchers = []
+
+@pytest.fixture(autouse=True)
+def isolated_transport(monkeypatch):
+    for name in (policy.ENV, policy._CAPABILITY_FD_ENV, 'VIBEIC_EXECUTION_AUTH_SOCKET'):
+        monkeypatch.delenv(name, raising=False)
+    yield
+    for proc, fd, channel in _launchers:
+        channel.close(); proc.wait(timeout=10)
+        try: os.close(fd)
+        except OSError: pass
+    _launchers.clear()
+
+
+def real_entry(path='IC', execution_mode='default', project=None):
+    import tempfile, struct
+    project = Path(project or tempfile.mkdtemp())
+    stage_owner_route(project, path.lower())
+    parent, channel = socket.socketpair()
+    channel.set_inheritable(True)
+    command = [sys.executable, '-I', str(Path(policy.__file__).with_name('vibe_ic_one_shot_runner.py')),
+               str(project), '--route', path.lower(), '--execution-mode', execution_mode,
+               '--route-authority-only', '--receipt-channel-fd', str(channel.fileno())]
+    environment = {k:v for k,v in os.environ.items() if not k.startswith('VIBEIC_EXECUTION')}
+    proc = subprocess.Popen(command, pass_fds=(channel.fileno(),), stderr=subprocess.PIPE, env=environment)
+    channel.close(); parent.settimeout(30)
     try:
-        return front._configure_execution_policy(args, _entry_capability=token)
-    finally:
-        policy._ACTIVE_ENTRY_CAPABILITY = previous
+        data, ancillary, _, _ = parent.recvmsg(131072, socket.CMSG_SPACE(4))
+        if not data: raise AssertionError(proc.stderr.read(8192).decode())
+        while b'\n' not in data:
+            chunk = parent.recv(4096)
+            if not chunk: raise AssertionError('canonical receipt channel EOF')
+            data += chunk
+            if len(data) > 131072: raise AssertionError('canonical receipt bound exceeded')
+        fd = struct.unpack('i', ancillary[0][2][:4])[0]
+        os.set_inheritable(fd, True)
+        payload = json.loads(data)
+        # Discover the issuer-owned listener from the inherited worker's env;
+        # locator is transport only, independently verified by consume().
+        credential = json.loads(os.pread(fd,4096,0))
+        process_env = Path(f"/proc/{credential['pid']}/environ").read_bytes()
+        # Socket path is sent as a locator by the real consumer CLI.
+        os.environ[policy._CAPABILITY_FD_ENV] = str(fd)
+        os.environ['VIBEIC_EXECUTION_AUTH_SOCKET'] = payload.pop('socket')
+        _launchers.append((proc,fd,parent))
+        return payload
+    except BaseException:
+        proc.terminate(); proc.wait(timeout=5); parent.close(); raise
+
+
+def _live_frontdoor_fixture(front, args):
+    payload = real_entry(execution_mode='ultra')
+    return front._configure_execution_policy(args)
 
 
 def issued_route(*, path, source_sha, project_digest, request_digest, route='macro'):
-    authority = object()
-    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
-    token = object()
-    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
-    try:
-        em._register_route_issuer(authority, _entry_capability=token)
-        return em._issue_route_receipt(
-            ic_ip_path=path, source_sha=source_sha,
-            project_digest=project_digest, request_digest=request_digest,
-            route=route, _authority=authority)
-    finally:
-        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+    return real_entry(path)['route']
 
 
 def test_default_omitted_is_one_existing_controller_plan(tmp_path):
@@ -318,8 +349,7 @@ def test_untrusted_environment_and_metadata_cannot_issue_ultra(monkeypatch, payl
 
 
 def test_unregistered_caller_cannot_install_frontdoor_issuer():
-    with pytest.raises(em.Refusal, match='ULTRA_ISSUER_NOT_ALLOWED'):
-        policy._register_frontdoor_issuer(object())
+    assert not hasattr(policy, '_register_frontdoor_issuer')
 
 
 def test_recomputed_receipt_with_valid_looking_process_identity_is_not_authority(monkeypatch):
@@ -376,9 +406,9 @@ def test_issued_ultra_receipt_preserves_authority_and_tamper_refuses(monkeypatch
     env[policy.ENV] = json.dumps(issued, sort_keys=True)
     monkeypatch.setattr(os, 'environ', env)
     assert policy.request()['authority'] == 'USER_EXPLICIT_ULTRA'
-    receipt = Path(issued['request_receipt_path'])
-    receipt.chmod(0o644)
+    receipt = tmp_path / 'forged-request.json'
     receipt.write_text('{}')
+    env[policy.ENV] = json.dumps(dict(issued, request_receipt_path=str(receipt), request_receipt_sha256=em.digest(receipt)))
     with pytest.raises(em.Refusal, match='REQUEST_RECEIPT_INVALID'):
         policy.request()
 
@@ -439,6 +469,7 @@ def test_ip_context_requires_and_binds_distinct_route_receipt(tmp_path):
     project_digest = 'e' * 64
     route = issued_route(path='IP', source_sha=H.BASE, project_digest=project_digest,
                          request_digest=request_digest)
+    project_digest, request_digest = route['project_digest'], route['request_digest']
     ctx = em.Context('ip', H.BASE, {'text.txt': source}, H.OBJECTIVE, ('transform',),
                      ic_ip_path='IP', route_receipt=route,
                      project_digest=project_digest, request_digest=request_digest)
@@ -455,6 +486,7 @@ def test_ic_context_also_requires_and_binds_an_issued_route_receipt(tmp_path):
     request_digest = '1' * 64
     route = issued_route(path='IC', source_sha=H.BASE, project_digest=project_digest,
                          request_digest=request_digest)
+    project_digest, request_digest = route['project_digest'], route['request_digest']
     production = replace(ctx, route_receipt=route, project_digest=project_digest,
                          request_digest=request_digest)
     assert production.binding()['ic_ip_path'] == 'IC'
@@ -518,6 +550,7 @@ def test_routed_production_context_cannot_bypass_explicit_ultra_intent(tmp_path)
     project_digest = '3' * 64
     route = issued_route(path='IC', source_sha=H.BASE, project_digest=project_digest,
                          request_digest=request_digest, route='resolved')
+    project_digest, request_digest = route['project_digest'], route['request_digest']
     routed = replace(ctx, route_receipt=route, project_digest=project_digest,
                      request_digest=request_digest)
     with pytest.raises(em.Refusal, match='ULTRA_INTENT_MISSING'):
@@ -553,7 +586,7 @@ def test_route_receipt_must_remain_the_current_authority_pointer(tmp_path):
     source.write_text('route input\n')
     stale = em.Context('1', H.BASE, {'text.txt': source}, H.OBJECTIVE,
                         ('transform',), ic_ip_path='IC', route_receipt=first,
-                        project_digest='c' * 64, request_digest='d' * 64)
+                        project_digest=first['project_digest'], request_digest=first['request_digest'])
     assert second['route_digest'] != first['route_digest']
     with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
         stale.binding()
@@ -688,10 +721,8 @@ def test_stdin_runner_cmdline_cannot_answer_canonical_capability(tmp_path):
 
 
 def test_route_issuer_api_cannot_be_called_by_an_arbitrary_caller():
-    with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
-        em._issue_route_receipt(ic_ip_path='IC', source_sha=H.BASE,
-                                project_digest='a' * 64,
-                                request_digest='b' * 64)
+    assert not hasattr(em, '_issue_route_receipt')
+    assert not hasattr(em, '_register_route_issuer')
 
 
 def test_compiled_route_frame_spoof_cannot_register_or_issue(tmp_path):
@@ -706,24 +737,14 @@ def test_compiled_route_frame_spoof_cannot_register_or_issue(tmp_path):
     result = subprocess.run([sys.executable, '-'], input=script, text=True,
                             capture_output=True,
                             env={**os.environ, 'PYTHONPATH': str(Path(em.__file__).parent)})
-    assert 'ROUTE_AUTHORITY_UNAVAILABLE' in result.stdout
+    assert 'AttributeError' in result.stdout
     assert 'ISSUED' not in result.stdout
 
 
 def test_real_owner_route_entry_issues_typed_receipt_after_admission(tmp_path):
     stage_owner_route(tmp_path, 'ic')
     assert _delivery_route.admit(tmp_path) is None
-    authority = object()
-    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
-    token = object()
-    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
-    try:
-        em._register_route_issuer(authority, _entry_capability=token)
-        receipt = _delivery_route.issue_typed_receipt(
-            tmp_path, 'ic', authority=authority,
-            request_digest=policy.request()['request_digest'])
-    finally:
-        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+    receipt = real_entry(project=tmp_path)['route']
     assert receipt['kind'] == 'issued-route'
     assert receipt['ic_ip_path'] == 'IC'
 
@@ -739,18 +760,9 @@ def test_public_neutral_test_sentinel_without_fixture_boundary_refuses(tmp_path)
 
 
 def test_route_issuer_rejects_none_digest_fields():
-    authority = object()
-    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
-    token = object()
-    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
-    try:
-        em._register_route_issuer(authority, _entry_capability=token)
-        with pytest.raises(em.Refusal, match='ROUTE_RECEIPT_INVALID'):
-            em._issue_route_receipt(ic_ip_path='IC', source_sha=None,
-                                    project_digest=None, request_digest=None,
-                                    _authority=authority)
-    finally:
-        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+    assert not hasattr(em, '_issue_route_receipt')
+    with pytest.raises(em.Refusal, match='PRODUCTION_ROUTE_REQUIRED'):
+        policy.controller_fields(ic_ip_path=None, route_receipt=None)
 
 
 def test_unexecuted_canonical_gate_names_cannot_be_validator_pass(tmp_path):
@@ -834,19 +846,8 @@ def test_rehashed_portfolio_source_sha_cannot_authenticate_canonical_yaml(tmp_pa
 def test_route_ultra_intent_cannot_be_omitted_or_downgraded(tmp_path):
     project_digest = 'a' * 64
     request_digest = 'b' * 64
-    authority = object()
-    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
-    token = object()
-    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
-    try:
-        em._register_route_issuer(authority, _entry_capability=token)
-        route = em._issue_route_receipt(
-            ic_ip_path='IC', source_sha=H.BASE,
-            project_digest=project_digest, request_digest=request_digest,
-            route='macro', intent_label='USER_EXPLICIT_ULTRA', mode_intent='ultra',
-            _authority=authority)
-    finally:
-        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+    route = real_entry(execution_mode='ultra')['route']
+    project_digest, request_digest = route['project_digest'], route['request_digest']
     ctx = replace(H.context(tmp_path), route_receipt=route,
                   project_digest=project_digest, request_digest=request_digest,
                   intent_label='USER_EXPLICIT_ULTRA')

@@ -42,10 +42,10 @@ def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
     source = {str(p.resolve()): em.digest(p.resolve()) for p in
               (Path(sys.executable), TOOL, Path(__file__))}
     variant = VARIANTS / f'{arm}.py'
-    if variant.is_file():
-        source[str(variant.resolve())] = em.digest(variant)
+    selected_tool = variant if variant.is_file() else TOOL
+    source[str(selected_tool.resolve())] = em.digest(selected_tool)
     components = tuple(em.Component(action, (
-        str(Path(sys.executable).resolve()), str(TOOL.resolve()), '{inputs}',
+        str(Path(sys.executable).resolve()), str(selected_tool.resolve()), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
         for action in ('transform', 'measure'))
     return em.Adapter(arm, 'neutral_' + arm, '1', BASE, source, sys.version,
@@ -56,13 +56,32 @@ def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
                                        'measurement.json': ('measurement.json',)}, **kw)
 
 
+class NeutralContext(em.Context):
+    """Protocol-only fixture boundary; absent from production authority."""
+    def binding(self):
+        if self.route_receipt.get('kind') != 'neutral-test':
+            return super().binding()
+        if self.native_mode not in ('direct', 'librelane', 'dual'):
+            raise em.Refusal('AMBIGUOUS_NATIVE_IDENTITY', self.native_mode)
+        if self.ic_ip_path != self.route_receipt.get('ic_ip_path'):
+            raise em.Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
+        if not re.fullmatch(r'[0-9a-f]{40}', self.source_sha):
+            raise em.Refusal('INVALID_SOURCE_SHA', self.source_sha)
+        return dict(step_id=self.step_id, source_sha=self.source_sha,
+                    controller_sha256=em.digest(Path(em.__file__)),
+                    inputs={n: em.digest(Path(p)) for n,p in self.inputs.items()},
+                    objective=dict(self.objective), required_gates=list(self.required_gates),
+                    native_mode=self.native_mode, ic_ip_path=self.ic_ip_path,
+                    route_receipt=dict(self.route_receipt), project_digest=self.project_digest,
+                    route_receipt_sha256=em._hash(self.route_receipt),
+                    intent_label=self.intent_label, request_digest=self.request_digest)
+
+
 def context(tmp_path):
     p = tmp_path / 'original.txt'
     p.write_text('one input\n')
-    return em.Context('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',),
-                      ic_ip_path='IC', route_receipt={'kind': 'neutral-test',
-                                                      'ic_ip_path': 'IC'},
-                      test_boundary=em._TEST_CONTEXT_TOKEN)
+    return NeutralContext('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',),
+                         ic_ip_path='IC', route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
 
 
 def controller(*arms, budget=None):
@@ -398,8 +417,8 @@ def test_real_canonical_portfolio_preserves_final_source_policy_and_blocks_unreg
     assert len(data['tools']) == 63
     assert sum(len(s['ultra_tools']) for s in data['steps']) == 333
     assert data['meta']['inventory_sha256'] == 'd364f39fc37b77f5ba711cea7cab879345de56c157784cf847a66108ebc518bc'
-    assert data['meta']['source_commit'] == subprocess.check_output(
-        ['git', '-C', str(require_repo()), 'rev-parse', 'HEAD'], text=True).strip()
+    assert data['meta']['canonical_flow_git_blob'] == subprocess.check_output(
+        ['git', '-C', str(require_repo()), 'hash-object', str(em._canonical_flow_path())], text=True).strip()
     assert data['meta']['policy_globally_implemented'] is False
     a9 = next(s for s in data['steps'] if s['id'] == 'A9')
     assert a9['policy_default']['tool_ids'] == ['ngspice']

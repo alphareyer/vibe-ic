@@ -33,6 +33,7 @@ import time
 from typing import Callable, Mapping
 from types import MappingProxyType
 import uuid
+from functools import lru_cache
 
 import os as _os                                                    # noqa: E402
 import sys as _sys                                                  # noqa: E402
@@ -48,9 +49,6 @@ from _atomic_artefact import write_bytes, write_json
 # cannot adopt a previous issuer's run: durable external supervision is not wired.
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
-_ROUTE_SEAL_KEY = secrets.token_bytes(32)
-_ACTIVE_ROUTE_ENTRY_CAPABILITY = None
-_TEST_CONTEXT_TOKEN = object()
 
 
 def _sealed_authority_store():
@@ -84,33 +82,6 @@ def _sealed_authority_store():
 
 
 _issue_sealed, _consume_sealed = _sealed_authority_store()
-
-
-def _route_authority_store():
-    issued, current = {}, {}
-    registered = None
-
-    def register(authority: object) -> None:
-        nonlocal registered
-        registered = authority
-
-    def matches(authority: object) -> bool:
-        return registered is not None and authority is registered
-
-    def record(value: dict) -> None:
-        route_digest = value['route_digest']
-        issued[route_digest] = json.loads(json.dumps(value))
-        current[value['current_pointer']] = route_digest
-
-    def verify(receipt: Mapping[str, object]) -> bool:
-        return (current.get(receipt.get('current_pointer')) == receipt.get('route_digest') and
-                issued.get(receipt.get('route_digest')) == dict(receipt))
-
-    return register, matches, record, verify
-
-
-_register_route_authority, _route_authority_matches, _record_route, _verify_recorded_route = (
-    _route_authority_store())
 
 
 class Refusal(RuntimeError):
@@ -159,6 +130,7 @@ def _git_source_authority(source_sha: str) -> tuple[str, str]:
     return commit, tree
 
 
+@lru_cache(maxsize=4096)
 def _git_blob_at_commit(source_sha: str, relative: str) -> str:
     """Return a tracked blob only from the verified source commit.
 
@@ -203,47 +175,33 @@ def _canonical_flow_path() -> Path:
     return _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
 
 
-def _canonical_flow_authority(flow_path: Path) -> str:
-    """Require the canonical flow to be the clean tracked object, not a copy."""
-    flow_path = flow_path.resolve()
-    canonical = _canonical_flow_path().resolve()
-    if flow_path != canonical or not flow_path.is_file() or flow_path.is_symlink():
-        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path))
-    try:
-        relative = flow_path.relative_to(_REPO_ROOT)
-        status = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'status', '--porcelain', '--', str(relative)],
-            check=True, capture_output=True, text=True, timeout=5)
-        blob = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'rev-parse', f'HEAD:{relative}'],
-            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-        observed = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(flow_path)],
-            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path)) from exc
-    if status.stdout.strip() or blob != observed:
-        raise Refusal('PORTFOLIO_CANONICAL_UNTRUSTED', str(flow_path))
-    return hashlib.sha256(flow_path.read_bytes()).hexdigest()
+def _blob_bytes(path: Path) -> str:
+    content = path.read_bytes()
+    return hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
 
 
 def _tracked_clean_file(path: Path) -> None:
+    if path.is_symlink():
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', str(path))
     path = path.resolve()
     try:
-        relative = path.relative_to(_REPO_ROOT)
-        status = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'status', '--porcelain', '--', str(relative)],
-            check=True, capture_output=True, text=True, timeout=5)
-        blob = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'rev-parse', f'HEAD:{relative}'],
-            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-        observed = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(path)],
-            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
+        relative = str(path.relative_to(_REPO_ROOT))
+        head = subprocess.check_output(['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        expected = _git_blob_at_commit(head, relative)
+        if _blob_bytes(path) != expected:
+            raise Refusal('SOURCE_AUTHORITY_DIRTY', str(path))
+    except (OSError, ValueError) as exc:
         raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', str(path)) from exc
-    if status.stdout.strip() or blob != observed:
-        raise Refusal('SOURCE_AUTHORITY_DIRTY', str(path))
+
+
+def _canonical_flow_authority(flow_path: Path) -> str:
+    if flow_path.resolve() != _canonical_flow_path().resolve():
+        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path))
+    try:
+        _tracked_clean_file(flow_path)
+    except Refusal as exc:
+        raise Refusal('PORTFOLIO_CANONICAL_UNTRUSTED', str(flow_path)) from exc
+    return digest(flow_path)
 
 
 def _local_python_imports(path: Path) -> set[Path]:
@@ -284,96 +242,14 @@ def _route_pointer(receipt: Mapping[str, object]) -> str:
         'intent_label', 'mode_intent')})
 
 
-def _route_seal(value: Mapping[str, object]) -> str:
-    body = {key: value[key] for key in value if key not in ('route_digest', 'issuer_seal')}
-    return hmac.new(_ROUTE_SEAL_KEY, _hash(body).encode(), hashlib.sha256).hexdigest()
-
-
-def _register_route_issuer(authority: object, *, _entry_capability=None) -> None:
-    """Install the route issuer after the real front door validated routing.
-
-    No frame name or path is an authority.  The top-level runner creates the
-    entry capability after parsing and route admission; callers that merely
-    compile code with a canonical ``co_filename`` cannot supply it.
-    """
-    if (_entry_capability is None or _ACTIVE_ROUTE_ENTRY_CAPABILITY is None or
-            _entry_capability is not _ACTIVE_ROUTE_ENTRY_CAPABILITY):
-        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'validated live route entry required')
-    _register_route_authority(authority)
-
-
-def _register_issued_route(receipt: Mapping[str, object], *, _authority=None) -> dict:
-    """Register a route receipt issued by the canonical route authority.
-
-    A caller-supplied self-hash is only a claim.  The controller accepts an
-    issued route after it has been recorded in this process's authority ledger
-    and is still the current receipt for its binding key.
-    """
-    if not _route_authority_matches(_authority):
-        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'only the canonical route issuer may register receipts')
-    value = dict(receipt)
-    if (value.get('schema') != 1 or value.get('kind') != 'issued-route' or
-            value.get('authority') != 'canonical-route-authority' or
-            value.get('issuer') != 'vibeic-route-frontdoor' or
-            not isinstance(value.get('route_digest'), str) or
-            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('route_digest'))) or
-            not re.fullmatch(r'[0-9a-f]{40}', str(value.get('source_sha'))) or
-            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('project_digest'))) or
-            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('request_digest'))) or
-            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('current_pointer'))) or
-            value.get('current_pointer') != _route_pointer(value) or
-            not isinstance(value.get('issuer_seal'), str) or
-            not hmac.compare_digest(value['issuer_seal'], _route_seal(value))):
-        raise Refusal('ROUTE_AUTHORITY_INVALID', 'canonical issued route required')
-    route_digest = value['route_digest']
-    if _hash({key: value[key] for key in value if key != 'route_digest'}) != route_digest:
-        raise Refusal('ROUTE_RECEIPT_DIGEST_MISMATCH', str(value.get('ic_ip_path')))
-    pointer = value['current_pointer']
-    _record_route(value)
-    return json.loads(json.dumps(value))
-
-
-def _issue_route_receipt(*, ic_ip_path: str, source_sha: str,
-                         project_digest: str, request_digest: str,
-                         route: str = '', intent_label: str = 'PROGRAM_DEFAULT',
-                         mode_intent: str = 'default', _authority=None) -> dict:
-    if not _route_authority_matches(_authority):
-        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'route receipts are issued by the canonical route authority')
-    if (ic_ip_path not in ('IC', 'IP') or
-            not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha) or
-            not isinstance(project_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', project_digest) or
-            not isinstance(request_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', request_digest) or
-            not isinstance(route, str) or not route.strip()):
-        raise Refusal('ROUTE_RECEIPT_INVALID', 'typed nonempty route fields are required')
-    _git_source_authority(source_sha)
-    if intent_label not in ('PROGRAM_DEFAULT', 'USER_EXPLICIT_ULTRA'):
-        raise Refusal('ROUTE_INTENT_INVALID', str(intent_label))
-    if mode_intent not in ('default', 'ultra'):
-        raise Refusal('ROUTE_INTENT_INVALID', str(mode_intent))
-    if (intent_label == 'USER_EXPLICIT_ULTRA') != (mode_intent == 'ultra'):
-        raise Refusal('ROUTE_INTENT_INVALID', 'route mode and intent disagree')
-    value = dict(schema=1, kind='issued-route', authority='canonical-route-authority',
-                 issuer='vibeic-route-frontdoor', ic_ip_path=ic_ip_path,
-                 source_sha=source_sha, project_digest=project_digest,
-                 request_digest=request_digest, route=route,
-                 intent_label=intent_label, mode_intent=mode_intent)
-    value['current_pointer'] = _route_pointer(value)
-    value['issuer_seal'] = _route_seal(value)
-    value['route_digest'] = _hash(value)
-    return _register_issued_route(value, _authority=_authority)
-
-
 def _verify_route_authority(receipt: Mapping[str, object]) -> None:
-    route_digest = receipt.get('route_digest')
-    pointer = receipt.get('current_pointer')
-    if (not isinstance(route_digest, str) or
-            not re.fullmatch(r'[0-9a-f]{64}', route_digest) or
-            not isinstance(pointer, str) or
-            not re.fullmatch(r'[0-9a-f]{64}', pointer) or
-            not _verify_recorded_route(receipt) or
-            not isinstance(receipt.get('issuer_seal'), str) or
-            not hmac.compare_digest(receipt['issuer_seal'], _route_seal(receipt))):
-        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(pointer))
+    from execution_authority import consume
+    try:
+        issued = consume()['route']
+    except Refusal as exc:
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
+    if dict(receipt) != issued:
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'not the current live issued route')
 
 
 def _issued(path: Path) -> dict:
@@ -423,7 +299,6 @@ class Context:
     # Only the repository's explicit neutral test fixture may use the
     # compatibility route.  A caller-authored ``kind=neutral-test`` mapping
     # is not production authorization and cannot qualify or adopt.
-    test_boundary: object | None = field(default=None, repr=False, compare=False)
 
     def binding(self) -> dict:
         if not re.fullmatch(r'[0-9a-f]{40}', self.source_sha):
@@ -444,12 +319,7 @@ class Context:
         if route_path != self.ic_ip_path:
             raise Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
         route_kind = self.route_receipt.get('kind')
-        if route_kind == 'neutral-test':
-            if (self.test_boundary is not _TEST_CONTEXT_TOKEN or
-                    self.ic_ip_path != 'IC' or self.project_digest or
-                    self.request_digest or self.intent_label != 'PROGRAM_DEFAULT'):
-                raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
-        elif route_kind == 'issued-route':
+        if route_kind == 'issued-route':
             required = ('schema', 'route_digest', 'project_digest', 'source_sha',
                         'request_digest')
             if (any(key not in self.route_receipt for key in required) or
@@ -546,10 +416,15 @@ class Adapter:
     own_no_tool_reason: str | None = None
     output_contract: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
+    verified_source_blobs: Mapping[str, str] = field(default_factory=dict)
+    executable_receipts: Mapping[str, object] = field(default_factory=dict)
+
     def identity(self) -> dict:
         return dict(arm_id=self.arm_id, tool_id=self.tool_id,
                     step_id=self.step_id, source_sha=self.source_sha,
                     source_files=dict(self.source_files),
+                    verified_source_blobs=dict(self.verified_source_blobs),
+                    executable_receipts=dict(self.executable_receipts),
                     tool_version=self.tool_version,
                     engine_families=list(self.engine_families),
                     components=[dict(name=c.name, argv=list(c.argv),
@@ -577,6 +452,9 @@ class Registry:
         if not adapter.qualification_evidence:
             raise Refusal('QUALIFICATION_UNBOUND', adapter.arm_id)
         _verified_current_source_commit(adapter.source_sha)
+        head = subprocess.check_output(['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        if head != adapter.source_sha:
+            raise Refusal('SOURCE_AUTHORITY_STALE', adapter.source_sha)
         executable_paths = []
         for component in adapter.components:
             binary = shutil.which(component.argv[0])
@@ -584,13 +462,10 @@ class Registry:
                 executable_paths.append(Path(binary).resolve())
         known_tool = adapter.tool_id in ('librelane', 'openroad', 'openroad_fork')
         if known_tool:
-            expected = 'librelane' if adapter.tool_id == 'librelane' else 'openroad'
-            if (not executable_paths or
-                    any(expected not in p.name.lower() for p in executable_paths)):
-                raise Refusal('TOOL_ID_UNBOUND', adapter.arm_id)
-            version_text = str(adapter.tool_version).lower()
-            if any(token in version_text for token in ('fabricated', 'fake', 'fixture', 'placeholder')):
-                raise Refusal('TOOL_VERSION_UNBOUND', adapter.arm_id)
+            # Priority is never granted to a caller's name/version or basename.
+            # Native installations require an independently issued install
+            # receipt; this source-only controller has no such issuer wired.
+            raise Refusal('TOOL_ID_UNBOUND', 'verified native installation receipt required')
         if adapter.applicability not in ('applicable', 'inapplicable', 'unknown'):
             raise Refusal('INVALID_APPLICABILITY', adapter.arm_id)
         if adapter.role not in ('producer', 'checker', 'complementary'):
@@ -611,6 +486,12 @@ class Registry:
             if not p.is_file() or p.is_symlink() or digest(p) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', path)
         declared_sources = {Path(path).resolve() for path in adapter.source_files}
+        external = set(executable_paths) - {p for p in executable_paths if p.is_relative_to(_REPO_ROOT)}
+        for path in declared_sources - external:
+            _tracked_clean_file(path)
+            relative = str(path.relative_to(_REPO_ROOT))
+            if _git_blob_at_commit(adapter.source_sha, relative) != _blob_bytes(path):
+                raise Refusal('ADAPTER_SOURCE_MISMATCH', str(path))
         missing_dependencies = _source_closure(adapter.source_files) - declared_sources
         if missing_dependencies:
             raise Refusal('ADAPTER_SOURCE_CLOSURE_INCOMPLETE', str(sorted(missing_dependencies)[0]))
@@ -630,8 +511,23 @@ class Registry:
         # The caller's dataclass may be frozen while its nested mappings remain
         # mutable.  Publish an immutable registration snapshot so a later
         # ``arm.source_files[path] = new_digest`` cannot rehash authority.
+        tool_receipts = {}
+        for path in set(executable_paths):
+            try:
+                measured = subprocess.run([str(path), '--version'], capture_output=True, text=True, timeout=2)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise Refusal('TOOL_VERSION_UNBOUND', str(path)) from exc
+            version = (measured.stdout + measured.stderr).strip()
+            if measured.returncode != 0 or not version:
+                raise Refusal('TOOL_VERSION_UNBOUND', str(path))
+            tool_receipts[str(path)] = dict(executable_sha256=digest(path), version=version,
+                                            argv=[str(path), '--version'], rc=measured.returncode)
+        source_blobs = {str(p): _git_blob_at_commit(adapter.source_sha, str(p.relative_to(_REPO_ROOT)))
+                        for p in declared_sources - external}
         snapshot = replace(
             adapter,
+            verified_source_blobs=MappingProxyType(source_blobs),
+            executable_receipts=MappingProxyType(tool_receipts),
             source_files=MappingProxyType(dict(adapter.source_files)),
             engine_families=tuple(adapter.engine_families),
             components=tuple(adapter.components),
@@ -700,22 +596,13 @@ def _validate_portfolio(data: dict) -> None:
             raise Refusal('PORTFOLIO_STEP_UNBOUND', str(row.get('id')))
         source = ((row.get('current_default') or {}).get('source') or {})
         expected_file = 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
-        if (source.get('canonical_file') != expected_file or
+        if ('sha' in source or source.get('canonical_file') != expected_file or
                 str(source.get('canonical_step_id')) != str(row.get('id')) or
-                not re.fullmatch(r'[0-9a-f]{40}', str(source.get('sha'))) or
-                source.get('sha') != meta.get('source_commit')):
+                source.get('canonical_blob') != meta.get('canonical_flow_git_blob')):
             raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
-        source_commit = _verified_current_source_commit(str(source['sha']))
-        canonical_path = _canonical_flow_path()
-        relative = str(canonical_path.relative_to(_REPO_ROOT))
-        try:
-            current_blob = subprocess.run(
-                ['git', '-C', str(_REPO_ROOT), 'hash-object', str(canonical_path)],
-                check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', relative) from exc
-        if (_git_blob_at_commit(source_commit, relative) != current_blob or
-                source_commit != meta.get('source_commit')):
+        current_blob = subprocess.check_output(['git', '-C', str(_REPO_ROOT),
+                                               'hash-object', str(_canonical_flow_path())], text=True).strip()
+        if current_blob != meta.get('canonical_flow_git_blob'):
             raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
         for program in source.get('programs') or ():
             program_path = _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/programs' / f'{program}.py'
@@ -778,15 +665,16 @@ class Controller:
             if binary:
                 path = Path(binary).resolve()
                 executables.append((str(path), digest(path)))
-        # Diversity is based on the implementation object and the exact
-        # component invocation, never on arm/tool/version/family labels a
-        # caller can rewrite after registration.
-        invocations = tuple(
-            (str(Path(shutil.which(c.argv[0])).resolve()), *c.argv[1:])
-            if shutil.which(c.argv[0]) else tuple(c.argv)
-            for c in adapter.components)
-        return (tuple(sorted(adapter.source_files.values())),
-                tuple(executables), invocations)
+        # Arguments and caller aliases are reproduction data only. Only the
+        # engine object and independently verified implementation blobs count.
+        implementation = set()
+        for component in adapter.components:
+            for argument in component.argv[1:]:
+                path = Path(argument)
+                if path.is_file() and path.suffix == '.py':
+                    implementation |= _source_closure({str(path.resolve()): digest(path)})
+        return (tuple(sorted(set(d for _, d in executables))),
+                tuple(sorted(digest(p) for p in implementation)))
 
     @staticmethod
     def acceptance_contract(context: Context, step: Mapping[str, object]) -> dict:
@@ -1404,6 +1292,9 @@ class Controller:
 
     @staticmethod
     def _source_current(arm: Adapter) -> None:
+        for name, blob in arm.verified_source_blobs.items():
+            if _blob_bytes(Path(name)) != blob:
+                raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
         for name, expected in arm.source_files.items():
             path = Path(name)
             if not path.is_file() or path.is_symlink() or digest(path) != expected:

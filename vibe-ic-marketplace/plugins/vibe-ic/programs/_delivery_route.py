@@ -25,35 +25,14 @@ import _tapeout_declaration as _td
 ROUTES = {"ic": _td.DELIVERABLE_DIE, "ip": _td.DELIVERABLE_HARDMACRO}
 
 
-def issue_typed_receipt(project: Path, route: str, *, authority: object,
-                        request_digest: str, intent_label: str = 'PROGRAM_DEFAULT',
-                        mode_intent: str = 'default') -> dict:
-    """Issue the route receipt after :func:`admit` has accepted owner input.
-
-    The caller is the live canonical runner and supplies its private issuer;
-    this function performs no frame/path authorization and cannot mint before
-    validated routing.
-    """
-    if route not in ROUTES or not isinstance(request_digest, str):
-        raise ValueError('validated route and request digest required')
-    try:
-        source_sha = subprocess.run(
-            ['git', '-C', str(Path(__file__).resolve().parents[4]), 'rev-parse', 'HEAD'],
-            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError('source authority unavailable') from exc
-    route_file = project / _st.DESIGN_ANSWERS_REL
-    project_digest = hashlib.sha256(route_file.read_bytes()).hexdigest()
-    from execution_modes import _issue_route_receipt
-    return _issue_route_receipt(
-        ic_ip_path='IC' if route == 'ic' else 'IP',
-        source_sha=source_sha,
-        project_digest=project_digest,
-        request_digest=request_digest,
-        route=route,
-        intent_label=intent_label,
-        mode_intent=mode_intent,
-        _authority=authority)
+def issue_typed_receipt(project, route, **_unused):
+    """Consume the immutable route issued by the isolated canonical entry."""
+    from execution_authority import consume
+    from execution_modes import Refusal
+    receipt = consume()['route']
+    if receipt['project'] != str(Path(project).resolve()) or receipt['route'] != route:
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'project/route does not match live issuer')
+    return receipt
 
 
 def _disclose_undeclared(reason: str, doc: object) -> str:

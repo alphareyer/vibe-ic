@@ -30,11 +30,6 @@ PROGRAM_DEFAULT = 'PROGRAM_DEFAULT'
 USER_EXPLICIT_ULTRA = 'USER_EXPLICIT_ULTRA'
 DEFAULT_MODE = 'default-mode'
 ULTRA_MODE = 'ultra-mode'
-_REGISTERED_ISSUER = None
-_ISSUER_CONTEXT: dict | None = None
-_ACTIVE_ENTRY_CAPABILITY = None
-_ISSUED_REQUESTS: dict[str, dict] = {}
-_ISSUED_CAPABILITIES: dict[str, tuple[object, socket.socket]] = {}
 _CANONICAL_FRONTDOOR = (Path(__file__).with_name('vibe_ic_one_shot_runner.py').resolve())
 
 
@@ -122,137 +117,11 @@ def _default_payload() -> dict:
     return payload
 
 
-def _register_frontdoor_issuer(authority: object, *, _entry_capability=None) -> None:
-    """Install the canonical runner's process-local private authority."""
-    global _REGISTERED_ISSUER, _ISSUER_CONTEXT
-    if (_entry_capability is None or _ACTIVE_ENTRY_CAPABILITY is None or
-            _entry_capability is not _ACTIVE_ENTRY_CAPABILITY):
-        raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'canonical entry capability required')
-    if _REGISTERED_ISSUER is not None and _REGISTERED_ISSUER is not authority:
-        raise Refusal('ULTRA_ISSUER_CONFLICT', 'front-door issuer already registered')
-    _REGISTERED_ISSUER = authority
-    if _ISSUER_CONTEXT is None:
-        _ISSUER_CONTEXT = dict(
-            issuer_process=_process_identity(os.getpid()),
-            invocation_id=secrets.token_hex(16),
-            issuer_role='canonical-frontdoor')
-
-
-class _CapabilityServer:
-    """Parent-owned live challenge endpoint for one issued request."""
-
-    def __init__(self, sock: socket.socket, request_digest: str,
-                 issuer_context: dict):
-        self._sock = sock
-        self._request_digest = request_digest
-        self._issuer_context = issuer_context
-        self._thread = threading.Thread(target=self._serve,
-                                        name='vibeic-execution-capability',
-                                        daemon=True)
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def _serve(self) -> None:
-        pending = b''
-        try:
-            while True:
-                chunk = self._sock.recv(4096)
-                if not chunk:
-                    return
-                pending += chunk
-                while b'\n' in pending:
-                    line, pending = pending.split(b'\n', 1)
-                    try:
-                        request = json.loads(line.decode())
-                    except (UnicodeDecodeError, ValueError):
-                        request = {}
-                    ok = (request.get('request_digest') == self._request_digest and
-                          request.get('invocation_id') == self._issuer_context['invocation_id'] and
-                          isinstance(request.get('nonce'), str) and
-                          len(request['nonce']) >= 16)
-                    response = dict(ok=ok, request_digest=self._request_digest
-                                    if ok else None, nonce=request.get('nonce') if ok else None,
-                                    invocation_id=self._issuer_context['invocation_id']
-                                    if ok else None,
-                                    issuer_process=self._issuer_context['issuer_process']
-                                    if ok else None)
-                    self._sock.sendall(json.dumps(response, sort_keys=True).encode() + b'\n')
-        except (OSError, ValueError):
-            return
-
-
 def _verify_parent_capability(request_digest: str, receipt: dict) -> None:
-    """Require the registered issuer's live endpoint for this invocation."""
-    raw_fd = os.environ.get(_CAPABILITY_FD_ENV)
-    if raw_fd is None:
-        raise Refusal('REQUEST_CAPABILITY_REQUIRED', request_digest)
-    process = receipt.get('issuer_process')
-    invocation_id = receipt.get('invocation_id')
-    if (receipt.get('issuer_role') != 'canonical-frontdoor' or
-            not isinstance(process, dict) or
-            not isinstance(invocation_id, str) or len(invocation_id) < 16 or
-            process.get('source_path') != str(_CANONICAL_FRONTDOOR) or
-            process.get('source_sha256') != _canonical_source_sha256()):
-        raise Refusal('REQUEST_CAPABILITY_INVALID', 'unregistered issuer invocation')
-    sock = None
-    try:
-        fd = int(raw_fd)
-        sock = socket.socket(fileno=fd)
-        peer_pid = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET,
-                                                        socket.SO_PEERCRED, 12))[0]
-        live = _process_identity(peer_pid)
-        expected_argv = live.get('argv', [])
-        argv0 = Path(expected_argv[0])
-        if not argv0.is_absolute():
-            resolved_argv0 = shutil.which(expected_argv[0])
-            argv0 = Path(resolved_argv0).resolve() if resolved_argv0 else Path('')
-        if (peer_pid != process.get('pid') or
-                live.get('start_ticks') != str(process.get('start_ticks')) or
-                live.get('source_path') != str(_CANONICAL_FRONTDOOR) or
-                live.get('source_sha256') != _canonical_source_sha256() or
-                live.get('executable_path') != process.get('executable_path') or
-                live.get('executable_sha256') != process.get('executable_sha256') or
-                live.get('argv') != process.get('argv') or
-                live.get('argv_sha256') != process.get('argv_sha256') or
-                len(expected_argv) < 2 or
-                str(argv0.resolve()) != live.get('executable_path') or
-                expected_argv[1] != str(_CANONICAL_FRONTDOOR)):
-            raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest)
-        forbidden = {'PYTHONPATH', 'PYTHONHOME', 'PYTHONINSPECT', 'PYTHONSTARTUP'}
-        if forbidden.intersection(live.get('environment_names', ())):
-            raise Refusal('REQUEST_CAPABILITY_INVALID', 'import-injected issuer environment')
-        nonce = secrets.token_hex(16)
-        sock.settimeout(2.0)
-        sock.sendall(json.dumps(dict(request_digest=request_digest,
-                                     invocation_id=invocation_id, nonce=nonce),
-                                sort_keys=True).encode() + b'\n')
-        pending = b''
-        while b'\n' not in pending:
-            chunk = sock.recv(4096)
-            if not chunk:
-                raise Refusal('REQUEST_CAPABILITY_INVALID', 'capability peer closed before response')
-            pending += chunk
-            if len(pending) > 65536:
-                raise Refusal('REQUEST_CAPABILITY_INVALID', 'capability response exceeded bound')
-        response = json.loads(pending.split(b'\n', 1)[0].decode())
-        if (response.get('ok') is not True or
-                response.get('request_digest') != request_digest or
-                response.get('nonce') != nonce or
-                response.get('invocation_id') != invocation_id or
-                response.get('issuer_process') != process):
-            raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest)
-    except Refusal:
-        raise
-    except (OSError, ValueError, UnicodeDecodeError, struct.error) as exc:
-        raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest) from exc
-    finally:
-        try:
-            if sock is not None:
-                sock.settimeout(None)
-                sock.detach()
-        except OSError:
-            pass
+    from execution_authority import consume
+    issued = consume()['request']
+    if issued != receipt or issued['request_digest'] != request_digest:
+        raise Refusal('REQUEST_CAPABILITY_INVALID', 'request not issued by this live launcher')
 
 
 def _load_parent_receipt(value: dict) -> dict:
@@ -280,9 +149,7 @@ def _load_parent_receipt(value: dict) -> dict:
                 or _digest(path_payload) != _digest(receipt)
                 or value.get('request_receipt_sha256') != path_sha):
             raise Refusal('REQUEST_RECEIPT_INVALID', str(receipt_path))
-    same_process = digest in _ISSUED_REQUESTS and _ISSUED_REQUESTS[digest] == receipt
-    if not same_process:
-        _verify_parent_capability(digest, receipt)
+    _verify_parent_capability(digest, receipt)
     return receipt
 
 
@@ -293,6 +160,11 @@ def request() -> dict:
         raise Refusal('INVALID_EXECUTION_REQUEST', str(exc)) from exc
     if not isinstance(value, dict):
         raise Refusal('INVALID_EXECUTION_REQUEST', repr(value))
+    if not value:
+        if _CAPABILITY_FD_ENV in os.environ:
+            from execution_authority import consume
+            issued = consume()['request']
+            value = dict(mode=issued['mode'], request_digest=issued['request_digest'], request_receipt=issued)
     if not value:
         payload = _default_payload()
         return dict(mode='default', mode_label=DEFAULT_MODE,
@@ -332,23 +204,19 @@ def request() -> dict:
         authority = USER_EXPLICIT_ULTRA
         ultra_match = True
     else:
-        # An environment cannot relabel even the default intent.  A child may
-        # transport a parent receipt only when it remains exactly PROGRAM_DEFAULT.
-        if (value.get('authority') not in (None, 'PROGRAM_DEFAULT') or
-                value.get('intent_label') not in (None, PROGRAM_DEFAULT) or
-                value.get('mode_intent') not in (None, 'default') or
-                value.get('request_receipt_path') or value.get('request_receipt_sha256')):
-            raise Refusal('REQUEST_RECEIPT_INVALID', 'default transport carries foreign intent metadata')
-        receipt = value.get('request_receipt')
-        if receipt is not None:
-            if receipt != _default_payload() or value.get('request_digest') != receipt['request_digest']:
+        if _CAPABILITY_FD_ENV in os.environ:
+            receipt = _load_parent_receipt(value)
+            if receipt.get('mode') != 'default' or receipt.get('intent_label') != PROGRAM_DEFAULT:
+                raise Refusal('REQUEST_RECEIPT_INVALID', 'default intent relabelled')
+        else:
+            if (value.get('authority') not in (None, PROGRAM_DEFAULT) or
+                    value.get('intent_label') not in (None, PROGRAM_DEFAULT) or
+                    value.get('request_receipt_path')):
+                raise Refusal('REQUEST_RECEIPT_INVALID', 'unbound default metadata')
+            receipt = value.get('request_receipt') or _default_payload()
+            if receipt != _default_payload() or value.get('request_digest', receipt['request_digest']) != receipt['request_digest']:
                 raise Refusal('REQUEST_RECEIPT_INVALID', 'default transport relabelled')
-        elif value.get('request_digest') not in (None, _default_payload()['request_digest']):
-            raise Refusal('REQUEST_RECEIPT_INVALID', 'default transport has an unbound digest')
-        intent = PROGRAM_DEFAULT
-        authority = 'PROGRAM_DEFAULT'
-        ultra_match = False
-        receipt = receipt or _default_payload()
+        intent, authority, ultra_match = PROGRAM_DEFAULT, PROGRAM_DEFAULT, False
     return dict(mode=selected, mode_label=ULTRA_MODE if selected == 'ultra' else DEFAULT_MODE,
                 mode_intent=selected, intent_label=intent, ultra_match=ultra_match,
                 mode_explicit=intent == USER_EXPLICIT_ULTRA,
@@ -384,6 +252,12 @@ def configure(args: argparse.Namespace, *, _issuer=None, _entry_capability=None)
     """
     # A child may receive a custom environment from its parent, so reconstruct
     # only a digest-bound parent transport before parsing local flags.
+    if ENV not in os.environ and _CAPABILITY_FD_ENV in os.environ:
+        from execution_authority import consume
+        issued = consume()['request']
+        if issued['mode'] == 'ultra':
+            os.environ[ENV] = json.dumps(dict(mode='ultra', request_digest=issued['request_digest'],
+                                               request_receipt=issued))
     had_transport = ENV in os.environ
     parent_digest = getattr(args, 'execution_request_digest', None)
     parent_receipt = getattr(args, 'execution_request_receipt', None)
@@ -430,51 +304,10 @@ def configure(args: argparse.Namespace, *, _issuer=None, _entry_capability=None)
             raise Refusal('INVALID_LICENSE_BUDGET', str(exc)) from exc
     requested = getattr(args, 'execution_mode', None)
     inherited = value.get('intent_label') == USER_EXPLICIT_ULTRA
-    if requested == 'ultra' and inherited:
-        # Preserve the parent's exact evidence; never mint a new receipt.
-        pass
-    elif requested == 'ultra' and inherited_mode == 'default' and not had_transport:
-        # Only the canonical top-level Phase-1 front door may issue Ultra
-        # authority. A child must receive an already-issued digest-bound
-        # receipt and the live parent capability endpoint.
-        if (_issuer is None or _issuer is not _REGISTERED_ISSUER or
-                _entry_capability is None or _entry_capability is not _ACTIVE_ENTRY_CAPABILITY):
-            raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'child')
-        if _ISSUER_CONTEXT is None:
-            raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'front-door invocation is not registered')
-        evidence = dict(schema=1, mode='ultra', mode_label=ULTRA_MODE,
-                        intent_label=USER_EXPLICIT_ULTRA, ultra_match=True,
-                        issuer='live-frontdoor', user_evidence='--execution-mode ultra',
-                        issuer_role=_ISSUER_CONTEXT['issuer_role'],
-                        issuer_process=dict(_ISSUER_CONTEXT['issuer_process']),
-                        invocation_id=_ISSUER_CONTEXT['invocation_id'],
-                        nonce=uuid.uuid4().hex)
-        evidence['request_digest'] = _digest(evidence)
-        try:
-            parent_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-            child_sock.set_inheritable(True)
-            server = _CapabilityServer(parent_sock, evidence['request_digest'],
-                                       _ISSUER_CONTEXT)
-            _ISSUED_CAPABILITIES[evidence['request_digest']] = (server, child_sock)
-            os.environ[_CAPABILITY_FD_ENV] = str(child_sock.fileno())
-            server.start()
-        except OSError as exc:
-            raise Refusal('REQUEST_CAPABILITY_UNAVAILABLE', str(exc)) from exc
-        receipt_dir = Path(tempfile.mkdtemp(prefix='vibeic-execution-request-'))
-        receipt_path = receipt_dir / 'request.json'
-        receipt_path.write_text(json.dumps(evidence, sort_keys=True, separators=(',', ':')) + '\n')
-        receipt_path.chmod(0o444)
-        _ISSUED_REQUESTS[evidence['request_digest']] = evidence
-        value.update(mode='ultra', mode_label=ULTRA_MODE, mode_intent='ultra',
-                     intent_label=USER_EXPLICIT_ULTRA, ultra_match=True,
-                     mode_explicit=True, request_digest=evidence['request_digest'],
-                     request_receipt=evidence, request_receipt_path=str(receipt_path),
-                     request_receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
-                     authority=USER_EXPLICIT_ULTRA)
-    elif requested == 'ultra':
-        raise Refusal('PARENT_REQUEST_CONFLICT', 'child cannot upgrade or relabel its parent')
-    elif requested == 'default' and inherited:
-        raise Refusal('PARENT_REQUEST_CONFLICT', 'child cannot downgrade an explicit Ultra parent')
+    if requested == 'ultra' and not inherited:
+        raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'only the isolated canonical CLI issues Ultra')
+    if requested == 'default' and inherited:
+        raise Refusal('PARENT_REQUEST_CONFLICT', 'child cannot downgrade Ultra')
     os.environ[ENV] = json.dumps(value, sort_keys=True)
     # Reparse after normalization so all validation occurs on the actual child
     # transport, not merely on argparse's local values.
@@ -565,8 +398,6 @@ def child_arguments(argv: list[str], *, supports_execution_policy: bool = True) 
 
 def child_pass_fds() -> tuple[int, ...]:
     """Return only the live parent capability FD for subprocess inheritance."""
-    if ENV not in os.environ:
-        return ()
     raw_fd = os.environ.get(_CAPABILITY_FD_ENV)
     if raw_fd is None:
         return ()
