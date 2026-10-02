@@ -33,6 +33,9 @@ def project(tmp_path: Path) -> Path:
     is distinct).
     """
     p = tmp_path / "proj"
+    # These reports belong to the direct producer. The Default tool arm is
+    # exercised separately with its retained native State and material inputs.
+    _write(p / "phase3/librelane_switch.json", {"steps": {"34": "direct"}})
     _write(p / "reports/phase3/drc_router.json", {
         "summary": {"real_violation_total": 3,
                     "producers": [{"producer": "openroad"}]}})

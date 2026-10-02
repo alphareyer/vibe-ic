@@ -58627,8 +58627,8 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
 
     clock_plan.parent.mkdir(parents=True, exist_ok=True)
     clock_plan.write_text(json.dumps({
-        "tool": "openroad",
-        "source_log": str((pnr_out / "openroad.log").relative_to(project)),
+        "tool": "python",
+        "producer": "phase3_one_shot_runner.emit_clock_plan",
         "primary_clock": next(iter(clocks)),
         "clocks": list(clocks.values()),
         # PROVENANCE: what this plan was derived from, by CONTENT.
@@ -73147,6 +73147,12 @@ def _step34_odb_half(project: Path, top: str, pdk: PdkConfig, container: str,
     except Exception as exc:  # a refusal names itself; nothing falls back
         doc["refusal"] = str(exc)
     doc["tool"] = tool
+    if tool is not None:
+        try:
+            _lf.validate_fill_handoff(project, tool, routed_def=routed)
+        except Exception as exc:
+            doc["refusal"] = str(exc)
+            tool.setdefault("refusals", []).append(str(exc))
     tool_ok = tool is not None and not tool.get("refusals")
     if mode == "librelane":
         ship = "librelane" if tool_ok else None
@@ -73159,8 +73165,18 @@ def _step34_odb_half(project: Path, top: str, pdk: PdkConfig, container: str,
                             "rule": "feasible arms; a tie keeps the direct arm"}
     doc["shipped"] = ship
     if ship == "librelane":
-        _llc.handoff_to_direct(Path(tool["state"]), {"def": filled_def},
-                               arms / "odb_handoff.json")
+        try:
+            _llc.handoff_to_direct(Path(tool["state"]), {"def": filled_def},
+                                   arms / "odb_handoff.json")
+            _lf.update_record(project, "odb", doc)
+            _lf.validate_fill_consumption(project)
+        except Exception as exc:
+            doc.update(shipped=None, refusal=str(exc))
+            _lf.update_record(project, "odb", doc)
+            filled_def.unlink(missing_ok=True)
+            (pnr / "metal_fill.done").unlink(missing_ok=True)
+            notes.append(f"metal fill handoff REFUSED: {exc}")
+            return False
         _subject = _measured_subject(
             project, top, [routed, filled_def],
             tool_log=Path(tool["state"]).parent / "openroad-fillinsertion.log")
@@ -73231,6 +73247,13 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["subject"])
+        measured = _lf.validate_density_result(project, tool, layout=filled)
+        if measured.get("value") == "NOT_MEASURED":
+            doc.update(shipped=None, librelane=tool, direct=direct,
+                       shipped_sha256=None,
+                       ship_refusal="LL_FILL_GDS_UNBOUND: " + str(measured.get("reason")))
+            _lf.update_record(project, "gds", doc)
+            return False, doc["ship_refusal"]
         if tool[_lf.DENSITY_METRIC] == 0:
             def _copy_filled() -> Tuple[bool, str]:
                 shutil.copyfile(filled, gds_out)
@@ -73238,6 +73261,12 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
             (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
                 "KLayout.Filler and PDK-derived density fill (phase3_one_shot_runner step_gds)",
                 _copy_filled)
+            if _sha256_file(gds_out) != tool["subject_sha256"]:
+                doc.update(shipped=None, librelane=tool, direct=direct,
+                           shipped_sha256=None,
+                           ship_refusal="LL_FILL_GDS_NOT_CONSUMED: streamed bytes differ from measured fill")
+                _lf.update_record(project, "gds", doc)
+                return False, doc["ship_refusal"]
         result = (tool[_lf.DENSITY_METRIC] == 0,
                   f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "

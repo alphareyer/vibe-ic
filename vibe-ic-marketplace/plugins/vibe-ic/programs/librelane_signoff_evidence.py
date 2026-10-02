@@ -162,10 +162,14 @@ def _pdk_mounts(project: Path, switch: dict, folder: Path, image: str) -> list:
     return mounts
 
 
-def _hashes(paths: dict) -> None:
+def _hashes(paths: dict, mounts: list | None = None) -> None:
     _require(isinstance(paths, dict), 'LL_INPUT_FINGERPRINT_MALFORMED')
     for name, sha in paths.items():
         path = Path(name)
+        for host, guest in sorted(mounts or [], key=lambda m: len(str(m[1])), reverse=True):
+            if path.is_relative_to(guest):
+                path = Path(host) / path.relative_to(guest)
+                break
         _require(path.is_absolute() and path.is_file(), f'LL_INPUT_MATERIAL_MISSING: {name}')
         _require(digest(path) == sha, f'LL_INPUT_CHANGED: {name}')
 
@@ -210,7 +214,7 @@ def count_row(project: Path, folder: Path, step: str, key: str,
         _hashes(fp.get('state_files'))
         _require(all(Path(p).resolve().is_relative_to(project.resolve())
                      for p in fp['state_files']), 'LL_FOREIGN_INPUT_SOURCE')
-        _hashes(fp.get('config_files'))
+        _hashes(fp.get('config_files'), mounts)
         # Every PDK/config file actually named must have a producer hash, also
         # when its name is a container path. Older receipts lacking these
         # material bindings remain incomplete; root owns producer API repair.

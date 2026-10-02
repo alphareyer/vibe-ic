@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project-local LibreLane step handoff. No Phase-3 step opts in implicitly."""
+"""Project-local LibreLane handoff with explicit production defaults."""
 from __future__ import annotations
 
 import argparse
@@ -761,6 +761,56 @@ def _walk_paths(value: Any):
             yield from _walk_paths(item)
     elif isinstance(value, str) and value.startswith('/'):
         yield Path(value)
+
+
+def config_file_hashes(config: dict, mounts: list) -> dict[str, str]:
+    """Hash config files on the host, including files behind PDK mounts."""
+    result = {}
+    for path in _walk_paths(config):
+        source = path
+        for host, guest in sorted(mounts, key=lambda m: len(str(m[1])), reverse=True):
+            if path.is_relative_to(guest):
+                source = Path(host) / path.relative_to(guest)
+                break
+        if source.is_file():
+            result[str(path)] = digest(source)
+    return result
+
+
+def validate_step_receipt(folder: Path, step: str) -> dict:
+    """Validate retained tool bytes before reuse or downstream publication.
+
+    This checks a product boundary, not source landing. Missing execution
+    output is refused; computing a new digest cannot replace the producer's
+    recorded digest.
+    """
+    try:
+        folder = folder.resolve()
+        receipt = _load(folder / 'vibeic_receipt.json')
+        fp, hashes = receipt['input'], receipt['sha256']
+        if fp.get('step') != step or not isinstance(hashes, dict):
+            raise ValueError('wrong producer or missing hashes')
+        for name in ('state_out.json', 'input_fingerprint.json', 'pdk_root.json',
+                     'invocation.log'):
+            if name not in hashes:
+                raise ValueError(f'missing producer file: {name}')
+        for name, sha in hashes.items():
+            path = (folder / name).resolve()
+            if not path.is_relative_to(folder) or not re.fullmatch('[0-9a-f]{64}', str(sha)) \
+                    or not path.is_file() or digest(path) != sha:
+                raise ValueError(f'changed producer file: {name}')
+        if _load(folder / 'input_fingerprint.json') != fp:
+            raise ValueError('input fingerprint differs')
+        if not (folder / 'invocation.log').read_text().strip():
+            raise ValueError('tool execution log is empty')
+        state = _load(folder / 'state_out.json')
+        for path in _walk_paths({k: v for k, v in state.items() if k != 'metrics'}):
+            if path.is_relative_to(folder) and \
+                    hashes.get(str(path.relative_to(folder))) != digest(path):
+                raise ValueError(f'unbound output view: {path}')
+        return receipt
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise Refusal('LL_STEP_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
 
 
 # Early steps consume only the views produced so far. Floorplan creates
@@ -1706,7 +1756,7 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
 #: criteria (a) and (b), or b-analog for an analog observer step). A step not
 #: named here defaults to `direct`. A project opts out of a cut-over default by
 #: naming the step `direct` in `phase3/librelane_switch.json`.
-PRODUCTION_DEFAULTS: dict[str, str] = {'3': 'librelane'}
+PRODUCTION_DEFAULTS: dict[str, str] = {'3': 'librelane', '34': 'librelane'}
 
 #: The chip path: a die that carries its own pad ring
 #: (`_tapeout_declaration.requests_pad_ring`, the condition of step 15.5ic).
@@ -2518,8 +2568,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                            {k: v for k, v in state.items() if k != 'metrics'})},
                        # Files the step config names (SDC, EQY script, PDN Tcl…)
                        # are inputs too: an edited deck must re-run the step.
-                       'config_files': {str(path): digest(path) for path in _walk_paths(
-                           _load(config)) if path.is_file()},
+                       'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
         if step_id == 'OpenROAD.STAPostPNR':
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
@@ -2543,7 +2592,11 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         # from before the root was recorded (the CLI then took the image's
         # PDK_ROOT) or under another root/mount is archived and re-run. The
         # fingerprint itself is unchanged, so no other step re-runs for it.
-        if (receipt.exists() and _load(receipt).get('input') == fingerprint
+        try:
+            retained = validate_step_receipt(folder, step_id) if receipt.exists() else None
+        except Refusal:
+            retained = None
+        if (retained is not None and retained.get('input') == fingerprint
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
@@ -2613,7 +2666,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             if not inputs_unchanged:
                 raise Refusal('LL_RCX_OUTPUT_UNBOUND',
                               f'{folder}: extraction input bytes changed during execution')
-        hashes = {'state_out.json': digest(folder / 'state_out.json')}
+        hashes = {'state_out.json': digest(folder / 'state_out.json'),
+                  'invocation.log': digest(folder / 'invocation.log')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):
                 hashes[str(path.relative_to(folder))] = digest(path)

@@ -41,6 +41,7 @@ import pg_supply_pin_ownership_check as G  # noqa: E402
 import phase3_one_shot_runner as R  # noqa: E402
 from _ppa import pareto as P  # noqa: E402
 from _ppa.backends import openroad as ORB  # noqa: E402
+import _default_backend_fixtures as BF
 from test_ppa_feasibility import candidate, metric  # noqa: E402
 
 CAL = PROGRAMS / "calibration"
@@ -130,6 +131,7 @@ def _stage_fill(tmp_path, monkeypatch, tool_writes):
     file write (`tool_writes(tcl_text) -> DEF text`)."""
     project = tmp_path / "proj"
     pnr = _pnr(project)
+    _switch(project, **{"34": "direct"})
     (pnr / "top.def").write_text(CAL_NEG.read_text())
     (pnr / "routed.def").write_text(CAL_NEG.read_text())
     (pnr / "pnr.tcl").write_text(DECK)
@@ -365,16 +367,9 @@ def _tool_folder(project: Path, def_text: str) -> Path:
 
 
 def _tool_record(project: Path, refusals=()):
-    folder = _tool_folder(project, CAL_NEG.read_text() + "\n# filled\n")
-    return {"step": LF.ODB_FILL_STEP, "state": str(folder / "state_out.json"),
-            "state_sha256": LLC.digest(folder / "state_out.json"),
-            "filled_def": str(folder / "chip_top.def"), "filled_def_sha256": "x",
-            "subject_sha256": "y", "patterns": PATTERNS,
-            "census": {"added": 7, "removed": 0,
-                       "per_class": {"decap": 5, "fill": 2, "other": 0},
-                       "per_master": {}, "class_of_master": {}},
-            "occupancy": {"after": {"row_utilization_pct": 100.0}},
-            "supply_ownership": {"verdict": "PASS"}, "refusals": list(refusals)}
+    record = BF.fill_record(project, refusals=refusals)
+    record["patterns"] = PATTERNS
+    return record
 
 
 def _odb_stage(tmp_path, monkeypatch, mode, refusals=()):
@@ -446,6 +441,7 @@ def test_dual_ships_the_feasible_arm_and_a_tie_keeps_direct(
 
 
 def test_the_direct_switch_leaves_the_gds_passes_to_the_caller(tmp_path):
+    _switch(tmp_path, **{"34": "direct"})
     assert R._step34_gds_tool_arm(tmp_path, SimpleNamespace(name="p"),
                                   tmp_path / "x.gds") is None
 
@@ -454,22 +450,22 @@ def _gds_stage(tmp_path, monkeypatch, mode, counts):
     project = tmp_path / "proj"
     project.mkdir()
     _switch(project, **{"34": mode})
-    gds = project / "top.gds"
+    gds = project / "phase3/stage4/gds/top.gds"
+    gds.parent.mkdir(parents=True)
     gds.write_bytes(b"sealed")
     monkeypatch.setattr(R, "_librelane_step_ctx", lambda *a: ("img", tmp_path))
     calls = []
 
     def _density(project_, image, root, pdk, *, gds, lane, steps=LF.DENSITY_STEPS, **k):
         calls.append(lane)
-        state = tmp_path / f"{lane}.state.json"
-        state.write_text("{}")
-        out = {LF.DENSITY_METRIC: counts[lane], "state": str(state),
-               "state_sha256": LLC.digest(state), "subject_sha256": "s"}
+        subject = Path(gds)
         if "KLayout.Filler" in steps:
-            filled = tmp_path / "tool.gds"
-            filled.write_bytes(Path(gds).read_bytes() + b"+pdkfill")
-            out["filler"] = {"filled_gds": str(filled), "script": "fill.rb"}
-            out["subject"] = str(filled)
+            subject = project / "phase3/librelane/34-fill/tool.gds"
+            subject.parent.mkdir(parents=True, exist_ok=True)
+            subject.write_bytes(Path(gds).read_bytes() + b"+pdkfill")
+        out = BF.density_record(project, subject, counts[lane], lane=f"{lane}/02-klayout-density")
+        if "KLayout.Filler" in steps:
+            out["filler"] = {"filled_gds": str(subject), "script": "fill.rb"}
         return out
     monkeypatch.setattr(LF, "run_density", _density)
     return project, gds, calls
@@ -540,6 +536,15 @@ def _record(project, odb=None, gds=None):
         doc["odb"] = odb
     if gds is not None:
         doc["gds"] = gds
+    if odb is not None and odb.get("shipped") == "librelane" and "tool" not in odb:
+        odb["tool"] = BF.consume_fill(project, BF.fill_record(project))
+    if gds is not None:
+        arm = gds.get(gds.get("shipped"))
+        if isinstance(arm, dict) and "state" not in arm:
+            layout = project / "phase3/stage4/gds/top.gds"
+            layout.parent.mkdir(parents=True, exist_ok=True)
+            layout.write_bytes(b"source-fixture stream")
+            arm.update(BF.density_record(project, layout, arm.get(LF.DENSITY_METRIC)))
     p = project / LF.RECORD_REL
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(doc))
@@ -547,7 +552,9 @@ def _record(project, odb=None, gds=None):
 
 def _gate_project(tmp_path, mode="librelane"):
     project = tmp_path / "g"
-    (_pnr(project) / "routed.def").write_text("routed\n")
+    pnr = _pnr(project)
+    (pnr / "routed.def").write_text(_def([]))
+    (pnr / "top.def").write_text(_def([]))
     _switch(project, **{"34": mode})
     return project, LLC.digest(project / "phase3/stage3/pnr/routed.def")
 
@@ -585,15 +592,22 @@ def test_the_gate_refuses_a_record_about_another_route(tmp_path):
 
 def _step37(project, arm="klayout", count=0):
     root = project / "phase3/librelane"
-    state = root / f"37-{arm}-finish/03-klayout-density/state_out.json"
-    state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text("{}")
-    (root / "37-promotion.json").write_text(json.dumps({"selection": arm}))
-    (root / f"37-{arm}-density.json").write_text(json.dumps({
+    gds = project / "phase3/stage4/gds/top.gds"
+    gds.parent.mkdir(parents=True, exist_ok=True)
+    gds.write_bytes(b"source-fixture stream")
+    source = root / "finished.gds"
+    source.write_bytes(gds.read_bytes())
+    row = BF.density_record(project, source, count, lane=f"37-{arm}-finish/03-klayout-density",
+                            config_folder="37-config")
+    state = Path(row["state"])
+    BF.put(root / "37-promotion.json", {"selection": arm, "canonical": str(gds),
+        "source": str(source), "finished": {arm: str(source)},
+        "source_sha256": LLC.digest(source), "canonical_sha256": LLC.digest(gds)})
+    BF.put(root / f"37-{arm}-density.json", {
         "verdict": "PASS" if count == 0 else "FAIL", "source": str(state),
         "sha256": {"state_out.json": LLC.digest(state)},
         "metrics": {LF.DENSITY_METRIC: {"status": "MEASURED" if count == 0 else "FAIL",
-                                        "value": count}}}))
+                                       "value": count}}})
     return state
 
 
@@ -614,11 +628,13 @@ def test_on_a_tool_stream_the_gds_half_is_step_37s_chain(tmp_path):
 
 def test_the_dfm_screen_reads_cmp_density_from_the_tool(tmp_path):
     project, sha = _gate_project(tmp_path)
-    state = project / "st.json"
-    state.write_text("{}")
-    _record(project, gds={"shipped": "librelane", "librelane": {
-        LF.DENSITY_METRIC: 1, "rules": {"M2.4": 1}, "state": str(state),
-        "state_sha256": LLC.digest(state)}})
+    layout = project / "phase3/stage4/gds/top.gds"
+    layout.parent.mkdir(parents=True)
+    layout.write_bytes(b"source-fixture stream")
+    row = BF.density_record(project, layout, 1)
+    row["rules"] = {"M2.4": 1}
+    state = Path(row["state"])
+    _record(project, gds={"shipped": "librelane", "librelane": row})
     ref = DFM.audit(project)["density_ref"]
     assert ref["tool"].startswith("KLayout.Density")
     assert ref["errors"] == 1 and ref["step34_pass"] is False

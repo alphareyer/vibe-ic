@@ -642,6 +642,11 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
         findings.append(Finding("ERROR", "LL_FILL_ODB_NOT_RUN",
                                 "OpenROAD.FillInsertion left no record"))
     else:
+        if odb.get("shipped") == "librelane":
+            try:
+                _lf.validate_fill_consumption(project_dir)
+            except Exception as exc:
+                findings.append(Finding("ERROR", "LL_FILL_HANDOFF_UNBOUND", str(exc)))
         if odb.get("def_sha256") != _sha256(routed):
             findings.append(Finding("ERROR", "LL_FILL_RECORD_STALE",
                                     "the fill record is about another routed DEF"))
@@ -660,7 +665,12 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
                                     str(gds.get("tool_refusal") or gds.get("ship_refusal")
                                         or "no GDS fill shipped")))
         elif isinstance(arm, dict):
-            count = arm.get(_lf.DENSITY_METRIC)
+            measured = _lf.tool_density(project_dir)
+            if measured and measured.get("status") == "MEASURED":
+                count = measured.get("errors")
+            else:
+                findings.append(Finding("ERROR", "LL_DENSITY_NOT_MEASURED",
+                                        str(measured or "current density producer absent")))
     elif _llc.selected_mode(project_dir, "37") != "direct":
         s37 = _lf.step37_density(project_dir)
         if s37 is None:
