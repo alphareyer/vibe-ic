@@ -9,6 +9,7 @@ producer receipt and every downstream gate are observed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ast
 import json
 from pathlib import Path
 import re
@@ -38,17 +39,30 @@ def _site_path(site: str) -> Path:
     path = HERE / module
     if not module or not symbol or not path.is_file():
         raise em.Refusal("BACKEND_PRODUCER_SITE_MISSING", site)
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError) as exc:
+        raise em.Refusal("BACKEND_PRODUCER_SITE_UNREADABLE", site) from exc
+    symbols = {node.name for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    if symbol not in symbols:
+        raise em.Refusal("BACKEND_PRODUCER_SYMBOL_MISSING", site)
     return path
 
 
 def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
     paths = {HERE / "execution_modes.py", Path(__file__), HERE / "execution_provider_catalog.py"}
     paths.update(_site_path(site) for site in spec["producer_sites"])
+    # The worker imports this module and calls its row dispatcher directly.
+    # Bind the dispatcher and its canonical gate implementation in the same
+    # source identity; a file:symbol catalog entry is not an executable CLI.
+    paths.update({HERE / "execution_backend_producers.py", HERE / "execution_backend_gates.py"})
     for gate in spec["consumer_gates"]:
         candidate = HERE / (str(gate) + ".py")
         if candidate.is_file():
             paths.add(candidate)
     paths.add(HERE / "execution_backend_snapshot.py")
+    paths.add(HERE / "execution_backend_worker.py")
     paths = {p.resolve() for p in paths if p.is_file() and not p.is_symlink()}
     paths.add(Path(sys.executable).resolve())
     return {str(p): em.digest(p) for p in sorted(paths)}
@@ -173,21 +187,24 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     applicable = applicability == "applicable"
     applicability_kind = ("applicable" if applicable else
                           "inapplicable" if applicability.startswith("inapplicable") else "unknown")
-    producer = _site_path(str(spec["producer_sites"][0]))
+    producer = HERE / "execution_backend_worker.py"
     source_files = _source_files(spec)
     gates = tuple(spec["consumer_gates"])
-    output_contract = {name: (name,) for name in spec["canonical_outputs"]}
+    # The controller consumes one exact staged receipt. The worker expands the
+    # canonical OR/glob clauses into concrete output members before hashing
+    # them in that receipt; wildcard strings never enter Adapter.required_outputs.
+    output_contract = {name: ("backend_result.json",) for name in spec["canonical_outputs"]}
     validator = _step37_validator("librelane") if spec["step_id"] == "37" else validate
     return em.Adapter(
         arm_id=str(spec["arm_id"]), tool_id=str(spec["tool_id"]), step_id=str(spec["step_id"]),
         source_sha=source_sha, source_files=source_files,
         tool_version="source-bound; native qualification NOT_MEASURED",
         engine_families=tuple(spec["engine_families"]),
-        components=(em.Component("producer", (str(Path(sys.executable).resolve()), str(producer), "{inputs}", "{outputs}"), 30),),
-        validate=validator, required_outputs=tuple(spec["canonical_outputs"]),
+        components=(em.Component("producer", (str(Path(sys.executable).resolve()), str(producer), "{inputs}", "{outputs}", "--step-id", str(spec["step_id"]), "--params-json", json.dumps({"route": "librelane" if spec["step_id"] != "30" else "path_spice"})), 30),),
+        validate=validator, required_outputs=("backend_result.json",),
         objective=dict(objective), applicability=applicability_kind,
         applicability_reason="" if applicable else str(applicability), role="producer",
-        qualified=True, qualification_evidence=(
+        qualified=False, qualification_evidence=(
             "source receipt contract only; native execution NOT_MEASURED; producer site=" + str(producer)),
         available=available, availability_reason="" if available else "NATIVE_EXECUTION_NOT_MEASURED",
         cpus=1, ram_mb=256, output_contract=output_contract,

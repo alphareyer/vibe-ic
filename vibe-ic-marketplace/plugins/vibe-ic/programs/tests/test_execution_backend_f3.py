@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -49,6 +50,28 @@ def test_default_call_path_is_source_only_and_unmeasured():
     assert adapter.availability_reason == "NATIVE_EXECUTION_NOT_MEASURED"
     assert adapter.tool_id == "librelane"
     assert adapter.engine_families == ("openroad",)
+
+
+def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
+    source = tmp_path / "seed.txt"
+    source.write_text("source-only\n")
+    row = next(r for r in coverage_rows() if r["step_id"] == "15")
+    context = em.Context("15", BASE, {"project/input/seed.txt": source},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+    registry = register_backend_adapters(em.Registry(), source_sha=BASE, available=True)
+    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    plan = controller.plan(context, "default-mode")
+    adapter = registry.adapters("15")[0]
+    root = tmp_path / "run"
+    root.mkdir()
+    receipt = controller._run_arm(adapter, context,
+                                  {"run_id": "source-test", "binding": plan["binding"], "mode": "default-mode"},
+                                  root, threading.Event())
+    assert receipt["processes"][0]["rc"] == 0
+    result = json.loads((root / adapter.arm_id / "outputs" / "backend_result.json").read_text())
+    assert result["step_id"] == "15"
+    assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
 
 
 def test_step30_default_and_explicit_xyce_are_parameters_of_one_provider():
