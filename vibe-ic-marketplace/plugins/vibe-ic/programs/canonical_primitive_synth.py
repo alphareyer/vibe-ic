@@ -251,6 +251,15 @@ def _division_frame(text: str) -> Tuple[str, str]:
     return owner, "assertion"
 
 
+def _division_clauses(sentence: str) -> List[str]:
+    """A requirement complement owns its coordinated operand predicates."""
+    if re.match(r"^(?:(?:the|this|that)\s+)?(?:requirements?|guarantees?|"
+                r"constraints?|statements?|rules?|property|properties)\s+that\b", sentence):
+        return [sentence]
+    return re.split(r"(?:;\s*|,\s*(?:and|but|yet|however)\s+)"
+                    r"(?!\s*" + _DIVISION_ELIDED_START + r")", sentence)
+
+
 def _division_propositions(desc_text: str,
                            records: List[Dict[str, str]]) -> List[_DivisionProposition]:
     """Keep list/section frames while separating propositions and quotations.
@@ -305,8 +314,7 @@ def _division_propositions(desc_text: str,
                 frame = "question"
             # Keep coordinated predicates with an elided subject together;
             # the withdrawal resolver supplies their common referent.
-            clauses = re.split(r"(?:;\s*|,\s*(?:and|but|yet|however)\s+)"
-                               r"(?!\s*" + _DIVISION_ELIDED_START + r")", sentence)
+            clauses = _division_clauses(sentence)
             for clause in clauses:
                 clause = clause.strip().removeprefix("and ")
                 if not clause:
@@ -466,8 +474,21 @@ def _division_comparison_conflicts(fact: _DivisionComparison,
             (fact.relation == "less" and not denied(fact.match)))
 
 
+class _DivisionComplement(NamedTuple):
+    domains: set
+    withdrawal: str
+    unknown: bool
+
+
+def _division_complement_operand_subject(body: str) -> bool:
+    """Bind predicate subjects; an operand on an output's RHS is not an input."""
+    subjects = re.split(r"\s*,?\s*\b(?:and|but|yet)\b\s+|\s*[;,]\s*", body)
+    return any(re.match(r"^(?:both\s+operands|the\s+operands|(?:both\s+)?" +
+                        _division_operand() + r")", subject.strip()) for subject in subjects)
+
+
 def _division_requirement_complement(body: str, invariants: Dict[str, re.Pattern]
-                                     ) -> Optional[Tuple[set, str]]:
+                                     ) -> Optional[_DivisionComplement]:
     """Consume every coordinated domain predicate, keeping withdrawal polarity.
 
     An unparsed target operand complement cannot leave an earlier guarantee
@@ -476,18 +497,35 @@ def _division_requirement_complement(body: str, invariants: Dict[str, re.Pattern
     facts = sorted((match.start(), match.end(), domain)
                    for domain, pattern in invariants.items()
                    for match in pattern.finditer(body))
-    if not re.search(r"\b(?:dividend|numerator|divisor|denominator|operands?)\b", body):
+    if not _division_complement_operand_subject(body):
         return None
     domains, end = set(), 0
     for start, stop, domain in facts:
         if not re.fullmatch(r"\s*(?:(?:,\s*)?(?:and|but|yet)\s+)?", body[end:start]):
-            return {"nonzero", "ordering"}, body
+            return _DivisionComplement({"nonzero", "ordering"}, body, True)
         domains.add(domain)
         end = stop
     tail = body[end:].strip()
-    if not domains or not re.match(_DIVISION_ELIDED_START, tail):
-        return {"nonzero", "ordering"}, body
-    return domains, tail
+    if not domains or (tail and not re.match(_DIVISION_ELIDED_START, tail)):
+        return _DivisionComplement({"nonzero", "ordering"}, body, True)
+    return _DivisionComplement(domains, tail, False)
+
+
+def _division_withdraws(tail: str, denied: Callable[[str], bool]) -> bool:
+    """Each elided withdrawal predicate owns its polarity and common subject."""
+    clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|\s*[;,]\s*", tail)
+    for clause in clauses:
+        clause = clause.strip()
+        if not re.match(_DIVISION_ELIDED_START, clause):
+            continue
+        for predicate in re.finditer(r"\b(?:waived|removed|obsolete|optional|retracted|"
+                                     r"cancelled|canceled|inapplicable|deprecated|superseded)\b", clause):
+            if not denied(clause[:predicate.start()]):
+                return True
+        if re.search(r"\b(?:does|do|did)\s+not\s+apply\b|"
+                     r"\bno\s+longer\s+(?:apply|applies|required)\b", clause):
+            return True
+    return False
 
 
 def _division_plural_requirement(text: str, antecedents: set
@@ -558,10 +596,7 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
         plural = _division_plural_requirement(proposition.text, antecedents)
         if plural is not None and _division_target_evidence(proposition):
             matching, tail = plural
-            for predicate in withdrawal.finditer(tail):
-                if not denied(tail[:predicate.start()]):
-                    retracted.update(matching)
-            if inapplicable.search(tail):
+            if _division_withdraws(tail, denied):
                 retracted.update(matching)
         subject = referent.search(proposition.text)
         if (subject is None and carried_subject is not None
@@ -606,16 +641,11 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
             if resolved is None:
                 carried_subject = None
                 continue
-            embedded_domains, tail = resolved
-            # An unresolved relevant complement still has a withdrawal scope;
-            # do not require its unknown body to look like an elided verb.
-            if tail == body:
-                for predicate in withdrawal.finditer(tail):
-                    if (_division_target_evidence(proposition)
-                            and not denied(tail[:predicate.start()])):
-                        retracted.update(embedded_domains)
-                if _division_target_evidence(proposition) and inapplicable.search(tail):
-                    retracted.update(embedded_domains)
+            embedded_domains, tail = resolved.domains, resolved.withdrawal
+            # An active unknown operand constraint cannot be established by
+            # this emitter. Negating its withdrawal does not resolve its intent.
+            if resolved.unknown and _division_target_evidence(proposition):
+                retracted.update(embedded_domains)
                 continue
         clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|"
                            r"\s*[;,]\s*", tail)

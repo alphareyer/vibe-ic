@@ -4398,3 +4398,114 @@ def test_unsigned_divider_r11_bounded_grammar(case, clause, expected, replace_do
     if replace_domain:
         description = description.replace("The divisor is nonzero. Dividend is at least divisor.\n", "")
     _r11_public_paths(description, expected, tmp_path)
+
+
+# R12: exact six reviewer inputs under both ordinary module/WIDTH identities.
+_R12_CASES = [('coordinated_comma',
+  'The guarantee that divisor input is nonzero, and dividend input is ≥ divisor input is cancelled.',
+  'review_ratio_unit',
+  8,
+  'DEFER',
+  '33942f5657eeb1b34678158dfb309387fe6346e0e51f496300a52cd546ed3bee'),
+ ('unknown_complement_not_removed',
+  'The requirement that the divisor input has an unspecified admissible range has not been removed.',
+  'review_ratio_unit',
+  8,
+  'DEFER',
+  '2f4c71fc6b76ec4e2326dd3514a932df9dbb5d65e1e46e460d8aebab8dce3e75'),
+ ('output_mentions_divisor',
+  'The requirement that quotient is at least divisor has been removed.',
+  'review_ratio_unit',
+  8,
+  'EMIT',
+  'f74bac29d6fce704ecd3e5d3dd14dff0d3949a3cc0df0397ceb39ee272bd96d9'),
+ ('output_mentions_dividend',
+  'The requirement that quotient output is nonzero for dividend has been removed.',
+  'review_ratio_unit',
+  8,
+  'EMIT',
+  '8d7a94d90d68d0ff3aabee7f0dde1e60a137862610efbae981300b1a50b3c68b'),
+ ('plural_negation_then_withdraw',
+  'Both the divisor and the dividend requirements are not waived but are removed.',
+  'review_ratio_unit',
+  8,
+  'DEFER',
+  '55af61a0ceee73182328e092ef0f726bed51330a59fddac09419a8f274f87e76'),
+ ('demonstrative_negation_then_withdraw',
+  'All of those requirements are not waived but are removed.',
+  'review_ratio_unit',
+  8,
+  'DEFER',
+  '20438df50475350becba19703e463c6ee635f9795647d6d9f7a01e061f54e506'),
+ ('coordinated_comma-width9',
+  'The guarantee that divisor input is nonzero, and dividend input is ≥ divisor input is cancelled.',
+  'confirmation_ratio_unit',
+  9,
+  'DEFER',
+  '6d5a11c5651cbe46b337856f28fed5d05f0cbc3918f1780329f4b6b12fc3dc1a'),
+ ('unknown_complement_not_removed-width9',
+  'The requirement that the divisor input has an unspecified admissible range has not been removed.',
+  'confirmation_ratio_unit',
+  9,
+  'DEFER',
+  'c96c1aae01ed5dd3e991e785b609fdeceb14e2512c4bd14f5ae0490ba9933751'),
+ ('output_mentions_divisor-width9',
+  'The requirement that quotient is at least divisor has been removed.',
+  'confirmation_ratio_unit',
+  9,
+  'EMIT',
+  '68fcca82a29e80705730e02def634dfefe5d25bf86f73dafd07455e55ff56b6e'),
+ ('output_mentions_dividend-width9',
+  'The requirement that quotient output is nonzero for dividend has been removed.',
+  'confirmation_ratio_unit',
+  9,
+  'EMIT',
+  '466c8ed64a8ac7b2dc4448f4f2670fb775e05eace533799e8f81a8135e21acc9'),
+ ('plural_negation_then_withdraw-width9',
+  'Both the divisor and the dividend requirements are not waived but are removed.',
+  'confirmation_ratio_unit',
+  9,
+  'DEFER',
+  '827cd5761865d05a32aad4a9a75864f8d747ae4a87b7fbedf93de07d4c59491e'),
+ ('demonstrative_negation_then_withdraw-width9',
+  'All of those requirements are not waived but are removed.',
+  'confirmation_ratio_unit',
+  9,
+  'DEFER',
+  '644e0bc3553130019309498587becb31d59de978e0b572abcab7bd3657c93935')]
+
+
+@pytest.mark.parametrize("case,clause,module,width,expected,source_sha256", _R12_CASES,
+                         ids=[row[0] for row in _R12_CASES])
+def test_unsigned_divider_r12_exact_review(case, clause, module, width, expected, source_sha256, tmp_path):
+    import hashlib
+    description = _R11_SPEC.format(clause=clause).replace("review_ratio_unit", module)
+    description = description.replace("default value of 8.", f"default value of {width}.")
+    assert hashlib.sha256(description.encode()).hexdigest() == source_sha256
+    source, rtl = tmp_path / "description.txt", tmp_path / "candidate.v"
+    source.write_text(description)
+    cli = subprocess.run([sys.executable, str(PROG), "--from-desc", str(source),
+                          "--out", str(rtl)], capture_output=True, text=True)
+    payload = json.loads(cli.stdout)
+    project = tmp_path / "project"
+    doc = project / "phase1/input_doc/design_description.txt"
+    doc.parent.mkdir(parents=True)
+    doc.write_bytes(source.read_bytes())
+    result = _load_runner()._try_canonical_primitive_rtl(project, time.time())
+    outputs = list(project.rglob("*.v")) + list(project.rglob("*.sv"))
+    # Both public paths have executed before any observed verdict is asserted.
+    assert payload["verdict"] == expected, payload
+    assert cli.returncode == (0 if expected == "EMIT" else 2), cli.stderr
+    assert rtl.exists() == (expected == "EMIT")
+    if expected == "DEFER":
+        assert payload["defer_reason"]["kind"] == "unsupported_unsigned_iterative_divider"
+        assert result is None
+        assert outputs == []
+    else:
+        assert result is not None and result.status == "PASS"
+        assert len(outputs) == 1
+        assert outputs[0].read_bytes() == rtl.read_bytes()
+        compiler = subprocess.run(["iverilog", "-g2012", "-s", module,
+                                   "-o", str(tmp_path / "sim.out"), str(rtl)],
+                                  capture_output=True, text=True)
+        assert compiler.returncode == 0, compiler.stdout + compiler.stderr
