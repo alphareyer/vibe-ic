@@ -67467,6 +67467,11 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
     doc: Dict[str, Any] = {"step": "24", "mode": mode,
                            "producer": "librelane:OpenROAD.IRDropReport",
                            "def_sha256": _sha256_file(routed)}
+    inputs = {"def": routed, "netlist": pnr / f"{top}_pnr.v",
+              "sdc": pnr / "constraint.sdc", "spef": spef}
+    doc["inputs"] = {key: {"path": str(path.relative_to(project)),
+                            "sha256": _sha256_file(path) if path.is_file() else None}
+                     for key, path in inputs.items()}
     try:
         image, root = _librelane_step_ctx(project, "24", pdk.name)
         declared = getattr(pdk, "ir_budget_pct", None)
@@ -67478,6 +67483,31 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
                             spef=spef, budget_pct=budget, budget_source=source)
         doc["record"] = record
         doc["judgment"] = _la.judge_ir(record)
+        folder = Path(record["tool_state"]).parent
+        state = json.loads((folder / "state_in.json").read_text())
+        config_path = project / "phase3/librelane/24-config/OpenROAD.IRDropReport.json"
+        config = json.loads(config_path.read_text())
+        corner = config["DEFAULT_CORNER"]
+        tech_pattern = _la._pattern_for(corner, config["TECH_LEFS"])
+        spef_pattern = _la._pattern_for(corner, state["spef"])
+        mounts = [(root / pdk.name, f"/pdk/{pdk.name}")]
+        def _asset(value):
+            path = _la._host_path(value, mounts)
+            return {"path": str(path), "sha256": _sha256_file(path)}
+        doc["native_basis"] = {
+            "odb": _asset(state["odb"]), "sdc": _asset(state["sdc"]),
+            "spef": _asset(state["spef"][spef_pattern]),
+            "tech_lef": _asset(config["TECH_LEFS"][tech_pattern]),
+            "liberties": [_asset(value) for value in _la.libraries_read(folder, corner)],
+        }
+        # Retain the actual tool state, report, logs and same-basis arm bytes.
+        # Host gates can then refuse a stale state rather than adopting its label.
+        paths = [Path(record["tool_state"]), config_path]
+        for folder in (Path(record["tool_state"]).parent,
+                       project / "phase3/tool_arms/24"):
+            paths += [path for path in folder.rglob("*") if path.is_file()]
+        doc["artifacts"] = {str(path.relative_to(project)): _sha256_file(path)
+                              for path in paths}
     except Exception as exc:  # a refusal names itself; nothing falls back
         doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": [f"refused: {exc}"]}
     _aa.write_json(rpt / _LL_IR_RECORD, doc)
@@ -67554,6 +67584,7 @@ def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
         "verdict": verdict, "def_sha256": doc.get("def_sha256"),
         "tool_state": record["tool_state"], "tool_state_sha256": record["tool_state_sha256"],
         "evidence": "LibreLane OpenROAD.IRDropReport state metrics + irdrop.rpt",
+        "power_basis": doc.get("power_basis"),
     })
     # The dynamic tier, from Vibeic.TransientIR, in the direct
     # emitter's payload (its own `build_result`), or its error by name.
@@ -67574,6 +67605,66 @@ def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
                    "producer": "librelane:Vibeic.TransientIR",
                    "reason": transient.get("reason") or "no transient record"}
     _aa.write_json(rpt / "dynamic_ir.json", payload)
+
+
+def _step24_primary_mode(project: Path) -> str:
+    """Ordinary Step 24 prefers the existing LibreLane route; explicit modes win.
+
+    Kept at this owned boundary until shared selection is composed. It does
+    not write a switch into the user's project.
+    """
+    import librelane_contract as ll
+    path = project / "phase3/librelane_switch.json"
+    steps = ll._load(path).get("steps", {}) if path.is_file() else {}
+    return ll.selected_mode(project, "24") if "24" in steps else "librelane"
+
+
+def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
+                          notes: List[str]) -> Dict[str, Any]:
+    """Adopt the existing LibreLane static result; disclose a concrete refusal.
+
+    The PSM session needed for EM leaves a cross-check, not a second primary
+    IR producer. A known over-budget measurement is retained even when the
+    primary is incomplete. Missing primary evidence never turns into PASS.
+    """
+    import em_current_density_check as emc
+    import librelane_ir_antenna as la
+    rpt = _pl.reports_phase3_dir(project)
+    direct = json.loads((rpt / "ir_drop.json").read_text())
+    _aa.write_json(rpt / "ir_drop_psm_cross_check.json", direct)
+    _aa.write_text(rpt / "ir_drop_psm_cross_check.rpt", (rpt / "ir_drop.rpt").read_text())
+    doc = json.loads((rpt / _LL_IR_RECORD).read_text())
+    valid = bool(doc.get("record") and doc.get("artifacts"))
+    for row in (doc.get("inputs") or {}).values():
+        valid = valid and bool(row["sha256"] and emc._native_sha(project / row["path"]) == row["sha256"])
+    for name, digest in (doc.get("artifacts") or {}).items():
+        valid = valid and bool(digest and emc._native_sha(project / name) == digest)
+    if valid:
+        record = doc["record"]
+        valid = (record["def_sha256"] == basis["layout_sha256"]
+                 and record["spef_sha256"] == basis["spef_sha256"]
+                 and emc._native_sha(Path(record["tool_state"])) == record["tool_state_sha256"])
+    if valid:
+        doc["judgment"] = la.judge_ir(doc["record"])
+        doc["power_basis"] = basis
+        _librelane_step24_publish(project, doc)
+        notes.append(f"Step24 primary adopted LibreLane IR: {doc['judgment']['verdict']}")
+    else:
+        if doc.get("record"):
+            doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": ["LL_IR_CURRENT_BINDING_INVALID"]}
+        _librelane_step24_refusal_publish(project, doc)
+        refused = json.loads((rpt / "ir_drop.json").read_text())
+        refused["power_basis"] = basis
+        if direct.get("verdict") == "FAIL":
+            refused.update(direct)
+            refused["primary_tool_status"] = "NOT_MEASURED"
+            refused["measured_failure"] = "ir_drop_psm_cross_check.json"
+            _aa.write_text(rpt / "ir_drop.rpt", (rpt / "ir_drop_psm_cross_check.rpt").read_text())
+        _aa.write_json(rpt / "ir_drop.json", refused)
+        notes.append(f"Step24 primary NOT_MEASURED: {doc['judgment'].get('reasons')}")
+    doc["adopted"] = bool(valid)
+    _aa.write_json(rpt / _LL_IR_RECORD, doc)
+    return doc
 
 
 def _librelane_antenna_router(project: Path, top: str, pdk: PdkConfig, mode: str,
@@ -70856,7 +70947,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if _em_mode == "librelane":
         raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
                          "LibreLane has no EM step; use dual for the OpenROAD audit")
-    _audit_tool = _em_mode == "dual"
+    # Default and dual use the same native PSM producer. There is no second
+    # density run or user switch required for the ordinary Step-25 consumer.
+    _audit_tool = _em_mode in ("direct", "dual")
     # The OpenROAD fork's check_current_density consumes areal A/um^2 limits.
     # LEF routing DCCURRENTDENSITY is mA/um: divide by declared THICKNESS.
     # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
@@ -70864,18 +70957,15 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
     _jmax = _emcd.parse_lef_jmax(_tlef)
     _em_limits = out_dir / "em_openroad_limits.txt"
-    _limit_rows = [
-        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - _emcd._DEFAULT_MARGIN):.12g}"
-        for row in _jmax.values()
-        if row.get("kind") == "routing" and row.get("jmax_areal_A_per_um2")
-    ]
+    _limit_rows = _emcd.native_limits(_tlef).splitlines()
+    _authority_snapshot = out_dir / "em_native_authority.tlef"
     if _audit_tool and not _limit_rows:
         notes.append("OpenROAD EM density NOT_MEASURED: tech LEF has no routing Jmax plus THICKNESS")
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
                 out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
-                out_dir / "em_openroad_ab.json", _em_limits,
+                out_dir / "em_openroad_ab.json", _em_limits, _authority_snapshot,
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
@@ -70884,6 +70974,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             pass
     if _audit_tool and _limit_rows:
         _aa.write_text(_em_limits, "\n".join(_limit_rows) + "\n")
+    # Stage the exact authority on every solve, including a changed kit.
+    # Its digest must also match the file the native session actually reads.
+    _aa.write_text(_authority_snapshot, _tlef)
     # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
@@ -70911,6 +71004,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f'-em_limits_file {out_dir_c}/{_em_limits.name} '
             f'-em_report {_density_csv} -allow_reuse}} _em_err]}} {{\n'
             f'  puts "EM_TOOL_NONFATAL {net}: $_em_err"\n'
+            f'}} else {{\n'
+            f'  puts "EM_DENSITY_DONE {net}"\n'
+            f'  puts "EM_BOUND_OUTPUT em_openroad_density_{net}.csv '
+            f'[lindex [exec sha256sum {_density_csv}] 0]"\n'
             f'}}\n' if _audit_tool and _limit_rows else '')
         psm_blocks.append(
             f'puts "=== PSM_NET {net} ==="\n'
@@ -70949,6 +71046,46 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # quasi-static, and every record carries the same basis id.
     import dynamic_ir_vectored_emit as _dyn_basis
     _basis = _step24_basis_inputs(project, def_file, pdk)
+    _primary_ir_mode = _step24_primary_mode(project)
+    if _primary_ir_mode != "direct":
+        _librelane_step24_record(project, top, pdk, _primary_ir_mode,
+                                  _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
+    _source_identity = _emcd.native_source_identity()
+    _native_inputs = {}
+    _input_paths = {"layout": str(def_file), "tech_lef": str(pdk.tech_lef),
+                    "cell_lef": str(pdk.cell_lef), "liberty0": str(pdk.liberty)}
+    for role in ("sdc", "spef"):
+        if _basis[role]:
+            _input_paths[role] = str(_basis[role])
+    _input_paths.update({f"liberty{i}": value for i, value in
+                         enumerate(_basis["extra_liberties"], 1)})
+    _input_paths.update({f"macro_lef{i}": str(value) for i, value in
+                         enumerate(pdk.macro_lefs)})
+    _read_layout_tcl = f"read_def {def_c}"
+    # Use the actual LibreLane IR input ODB when the route ran. It is the
+    # bridge of this current DEF and preserves the tool's PSM source subject.
+    _ll_doc_path = out_dir / _LL_IR_RECORD
+    if _primary_ir_mode != "direct":
+        _ll_doc = json.loads(_ll_doc_path.read_text())
+        if _ll_doc.get("record"):
+            _ll_state_path = Path(_ll_doc["record"]["tool_state"]).parent / "state_in.json"
+            _ll_state = json.loads(_ll_state_path.read_text())
+            _input_paths["librelane_odb"] = str(_ll_state["odb"])
+            _read_layout_tcl = f"read_db {_dyn_basis._tcl_word(_to_container_path(_ll_state['odb'], container))}"
+    for role, value in _input_paths.items():
+        path = Path(value)
+        try:
+            rel = str(path.relative_to(project))
+        except ValueError:
+            rel = None
+        _native_inputs[role] = {"declared_path": value, "project_path": rel,
+                               "sha256": _emcd._native_sha(path)}
+    _native_inputs["tech_lef"]["sha256"] = hashlib.sha256(_tlef.encode()).hexdigest()
+    def _input_digest_tcl(stage):
+        return "".join(
+            f'puts "EM_BOUND_{stage} {role} [lindex [exec sha256sum '
+            f'{_dyn_basis._tcl_word(_to_container_path(value, container))}] 0]"\n'
+            for role, value in _input_paths.items())
     _pb_libs = [_to_container_path(x, container) for x in _basis["extra_liberties"]]
     _pb_tcl = _dyn_basis.power_basis_tcl(
         _pb_libs, (_to_container_path(str(_basis["sdc"]), container)
@@ -70970,21 +71107,22 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     import _psm_source_model as _psm_sm
     tcl_path = out_dir / f"ir_em_{top}.tcl"
     tcl_path.write_text(f"""
+{_input_digest_tcl('BEFORE')}
 read_lef {tech_lef_c}
 read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
-{_oc_tcl}read_def {def_c}
+{_oc_tcl}{_read_layout_tcl}
 {_pb_tcl}{geometry_tcl}
 if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
 catch {{set_wire_rc -clock -layer {mp}5}}
-{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}exit
+{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}{_input_digest_tcl('AFTER')}exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
     cmd = (
-        f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+        f"set -o pipefail; export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
         f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/ir_em.log"
     )
@@ -71065,20 +71203,28 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
         _density_rows[_net] = _counts
     _psm_model = _psm_sm.describe(log)
-    _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
+    _native_density_record = {
+        "schema": "em_native_density/1",
         "tool": "OpenROAD.check_current_density",
         "source_model": _psm_model["model"],
         "psm_source_model": _psm_model,
-        "sdc_spef_loaded": False, "nets": _density_rows,
-        "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
+        "sdc_spef_loaded": bool(_basis["sdc"] and _basis["spef"] and not _basis_record["unread"]),
+        "nets": _density_rows,
+        "verdict": ("FAIL" if any(r["violated"] for r in _density_rows.values()) else
+                    "MEASURED" if _audit_tool and _density_rows and all(
             r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
             else "NOT_MEASURED"),
         "mode": _em_mode,
         "scope": "routing wires only",
-        "via_cut_status": "NOT_MEASURED: OpenROAD density CSV omits via-cut records",
+        "via_cut_status": "NOT_MEASURED: native areal table carries no per-cut authority",
         "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
         "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
-    }, indent=2) + "\n")
+        "pdk": {"name": pdk.name, "tech_lef": str(pdk.tech_lef)},
+        "authority": {"snapshot": str(_authority_snapshot.relative_to(project))},
+        "margin": _emcd._DEFAULT_MARGIN, "source_identity": _source_identity,
+        "inputs": _native_inputs, "power_basis": _basis_record,
+        "execution": {"argv": ["bash", "-c", cmd], "native_rc": rc},
+    }
     # Parse IR + EM numbers from PSM stdout (deterministic regex).
     ir_lines = [ln for ln in log.splitlines()
                 if re.search(r"voltage|IR drop|PSM-|Supply", ln, re.I)]
@@ -71305,8 +71451,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             # disk later and compare it with itself, which is why the PDN floor
             # could be sized from a previous run's current with nothing able to
             # notice. See `_pdn_em_measures_this_layout`.
-            "subject_def": f"phase3/stage3/pnr/{_ppa_power._PDN_EM_SUBJECT_DEF}",
-            "subject_def_sha256": _ppa_power._pdn_em_subject_digest(project),
+            "subject_def": str(def_file.relative_to(project)),
+            "subject_def_sha256": _native_inputs["layout"]["sha256"],
             # NOT a sign-off verdict — see the ir_drop.json note above. The EM
             # sign-off PASS/FAIL (segment current density vs PDK Jmax) is
             # decided downstream by em_report_check (eda_report_audit --mode em)
@@ -71369,6 +71515,36 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "evidence": "analyze_power_grid -enable_em stdout",
         }, indent=2) + "\n")
         notes.append(f"EM NOT_MEASURED: {_em_why}{_em_conn}")
+    # Finalize after the reports exist: these bytes are consumed by the same
+    # Step-25 gate and downstream signoff readers. A native marker, not rc0 or
+    # a tool label, binds each density CSV. The source is frozen before probes.
+    if _primary_ir_mode != "direct" and ir_ok:
+        _ll_primary = _step24_adopt_primary(project, _basis_record, notes)
+        _native_density_record["librelane_ir"] = {
+            "adopted": _ll_primary.get("adopted", False),
+            "record": str(_ll_doc_path.relative_to(project)),
+            "record_sha256": _emcd._native_sha(_ll_doc_path),
+            "reason": (_ll_primary.get("judgment") or {}).get("reasons"),
+        }
+    for role, row in _native_inputs.items():
+        if row["sha256"] is None:
+            marker = re.search(rf"^EM_BOUND_BEFORE {re.escape(role)} ([a-f0-9]{{64}})$", log, re.M)
+            row["sha256"] = marker.group(1) if marker else None
+    _outputs = [tcl_path, out_dir / "ir_em.log", _em_limits, _authority_snapshot,
+                em_geometry, out_dir / "em_pg_geometry_subject.json", _merged,
+                ir_rpt, ir_rpt.with_suffix(".json"), em_rpt, em_rpt.with_suffix(".json"),
+                *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)]
+    if _primary_ir_mode != "direct":
+        _outputs += [_ll_doc_path]
+        _outputs += [project / path for path in (_ll_primary.get("artifacts") or {})] if ir_ok else []
+    _native_density_record["outputs"] = {str(path.relative_to(project)): _emcd._native_sha(path)
+                                         for path in _outputs}
+    _aa.write_text(out_dir / "em_openroad_density.json",
+                   json.dumps(_native_density_record, indent=2) + "\n")
+    _binding = _emcd.validate_native_density(project)
+    if not _binding["valid"]:
+        notes.append(f"EM native density NOT_MEASURED: {_binding['reason']}")
     return ir_ok, em_ok
 
 
@@ -75174,6 +75350,26 @@ def _read_verdict(json_path: Path) -> Optional[str]:
         return None
 
 
+def _step25_native_density_due(project: Path, def_file: Path,
+                               pdk: PdkConfig) -> bool:
+    """Cache admission for the existing Step-24/25 producer, never a second run.
+
+    Shared canonicalization composes this predicate with its existing report
+    freshness tests. Partial but current native coverage is retained; stale
+    inputs, another kit, changed consumers or an absent execution are due.
+    """
+    import em_current_density_check as emc
+    binding = emc.validate_native_density(project)
+    if not binding["valid"]:
+        return True
+    try:
+        doc = json.loads((_pl.reports_phase3_dir(project) / "em_openroad_density.json").read_text())
+        return (doc["inputs"]["layout"]["sha256"] != emc._native_sha(def_file)
+                or doc["pdk"] != {"name": pdk.name, "tech_lef": str(pdk.tech_lef)})
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
 def _emit_em_current_authority(project: Path, pdk: PdkConfig,
                                container: str, notes: List[str]) -> bool:
     """#1215 — run the Step-25 EM AUTHORITY comparison with a REACHABLE Jmax
@@ -75219,8 +75415,8 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
                 stage_dir = project / "phase3" / "pdk_stage"
                 stage_dir.mkdir(parents=True, exist_ok=True)
                 staged = stage_dir / host_p.name
-                if not staged.is_file():
-                    staged.write_text(txt)
+                # A new declared kit must never reuse a same-named old file.
+                _aa.write_text(staged, txt)
                 tlef_arg = staged
             elif txt is not None:
                 notes.append(
