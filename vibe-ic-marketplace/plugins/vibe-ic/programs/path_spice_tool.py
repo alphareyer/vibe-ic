@@ -1037,6 +1037,8 @@ def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
     host = lambda path: Path(str(path).replace(f'/pdk/{pdk}/', str(pdk_root / pdk) + '/', 1))
     libs = [host(path) for path in inputs['liberties']]
     subject, _tool = current.tool_subject(project, top, corner=corner)
+    if image != _tool['image'] or config.get('PDK') != pdk or not any(Path(host_root).resolve() == (pdk_root / pdk).resolve() and guest_root == f'/pdk/{pdk}' for host_root, guest_root in _tool['mounts']):
+        raise Refusal('CURRENT_STEP30_IMAGE_OR_PDK_MISMATCH', str(pdk_root))
     roles = {row['role']: row for row in subject['inputs']}
     for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc'), ('spef', 'spef')]:
         if current.digest(project / inputs[key]) != roles[role]['sha256']:

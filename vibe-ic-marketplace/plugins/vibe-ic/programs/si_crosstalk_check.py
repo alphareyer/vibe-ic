@@ -191,6 +191,10 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
 
         findings.extend(_incoherent(data))
 
+        if (data.get('delta_delay') or {}).get('verdict') == 'FAIL' or data.get('delta_delay_verdict') == 'FAIL':
+            findings.append(Finding('ERROR', 'SI_DELTA_DELAY_FAIL',
+                                    'The current timing-window delta-delay measurement failed'))
+
         violations = data.get("violations_count", 0)
         stats["violations"] = violations
 
