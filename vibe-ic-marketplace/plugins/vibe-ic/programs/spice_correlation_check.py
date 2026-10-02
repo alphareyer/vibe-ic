@@ -3772,7 +3772,7 @@ def run_audit(project: Path, run_spice: bool = True,
         if not result.passed:
             result.findings.append(Finding(rule='SPICE_CURRENT_' + str(verdict), severity='ERROR',
                                            message='Current tool correlation: ' + str(doc.get('arms'))))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (pst.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
         result.passed = False
         result.summary = {'skipped': False, 'pass': False, 'measurement': 'NOT_MEASURED',
                           'current_binding': 'REFUSED', 'reason': str(exc)}
