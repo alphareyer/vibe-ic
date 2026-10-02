@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1399
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1399)
+- **Total programs (excluding helpers / shims):** 1401
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1401)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1390 |
+| `any` | 1392 |
 
 ## Alphabetical listing
 
@@ -412,6 +412,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `every_required_metric_key_has_a_producer` | any | — | an axis proves from a metric somebody actually emits. |
 | `evidence_citation_resolves_check` | any | — | a cited evidence artifact must EXIST. |
 | `excluded_master_census_check` | any | — | ADVISORY per-step census of masters excluded by the run's cell policy. |
+| `execution_adapters_analog` | any | — | Source-bound analog provider catalog for A1-A9 and M1-M4. |
+| `execution_analog_worker` | any | — | Source-only worker boundary for the analog provider catalog. |
 | `execution_modes` | any | — | Bounded execution-policy controller; BLOCKING at this API boundary. |
 | `expert_decision_table` | any | — | a decision table is DATED, and a stale one is refused. |
 | `explicit_argument_outranks_the_environment_pointer` | any | — | whatever a gate scanned, it says so. |
@@ -1471,7 +1473,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1390 programs)
+### `any` (1392 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1855,6 +1857,8 @@ _(no programs in this group)_
 - `every_required_metric_key_has_a_producer` — an axis proves from a metric somebody actually emits.
 - `evidence_citation_resolves_check` — a cited evidence artifact must EXIST.
 - `excluded_master_census_check` — ADVISORY per-step census of masters excluded by the run's cell policy.
+- `execution_adapters_analog` — Source-bound analog provider catalog for A1-A9 and M1-M4.
+- `execution_analog_worker` — Source-only worker boundary for the analog provider catalog.
 - `execution_modes` — Bounded execution-policy controller; BLOCKING at this API boundary.
 - `expert_decision_table` — a decision table is DATED, and a stale one is refused.
 - `explicit_argument_outranks_the_environment_pointer` — whatever a gate scanned, it says so.
