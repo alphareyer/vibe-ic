@@ -641,6 +641,7 @@ class Controller:
             raise Refusal('ARM_OUTPUT_UNAVAILABLE', str(directory)) from exc
         inputs, outputs = directory / 'inputs', directory / 'outputs'
         inputs.mkdir(); outputs.mkdir()
+        manifest = inputs / 'issued_manifest.json'
         receipt = dict(run_id=plan['run_id'], arm_id=arm.arm_id,
                        adapter=arm.identity(), binding=plan['binding'],
                        output_root=str(outputs), input_root=str(inputs),
@@ -648,12 +649,23 @@ class Controller:
                        evidence=None, started_ns=time.monotonic_ns())
         def frozen_binding():
             actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*')
-                      if p.is_file() and p.name != 'issued_manifest.json'}
+                      if p.is_file() and p != manifest}
             if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
                 raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         try:
             if context.binding() != plan['binding']:
                 raise Refusal('CURRENT_INPUT_CHANGED', arm.arm_id)
+            targets = set()
+            for name in context.inputs:
+                target = inputs / _relative(name)
+                if target == manifest or manifest in target.parents:
+                    raise Refusal('RESERVED_INPUT_PATH', name)
+                if target in targets:
+                    raise Refusal('DUPLICATE_INPUT_PATH', name)
+                targets.add(target)
+            # Reserve only the Controller's exact metadata location before
+            # copying caller inputs, including normalized spelling aliases.
+            manifest.touch(exist_ok=False)
             for name, source in context.inputs.items():
                 target = inputs / _relative(name)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -662,7 +674,6 @@ class Controller:
             # Bind the worker's typed route and parameters to the exact frozen
             # input copy.  This manifest is metadata, not a mutable project
             # input, and is excluded from the byte-for-byte frozen census.
-            manifest = inputs / 'issued_manifest.json'
             manifest.write_text(json.dumps({
                 'schema': 'execution-issued-manifest/v2',
                 'step_id': context.step_id,
@@ -942,7 +953,7 @@ class Controller:
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
                 str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
-                if p.is_file() and p.name != 'issued_manifest.json'
+                if p.is_file() and p != manifest
                 } != binding['inputs']:
             raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         evidence = receipt.get('evidence') or {}
