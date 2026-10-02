@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_right
+import hashlib
 import json
 import bisect
 import re
@@ -216,6 +217,136 @@ DELIVERY_TARGETS: Dict[str, Dict[str, Any]] = {
         "note": "only in scope when the run is actually shipping to a foundry",
     },
 }
+
+# Prompt-derived delivery is a deterministic lower bound.  It is deliberately
+# a small vocabulary of explicit delivery phrases: category, mode and benchmark
+# metadata never select a physical route, and vague prose must not silently
+# upgrade or downgrade a run.
+PROMPT_DELIVERY_REQUIREMENTS_SCHEMA = "vibeic.prompt_delivery_requirements.v1"
+PROMPT_DELIVERY_RULES_VERSION = "r2"
+_DELIVERY_ORDER = {
+    "rtl": 0,
+    "gds": 1,
+    "shippable_gds": 2,
+    "foundry_handoff": 3,
+}
+_PROMPT_DELIVERY_PATTERNS = (
+    ("foundry_handoff", re.compile(
+        r"\b(?:foundry\s+handoff|hand\s*off\s+to\s+(?:the\s+)?foundry)\b", re.I)),
+    ("shippable_gds", re.compile(
+        r"\b(?:shippable\s+gds|tape[- ]?out\s+precheck|tape[- ]?out\s+ready\s+gds)\b", re.I)),
+    ("gds", re.compile(
+        r"\b(?:stream[- ]?out\s+gds|produce\s+(?:a\s+)?gds|deliver\s+(?:a\s+)?gds|gds\s+delivery)\b", re.I)),
+)
+_DIE_ROUTE = re.compile(r"\b(?:die|chip|tape[- ]?out|shuttle)\b", re.I)
+_HARDMACRO_ROUTE = re.compile(
+    r"\b(?:ip\s+(?:path|deliverable|block)|hard[- ]?macro|macro\s+deliverable)\b", re.I)
+
+
+def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
+    """Derive an immutable delivery floor from explicit user prompt language."""
+    text = str(prompt or "")
+    route_hits = []
+    if _DIE_ROUTE.search(text):
+        route_hits.append("DIE")
+    if _HARDMACRO_ROUTE.search(text):
+        route_hits.append("HARDMACRO")
+    matches = []
+    for target, rx in _PROMPT_DELIVERY_PATTERNS:
+        hit = rx.search(text)
+        if hit:
+            matches.append({"target": target, "excerpt": hit.group(0)})
+    route_family = None
+    status = "UNSPECIFIED"
+    minimum_target = None
+    reasons = []
+    if len(set(route_hits)) > 1:
+        status = "CONFLICT"
+        reasons.append("prompt names both DIE and HARDMACRO delivery")
+    elif route_hits:
+        route_family = route_hits[0]
+        status = "EXPLICIT_ROUTE"
+    if matches:
+        strongest = max(matches, key=lambda row: _DELIVERY_ORDER[row["target"]])
+        minimum_target = strongest["target"]
+        if status == "UNSPECIFIED":
+            status = "DELIVERY_ONLY"
+        if route_family == "HARDMACRO" and minimum_target != "ip_hardmacro":
+            status = "CONFLICT"
+            reasons.append("HARDMACRO prompt cannot request a DIE delivery target")
+        elif route_family == "DIE" and minimum_target == "ip_hardmacro":
+            status = "CONFLICT"
+            reasons.append("DIE prompt cannot request an IP delivery target")
+    if route_family == "HARDMACRO":
+        minimum_target = "ip_hardmacro"
+    payload = {
+        "schema": PROMPT_DELIVERY_REQUIREMENTS_SCHEMA,
+        "rules_version": PROMPT_DELIVERY_RULES_VERSION,
+        "prompt_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "status": status,
+        "route_family": route_family,
+        "minimum_target": minimum_target,
+        "evidence": matches,
+        "reasons": reasons,
+    }
+    payload["requirements_sha256"] = hashlib.sha256(json.dumps(
+        {k: v for k, v in payload.items() if k != "requirements_sha256"},
+        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return payload
+
+
+def resolve_prompt_delivery_target(requirements: Dict[str, Any],
+                                   requested_target: Optional[str]) -> Dict[str, Any]:
+    """Resolve an AI target without permitting a prompt-bound downgrade/flip."""
+    if not isinstance(requirements, dict):
+        return {"ok": False, "reason": "prompt delivery requirements missing"}
+    if requirements.get("schema") != PROMPT_DELIVERY_REQUIREMENTS_SCHEMA:
+        return {"ok": False, "reason": "prompt delivery requirements schema invalid"}
+    if requirements.get("requirements_sha256") != hashlib.sha256(json.dumps(
+            {k: v for k, v in requirements.items() if k != "requirements_sha256"},
+            sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest():
+        return {"ok": False, "reason": "prompt delivery requirements digest invalid"}
+    if requirements.get("status") == "CONFLICT":
+        return {"ok": False, "reason": "prompt delivery requirements conflict"}
+    target = requested_target
+    if target is not None and not isinstance(target, str):
+        return {"ok": False, "reason": "delivery_target must be a string"}
+    if target is not None and target not in DELIVERY_TARGETS:
+        return {"ok": False, "reason": "delivery_target is not a product target"}
+    family = requirements.get("route_family")
+    minimum = requirements.get("minimum_target")
+    if family == "HARDMACRO":
+        if target is not None and target != "ip_hardmacro":
+            return {"ok": False, "reason": "AI target flips HARDMACRO to a DIE route"}
+        return {"ok": True, "target": "ip_hardmacro", "route_family": "HARDMACRO",
+                "source": "prompt_derived" if target is None else "ai_compatible"}
+    if family == "DIE" and target == "ip_hardmacro":
+        return {"ok": False, "reason": "AI target flips DIE to an IP route"}
+    if minimum is not None:
+        if minimum not in _DELIVERY_ORDER:
+            return {"ok": False, "reason": "prompt delivery floor is invalid"}
+        if target is None:
+            target = minimum
+            source = "prompt_derived"
+        elif target != "ip_hardmacro" and _DELIVERY_ORDER[target] < _DELIVERY_ORDER[minimum]:
+            return {"ok": False, "reason": "AI target downgrades prompt delivery floor"}
+        else:
+            source = "ai_compatible"
+    else:
+        target = target or "rtl"
+        source = "ai_compatible" if requested_target is not None else "default"
+    if family == "DIE" and target == "ip_hardmacro":
+        return {"ok": False, "reason": "AI target flips DIE to an IP route"}
+    return {"ok": True, "target": target,
+            "route_family": family or ("DIE" if target in _DELIVERY_ORDER and target != "rtl" else None),
+            "source": source}
+
+
+def delivery_route_for_target(target: str, route_family: Optional[str] = None) -> str:
+    """Map a fixed delivery target to the canonical IC/IP runner front door."""
+    if route_family == "DIE" or target in {"gds", "shippable_gds", "foundry_handoff"}:
+        return "ic"
+    return "ip"
 
 # `route` and `entry_step` answer DIFFERENT questions, and conflating them is how
 # the first draft lost information: `route` says which loop OWNS the transform,

@@ -75,9 +75,14 @@ def _reject_duplicate_json_pairs(pairs):
     return result
 
 
+def _reject_nonfinite_json_constant(value):
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
 def _strict_json_loads(raw):
-    """Parse JSON evidence without permitting duplicate object members."""
-    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs)
+    """Parse RFC8259 JSON evidence with duplicate and non-finite refusal."""
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs,
+                      parse_constant=_reject_nonfinite_json_constant)
 
 
 class _CoordinatorBusy(RuntimeError):
@@ -1093,6 +1098,7 @@ _AI_REPAIR_RECORD_SCHEMA = "vibeic.benchmark.ai_repair_record.v1"
 _ROUTE_TASK_SCHEMA = "vibeic.task_route_task.v1"
 _AI_ROUTE_SCHEMA = "vibeic.task_route_review.v1"
 _ROUTE_WORKLIST = "needs_ai_routing.jsonl"
+_ROUTE_INPUT_ANCHOR = "route_input_anchor.json"
 _REVIEW_WORKLIST = "needs_ai_review.jsonl"
 _BACKUP_WORKLIST = "needs_ai_backup.jsonl"
 _REPAIR_WORKLIST = "needs_ai_repair.jsonl"
@@ -2231,8 +2237,8 @@ def _read_jsonl(path: Path) -> list[dict]:
         if not raw.strip():
             continue
         try:
-            row = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            row = _strict_json_loads(raw)
+        except (ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"{path}:{lineno}: invalid JSON: {exc}") from exc
         if not isinstance(row, dict):
             raise ValueError(f"{path}:{lineno}: row is not an object")
@@ -2496,8 +2502,11 @@ def _verified_prompt_evidence(items, prompt_text: str) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        excerpt = re.sub(r"\s+", " ", str(item.get("excerpt") or "")).strip()
-        supports = str(item.get("supports") or "").strip()
+        if (not isinstance(item.get("excerpt"), str)
+                or not isinstance(item.get("supports"), str)):
+            continue
+        excerpt = re.sub(r"\s+", " ", item.get("excerpt")).strip()
+        supports = item.get("supports").strip()
         if (len(excerpt) >= 8 and excerpt in normalized_prompt
                 and len(supports) >= 12):
             verified.append({"excerpt": excerpt, "supports": supports})
@@ -4960,7 +4969,8 @@ def _rtl_gen_waive(project: Path) -> dict | None:
     return None
 
 
-def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
+def _solver_argv(runner: Path, proj: Path, entry, exit_step,
+                 delivery_route: str = "ip") -> list:
     """One problem's runner argv, assembled from the routing verdict.
 
     Open RTL evaluations deliver IP/module evidence, so explicitly choose the
@@ -4973,8 +4983,10 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import task_nature_route as tnr                       # noqa: PLC0415
+    if delivery_route not in {"ic", "ip"}:
+        raise ValueError(f"invalid delivery runner route: {delivery_route!r}")
     argv = [sys.executable, str(runner), str(proj),
-            "--route", "ip", "--skip-analog", "--skip-hardware"]
+            "--route", delivery_route, "--skip-analog", "--skip-hardware"]
     if exit_step and exit_step in tnr.flow_step_ids():
         order = {s: i for i, s in enumerate(tnr.flow_step_ids())}
         if order.get(exit_step, 99) < order.get("15", 99):
@@ -4990,7 +5002,7 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
 
 
 def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
-                        entry, exit_step) -> list:
+                        entry, exit_step, delivery_route: str = "ip") -> list:
     """Re-enter one routed problem without losing its declared exit.
 
     AI backup/repair supplies RTL, so it resumes at the first RTL-validation
@@ -4998,7 +5010,7 @@ def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
     behavioural task into synthesis/DFT/LEC work.
     """
     effective_entry = "2" if supplied_rtl else entry
-    return _solver_argv(runner, proj, effective_entry, exit_step)
+    return _solver_argv(runner, proj, effective_entry, exit_step, delivery_route)
 
 
 def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
@@ -5006,7 +5018,8 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
                              route_receipt: dict | None = None,
                              task_sha256: str | None = None,
                              source_sha256: str | None = None,
-                             ldoc_root_handle: str | None = None) -> dict:
+                             ldoc_root_handle: str | None = None,
+                             delivery_route: str = "ip") -> dict:
     """Materialize canonical Phase-1 provenance before a mid-flow entry.
 
     This prerequisite is BLOCKING: missing or mutable provenance must stop the
@@ -5036,7 +5049,7 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
         return {"status": "BLOCKED", "runner_rc": None,
                 "reason": f"front-door input is unreadable: {exc}"}
 
-    argv = _solver_argv(runner, project, "D1", "D1")
+    argv = _solver_argv(runner, project, "D1", "D1", delivery_route)
     argv.append("--no-dashboard")
     process = runner_budget.run(argv)
     diagnostic = _runner_diagnostics(process, argv, project, require_phase2=False)
@@ -5448,7 +5461,8 @@ def _publish_current_receipt(project: Path, kind: str, value: dict,
 
 def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
                        runner: Path, runner_budget,
-                       *, run_scope: str | None = None) -> tuple[dict, dict, dict]:
+                       *, run_scope: str | None = None,
+                       delivery_route: str = "ip") -> tuple[dict, dict, dict]:
     """Run/consume D1 and return (frontdoor, pending, activation).
 
     D1 is a two-stage admission: the pending record is visible before the
@@ -5485,7 +5499,8 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
     frontdoor = _ensure_phase1_frontdoor(
         runner, project, runner_budget, force_current=True,
         route_receipt=route_receipt, task_sha256=task_sha,
-        source_sha256=source_sha, ldoc_root_handle=ldoc_handle)
+        source_sha256=source_sha, ldoc_root_handle=ldoc_handle,
+        delivery_route=delivery_route)
     if frontdoor.get("status") == "BLOCKED":
         # Keep the named pending state. Never manufacture activation on a
         # refusal, even if stale L-docs happen to be on disk.
@@ -5574,13 +5589,16 @@ def _route_contract_sha256() -> str:
         {"nature_entry": tnr.NATURE_ENTRY,
          "evidence_exit": tnr.EVIDENCE_EXIT,
          "delivery_targets": tnr.DELIVERY_TARGETS,
+         "prompt_delivery_requirements_schema": tnr.PROMPT_DELIVERY_REQUIREMENTS_SCHEMA,
+         "prompt_delivery_rules_version": tnr.PROMPT_DELIVERY_RULES_VERSION,
          "canonical_dag_sha256": rd.canonical_dag()["sha256"]},
         sort_keys=True))
 
 
 def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
                         proposal: dict, run_p: Path,
-                        benchmark: str | None = None) -> dict:
+                        benchmark: str | None = None,
+                        dataset_path: Path | None = None) -> dict:
     """Issue an input-only route question before any design runner executes."""
     import task_nature_route as tnr                       # noqa: PLC0415
     import route_decision as rd                            # noqa: PLC0415
@@ -5589,6 +5607,7 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
     prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
     safe = _safe_problem_id(str(problem_id))
     prompt_text = prompt.read_text(errors="replace")
+    prompt_delivery = tnr.prompt_delivery_requirements(prompt_text)
     semantic_payload = tnr.semantic_routing_payload(
         prompt_text,
         context={"program_proposal": {
@@ -5604,6 +5623,7 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
         project_path=str(project), prompt_path=str(prompt),
         response_path=response_path,
         semantic_payload_sha256=semantic_payload["semantic_payload_sha256"],
+        dataset_path=str(Path(dataset_path).resolve()) if dataset_path is not None else None,
         harness_digest=None, golden_digest=None, expected_digest=None)
     task = {
         "schema": _ROUTE_TASK_SCHEMA,
@@ -5619,6 +5639,7 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
         # other opaque identity.  Those values live in the separate binding.
         "semantic_payload": semantic_payload,
         "semantic_payload_sha256": semantic_payload["semantic_payload_sha256"],
+        "prompt_delivery_requirements": prompt_delivery,
         "coordinator_binding": coordinator_binding,
         "routing_contract_sha256": _route_contract_sha256(),
         "allowed_natures": sorted(tnr.NATURE_ENTRY),
@@ -5650,6 +5671,61 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
     return task
 
 
+def _route_input_anchor(bench: str, fmt: str, dataset: Path,
+                        route_tasks: list[dict]) -> dict:
+    """Create the coordinator-owned input/task anchor used by resume."""
+    body = {
+        "schema": "vibeic.route_input_anchor.v1",
+        "benchmark": str(bench),
+        "format": str(fmt),
+        "dataset_handle": hashlib.sha256(
+            str(Path(dataset).resolve()).encode("utf-8")).hexdigest(),
+        "tasks": [{
+            "id": str(task["id"]),
+            "task_sha256": str(task["task_sha256"]),
+            "project": str(task["project"]),
+            "prompt_path": str(task["prompt_path"]),
+            "prompt_sha256": str(task["prompt_sha256"]),
+            "response_path": str(task["response_path"]),
+            "source_sha256": str(task["public_original_input"].get("source_sha256")),
+            "semantic_payload_sha256": str(task["semantic_payload_sha256"]),
+        } for task in route_tasks],
+    }
+    body["anchor_sha256"] = _sha256_text(json.dumps(body, sort_keys=True))
+    return body
+
+
+def _validate_route_input_anchor(bench: str, fmt: str, dataset: Path,
+                                 run_p: Path, route_tasks: list[dict]) -> None:
+    """Reject co-mutated run-root copies before any route can execute."""
+    path = Path(run_p).resolve() / _ROUTE_INPUT_ANCHOR
+    anchor = _strict_json_loads(path.read_text(errors="replace"))
+    if not isinstance(anchor, dict) or anchor.get("schema") != "vibeic.route_input_anchor.v1":
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: schema")
+    digest = anchor.get("anchor_sha256")
+    body = {k: v for k, v in anchor.items() if k != "anchor_sha256"}
+    if not isinstance(digest, str) or _sha256_text(json.dumps(body, sort_keys=True)) != digest:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: digest")
+    if (anchor.get("benchmark") != str(bench)
+            or anchor.get("format") != str(fmt)
+            or anchor.get("dataset_handle") != hashlib.sha256(
+                str(Path(dataset).resolve()).encode("utf-8")).hexdigest()):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: current run identity")
+    expected = anchor.get("tasks")
+    actual = [{
+        "id": str(task.get("id")),
+        "task_sha256": str(task.get("task_sha256")),
+        "project": str(task.get("project")),
+        "prompt_path": str(task.get("prompt_path")),
+        "prompt_sha256": str(task.get("prompt_sha256")),
+        "response_path": str(task.get("response_path")),
+        "source_sha256": str((task.get("public_original_input") or {}).get("source_sha256")),
+        "semantic_payload_sha256": str(task.get("semantic_payload_sha256")),
+    } for task in route_tasks]
+    if expected != actual:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: issued task/input identity changed")
+
+
 def _claim_names_nature(claim: str, nature: str) -> bool:
     """True when an evidence claim cites `nature` (``_`` and space alike)."""
     def norm(text: str) -> str:
@@ -5657,7 +5733,9 @@ def _claim_names_nature(claim: str, nature: str) -> bool:
     return f" {norm(nature)} " in f" {norm(claim)} "
 
 
-def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
+def _validate_ai_route(task: dict, run_p: Path, *,
+                       benchmark: str | None = None,
+                       dataset: Path | None = None) -> tuple[dict | None, list[str]]:
     """Fail closed on an unsigned, stale, non-blind, or ungrounded route."""
     import task_nature_route as tnr                       # noqa: PLC0415
     import route_decision as rd                            # noqa: PLC0415
@@ -5671,6 +5749,15 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
         if _strict_json_loads(issued.read_text()) != task:
             raise ValueError("route task differs from coordinator issue")
+        binding = task.get("coordinator_binding")
+        if not isinstance(binding, dict):
+            raise ValueError("coordinator binding is missing")
+        binding_digest = binding.get("binding_sha256")
+        binding_body = {k: v for k, v in binding.items()
+                        if k != "binding_sha256"}
+        if (not isinstance(binding_digest, str)
+                or rd.sha256_json(binding_body) != binding_digest):
+            raise ValueError("coordinator binding digest mismatch")
         project = Path(str(task["project"])).resolve()
         if project != run_p / "projects" / _safe_problem_id(str(task["id"])):
             raise ValueError("route project is not owned by this run/task")
@@ -5678,6 +5765,19 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         prompt_text = prompt.read_text(errors="replace")
         if _sha256_text(prompt_text) != task["prompt_sha256"]:
             raise ValueError("route prompt changed after issue")
+        prompt_delivery = tnr.prompt_delivery_requirements(prompt_text)
+        if task.get("prompt_delivery_requirements") != prompt_delivery:
+            raise ValueError("prompt delivery requirements changed after issue")
+        if benchmark is not None and dataset is not None:
+            expected_binding = rd.build_coordinator_binding(
+                benchmark=benchmark, problem_id=str(task["id"]),
+                project_path=str(project), prompt_path=str(prompt),
+                response_path=str(task["response_path"]),
+                semantic_payload_sha256=str(task["semantic_payload_sha256"]),
+                dataset_path=str(Path(dataset).resolve()),
+                harness_digest=None, golden_digest=None, expected_digest=None)
+            if binding != expected_binding:
+                raise ValueError("coordinator binding differs from current run identity")
         if task.get("routing_contract_sha256") != _route_contract_sha256():
             raise ValueError("general route table changed after issue")
         semantic_payload = task.get("semantic_payload")
@@ -5716,40 +5816,66 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             if key not in response or response.get(key) != value:
                 reasons.append(f"AI_ROUTE_INVALID: {key} is stale or wrong")
         author = response.get("author")
-        if (not isinstance(author, dict) or author.get("kind") != "AI"
-                or not str(author.get("model") or "").strip()
-                or str(author.get("model")).lower() in
+        if (not isinstance(author, dict)
+                or not isinstance(author.get("kind"), str)
+                or author.get("kind") != "AI"
+                or not isinstance(author.get("model"), str)
+                or not author.get("model").strip()
+                or author.get("model").lower() in
                 {"unknown", "unspecified", "n/a"}):
             reasons.append("AI_ROUTE_INVALID: named AI author required")
         blind = response.get("blind")
         if not isinstance(blind, dict) or blind.get("oracle_accessed") is not False:
             reasons.append("AI_ROUTE_INVALID: blind.oracle_accessed must be false")
-        if len(str(response.get("rationale") or "").strip()) < 24:
+        if (not isinstance(response.get("rationale"), str)
+                or len(response.get("rationale").strip()) < 24):
             reasons.append("AI_ROUTE_INVALID: route rationale too short")
         disposition = response.get("disposition")
-        if disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}:
+        if (not isinstance(disposition, str)
+                or disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}):
             reasons.append("AI_ROUTE_INVALID: unknown disposition")
         semantic = response.get("semantic_decision")
         typed_route = isinstance(semantic, dict)
-        if semantic is not None and not isinstance(semantic, dict):
+        if "semantic_decision" in response and not isinstance(semantic, dict):
             reasons.append("AI_ROUTE_INVALID: semantic_decision must be an object")
             semantic = {}
         semantic = semantic or {}
         if any(key in semantic for key in ("entry_step", "answer_step", "verify_through")):
             reasons.append("AI_ROUTE_INVALID: semantic decision may not choose flow steps")
         if ("semantic_payload_sha256" in semantic
-                and semantic.get("semantic_payload_sha256") != task.get("semantic_payload_sha256")):
+                and (not isinstance(semantic.get("semantic_payload_sha256"), str)
+                     or semantic.get("semantic_payload_sha256") != task.get("semantic_payload_sha256"))):
             reasons.append("AI_ROUTE_INVALID: semantic payload binding is stale")
         nature = semantic.get("nature", response.get("ai_nature"))
-        requested_evidence = semantic.get("requested_evidence") or None
-        delivery_target = semantic.get("delivery_target") or "rtl"
+        requested_evidence = semantic.get("requested_evidence")
+        delivery_target = semantic.get("delivery_target")
+        if nature is not None and not isinstance(nature, str):
+            reasons.append("AI_ROUTE_INVALID: ai_nature must be a string")
+        if ("requested_evidence" in semantic
+                and not isinstance(requested_evidence, str)):
+            reasons.append("AI_ROUTE_INVALID: requested_evidence must be a string")
+        if ("delivery_target" in semantic
+                and not isinstance(delivery_target, str)):
+            reasons.append("AI_ROUTE_INVALID: delivery_target must be a string")
+        prompt_evidence = response.get("prompt_evidence")
+        if prompt_evidence is not None:
+            if not isinstance(prompt_evidence, list):
+                reasons.append("AI_ROUTE_INVALID: prompt_evidence must be an array")
+            elif any(not isinstance(item, dict)
+                     or not isinstance(item.get("excerpt"), str)
+                     or not isinstance(item.get("supports"), str)
+                     for item in prompt_evidence):
+                reasons.append("AI_ROUTE_INVALID: prompt evidence fields must be strings")
         if disposition != "NEEDS_CLARIFICATION":
             if nature not in tnr.NATURE_ENTRY:
                 reasons.append("AI_ROUTE_INVALID: ai_nature is not a product nature")
             if requested_evidence is not None and requested_evidence not in tnr.EVIDENCE_EXIT:
                 reasons.append("AI_ROUTE_INVALID: requested_evidence is not a product evidence class")
-            if delivery_target not in tnr.DELIVERY_TARGETS:
-                reasons.append("AI_ROUTE_INVALID: delivery_target is not a product target")
+            resolved_delivery = tnr.resolve_prompt_delivery_target(
+                prompt_delivery, delivery_target)
+            if not resolved_delivery.get("ok"):
+                reasons.append("AI_ROUTE_INVALID: " + str(
+                    resolved_delivery.get("reason") or "delivery target refused"))
             if (disposition == "CONFIRM"
                     and nature != task["program_proposal"].get("entry_nature")):
                 reasons.append("AI_ROUTE_INVALID: CONFIRM differs from proposal")
@@ -5781,6 +5907,14 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             return None, ["AI_ROUTE_NEEDS_CLARIFICATION: AI could not select a route"]
         entry = tnr.NATURE_ENTRY[nature]
         requested_evidence = requested_evidence or entry["default_evidence"]
+        resolved_delivery = tnr.resolve_prompt_delivery_target(
+            prompt_delivery, delivery_target)
+        if not resolved_delivery.get("ok"):
+            return None, reasons + ["AI_ROUTE_INVALID: " + str(
+                resolved_delivery.get("reason") or "delivery target refused")]
+        delivery_target = str(resolved_delivery["target"])
+        delivery_route = tnr.delivery_route_for_target(
+            delivery_target, resolved_delivery.get("route_family"))
         # The prompt itself is the only user-owned source available at this
         # boundary. Reviewer prose and benchmark metadata are never Ultra
         # evidence. The Program derives all flow steps from this receipt.
@@ -5802,6 +5936,8 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             "program_proposal": task["program_proposal"],
             "requested_evidence": requested_evidence,
             "delivery_target": delivery_target,
+            "delivery_route": delivery_route,
+            "prompt_delivery_requirements": prompt_delivery,
             "route_receipt": route_receipt,
             "semantic_payload_sha256": task["semantic_payload_sha256"],
             "coordinator_binding": task.get("coordinator_binding"),
@@ -6238,7 +6374,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             route_tasks.append(_make_ai_route_task(
-                pid, proj, staged, proposal, run_p, benchmark=bench))
+                pid, proj, staged, proposal, run_p, benchmark=bench,
+                dataset_path=ds))
+        _write_immutable_json(run_p / _ROUTE_INPUT_ANCHOR,
+                              _route_input_anchor(bench, fmt, ds, route_tasks))
         _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
         for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
             _write_jsonl(run_p / name, [])
@@ -6347,7 +6486,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             # barrier.  Response shape cannot opt into a legacy bypass.
             phase1_frontdoor, pending, activation = _activate_route_d1(
                 proj, route_task, route_receipt, runner, runner_budget,
-                run_scope=run_scope)
+                run_scope=run_scope,
+                delivery_route=str(verdict.get("delivery_route") or "ip"))
             if entry == "D1":
                 nature_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
                 candidates = [str(x) for x in nature_row.get("then") or []]
@@ -6374,7 +6514,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 got = {"ok": True, "completion": "", "rtl_gen": None}
                 rc = 0
             else:
-                argv = _solver_argv(runner, proj, effective_entry, exit_step)
+                argv = _solver_argv(
+                    runner, proj, effective_entry, exit_step,
+                    str(verdict.get("delivery_route") or "ip"))
                 process = runner_budget.run(argv)
                 if process.error is not None:
                     raise RuntimeError(process.error)
@@ -6419,6 +6561,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "public_original_input": staged["public_original_input"],
                 "phase1_frontdoor": phase1_frontdoor,
                 "route_receipt": route_receipt,
+                "delivery_route": verdict.get("delivery_route") or "ip",
                 "d1_activation": activation,
                 "effective_entry": effective_entry,
                 "admitted_steps": admitted_steps,
@@ -6661,10 +6804,17 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print("ERROR: AI route worklist differs from issued solve population",
                   file=sys.stderr)
             return 2
+        try:
+            _validate_route_input_anchor(bench, fmt, Path(dataset).resolve(),
+                                         run_p, route_tasks)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"ERROR: AI route input anchor refused: {exc}", file=sys.stderr)
+            return 2
         decisions = {}
         pending = []
         for task in route_tasks:
-            decision, reasons = _validate_ai_route(task, run_p)
+            decision, reasons = _validate_ai_route(
+                task, run_p, benchmark=bench, dataset=Path(dataset).resolve())
             if decision is None:
                 pending.append((task.get("id"), reasons))
             else:
@@ -6773,13 +6923,14 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if isinstance(task, dict):
             task["phase1_provenance"] = current
     def _run_and_collect(job) -> _ResumeRunnerOutcome:
-        pid, proj, supplied_rtl, entry, exit_step = job
+        pid, proj, supplied_rtl, entry, exit_step, delivery_route = (
+            (*job, "ip") if len(job) == 5 else job)
         # AI backup/repair has already authored the candidate. Re-enter at the
         # first RTL-validation step so program-first does not author again and
         # overwrite the hash whose semantics the AI just repaired. The routed
         # exit still applies; otherwise resume expands a step-2/4 task into LEC.
         argv = _resume_solver_argv(
-            runner, proj, supplied_rtl, entry, exit_step)
+            runner, proj, supplied_rtl, entry, exit_step, delivery_route)
         process = runner_budget.run(argv)
         diagnostic = _runner_diagnostics(process, argv, proj)
         diagnostics_json = json.dumps(diagnostic) if diagnostic else None
@@ -6859,7 +7010,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         return gate_rc
     retry_outcomes = _ordered_parallel_map(
         [(p["id"], p["project"], False, p["result"].get("entry"),
-          p["result"].get("exit"))
+          p["result"].get("exit"), p["result"].get("delivery_route", "ip"))
          for p in retry_plans], _run_and_collect, jobs)
     existing_backup_ids = {str(item.get("id")) for item in backup}
     for plan, outcome in zip(retry_plans, retry_outcomes):
@@ -7015,7 +7166,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         return _run_and_collect(job)
 
     backup_outcomes = iter(_ordered_parallel_map(
-        [(p["id"], p["project"], True, None, p["result"].get("exit"))
+        [(p["id"], p["project"], True, None, p["result"].get("exit"),
+          p["result"].get("delivery_route", "ip"))
          for p in backup_run_plans],
         _run_completed_backup, jobs))
     for plan in backup_plans:

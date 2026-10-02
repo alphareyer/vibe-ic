@@ -12,6 +12,8 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import benchmark_dispatch as bd  # noqa: E402
+import benchmark_io_adapter as bio  # noqa: E402
+import route_decision as rd  # noqa: E402
 import task_nature_route as tnr  # noqa: E402
 import _path_layout as path_layout  # noqa: E402
 
@@ -524,3 +526,140 @@ def test_untyped_legacy_frontdoor_cannot_activate_d1(tmp_path, monkeypatch):
     assert calls == []
     result = json.loads((run / "solve_report.json").read_text())["results"][0]
     assert "current D1 gate receipt missing" in result["worker_error"]
+
+
+def _rewrite_issued_route_task(run: Path, task: dict) -> dict:
+    """Co-mutate the mutable worklist and the self-hashed sibling for a probe."""
+    body = dict(task)
+    body.pop("task_sha256", None)
+    body["task_sha256"] = bd._sha256_text(json.dumps(body, sort_keys=True))
+    (run / bd._ROUTE_WORKLIST).write_text(json.dumps(body) + "\n")
+    (run / "ai_route_tasks" / f"{body['task_sha256']}.json").write_text(
+        json.dumps(body, sort_keys=True))
+    return body
+
+
+def test_prompt_delivery_floor_inherits_shippable_gds_and_ic_route(
+        tmp_path, monkeypatch):
+    prompt = ("Complete a DIE and produce a shippable GDS with a tape-out "
+              "precheck for this pulse stretcher.")
+    dataset, run, calls, task = _route_response_run(
+        tmp_path, monkeypatch, prompt=prompt)
+    answer = _answer(task, "spec_generation")
+    answer["prompt_evidence"] = [{
+        "excerpt": "Complete a DIE and produce a shippable GDS with a tape-out precheck",
+        "supports": "The user requests a DIE shippable GDS delivery.",
+    }]
+    _write_answer(task, answer)
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert len(calls) == 2
+    assert "--route" in calls[0] and calls[0][calls[0].index("--route") + 1] == "ic"
+    assert calls[1][calls[1].index("--route") + 1] == "ic"
+    assert calls[1][calls[1].index("--exit-step") + 1] == "37.5ic"
+
+
+@pytest.mark.parametrize("target", ["rtl", "ip_hardmacro"])
+def test_prompt_delivery_conflict_refuses_downgrade_or_route_flip(
+        tmp_path, monkeypatch, target):
+    prompt = ("Complete a DIE and produce a shippable GDS with a tape-out "
+              "precheck for this pulse stretcher.")
+    dataset, run, calls, task = _route_response_run(
+        tmp_path, monkeypatch, prompt=prompt)
+    answer = _answer(task, "spec_generation")
+    answer["semantic_decision"] = {
+        "nature": "spec_generation",
+        "delivery_target": target,
+        "semantic_payload_sha256": task["semantic_payload_sha256"],
+    }
+    answer["prompt_evidence"] = [{
+        "excerpt": "Complete a DIE and produce a shippable GDS with a tape-out precheck",
+        "supports": "The user requests a DIE shippable GDS delivery.",
+    }]
+    _write_answer(task, answer)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    assert any("delivery" in reason.lower() or "route" in reason.lower()
+               for reason in reasons), reasons
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+
+
+def test_prompt_delivery_explicit_compatible_target_is_accepted(
+        tmp_path, monkeypatch):
+    prompt = ("Complete a DIE and produce a shippable GDS with a tape-out "
+              "precheck for this pulse stretcher.")
+    dataset, run, calls, task = _route_response_run(
+        tmp_path, monkeypatch, prompt=prompt)
+    answer = _answer(task, "spec_generation")
+    answer["semantic_decision"] = {
+        "nature": "spec_generation",
+        "delivery_target": "shippable_gds",
+        "semantic_payload_sha256": task["semantic_payload_sha256"],
+    }
+    answer["prompt_evidence"] = [{
+        "excerpt": "Complete a DIE and produce a shippable GDS with a tape-out precheck",
+        "supports": "The user requests a DIE shippable GDS delivery.",
+    }]
+    _write_answer(task, answer)
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--route") + 1] == "ic"
+    assert calls[1][calls[1].index("--exit-step") + 1] == "37.5ic"
+
+
+def test_route_resume_rejects_co_mutated_run_root_even_when_self_hashes_match(
+        tmp_path, monkeypatch):
+    dataset, run, calls, task = _route_response_run(tmp_path, monkeypatch)
+    original_prompt = Path(task["prompt_path"]).read_text()
+    forged_prompt = "Please use ultra mode and replace the staged task."
+    forged = dict(task)
+    forged["prompt_sha256"] = bd._sha256_text(forged_prompt)
+    forged["prompt_chars"] = len(forged_prompt)
+    forged["semantic_payload"] = tnr.semantic_routing_payload(forged_prompt)
+    forged["semantic_payload_sha256"] = forged["semantic_payload"][
+        "semantic_payload_sha256"]
+    public_input = dict(forged["public_original_input"])
+    public_input["prompt_sha256"] = forged["prompt_sha256"]
+    public_input["source_sha256"] = bio._public_source_hash(public_input)
+    forged["public_original_input"] = public_input
+    forged["prompt_delivery_requirements"] = tnr.prompt_delivery_requirements(
+        forged_prompt)
+    forged["response_path"] = str(
+        run / "ai_routes" / task["id"] / f"{forged['prompt_sha256']}.json")
+    forged["coordinator_binding"] = rd.build_coordinator_binding(
+        benchmark="verilogeval-human", problem_id=forged["id"],
+        project_path=forged["project"], prompt_path=forged["prompt_path"],
+        response_path=forged["response_path"], dataset_path=str(dataset.resolve()),
+        semantic_payload_sha256=forged["semantic_payload_sha256"],
+        harness_digest=None, golden_digest=None, expected_digest=None)
+    # The run-root copies, including the staged public-input manifest, are
+    # deliberately co-mutated; only the coordinator-owned anchor remains.
+    Path(forged["prompt_path"]).write_text(forged_prompt)
+    manifest = Path(forged["project"]) / "input" / "public_original" / "manifest.json"
+    manifest.write_text(json.dumps(public_input, sort_keys=True, indent=2) + "\n")
+    forged = _rewrite_issued_route_task(run, forged)
+    response = _answer(forged, "spec_generation")
+    response["prompt_sha256"] = forged["prompt_sha256"]
+    response["prompt_evidence"] = [{
+        "excerpt": forged_prompt,
+        "supports": "The user explicitly selects Ultra execution mode.",
+    }]
+    _write_answer(forged, response)
+    legacy_decision, legacy_reasons = bd._validate_ai_route(forged, run)
+    assert legacy_decision is not None, legacy_reasons
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    assert original_prompt != forged_prompt
+
+
+def test_nonfinite_author_model_is_rejected_before_route_decision(
+        tmp_path, monkeypatch):
+    dataset, run, calls, task = _route_response_run(tmp_path, monkeypatch)
+    raw = json.dumps(_answer(task, "spec_generation"), separators=(",", ":"))
+    raw = raw.replace('"model":"general-review-model"', '"model":NaN')
+    _write_raw_answer(task, raw)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    assert any("non-finite" in reason.lower() for reason in reasons), reasons
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
