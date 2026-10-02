@@ -41,22 +41,21 @@ from _atomic_artefact import write_bytes, write_json
 # cannot adopt a previous issuer's run: durable external supervision is not wired.
 _COMPLETION_KEY = secrets.token_bytes(32)
 def _make_authority_ledger():
-    """Append-only in-process authority index.
+    """Read-only public index; enrollment stays in supervisor call closures.
 
-    A receipt may be rewritten by an untrusted adapter, but an issued
-    completion payload is recorded once and can never be replaced or removed
-    through the public module object.  The signature is still checked; this
-    ledger binds it to the controller observation that created it.
+    This is an in-process API boundary, not isolation against arbitrary Python
+    reflection or replacement of trusted controller code. Workers receive only
+    serialized facts, never the live enrollment capability.
     """
     entries: dict[str, str] = {}
+    lock = threading.Lock()
 
     class AuthorityLedger:
         __slots__ = ()
 
         def __setitem__(self, path: str, payload: str) -> None:
-            if path in entries and entries[path] != payload:
-                raise Refusal('ISSUED_AUTHORITY_REWRITE', path)
-            entries[path] = payload
+            code = 'ISSUED_AUTHORITY_REWRITE' if path in entries else 'ISSUED_AUTHORITY_UNAVAILABLE'
+            raise Refusal(code, path)
 
         def __getitem__(self, path: str) -> str:
             return entries[path]
@@ -64,13 +63,28 @@ def _make_authority_ledger():
         def get(self, path: str, default=None):
             return entries.get(path, default)
 
-    return AuthorityLedger()
+    def supervised(method):
+        def invoke(self, *args, **kwargs):
+            if '_issue' in kwargs:
+                raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', 'caller supplied enrollment')
+
+            def issue(path, payload):
+                path = str(path)
+                with lock:
+                    if path in entries and entries[path] != payload:
+                        raise Refusal('ISSUED_AUTHORITY_REWRITE', path)
+                    entries[path] = payload
+
+            return method(self, *args, **kwargs, _issue=issue)
+        return invoke
+
+    return AuthorityLedger(), supervised
 
 
-_ISSUED_AUTHORITY = _make_authority_ledger()
+_ISSUED_AUTHORITY, _supervised = _make_authority_ledger()
 def _record_authority(path: Path | str, payload: str,
                       ledger=_ISSUED_AUTHORITY) -> None:
-    """Record through the controller-owned ledger captured at definition."""
+    """Compatibility boundary: callers cannot enroll first issuance."""
     ledger[str(path)] = payload
 
 
@@ -111,19 +125,31 @@ def _hash(value: object) -> str:
 
 
 def _provider_identity(adapter: 'Adapter') -> tuple:
-    """Return the implementation identity used for Ultra de-duplication.
+    """Executed component roots and their source-owned import closure.
 
-    ``engine_families`` is a disclosure field and may be edited by a caller;
-    it is not a proof that two arms execute different providers.  The first
-    executable plus the complete source digest map bind the actual provider
-    bytes.  This deliberately ignores arm labels and per-run input/output
-    paths, so a relabelled wrapper cannot become a second Ultra arm.
+    Caller labels and unrelated source-map members cannot establish a distinct
+    implementation. The source map must bind every member of this closure;
+    changing a supplied digest does not change the implementation we observed.
+    Native-engine independence still needs native qualification evidence.
     """
-    argv0 = adapter.components[0].argv[0] if adapter.components else ''
-    resolved = shutil.which(argv0) or argv0
-    return (str(Path(resolved).resolve()),
-            tuple(sorted((str(Path(path).resolve()), str(value))
-                         for path, value in adapter.source_files.items())))
+    from execution_provider_catalog import source_closure
+    roots = []
+    for component in adapter.components:
+        executable = Path(shutil.which(component.argv[0]) or component.argv[0]).resolve()
+        files = [executable]
+        for token in component.argv[1:]:
+            path = Path(token)
+            if path.is_absolute() and path.is_file():
+                files.append(path.resolve())
+        roots.append(tuple(str(p) for p in files))
+    closure = source_closure(Path(p) for files in roots for p in files)
+    observed = []
+    for path in sorted(closure):
+        actual = digest(path)
+        if adapter.source_files.get(str(path)) != actual:
+            raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
+        observed.append((str(path), actual))
+    return tuple(roots), tuple(observed)
 
 
 def _seal(value: dict) -> dict:
@@ -362,14 +388,12 @@ class Controller:
         # is explicitly available, but registration alone never grants native
         # qualification.  Native qualification remains a separate receipt
         # fact and is represented by ``qualified=True`` only when bound.
-        if not adapter.qualified:
-            return 'READY_SOURCE_BOUND'
         if adapter.license_id and self.budget.licenses.get(adapter.license_id, 0) < 1:
             return 'LICENSE_UNAVAILABLE'
         if (adapter.cpus > min(self.budget.cpus, len(os.sched_getaffinity(0))) or
                 adapter.ram_mb > self.budget.ram_mb):
             return 'BUDGET_UNAVAILABLE'
-        return 'READY'
+        return 'READY' if adapter.qualified else 'READY_SOURCE_BOUND'
 
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
@@ -466,11 +490,16 @@ class Controller:
         return dict(mode=selected_mode, binding=binding,
                     arms=[a.arm_id for a in ready], portfolio=rows,
                     status='PLANNED', reason=reason,
-                    independence={a.arm_id: list(a.engine_families) for a in ready})
+                    independence={a.arm_id: {
+                        'sha256': _hash(_provider_identity(a)),
+                        'declared_families': list(a.engine_families),
+                        'scope': 'SOURCE_COMPONENT_CLOSURE',
+                        'native_independence': 'NOT_MEASURED'} for a in ready})
 
+    @_supervised
     def run(self, context: Context, output: Path, execution_mode: str | None = None,
             *, cancel: threading.Event | None = None,
-            superiority: Superiority | None = None) -> dict:
+            superiority: Superiority | None = None, _issue=None) -> dict:
         output = Path(output).resolve()
         try:
             output.mkdir(parents=True, exist_ok=False)
@@ -493,7 +522,7 @@ class Controller:
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
         _write(output / 'plan.json', plan)
-        _record_authority(output / 'issued-plan.json', json.dumps(plan))
+        _issue(output / 'issued-plan.json', json.dumps(plan))
         _write(output / 'issued-plan.json', _seal(plan))
         if not plan['arms']:
             _write(output / 'result.json', plan)
@@ -502,9 +531,15 @@ class Controller:
         condition = threading.Condition()
         usage = {'cpus': 0, 'ram_mb': 0, 'licenses': {}}
         available_cpus = set(os.sched_getaffinity(0))
+        wait_deadline = time.monotonic() + 1 + sum(
+            c.timeout_s for i in plan['arms'] for c in arms[i].components)
 
         def work(arm: Adapter):
             with condition:
+                admission = self._admission(arm, context)
+                if admission not in ('READY', 'READY_SOURCE_BOUND'):
+                    return self._run_arm(arm, context, plan, output, cancel,
+                                         _issue=_issue, start_refusal=admission)
                 def fits():
                     return (len(available_cpus) >= arm.cpus and
                             usage['cpus'] + arm.cpus <= self.budget.cpus and
@@ -512,7 +547,10 @@ class Controller:
                             (not arm.license_id or usage['licenses'].get(arm.license_id, 0) <
                              self.budget.licenses[arm.license_id]))
                 while not fits() and not cancel.is_set():
-                    condition.wait(.02)
+                    if time.monotonic() >= wait_deadline:
+                        return self._run_arm(arm, context, plan, output, cancel,
+                                             _issue=_issue, start_refusal='RESOURCE_WAIT_DEADLINE')
+                    condition.wait(min(.02, max(0, wait_deadline - time.monotonic())))
                 if not cancel.is_set():
                     usage['cpus'] += arm.cpus
                     usage['ram_mb'] += arm.ram_mb
@@ -521,9 +559,9 @@ class Controller:
                     cpuset = sorted(available_cpus)[:arm.cpus]
                     available_cpus.difference_update(cpuset)
                 else:
-                    return self._run_arm(arm, context, plan, output, cancel)
+                    return self._run_arm(arm, context, plan, output, cancel, _issue=_issue)
             try:
-                return self._run_arm(arm, context, plan, output, cancel, cpuset)
+                return self._run_arm(arm, context, plan, output, cancel, cpuset, _issue=_issue)
             finally:
                 with condition:
                     usage['cpus'] -= arm.cpus
@@ -545,7 +583,10 @@ class Controller:
         return summary
 
     def _run_arm(self, arm: Adapter, context: Context, plan: dict, root: Path,
-                 cancel: threading.Event, cpuset: list[int] | None = None) -> dict:
+                 cancel: threading.Event, cpuset: list[int] | None = None,
+                 *, _issue=None, start_refusal: str | None = None) -> dict:
+        if _issue is None:
+            raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', 'arm execution outside Controller.run')
         directory = root / arm.arm_id
         try:
             directory.mkdir()
@@ -563,6 +604,8 @@ class Controller:
             if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
                 raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         try:
+            if start_refusal:
+                raise Refusal(start_refusal, arm.arm_id)
             if context.binding() != plan['binding']:
                 raise Refusal('CURRENT_INPUT_CHANGED', arm.arm_id)
             for name, source in context.inputs.items():
@@ -595,15 +638,25 @@ class Controller:
                             "os.execvpe(sys.argv[3],sys.argv[3:],os.environ)")
                 import sys
                 cpuset = cpuset or sorted(os.sched_getaffinity(0))[:arm.cpus]
+                child_env = {**os.environ, 'OMP_NUM_THREADS': str(arm.cpus),
+                             'OPENBLAS_NUM_THREADS': str(arm.cpus),
+                             'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
+                             'VIBEIC_ARM_ID': arm.arm_id}
+                child_env.pop('VIBEIC_STEP37_ROUTE', None)
+                if arm.step_id == '37':
+                    params = json.loads(component.argv[component.argv.index('--params-json') + 1])
+                    route = params.get('streamout_route')
+                    if route != 'librelane' or arm.arm_id != 'backend_37_' + route:
+                        raise Refusal('BACKEND_STEP37_ROUTE_UNBOUND', arm.arm_id)
+                    child_env['VIBEIC_STEP37_ROUTE'] = route
+                record['issued_environment'] = {k: child_env[k] for k in
+                    ('VIBEIC_ARM_ID', 'VIBEIC_STEP37_ROUTE') if k in child_env}
                 with stdout.open('wb') as out, stderr.open('wb') as err:
                     process = subprocess.Popen(
                         [sys.executable, '-c', launcher, str(arm.ram_mb * 1024 * 1024),
                          ','.join(map(str, cpuset)), *argv],
                         cwd=outputs, stdout=out, stderr=err, start_new_session=True,
-                        env={**os.environ, 'OMP_NUM_THREADS': str(arm.cpus),
-                             'OPENBLAS_NUM_THREADS': str(arm.cpus),
-                             'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
-                             'VIBEIC_ARM_ID': arm.arm_id})
+                        env=child_env)
                     record['pid'] = process.pid
                     stop = None
                     try:
@@ -651,7 +704,7 @@ class Controller:
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           evidence=receipt.get('evidence'),
                           ended_ns=receipt['ended_ns'], run_root=str(root))
-        _record_authority(directory / 'issued-completion.json', json.dumps(completion))
+        _issue(directory / 'issued-completion.json', json.dumps(completion))
         _write(directory / 'issued-completion.json', _seal(completion))
         _write(directory / 'receipt.json', receipt)
         return receipt
@@ -686,7 +739,7 @@ class Controller:
             raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
 
     @staticmethod
-    def _selected_generation(root: Path, receipt: dict) -> dict:
+    def _selected_generation(root: Path, receipt: dict, _issue) -> dict:
         parent = root / 'selected'
         if parent.is_symlink():
             raise Refusal('SELECTED_NAMESPACE_UNSAFE', str(parent))
@@ -706,7 +759,7 @@ class Controller:
         manifest = dict(generation=generation, directory=str(target),
                         run_id=receipt['run_id'], arm_id=receipt['arm_id'],
                         binding=receipt['binding'], outputs=hashes)
-        _record_authority(target / 'manifest.json', json.dumps(manifest))
+        _issue(target / 'manifest.json', json.dumps(manifest))
         _write(target / 'manifest.json', _seal(manifest))
         return manifest
 
@@ -771,7 +824,8 @@ class Controller:
                for v in evidence.get('metrics', {}).values()):
             raise Refusal('INVALID_METRIC', arm.arm_id)
 
-    def adopt(self, context: Context, root: Path, choice: Mapping[str, object] | None) -> dict:
+    @_supervised
+    def adopt(self, context: Context, root: Path, choice: Mapping[str, object] | None, *, _issue=None) -> dict:
         """AI must supply an explicit receipt-bound decision; no rc0/PASS shortcut.
 
         All evidence is reconsumed at adoption, including the adapter's actual
@@ -817,12 +871,12 @@ class Controller:
             # lease on the earlier input/executable/output bytes. Recheck after
             # it returns, then capture and bind the selected artifact generation.
             self._eligible(receipt, context, arm)
-            generation = self._selected_generation(root, receipt)
+            generation = self._selected_generation(root, receipt, _issue)
             self._execution_authority(root, plan, receipt, arm)
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
             self._generation_current(generation)
-            adoption.update(status='ADOPTED', selected=arm_id,
+            adoption.update(status='PROVISIONAL', selected=arm_id,
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
                             selected_generation=generation)
@@ -830,21 +884,24 @@ class Controller:
             # on the immutable selected generation before recording adoption;
             # no consumer may read the mutable run root after this boundary.
             if 'backend_result.json' in generation.get('outputs', {}):
-                try:
-                    import execution_backend_consumer as _backend_consumer
-                    _backend_consumer.import_selected(
-                        Path(generation['directory']), context, self, root, adoption)
-                except ModuleNotFoundError:
-                    pass
+                import execution_backend_consumer as _backend_consumer
+                consumer = _backend_consumer.import_selected(
+                    Path(generation['directory']), context, self, root, adoption)
+                if not isinstance(consumer, dict) or consumer.get('status') != 'CONSUMED':
+                    raise Refusal('BACKEND_CANONICAL_CONSUMER_REFUSED', str(arm_id))
+                adoption['consumer'] = consumer
+            adoption['status'] = 'ADOPTED'
             _write(root / 'adoption.json', adoption)
         except Refusal as exc:
-            adoption.update(reason=exc.code, detail=str(exc))
+            adoption.update(status='REFUSED', selected=None, reason=exc.code, detail=str(exc))
+            adoption.pop('selected_generation', None)
             try:
                 _write(root / 'adoption.json', adoption)
             except OSError as recording:
                 raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:
+            adoption.pop('selected_generation', None)
             adoption.update(status='REFUSED', selected=None,
                             reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))
             try:
@@ -853,3 +910,6 @@ class Controller:
                 raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise Refusal('INVALID_ADOPTION_EVIDENCE', str(exc)) from exc
         return adoption
+
+# Do not expose a decorator that callers could use to mint enrollment.
+del _supervised
