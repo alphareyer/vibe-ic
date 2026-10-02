@@ -445,6 +445,18 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     }
     _check_density(project_dir, findings, stats)
     _check_erc(project_dir, findings, stats)
+    import _physical_current as _pc
+    try:
+        record = json.loads((project_dir / "reports/phase3/erc_current.json").read_text())
+    except (OSError, ValueError):
+        record = None
+    refusal = _pc.validate(project_dir, record, step="31", stage="stage4",
+                           tools=("openroad",), required_inputs=("def", "pdk_tech_lef", "pdk_cell_lef", "pdk_liberty", "recipe"),
+                           required_outputs=("report", "log"), marker="ERC_NATIVE_DONE")
+    if not refusal and record["outputs"]["report"] != _pc.entry(project_dir, _find_erc_report(project_dir)):
+        refusal = "ERC_CURRENT_REPORT_SWAPPED"
+    stats["current_erc"] = "NOT_MEASURED" if refusal else "CURRENT"
+    stats["current_erc_reason"] = refusal
     return findings, stats
 
 
@@ -519,6 +531,14 @@ def main(argv: list = None) -> int:
     has_error = report["summary"]["errors_count"] > 0
     nothing_examined = (not stats["density_checked"]
                         and not stats["erc_checked"])
+    if not has_error and stats.get("current_erc") == "NOT_MEASURED":
+        report["verdict"] = "NOT_MEASURED"
+        report["reason"] = stats["current_erc_reason"]
+        report["summary"]["pass"] = False
+        if args.json:
+            Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
+        print("NOT_MEASURED: " + stats["current_erc_reason"])
+        return 2
     if nothing_examined and not has_error:
         return 1
     return 0 if report["summary"]["pass"] else 1

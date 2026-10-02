@@ -1946,6 +1946,15 @@ def run_audit(project: Path, arm: str) -> Result:
         "verdict_tier": result.verdict_tier,
         "pass": result.passed,
     }
+    if arm == "ip":
+        import _physical_current as _pc
+        refusal = _pc.check_kit(project)
+        if refusal:
+            result.findings.append(Finding("IP_KIT_CURRENT_REFUSED", "ERROR", "", refusal))
+            result.passed = False
+            result.verdict_tier = "FAIL"
+            result.summary.update(pass_=False, verdict_tier="FAIL")
+            result.summary["pass"] = False
     return result
 
 

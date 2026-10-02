@@ -52014,7 +52014,8 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     except Refusal as exc:
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
-        return None
+        import _physical_current as _pc
+        return _pc.direct_half(project, top, pdk, half, direct)
     t0 = time.time()
     vacuous = _vacuous_on_unrouted(project, half, t0)
     if vacuous is not None:
@@ -58601,7 +58602,8 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         try:
             existing = json.loads(clock_plan.read_text(errors="ignore"))
             cl = existing.get("clocks") if isinstance(existing, dict) else None
-            needs_refresh = not (isinstance(cl, list) and cl)
+            needs_refresh = not (isinstance(cl, list) and cl
+                                 and isinstance(existing.get("current"), dict))
         except Exception:
             existing = None
             needs_refresh = True
@@ -58661,19 +58663,21 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
             "declared clock says so; no nominal clock is invented")
         return None
 
-    clock_plan.parent.mkdir(parents=True, exist_ok=True)
-    clock_plan.write_text(json.dumps({
-        "tool": "openroad",
-        "source_log": str((pnr_out / "openroad.log").relative_to(project)),
-        "primary_clock": next(iter(clocks)),
-        "clocks": list(clocks.values()),
-        # PROVENANCE: what this plan was derived from, by CONTENT.
-        # `clock_plan_check` re-hashes exactly these paths, so the two sides
-        # cannot disagree about the inputs, and the record survives clone /
-        # copy / rsync / archive extraction the way an mtime does not.
-        "derived_from": _pl.clock_plan_sdc_digests(project, sdc_paths),
-    }, indent=2) + "\n")
-    return str(clock_plan)
+    # Step 16 is measured by OpenROAD; parsed prose alone is not production.
+    try:
+        import _physical_current as _pc
+        declared_pdk = _read_declared_pdk_target(project)
+        if not declared_pdk:
+            raise ValueError("CLOCK_PLAN_PDK_NOT_DECLARED")
+        pdk = _detect_pdk(project, declared_pdk)
+        if pdk is None:
+            raise ValueError("CLOCK_PLAN_PDK_NOT_RESOLVED")
+        floorplan = _pl.pnr_dir(project) / "floorplan.def"
+        return _pc.clock_plan(project, clock_plan, floorplan, sdc_paths, pdk)
+    except (OSError, ValueError, RuntimeError) as exc:
+        notes.append(f"clock_plan.json NOT written: {exc}")
+        return None
+
 
 
 # ---------------------------------------------------------------------------
@@ -60338,6 +60342,18 @@ def step_digital_hardmacro_gen(project: Path,
             _V.ReasonClass.NOT_EXECUTED.value),
     }.get(cp.returncode,
           (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value))
+    if cp.returncode == 0:
+        gate = PROGRAMS_DIR / "digital_hardmacro_check.py"
+        checked, stopped = _run_producer(
+            "digital_hardmacro_gen", [sys.executable, str(gate), str(project),
+                                      "--json", str(project / "reports/phase3/digital_hardmacro.json")],
+            t0, noun="the current kit check")
+        if stopped is not None:
+            return stopped
+        if checked.returncode:
+            status = "FAIL" if checked.returncode == 1 else "NOT_MEASURED"
+            reason = "" if status == "FAIL" else _V.ReasonClass.NOT_EXECUTED.value
+            msg += "; current kit consumer refused: " + (checked.stdout or checked.stderr or "").strip()[-500:]
     out: List[str] = []
     hm = project / "phase3" / "stage4" / "hardmacro"
     if hm.is_dir():
@@ -60460,6 +60476,18 @@ def step_ip_release_docs_gen(
     if doc_root.is_dir():
         outputs.extend(str(f) for f in sorted(doc_root.rglob("*"))
                        if f.is_file())
+    if cp.returncode == 0:
+        checked, stopped = _run_producer(
+            "ip_release_docs_gen", [sys.executable, str(PROGRAMS_DIR / "release_docs_check.py"),
+                                    str(project), "--arm", "ip", "--json",
+                                    str(project / "reports/phase3/release_docs.json")],
+            t0, noun="the current document check")
+        if stopped is not None:
+            return stopped
+        if checked.returncode:
+            status = "FAIL" if checked.returncode == 1 else "NOT_MEASURED"
+            reason = "" if status == "FAIL" else _V.ReasonClass.NOT_EXECUTED.value
+            detail += "; current document consumer refused"
     return StepResult("ip_release_docs_gen", status, time.time() - t0,
                       detail, outputs,
                       {"producer_rc": cp.returncode, "flow_step": "37.5ip",
@@ -74172,6 +74200,16 @@ def _emit_erc_report(project: Path, top: str, pdk: PdkConfig,
     OpenROAD report_erc_metrics (floating-net / unconnected-pin electrical
     checks) on the routed DEF. Writes reports/phase3/erc.{rpt,json}.
     chip-AGNOSTIC. Best-effort."""
+    import _physical_current as _pc
+    try:
+        _erc_inputs = {role: _pc.entry(project, path, external=role.startswith("pdk_"))
+                       for role, path in (("def", _pl.pnr_dir(project) / f"{top}.def"),
+                                          ("pdk_tech_lef", pdk.tech_lef),
+                                          ("pdk_cell_lef", pdk.cell_lef),
+                                          ("pdk_liberty", pdk.liberty))}
+    except (OSError, ValueError) as exc:
+        notes.append(f"ERC NOT_MEASURED: {exc}")
+        return False
     pnr_out = _pl.pnr_dir(project)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
@@ -74200,6 +74238,7 @@ puts "=== ERC: floating nets ==="
 if {{[catch {{report_floating_nets -verbose}} _fn]}} {{ puts "ERC_FN_NONFATAL: $_fn" }}
 puts "=== ERC metrics ==="
 if {{[catch {{report_erc_metrics}} _erc]}} {{ puts "ERC_METRICS_NONFATAL: $_erc" }}
+puts "ERC_NATIVE_DONE"
 exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -74210,6 +74249,16 @@ exit
     )
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[out_dir / "erc.log"])
     log = (out or "") + "\n" + (err or "")
+    if rc or "ERC_NATIVE_DONE" not in log or "NONFATAL:" in log or "[ERROR" in log:
+        notes.append(f"ERC NOT_MEASURED: native tool did not complete (rc={rc})")
+        return False
+    _erc_inputs["recipe"] = _pc.entry(project, tcl_path)
+    for _role, _expected in _erc_inputs.items():
+        if _pc.entry(project, project / _expected["path"], external=_role.startswith("pdk_")) != _expected:
+            notes.append(f"ERC NOT_MEASURED: input changed during native tool: {_role}")
+            return False
+    (out_dir / "erc.log").write_text(log)
+
     # v0.3.16 #514: also capture the -verbose floating net/pin NAME lines
     # (e.g. " spare_aoi_0/A1") so erc.rpt carries them for the by-owner
     # classifier, not just the summary counts.
@@ -74271,6 +74320,12 @@ exit
         "note": ("open-source ERC screen; full Calibre PERC "
                  "(latch-up/ESD) deferred"),
     }, indent=2) + "\n")
+    _pc_record = _pc.build(project, "31", "stage4", _pc.design_of(def_file),
+                           pdk.name, "openroad", _erc_inputs,
+                           {"report": _pc.entry(project, erc_rpt),
+                            "log": _pc.entry(project, out_dir / "erc.log")},
+                           {"rc": rc, "argv": ["openroad", "-no_init", "-exit", str(tcl_path)]})
+    _aa.write_json(out_dir / "erc_current.json", _pc_record)
     return True
 
 

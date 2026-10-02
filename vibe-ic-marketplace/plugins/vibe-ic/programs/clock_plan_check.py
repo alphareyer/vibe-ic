@@ -792,6 +792,34 @@ def main(argv=None):
                        f"would not be reflected here.",
         })
 
+    # Blocking current-subject check for the ordinary Step-16 producer.
+    import _physical_current as _pc
+    current = plan.get("current") if isinstance(plan, dict) else None
+    required = ["floorplan", "recipe", "pdk_lef_0", "pdk_lef_1", "sdc_0"]
+    refusal = _pc.validate(project, current, step="16", stage="stage3",
+                           tools=("openroad",), required_inputs=required,
+                           required_outputs=("log",), marker="CLOCK_PLAN_DONE")
+    if not refusal:
+        native = []
+        text = (project / current["outputs"]["log"]["path"]).read_text()
+        for name, period, source in re.findall(
+                r"(?m)^CLOCK_PLAN_NATIVE ([^|\n]+)\|([^|\n]+)\|([^\n]+)$", text):
+            native.append({"name": name, "period_ns": float(period), "source": source})
+        if f"CLOCK_PLAN_PDK {current['pdk']}\n" not in text:
+            refusal = "CLOCK_PLAN_NATIVE_PDK_CHANGED"
+        if plan.get("clocks") != native or not native:
+            refusal = "CLOCK_PLAN_NATIVE_VALUES_CHANGED"
+        recorded = {r["path"] for role, r in current["inputs"].items()
+                    if role.startswith("sdc_")}
+        if recorded != {str(p.relative_to(project)) for p in _pl.clock_plan_input_sdcs(project)}:
+            refusal = "CLOCK_PLAN_SDC_SET_CHANGED"
+        if current["inputs"]["floorplan"]["path"] != "phase3/stage3/pnr/floorplan.def":
+            refusal = "CLOCK_PLAN_FLOORPLAN_SWAPPED"
+    if refusal:
+        ok = False
+        findings.append({"severity": "FAIL", "rule": "CLOCK_PLAN_CURRENT_REFUSED",
+                         "message": refusal})
+
     verdict = "PASS" if ok else "FAIL"
     rc = 0 if ok else 1
     if ok:

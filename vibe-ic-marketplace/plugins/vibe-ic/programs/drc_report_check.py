@@ -413,6 +413,15 @@ def signoff_verdict(payload: object, project_dir: str) -> tuple:
     producers = summary.get("producers")
     add: dict = {"signoff_scope": True}
 
+    import librelane_signoff_evidence as _native
+    if not _native.tool_selected(Path(project_dir), "31"):
+        import _physical_current as _pc
+        refusal = _pc.check_direct_half(Path(project_dir), "drc")
+        if refusal:
+            findings.append({"rule": "DRC_CURRENT_SUBJECT_REFUSED", "severity": "ERROR",
+                             "file": "reports/phase3/direct_current_drc.json",
+                             "message": refusal})
+
     if not isinstance(producers, list) or not producers:
         findings.append({
             "rule": "DRC_SIGNOFF_PRODUCER_UNRECOGNISED", "severity": "ERROR",

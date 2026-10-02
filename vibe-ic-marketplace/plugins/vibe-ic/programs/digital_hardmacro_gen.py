@@ -213,6 +213,7 @@ class Record:
     lef_policy: dict = field(default_factory=dict)
     interface: dict = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    current: dict = field(default_factory=dict)
 
 
 # ── inputs ────────────────────────────────────────────────────────────────
@@ -1594,6 +1595,10 @@ def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
             # stalled / ceiling / launch_error are NOT a LEF verdict: say which.
             return False, (f"magic did not complete: watchdog reported "
                            f"{cp.outcome} after {cp.elapsed_s:.0f}s")
+        # Retain the native recipe and transcript for the kit consumer.
+        out_lef.parent.mkdir(parents=True, exist_ok=True)
+        (out_lef.parent / "digital_lef.log").write_text((cp.out or "") + "\n" + (cp.err or ""))
+        (out_lef.parent / "digital_lef.tcl").write_text(script.read_text())
         return _accept_lef(work / f"{top}.lef", out_lef, cp.rc,
                            cp.err or cp.out,
                            def_file.read_text(errors="replace"))
@@ -1827,14 +1832,28 @@ def characterise_liberty(project: Path, design: str, container: str,
         f"read_liberty {lib}", f"read_verilog {netlist}",
         f"link_design {design}", f"read_sdc {sdc}", f"read_spef {spef}",
         f"write_timing_model -library_name {design} -cell_name {design} "
-        f"{lib_out}", "")))
+        f"{lib_out}", 'puts "TIMING_MODEL_DONE"', "")))
     cmd = f"export PATH=/foss/tools/bin:$PATH; sta -no_splash -exit {tcl}"
     argv = (["bash", "-lc", cmd] if shutil.which("sta") or not container
             else _ce.docker_exec_argv(container, "bash", "-lc", cmd))
     rc, out, err = _sh(argv)
     text = lib_out.read_text(errors="replace") if lib_out.is_file() else ""
     arcs = len(re.findall(r"\btiming\s*\(", text))
-    for tmp in (tcl, lib_out):
+    import _physical_current as _pc
+    log = out_dir / "timing_native.log"
+    log.write_text((out or "") + "\n" + (err or ""))
+    try:
+        inputs = {role: _pc.entry(project, path, external=role.startswith("pdk_"))
+                  for role, path in (("netlist", netlist), ("sdc", sdc),
+                                     ("spef", spef), ("sta_report", rpt),
+                                     ("pdk_liberty", lib), ("recipe", tcl))}
+        rec["current_inputs"] = inputs
+        rec["execution"] = {"rc": rc, "argv": argv}
+        rec["log"] = _pc.entry(project, log)
+    except (OSError, ValueError) as exc:
+        rc = 2
+        rec["current_refusal"] = str(exc)
+    for tmp in (lib_out,):
         try:
             tmp.unlink()
         except OSError:
@@ -1885,6 +1904,22 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
     if gds is None:
         rec.status, rec.reason = "REFUSED", "no sign-off GDS under phase3/stage4/gds/"
         rec.notes.append("Step 37.5ip's declared input is step 37's GDS.")
+        return RC_REFUSED, rec
+    import _physical_current as _pc
+    import _tapeout_declaration as _td
+    try:
+        declaration = project / _td.DECLARATION_REL
+        route, error = _td.load(declaration)
+        if error or _td.answer(route, "deliverable") != _td.DELIVERABLE_HARDMACRO:
+            raise ValueError("IP_ROUTE_NOT_OWNER_DECLARED_HARDMACRO")
+        pdk_name, technology = _pc.pdk_of(project)
+        inputs = {"def": _pc.entry(project, def_path),
+                  "gds": _pc.entry(project, gds),
+                  "route": _pc.entry(project, declaration),
+                  "technology": _pc.entry(project, technology),
+                  "pdk_magicrc": _pc.entry(project, _magicrc_for(pdk_root), external=True)}
+    except (OSError, ValueError) as exc:
+        rec.status, rec.reason = "REFUSED", str(exc)
         return RC_REFUSED, rec
     geom = _require(_gds_geometry_count, "_gds_geometry_count")(gds.read_bytes())
     if geom <= 0:
@@ -2025,6 +2060,16 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         rec.interface["pre_existing_power_ground"] = present_pre
     stale = sorted(n for n, got in present_pre.items() if got != expected_pg)
     replacing = bool(stale)
+    # Unbound or stale kits must be reproduced by the ordinary native producer.
+    try:
+        prior = json.loads((hm / "current_kit.json").read_text())
+        current_refusal = _pc.check_kit(project)
+    except (OSError, ValueError):
+        current_refusal = "IP_KIT_CURRENT_RECORD_MISSING"
+    if current_refusal:
+        replacing = bool(present_pre)
+    else:
+        rec.current = prior
     if replacing:
         rec.replaced_reason = (
             "a kit already on disk does not carry the supply interface this "
@@ -2103,7 +2148,7 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
 
     def stage_other_views() -> None:
         stage(gds_path, lambda q: shutil.copy(gds, q))
-        stage(v_path, lambda q: atomic_write_text(q, emit_verilog(design, pins)))
+
         # R-0915-87(3): characterised from the run's own STA when it can be;
         # the interface-only view otherwise, with the reason recorded beside
         # it. Done INSIDE the write, so a kit this run leaves untouched is
@@ -2123,6 +2168,11 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
             atomic_write_text(q, char if char else emit_liberty(design, pins))
 
         stage(lib_path, _write_lib)
+        timing = json.loads((hm / LIBERTY_TIMING_RECORD).read_text())
+        selected_netlist = Path(timing.get("netlist", ""))
+        if not selected_netlist.is_file():
+            raise RuntimeError("IP_KIT_CURRENT_NETLIST_MISSING")
+        stage(v_path, lambda q: shutil.copyfile(selected_netlist, q))
 
     # ORDER IS A DECISION, AND IT DEPENDS ON WHETHER A DELIVERY IS AT RISK.
     #
@@ -2182,6 +2232,30 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
             "but this producer does not label the kit deliverable: a tool "
             "success that drops either physical supply pin is not integration.")
         return RC_REFUSED, rec
+    if rec.produced:
+        try:
+            timing = json.loads((hm / LIBERTY_TIMING_RECORD).read_text())
+            if not timing.get("characterised"):
+                raise ValueError("IP_KIT_TIMING_NOT_MEASURED")
+            inputs.update({("pdk_timing_liberty" if role == "pdk_liberty" else f"timing_{role}"): row
+                           for role, row in timing["current_inputs"].items()})
+            for role, row in inputs.items():
+                if _pc.entry(project, project / row["path"], external="pdk_" in role) != row:
+                    raise ValueError(f"IP_KIT_CURRENT_INPUT_CHANGED: {role}")
+            outputs = {role: _pc.entry(project, path) for role, path in (
+                ("lef", lef_path), ("liberty", lib_path), ("gds", gds_path),
+                ("verilog", v_path), ("log", hm / "digital_lef.log"),
+                ("timing_log", hm / "timing_native.log"))}
+            if "DIGITAL_LEF_WRITE_DONE" not in (hm / "digital_lef.log").read_text():
+                raise ValueError("IP_KIT_NATIVE_LEF_EXECUTION_MISSING")
+            rec.current = _pc.build(project, "37.5ip", "stage4", design, pdk_name,
+                                    "magic+opensta", inputs, outputs,
+                                    {"rc": 0, "argv": ["magic", "lef write"],
+                                     "timing": timing["execution"]})
+            atomic_write_text(hm / "current_kit.json", json.dumps(rec.current, indent=2))
+        except (OSError, ValueError, KeyError) as exc:
+            rec.status, rec.reason = "REFUSED", str(exc)
+            return RC_REFUSED, rec
     if not rec.produced:
         rec.notes.append(
             "NOTHING WAS WRITTEN. Every view was already on disk and already "
