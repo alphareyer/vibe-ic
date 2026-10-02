@@ -2943,3 +2943,129 @@ def test_the_payload_check_is_absent_when_the_contract_declares_no_data_port():
         pytest.skip("the trimmed description no longer states a ratio contract")
     tb = rcs.emit_scoreboard_tb(c)
     assert "grp[" not in tb and "===" not in tb
+
+
+# Exact independent R7 inputs retained verbatim for R8.
+_R8_SPEC = '''Design an unsigned iterative arithmetic unit using the restoring division algorithm.
+Module name: extra_scope_unit
+Parameter WIDTH has a default value of 9.
+Input ports:
+clk: posedge clock.
+rst: active-low asynchronous reset.
+start: one-cycle request.
+{ports}
+Output ports:
+quotient[WIDTH-1:0]: unsigned quotient.
+remainder[WIDTH-1:0]: unsigned remainder.
+valid: one-cycle completion.
+{domain}
+On reset all outputs clear. New inputs are accepted after the previous result.
+At each restoring iteration append the next dividend bit to the shifted partial remainder and subtract the divisor; a negative trial restores the shifted partial remainder and produces quotient bit zero.
+Completion takes WIDTH cycles for power-of-two WIDTH and WIDTH+1 cycles otherwise; no extra input-only cycle.
+'''
+_R8_CASES = [('source_port_WIDTH',
+  True,
+  'The divisor is nonzero. Dividend is at least divisor. Target input guarantees remain unconditional.',
+  'WIDTH[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('coord_and_also',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived and '
+  'also removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('coord_repeated_subject',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived but the '
+  'nonzero requirement was removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('coord_repeated_subject_yet',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived, yet '
+  'the nonzero requirement was removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('coord_semicolon_elided',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived; was '
+  'removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('coord_comma_elided',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The nonzero requirement was not waived, was '
+  'removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('named_dividend',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The dividend requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('named_numerator',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The numerator constraints are waived.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('named_operands',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The operand requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('named_both_operands',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. Both operand requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('unnamed_all',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. All requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('unnamed_both',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. Both requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('unnamed_above',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The above requirements are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('plural_after_unrelated_target',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. The quotient may be zero. These requirements '
+  'are removed.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('ordering_could_possibly',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. Dividend could possibly be less than divisor.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('ordering_might_sometimes',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. Dividend might sometimes be less than divisor.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.'),
+ ('ordering_could_be',
+  False,
+  'The divisor is nonzero. Dividend is at least divisor. Dividend could be smaller than divisor.',
+  'dividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.')]
+
+
+@pytest.mark.parametrize("case,emit,domain,ports", _R8_CASES,
+                         ids=[row[0] for row in _R8_CASES])
+def test_unsigned_divider_r8_exact_independent(case, emit, domain, ports, tmp_path):
+    description = _R8_SPEC.format(ports=ports, domain=domain)
+    source, rtl = tmp_path / "description.txt", tmp_path / "candidate.v"
+    source.write_text(description)
+    command = subprocess.run([sys.executable, str(PROGRAMS / "canonical_primitive_synth.py"),
+                              "--from-desc", str(source), "--out", str(rtl)],
+                             capture_output=True, text=True)
+    response = json.loads(command.stdout)
+    expected = "EMIT" if emit else "DEFER"
+    assert response["verdict"] == expected, response
+    assert command.returncode == (0 if emit else 2), command.stderr
+    assert rtl.is_file() == emit
+    project = tmp_path / "project"
+    input_doc = project / "phase1/input_doc/design_description.txt"
+    input_doc.parent.mkdir(parents=True)
+    input_doc.write_text(description)
+    consumer = _load_runner()._try_canonical_primitive_rtl(project, time.time())
+    outputs = list(project.glob("phase2/stage1/rtl/*.v"))
+    actual = "EMIT" if consumer is not None and consumer.status == "PASS" and outputs else "DEFER"
+    assert actual == expected
+    assert bool(outputs) == emit
+    if emit:
+        assert len(outputs) == 1 and outputs[0].read_bytes() == rtl.read_bytes()
+        # Same Icarus standard and options as the sealed independent probe.
+        compile_run = subprocess.run(["iverilog", "-g2012", "-s", "extra_scope_unit",
+                                      "-o", str(tmp_path / "sim.out"), str(rtl)],
+                                     capture_output=True, text=True)
+        assert compile_run.returncode == 0, compile_run.stdout + compile_run.stderr
