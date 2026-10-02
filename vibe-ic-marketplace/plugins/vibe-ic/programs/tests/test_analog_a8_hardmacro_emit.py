@@ -235,6 +235,11 @@ def test_the_lef_write_carries_a_marker_from_its_own_argv(tmp_path: Path,
     monkeypatch.setattr(E, "_docker_exec", fake_exec)
     r = E.emit_block(p, "blk", "c", "/pdk")
     assert r["emitted"] is True, r
+    manifest = json.loads((p / "phase3" / "analog" / "hardmacro" /
+                           "blk" / "a8_views_provenance.json").read_text())
+    assert manifest["producer"] == "analog_a8_hardmacro_emit"
+    assert manifest["source_gds_sha256"] == r["source_gds_sha256"]
+    assert set(manifest["views"]) == {".lef", ".lib", ".gds", ".v"}
     long_runs = [c for c in calls if "magic" in c["cmd"]]
     assert long_runs and all(c["marker"] and c["marker"] in c["cmd"]
                              for c in long_runs), calls

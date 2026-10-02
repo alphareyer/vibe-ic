@@ -1116,7 +1116,13 @@ _STEP_ARTEFACTS: Dict[str, tuple] = {
                        "netlist_provenance.json"),
     "A4_corner_sweep": ("corner_results.json",),
     "A5_layout": ("layout.mag",),
-    "A7_post_layout_resim": ("pre_vs_post.json",),
+    "A6_block_pv": ("drc.report", "comp.json", "a6_librelane_drc.json"),
+    "A7_post_layout_resim": ("pre_vs_post.json", "a7_post_layout.json"),
+    "A8_hardmacro_gen": ("../hardmacro/{block}/{block}.lef",
+                          "../hardmacro/{block}/{block}.lib",
+                          "../hardmacro/{block}/{block}.gds",
+                          "../hardmacro/{block}/{block}.v",
+                          "../hardmacro/{block}/a8_views_provenance.json"),
     "A9_hw_verify": ("hw_measurements.json",),
 }
 
@@ -1458,19 +1464,34 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     # never clear a violation, because a deviation A5 recorded is
     # reported as a DISCLOSURE beside the class and changes neither the
     # class nor any exit code.
-    # THE A6 TOOL ARM, OPT-IN (T94): LibreLane KLayout.DRC + Magic.DRC on the
-    # block GDS, the graded-rule union and A6's own attribution on top.
-    # Selected by phase3/librelane_switch.json {"steps": {"A6": ...}}. It is
-    # the STRICTER half: a blocking arm is the step's FAIL; a clean arm leaves
-    # the native path below to decide.
-    if step_name == "A6_block_pv" and (_pl.analog_dir(project) / bname
-                                       / f"{bname}.gds").is_file():
+    # THE A6 TOOL ARM (Default cutover): LibreLane KLayout.DRC + Magic.DRC on
+    # the block GDS, the graded-rule union and A6's own attribution on top.
+    # PRODUCTION_DEFAULTS selects this arm unless the project explicitly
+    # names A6 direct. It is the STRICTER half: a blocking arm is the step's
+    # FAIL; a clean arm leaves the native path below to decide.
+    if step_name == "A6_block_pv":
         import librelane_contract as _llc
         try:
             _a6_mode = _llc.selected_mode(project, "A6")
         except _llc.Refusal:
             _a6_mode = "invalid"
         if _a6_mode != "direct":
+            _a6_bdir = _pl.analog_dir(project) / bname
+            if not (_a6_bdir / f"{bname}.gds").is_file():
+                # A5 may leave a Magic source layout as the fixed input. The
+                # shipped LibreLane DRC arm consumes GDS and is deliberately
+                # not allowed to manufacture a conversion while A6 is being
+                # adjudicated.
+                if (_a6_bdir / "layout.mag").is_file():
+                    return StepResult(
+                        step_name, bname, _V.Verdict.NOT_MEASURED.value,
+                        time.time() - t0,
+                        "A6 LibreLane arm requires the A5 GDS view; "
+                        "layout.mag is present but no conversion was run",
+                        output_files=_step_outputs(project, bname, step_name),
+                        extras={"verdict_tier": "INPUT_VIEW_UNAVAILABLE",
+                                "layout_input": "layout.mag"},
+                        reason_class=_V.ReasonClass.INPUT_ABSENT)
             _a6_arm = _a6_librelane_arm(
                 project, bname,
                 (getattr(args, "container", None)
@@ -1541,6 +1562,82 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                 # Producing is not a verdict; the A8 gate below still reports
                 # the missing artefact on its own evidence.
                 pass
+
+        # Default A8 producer: Magic.WriteLEF plus the source-bound Liberty
+        # and Verilog views. The gate remains read-only; this runner owns the
+        # producer and records its result beside the package. An explicit
+        # A8 direct switch keeps the legacy skill hand-off for projects that
+        # already own their four views.
+        import librelane_contract as _llc
+        try:
+            _a8_mode = _llc.selected_mode(project, "A8")
+        except _llc.Refusal as _exc:
+            return StepResult(
+                step_name, bname, "FAIL", time.time() - t0,
+                f"phase3/librelane_switch.json: {_exc}",
+                reason_class=_V.ReasonClass.EXECUTION_ERROR)
+        a8_prog = PROGRAMS_DIR / "analog_a8_hardmacro_emit.py"
+        if _a8_mode != "direct" and a8_prog.is_file():
+            a8_record = out_dir / "a8_hardmacro_emit.json"
+            a8_container = (getattr(args, "container", None)
+                            or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                            or _pin.default_container_name())
+            try:
+                a8_cp = _pr.run(
+                    [sys.executable, str(a8_prog), str(project),
+                     "--block", bname, "--container", a8_container,
+                     "--json", str(a8_record)],
+                    capture_output=True, text=True)
+            except (OSError, subprocess.SubprocessError, _pr.Stalled) as _exc:
+                return StepResult(
+                    step_name, bname, _spf.REFUSAL_STATUS, time.time() - t0,
+                    f"{a8_prog.name} could not execute: {_exc}",
+                    extras={"producer": a8_prog.name,
+                            "verdict_tier": "ENV_UNAVAILABLE"},
+                    reason_class=_spf.REFUSAL_REASON_CLASS)
+            _a8_tail = ((a8_cp.stderr or "").strip().splitlines()
+                        or (a8_cp.stdout or "").strip().splitlines()
+                        or ["no output"])[-1]
+            if a8_cp.returncode == _pc.EX_ENV_REFUSED:
+                return StepResult(
+                    step_name, bname, _spf.REFUSAL_STATUS, time.time() - t0,
+                    f"{a8_prog.name}: {_a8_tail}",
+                    extras={"producer": a8_prog.name,
+                            "producer_rc": a8_cp.returncode,
+                            "verdict_tier": "ENV_UNAVAILABLE"},
+                    reason_class=_spf.REFUSAL_REASON_CLASS)
+            if a8_cp.returncode == 2:
+                return StepResult(
+                    step_name, bname, _V.Verdict.NOT_MEASURED.value,
+                    time.time() - t0,
+                    f"{a8_prog.name}: {_a8_tail}",
+                    extras={"producer": a8_prog.name,
+                            "producer_rc": a8_cp.returncode,
+                            "verdict_tier": "PDK_UNAVAILABLE",
+                            "producer_record": str(a8_record.relative_to(project))},
+                    reason_class=_V.ReasonClass.TOOL_ABSENT)
+            if a8_cp.returncode == 1:
+                _hdir = project / "phase3" / "analog" / "hardmacro" / bname
+                _views = [_hdir / f"{bname}{suffix}"
+                          for suffix in (".lef", ".lib", ".gds", ".v")]
+                if all(p.is_file() for p in _views):
+                    return StepResult(
+                        step_name, bname, _V.Verdict.NOT_MEASURED.value,
+                        time.time() - t0,
+                        f"{a8_prog.name} did not refresh the complete view set: "
+                        f"{_a8_tail}",
+                        extras={"producer": a8_prog.name,
+                                "producer_rc": 1,
+                                "verdict_tier": "STALE_VIEWS_REFUSED",
+                                "producer_record": str(a8_record.relative_to(project))},
+                        reason_class=_V.ReasonClass.INPUT_ABSENT)
+            if a8_cp.returncode not in (0, 1):
+                return StepResult(
+                    step_name, bname, "NOT_MEASURED", time.time() - t0,
+                    f"{a8_prog.name} exited rc={a8_cp.returncode}: {_a8_tail}",
+                    extras={"producer": a8_prog.name,
+                            "producer_rc": a8_cp.returncode},
+                    reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
         # A8 IS ALSO THE MOMENT THE MACRO'S INTERFACE FIRST EXISTS AS THREE
         # VIEWS. `analog_hardmacro_pinname_consistency_check` compares them —
@@ -1946,11 +2043,10 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # deck does that. Same shape as A4's real-sweep fall-through: the
             # gate below still owns the verdict, on the artefact that is
             # actually on disk.
-            # A7 HAS A TOOL PRODUCER, OPT-IN (T94). LibreLane Magic.RCX
+            # A7 HAS A TOOL PRODUCER (Default cutover). LibreLane Magic.RCX
             # extracts the A5 GDS and A4's ngspice machinery re-simulates the
-            # A3 testbench on it (`analog_a7_post_layout_emit`). Selected per
-            # project by `phase3/librelane_switch.json` {"steps": {"A7": ...}};
-            # the default stays the skill hand-off until the owner cuts over.
+            # A3 testbench on it (analog_a7_post_layout_emit). A project may
+            # explicitly select direct in phase3/librelane_switch.json.
             if step_name == "A7_post_layout_resim":
                 import librelane_contract as _llc
                 import analog_a7_post_layout_emit as _a7_emit

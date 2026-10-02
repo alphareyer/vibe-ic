@@ -73,6 +73,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -1058,6 +1059,12 @@ def run(project: Path, block: str, container: str, image: str,
         if not need.is_file():
             return _refuse(record, record_path, "A7_INPUT_ABSENT",
                            f"{need.relative_to(project)} (owed by {owner})", 2)
+    # The extracted netlist and every post-layout comparison are bound to the
+    # exact A5 GDS bytes consumed by Magic.RCX. A later replacement at the
+    # same path must not leave a clean pre_vs_post record certifying it.
+    layout_sha256 = hashlib.sha256(gds.read_bytes()).hexdigest()
+    record["layout_path"] = str(gds.relative_to(project))
+    record["layout_sha256"] = layout_sha256
     # THE PAIR MUST BE ONE DESIGN before anything is extracted or simulated:
     # a layout of an earlier netlist extracts faithfully and then disagrees
     # with the current one, which reads as a layout that lost devices.
@@ -1393,6 +1400,8 @@ def run(project: Path, block: str, container: str, image: str,
             "extracted_netlist": typical["extracted_netlist"],
             "post_layout_netlist": typical["post_layout_netlist"],
             "extraction_tool": f"LibreLane {RCX_STEP}", "image": image,
+            "layout_path": str(gds.relative_to(project)),
+            "layout_sha256": layout_sha256,
             "record": str(record_path.relative_to(project)),
             **({"not_compared": not_compared} if not_compared else {}),
         },

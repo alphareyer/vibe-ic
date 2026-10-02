@@ -75,6 +75,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import sys
+import hashlib
+import json
 from pathlib import Path
 from typing import List, Optional
 
@@ -383,6 +385,64 @@ def _pin_access_findings(project: Path, block: str, lef_text: str,
     return out
 
 
+def _view_provenance_findings(project: Path, block: str) -> List[dict]:
+    """Validate the producer's source-bound four-view manifest when present.
+
+    Legacy skill packages may not carry the manifest and remain judged by the
+    existing four gates. Packages emitted by the Default runner do carry it;
+    any source/view mutation is then a blocking A8 finding, so M1 cannot read
+    a stale GDS or Verilog view under a clean LEF/LIB pair.
+    """
+    hdir = project / "phase3" / "analog" / "hardmacro" / block
+    manifest = hdir / "a8_views_provenance.json"
+    if not manifest.is_file():
+        return []
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [{"block": block, "rule": "A8_VIEW_PROVENANCE_INVALID",
+                 "rel_path": str(manifest.relative_to(project)),
+                 "detail": f"cannot read producer manifest: {exc}"}]
+    if not isinstance(doc, dict) or doc.get("producer") != "analog_a8_hardmacro_emit":
+        return [{"block": block, "rule": "A8_VIEW_PROVENANCE_INVALID",
+                 "rel_path": str(manifest.relative_to(project)),
+                 "detail": "manifest does not name analog_a8_hardmacro_emit"}]
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    out: List[dict] = []
+    source_rel = doc.get("source_gds")
+    source = project / source_rel if isinstance(source_rel, str) else None
+    expected_source = doc.get("source_gds_sha256")
+    if source is None or not source.is_file():
+        out.append({"block": block, "rule": "A8_VIEW_SOURCE_MISSING",
+                    "rel_path": str(manifest.relative_to(project)),
+                    "detail": f"producer source GDS is absent: {source_rel}"})
+    elif digest(source) != expected_source:
+        out.append({"block": block, "rule": "A8_VIEW_SOURCE_MUTATED",
+                    "rel_path": str(source.relative_to(project)),
+                    "detail": "source GDS bytes differ from the producer digest"})
+    views = doc.get("views")
+    if not isinstance(views, dict):
+        return out + [{"block": block, "rule": "A8_VIEW_PROVENANCE_INVALID",
+                       "rel_path": str(manifest.relative_to(project)),
+                       "detail": "manifest has no views map"}]
+    for suffix in (".lef", ".lib", ".gds", ".v"):
+        row = views.get(suffix)
+        path = project / row.get("path") if isinstance(row, dict) and isinstance(row.get("path"), str) else None
+        expected = row.get("sha256") if isinstance(row, dict) else None
+        if path is None or not path.is_file():
+            out.append({"block": block, "rule": "A8_VIEW_MISSING",
+                        "rel_path": str(manifest.relative_to(project)),
+                        "detail": f"producer view {suffix} is absent"})
+        elif digest(path) != expected:
+            out.append({"block": block, "rule": "A8_VIEW_MUTATED",
+                        "rel_path": str(path.relative_to(project)),
+                        "detail": f"{suffix} bytes differ from the producer digest"})
+    return out
+
+
 def _check_block(project: Path, block: str
                  ) -> tuple[Optional[str], List[dict]]:
     hdir = project / "phase3" / "analog" / "hardmacro" / block
@@ -438,6 +498,7 @@ def _check_block(project: Path, block: str
             project, block,
             lef_path.read_text(encoding="utf-8", errors="replace"),
             str(lef_path.relative_to(project))))
+    findings.extend(_view_provenance_findings(project, block))
     if findings:
         return "FAIL", findings
 

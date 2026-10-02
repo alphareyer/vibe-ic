@@ -15,6 +15,7 @@ measurement line ngspice prints. Nothing inside vibe-ic is monkeypatched.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -219,8 +220,14 @@ def test_the_producer_writes_a_comparison_the_a7_gate_certifies(stub):
     assert all((s["pre_value"], s["post_value"]) == (1.20, 1.19)
                for s in doc["specs"])
     assert (project / doc["_provenance"]["extracted_netlist"]).is_file()
+    gds = bdir / "blk.gds"
+    expected_layout_sha = hashlib.sha256(gds.read_bytes()).hexdigest()
+    assert doc["_provenance"]["layout_path"] == \
+        "phase3/analog/blk/blk.gds"
+    assert doc["_provenance"]["layout_sha256"] == expected_layout_sha
     rec = json.loads((bdir / "a7_post_layout.json").read_text())
     assert [c["depth"] for c in rec["corners"]] == ["RC", "RC"]
+    assert rec["layout_sha256"] == expected_layout_sha
     # nothing the resimulation wrote lands beside the A3 deck
     assert sorted(p.name for p in bdir.iterdir() if p.is_file()) == sorted([
         "a7_post_layout.json", "blk.gds", "blk.sp", "corner_results.json",
@@ -283,7 +290,7 @@ def test_an_absent_layout_is_an_honest_gap(stub):
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 2
 
 
-def test_the_runner_invokes_the_producer_only_when_the_switch_selects_it(
+def test_the_runner_invokes_the_producer_by_default_and_direct_is_opt_out(
         tmp_path, monkeypatch):
     import analog_one_shot_runner as R
     project = _project(tmp_path)
@@ -304,11 +311,18 @@ def test_the_runner_invokes_the_producer_only_when_the_switch_selects_it(
                         lambda c: (PIN.IMAGE_DIGEST, ""))
     R.step_for_block(project, {"name": "blk", "type": "ldo"},
                      "A7_post_layout_resim", None)
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("--image") + 1].endswith(PIN.IMAGE_DIGEST)
+    assert "@" in calls[0][calls[0].index("--image") + 1]
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"A7": "direct"}}))
+    R.step_for_block(project, {"name": "blk", "type": "ldo"},
+                     "A7_post_layout_resim", None)
+    assert len(calls) == 1
     (project / "phase3/librelane_switch.json").write_text(
         json.dumps({"steps": {"A7": "librelane"}}))
     R.step_for_block(project, {"name": "blk", "type": "ldo"},
                      "A7_post_layout_resim", None)
-    assert len(calls) == 1
-    assert calls[0][calls[0].index("--image") + 1].endswith(PIN.IMAGE_DIGEST)
-    assert "@" in calls[0][calls[0].index("--image") + 1]
+    assert len(calls) == 2
+    assert calls[-1][calls[-1].index("--image") + 1].endswith(PIN.IMAGE_DIGEST)
+    assert "@" in calls[-1][calls[-1].index("--image") + 1]
