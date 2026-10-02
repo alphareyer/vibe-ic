@@ -104,6 +104,13 @@ def module_name_of(desc_text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _module_name_candidates(desc_text: str) -> List[str]:
+    """Return every explicit Module name declaration in source order."""
+    return re.findall(
+        r"Module\s*name\s*[:：]\s*\n?\s*([A-Za-z_]\w*)",
+        desc_text or "", re.I)
+
+
 def _low(text: str) -> str:
     return text.lower()
 
@@ -172,19 +179,24 @@ def _unique_role_record(records: List[Dict[str, str]], role: str,
 
 
 def _width_from_parameter(desc_text: str) -> Optional[int]:
-    low = " ".join((desc_text or "").lower().split())
+    normalized = " ".join((desc_text or "").split())
     patterns = (
-        r"\bparameter\s+width\s+has\s+(?:a\s+)?default\s+(?:value\s+)?of\s+(\d+)\b",
-        r"\bparameter\s+width\s*(?:=|:)\s*(\d+)\b",
-        r"\bwidth\s+(?:defaults?|default(?:s)?\s+to)\s+(\d+)\b",
+        r"(?i:\bparameter)\s+WIDTH\s+has\s+(?:a\s+)?default\s+(?:value\s+)?of\s+(\d+)\b",
+        r"(?i:\bparameter)\s+WIDTH\s*(?:=|:)\s*(\d+)\b",
+        r"\bWIDTH\s+(?i:defaults?|default(?:s)?\s+to)\s+(\d+)\b",
     )
-    values = {int(m.group(1)) for p in patterns for m in re.finditer(p, low)}
+    values = {int(m.group(1)) for p in patterns
+              for m in re.finditer(p, normalized)}
     return next(iter(values)) if len(values) == 1 and next(iter(values)) > 0 else None
 
 
 def _width_expression_matches(vector: str, width: int) -> bool:
-    expr = re.sub(r"\s+", "", vector.strip("[]").lower())
-    return expr in {"width-1:0", f"{width - 1}:0"}
+    expr = re.sub(r"\s+", "", vector.strip("[]"))
+    return expr in {"WIDTH-1:0", f"{width - 1}:0"}
+
+
+def _contains_any(text: str, patterns: Tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
 def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List[str]]:
@@ -201,20 +213,37 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
         return None, []
     records = _source_port_records(desc_text)
     unresolved: List[str] = []
-    module = module_name_of(desc_text)
+    module_candidates = _module_name_candidates(desc_text)
+    module = module_candidates[0] if module_candidates else None
     if not module:
         unresolved.append("module name")
+    elif len(set(module_candidates)) != 1:
+        unresolved.append("conflicting module name declarations")
     width = _width_from_parameter(desc_text)
     if width is None:
-        unresolved.append("WIDTH default")
-    if re.search(r"\bsigned\b", low):
+        unresolved.append("uppercase WIDTH default")
+    if not re.search(r"\bunsigned\b", low):
+        unresolved.append("explicit unsigned operand domain")
+    if (_contains_any(low, (
+            r"\bnot\s+unsigned\b", r"\bunsigned\s+is\s+not\b",
+            r"\b(?:signed|signedness)\b"))):
         unresolved.append("unsigned operand domain (signed is unsupported)")
-    if not re.search(r"\bnon[- ]?zero\b", low):
+    nonzero_positive = re.search(
+        r"\b(?:both\s+operands|the\s+operands?|the\s+divisor|divisor|"
+        r"dividend)\s+(?:are|is|must\s+be)\s+non[- ]?zero\b", low)
+    nonzero_uncertain = _contains_any(low, (
+        r"\b(?:do\s+not|don't|does\s+not)\s+assume\b[^.\n]{0,60}"
+        r"\bnon[- ]?zero\b",
+        r"\b(?:may|can|could|might)\s+be\s+zero\b",
+        r"\bzero\s+(?:divisor|denominator)\b"))
+    if not nonzero_positive or nonzero_uncertain:
         unresolved.append("nonzero operand domain")
     if not (re.search(r"\bdividend\b\s*(?:is|must be)?\s*at least\s*\bdivisor\b", low)
             or re.search(r"\bdividend\b\s*>=\s*\bdivisor\b", low)):
         unresolved.append("dividend >= divisor domain")
-    if re.search(r"\b(?:zero|0)\s+(?:divisor|denominator)\b", low):
+    if _contains_any(low, (
+            r"\b(?:zero|0)\s+(?:divisor|denominator)\b",
+            r"\b(?:divisor|denominator)\s+(?:may|can|could|might)\s+be\s+zero\b")):
         unresolved.append("zero divisor is unsupported")
 
     clock_candidates = [r for r in records if r["direction"] == "in"
@@ -236,6 +265,12 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
         unresolved.append("one one-cycle request port")
 
     selected: Dict[str, Dict[str, str]] = {}
+    if len(clock_candidates) == 1:
+        selected["clock"] = clock_candidates[0]
+    if len(reset_candidates) == 1:
+        selected["reset"] = reset_candidates[0]
+    if len(request_candidates) == 1:
+        selected["start"] = request_candidates[0]
     for role, directions in (("dividend", {"in"}), ("divisor", {"in"}),
                              ("quotient", {"out"}), ("remainder", {"out"})):
         record = _unique_role_record(records, role, directions)
@@ -250,6 +285,59 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
         unresolved.append("one completion-valid output port")
     else:
         selected["valid"] = valid_candidates[0]
+
+    # Every declared port must have one and only one contract role.  This
+    # prevents an unconsumed enable, a duplicate operand record, and an
+    # ambiguous role from being silently dropped by the emitter.
+    selected_ids = {id(record) for record in selected.values()}
+    if len(records) != len(selected_ids) or any(id(record) not in selected_ids
+                                                for record in records):
+        unresolved.append("unsupported extra declared port/control")
+    if len({record["name"] for record in selected.values()}) != len(selected):
+        unresolved.append("interface roles must bind to distinct ports")
+
+    for role in ("clock", "reset", "start", "valid"):
+        record = selected.get(role)
+        if record is not None and record["vector"]:
+            unresolved.append(f"{role} control must be scalar")
+
+    selected_valid = selected.get("valid")
+    if (selected_valid is not None
+            and not re.search(r"\bone[- ]cycle\b", selected_valid["text"], re.I)):
+        unresolved.append("one-cycle valid output semantics")
+
+    reset_text = " ".join(record["text"] for record in records
+                            if re.search(r"\b(?:reset|rst)\w*\b",
+                                         record["name"] + " " + record["text"], re.I))
+    request_text = " ".join(record["text"] for record in records
+                              if re.search(r"\b(?:start|request|launch|go)\w*\b",
+                                           record["name"] + " " + record["text"], re.I))
+    valid_text = " ".join(record["text"] for record in records
+                            if re.search(r"\b(?:valid|done|completion|complete)\w*\b",
+                                         record["name"] + " " + record["text"], re.I))
+    if _contains_any(reset_text, (
+            r"\b(?:not|isn't|is\s+not)\s+active[- ]low\b",
+            r"\bactive[- ]high\b",
+            r"\b(?:not|isn't|is\s+not)\s+(?:async|asynchronous)\b",
+            r"\bsynchronous\s+reset\b")):
+        unresolved.append("reset polarity/edge semantics are contradictory")
+    if _contains_any(request_text, (
+            r"\b(?:not|isn't|is\s+not)\s+one[- ]cycle\b",
+            r"\b(?:may|can|could|might)\s+remain\s+asserted\b",
+            r"\b(?:level[- ]sensitive|held\s+until)\b")):
+        unresolved.append("one-cycle request semantics are contradictory")
+    if _contains_any(valid_text, (
+            r"\bremains?\s+asserted\b",
+            r"\bstays?\s+(?:high|asserted)\b",
+            r"\buntil\s+(?:the\s+)?next\s+request\b",
+            r"\b(?:not|isn't|is\s+not)\s+one[- ]cycle\b",
+            r"\b(?:multiple|more\s+than\s+one)\s+cycles?\b")):
+        unresolved.append("one-cycle valid semantics are contradictory")
+    if _contains_any(low, (
+            r"\bcompletion\b[^.\n]{0,80}\bWIDTH\s*\+\s*2\b",
+            r"\blatency\b[^.\n]{0,80}\bWIDTH\s*\+\s*2\b",
+            r"\b(?:an|one|the|this)\s+extra\s+input[- ]only\s+cycle\b")):
+        unresolved.append("source-declared latency is contradictory")
 
     if width is not None:
         for role in ("dividend", "divisor", "quotient", "remainder"):
@@ -3305,6 +3393,64 @@ def _source_contract_metadata(shape: str, desc_text: str) -> Dict:
     }
 
 
+def _publish_source_bound_project(project: Path) -> Dict:
+    """Emit the source-bound shape from a held project snapshot.
+
+    The live project is read only through an isolated snapshot.  Publication
+    is committed with the runner's fd-bound transaction, which rechecks the
+    original manifest before replacing any top-level subtree.  A source edit,
+    ancestor symlink, or output race therefore refuses and leaves the live
+    project unchanged.
+    """
+    import tempfile
+    import design_one_shot_runner as runner
+
+    binding = runner._Phase1ProjectBinding.open(project)
+    stage_binding = None
+    transaction = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="vibeic-canonical-cli-") as td:
+            stage = Path(td) / project.name
+            baseline = runner._phase1_snapshot_to_stage(binding, stage)
+            stage_binding = runner._Phase1ProjectBinding.open(stage)
+            desc, _src = _read_project_desc(stage)
+            shape = detect_shape(desc)
+            if shape != _UNSIGNED_DIVISION_SHAPE:
+                raise ValueError("SOURCE_BOUND_SHAPE_CHANGED_DURING_SNAPSHOT")
+            module = module_of_shape(shape, desc)
+            rtl = emit_rtl(shape, desc)
+            out = stage / "phase2" / "stage1" / "rtl" / f"{module}.v"
+            publication = runner._publish_phase1_rtl_no_clobber(
+                stage, out, rtl, project_binding=stage_binding)
+            try:
+                publication.require_current_chain()
+            finally:
+                publication.close()
+            final = runner._phase1_tree_manifest_fd(
+                stage_binding.project_fd, stage)
+            transaction = runner._phase1_commit_staged_tree(
+                binding, stage_binding, baseline, final)
+            binding.require_current()
+            result = {
+                "verdict": "EMIT",
+                "shape": shape,
+                "module": module,
+                "written": str(project / out.relative_to(stage)),
+            }
+            result.update(_source_contract_metadata(shape, desc))
+            cleanup_warning = transaction.finalize()
+            transaction = None
+            if cleanup_warning:
+                result["cleanup_warning"] = cleanup_warning
+            return result
+    finally:
+        if transaction is not None:
+            transaction.rollback()
+        if stage_binding is not None:
+            stage_binding.close()
+        binding.close()
+
+
 def _publish_declared_watchdog(project: Path) -> Optional[Dict]:
     """Validate a held snapshot and CAS-publish without following output links.
 
@@ -3416,6 +3562,19 @@ def main(argv=None) -> int:
                           "module": module_name_of(desc),
                           "defer_reason": route_to_ai_reason(desc)}))
         return 2
+    if a.emit and shape == _UNSIGNED_DIVISION_SHAPE:
+        try:
+            print(json.dumps(_publish_source_bound_project(proj)))
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            reason = ("occupied output preserved"
+                      if getattr(exc, "reason", None) ==
+                      "RTL_OUTPUT_ALREADY_EXISTS"
+                      else "SOURCE_BOUND_PROJECT_REFUSED: " + str(exc))
+            print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                              "module": module_name_of(desc),
+                              "reason": reason}))
+            return 2
     module = module_of_shape(shape, desc)
     written = None
     if a.emit:

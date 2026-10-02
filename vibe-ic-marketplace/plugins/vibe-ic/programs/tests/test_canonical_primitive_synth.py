@@ -384,6 +384,95 @@ def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains
         "unsupported_unsigned_iterative_divider")
 
 
+def _r2_unsigned_divider_variants():
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    return [
+        ("valid_hold_until_request",
+         desc.replace("valid: one-cycle completion.",
+                      "valid: remains asserted until next request."),
+         "one-cycle valid"),
+        ("zero_divisor_uncertain",
+         desc.replace(
+             "Both operands are nonzero, and dividend is at least divisor.",
+             "Do not assume nonzero; the divisor may be zero."),
+         "zero divisor"),
+        ("reset_not_active_low_async",
+         desc.replace("rst: active-low asynchronous reset.",
+                      "rst: reset is not active-low asynchronous."),
+         "reset"),
+        ("reset_active_low_not_async",
+         desc.replace("rst: active-low asynchronous reset.",
+                      "rst: active-low reset is not asynchronous."),
+         "reset"),
+        ("request_not_one_cycle",
+         desc.replace("start: one-cycle request.",
+                      "start: request is not one-cycle."),
+         "one-cycle request"),
+        ("latency_width_plus_two",
+         desc.replace("WIDTH+1 cycles otherwise", "WIDTH+2 cycles otherwise"),
+         "latency"),
+        ("unsigned_not_explicit",
+         desc.replace("Design an unsigned iterative", "Design an iterative")
+         .replace("unsigned dividend", "dividend")
+         .replace("unsigned divisor", "divisor")
+         .replace("unsigned quotient", "quotient")
+         .replace("unsigned remainder", "remainder"),
+         "explicit unsigned"),
+        ("zero_divisor_exact_supplement",
+         desc.replace(
+             "Both operands are nonzero, and dividend is at least divisor.",
+             "The dividend is nonzero, and the divisor may be zero."),
+         "zero divisor"),
+        ("conflicting_module_declarations",
+         desc.replace("Module name: unsigned_ratio_unit",
+                      "Module name: unsigned_ratio_unit\n"
+                      "Module name: other_ratio_unit"),
+         "conflicting module"),
+        ("extra_enable_port",
+         desc.replace("start: one-cycle request.",
+                      "start: one-cycle request.\n"
+                      "enable: one-cycle enable."),
+         "unsupported extra"),
+        ("vector_clock",
+         desc.replace("clk: posedge clock.",
+                      "clk[1:0]: posedge clock."),
+         "clock control"),
+        ("vector_reset",
+         desc.replace("rst: active-low asynchronous reset.",
+                      "rst[1:0]: active-low asynchronous reset."),
+         "reset control"),
+        ("vector_request",
+         desc.replace("start: one-cycle request.",
+                      "start[1:0]: one-cycle request."),
+         "start control"),
+        ("vector_valid",
+         desc.replace("valid: one-cycle completion.",
+                      "valid[1:0]: one-cycle completion."),
+         "valid control"),
+        ("lowercase_width_parameter",
+         desc.replace("Parameter WIDTH", "Parameter width")
+         .replace("[WIDTH-1:0]", "[width-1:0]"),
+         "uppercase WIDTH"),
+        ("one_operand_two_roles",
+         desc.replace(
+             "dividend[WIDTH-1:0]: unsigned dividend.\n"
+             "divisor[WIDTH-1:0]: unsigned divisor.",
+             "operand[WIDTH-1:0]: unsigned operand used as both dividend "
+             "and divisor."),
+         "distinct ports"),
+    ]
+
+
+@pytest.mark.parametrize("label,desc,needle", _r2_unsigned_divider_variants())
+def test_unsigned_divider_r2_adversarial_contracts_defer(label, desc, needle):
+    reason = rcs.route_to_ai_reason(desc)
+    assert rcs.detect_shape(desc) is None, label
+    assert reason is not None and reason["kind"] == (
+        "unsupported_unsigned_iterative_divider"), label
+    assert any(needle.lower() in item.lower()
+               for item in reason["unresolved"]), (label, reason)
+
+
 def _native_divider_vectors(width, exhaustive=False):
     """Independent legal operands and Python's mathematical / and % oracle."""
     limit = (1 << width) - 1
@@ -802,6 +891,52 @@ def test_unsigned_divider_project_cli_emits_fresh_source_bound_output(tmp_path):
     assert result["written"] == str(output)
     assert output.read_text() == rcs.emit_rtl(rcs._UNSIGNED_DIVISION_SHAPE, desc)
     assert result["source_sha256"] in output.read_text()
+
+
+@pytest.mark.parametrize("ancestor", ["phase2", "phase2/stage1/rtl"])
+def test_unsigned_divider_project_cli_refuses_ancestor_symlink(
+        tmp_path, ancestor, capsys):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    proj = _mk_project(tmp_path / "project", desc)
+    source = proj / "input" / "design_description.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text(desc)
+    external = tmp_path / "external"
+    external.mkdir()
+    link = proj / ancestor
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(external, target_is_directory=True)
+
+    rc = rcs.main([str(proj), "--emit"])
+    result = json.loads(capsys.readouterr().out)
+    assert (rc, result["verdict"]) == (2, "REFUSED")
+    assert "SOURCE_BOUND_PROJECT_REFUSED" in result["reason"]
+    assert link.is_symlink() and link.resolve() == external
+    assert not list(external.iterdir())
+
+
+def test_unsigned_divider_project_cli_refuses_source_mutation_before_commit(
+        tmp_path, monkeypatch, capsys):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    proj = _mk_project(tmp_path / "project", desc)
+    source = proj / "input" / "design_description.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text(desc)
+    changed = desc.replace("default value of 9", "default value of 12")
+    original_emit = rcs.emit_rtl
+
+    def mutate_live_source(shape, source_text):
+        source.write_text(changed)
+        return original_emit(shape, source_text)
+
+    monkeypatch.setattr(rcs, "emit_rtl", mutate_live_source)
+    rc = rcs.main([str(proj), "--emit"])
+    result = json.loads(capsys.readouterr().out)
+    assert (rc, result["verdict"]) == (2, "REFUSED")
+    assert "SOURCE_BOUND_PROJECT_REFUSED" in result["reason"]
+    assert "held project" in result["reason"]
+    assert not list((proj / "phase2").rglob("*.v"))
+    assert "default value of 12" in source.read_text()
 
 
 # ============================================================================
