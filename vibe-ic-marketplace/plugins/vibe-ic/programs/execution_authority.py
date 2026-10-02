@@ -25,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 FD_ENV = 'VIBEIC_EXECUTION_CAP_FD'
 SOCKET_ENV = 'VIBEIC_EXECUTION_AUTH_SOCKET'
+_SOURCE_CLOSURES = {}
 
 
 def sha(value):
@@ -56,6 +57,18 @@ def read_line(sock):
 
 def source_closure():
     """Verify the issuer's complete tracked local importer closure."""
+    head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    prior = _SOURCE_CLOSURES.get(head)
+    if prior is not None:
+        # Cache only the graph belonging to a verified commit. Every live
+        # challenge still rechecks each file's bytes and symlink status.
+        for relative, blob in prior.items():
+            path = ROOT / relative
+            content = path.read_bytes()
+            current = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+            if path.is_symlink() or current != blob:
+                raise ValueError('canonical source drift: ' + relative)
+        return dict(prior)
     pending = [HERE / name for name in ('execution_authority.py', '_delivery_route.py',
                'execution_policy.py', 'execution_modes.py', 'vibe_ic_one_shot_runner.py')]
     objects = subprocess.check_output(
@@ -82,7 +95,8 @@ def source_closure():
                     pending.append(dependency)
     flow = HERE.parent / 'flow/phase1_phase2_phase3.yaml'
     blobs[str(flow.relative_to(ROOT))] = tracked(flow)
-    return blobs
+    _SOURCE_CLOSURES[head] = dict(blobs)
+    return dict(blobs)
 
 
 def validate_payload(payload, credential):
@@ -144,7 +158,7 @@ def consume():
         fd = int(os.environ[FD_ENV])
         credential = json.loads(os.pread(fd, 4096, 0))
         seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
-        if (fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals or
+        if (not isinstance(credential, dict) or fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals or
                 set(credential) != {'pid', 'start_ticks', 'token', 'fd', 'invocation_id', 'request_digest', 'route_digest'} or
                 type(credential['pid']) is not int or credential['pid'] <= 0 or
                 type(credential['fd']) is not int or credential['fd'] < 0 or
@@ -236,6 +250,8 @@ def main():
         with client:
             try:
                 challenge = read_line(client)
+                if not isinstance(challenge, dict):
+                    raise ValueError('authority challenge shape invalid')
                 ok = (isinstance(challenge, dict) and
                       all(isinstance(challenge.get(name), str) and
                           secrets.compare_digest(challenge[name], credential[name]) for name in
