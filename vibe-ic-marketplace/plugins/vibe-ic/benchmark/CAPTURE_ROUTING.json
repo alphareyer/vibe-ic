@@ -17,6 +17,11 @@
       "bucket_B_skill_file": "agents/ic-expert-agent.md",
       "bucket_B_section_anchor": "NL spec phrase patterns"
     },
+    "phase1.l8_timing": {
+      "description": "Capture subtype for L8 prose timing and declared input-clock identity; does not add a flow step.",
+      "bucket_A_program": "programs/phase1_doc_one_shot_runner.py",
+      "bucket_B_skill_file": "skills/phase1-output-verify/SKILL.md"
+    },
     "phase1.spec_review": {
       "description": "Source-bound AI questions about missing spec definitions. The shared validator checks the supplied corpus and evidence; it never invents a predicate or treats a question as RTL repair proof. D1 stays advisory, while the benchmark adapter retains its existing acceptance/scoring boundary.",
       "bucket_A_program": "programs/spec_review_lint.py",
@@ -78,6 +83,11 @@
     "phase2.yosys_synth": {
       "bucket_A_program": "programs/design_one_shot_runner.py",
       "bucket_B_skill_file": "skills/synth-doctor/SKILL.md"
+    },
+    "phase2.chip_top_wrapper.declared_subject": {
+      "description": "Capture subtype for ordinary runner wrapper selection and declared top identity; does not add a flow step.",
+      "bucket_A_program": "programs/design_one_shot_runner.py",
+      "bucket_B_skill_file": "skills/catalog-glue-author/SKILL.md"
     },
     "phase2.reference_tb": {
       "bucket_A_program": "programs/bit_level_full_stack_tb_check.py",

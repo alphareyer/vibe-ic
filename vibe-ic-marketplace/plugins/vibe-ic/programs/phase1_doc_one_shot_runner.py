@@ -42200,7 +42200,8 @@ def _v1_6_328_canonical_clock_port_name(
             # a phantom name back to a freshly-synthesised entry.
             if re.match(r"^clk_\d", name.lower()):
                 continue
-            if _RE_V1_6_328_CANONICAL_CLOCK_DOMAIN_NAME.match(name):
+            if (_RE_V1_6_328_CANONICAL_CLOCK_DOMAIN_NAME.match(name)
+                    or _V1_6_574_CLOCK_PORT_RE.match(name)):
                 return name
     # Step 2 — L1.pin_table on disk.
     try:
@@ -42219,6 +42220,21 @@ def _v1_6_328_canonical_clock_port_name(
                 if _RE_CLOCK_PORT_v1_6_323.match(name.lower()):
                     return name
     return None
+
+
+def _single_declared_input_clock_port(project: Path) -> Optional[str]:
+    """Bind unnamed primary prose only when L1 declares one input clock."""
+    l1 = _try_load_l_doc(project, "L1_DATASHEET")
+    pins = (l1 or {}).get("pin_table") if isinstance(l1, dict) else None
+    if not isinstance(pins, list):
+        return None
+    names = {
+        p["name"] for p in pins if isinstance(p, dict)
+        and isinstance(p.get("name"), str)
+        and str(p.get("mode") or p.get("direction") or "").lower() == "input"
+        and _V1_6_574_CLOCK_PORT_RE.match(p["name"])
+    }
+    return next(iter(names)) if len(names) == 1 else None
 
 
 # v1.6.360 — for #255 P2 ORGANIC. Width-role bigram structural anchor.
@@ -42893,6 +42909,9 @@ def gen_l8_timing_waveform(project: Path,
             # prose mentions of the same named clock collapse into
             # one entry with widened freq range.
             if role == "primary":
+                declared_clock = _single_declared_input_clock_port(project)
+                if declared_clock:
+                    domain_name = declared_clock
                 if _primary_emitted:
                     continue
                 key = f"primary_{low_mhz}_{high_mhz}"
@@ -42921,6 +42940,10 @@ def gen_l8_timing_waveform(project: Path,
                     },
                     "extraction_strategy": "clock_domain_doc_prose_fmax",
                 }
+                if declared_clock:
+                    entry["source_pin"] = declared_clock
+                    entry["domain_kind"] = "primary"
+                    entry["port_binding_evidence"] = "L1_DATASHEET.pin_table"
                 # A row that states the period as well as the frequency has
                 # written ONE fact twice. Take the stated one; the derived
                 # one is the rounded restatement. Range rows (`high_mhz`) are

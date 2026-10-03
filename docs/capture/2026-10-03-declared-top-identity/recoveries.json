@@ -1,0 +1,115 @@
+[
+  {
+    "step": "phase2.chip_top_wrapper.declared_subject",
+    "design": "subservient",
+    "bucket": "A",
+    "rule_name": "declared_subject_required_before_wrapper_emission",
+    "docstring": "An explicit L9 design subject must be defined before a wrapper can replace its name; select that subject within multi-module files.",
+    "expected_signal": "ERROR",
+    "fix_action": "Prefer the explicitly declared subject within each input file; if it is absent, refuse wrapper emission and retain the normal RTL-authoring handoff.",
+    "owner_layer": "programs/design_one_shot_runner.py::_autoemit_chip_top_wrapper",
+    "before_state": "Base writes chip_top around serv_compdec while declared subservient is absent; canonical attempt rc=1.",
+    "after_state": "Candidate refuses the missing subject; normal catalog-glue-author then authors the actual SoC top.",
+    "ai_reasoning": "A module name is structural authority. A helper with a matching pin set cannot stand in for an unimplemented declared design subject.",
+    "review_scope": "Primary review of frozen program output; independent input-only expert owns a separate role. No blind-primary-review claim.",
+    "base_commit": "dc2dc7e1fa6d65baa3ed4cf89715b672c4e2404c",
+    "proof": "programs/tests/test_chip_top_declared_subject_missing.py and frozen current-run L9/catalog RTL artifact controls",
+    "measured_controls": {
+      "base": {
+        "failed": 2,
+        "passed": 38,
+        "rc": 1
+      },
+      "candidate": {
+        "failed": 0,
+        "passed": 40,
+        "rc": 0
+      }
+    },
+    "image_digest": "sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe",
+    "remaining": "Independent expert/D1 consumption, canonical clock L9 consumption, synchronous reset-glitch contract, ISA/physical work. Transport RESOLVED via fresh pinned in-image canonical LOCAL route. Whole-IC acceptance remains INCOMPLETE.",
+    "evidence_packet": "declared-top-identity-evidence-r2.tar",
+    "evidence_sha256": [
+      {
+        "artifact": "wrapper-guard.evidence.json",
+        "sha256": "76a298852246cf1a8d066a516bf8e4c5ba277cacb4fc945aed0b34a049214870"
+      },
+      {
+        "artifact": "wrapper-guard.delta.patch",
+        "sha256": "ef49f02e8eac2f29722e5870d7a33eab2998fc78bb8ddceaccc0c54f404240ce"
+      },
+      {
+        "artifact": "source-base-controls.log",
+        "sha256": "430514735e8d1de577efc80d7b1b16e843258c879a7103b83c9ade4a2d23a6db"
+      },
+      {
+        "artifact": "source-controls.log",
+        "sha256": "b87ffef9711cd8d4857f5776ac049f67423787859b9736f7f02ddf08aac5f9c7"
+      },
+      {
+        "artifact": "raw-attempt-001/artifacts.json",
+        "sha256": "1ee27218d9e5dcb48ecdadbd3d109d074fd7faede7388492e74028cfd15f39c9"
+      },
+      {
+        "artifact": "native-integration-001/result.json",
+        "sha256": "eb723268e626a7d0b03bade47a10dfe9ef65dbe4a68baa43fb4e4387a5055b9f"
+      }
+    ],
+    "pattern": "When an explicit design top is missing, a pin-matching helper must not substitute for that declared subject; prefer the declared subject within multi-module inputs."
+  },
+  {
+    "step": "phase1.l8_timing",
+    "design": "subservient",
+    "bucket": "A",
+    "rule_name": "bind_primary_prose_to_one_declared_input_clock",
+    "owner_layer": "programs/phase1_doc_one_shot_runner.py::gen_l8_timing_waveform",
+    "expected_signal": "AUTO-FIX",
+    "fix_action": "Bind unnamed primary prose to exactly one L1 input clock using the shared clock matcher; keep explicit domains and ambiguous input surfaces unchanged. Recognize the bound prefixed name in the existing sibling frequency walker.",
+    "before_state": "Original current-run inputs emit clock_domains clk/20ns and waveform i_clk/unknown. Four of eight new producer controls fail.",
+    "after_state": "Both L8 views emit i_clk/source_pin=i_clk/20ns with original PDK scope and alternate observations retained.",
+    "measured_controls": {
+      "base": {
+        "passed": 4,
+        "failed": 4,
+        "rc": 1
+      },
+      "candidate": {
+        "passed": 34,
+        "failed": 0,
+        "skipped": 1,
+        "rc": 0
+      }
+    },
+    "skip_reason": "checked-in converged artifact not present",
+    "evidence_packet": "declared-top-identity-evidence-r2.tar",
+    "evidence_sha256": [
+      {
+        "artifact": "source-base-clock-artifact.json",
+        "sha256": "bd76dd67610d1c6d3ec30db4a281ef1730a6d7bfa4125c84574c21b0b73f0384"
+      },
+      {
+        "artifact": "source-clock-artifact.json",
+        "sha256": "7d4ab87dbe970d56eec22bf93433ec1f8105d21935d78c6d9a7d1033a38b934d"
+      },
+      {
+        "artifact": "source-base-clock-controls.log",
+        "sha256": "31ab27c2d8b0c560a14b60374c50a9a7525b64b6df3ab3b12b0c8e7acd7ed1c3"
+      },
+      {
+        "artifact": "source-clock-controls.log",
+        "sha256": "c7a1fbfe10f722e8dbeb7e2026a947e6dfb11d7c81ae31997a426d5139736c60"
+      },
+      {
+        "artifact": "source-base-clock-exit.json",
+        "sha256": "1f985f39a2559205f21e4c9c1baec84d016e32bff05b68454a2a0d76c46cc670"
+      },
+      {
+        "artifact": "source-clock-exit.json",
+        "sha256": "29ce9e969c5856a7df2087c79eecd6d8c912a8f808d16bb6b995e5e1313fdda0"
+      }
+    ],
+    "remaining": "Normal canonical L9 consumption and whole-IC acceptance pending; no generated-layer hand edits or broad control reruns.",
+    "pattern": "Unnamed primary timing may bind only to a uniquely declared input clock; preserve explicit clock identities and leave ambiguous or absent input-clock declarations unbound.",
+    "docstring": "Bind unnamed primary prose timing to one declared input clock without replacing explicit domains or guessing among multiple inputs."
+  }
+]

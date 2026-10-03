@@ -17669,7 +17669,8 @@ def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
             continue
         # v0.1.38 (multi-module fix): prefer the module whose name matches
         # the file basename; else fall back to the first module in file.
-        chosen = next((t for t in file_mods if t[0] == f.stem), file_mods[0])
+        chosen = next((t for t in file_mods if t[0] == l9_top_module),
+                      next((t for t in file_mods if t[0] == f.stem), file_mods[0]))
         (deferred if _is_deferred else candidates).append(chosen)
     # #783 — L9 port-set tiebreak. Runs ONLY when L9 declares top-level pins
     # AND the pool holds more than one distinct module; otherwise it is a
@@ -17681,6 +17682,17 @@ def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
     # satisfy `l9_rtl_pin_consistency_check` BY CONSTRUCTION instead of
     # emitting a top that structurally cannot.
     _pool = candidates + deferred
+    # A declared design subject that has not been authored cannot be replaced
+    # by a catalog helper, even when that helper wins the pin-set heuristic.
+    # The runner's own wrapper sentinel remains eligible for single-leaf
+    # auto-emission; a different explicit L9 top is a binding design identity.
+    if (l9_top_module and l9_top_module != synth_top
+            and not any(t[0] == l9_top_module for t in _pool)):
+        print(f"      CHIP_TOP_SUBJECT_MISSING: L9 declares {l9_top_module!r}, "
+              f"which no staged RTL module defines; refusing to wrap a "
+              f"different module as {synth_top!r}. Author the declared top "
+              f"through the runner's RTL handoff.")
+        return None
     # SALVAGE-PORT GUARD (#315 p12) — an EXPLICIT L9 `top_module` declaration
     # outranks any heuristic read of the port sets, exactly as the v0.1.62
     # preference below already asserts for the primary pool. Hoisted here so
