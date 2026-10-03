@@ -215,6 +215,24 @@ def _mag_from_script(script: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def test_internal_rail_anchors_are_not_top_level_labels():
+    """Only declared pins may become Magic extraction interface metadata.
+
+    The routing plan records rail anchors in ``plan.ports`` for geometry
+    bookkeeping.  Magic promotes a top-cell label to an extracted subckt
+    port, so emitting an undeclared anchor widens the A3 interface.  This
+    checks only the metadata boundary; the native extraction still decides
+    whether a physical open remains.  The declared-pin path remains covered
+    by the pin tests below.
+    """
+    plan = A5E.Plan()
+    plan.ports = [("nbias", 10, 20)]
+    plan.port_nets = ["vdd", "vss", "vref", "vout"]
+    script = A5E.layout_tcl("blk", plan, "/stage")
+    assert "label nbias " not in script
+    assert "port make" not in script
+
+
 class FakeStage:
     """Stands in for the container, and records what was asked of it."""
 

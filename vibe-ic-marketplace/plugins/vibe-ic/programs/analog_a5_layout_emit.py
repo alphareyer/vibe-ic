@@ -2965,11 +2965,20 @@ def layout_tcl(block: str, plan: Plan, out_dir: str) -> str:
     this program reports the failure rather than a partial layout."""
     L = ["drc off", f"cellname create {block}", f"load {block}"]
     L += plan.tcl
+    # Magic promotes every label in the top cell to an extraction interface
+    # name.  `plan.ports` also carries the emitter's rail-anchor bookkeeping;
+    # the declared interface is emitted below from `plan.pins`.  Labelling an
+    # undeclared anchor widens the extracted top .subckt (the prior native
+    # run exposed names such as `vdd.n10` and `vg.n19`).  This is a metadata
+    # correction only: the repaired native extraction must still establish
+    # whether any physical conductor remains open.  Keep the label path only
+    # for a declared-port entry and never promote an undeclared anchor.
     for net, x, y in plan.ports:
+        if net not in plan.port_nets:
+            continue
         L.append(f"box {x} {y} {x} {y}")
         L.append(f"label {net} FreeSans 40 0 0 0 c metal2")
-        if net in plan.port_nets:
-            L.append("port make")
+        L.append("port make")
     # A DECLARED PORT IS A RECTANGLE ON PURE ROUTING METAL (see `_draw_pins`).
     # A point label does not survive the GDS the abstract is written from, and
     # a label on a via is moved by Magic onto the cut layer; both give an
