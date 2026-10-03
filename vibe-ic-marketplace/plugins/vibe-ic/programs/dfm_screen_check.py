@@ -426,14 +426,24 @@ def audit(project: Path) -> dict:
     density_ref = None
     tool_ref = _step34_tool_density(project)
     if tool_ref is not None:
+        per_layer = tool_ref.get("per_layer")
+        per_layer_pass = per_layer is None or per_layer.get("verdict") == "PASS"
         density_ref = {"source": tool_ref.get("source"),
                        "tool": "KLayout.Density / Checker.KLayoutDensity",
                        "status": tool_ref.get("status"),
                        "errors": tool_ref.get("errors"),
                        "rules": tool_ref.get("rules"),
                        "state_sha256": tool_ref.get("state_sha256"),
+                       "subject_sha256": tool_ref.get("subject_sha256"),
+                       "per_layer_consumer": per_layer,
+                       "measurement_verdict": (
+                           "FAIL" if type(tool_ref.get("errors")) is int
+                           and tool_ref["errors"] > 0 or
+                           per_layer is not None and per_layer.get("verdict") == "FAIL" else
+                           "PASS" if tool_ref.get("status") == "MEASURED"
+                           and tool_ref.get("errors") == 0 and per_layer_pass else "NOT_MEASURED"),
                        "step34_pass": (tool_ref.get("status") == "MEASURED"
-                                       and tool_ref.get("errors") == 0)}
+                                       and tool_ref.get("errors") == 0 and per_layer_pass)}
     elif gate_json.is_file():
         try:
             g = json.loads(gate_json.read_text(errors="replace"))

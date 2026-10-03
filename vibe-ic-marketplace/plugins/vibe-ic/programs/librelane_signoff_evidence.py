@@ -162,10 +162,14 @@ def _pdk_mounts(project: Path, switch: dict, folder: Path, image: str) -> list:
     return mounts
 
 
-def _hashes(paths: dict) -> None:
+def _hashes(paths: dict, mounts: list | None = None) -> None:
     _require(isinstance(paths, dict), 'LL_INPUT_FINGERPRINT_MALFORMED')
     for name, sha in paths.items():
         path = Path(name)
+        for host, guest in sorted(mounts or [], key=lambda m: len(str(m[1])), reverse=True):
+            if path.is_relative_to(guest):
+                path = Path(host) / path.relative_to(guest)
+                break
         _require(path.is_absolute() and path.is_file(), f'LL_INPUT_MATERIAL_MISSING: {name}')
         _require(digest(path) == sha, f'LL_INPUT_CHANGED: {name}')
 
@@ -210,11 +214,17 @@ def count_row(project: Path, folder: Path, step: str, key: str,
         _hashes(fp.get('state_files'))
         _require(all(Path(p).resolve().is_relative_to(project.resolve())
                      for p in fp['state_files']), 'LL_FOREIGN_INPUT_SOURCE')
-        _hashes(fp.get('config_files'))
+        _hashes(fp.get('config_files'), mounts)
         # Every PDK/config file actually named must have a producer hash, also
         # when its name is a container path. Older receipts lacking these
         # material bindings remain incomplete; root owns producer API repair.
         for path in _walk_paths(raw_config):
+            if (step == 'KLayout.Density' and str(path) == raw_config.get('PDK_ROOT')
+                    == _read(folder / 'pdk_root.json').get('cli_pdk_root')):
+                # The CLI root is a directory supplied by the validated child
+                # mount, not a file on the host at /pdk. _pdk_mounts above
+                # already binds the real declared/resolved PDK tree.
+                continue
             translated = path
             for host, guest in mounts:
                 if path.is_relative_to(guest):
@@ -223,6 +233,15 @@ def count_row(project: Path, folder: Path, step: str, key: str,
             if translated.is_dir():
                 # Resolver directory variables are not file inputs in
                 # run_chain's fingerprint; the PDK mount is bound above.
+                continue
+            if step == 'KLayout.Density' and not translated.is_file():
+                material = config_root / 'KLayout.Density.image_files.json'
+                owned = _read(material)
+                _require(owned == fp.get('image_files') and owned.get('image') == image
+                         and digest(material) == fp.get('image_files_sha256')
+                         and re.fullmatch('[0-9a-f]{64}', str(
+                             _member(owned, 'sha256').get(str(path)))),
+                         f'LL_CONFIG_IMAGE_MATERIAL_UNBOUND: {path}')
                 continue
             _require(translated.is_file(), f'LL_CONFIG_MATERIAL_MISSING: {path}')
             sha = (fp.get('config_files') or {}).get(str(path)) or \

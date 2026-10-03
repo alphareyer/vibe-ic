@@ -88,6 +88,35 @@ def run(caller_argv) -> int:
             print(f"REFUSED: the audit did not run (argument error, exit "
                   f"{code}). NOTHING was certified.", file=sys.stderr)
         return RC_FAIL
+    # The ordinary row gate consumes the same material/execution receipt the
+    # signoff writer consumes. A report's tool signature cannot replace it.
+    import json
+    import _opensta_current as current
+    project = Path(proj)
+    if (project / 'reports/phase3/power.rpt').exists() or (project / 'phase3/stage3/pnr').exists():
+        try:
+            current.power_binding(project)
+            from _ppa import power
+            doc = json.loads((project / 'reports/phase3/power.json').read_text())
+            parsed = power.read_power_report(project / 'reports/phase3/power.rpt')
+            expected = power.signoff_record(parsed, source='reports/phase3/power.rpt',
+                                             analysis_mode=doc.get('analysis_mode'))
+            if doc != expected or doc.get('power_measurement') != 'MEASURED':
+                raise current.Refusal('CURRENT_POWER_DOWNSTREAM_RESULT_MISMATCH')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f'POWER_CURRENT_INPUTS_UNBOUND: {exc}', file=sys.stderr)
+            # Keep the gate's declared JSON truthful even if its older text
+            # audit succeeded. Existing measured findings remain in the list.
+            for i, arg in enumerate(passthrough):
+                path = (passthrough[i + 1] if arg == '--json' and i + 1 < len(passthrough)
+                        else arg.split('=', 1)[1] if arg.startswith('--json=') else None)
+                if path and Path(path).is_file():
+                    report = json.loads(Path(path).read_text())
+                    report.update(passed=False, verdict='FAIL')
+                    report.setdefault('findings', []).append({'severity': 'ERROR',
+                        'category': 'POWER_CURRENT_INPUTS_UNBOUND', 'message': str(exc)})
+                    Path(path).write_text(json.dumps(report, indent=2) + '\n')
+            return RC_FAIL
     return RC_FAIL if rc not in (0, 1) else rc
 
 

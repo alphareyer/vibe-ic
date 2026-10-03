@@ -1322,6 +1322,12 @@ def run_audit(project: Path, tol_pct: float = DEFAULT_TOL_PCT,
         if detail.get("obstruction_not_determined"):
             undetermined.append(name)
 
+    import _physical_current as _pc
+    refusal = _pc.check_kit(project)
+    if refusal:
+        result.findings.append(Finding(rule="IP_KIT_CURRENT_REFUSED", severity="ERROR",
+                                       message=refusal))
+        failed.extend(name for name in packages if name not in failed)
     result.passed = not failed
     # THE TIER WORD RIDES THE VERDICT AND MUST NOT CONTRADICT IT. The default
     # is the plain-PASS word; on a refusal a consumer reading `verdict_tier`

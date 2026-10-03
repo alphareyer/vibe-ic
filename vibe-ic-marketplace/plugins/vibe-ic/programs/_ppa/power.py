@@ -2028,6 +2028,14 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
     # Two independent bindings, because either alone leaves a hole: the tool's
     # own exit status, and whether the artefact was written by THIS call.
     _rel = str(power_rpt.relative_to(project))
+    if power_rpt.is_file() and 'POST_ROUTE_SPEF' in power_rpt.read_text(errors='replace'):
+        import _opensta_current as current
+        try:
+            current.power_binding(project)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            retire_signoff_record(out, f'current power input binding refused: {exc}', notes)
+            return {'verdict': STATUS_NOT_MEASURED, 'power_measurement': STATUS_NOT_MEASURED,
+                    'power_not_measured_reason': str(exc)}
     if tool_rc is not None and tool_rc != 0:
         retire_signoff_record(
             out, f"the power tool exited {tool_rc}; no measurement was "
@@ -2926,3 +2934,7 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             f"# source: {source}\n"
             f"# tool: {tool}\n")
     return None if prior == body else body
+def current_tool_power_text(corner, row, report_text, state_sha256, subject):
+    """The tool report body, unchanged, plus its current material identities."""
+    provenance = '\n'.join('# ' + line for line in json.dumps(subject, indent=2).splitlines())
+    return tool_power_report_text(corner, row, report_text, state_sha256) + '\n# Current material inputs\n' + provenance + '\n'

@@ -2561,7 +2561,27 @@ def _check_lvs(project_dir: Path) -> AuditResult:
 
 def _check_power(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:power", passed=False)
-    reason = _waived_for_pdk(project_dir, "power")
+    canonical = project_dir / 'reports/phase3/power.rpt'
+    current_route = canonical.exists() or (project_dir / 'phase3/stage3/pnr').exists()
+    current_bound = False
+    # Audit the declared adopted product. A native source report can be short
+    # and unsigned; its authenticity comes from its checked run_chain receipt,
+    # current inputs and exact adoption, not from a signature we add to it.
+    if current_route:
+        try:
+            import _opensta_current as current
+            from _ppa import power
+            current.power_binding(project_dir)
+            doc = json.loads((project_dir / 'reports/phase3/power.json').read_text())
+            expected = power.signoff_record(power.read_power_report(canonical),
+                source='reports/phase3/power.rpt', analysis_mode=doc.get('analysis_mode'))
+            if doc != expected or doc.get('power_measurement') != 'MEASURED':
+                raise current.Refusal('CURRENT_POWER_DOWNSTREAM_RESULT_MISMATCH')
+            current_bound = True
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            result.findings.append(Finding(rule='POWER_CURRENT_INPUTS_UNBOUND',
+                severity='ERROR', message=str(exc), file=str(canonical)))
+    reason = None if current_route else _waived_for_pdk(project_dir, "power")
     if reason and len(reason) >= 20:
         result.findings.append(Finding(
             rule="WAIVED_TOOL_UNAVAILABLE", severity="INFO",
@@ -2569,8 +2589,8 @@ def _check_power(project_dir: Path) -> AuditResult:
         result.passed = True
         result.summary = {"waived": True, "reason": reason}
         return result
-    files = _discover(project_dir, ["*power*.rpt", "*power*.log",
-                                     "*Power*.rpt", "*Power*.log"])
+    files = ([canonical] if canonical.is_file() else []) if current_route else _discover(
+        project_dir, ["*power*.rpt", "*power*.log", "*Power*.rpt", "*Power*.log"])
     if not files:
         result.findings.append(Finding(
             rule="POWER_REPORT_EXISTS", severity="ERROR",
@@ -2618,6 +2638,9 @@ def _check_power(project_dir: Path) -> AuditResult:
     own_design, design_binding = _check_report_design_binding(
         files, project_dir, "power", result)
 
+    if current_bound and own_design:
+        design_binding = True  # The routed module and recorded tool subject were checked.
+
     # The declared machine-readable half (reports/phase3/power.json). It
     # carries no number of its own, but it does carry two claims ABOUT the
     # measurement — which report it summarises, and how the switching power
@@ -2662,10 +2685,13 @@ def _check_power(project_dir: Path) -> AuditResult:
                          f"match the report it summarises"),
                 file=rel))
 
-    result.passed = own_design and has_leak and has_dyn and authentic and machine_ok
+    result.passed = (own_design and has_leak and has_dyn and authentic and machine_ok
+                     and (not current_route or current_bound)
+                     and not any(f.severity == 'ERROR' for f in result.findings))
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "has_leakage": has_leak,
                       "design_binding": design_binding,
+                      "current_binding": "CURRENT" if current_bound else "REFUSED" if current_route else "NOT_REQUIRED",
                       "has_dynamic": has_dyn, "tool_authentic": authentic,
                       "analysis_modes_in_report": sorted(stated_modes),
                       "machine_readable_found": len(companions),

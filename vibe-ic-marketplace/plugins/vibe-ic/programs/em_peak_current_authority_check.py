@@ -302,11 +302,12 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
                 "jmax_source": None}
     jpath, tlef = jmax, tech_lef
     if jpath is None and tlef is None:
-        try:
-            from signoff_ladder_run import _discover_jmax_ref
-            jpath, tlef = _discover_jmax_ref(project)
-        except Exception:  # pragma: no cover - defensive
-            jpath, tlef = None, None
+        if emc.native_project(em_path) is None:
+            try:
+                from signoff_ladder_run import _discover_jmax_ref
+                jpath, tlef = _discover_jmax_ref(project)
+            except Exception:  # pragma: no cover - defensive
+                jpath, tlef = None, None
     # The measured DEF identity authorizes its local special-wire geometry;
     # the matching ODB dump also carries placed macro PG PORT rectangles.
     local_def = None
@@ -353,6 +354,7 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
             "not_measured_segments": rep.get("not_measured_segments", []),
             "offender_count": rep.get("offender_count", 0),
             "findings": rep.get("findings", []),
+            "native_density": rep.get("native_density"),
             "em_report": str(em_path)}
 
 

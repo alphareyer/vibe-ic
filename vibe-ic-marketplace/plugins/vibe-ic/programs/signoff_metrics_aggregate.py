@@ -1113,11 +1113,26 @@ def main(argv=None) -> int:
             print(f"[FAIL] signoff_metrics_aggregate --check — "
                   f"{out.relative_to(project)} is unreadable ({exc})")
             return 1
-        drifted = [k for k, _, _ in RULES if on_disk.get(k) != metrics[k]]
+        # A numerically unchanged report can still describe different bytes.
+        # Check the producer's material digests and types as well as values.
+        keys = [k for k, _, _ in RULES] + ['__provenance__']
+        drifted = [k for k in keys if json.dumps(on_disk.get(k), sort_keys=True)
+                   != json.dumps(metrics[k], sort_keys=True)]
         if drifted:
             print(f"[FAIL] signoff_metrics_aggregate --check — "
                   f"{len(drifted)} key(s) no longer state what this run's "
                   f"reports state: {', '.join(drifted)}. Re-run the producer.")
+            return 1
+        rep = Path(args.json) if args.json else project / REPORT_REL
+        try:
+            recorded = json.loads(rep.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            print(f"[FAIL] signoff_metrics_aggregate --check — "
+                  f"aggregate report missing or unreadable: {rep}: {exc}")
+            return 1
+        if json.dumps(recorded, sort_keys=True) != json.dumps(report, sort_keys=True):
+            print("[FAIL] signoff_metrics_aggregate --check — aggregate report "
+                  "does not describe this project's current source reports")
             return 1
         print(f"[PASS] signoff_metrics_aggregate --check — all "
               f"{len(RULES)} key(s) agree with this run's own reports "
