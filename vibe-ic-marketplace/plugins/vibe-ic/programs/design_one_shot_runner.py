@@ -18102,7 +18102,7 @@ def _phase2_pdk_config(project: Path):
 def _bootstrap_execution_policy(execution, project: Path, *, top: str,
                                 container: str, ic_class: Optional[str],
                                 skip_analog: bool):
-    """Give Ultra the normal runner's typed PDK without changing Default."""
+    """Give Ultra the normal runner's JSON-bound PDK without changing Default."""
     parameters = {
         "top": top,
         "container": container,
@@ -18118,7 +18118,13 @@ def _bootstrap_execution_policy(execution, project: Path, *, top: str,
             # unavailable external adapter carrying this exact refusal.
             parameters["pdk_refusal"] = str(exc)
         else:
-            parameters["pdk"] = pdk
+            # The typed PdkConfig is a runner-local resolution result.  Ultra
+            # carries the same values through Context.objective, whose
+            # acceptance digest is canonical JSON.  Reuse the Step-9 adapter's
+            # existing conversion rather than placing a dataclass in every
+            # later frontend objective (which fails closed at json.dumps).
+            from execution_production import _pdk_dict
+            parameters["pdk"] = _pdk_dict(pdk)
             parameters["pdk_name"] = pdk.name
     return execution.bootstrap(project, parameters=parameters)
 

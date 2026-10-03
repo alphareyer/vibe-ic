@@ -200,10 +200,24 @@ def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
         skip_analog=True)
     assert result == "runtime"
     assert observed["project"] == p
-    assert observed["parameters"]["pdk"] is pdk
+    import execution_modes as EM
+    import execution_production as EP
+    assert observed["parameters"]["pdk"] == EP._pdk_dict(pdk)
+    assert observed["parameters"]["pdk"] is not pdk
+    assert observed["parameters"]["pdk"]["name"] == pdk.name
+    assert observed["parameters"]["pdk"]["liberty"] == pdk.liberty
     assert observed["parameters"]["pdk_name"] == pdk.name
     assert observed["parameters"]["top"] == "top"
     assert "pdk_refusal" not in observed["parameters"]
+    # Later fixed frontend rows copy these parameters into Context.objective;
+    # prove the exact acceptance-digest boundary that the normal CLI uses.
+    json.dumps(observed["parameters"], sort_keys=True)
+    step8 = SimpleNamespace(step_id="8", required_gates=("sdc_gate",),
+                            objective=observed["parameters"])
+    acceptance = EM.Controller.acceptance_contract(
+        step8, {"required_output_contract": ["reports/phase2/sdc_check.json"]})
+    assert acceptance["objective"]["pdk"]["name"] == pdk.name
+    assert EM._hash(acceptance)
 
 
 @pytest.mark.parametrize("damage", ["missing", "conflict"])
