@@ -1890,6 +1890,12 @@ def main() -> int:
         _name_the_sidecar_this_pass_wrote(project, summary, d1_ran=not refused)
         _p1 = _pl.report_path(project, "phase1_one_shot.json")   # the router, always
         _p1.parent.mkdir(parents=True, exist_ok=True)
+        # Dispatched producers must state their generation themselves — the
+        # docs-mode main branch is a first-class report writer, so its write
+        # passes through the same producer binding the second-pass tail uses.
+        # Standalone runs (no VIBEIC_RUNNER_INVOCATION_CONTEXT) are unchanged.
+        from benchmark_dispatch import _bind_runner_report
+        summary = _bind_runner_report(summary, project, __file__, _p1.name)
         _p1.write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
         return max(rc, rc_route)
@@ -1989,6 +1995,11 @@ def main() -> int:
     _name_the_sidecar_this_pass_wrote(project, summary, d1_ran=not _refused)
     _p1 = _pl.report_path(project, "phase1_one_shot.json")       # the router, always
     _p1.parent.mkdir(parents=True, exist_ok=True)
+    # Same producer binding as the docs branch and the second-pass tail: a
+    # dispatched run's fresh phase1 report must carry its generation, and a
+    # standalone run (no invocation context) is byte-identical to before.
+    from benchmark_dispatch import _bind_runner_report
+    summary = _bind_runner_report(summary, project, __file__, _p1.name)
     _p1.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(f"\n=== phase1_one_shot_runner DONE (mode={mode}) ===")
