@@ -228,6 +228,50 @@ def test_selected_declared_interface_rebinds_l9_and_the_normal_wrapper(tmp_path)
     assert (proj / "plugin_output/declaration.provenance.json").read_bytes() == original_choice
 
 
+def test_selected_binding_keeps_input_and_implementation_evidence_distinct(tmp_path):
+    import hashlib
+    import phase1_doc_one_shot_runner as D
+    from _staged_top_module import bind_selected_interface
+    proj = _selected_project(tmp_path)
+    l9 = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    original = json.loads(l9.read_text())
+    bound = bind_selected_interface(proj, original)
+    binding = bound["selected_interface_binding"]
+    assert binding["top_module"] == "core"
+    selected = proj / binding["selected_source"]
+    assert binding["selected_source_sha256"] == hashlib.sha256(selected.read_bytes()).hexdigest()
+    assert binding["provenance_verification"] == "NOT_VERIFIED_BY_INTERFACE_BINDING"
+    assert binding["illustrative_groups"]
+    assert not D._assert_no_rtl_oracle_leak_in_l_doc(bound, l9.name)
+    added = [p for p in bound["top_ports"] if p.get("extraction_strategy") == STAGED]
+    assert {p["name"] for p in added} == {"o_memory_wdata", "o_memory_waddr", "o_memory_wen"}
+    for port in added:
+        assert "Input interface delegation:" in port["evidence"]
+        assert "input/docs/L3_external_interface.md" in port["evidence"]
+        assert "Implemented name/direction/width: selected_interface_binding" in port["evidence"]
+    assert bind_selected_interface(proj, bound) == bound
+    # Exercise the real pad consumer, not a reader authored for this repair.
+    from io_pad_chip_top_gen import _read_top_ports
+    l9.write_text(json.dumps(bound))
+    assert _read_top_ports(proj) == bound["top_ports"]
+
+
+def test_selected_binding_does_not_relabel_forbidden_document_evidence(tmp_path):
+    import phase1_doc_one_shot_runner as D
+    from _staged_top_module import bind_selected_interface
+    proj = _selected_project(tmp_path)
+    l9 = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    content = json.loads(l9.read_text())
+    for port in content["top_ports"]:
+        if port["name"] in DOC_ONLY:
+            port["evidence"] = "phase2/stage2/synth/core_synth.v: invented input authority"
+    bound = bind_selected_interface(proj, content)
+    violations = D._assert_no_rtl_oracle_leak_in_l_doc(bound, l9.name)
+    assert violations and any("phase2/stage2/synth/core_synth.v" in v for v in violations)
+    # Current implementation provenance does not excuse a contaminated input citation.
+    assert any("ports" in v and "evidence" in v for v in violations)
+
+
 def test_l9_regeneration_publishes_before_selected_handoff_read(tmp_path, monkeypatch):
     """Exercise the real emitter ordering with L9 absent at entry.
 

@@ -315,8 +315,23 @@ def bind_selected_interface(project: Path, content: dict) -> dict:
         bound.append(dict(rtl, mode=rtl["direction"], io=None, rtl_name=rtl["name"],
                           aliases=[], msb=width - 1, lsb=0,
                           declared_by_staged_top=True,
-                          evidence=f"{source}: module {top} port list",
                           extraction_strategy=EXTRACTION_STRATEGY))
+    # Document evidence authorizes interface delegation, not the implemented
+    # spelling or width. Keep that source's current subject/hash in the existing
+    # implementation binding, which the pad consumer refreshes before reading.
+    for port in bound:
+        if (port.get("extraction_strategy") != EXTRACTION_STRATEGY
+                or port["name"] not in added):
+            continue
+        citations = [documented[n].get("evidence") for g in groups
+                     if port["name"] in g["rtl"] for n in g["l9"]
+                     if documented[n].get("evidence")]
+        if not citations:
+            raise ValueError(f"input delegation evidence missing for {port['name']}")
+        port["evidence"] = (
+            "Input interface delegation: " + "; ".join(dict.fromkeys(map(str, citations)))
+            + ". Implemented name/direction/width: selected_interface_binding "
+              "(current selected_source and selected_source_sha256).")
     for key in ("ports", "top_ports", "top_module_pins"):
         result[key] = bound
     provenance_path = project / "plugin_output/declaration.provenance.json"
