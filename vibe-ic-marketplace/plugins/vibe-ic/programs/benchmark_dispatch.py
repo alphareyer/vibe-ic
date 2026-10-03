@@ -8222,10 +8222,13 @@ def main():
     if not a.bench:
         ap.print_help()
         sys.exit(2)
-    # A front door that answers "unknown benchmark: verilogeval-v1" to someone
-    # who typed a name from our own README is a front door with a lock on it.
+    # Resolve every operational spelling through the one alias table, even
+    # when an old registry row still uses that spelling.  In particular,
+    # ``cvdp`` is a historical Shape-D row while the alias table deliberately
+    # routes current work to ``cvdp-open``.  ``--show`` keeps an exact registry
+    # key so the historical row remains inspectable.
     _reg_keys = json.loads(REGISTRY.read_text())["benchmarks"]
-    if a.bench and a.bench not in _reg_keys:
+    if a.bench and not (a.show and a.bench in _reg_keys):
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             import benchmark_io_adapter as _bio          # noqa: PLC0415
@@ -8233,7 +8236,8 @@ def main():
         except ImportError:
             _resolved = None
         if _resolved and _resolved in _reg_keys:
-            print(f"[name] {a.bench!r} -> {_resolved!r}")
+            if _resolved != a.bench:
+                print(f"[name] {a.bench!r} -> {_resolved!r}")
             a.bench = _resolved
 
     if a.show:

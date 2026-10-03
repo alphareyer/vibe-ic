@@ -223,6 +223,50 @@ def test_retired_setup_is_not_a_public_command(tmp_path):
     assert "unrecognized arguments: --setup" in result.stderr
 
 
+@pytest.mark.parametrize("spelling,canonical", [
+    ("cvdp", "cvdp-open"),
+    ("cvdp-open", "cvdp-open"),
+    ("ve-human", "verilogeval-human"),
+])
+def test_operational_main_resolves_alias_before_dispatch(
+        tmp_path, monkeypatch, spelling, canonical):
+    calls = []
+
+    def solve_spy(bench, dataset, run, **kwargs):
+        calls.append((bench, dataset, run, kwargs))
+        return 0
+
+    monkeypatch.setattr(dispatch, "cmd_solve", solve_spy)
+    monkeypatch.setattr(dispatch, "_install_orphan_guard", lambda: None)
+    monkeypatch.setattr(sys, "argv", [
+        "benchmark_dispatch.py", spelling, "--solve",
+        "--dataset", str(tmp_path / "unread-dataset"),
+        "--run", str(tmp_path / "uncreated-run"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        dispatch.main()
+    assert exc.value.code == 0
+    assert [call[:3] for call in calls] == [(
+        canonical, str(tmp_path / "unread-dataset"),
+        str(tmp_path / "uncreated-run"))]
+
+
+def test_show_preserves_exact_historical_registry_key(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", [
+        "benchmark_dispatch.py", "cvdp", "--show"])
+    dispatch.main()
+    shown = json.loads(capsys.readouterr().out)
+    assert list(shown) == ["cvdp"]
+    assert shown["cvdp"]["status"].startswith("SUPERSEDED by cvdp-open")
+
+
+def test_unknown_benchmark_still_refuses_before_dispatch(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "benchmark_dispatch.py", "not-a-real-benchmark", "--show"])
+    with pytest.raises(SystemExit, match="unknown benchmark"):
+        dispatch.main()
+
+
 @pytest.mark.parametrize(
     "bench", ["verilogeval-v2", "verilogeval-human", "rtllm", "cvdp-open"])
 def test_every_open_plan_names_only_the_general_solve_front_door(
