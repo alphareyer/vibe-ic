@@ -233,6 +233,30 @@ def test_internal_rail_anchors_are_not_top_level_labels():
     assert "port make" not in script
 
 
+def test_body_tap_contact_is_derived_from_tech_residues():
+    """The body tap must use the PDK's local-to-metal1 contact.
+
+    The Sky130 body label is on a device-contact layer, not on metal1.  A
+    guessed via stack leaves the extracted B terminals on ``d9/B``; this
+    control requires the producer to derive the bridge from the technology
+    contact table and to refuse the answer when that bridge is absent.
+    """
+    class Layers:
+        connects = {
+            "viali": ("locali", "metal1"),
+            "via1": ("metal1", "metal2"),
+        }
+        plane_of = {"locali": "locali", "metal1": "metal1",
+                    "metal2": "metal2"}
+
+    class NoBridge:
+        connects = {"via1": ("metal1", "metal2")}
+        plane_of = Layers.plane_of
+
+    assert A5E.body_tap_contact_layer(Layers()) == "viali"
+    assert A5E.body_tap_contact_layer(NoBridge()) is None
+
+
 class FakeStage:
     """Stands in for the container, and records what was asked of it."""
 

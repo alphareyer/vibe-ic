@@ -936,6 +936,25 @@ def terminal_map(dev: dict, cell: dict
     return out, ring, unmapped
 
 
+def body_tap_contact_layer(layers) -> Optional[str]:
+    """Return the PDK contact that joins local interconnect to metal1.
+
+    Sky130 guard-ring labels are on ``psubdiffcont``/``nsubdiffcont``.
+    Those device-contact types are not the metal1 routing plane: the gencell
+    already supplies the local-interconnect residue, and the route needs the
+    technology's own local-interconnect-to-metal1 contact before the normal
+    via1 stack can leave the ring.  Derive that contact from the loaded tech
+    table; never name ``mcon`` or another PDK alias here.
+    """
+    if layers is None:
+        return None
+    for contact, residues in layers.connects.items():
+        planes = {layers.plane_of.get(r) for r in residues}
+        if "locali" in planes and "metal1" in planes:
+            return contact
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 5. the bulk tap — I3, the search that must cover the whole structure
 # ──────────────────────────────────────────────────────────────────────
@@ -1988,6 +2007,7 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                cells: Dict[tuple, dict], facts: PdkFacts, geo: Geo,
                tap_clear: int, pin_spec: Optional[dict] = None) -> Plan:
     plan = Plan()
+    body_tap_contact = body_tap_contact_layer(facts.layers)
     pitch = geo.pitch()
     pad_half = geo.via_pad[1]
     m1_space = geo.default_space
@@ -2108,10 +2128,17 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                              "every position on the guard ring lies in the "
                              "escape band of another terminal row; the tap "
                              "is drawn at the clearest of them")
+            if body_tap_contact is None:
+                plan.deviate(
+                    dev, "body_tap_contact_layer", 1, 0,
+                    "the loaded Magic technology declares no contact joining "
+                    "the gencell's local-interconnect residue to metal1; the "
+                    "body tap is left unconnected rather than guessed")
             groups.append({"net": ring_labels[0][0], "y": ty,
                            "escape_y": ty, "strapped": False,
                            "labels": [{"x": tx, "y": ty, "level": 1,
                                        "name": "tap"}],
+                           "body_tap_contact": body_tap_contact,
                            "level": 1})
 
         # two groups escaping at one height take opposite sides, so their
@@ -2236,6 +2263,16 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
     for d in per_dev:
         for g in d["groups"]:
             net, ey, lane = g["net"], g["abs_escape_y"], g["lane_x"]
+            tap_contact = g.get("body_tap_contact")
+            if tap_contact:
+                tx, ty, _ = g["abs_labels"][0]
+                # The gencell's body label is on a device-contact layer whose
+                # local-interconnect residue is already present in the child.
+                # Paint only the PDK-derived local-to-metal1 contact here;
+                # `_via_stack` then carries that conductor through metal1/2/3.
+                hp = geo.via_pad[1]
+                plan.paint(net, tap_contact, tx - hp, ty - hp,
+                           tx + hp, ty + hp)
             if g["strapped"]:
                 # THE STUB STARTS WHERE THE STACK ENDED UP. An island that
                 # was moved a lambda off its label and then wired from the
