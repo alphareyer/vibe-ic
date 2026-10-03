@@ -4935,6 +4935,68 @@ def _discover_run_liberty(project: Path) -> Optional[str]:
     return None
 
 
+def _bound_synthesis_liberty(project: Path) -> Optional[str]:
+    """Map the current tool handoff's selected cell library through its mounts.
+
+    The handoff already binds the declared PDK, current RTL/netlist and resolved
+    configuration. Its hashed PDK-root record names the host bytes behind the
+    tool's guest path; no legacy log search or PDK/corner guess participates.
+    """
+    import synth_handoff_netlist_check as handoff
+    import librelane_contract as LC
+
+    bound = handoff.bound_handoff(project)
+    if bound is None:
+        return None
+    try:
+        if bound['verdict'] != 'PASS':
+            raise ValueError('; '.join(bound['findings']))
+        binding = json.loads((project / 'phase2/stage2/synth/synth_inputs.json').read_text())['librelane_synthesis']
+        folder = project / binding['folder']
+        cfg = json.loads((folder / 'config.json').read_text())
+        receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+        root_path = folder / 'pdk_root.json'
+        if receipt['sha256'].get('pdk_root.json') != LC.digest(root_path):
+            raise ValueError('synthesis PDK mounts changed or were not recorded')
+        roots = json.loads(root_path.read_text())
+        guest_root = Path(roots['cli_pdk_root'])
+        if not guest_root.is_absolute() or str(guest_root) != cfg['PDK_ROOT']:
+            raise ValueError('synthesis PDK root disagrees with resolved config')
+        # CELL_LIBS is LibreLane's resolved production field; LIB remains
+        # supported for existing step configurations that retain that name.
+        groups = cfg.get('CELL_LIBS', cfg.get('LIB'))
+        if not isinstance(groups, dict) or not groups:
+            raise ValueError('current synthesis declares no cell library')
+        libraries = set()
+        for values in groups.values():
+            if not isinstance(values, list) or not values or any(
+                    not isinstance(v, str) or not v for v in values):
+                raise ValueError('current synthesis cell-library paths are malformed')
+            libraries.update(values)
+        if len(libraries) != 1:
+            raise ValueError('current synthesis cell library is ambiguous')
+        library = Path(next(iter(libraries)))
+        pdk, _ = LC.phase2_pdk(project)
+        pdk_guest = guest_root / pdk
+        if not library.is_absolute() or '..' in library.parts or not library.is_relative_to(pdk_guest):
+            raise ValueError('cell library is outside the selected PDK')
+        candidates = []
+        for host, guest in roots['mounts_under_it']:
+            host, guest = Path(host), Path(guest)
+            if not host.is_absolute() or not guest.is_absolute():
+                raise ValueError('synthesis PDK mount is not absolute')
+            if library.is_relative_to(guest):
+                target = (host / library.relative_to(guest)).resolve()
+                if not target.is_relative_to(host.resolve()):
+                    raise ValueError('cell library escapes its synthesis PDK mount')
+                candidates.append(target)
+        if len(candidates) != 1 or not candidates[0].is_file():
+            raise ValueError('selected synthesis cell library is missing or its mount is ambiguous')
+        return str(candidates[0])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, LC.Refusal) as exc:
+        raise ValueError(f'LL_LEC_LIB_UNBOUND: {exc}') from exc
+
+
 def resolve_liberty(project: Path, cli_liberty: Optional[str],
                     container_has) -> "Tuple[Optional[str], str]":
     """`(liberty, source)` — the Liberty this LEC will read, and WHY (PURE).
@@ -4949,10 +5011,17 @@ def resolve_liberty(project: Path, cli_liberty: Optional[str],
         default      the built-in constant, which belongs to ONE PDK and is
                      therefore wrong for every other one
 
-    Order is deliberate and preserves today's behaviour everywhere it already
-    worked: `run_synth` is consulted ONLY where the constant `default` would
-    otherwise have been used. `container_has` is a predicate so this stays pure
-    and testable without a container."""
+    A current LibreLane handoff owns the mapping and refuses conflicting or
+    invisible choices. Without that contract, the existing cli > staged >
+    recorded synthesis > default order remains. `container_has` is a predicate
+    so visibility remains testable without a container."""
+    bound_liberty = _bound_synthesis_liberty(project)
+    if bound_liberty is not None:
+        if cli_liberty and cli_liberty != DEFAULT_LIBERTY and Path(cli_liberty).resolve() != Path(bound_liberty):
+            raise ValueError('LL_LEC_LIB_CONFLICT: --liberty differs from current synthesis mapping')
+        if not container_has(bound_liberty):
+            raise ValueError('LL_LEC_LIB_INVISIBLE: selected synthesis library is not visible to the proof tool')
+        return bound_liberty, 'run_synth'
     if cli_liberty and cli_liberty != DEFAULT_LIBERTY and container_has(cli_liberty):
         return cli_liberty, "cli"
     staged = _discover_project_liberty(project)
@@ -5425,9 +5494,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     # THIS RUN's own synthesis recorded loading, because a gate netlist is only
     # meaningful against the library it was mapped to. The built-in constant is
     # the last resort and is named as such in the record.
-    liberty, liberty_source = resolve_liberty(
-        project, args.liberty,
-        lambda pth: _container_file_exists(container, pth))
+    try:
+        liberty, liberty_source = resolve_liberty(
+            project, args.liberty,
+            lambda pth: _container_file_exists(container, pth))
+    except ValueError as exc:
+        # Replace any old PASS before returning: the current declared mapping
+        # was refused and no proof was attempted against a substitute library.
+        parsed = {'proven': 0, 'unproven': 0, 'total': 0, 'equivalent': False,
+                  'verdict': 'INCONCLUSIVE', 'verdict_explanation': str(exc),
+                  'sat_model_unsupported_cells': [], 'unproven_cells': [],
+                  'undefined_macro_modules': []}
+        report = build_report(parsed, args.top, str(gate_netlist.resolve()), None, 'refused')
+        _atomic_write_bytes(rpt_out, (str(exc) + '\nLEC not run: library mapping refused.\n').encode())
+        _finish_telemetry_sidecar(telemetry_path, 'not_run', verdict='INCONCLUSIVE',
+                                equivalent=False, current_pass='setup')
+        _atomic_write_json(json_out, attach_telemetry(report, telemetry_path, project))
+        print(f'[lec_run] {exc}', file=sys.stderr)
+        return 2
     if liberty_source in ("staged", "run_synth"):
         print(f"[lec_run] Liberty resolved from {liberty_source}: {liberty}",
               file=sys.stderr)
