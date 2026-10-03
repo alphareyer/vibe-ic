@@ -2061,6 +2061,35 @@ _OTP_EVIDENCE_FILENAME_DENY = re.compile(
     r")(?:[/_.-]|$)"
 )
 
+# v0.1.82-r2 — an OTP token in an explicit negative interface/calibration
+# clause is absence evidence, not a declaration of an OTP layout. Keep this
+# clause-scoped and vocabulary-scoped: a declaration in a later clause on the
+# same input line remains positive, and no IC-class blanket rule is introduced.
+_OTP_EVIDENCE_TOKEN_RE = re.compile(
+    r"\bOTP\b|\bone[-\s]?time[-\s]?programmable\b|"
+    r"\bfuse(?:s|map|bit)?\b|\beFuse\b|\bantifuse\b",
+    re.IGNORECASE,
+)
+_OTP_EXPLICIT_ABSENCE_CLAUSE_RE = re.compile(
+    r"(?i)(?:\bno\b|\bwithout\b|\bnone\b|\bnot\b|\bn/?a\b|"
+    r"無|沒有|不需|無需|不含|未)"
+    r"[^;\n.!?。；！？→]{0,120}"
+    r"(?:\bOTP\b|\bone[-\s]?time[-\s]?programmable\b|"
+    r"\bfuse(?:s|map|bit)?\b|\beFuse\b|\bantifuse\b)"
+)
+_OTP_CLAUSE_SPLIT_RE = re.compile(r"[;\n.!?。；！？→]")
+
+
+def _has_positive_otp_evidence(text: str) -> bool:
+    """Return true for OTP evidence not explicitly negated in its clause."""
+    for clause in _OTP_CLAUSE_SPLIT_RE.split(str(text)):
+        if not _OTP_EVIDENCE_TOKEN_RE.search(clause):
+            continue
+        if _OTP_EXPLICIT_ABSENCE_CLAUSE_RE.search(clause):
+            continue
+        return True
+    return False
+
 # v1.6.248 — for #110. The L1 pin / L9 port extractors read every
 # file in `extracted` indiscriminately, including build / config
 # files copied into `input/docs/` (Doxyfile, Makefile, conf.py,
@@ -32361,11 +32390,35 @@ def _extract_memmap_range_constants(
 # a chip register file). Bilingual, negation/N-A anchored. Used by gen_l4 to
 # emit the honest L4 register_map_present=false flag. Chip-AGNOSTIC.
 _RE_L4_NO_REGMAP = re.compile(
-    r'(?i)status:\s*not[\s-]*applicable|'
-    r'無\s*SW-?visible\s*(?:chip[\s-]*(?:level)?\s*)?register|'
-    r'無\s*chip[\s-]*(?:level\s*)?register|沒有\s*(?:chip[\s-]*)?register|'
-    r'\bno\s+SW-?visible\s+(?:chip[\s-]*(?:level\s+)?)?register|'
+    # A status marker by itself is not an absence claim.  Require
+    # register-specific wording so an incomplete / N-A document remains
+    # unknown until its content says that no register map exists.
+    r'(?i)無\s*SW-?visible\s*(?:chip[\s-]*(?:level)?\s*)?register(?:s)?|'
+    r'無\s*chip[\s-]*(?:level\s*)?register(?:s)?|'
+    r'沒有\s*(?:chip[\s-]*)?register(?:s)?|'
+    r'\bno\s+(?:SW-?visible\s+)?(?:chip[\s-]*)?register(?:s)?\b|'
+    r'\bno\s+(?:control|status|configuration|config|interrupt)\s+registers?\b|'
+    r'\bno\s+register\s+file\b|'
     r'不需\s*產生.*register\s*file')
+
+
+def _l4_explicit_no_regmap_sources(
+        extracted: Dict[str, str]) -> List[str]:
+    """Return input docs that explicitly declare an absent L4 map.
+
+    Filename filtering keeps generic prose from becoming a typed absence
+    claim.  The caller applies this only when no register record was parsed,
+    so a contradictory declaration with a real register remains unknown.
+    """
+    sources: List[str] = []
+    for fname, text in (extracted or {}).items():
+        name = str(fname)
+        lowered = name.lower()
+        if not any(token in lowered for token in ("register", "l4", "l5")):
+            continue
+        if isinstance(text, str) and _RE_L4_NO_REGMAP.search(text):
+            sources.append(name)
+    return sources
 
 
 # v1.7.74 — for #507. L4 keeps every register the input DECLARED.
@@ -34257,8 +34310,16 @@ def gen_l4_regmap(project: Path,
     # v1.6.8 — uncapped fields[] (was [:64]); the row-scan in (b) above can
     # legitimately discover 100+ bytes for a typical 256-byte OTP layout.
     # v1.6.78 — closes #11 FLAG-EVIDENCE CONSISTENCY for L4.registers.
-    no_registers_in_input = _flag_no_X_in_input(
-        registers, evidence, "registers")
+    # v0.1.82-r1 — an explicit register-map absence is a typed producer fact;
+    # an empty parse or a filename alone is not enough to assert it.
+    _l4_no_regmap_sources = _l4_explicit_no_regmap_sources(extracted)
+    if registers:
+        no_registers_in_input = False
+    elif _l4_no_regmap_sources:
+        no_registers_in_input = True
+    else:
+        no_registers_in_input = _flag_no_X_in_input(
+            registers, evidence, "registers")
     # v1.6.70 — closes issue #10 Bug A. Previous code emitted a fixed
     # AID-class OTP geometry (`depth_bytes=128, width_bits=8`) plus
     # hardcoded read_map / write_map / lockbits / trim_registers /
@@ -34272,16 +34333,8 @@ def gen_l4_regmap(project: Path,
     # When fields ARE extracted, the default geometry (128B × 8 bits)
     # is preserved as a reasonable starting point that the field
     # agent can override via input/extraction_patterns.json.
-    _otp_evidence_re = re.compile(
-        r"\bOTP\b|"
-        r"\bone[-\s]?time[-\s]?programmable\b|"
-        r"\bfuse(?:s|map|bit)?\b|"
-        r"\beFuse\b|"
-        r"\bantifuse\b",
-        re.IGNORECASE,
-    )
     has_otp_evidence = bool(otp_layout_addrs) or any(
-        _otp_evidence_re.search(t) for t in extracted.values()
+        _has_positive_otp_evidence(t) for t in extracted.values()
     )
     # v1.6.78 — closes #11 FLAG-EVIDENCE CONSISTENCY for L4.otp_layout.
     # Filename-level evidence (e.g. OTP_Layout.md / fuse_map.txt) also
@@ -34970,18 +35023,15 @@ def gen_l4_regmap(project: Path,
     # register map, emit register_map_present=false so the gate's N/A escape
     # applies (mirrors L5.no_analog / L12.no_calibration). Input-docs only.
     _regs = content.get("registers")
-    if not (isinstance(_regs, list) and any(isinstance(r, dict) for r in _regs)):
-        for _f, _t in (extracted or {}).items():
-            fl = _f.lower()
-            if not ("register" in fl or "l4" in fl or "l5" in fl):
-                continue
-            if isinstance(_t, str) and _RE_L4_NO_REGMAP.search(_t):
-                content["register_map_present"] = False
-                evidence.setdefault(f"input/docs/{_f}", []).append({
-                    "literal": "register-map N/A assertion",
-                    "label": "input states no SW-visible chip register map",
-                })
-                break
+    if (not (isinstance(_regs, list)
+             and any(isinstance(r, dict) for r in _regs))
+            and _l4_no_regmap_sources):
+        content["register_map_present"] = False
+        for _f in _l4_no_regmap_sources:
+            evidence.setdefault(f"input/docs/{_f}", []).append({
+                "literal": "register-map N/A assertion",
+                "label": "input states no SW-visible chip register map",
+            })
 
     return _write_l_doc(project, "L4_REGMAP", content, evidence)
 

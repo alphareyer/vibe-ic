@@ -86,6 +86,46 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _receipt_pdk_mounts(folder: Path, receipt: dict) -> list[tuple[Path, str]]:
+    """Return the producer's bound guest-to-host PDK mounts.
+
+    ``run_chain`` records config-file keys as the guest paths the child read,
+    while this handoff consumer runs on the host.  The mount record is part of
+    the producer receipt; a changed or foreign record must refuse before any
+    digest is credited.
+    """
+    metadata = folder / "pdk_root.json"
+    recorded = (receipt.get("sha256") or {}).get("pdk_root.json")
+    if not isinstance(recorded, str) or _sha(metadata) != recorded:
+        raise ValueError("native receipt mismatch: pdk_root.json")
+    fingerprint = folder / "input_fingerprint.json"
+    fingerprint_sha = (receipt.get("sha256") or {}).get("input_fingerprint.json")
+    if (not isinstance(fingerprint_sha, str) or _sha(fingerprint) != fingerprint_sha
+            or json.loads(fingerprint.read_text()) != receipt.get("input")):
+        raise ValueError("native receipt mismatch: input_fingerprint.json")
+    doc = json.loads(metadata.read_text())
+    root_value = doc.get("cli_pdk_root")
+    root = Path(str(root_value or ""))
+    if (not isinstance(root_value, str) or not root.is_absolute()
+            or doc.get("stated_by") != "run_chain(pdk_root=...)"):
+        raise ValueError("native receipt has an unstated or foreign PDK root")
+    raw = doc.get("mounts_under_it")
+    if not isinstance(raw, list):
+        raise ValueError("native receipt is missing PDK mount metadata")
+    mounts: list[tuple[Path, str]] = []
+    for item in raw:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("native receipt has malformed PDK mount metadata")
+        host, guest_value = Path(str(item[0])).resolve(), item[1]
+        guest = Path(str(guest_value))
+        if (not isinstance(guest_value, str) or not guest.is_absolute()
+                or not host.is_dir()
+                or not (guest == root or guest.is_relative_to(root))):
+            raise ValueError("native receipt has a foreign PDK mount")
+        mounts.append((host, guest_value))
+    return mounts
+
+
 def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict, dict]:
     """Verify the existing run_chain receipt against its consumed/output bytes."""
     import librelane_contract as LC
@@ -118,10 +158,16 @@ def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict
     for path in rtl:
         if inp['config_files'].get(str(path.resolve())) != _sha(path):
             raise ValueError('producer consumed stale RTL bytes')
-    for kind in ('config_files', 'state_files'):
-        for path, recorded in inp[kind].items():
-            if recorded != _sha(Path(path)):
-                raise ValueError(f'producer consumed stale {kind}: {path}')
+    mounts = _receipt_pdk_mounts(folder, receipt)
+    # Rehash the producer's recorded population. A later reader namespace may
+    # expose additional image files; those were not part of this receipt.
+    expected_config_files = LC.config_file_hashes(
+        {'files': list(inp['config_files'])}, mounts)
+    if inp.get('config_files') != expected_config_files:
+        raise ValueError('producer consumed stale or incomplete config material')
+    for path, recorded in inp['state_files'].items():
+        if recorded != _sha(Path(path)):
+            raise ValueError(f'producer consumed stale state_files: {path}')
     stat = json.loads((folder / 'reports/stat.json').read_text())
     modules = stat.get('modules')
     module = (modules.get('\\' + top) or modules.get(top)) if isinstance(modules, dict) else None

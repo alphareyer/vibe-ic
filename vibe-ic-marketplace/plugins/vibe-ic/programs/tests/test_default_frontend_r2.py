@@ -152,10 +152,17 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
                     "     of which used for sequential elements: 4.000000\n")
             put(folder / "state_out.json", state)
             if sid == "Yosys.Synthesis":
-                receipt = {"input": {"step": sid, "image": image,
-                            "config": LC.digest(cfg_path),
-                            "state_files": {str(header): LC.digest(header)},
-                            "config_files": {str(rtl.resolve()): LC.digest(rtl)}},
+                fingerprint = {"step": sid, "image": image,
+                               "config": LC.digest(cfg_path),
+                               "state_files": {str(header): LC.digest(header)},
+                               "config_files": LC.config_file_hashes(
+                                   json.loads(cfg_path.read_text()), [(root, "/pdk")])}
+                put(folder / "input_fingerprint.json", fingerprint)
+                put(folder / "pdk_root.json", {
+                    "cli_pdk_root": "/pdk",
+                    "mounts_under_it": [[str(root), "/pdk"]],
+                    "stated_by": "run_chain(pdk_root=...)"})
+                receipt = {"input": fingerprint,
                            "sha256": {str(f.relative_to(folder)): LC.digest(f)
                                       for f in folder.rglob('*') if f.is_file()}}
                 put(folder / "vibeic_receipt.json", receipt)
@@ -265,6 +272,88 @@ def test_step9_phase2_default_publishes_exact_tool_bytes_and_step14_passes(tmp_p
         cp = _run_clause(p, _clause("14", gate))
         assert cp.returncode == 0, cp.stdout + cp.stderr
         assert "VACUOUS" not in cp.stdout
+
+
+def test_step14_maps_guest_pdk_config_material_from_producer_mount(tmp_path, monkeypatch):
+    """A host receipt reader must resolve a recorded guest TECH_LEF path."""
+    p, _, _ = _produce(tmp_path, monkeypatch, ordinary=True)
+    folder = p / "phase3/librelane/02-yosys-synthesis"
+    receipt_path = folder / "vibeic_receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+
+    pdk_record = json.loads((folder / "pdk_root.json").read_text())
+    host_root = Path(pdk_record["mounts_under_it"][0][0])
+    resolved_path = p / "phase3/librelane/synthesis_resolved.json"
+    resolved = json.loads(resolved_path.read_text())
+    guest = "/pdk/pdkA/libs.ref/techlef/tech.nom.tlef"
+    resolved["TECH_LEFS"] = {"nom_*": guest}
+    put(resolved_path, resolved)
+    tech_lef = host_root / "pdkA/libs.ref/techlef/tech.nom.tlef"
+    tech_lef.parent.mkdir(parents=True)
+    tech_lef.write_text("VERSION 5.8 ;\\n")
+    fingerprint = json.loads((folder / "input_fingerprint.json").read_text())
+    fingerprint["config"] = LC.digest(resolved_path)
+    fingerprint["config_files"] = LC.config_file_hashes(
+        resolved, [(host_root, "/pdk")])
+    put(folder / "input_fingerprint.json", fingerprint)
+    receipt["input"] = fingerprint
+    put(folder / "pdk_root.json", {
+        "cli_pdk_root": "/pdk",
+        "mounts_under_it": [[str(host_root), "/pdk"]],
+        "stated_by": "run_chain(pdk_root=...)"})
+    receipt["sha256"]["pdk_root.json"] = LC.digest(folder / "pdk_root.json")
+    receipt["sha256"]["input_fingerprint.json"] = LC.digest(folder / "input_fingerprint.json")
+    put(receipt_path, receipt)
+    sidecar = p / "phase2/stage2/synth/synth_inputs.json"
+    sidecar_doc = json.loads(sidecar.read_text())
+    sidecar_doc["librelane_synthesis"]["receipt_sha256"] = LC.digest(receipt_path)
+    put(sidecar, sidecar_doc)
+
+    assert H.bound_handoff(p)["verdict"] == "PASS"
+
+    # Reverse control: a foreign guest mount must remain a hard failure.
+    record = json.loads((folder / "pdk_root.json").read_text())
+    record["mounts_under_it"] = [[str(host_root), "/foreign"]]
+    put(folder / "pdk_root.json", record)
+    receipt["sha256"]["pdk_root.json"] = LC.digest(folder / "pdk_root.json")
+    put(receipt_path, receipt)
+    sidecar_doc["librelane_synthesis"]["receipt_sha256"] = LC.digest(receipt_path)
+    put(sidecar, sidecar_doc)
+    failed = H.bound_handoff(p)
+    assert failed["verdict"] == "FAIL"
+    assert any("pdk" in finding.lower() or "mount" in finding.lower()
+               for finding in failed["findings"])
+
+    # Changed and missing mapped assets remain hard failures.
+    record["mounts_under_it"] = [[str(host_root), "/pdk"]]
+    put(folder / "pdk_root.json", record)
+    receipt["sha256"]["pdk_root.json"] = LC.digest(folder / "pdk_root.json")
+    put(receipt_path, receipt)
+    sidecar_doc["librelane_synthesis"]["receipt_sha256"] = LC.digest(receipt_path)
+    put(sidecar, sidecar_doc)
+    tech_lef.write_text("VERSION 5.8 ; tampered\\n")
+    assert H.bound_handoff(p)["verdict"] == "FAIL"
+    tech_lef.unlink()
+    assert H.bound_handoff(p)["verdict"] == "FAIL"
+
+    # A valid producer may have no extra PDK mount when every recorded
+    # config-file key is already host-readable; the shared resolver owns the
+    # empty-mount semantics.
+    resolved["TECH_LEFS"] = {"nom_*": str(tech_lef)}
+    put(resolved_path, resolved)
+    tech_lef.write_text("VERSION 5.8 ; host-readable\\n")
+    fingerprint["config"] = LC.digest(resolved_path)
+    fingerprint["config_files"] = LC.config_file_hashes(resolved, [])
+    put(folder / "input_fingerprint.json", fingerprint)
+    receipt["input"] = fingerprint
+    record["mounts_under_it"] = []
+    put(folder / "pdk_root.json", record)
+    receipt["sha256"]["pdk_root.json"] = LC.digest(folder / "pdk_root.json")
+    receipt["sha256"]["input_fingerprint.json"] = LC.digest(folder / "input_fingerprint.json")
+    put(receipt_path, receipt)
+    sidecar_doc["librelane_synthesis"]["receipt_sha256"] = LC.digest(receipt_path)
+    put(sidecar, sidecar_doc)
+    assert H.bound_handoff(p)["verdict"] == "PASS"
 
 
 def test_step9_default_keeps_existing_phase2_coupling_gate(tmp_path, monkeypatch):

@@ -83,9 +83,18 @@ def _apply_universal(gd: Path, is_spi: bool = False) -> None:
     p = gd / "L4_REGMAP.json"
     if p.is_file():
         d = _read(p)
-        d.setdefault("register_map_present", True)
-        d.setdefault("base_address", "Defined at SoC level; offsets given relative to module base.")
-        d.setdefault("notes", "Module memory map per spec. Reads from reserved bits return zeros and writes to reserved bits have no effect.")
+        # v0.1.82-r1 — universal defaults apply only to a supported map.
+        # Preserve the producer's explicit absence and do not invent a map
+        # for an empty/unknown parse.
+        records = d.get("registers")
+        has_register_records = (
+            isinstance(records, list)
+            and any(isinstance(record, dict) for record in records)
+        )
+        if d.get("register_map_present") is not False and has_register_records:
+            d.setdefault("register_map_present", True)
+            d.setdefault("base_address", "Defined at SoC level; offsets given relative to module base.")
+            d.setdefault("notes", "Module memory map per spec. Reads from reserved bits return zeros and writes to reserved bits have no effect.")
         _write(p, d)
     # L5 N/A
     p = gd / "L5_ADI_SPEC.json"
