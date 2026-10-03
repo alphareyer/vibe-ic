@@ -217,3 +217,156 @@ def test_a_recorded_library_the_container_cannot_open_is_not_an_answer(tmp_path)
         f"resolved {got!r}; a recorded library that is not visible where the tool "
         "runs must fall back, not be handed on")
     assert source == "default", f"source was {source!r}"
+
+
+def _current_tool_handoff(tmp_path, pdk="pdk_neutral"):
+    """Existing producer contracts, without invoking Step9 or another tool."""
+    import json
+    import librelane_contract as LC
+    from test_librelane_contract_production_defaults import _chip
+
+    p = _chip(tmp_path / 'proj')
+    def put(path, doc):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
+    put(p / 'input/project.json', {'pdk': pdk})
+    put(p / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',
+        {'fields': {'pdk_target': pdk}})
+    put(p / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'top'})
+    rtl = p / 'phase2/stage1/rtl/top.v'
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text('module top(input clk, input a, output reg q); always @(posedge clk) q <= a; endmodule\n')
+    root = tmp_path / 'pdk-root'
+    lib = root / pdk / 'libs.ref/cells/typ.lib'
+    lib.parent.mkdir(parents=True)
+    lib.write_text('library (selected) { cell (selected_dff) { area : 1; } }\n')
+    folder = p / 'phase3/librelane/02-yosys-synthesis'
+    folder.mkdir(parents=True)
+    raw = folder / 'top.nl.v'
+    raw.write_text('module top(input clk, input a, output q); selected_dff r (.C(clk), .D(a), .Q(q)); endmodule\n')
+    mapped = p / 'phase2/stage2/synth/top_synth.v'
+    mapped.parent.mkdir(parents=True)
+    mapped.write_bytes(raw.read_bytes())
+    (mapped.parent / 'netlist.v').write_bytes(raw.read_bytes())
+    cfg = {'meta': {'step': 'Yosys.Synthesis'}, 'PDK': pdk, 'PDK_ROOT': '/pdk',
+           'DESIGN_NAME': 'top', 'VERILOG_FILES': [str(rtl.resolve())],
+           'CELL_LIBS': {'*': ['/pdk/' + str(lib.relative_to(root))]},
+           'SYNTH_TIEHI_CELL': 'selected_hi/Z', 'SYNTH_TIELO_CELL': 'selected_lo/ZN'}
+    put(folder / 'state_out.json', {'nl': str(raw), 'metrics': {
+        'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
+    put(folder / 'reports/stat.json', {'modules': {'\\top': {'num_cells': 1, 'num_submodules': 0}}})
+    put(folder / 'pdk_root.json', {'cli_pdk_root': '/pdk',
+                                 'mounts_under_it': [[str(root), '/pdk']]})
+    def refresh():
+        put(folder / 'config.json', cfg)
+        put(p / 'phase3/librelane/synthesis_resolved.json', cfg)
+        receipt = {'input': {'step': 'Yosys.Synthesis',
+                   'config': LC.digest(p / 'phase3/librelane/synthesis_resolved.json'),
+                   'config_files': {str(rtl.resolve()): LC.digest(rtl)}, 'state_files': {}},
+                   'sha256': {str(f.relative_to(folder)): LC.digest(f)
+                              for f in folder.rglob('*') if f.is_file() and f.name != 'vibeic_receipt.json'}}
+        put(folder / 'vibeic_receipt.json', receipt)
+        put(mapped.parent / 'synth_inputs.json', {'netlist': mapped.name, 'librelane_synthesis': {
+            'schema': 'vibe-ic/librelane-synthesis-handoff/1', 'top': 'top',
+            'folder': str(folder.relative_to(p)), 'mapped': str(mapped.relative_to(p)),
+            'netlist_sha256': LC.digest(raw), 'receipt_sha256': LC.digest(folder / 'vibeic_receipt.json')}})
+    refresh()
+    return p, lib, folder, cfg, refresh
+
+
+@pytest.mark.parametrize('pdk', ['pdk_neutral', 'sky130A'])
+def test_current_librelane_handoff_selects_exact_mapped_library(tmp_path, pdk):
+    p, lib, _, _, _ = _current_tool_handoff(tmp_path, pdk)
+    got, source = _effective(_mod(), p, visible=lambda x: x == _mod().DEFAULT_LIBERTY or Path(x).is_file())
+    assert got == str(lib), f'current bound mapping requires {lib}; actual selection was {got}'
+    assert source == 'run_synth'
+
+
+@pytest.mark.parametrize('damage', ['missing', 'invisible', 'foreign', 'stale_config',
+                                  'root_conflict', 'missing_binding', 'conflicting_cli', 'ambiguous'])
+def test_current_mapping_damage_refuses_instead_of_defaulting(tmp_path, damage):
+    import json
+    p, lib, folder, cfg, refresh = _current_tool_handoff(tmp_path)
+    mod = _mod()
+    cli = mod.DEFAULT_LIBERTY
+    if damage == 'missing':
+        lib.unlink()
+    elif damage == 'foreign':
+        cfg['CELL_LIBS'] = {'*': ['/pdk/foreign/libs.ref/cells/typ.lib']}
+        refresh()
+    elif damage == 'stale_config':
+        (folder / 'config.json').write_text('{}')
+    elif damage == 'root_conflict':
+        (folder / 'pdk_root.json').write_text(json.dumps({'cli_pdk_root': '/pdk', 'mounts_under_it': []}))
+    elif damage == 'missing_binding':
+        (p / 'phase2/stage2/synth/synth_inputs.json').write_text('{}')
+    elif damage == 'conflicting_cli':
+        cli = '/another/existing/library.lib'
+    elif damage == 'ambiguous':
+        cfg['CELL_LIBS']['*'].append('/pdk/pdk_neutral/another.lib')
+        refresh()
+    with pytest.raises(ValueError, match='LL_LEC_LIB'):
+        mod.resolve_liberty(p, cli, lambda x: damage != 'invisible')
+
+
+def _proof_edge(mod, monkeypatch, expected):
+    calls = []
+    monkeypatch.setattr(mod, '_container_available', lambda _: True)
+    monkeypatch.setattr(mod, '_container_file_exists', lambda _, p:
+                        p == mod.DEFAULT_LIBERTY or Path(p).is_file())
+    monkeypatch.setattr(mod, '_container_file_sha256', lambda _, p:
+                        mod._sha256_file(Path(p)) if Path(p).is_file() else None)
+    monkeypatch.setattr(mod, '_yosys_version', lambda _: 'Yosys fixture')
+    monkeypatch.setattr(mod, '_container_image_digest', lambda _: 'sha256:' + '1' * 64)
+    def yosys(container, script, **kw):
+        text = Path(script).read_text()
+        calls.append(text)
+        if str(expected) not in text:
+            return True, "ERROR: Module `\\selected_dff' referenced in module `\\top' in cell `\\r' is not part of the design.\n"
+        return True, ('equiv_status: Found 4 $equiv cells in equiv:\n'
+                      'Of those cells 4 are proven and 0 are unproven.\n'
+                      'Equivalence successfully proven!\n')
+    monkeypatch.setattr(mod, 'run_yosys_equiv', yosys)
+    return calls
+
+
+def test_ordinary_step13_consumes_selected_library_and_current_subject(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    import design_one_shot_runner as D
+    import lec_equivalence_check as G
+    import librelane_contract as LC
+    p, lib, _, _, _ = _current_tool_handoff(tmp_path)
+    mod = _mod()
+    calls = _proof_edge(mod, monkeypatch, lib)
+    original = subprocess.run
+    def producer(argv, *a, **kw):
+        if len(argv) > 1 and str(argv[1]).endswith('lec_run.py'):
+            return SimpleNamespace(returncode=mod.main(argv[2:]), stdout='', stderr='')
+        return original(argv, *a, **kw)
+    monkeypatch.setattr(subprocess, 'run', producer)
+    rows = D.step_lec_equivalence(p, 'top', 'host')
+    assert rows[-1].status == 'PASS', rows[-1].detail
+    report = json.loads((p / 'reports/lec.json').read_text())
+    assert report['liberty'] == str(lib) and report['liberty_source'] == 'run_synth'
+    assert report['proof_identity']['liberty']['sha256'] == 'sha256:' + LC.digest(lib)
+    assert report['proof_identity']['gate_netlist']['sha256'] == 'sha256:' + LC.digest(p / 'phase2/stage2/synth/top_synth.v')
+    assert calls and all(str(lib) in s for s in calls)
+    assert G.main([str(p)]) == 0
+
+
+def test_refused_current_mapping_replaces_old_pass_before_proof(tmp_path, monkeypatch):
+    import json
+    p, lib, _, _, _ = _current_tool_handoff(tmp_path)
+    mod = _mod()
+    calls = _proof_edge(mod, monkeypatch, lib)
+    reports = p / 'reports'
+    reports.mkdir(exist_ok=True)
+    (reports / 'lec.json').write_text(json.dumps({'verdict': 'PASS', 'equivalent': True, 'compared_points': 4}))
+    lib.unlink()
+    assert mod.main([str(p), '--top', 'top', '--gate-netlist', 'phase2/stage2/synth/top_synth.v', '--container', 'host']) == 2
+    report = json.loads((reports / 'lec.json').read_text())
+    assert report['verdict'] == 'INCONCLUSIVE' and report['compared_points'] == 0
+    assert report['liberty_source'] == 'refused' and 'LL_LEC_LIB' in report['verdict_explanation']
+    assert calls == []
