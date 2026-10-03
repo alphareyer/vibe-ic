@@ -1,0 +1,26 @@
+[
+  {
+    "step": "phase2.lec_execution",
+    "design": "native tool namespace routing",
+    "bucket": "A",
+    "rule_name": "local_owner_namespace_selection",
+    "pattern": "A named container option must not send an in-image native consumer to an unreachable Docker namespace; record the filesystem actually read.",
+    "docstring": "Existing LOCAL route selection must reach both proof execution and metadata readers.",
+    "expected_signal": "AUTO-FIX",
+    "fix_action": "Reuse `local_exec_mode` at the `lec_run.py` entry and in `pdk_revision_resolve.py`; retain native supervision and name the selected filesystem in revision receipts.",
+    "owner": "programs/lec_run.py",
+    "related_owners": [
+      "programs/pdk_revision_resolve.py",
+      "programs/vibe_ic_one_shot_runner.py::_capture_pdk_revision"
+    ],
+    "before": "Current canonical LEC rc1/no report and PDK_REVISION_NOT_RECORDED despite native synthesis; pinned original controls4failed2passed.",
+    "after": "Pinned candidate6passed: original-input LEC reaches library stage without proof; actual image PDK capture and ordinary record reader succeed. Native Yosys version and watchdog probe pass.",
+    "evidence_packets": [
+      {
+        "name": "lec-revision-local-controls-r1.tar",
+        "sha256": "f3caa7a15560adebd5bbb772871f5e7c1f4d0a134e77e22b35a3134b50d7fe00"
+      }
+    ],
+    "remaining": "Actual original-input LEC verdict remains NOT_MEASURED; canonical005 wholeIC FAIL, original2expertfindings/D1NM remain; port source has a separate owner. LOCAL image fingerprint remains unavailable to LEC cache, which stays disabled. No acceptance claim."
+  }
+]

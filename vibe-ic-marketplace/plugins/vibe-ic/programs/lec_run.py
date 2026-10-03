@@ -3258,7 +3258,8 @@ def _docker(container: str, cmd: str, timeout: int = 120,
             # `design_one_shot_runner._run` already does after the same repair.
         )
         return subprocess.CompletedProcess(
-            _ce.docker_exec_argv(container, "bash", "-lc", cmd),
+            (["bash", "-lc", cmd] if container in ("", "host") else
+             _ce.docker_exec_argv(container, "bash", "-lc", cmd)),
             rc, out, err)
 
     if _dw is not None:
@@ -4944,6 +4945,7 @@ def _bound_synthesis_liberty(project: Path) -> Optional[str]:
     """
     import synth_handoff_netlist_check as handoff
     import librelane_contract as LC
+    from pdk_revision_resolve import Fs
 
     bound = handoff.bound_handoff(project)
     if bound is None:
@@ -4978,21 +4980,39 @@ def _bound_synthesis_liberty(project: Path) -> Optional[str]:
         library = Path(next(iter(libraries)))
         pdk, _ = LC.phase2_pdk(project)
         pdk_guest = guest_root / pdk
-        if not library.is_absolute() or '..' in library.parts or not library.is_relative_to(pdk_guest):
-            raise ValueError('cell library is outside the selected PDK')
-        candidates = []
-        for host, guest in roots['mounts_under_it']:
-            host, guest = Path(host), Path(guest)
+        if not library.is_absolute() or '..' in library.parts:
+            raise ValueError('cell library path is not absolute or contains traversal')
+        mounts = [(Path(host), Path(guest)) for host, guest in roots['mounts_under_it']]
+        for host, guest in mounts:
             if not host.is_absolute() or not guest.is_absolute():
                 raise ValueError('synthesis PDK mount is not absolute')
-            if library.is_relative_to(guest):
-                target = (host / library.relative_to(guest)).resolve()
+        fs = Fs(None)
+        def mapped_path(path):
+            candidates = []
+            for host, guest in mounts:
+                if not path.is_relative_to(guest):
+                    continue
+                resolved = fs.realpath(str(host / path.relative_to(guest)))
+                if not resolved:
+                    raise ValueError('selected synthesis PDK path is missing')
+                target = Path(resolved)
                 if not target.is_relative_to(host.resolve()):
-                    raise ValueError('cell library escapes its synthesis PDK mount')
+                    raise ValueError('selected synthesis PDK path escapes its mount')
                 candidates.append(target)
-        if len(candidates) != 1 or not candidates[0].is_file():
-            raise ValueError('selected synthesis cell library is missing or its mount is ambiguous')
-        return str(candidates[0])
+            if len(candidates) != 1:
+                raise ValueError('selected synthesis PDK path has missing or ambiguous mounts')
+            return candidates[0]
+        selected = mapped_path(pdk_guest)
+        target = mapped_path(library)
+        if not selected.is_dir() or not target.is_file():
+            raise ValueError('selected synthesis PDK or cell library is missing')
+        if not target.is_relative_to(selected):
+            raise ValueError('cell library is outside the resolved selected PDK')
+        recorded = receipt['input']['config_files'].get(str(library))
+        current = LC.config_file_hashes({'cell_library': str(library)}, mounts)
+        if not recorded or current.get(str(library)) != recorded:
+            raise ValueError('selected synthesis cell library hash is missing or changed')
+        return str(target)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, LC.Refusal) as exc:
         raise ValueError(f'LL_LEC_LIB_UNBOUND: {exc}') from exc
 
@@ -5469,7 +5489,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 1
 
-    container = args.container
+    container = "host" if _ce.local_exec_mode(PROGRAM) else args.container
     try:
         _reachable = _container_available(container)
     except _ce.ContainerImageMismatch as exc:

@@ -1,0 +1,22 @@
+[
+  {
+    "step": "phase2.lec_execution",
+    "bucket": "A",
+    "design": "receipt-bound library containment",
+    "rule_name": "physical_selected_pdk_library_identity",
+    "pattern": "A receipt-bound library can use the resolved installation path while the selected PDK root uses a symlink; project both through unambiguous declared mounts, compare physical containment and retain the recorded library digest.",
+    "docstring": "Physical selected-root containment must govern library binding rather than lexical alias prefixes.",
+    "expected_signal": "AUTO-FIX",
+    "fix_action": "Reuse `Fs.realpath` and `LC.config_file_hashes` in `_bound_synthesis_liberty`; preserve declared mount uniqueness, selected-root containment and recorded hash refusal.",
+    "owner": "programs/lec_run.py",
+    "before": "Actual original005 native LEC INCONCLUSIVE rc2,0proof attempts; frozen e7 controls5failed3passed.",
+    "after": "New pinned affected controls8passed including unchanged current native receipt binding; ordinary original005 proof not yet measured.",
+    "evidence_packets": [
+      {
+        "name": "lec-library-binding-controls-r1.tar",
+        "sha256": "808aa5f51d7da8d192e325fc9f7373d3fd84a1fcf368f2a768fa74e52ce2a954"
+      }
+    ],
+    "remaining": "Actual equivalence and independent source review pending; no synthesis replay, WEN/derivative/port source adoption, wholeIC or D1 claim."
+  }
+]

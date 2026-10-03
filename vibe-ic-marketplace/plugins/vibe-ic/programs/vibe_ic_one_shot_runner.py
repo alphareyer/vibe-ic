@@ -262,7 +262,7 @@ def _capture_pdk_revision(project: Path, container: str) -> Dict[str, Any]:
         trees, scanned = _prr.candidate_trees_from_run(project, fs)
         resolved = [_prr.resolve_tree(fs, t) for t in trees]
         rec = _prr.build_record(
-            resolved, f"container:{container}", "run tool logs",
+            resolved, f"container:{fs.container}" if fs.container else "host", "run tool logs",
             note=(f"derived from {scanned} tool log(s) under {project}; "
                   f"{len(trees)} tree(s) offered a declared-revision artefact"))
         if not trees:

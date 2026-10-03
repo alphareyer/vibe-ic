@@ -289,7 +289,8 @@ class Fs:
     """
 
     def __init__(self, container: Optional[str] = None) -> None:
-        self.container = container or None
+        self.container = (container or None) if not _ce.local_exec_mode(
+            "pdk_revision_resolve") else None
 
     # -- primitives ---------------------------------------------------------
     def _sh(self, script: str, timeout: int = _PROBE_TIMEOUT
@@ -849,7 +850,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     fs = Fs(args.container)
-    read_in = f"container:{args.container}" if args.container else "host"
+    read_in = f"container:{fs.container}" if fs.container else "host"
 
     trees: List[str] = list(args.tree)
     derived_from = "--tree"
