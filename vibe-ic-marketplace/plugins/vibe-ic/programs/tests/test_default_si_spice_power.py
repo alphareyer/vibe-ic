@@ -329,6 +329,8 @@ def test_real_declared_row_gate_consumes_the_current_report(tmp_path, monkeypatc
 
 def spice_produce(p, folder, lib, monkeypatch, *, verdict='PASS'):
     write(p / 'fixture_pdk/neutral/libs.tech/ngspice/model.sp', '.model neutral nmos level=1\n')
+    write(p / 'fixture_pdk/neutral/libs.tech/magic/neutral.magicrc', '# SOURCE_FIXTURE_ONLY Magic rules\n')
+    write(p / 'fixture_pdk/neutral/libs.tech/librelane/config.tcl', '# SOURCE_FIXTURE_ONLY PDK declaration\n')
     def run(project, image, root, pdk_name, **kwargs):
         detail = {}
         for variant in ('base', 'mutated'):
@@ -338,6 +340,8 @@ def spice_produce(p, folder, lib, monkeypatch, *, verdict='PASS'):
             deck = write(directory / 'path_1.sp', '* SOURCE_FIXTURE_ONLY tool deck\n.end\n')
             runnable = write(directory / 'path_1.run.sp', '* SOURCE_FIXTURE_ONLY simulator deck\n.end\n')
             sim_log = write(directory / 'path_1.log', 'SOURCE_FIXTURE_ONLY measured 1 ns\n')
+            for name in ('path_1.wave', 'path_1.rpt', 'path_1.run.subckt', 'models_ngspice.sp'):
+                write(directory / name, 'SOURCE_FIXTURE_ONLY ' + name + '\n')
             detail[variant] = {'sta_execution': {'tool': 'OpenSTA', 'rc': 0,
                 'argv': ['sta', '-exit', str(script)], 'script': str(script), 'log': str(sta_log)},
                 'paths': [{'deck': str(deck), 'status': 'MEASURED', 'spice_ns': 1,
@@ -364,7 +368,9 @@ def test_step30_ordinary_caller_adopts_the_existing_tool_product(tmp_path, monke
 
 
 @pytest.mark.parametrize('mutation', ['netlist', 'spef', 'sdc', 'liberty', 'corner', 'models',
-    'execution', 'report_replay', 'wrong_project', 'wrong_stage', 'wrong_path', 'consumption', 'declared_result'])
+    'execution', 'report_replay', 'wrong_project', 'wrong_stage', 'wrong_path', 'consumption',
+    'declared_result', 'waveform', 'path_report', 'subckt', 'generated_models',
+    'magicrc', 'pdk_flow_config', 'execution_identity'])
 def test_step30_gate_refuses_current_byte_and_consumer_mutations(tmp_path, monkeypatch, mutation):
     p, folder, lib = project(tmp_path)
     assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
@@ -387,6 +393,15 @@ def test_step30_gate_refuses_current_byte_and_consumer_mutations(tmp_path, monke
     elif mutation == 'report_replay':
         path = p / 'reports/phase3/spice_path_tool.json'
         path.write_text(path.read_text() + '\n ')
+    elif mutation in ('waveform', 'path_report', 'subckt', 'generated_models'):
+        name = {'waveform': 'path_1.wave', 'path_report': 'path_1.rpt',
+                'subckt': 'path_1.run.subckt', 'generated_models': 'models_ngspice.sp'}[mutation]
+        path = p / 'phase3/tool_arms/30/ngspice/base' / name
+        path.write_text(path.read_text() + '\n ')
+    elif mutation in ('magicrc', 'pdk_flow_config'):
+        relative = 'magic/neutral.magicrc' if mutation == 'magicrc' else 'librelane/config.tcl'
+        path = p / 'fixture_pdk/neutral/libs.tech' / relative
+        path.write_text(path.read_text() + '\n ')
     else:
         path = p / 'reports/phase3/spice_correlation.current.json'
         doc = json.loads(path.read_text())
@@ -396,6 +411,8 @@ def test_step30_gate_refuses_current_byte_and_consumer_mutations(tmp_path, monke
             doc['stage'] = 'pre_layout'
         elif mutation == 'wrong_path':
             doc['outputs'][0]['path'] = str(tmp_path / 'outside.sp')
+        elif mutation == 'execution_identity':
+            doc['execution'][0]['argv'][0] = 'foreign_tool'
         else:
             doc['outputs'] = []
         put(path, doc)
@@ -408,3 +425,89 @@ def test_step30_current_measured_fail_is_still_fail(tmp_path, monkeypatch):
     assert result['status'] == 'RAN'
     assert SC.main([str(p), '--json', str(p / 'spice-gate.json')]) == 1
     assert json.loads((p / 'spice-gate.json').read_text())['summary']['measurement'] == 'MEASURED'
+
+
+def bounded_step30_caller():
+    """Execute the actual Step30 caller block and its existing StepResult exit.
+
+    Unrelated physical steps are outside this declared source fixture. Both
+    the frozen parent's caller and the candidate's caller can run this slice.
+    """
+    import ast
+    import inspect
+    import textwrap
+    source = inspect.getsource(R.step_canonicalize_artefacts)
+    start = next(source.index(marker) for marker in (
+        '    # Step 30 is BLOCKING:', '    # T106: step 30\'s tool arm') if marker in source)
+    block = source[start:source.index('    # --- Step 32b:', start)]
+    function = ast.parse(source).body[0]
+    stop = next(node for node in function.body if isinstance(node, ast.If)
+                and isinstance(node.test, ast.Name) and node.test.id == 'signoff_failures')
+    success = function.body[function.body.index(stop) + 1]
+    exits = ast.unparse(ast.Module(body=[stop, success], type_ignores=[]))
+    body = ('t0 = time.time()\nwritten = []\nnotes = []\nsignoff_failures = []\n'
+            + textwrap.dedent(block) + '\n' + exits)
+    namespace = dict(vars(R))
+    exec('def bounded(project, pdk, container=""):\n' + textwrap.indent(body, '    '), namespace)
+    return namespace['bounded']
+
+
+@pytest.mark.parametrize('verdict', ['PASS', 'FAIL'])
+def test_step30_ordinary_phase3_caller_consumes_declared_gate_and_blocks(tmp_path, monkeypatch, verdict):
+    import yaml
+    flow = yaml.safe_load(require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                                      'flow', 'phase1_phase2_phase3.yaml').read_text())
+    row = next(row for row in flow['steps'] if str(row['id']) == '30')
+    command = next(clause['program_exit_zero'] for clause in row['gate']['all_of']
+                   if 'program_exit_zero' in clause)
+    assert command.startswith('spice_correlation_check . --json ')
+    p, folder, lib = project(tmp_path)
+    # A pre-existing report deliberately exercises the parent's presence bypass.
+    assert spice_produce(p, folder, lib, monkeypatch, verdict=verdict)['status'] == 'RAN'
+    calls = []
+    producer, consumer = SC.run_installed_pdk_path_correlation, SC.main
+    def produce(*args, **kwargs):
+        calls.append('producer')
+        return producer(*args, **kwargs)
+    def consume(*args, **kwargs):
+        calls.append('consumer')
+        return consumer(*args, **kwargs)
+    monkeypatch.setattr(SC, 'run_installed_pdk_path_correlation', produce)
+    monkeypatch.setattr(SC, 'main', consume)
+    result = bounded_step30_caller()(p, pdk(lib))
+    assert result.status == verdict, result
+    assert calls == ['producer', 'consumer']
+    gate = json.loads((p / command.split('--json ')[1]).read_text())
+    assert gate['summary']['measurement'] == 'MEASURED'
+    assert gate['summary']['verdict'] == verdict
+    assert gate['passed'] == (verdict == 'PASS')
+
+
+def test_step30_ordinary_phase3_caller_blocks_current_subject_drift(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
+    producer = SC.run_installed_pdk_path_correlation
+    def produce(*args, **kwargs):
+        result = producer(*args, **kwargs)
+        path = p / 'phase3/stage3/extracted/neutral.spef'
+        path.write_text(path.read_text() + '\n ')
+        return result
+    monkeypatch.setattr(SC, 'run_installed_pdk_path_correlation', produce)
+    result = bounded_step30_caller()(p, pdk(lib))
+    assert result.status == 'FAIL', result
+    gate = json.loads((p / 'reports/phase2/gates/spice_correlation.json').read_text())
+    assert gate['summary']['current_binding'] == 'REFUSED'
+
+
+def test_step30_ordinary_phase3_refusal_retires_previous_current_pass(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
+    def absent_image(*args, **kwargs):
+        raise LC.Refusal('LL_IMAGE_ABSENT', 'SOURCE_FIXTURE_ONLY native image unavailable')
+    monkeypatch.setattr(LC, 'resolve_image', absent_image)
+    result = bounded_step30_caller()(p, pdk(lib))
+    assert result.status == 'FAIL', result
+    report = json.loads((p / 'reports/phase3/spice_correlation.json').read_text())
+    assert report['verdict'] == 'NOT_MEASURED'
+    assert not (p / 'reports/phase3/spice_correlation.current.json').exists()
+    assert not (p / 'phase3/stage3/spice/correlation.spice').exists()

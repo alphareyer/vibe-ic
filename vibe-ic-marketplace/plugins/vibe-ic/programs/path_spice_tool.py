@@ -457,6 +457,9 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
     out.write_text('* vibe-ic step 30: cells extracted from the declared layout\n'
                    + '\n'.join(body) + '\n')
     return {'path': str(out), 'magic_rc': run.returncode, 'magicrc': magicrc,
+            'magic_execution': {'tool': 'Magic', 'rc': run.returncode,
+                'argv': ['magic', '-dnull', '-noconsole', '-rcfile', magicrc, str(tcl)],
+                'script': str(tcl), 'log': str(work / 'magic.log')},
             'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept}
 
 
@@ -805,7 +808,8 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
         got = measure(deck, simulator, parsed, header)
         row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9,
                    simulator_execution={'tool': simulator, 'rc': sim.returncode,
-                       'argv': [simulator, str(deck.with_suffix('.run.sp'))],
+                       'argv': (['ngspice', '-b'] if simulator == 'ngspice' else ['Xyce'])
+                               + [str(deck.with_suffix('.run.sp'))],
                        'script': str(deck.with_suffix('.run.sp')),
                        'log': str(deck.with_suffix('.log'))})
         if sim.returncode != 0:
@@ -1047,8 +1051,14 @@ def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
         ('sta_state', folder / 'state_out.json'), ('sta_config', folder / 'config.json'),
         ('sta_receipt', folder / 'vibeic_receipt.json'), ('step23_record', project / lp.STEP23_RECORD),
         ('sta_corner_log', folder / corner / 'sta.log')]]
-    sources = {str(path.resolve()): current.digest(path) for path in
-               (pdk_root / pdk / 'libs.tech/ngspice').rglob('*') if path.is_file()}
+    sources = {str(path.resolve()): current.digest(path)
+               for directory in ('ngspice', 'magic')
+               for path in (pdk_root / pdk / 'libs.tech' / directory).rglob('*')
+               if path.is_file()}
+    for relative in _PDK_FLOW_CONFIGS:
+        path = pdk_root / pdk / relative
+        if path.is_file():
+            sources[str(path.resolve())] = current.digest(path)
     for name in ('CELL_SPICE_MODELS', 'PAD_SPICE_MODELS', 'CELL_GDS'):
         for path in config.get(name) or []:
             source = host(path).resolve(strict=True)
@@ -1061,6 +1071,49 @@ def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
                      'corner': corner, 'sources': sources}
 
 
+def _current_products(project: Path, tool: dict):
+    """Bind native path reports, extracted subckts, models and waveforms too.
+
+    These are the files the existing producer consumed to derive its result;
+    a deck alone does not bind its included circuit or measured samples.
+    """
+    root = project / 'phase3/tool_arms/30'
+    products = []
+    for simulator, arm in tool['detail'].items():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            execution = data.get('sta_execution')
+            if not execution:
+                continue
+            directory = root / simulator / variant
+            if Path(execution['script']) != directory / 'arm.tcl':
+                raise Refusal('CURRENT_STEP30_PATH_EXECUTION_MISMATCH', str(execution))
+            products += [('product:' + str(path.relative_to(root)), path)
+                         for path in sorted(directory.rglob('*')) if path.is_file()]
+        mutation = arm.get('mutation') or {}
+        if mutation.get('path'):
+            path = root / simulator / 'mutated.spef'
+            if Path(mutation['path']) != path:
+                raise Refusal('CURRENT_STEP30_MUTATION_PATH_MISMATCH', str(mutation))
+            products.append(('product:' + str(path.relative_to(root)), path))
+    return products
+
+
+def _current_executions(tool: dict):
+    executions = []
+    for arm in tool['detail'].values():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            extraction = ((data.get('cells') or {}).get('cell_view') or {}).get('magic_execution')
+            if extraction:
+                executions.append(extraction)
+            if data.get('sta_execution'):
+                executions.append(data['sta_execution'])
+            executions += [row['simulator_execution'] for row in data.get('paths') or []
+                           if row.get('simulator_execution')]
+    return executions
+
+
 def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     """Ordinary Step 30: existing write_path_spice route, one native simulator.
 
@@ -1071,21 +1124,20 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     project = Path(project).resolve(strict=True)
     report = project / 'reports/phase3/spice_correlation.json'
     receipt_path = report.with_suffix('.current.json')
-    for path in (report, receipt_path):
+    canonical_deck = project / 'phase3/stage3/spice/correlation.spice'
+    canonical_log = canonical_deck.with_suffix('.log')
+    for path in (report, receipt_path, canonical_deck, canonical_log,
+                 canonical_deck.with_suffix('.json')):
         path.unlink(missing_ok=True)
     subject, context = current_context(project, image, pdk_root, pdk)
     tool = run_step30(project, image, pdk_root, pdk, paths=1, simulators=('ngspice',))
     if current_context(project, image, pdk_root, pdk) != (subject, context):
         raise Refusal('CURRENT_STEP30_INPUT_CHANGED_DURING_RUN', str(project))
-    executions, outputs = [], []
+    executions, outputs = _current_executions(tool), []
     for arm in tool['detail'].values():
         for variant in ('base', 'mutated'):
             data = arm.get(variant) or {}
-            if data.get('sta_execution'):
-                executions.append(data['sta_execution'])
             for row in data.get('paths') or []:
-                if row.get('simulator_execution'):
-                    executions.append(row['simulator_execution'])
                 if row.get('deck'):
                     outputs.append(('deck:' + variant, Path(row['deck'])))
     # A known measured FAIL remains a failed measurement; absence is named.
@@ -1101,8 +1153,6 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     first_sim = next((ex for ex in executions if ex['tool'] == 'ngspice'), None)
     if first_deck is None or first_sim is None:
         raise Refusal('CURRENT_STEP30_CORRELATION_PRODUCT_MISSING', str(project))
-    canonical_deck = project / 'phase3/stage3/spice/correlation.spice'
-    canonical_log = canonical_deck.with_suffix('.log')
     canonical_deck.parent.mkdir(parents=True, exist_ok=True)
     canonical_deck.write_bytes(first_deck.read_bytes())
     canonical_log.write_bytes(Path(first_sim['log']).read_bytes())
@@ -1114,6 +1164,7 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     write_json(declared_result, doc)
     outputs += [('declared_result', declared_result)]
     outputs += [('tool_result', project / 'reports/phase3/spice_path_tool.json'), ('correlation', report)]
+    outputs += _current_products(project, tool)
     receipt = {**subject, 'schema': 'step30-current-v1', 'step': '30', 'context': context,
                'execution': executions, 'execution_files': execution_files,
                'outputs': [current.file_record(path, role, project) for role, path in outputs]}
@@ -1153,6 +1204,11 @@ def validate_current_step30(project: Path):
     if outputs.get('correlation') != str(report) or outputs.get('tool_result') != str(project / 'reports/phase3/spice_path_tool.json'):
         raise Refusal('CURRENT_STEP30_RESULT_CONSUMPTION_MISSING', str(report))
     tool = _load(project / 'reports/phase3/spice_path_tool.json')
+    if executions != _current_executions(tool):
+        raise Refusal('CURRENT_STEP30_EXECUTION_ADOPTION_MISMATCH', str(report))
+    products = {role: str(path) for role, path in _current_products(project, tool)}
+    if {role: path for role, path in outputs.items() if role.startswith('product:')} != products:
+        raise Refusal('CURRENT_STEP30_NATIVE_PRODUCTS_MISMATCH', str(report))
     doc = _load(report)
     if any(doc.get(k) != v for k, v in tool.items()):
         raise Refusal('CURRENT_STEP30_ADOPTION_MISMATCH', str(report))

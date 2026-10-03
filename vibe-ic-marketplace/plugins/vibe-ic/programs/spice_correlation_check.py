@@ -2959,6 +2959,15 @@ def run_installed_pdk_path_correlation(project: Path, liberty_path: str,
     import path_spice_tool as pst
     import librelane_postroute as lp
     project = Path(project)
+    # Retire this row's previous publication before resolving native inputs.
+    # A refusal before run_current_step30 must not leave an older PASS visible.
+    for relative in ('reports/phase3/spice_path_tool.json',
+                     'reports/phase3/spice_correlation.json',
+                     'reports/phase3/spice_correlation.current.json',
+                     'phase3/stage3/spice/correlation.json',
+                     'phase3/stage3/spice/correlation.spice',
+                     'phase3/stage3/spice/correlation.log'):
+        (project / relative).unlink(missing_ok=True)
     try:
         image = lc.resolve_image(project)
         folder, _ = lp.stapostpnr_state(project)

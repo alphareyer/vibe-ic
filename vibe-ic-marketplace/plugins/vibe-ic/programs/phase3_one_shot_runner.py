@@ -63607,102 +63607,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             if _pls_json.is_file():
                 written.append(str(_pls_json))
 
-    # T106: step 30's tool arm (OpenSTA write_path_spice on the STAPostPNR
-    # corner step 23 recorded), opt-in; recorded beside the direct gate, which
-    # still reads the direct record (not cut over).
-    from librelane_contract import selected_mode as _ll_mode30
-    if _ll_mode30(project, "30") != "direct":
-        _step30_tool_arm(project, pdk, written, notes)
-    # --- Step 30: transistor-level critical-path correlation ---------------
-    # The active PDK configuration supplies Liberty. The producer discovers
-    # its sibling cell SPICE + device model section at runtime, extracts the
-    # STA critical cone, simulates it in ngspice, and compares the measured
-    # delay with the Liberty+SPEF incremental delay from that same path. The
-    # tolerance is derived from the local Liberty NLDM grid cells; no fixed or
-    # design-tuned percentage is accepted.
-    spice_out = project / "phase3/stage3/spice"
-    spice_skip = spice_out / "spice_correlation_not_run.json"
-    _spice_corr_ran = False
-    _spice_driver_result: Dict[str, object] = {
-        "status": "ERROR", "reason": "SPICE producer not invoked"}
-    if not (project / "reports/phase3/spice_correlation.json").is_file():
-        try:
-            import spice_correlation_check as _scc
-            _active_liberty = _to_container_path(str(pdk.liberty), container)
-            _spice_driver_result = _scc.run_installed_pdk_path_correlation(
-                project, liberty_path=_active_liberty, container=container)
-            if _spice_driver_result.get("status") == "RAN":
-                _spice_corr_ran = True
-                written.extend([
-                    str(project / "reports/phase3/spice_correlation.json"),
-                    str(spice_out / "correlation.spice"),
-                    str(spice_out / "correlation.log"),
-                ])
-            else:
-                # Compatibility for an explicitly staged private bridge. It
-                # remains secondary; installed PDKs never need this branch.
-                _scc_rep = _scc.run_commercial_pdk_cell_correlation(
-                    project, container=container)
-                if _scc_rep is not None:
-                    _spice_corr_ran = True
-                    _spice_driver_result = {"status": "RAN",
-                                            "legacy_bridge": True}
-                    written.append(
-                        str(project / "reports/phase3/spice_correlation.json"))
-        except Exception as _scc_exc:
-            _spice_driver_result = {"status": "ERROR",
-                                    "reason": f"driver raised: {_scc_exc}"}
-            notes.append(f"SPICE correlation driver failed: {_scc_exc}")
-    else:
-        _spice_corr_ran = True
-    _spice_have = _spice_corr_ran or (
-                   any(spice_out.glob("*.sp")) or any(spice_out.glob("*.spice"))
-                   or any((project / "sim_spice").glob("*.sp"))
-                   if spice_out.is_dir() or (project / "sim_spice").is_dir()
-                   else False)
-    if _spice_corr_ran and spice_skip.is_file():
-        spice_skip.unlink()
-    if not _spice_have and not spice_skip.is_file():
-        spice_out.mkdir(parents=True, exist_ok=True)
-        _spice_cap_flag, _spice_reason = \
-            _spice_correlation_skip_disclosure(_spice_driver_result)
-        _tool_absent = bool(_spice_cap_flag)
-        _payload = {
-            "verdict": "SKIPPED-CONDITION" if _tool_absent else "ERROR",
-            "reason": _spice_reason,
-            "design_identity": _design_identity_fields(project),
-            "advisory_approximation": {
-                "post_route_sta_signoff": True,
-                "lvs_extracted_netlist_present": bool(
-                    list((project / "phase3/stage3/extracted").glob("*.sp"))
-                    if (project / "phase3/stage3/extracted").is_dir() else []),
-            },
-        }
-        if _tool_absent:
-            _payload["capability_flag"] = _spice_cap_flag
-            _payload["skips_required_output"] = [
-                "phase3/stage3/spice/correlation.json",
-                "reports/phase3/spice_correlation.json",
-            ]
-        spice_skip.write_text(json.dumps(_payload, indent=2) + "\n")
-        written.append(str(spice_skip))
-        # R-0915-43 — THE DECLARED HALF OF STEP 30 IS NEVER SILENT EITHER.
-        #
-        # `spice_correlation_not_run.json` is this runner's own disclosure and
-        # carries `skips_required_output` for the #675 promoter, but it is NOT
-        # one of step 30's declared outputs. MEASURED on sha256 run11: the
-        # driver reached a real conclusion — "Liberty grid tolerance could not
-        # be derived", an implemented-capability failure, not a capability gap
-        # — and `phase3/stage3/spice/correlation.json` did not exist. A reader
-        # of the declared record saw nothing at all.
-        #
-        # The SAME payload goes to the declared path: one refusal, two names,
-        # so the disclosure and the declared record cannot disagree about why
-        # the correlation did not happen.
-        _spice_declared = spice_out / "correlation.json"
-        if not _spice_declared.is_file():
-            _spice_declared.write_text(json.dumps(_payload, indent=2) + "\n")
-            written.append(str(_spice_declared))
+    # Step 30 is BLOCKING: the existing tool producer runs on the current
+    # STAPostPNR subject, then the declared strict consumer reads its receipt.
+    if not _step30_tool_arm(project, pdk, written, notes, container=container):
+        signoff_failures.append("step 30 current SPICE correlation refused or failed")
 
     # --- Step 32b: post-route timing repair TCL (ORGANIC #561) ----------------
     # Emit the standalone multi-corner-aware OpenROAD post-route timing-repair script
@@ -69852,26 +69760,37 @@ def _spice_correlation_skip_disclosure(
 
 
 def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
-                     notes: List[str]) -> None:
-    """Step 30 on the tool (T106): `path_spice_tool.run_step30` -- the tool's
-    SPEF-annotated path decks in ngspice and Xyce, the Liberty-grid tolerance
-    and the SPEF-mutation control -- to `reports/phase3/spice_path_tool.json`."""
-    import librelane_contract as _ll
-    import path_spice_tool as _pst
+                     notes: List[str], *, container: str = "") -> bool:
+    """BLOCKING ordinary Step 30; adopt the existing producer and strict gate.
+
+    Existing reports and mode flags cannot bypass a current execution. A
+    measured mismatch and an unmeasured refusal both stop signoff success.
+    """
+    import spice_correlation_check as _scc
     try:
-        image = _ll.resolve_image(project)
-        try:
-            root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
-        except _ll.Refusal as exc:
-            raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
-                              else "LL_PDK_ROOT_NOT_DECLARED",
-                              f"step 30 on LibreLane: {exc}") from None
-        doc = _pst.run_step30(project, image, Path(root), pdk.name)
-        written.append(str(project / "reports/phase3/spice_path_tool.json"))
-        notes.append("step 30 write_path_spice arm: " + ", ".join(
-            f"{s}={j['verdict']}" for s, j in doc["arms"].items()))
-    except Exception as exc:  # a refusal names itself; nothing falls back
-        notes.append(f"step 30 LibreLane: {exc}")
+        produced = _scc.run_installed_pdk_path_correlation(
+            project, liberty_path=str(pdk.liberty), container=container)
+    except Exception as exc:
+        produced = _scc._persist_declared_refusal(project, {
+            "status": "ERROR", "measurement": "NOT_MEASURED", "reason": str(exc)})
+    gate = project / "reports/phase2/gates/spice_correlation.json"
+    gate_rc = _scc.main([str(project), "--json", str(gate)])
+    notes.append(f"step 30 current write_path_spice: {produced.get('verdict', produced.get('status'))}; "
+                 f"strict consumer rc={gate_rc}; {produced.get('reason', '')}")
+    if produced.get("status") == "RAN":
+        (project / "phase3/stage3/spice/spice_correlation_not_run.json").unlink(missing_ok=True)
+    for relative in ("reports/phase3/spice_path_tool.json",
+                     "reports/phase3/spice_correlation.json",
+                     "reports/phase3/spice_correlation.current.json",
+                     "phase3/stage3/spice/correlation.json",
+                     "phase3/stage3/spice/correlation.spice",
+                     "phase3/stage3/spice/correlation.log",
+                     "phase3/stage3/spice/spice_correlation_not_run.json",
+                     "reports/phase2/gates/spice_correlation.json"):
+        path = project / relative
+        if path.is_file():
+            written.append(str(path))
+    return produced.get("status") == "RAN" and gate_rc == 0
 
 
 def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
