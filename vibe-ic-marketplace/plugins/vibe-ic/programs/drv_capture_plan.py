@@ -85,6 +85,58 @@ def _run_path(project: Path, value: str) -> Path:
     return project / path if not path.is_absolute() else path
 
 
+def _current_routed_identity(project: Path, recorded: Path) -> tuple[Path, str] | None:
+    """Return the current deck-owned netlist path and its link subject.
+
+    Handoff receipts can retain a predecessor state's absolute netlist path
+    after the same routed bytes were adopted under ``stage3/pnr``.  The
+    The direct STA deck's own ``read_verilog`` and ``link_design`` commands
+    are the canonical producer contract for both fields.  Accept that
+    identity only when setup and hold agree and the candidate bytes equal the
+    recorded state digest.  Any missing, malformed, disagreeing, or changed
+    input keeps the strict refusal path in force.
+    """
+    paths = []
+    sta_dir = project / "phase3/stage3/sta"
+    for kind in ("setup", "hold"):
+        deck = sta_dir / f"sta_mcorner_ocv_{kind}.tcl"
+        try:
+            reads = []
+            tops = []
+            for line in deck.read_text().splitlines():
+                words = line.strip().split()
+                if len(words) != 2:
+                    continue
+                if words[0] == "read_verilog":
+                    reads.append(words[1].strip("{}"))
+                elif words[0] == "link_design":
+                    tops.append(words[1].strip("{}"))
+        except OSError:
+            return None
+        if len(reads) != 1 or len(tops) != 1:
+            return None
+        candidate = _run_path(project, reads[0])
+        if not candidate.is_file():
+            return None
+        paths.append((candidate, tops[0]))
+    if len(paths) != 2 or paths[0] != paths[1]:
+        return None
+    try:
+        if _sha(paths[0][0]) != _sha(recorded):
+            return None
+    except OSError:
+        return None
+    return paths[0]
+
+
+def _current_routed_netlist(project: Path, recorded: Path) -> Path:
+    """Bind only the path portion of the current deck-owned identity."""
+    identity = _current_routed_identity(project, recorded)
+    if identity is None:
+        return recorded
+    return identity[0]
+
+
 def _state(project: Path, final_state: dict | None = None) -> tuple[dict, Path]:
     if final_state is not None:
         final = final_state.get("final") or {}
@@ -513,8 +565,13 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     if resolution["derivation"]["image_id"] != provenance["derivation"]["image_id"]:
         raise ValueError("final STA PDK image differs from run provenance")
     root = Path(resolution["path"])
-    netlist = _run_path(project, state["nl"])
-    top = netlist.name.removesuffix(".nl.v")
+    recorded_netlist = _run_path(project, state["nl"])
+    routed_identity = _current_routed_identity(project, recorded_netlist)
+    if routed_identity is None:
+        netlist = recorded_netlist
+        top = netlist.name.removesuffix(".nl.v")
+    else:
+        netlist, top = routed_identity
     state_def = _ref(_run_path(project, state["def"]))
     if final_state is None:
         # After handoff the canonical routed DEF must be the layout the final

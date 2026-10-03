@@ -80,8 +80,10 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
         mounts.extend(("-v", f"{root}:{root}"))
     name = _docker_watchdog.ephemeral_container_name("vibeic_drv_sta")
     raw = script.with_suffix(".tool.log")
+    cidfile = script.with_suffix(".container.cid")
     argv = ["docker", "run", *_docker_memory.docker_memory_flags(),
-            "--rm", "--name", name,
+            "--rm", "--network", "none", "--cidfile", str(cidfile),
+            "--name", name,
             *mounts, image, "--skip", "bash", "-c",
             f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
     if "--memory" not in argv:
