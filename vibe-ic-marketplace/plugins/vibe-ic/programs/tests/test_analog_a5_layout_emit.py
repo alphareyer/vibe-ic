@@ -287,6 +287,28 @@ class FakeStage:
         pass
 
 
+class CielSky130Stage(FakeStage):
+    """A Ciel sky130A tree: consolidated Tcl/tech filenames only."""
+
+    CIEL_TECH = (
+        DRC_TECH + MAGIC_TECH
+    )
+
+    def sh(self, cmd, timeout=900):
+        if cmd.startswith("cat "):
+            path = cmd.split(None, 1)[1].strip("'\"")
+            if path.endswith("sky130A-fet.tcl") or \
+                    path.endswith("sky130A-drc.tech"):
+                return 1, "", "cat: no such file"
+            if path.endswith("/sky130A.tcl"):
+                return 0, FET_TCL + RES_TCL, ""
+            if path.endswith("/sky130A.tech"):
+                return 0, self.CIEL_TECH, ""
+        if cmd.startswith("ls "):
+            return 0, "/pdk/sky130A/libs.tech/magic/sky130A.tcl\n", ""
+        return super().sh(cmd, timeout)
+
+
 def _project(tmp_path: Path, netlist: str, block: str = "blk") -> Path:
     d = tmp_path / "proj" / "phase3" / "analog" / block
     d.mkdir(parents=True)
@@ -308,6 +330,15 @@ def _run(monkeypatch, project: Path, stage: FakeStage, *extra):
                    "--drc-tech", "/pdk/x-drc.tech",
                    "--json", str(out), *extra])
     return rc, json.loads(out.read_text()) if out.is_file() else {}
+
+
+def test_default_ciel_resolver_uses_consolidated_pdk_files():
+    stage = CielSky130Stage()
+    facts, why = A5E.read_pdk(stage, "/pdk", "sky130A", None, None)
+    assert facts is not None, why
+    assert facts.sources["gencell_tcl"].endswith("/sky130A.tcl")
+    assert facts.sources["drc_tech"].endswith("/sky130A.tech")
+    assert facts.m1_space_um == 0.18
 
 
 # A device the PDK permits and this emitter has never drawn: the round-20

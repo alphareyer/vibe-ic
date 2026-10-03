@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import analog_a8_hardmacro_emit as E  # noqa: E402
@@ -224,6 +226,21 @@ def test_the_lef_write_carries_a_marker_from_its_own_argv(tmp_path: Path,
     (b / "topology.json").write_text(json.dumps(
         {"ports": ["vdd", "vss", "vin"], "rails": {"p": "vdd", "n": "vss"}}))
     monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/x.magicrc")
+    monkeypatch.setattr(E, "load_native_measurement", lambda *a, **k: ({
+        "liberty_value": 1.0,
+        "liberty_power_unit": "1uW",
+        "measurement_sha256": "m" * 64,
+        "metric": "cell_leakage_power",
+        "value": 1.0,
+        "unit": "uW",
+        "provenance": "real_ngspice",
+        "source_netlist": "phase3/analog/blk/post_layout_extracted.spice",
+        "source_netlist_sha256": "n" * 64,
+        "native_log": "phase3/analog/blk/a8_native_measurement.ngspice.log",
+        "native_log_sha256": "l" * 64,
+        "simulator": "ngspice-47",
+        "image_digest": "sha256:" + "a" * 64,
+    }, ""))
     calls = []
 
     def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
@@ -322,3 +339,300 @@ def test_a_role_the_table_cannot_place_is_left_alone():
 def test_no_rails_declared_is_a_no_op():
     out, n = E.annotate_pg_pins(_PG_LEF, {})
     assert n == 0 and out == _PG_LEF
+
+
+def _write_native_measurement_fixture(tmp_path: Path, *, value=0.5,
+                                       unit="mW", declared_ports=None):
+    project = tmp_path / "proj"
+    b = project / "phase3" / "analog" / "blk"
+    b.mkdir(parents=True)
+    (project / "phase3" / "analog" / "analog_block_list.json").write_text(
+        json.dumps({"blocks": ["blk"]}))
+    (b / "layout.mag").write_text("magic\ntech sky130A\n")
+    gds = b / "blk.gds"
+    gds.write_bytes(b"real-gds-bytes")
+    net = b / "post_layout_extracted.spice"
+    net.write_text(".subckt blk vdd vss vin vout\n.ends blk\n")
+    log = b / "a8_native_measurement.ngspice.log"
+    log.write_text("ngspice-47\npwr = 0.0005\n")
+    topo = {"ports": ["vdd", "vss", "vin", "vout"],
+            "rails": {"vdd": "vdd", "vss": "vss"}}
+    (b / "topology.json").write_text(json.dumps(topo))
+    rec = {
+        "schema": E._A8_MEASUREMENT_SCHEMA,
+        "status": "MEASURED",
+        "block": "blk",
+        "metric": "cell_leakage_power",
+        "value": value,
+        "unit": unit,
+        "provenance": "real_ngspice",
+        "simulator": "ngspice-47",
+        "image_digest": "sha256:" + "a" * 64,
+        "declared_ports": (declared_ports if declared_ports is not None
+                            else topo["ports"]),
+        "source_layout": "phase3/analog/blk/layout.mag",
+        "source_layout_sha256": E._sha256(b / "layout.mag"),
+        "source_gds": "phase3/analog/blk/blk.gds",
+        "source_gds_sha256": E._sha256(gds),
+        "source_netlist": "phase3/analog/blk/post_layout_extracted.spice",
+        "source_netlist_sha256": E._sha256(net),
+        "native_log": "phase3/analog/blk/a8_native_measurement.ngspice.log",
+        "native_log_sha256": E._sha256(log),
+    }
+    (b / E._A8_MEASUREMENT).write_text(json.dumps(rec))
+    return project, b, topo
+
+
+def test_missing_native_measurement_refuses_before_magic(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    (b / E._A8_MEASUREMENT).unlink()
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "native ngspice measurement" in why
+
+
+def test_stale_native_measurement_refuses(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    (b / "blk.gds").write_bytes(b"mutated-after-measurement")
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "source_gds_sha256" in why
+
+
+def test_native_measurement_value_must_match_native_log(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(
+        tmp_path, value=0.0009, unit="W")
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "does not match native" in why
+
+
+@pytest.mark.parametrize("value,unit", [
+    (0.0005, "W"), (0.5, "mW"), (500, "uW"),
+    (500000, "nW"), (500000000, "pW"),
+])
+def test_native_measurement_units_preserve_matching_positive(tmp_path: Path,
+                                                             value, unit):
+    project, b, topo = _write_native_measurement_fixture(
+        tmp_path, value=value, unit=unit)
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is not None, why
+    assert got["liberty_value"] == pytest.approx(500)
+
+
+def test_loader_rejects_wrong_extraction_top_even_with_current_hash(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    net = b / "post_layout_extracted.spice"
+    net.write_text(".subckt wrong_block vdd vss vin vout\n.ends wrong_block\n")
+    path = b / E._A8_MEASUREMENT
+    rec = json.loads(path.read_text())
+    rec["source_netlist_sha256"] = E._sha256(net)
+    path.write_text(json.dumps(rec))
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "exact declared top-cell" in why
+
+
+def test_declared_a3_subject_binding_is_emitted_by_a8(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    (b / "spec.json").write_text(json.dumps({
+        "block": "blk",
+        "interface": {"pins": [{"name": p} for p in topo["ports"]]},
+    }))
+    a3 = b / "blk.sp"
+    a3.write_text("* A3 netlist\n")
+    sidecar = b / "netlist_provenance.json"
+    sidecar.write_text(json.dumps({
+        "block": "blk",
+        "_provenance": {
+            "design_content": "structure_and_geometry",
+            "rendered_from": {
+                "topology_json": {
+                    "path": "phase3/analog/blk/topology.json",
+                    "sha256": E._sha256(b / "topology.json"),
+                },
+                "spec_json": {
+                    "path": "phase3/analog/blk/spec.json",
+                    "sha256": E._sha256(b / "spec.json"),
+                },
+            },
+            "artifact_sha256": E._sha256(a3),
+        },
+    }))
+    measurement, why = E.load_native_measurement(
+        project, "blk", b / "blk.gds", topo)
+    assert measurement is not None, why
+    bound, why = E._attach_declared_subject_binding(
+        project, "blk", topo, measurement)
+    assert bound is not None, why
+    assert bound["design_content"] == "structure_and_geometry"
+    binding = bound["subject_binding"]
+    assert binding["block"] == "blk"
+    assert binding["a3_netlist"] == "phase3/analog/blk/blk.sp"
+    saved = json.loads((b / E._A8_MEASUREMENT).read_text())
+    assert saved["subject_binding"] == binding
+
+
+def test_missing_declared_a3_subject_stays_unbound(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    measurement, why = E.load_native_measurement(
+        project, "blk", b / "blk.gds", topo)
+    assert measurement is not None, why
+    same, why = E._attach_declared_subject_binding(
+        project, "blk", topo, measurement)
+    assert same is not None and "netlist_provenance" in why
+    saved = json.loads((b / E._A8_MEASUREMENT).read_text())
+    assert "subject_binding" not in saved and "design_content" not in saved
+
+
+def test_extraction_requires_exact_declared_top_cell(tmp_path: Path,
+                                                    monkeypatch):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    (b / E._A8_MEASUREMENT).unlink()
+    monkeypatch.setattr(E, "layout_tech", lambda _b: "sky130A")
+    monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/sky130A.magicrc")
+    monkeypatch.setattr(E, "_native_model_contract", lambda *a, **k: (
+        {"path": "/pdk/models.lib", "section": "mos_tt",
+         "sha256": "a" * 64}, ""))
+    monkeypatch.setattr(E, "_native_ngspice_binary",
+                        lambda *a, **k: ("/usr/bin/ngspice", ""))
+    monkeypatch.setattr(E, "_runtime_image_digest",
+                        lambda *a, **k: ("sha256:" + "b" * 64, ""))
+    monkeypatch.setattr(E._mx, "build_extraction_tcl",
+                        lambda *a, **k: "extract")
+
+    def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
+        if "magic" in cmd:
+            stage = b / ".a8_native_stage"
+            stage.mkdir(parents=True, exist_ok=True)
+            (stage / "blk_extracted.spice").write_text(
+                ".subckt wrong_block vdd vss vin vout\n.ends wrong_block\n")
+            return 0, "Cell wrong_block read from current working directory\n", ""
+        raise AssertionError("ngspice must not run after wrong top-cell refusal")
+
+    monkeypatch.setattr(E, "_docker_exec", fake_exec)
+    rec, why = E._native_measurement_produce(
+        project, "blk", "container", "/pdk", b / "blk.gds", topo)
+    assert rec is None and "exact declared top-cell" in why
+    assert not (b / E._A8_MEASUREMENT).exists()
+
+
+def test_nonpositive_native_measurement_refuses(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path, value=0.0)
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "finite and > 0" in why
+
+
+def test_native_measurement_emits_non_degenerate_leakage_liberty(tmp_path: Path,
+                                                                  monkeypatch):
+    project, b, _topo = _write_native_measurement_fixture(tmp_path)
+    lef = """MACRO blk
+  PIN vdd
+    PORT
+      LAYER Metal3 ; RECT 0 0 1 1 ;
+    END
+  END vdd
+  PIN vss
+    PORT
+      LAYER Metal3 ; RECT 1 0 2 1 ;
+    END
+  END vss
+  PIN vin
+    PORT
+      LAYER Metal3 ; RECT 2 0 3 1 ;
+    END
+  END vin
+  PIN vout
+    PORT
+      LAYER Metal3 ; RECT 3 0 4 1 ;
+    END
+  END vout
+  SIZE 4 BY 4 ;
+END blk
+"""
+    monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/sky130A.magicrc")
+
+    def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
+        (b / "../hardmacro/blk/blk.lef").resolve().parent.mkdir(
+            parents=True, exist_ok=True)
+        (b / "../hardmacro/blk/blk.lef").resolve().write_text(lef)
+        return 0, "A8_LEF_OK", ""
+
+    monkeypatch.setattr(E, "_docker_exec", fake_exec)
+    result = E.emit_block(project, "blk", "container", "/pdk")
+    assert result["emitted"] is True, result
+    lib = (project / "phase3/analog/hardmacro/blk/blk.lib").read_text()
+    assert "cell_leakage_power : 500;" in lib
+    assert "cell_rise" not in lib and "cell_fall" not in lib
+    manifest = json.loads((project /
+                           "phase3/analog/hardmacro/blk/a8_views_provenance.json").read_text())
+    assert manifest["native_measurement"]["metric"] == "cell_leakage_power"
+
+
+def test_missing_measurement_uses_ordinary_producer_path(tmp_path: Path,
+                                                         monkeypatch):
+    project, b, _topo = _write_native_measurement_fixture(tmp_path)
+    (b / E._A8_MEASUREMENT).unlink()
+    produced = {
+        "liberty_value": 500.0,
+        "liberty_power_unit": "1uW",
+        "measurement_sha256": "m" * 64,
+        "metric": "cell_leakage_power",
+        "value": 0.0005,
+        "unit": "W",
+        "provenance": "real_ngspice",
+        "source_netlist": "phase3/analog/blk/post_layout_extracted.spice",
+        "source_netlist_sha256": "n" * 64,
+        "native_log": "phase3/analog/blk/a8_native_measurement.ngspice.log",
+        "native_log_sha256": "l" * 64,
+        "simulator": "ngspice-47",
+        "image_digest": "sha256:" + "a" * 64,
+    }
+    calls = []
+    reads = iter([(None, "missing"), (produced, "")])
+    monkeypatch.setattr(E, "load_native_measurement",
+                        lambda *a, **k: next(reads))
+    monkeypatch.setattr(E, "_native_measurement_produce",
+                        lambda *a, **k: (calls.append(a[1]) or (produced, "")))
+    monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/sky130A.magicrc")
+
+    lef = """MACRO blk
+  PIN vdd
+    PORT
+      LAYER Metal3 ; RECT 0 0 1 1 ;
+    END
+  END vdd
+  PIN vss
+    PORT
+      LAYER Metal3 ; RECT 1 0 2 1 ;
+    END
+  END vss
+  PIN vin
+    PORT
+      LAYER Metal3 ; RECT 2 0 3 1 ;
+    END
+  END vin
+  PIN vout
+    PORT
+      LAYER Metal3 ; RECT 3 0 4 1 ;
+    END
+  END vout
+  SIZE 4 BY 4 ;
+END blk
+"""
+
+    def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
+        h = project / "phase3/analog/hardmacro/blk"
+        h.mkdir(parents=True, exist_ok=True)
+        (h / "blk.lef").write_text(lef)
+        return 0, "A8_LEF_OK", ""
+
+    monkeypatch.setattr(E, "_docker_exec", fake_exec)
+    result = E.emit_block(project, "blk", "container", "/pdk")
+    assert result["emitted"] is True, result
+    assert calls == ["blk"]
+
+
+def test_declared_port_mismatch_is_not_aliased(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path,
+                                                         declared_ports=[
+                                                             "IOVDD", "VSS",
+                                                             "VREF", "VOUT"])
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "declared_ports" in why

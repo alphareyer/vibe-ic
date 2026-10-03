@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1403
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1403)
+- **Total programs (excluding helpers / shims):** 1405
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1405)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1394 |
+| `any` | 1396 |
 
 ## Alphabetical listing
 
@@ -816,9 +816,11 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `mipi_spmi_rffe_protocol_synth` | any | v0.1.89 | MIPI System Power Management Interface (SPMI) + RF Front-End Control Interface (RFFE) protocol synth helper. |
 | `mixed_signal_cosim_check` | any | — | deterministic gate for mixed-signal co-simulation |
 | `mixed_signal_interface_si_check` | any | — | M3 interface signal-integrity gate. |
+| `mixed_signal_m3_run` | any | — | M3's current-input producer boundary, with honest unavailable coverage. |
 | `mixed_signal_merge_check` | any | v0.2.84 | M1 gate (v0.2.84: SUBSTANCE, not presence). |
 | `mixed_signal_power_domain_run` | any | — | M2: placed protection-cell evidence from UPF + routed Verilog/DEF. |
 | `mixed_signal_signoff_check` | any | — | gate M4 (hardened, anti-fabrication). |
+| `mixed_signal_signoff_run` | any | — | Derive M4 from current M1-M3 and native top-level PV evidence. |
 | `mixed_signal_top_lvs_run` | any | — | REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub). |
 | `modbus_protocol_synth` | any | v0.1.84 | Modbus-class protocol synth helper. |
 | `modify_complete_synth` | any | — | deterministic SOLVER for two CVDP "complete / enhance a FULLY-and-UNAMBIGUOUSLY-specified atomic function" records whose function is pinn... |
@@ -1475,7 +1477,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1394 programs)
+### `any` (1396 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2262,9 +2264,11 @@ _(no programs in this group)_
 - `mipi_spmi_rffe_protocol_synth` — MIPI System Power Management Interface (SPMI) + RF Front-End Control Interface (RFFE) protocol synth helper.  _[v0.1.89]_
 - `mixed_signal_cosim_check` — deterministic gate for mixed-signal co-simulation
 - `mixed_signal_interface_si_check` — M3 interface signal-integrity gate.
+- `mixed_signal_m3_run` — M3's current-input producer boundary, with honest unavailable coverage.
 - `mixed_signal_merge_check` — M1 gate (v0.2.84: SUBSTANCE, not presence).  _[v0.2.84]_
 - `mixed_signal_power_domain_run` — M2: placed protection-cell evidence from UPF + routed Verilog/DEF.
 - `mixed_signal_signoff_check` — gate M4 (hardened, anti-fabrication).
+- `mixed_signal_signoff_run` — Derive M4 from current M1-M3 and native top-level PV evidence.
 - `mixed_signal_top_lvs_run` — REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub).
 - `modbus_protocol_synth` — Modbus-class protocol synth helper.  _[v0.1.84]_
 - `modify_complete_synth` — deterministic SOLVER for two CVDP "complete / enhance a FULLY-and-UNAMBIGUOUSLY-specified atomic function" records whose function is pinn...

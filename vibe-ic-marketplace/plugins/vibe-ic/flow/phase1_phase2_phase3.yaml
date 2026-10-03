@@ -9708,6 +9708,7 @@ steps:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [mixed-signal-cosim, ams-sim]
     programs:
+      - mixed_signal_m3_run
       - mixed_signal_cosim_check
       - mixed_signal_interface_si_check
     required_outputs:
@@ -9715,8 +9716,8 @@ steps:
       - "reports/analog/mixed_signal/interface_si.json"
     gate:
       all_of:
-        - program_exit_zero: "mixed_signal_cosim_check . --json reports/analog/mixed_signal/cosim_audit.json"
-        - program_exit_zero: "mixed_signal_interface_si_check . --json reports/analog/mixed_signal/interface_si_audit.json"
+        - program_exit_zero: "mixed_signal_cosim_check . --require-current-production --json reports/analog/mixed_signal/cosim_audit.json"
+        - program_exit_zero: "mixed_signal_interface_si_check . --require-current-production --json reports/analog/mixed_signal/interface_si_audit.json"
     blocks_on: [M2]
 
   - id: M4
@@ -9736,11 +9737,12 @@ steps:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [tapeout-checklist]
     programs:
+      - mixed_signal_signoff_run
       - mixed_signal_signoff_check
     required_outputs:
       - "reports/analog/mixed_signal/signoff.json"
     gate:
-      program_exit_zero: "mixed_signal_signoff_check . --json reports/analog/mixed_signal/signoff_audit.json"
+      program_exit_zero: "mixed_signal_signoff_check . --require-current-production --json reports/analog/mixed_signal/signoff_audit.json"
     blocks_on: [M3]
 
 

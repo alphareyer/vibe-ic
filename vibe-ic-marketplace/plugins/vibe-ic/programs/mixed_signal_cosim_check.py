@@ -635,10 +635,17 @@ def main(argv: list = None) -> int:
     )
     ap.add_argument("project_dir", type=Path)
     ap.add_argument("--json", default=None, help="JSON report output path")
+    ap.add_argument("--require-current-production", action="store_true",
+                    help="Default M3: exact current production; no stub/waiver path")
     # v1.6.144 (#57) — FPGA-prototype-stage stub waiver.
     import _fpga_stub_waiver as _stub
     _stub.add_fpga_stub_argparse(ap)
     args = ap.parse_args(argv)
+
+    if args.require_current_production:
+        import mixed_signal_m3_run as production
+        return production.main([str(args.project_dir), "--check-only", "--kind", "cosim",
+                                *(["--json", args.json] if args.json else [])])
 
     if not args.project_dir.is_dir():
         print(f"ERROR: {args.project_dir} is not a directory", file=sys.stderr)

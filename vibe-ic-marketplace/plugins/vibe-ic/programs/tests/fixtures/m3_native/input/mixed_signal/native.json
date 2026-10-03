@@ -1,0 +1,16 @@
+{
+  "schema": "vibeic.mixed_signal.native_inputs.v1",
+  "top": "bridge_top",
+  "scope": "declared_model_component",
+  "digital": {
+    "netlist": "phase3/stage3/pnr/bridge_top_pnr.v",
+    "clock": "clk", "reset_n": "reset_n", "drive": "enable",
+    "sense": "sense", "response": "accepted", "extra_sources": []
+  },
+  "analog": {
+    "netlist": "input/mixed_signal/receiver.sp", "subckt": "receiver",
+    "ports": ["drive", "sense"], "dependencies": [],
+    "drive_low_v": 0.0, "drive_high_v": 1.0, "drive_transition_ns": 0.1,
+    "adc_low_v": 0.3, "adc_high_v": 0.7
+  }
+}
