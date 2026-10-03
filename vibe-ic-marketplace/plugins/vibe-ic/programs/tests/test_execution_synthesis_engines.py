@@ -81,6 +81,25 @@ def test_self_reported_source_and_image_cannot_admit(tmp_path):
         registry.adapters("9")[0].available is False
 
 
+def test_tool_image_accepts_pinned_reference_but_returns_measured_image_id(monkeypatch):
+    image_id = "sha256:" + "1" * 64
+    reference = "registry.invalid/tools@" + image_id
+    seen = []
+
+    import librelane_image_facts as image_facts
+    monkeypatch.setattr(image_facts, "image_facts", lambda image: (
+        seen.append(image) or {"image_id": image_id, "librelane_version": "measured"}))
+
+    measured, facts, missing = production._tool_and_image(reference)
+    assert seen == [reference]
+    assert measured == image_id and facts["image_id"] == image_id and missing == []
+
+    wrong = "registry.invalid/tools@sha256:" + "2" * 64
+    measured, _, missing = production._tool_and_image(wrong)
+    assert measured == "UNMEASURED:measured_image_id"
+    assert missing == ["measured_image_id"]
+
+
 def test_missing_tool_is_not_measured_even_with_a_real_image_digest(tmp_path, monkeypatch):
     _, _, ctx = _ctx(tmp_path)
     monkeypatch.setattr(production, "_tool_and_image", lambda image: (

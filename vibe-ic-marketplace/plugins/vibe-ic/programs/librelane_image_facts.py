@@ -59,7 +59,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
-from librelane_contract import Refusal, image_pdk_root  # noqa: E402
+import _container_exec as _ce  # noqa: E402 — one answer for nested-container reachability
+from librelane_contract import Refusal, image_pdk_root, run_container  # noqa: E402
 
 #: Decision 22: Chip for DIE, Classic for HARDMACRO.
 DEFAULT_FLOWS = ('Classic', 'Chip')
@@ -277,6 +278,34 @@ def _probe_argv(docker: str, image_id: str, container: str, deadline_s: float,
     return [*head, image_id, '--skip', 'timeout', *inner]
 
 
+def _local_probe_argv(docker: str, image_id: str, deadline_s: float,
+                      entrypoint: bool, command: list[str]) -> list[str]:
+    """The same bounded probe through the attested LOCAL owner.
+
+    A nested container has no Docker client and therefore cannot create a
+    separately named child.  ``librelane_contract.run_container`` verifies
+    the live outer CID/image/network/memory/auto-remove receipt before it
+    translates this argv into a local process.  Its LOCAL deadline kills the
+    process group, so no Docker name is needed for cleanup.
+    """
+    inner = ['--kill-after=5', str(max(1, int(deadline_s) - _INNER_MARGIN_S)), *command]
+    head = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none']
+    if entrypoint:
+        return [*head, '--entrypoint', 'timeout', image_id, *inner]
+    return [*head, image_id, '--skip', 'timeout', *inner]
+
+
+def _run_probe(docker: str, image: str, image_id: str, container: str, deadline_s: float,
+               entrypoint: bool, command: list[str]) -> subprocess.CompletedProcess:
+    if _ce.no_container_route():
+        return run_container(
+            _local_probe_argv(docker, image, deadline_s, entrypoint, command),
+            probe_deadline_s=deadline_s,
+        )
+    return _run(_probe_argv(docker, image_id, container, deadline_s, entrypoint, command),
+                deadline_s, container, docker)
+
+
 def image_facts(image: str, docker: str = 'docker',
                 flows: tuple[str, ...] = DEFAULT_FLOWS,
                 deadline_s: float = DEFAULT_DEADLINE_S) -> dict[str, Any]:
@@ -295,23 +324,32 @@ def image_facts(image: str, docker: str = 'docker',
     if key in _FACTS:
         return {**_FACTS[key], 'image': image}
     not_measured: dict[str, str] = {}
-    try:
-        labels = _run([docker, 'image', 'inspect', '--format', '{{json .Config.Labels}}',
-                       ident['image_id']], _INSPECT_DEADLINE_S)
-        label_map = json.loads(labels.stdout) if labels.returncode == 0 else None
-        if label_map is None:
-            not_measured['image_version_label'] = f'docker image inspect rc={labels.returncode}'
-    except _Deadline as exc:
+    local = _ce.no_container_route()
+    if local:
+        # The verified LOCAL receipt currently exposes the bound image ID but
+        # not labels or its Config.Env as a public contract.  Say that instead
+        # of reaching for an unavailable Docker socket or treating the outer
+        # login environment as the image's entrypoint-bypass environment.
         label_map = None
-        not_measured['image_version_label'] = f'docker image inspect: {exc}'
-    except ValueError:
-        label_map = None
-        not_measured['image_version_label'] = 'docker image inspect printed no JSON'
+        not_measured['image_version_label'] = 'LOCAL image labels not exposed by the attested owner'
+        not_measured['bypass_env'] = 'LOCAL image Config.Env not exposed by the attested owner'
+    else:
+        try:
+            labels = _run([docker, 'image', 'inspect', '--format', '{{json .Config.Labels}}',
+                           ident['image_id']], _INSPECT_DEADLINE_S)
+            label_map = json.loads(labels.stdout) if labels.returncode == 0 else None
+            if label_map is None:
+                not_measured['image_version_label'] = f'docker image inspect rc={labels.returncode}'
+        except _Deadline as exc:
+            label_map = None
+            not_measured['image_version_label'] = f'docker image inspect: {exc}'
+        except ValueError:
+            label_map = None
+            not_measured['image_version_label'] = 'docker image inspect printed no JSON'
     name = _dw.ephemeral_container_name('vibeic_llfacts')
     try:
-        probe = _run(_probe_argv(docker, ident['image_id'], name, deadline_s, True,
-                                 ['python3', '-c', _PROBE, ','.join(flows), IMAGE_PROVENANCE_DIR]),
-                     deadline_s, name, docker)
+        probe = _run_probe(docker, image, ident['image_id'], name, deadline_s, True,
+                           ['python3', '-c', _PROBE, ','.join(flows), IMAGE_PROVENANCE_DIR])
     except _Deadline as exc:
         raise Refusal('LL_IMAGE_FACTS_UNREADABLE', f'{image}: facts probe: {exc}') from None
     try:
@@ -322,6 +360,10 @@ def image_facts(image: str, docker: str = 'docker',
         raise Refusal('LL_IMAGE_FACTS_UNREADABLE',
                       f'{image}: rc={probe.returncode} {(probe.stderr or "")[-400:]}')
     not_measured.update(facts.get('not_measured') or {})
+    if local:
+        for rows in (facts.get('clis') or {}).values():
+            for option in rows or []:
+                option['bypass_env'] = None
     version = (label_map or {}).get('org.opencontainers.image.version')
     if not version and 'image_version_label' not in not_measured:
         not_measured['image_version_label'] = 'no org.opencontainers.image.version label'
@@ -331,9 +373,8 @@ def image_facts(image: str, docker: str = 'docker',
     if names:
         name = _dw.ephemeral_container_name('vibeic_llfacts_login')
         try:
-            shell = _run(_probe_argv(docker, ident['image_id'], name, deadline_s, False,
-                                     ['python3', '-c', _LOGIN_PROBE, *names]),
-                         deadline_s, name, docker)
+            shell = _run_probe(docker, image, ident['image_id'], name, deadline_s, False,
+                               ['python3', '-c', _LOGIN_PROBE, *names])
             line = next((ln for ln in (shell.stdout or '').splitlines()
                          if ln.startswith(LOGIN_ENV_MARKER)), None)
             try:
@@ -353,7 +394,9 @@ def image_facts(image: str, docker: str = 'docker',
               'pdk_root_env': ident['pdk_root'],
               **{k: v for k, v in facts.items() if k != 'not_measured'},
               'not_measured': not_measured, 'deadline_s': deadline_s,
-              'read_by': 'librelane_image_facts.image_facts (two capped, named docker runs with a deadline)'}
+              'read_by': ('librelane_image_facts.image_facts '
+                          + ('(two attested LOCAL probes with a deadline)'
+                             if local else '(two capped, named docker runs with a deadline)'))}
     _FACTS[key] = record
     return record
 

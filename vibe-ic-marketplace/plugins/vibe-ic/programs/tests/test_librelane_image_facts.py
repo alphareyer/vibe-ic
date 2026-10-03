@@ -138,6 +138,9 @@ class FakeDocker:
 @pytest.fixture
 def docker(monkeypatch):
     monkeypatch.setattr(facts_mod, '_FACTS', {})
+    # This fixture substitutes Docker at the process edge even when pytest
+    # itself runs in a fresh image that deliberately has no Docker client.
+    monkeypatch.setattr(facts_mod._ce, 'no_container_route', lambda: False)
     monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '3g')
     fake = FakeDocker()
     monkeypatch.setattr(facts_mod.subprocess, 'run', fake)
@@ -171,6 +174,48 @@ def test_facts_come_from_the_image_through_two_capped_named_containers(docker):
     assert record['orfs_commit'].startswith('c9c22caf9') and record['not_measured'] == {}
     pdk = next(o for o in record['clis']['flow'] if o['name'] == 'pdk')
     assert pdk['login_env'] == {'PDK': 'ihp-sg13g2'} and pdk['bypass_env'] == {'PDK': None}
+
+
+def test_local_facts_use_attested_owner_without_docker_and_keep_unseen_metadata_unknown(
+        monkeypatch):
+    """A canonical fresh outer has tools but deliberately no Docker client."""
+    calls = []
+    monkeypatch.setattr(facts_mod, '_FACTS', {})
+    monkeypatch.setattr(facts_mod._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(facts_mod, 'image_pdk_root',
+                        lambda image, docker='docker': {
+                            'image_id': IMAGE_ID, 'pdk_root': '/foss/pdks'})
+
+    def local_run(argv, *, probe_deadline_s):
+        calls.append((list(argv), probe_deadline_s))
+        if '--entrypoint' in argv:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(REAL_PROBE) + '\n', stderr='')
+        return SimpleNamespace(returncode=0, stdout=REAL_LOGIN, stderr='')
+
+    monkeypatch.setattr(facts_mod, 'run_container', local_run)
+    monkeypatch.setattr(facts_mod, '_run',
+                        lambda *args, **kwargs: pytest.fail('LOCAL facts reached direct Docker'))
+
+    image_ref = 'registry.invalid/tools@sha256:' + 'a' * 64
+    record = facts_mod.image_facts(image_ref)
+    assert record['image_id'] == IMAGE_ID
+    assert record['librelane_version'] == '3.1.0.dev1'
+    assert record['image_version_label'] is None
+    assert 'LOCAL image labels' in record['not_measured']['image_version_label']
+    assert 'Config.Env' in record['not_measured']['bypass_env']
+    assert record['read_by'].endswith('(two attested LOCAL probes with a deadline)')
+    assert len(calls) == 2
+    for argv, deadline in calls:
+        assert argv[:2] == ['docker', 'run'] and deadline == facts_mod.DEFAULT_DEADLINE_S
+        assert '--rm' in argv and argv[argv.index('--network') + 1] == 'none'
+        assert '--name' not in argv
+        assert image_ref in argv
+    assert '--entrypoint' in calls[0][0] and '--skip' in calls[1][0]
+    for rows in record['clis'].values():
+        for option in rows:
+            assert option['bypass_env'] is None
+    pdk = next(o for o in record['clis']['flow'] if o['name'] == 'pdk')
+    assert pdk['login_env'] == {'PDK': 'ihp-sg13g2'}
 
 
 def test_every_tool_run_has_a_deadline(docker):

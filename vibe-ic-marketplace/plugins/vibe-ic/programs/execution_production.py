@@ -128,7 +128,11 @@ def _tool_and_image(image: object, project: Path | None = None) -> tuple[str, di
             missing.append("image:" + type(exc).__name__)
             return "UNMEASURED:image", {}, missing
     image_text = str(image)
-    if not image_text.startswith("sha256:") or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_text):
+    import _eda_pin
+    digest = _eda_pin.reference_digest(image_text)
+    expected_id = (image_text if re.fullmatch(r"sha256:[0-9a-f]{64}", image_text)
+                   else digest if digest else None)
+    if expected_id is None:
         missing.append("image_id")
         return "UNMEASURED:image_id", {}, missing
     try:
@@ -136,11 +140,11 @@ def _tool_and_image(image: object, project: Path | None = None) -> tuple[str, di
         measured = facts.image_facts(image_text)
     except Exception as exc:  # absent Docker/EDA is an honest NM arm
         return "UNMEASURED:image_facts", {}, ["image_facts:" + type(exc).__name__]
-    if not isinstance(measured, dict) or measured.get("image_id") != image_text:
+    if not isinstance(measured, dict) or measured.get("image_id") != expected_id:
         missing.append("measured_image_id")
     if not measured.get("librelane_version"):
         missing.append("librelane_version")
-    return (image_text if not missing else "UNMEASURED:" + ",".join(missing),
+    return (expected_id if not missing else "UNMEASURED:" + ",".join(missing),
             measured if isinstance(measured, dict) else {}, missing)
 
 
@@ -712,8 +716,7 @@ def _step9_installation(project: Path, top: str, pdk: object,
     source, sources = source_identity()
     import librelane_contract as ll
     image_ref = ll.resolve_image(project)
-    image_id = ll.image_pdk_root(image_ref)["image_id"]
-    image_id, facts, missing = _tool_and_image(image_id, project)
+    image_id, facts, missing = _tool_and_image(image_ref, project)
     if missing:
         raise em.Refusal("STEP9_INSTALLATION_NOT_MEASURED", ",".join(missing))
     if not isinstance(pdk, Mapping) and pdk is None:
