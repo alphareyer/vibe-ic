@@ -659,22 +659,64 @@ def test_supply_nets_and_pad_connected_ring_are_emitted_only_from_declarations(t
     assert not {'VDD_NETS', 'GND_NETS', 'PDN_CORE_RING', 'PDN_CORE_RING_CONNECT_TO_PADS'} & set(out)
 
 
-def test_pdn_cfg_is_the_images_script_plus_declared_connects(tmp_path, monkeypatch):
-    default = 'pdngen\nadd_pdn_connect -grid stdcell_grid -layers {Metal4 Metal5}\n'
+@pytest.mark.parametrize('banner', ['', '[INFO] USER_ID: 1000\n[INFO] SKIPPING UI STARTUP\n'],
+                         ids=['clean', 'startup_banner'])
+def test_pdn_cfg_is_the_images_script_plus_declared_connects(tmp_path, monkeypatch, banner):
+    # Return the native script for the old raw probe and a structured envelope
+    # for the repaired probe.  The banner therefore makes the base control red
+    # while the candidate still proves the same payload and registry bytes.
+    default = ('# native script\nputs {[INFO] belongs to this Tcl payload}\n'
+               'add_pdn_connect -grid stdcell_grid -layers {Metal4 Metal5}\n\n')
+    native = tmp_path / 'native/scripts/openroad/common/pdn_cfg.tcl'
+    write(native, default)
     calls = []
-    monkeypatch.setattr(contract.subprocess, 'run', lambda cmd, **_: calls.append(cmd) or
-                        SimpleNamespace(returncode=0, stdout=default, stderr=''))
+
+    def probe(cmd, **_):
+        calls.append(cmd)
+        script = cmd[cmd.index('-c') + 1]
+        if contract._PDN_PAYLOAD_KEY in script:
+            stdout = banner + json.dumps({contract._PDN_PAYLOAD_KEY: default}) + '\n'
+        else:
+            stdout = banner + default
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+
+    monkeypatch.setattr(contract.subprocess, 'run', probe)
     out = contract.emit_pdn_cfg('img', 'gf180mcuD', tmp_path / 'pdn_cfg.tcl')
     text = out.read_text()
-    assert text.startswith(default.rstrip('\n'))
+    assert text.startswith(default)
+    assert text == default + (
+        '# vibe-ic: pdk_registry.json pdks[name=gf180mcuD].pdn_ring.connects\n'
+        'add_pdn_connect -grid stdcell_grid -layers {Metal2 Metal5}\n'
+        'add_pdn_connect -grid stdcell_grid -layers {Metal2 Metal4}\n')
     assert text.rstrip().splitlines()[-2:] == [
         'add_pdn_connect -grid stdcell_grid -layers {Metal2 Metal5}',
         'add_pdn_connect -grid stdcell_grid -layers {Metal2 Metal4}']
     assert contract.emit_pdn_cfg('img', 'sky130A', tmp_path / 'none.tcl') is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('payload,rc', [
+    ('', 0),
+    ('[INFO] startup only\n', 0),
+    ('not JSON add_pdn_connect', 0),
+    ('"truncated add_pdn_connect', 0),
+    (json.dumps({'script': 'add_pdn_connect'}), 0),
+    (json.dumps({contract._PDN_PAYLOAD_KEY: None}), 0),
+    (json.dumps({contract._PDN_PAYLOAD_KEY: ''}), 0),
+    (json.dumps({contract._PDN_PAYLOAD_KEY: 'puts {no connection command}\n'}), 0),
+    (json.dumps({contract._PDN_PAYLOAD_KEY: 'add_pdn_connect\n'}) + '\n' +
+     json.dumps({contract._PDN_PAYLOAD_KEY: 'add_pdn_connect\n'}), 0),
+    (json.dumps({contract._PDN_PAYLOAD_KEY: 'add_pdn_connect\n'}), 1),
+], ids=['missing', 'banner_only', 'invalid_json', 'truncated_json',
+        'wrong_key', 'null_payload', 'empty_payload', 'missing_connect',
+        'duplicate_payload', 'probe_failed'])
+def test_pdn_cfg_refuses_invalid_or_missing_payload(tmp_path, monkeypatch, payload, rc):
     monkeypatch.setattr(contract.subprocess, 'run', lambda *a, **k: SimpleNamespace(
-        returncode=0, stdout='not a pdn script', stderr=''))
+        returncode=rc, stdout=payload, stderr='probe failure' if rc else ''))
+    target = tmp_path / 'bad.tcl'
     with pytest.raises(contract.Refusal, match='LL_PDN_CFG_UNREADABLE'):
-        contract.emit_pdn_cfg('img', 'gf180mcuD', tmp_path / 'bad.tcl')
+        contract.emit_pdn_cfg('img', 'gf180mcuD', target)
+    assert not target.exists()
 
 
 def test_overlay_joins_the_design_config_with_its_source(tmp_path, monkeypatch):

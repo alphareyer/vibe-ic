@@ -2444,6 +2444,36 @@ def flow_gated_off(config_root: Path) -> dict[str, list[str]]:
             if any(not value for value in gates.values())}
 
 
+_PDN_PAYLOAD_KEY = 'vibeic_pdn_payload_v1'
+
+
+def _extract_pdn_payload(stdout: str) -> str:
+    """Extract the image's Tcl from its structured stdout envelope.
+
+    The pinned image's normal entrypoint may print startup diagnostics before
+    executing the requested command.  Those bytes are not Tcl and must never
+    be copied into a generated config.  The probe therefore emits one JSON
+    record whose value is the *entire* native script; this reader accepts only
+    exactly one such record and preserves the value byte-for-byte.
+    """
+    records: list[str] = []
+    for line in str(stdout or '').splitlines():
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict) and _PDN_PAYLOAD_KEY in value:
+            payload = value[_PDN_PAYLOAD_KEY]
+            if not isinstance(payload, str):
+                raise Refusal('LL_PDN_CFG_UNREADABLE',
+                              'structured payload value is not a string')
+            records.append(payload)
+    if len(records) != 1 or not records[0]:
+        raise Refusal('LL_PDN_CFG_UNREADABLE',
+                      'missing or ambiguous structured PDN Tcl payload')
+    return records[0]
+
+
 def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') -> Path | None:
     """The image's own PDN script plus the PDK registry's pad-facing connects.
 
@@ -2464,18 +2494,26 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') 
                 if isinstance(pair, list) and len(pair) == 2]
     if not (ring.get('connect_to_pad_layers') and connects):
         return None
-    script = ('import os,librelane;print(open(os.path.join(os.path.dirname(librelane.__file__),'
-              '"scripts","openroad","common","pdn_cfg.tcl")).read(),end="")')
+    script = ('import json,os,librelane;print(json.dumps({' + repr(_PDN_PAYLOAD_KEY) +
+              ':open(os.path.join(os.path.dirname(librelane.__file__),'
+              '"scripts","openroad","common","pdn_cfg.tcl")).read()}))')
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
                             'none', '--entrypoint', 'python3', image, '-c', script],
                            probe_deadline_s=PROBE_DEADLINE_S)
-    if result.returncode or 'add_pdn_connect' not in result.stdout:
+    if result.returncode:
         raise Refusal('LL_PDN_CFG_UNREADABLE', (result.stderr or '')[-500:])
-    lines = [result.stdout.rstrip('\n'), '',
-             f'# vibe-ic: pdk_registry.json pdks[name={pdk}].pdn_ring.connects',
-             *[f'add_pdn_connect -grid stdcell_grid -layers {{{a} {b}}}' for a, b in connects]]
+    native = _extract_pdn_payload(result.stdout)
+    if 'add_pdn_connect' not in native:
+        raise Refusal('LL_PDN_CFG_UNREADABLE',
+                      'structured PDN Tcl payload lacks add_pdn_connect')
+    # Keep the native payload byte-for-byte.  Add only the one separator needed
+    # before the source-owned registry additions; never strip Tcl text that may
+    # legitimately contain an ``[INFO]`` fragment or trailing newlines.
+    separator = '' if native.endswith('\n\n') else ('\n' if native.endswith('\n') else '\n\n')
+    suffix = [f'# vibe-ic: pdk_registry.json pdks[name={pdk}].pdn_ring.connects',
+              *[f'add_pdn_connect -grid stdcell_grid -layers {{{a} {b}}}' for a, b in connects]]
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text('\n'.join(lines) + '\n')
+    output.write_text(native + separator + '\n'.join(suffix) + '\n')
     return output
 
 
