@@ -2528,6 +2528,59 @@ def _current_config_material(config: dict, mounts: list) -> dict:
     return result
 
 
+def xor_report_record(folder: Path) -> dict:
+    """Read the actual Step37.3 KLayout report and its compared subjects."""
+    import xml.etree.ElementTree as ET
+    report = folder / 'xor.xml'
+    if not report.is_file():
+        raise Refusal('LL_XOR_REPORT_MISSING', str(report))
+    try:
+        with report.open('rb') as stream:
+            root = ET.parse(stream).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise Refusal('LL_XOR_REPORT_UNREADABLE', str(report)) from exc
+    state = _load(folder / 'state_out.json')
+    design = _load(folder / 'config.json').get('DESIGN_NAME')
+    magic, klayout = state.get('mag_gds'), state.get('klayout_gds')
+    if (root.tag != 'report-database' or not design
+            or root.findtext('top-cell') != design
+            or root.findtext('description') != f'XOR {magic} vs. {klayout}'):
+        raise Refusal('LL_XOR_REPORT_SUBJECT_MISMATCH', str(report))
+    items = root.find('items')
+    value = (state.get('metrics') or {}).get('design__xor_difference__count')
+    if (items is None or type(value) is not int or value < 0
+            or len(items.findall('item')) != value
+            or any(item.tag != 'item' for item in items)):
+        raise Refusal('LL_XOR_REPORT_COUNT_MISMATCH', str(report))
+    return {'path': 'xor.xml', 'sha256': digest(report), 'design': design,
+            'magic_gds': {'path': magic, 'sha256': digest(Path(magic))},
+            'klayout_gds': {'path': klayout, 'sha256': digest(Path(klayout))},
+            'count': len(items.findall('item'))}
+
+
+def bind_xor_report(folder: Path, receipt: dict) -> dict:
+    """Complete producer metadata from retained real report bytes, without tools."""
+    record = xor_report_record(folder)
+    return {**receipt, 'sha256': {**receipt['sha256'], 'xor.xml': record['sha256']},
+            'xor_report': record}
+
+
+def check_xor_report(folder: Path, receipt: dict) -> dict:
+    """A missing binding or any changed bytes/subject/result blocks reuse."""
+    record = receipt.get('xor_report')
+    if (not isinstance(record, dict) or record.get('path') != 'xor.xml'
+            or receipt.get('sha256', {}).get('xor.xml') != record.get('sha256')):
+        raise Refusal('LL_XOR_REPORT_BINDING_MISSING', str(folder))
+    if not (folder / 'xor.xml').is_file():
+        raise Refusal('LL_XOR_REPORT_MISSING', str(folder / 'xor.xml'))
+    if digest(folder / 'xor.xml') != record['sha256']:
+        raise Refusal('LL_XOR_REPORT_CHANGED', str(folder / 'xor.xml'))
+    current = xor_report_record(folder)
+    if current != record:
+        raise Refusal('LL_XOR_REPORT_BINDING_MISMATCH', str(folder / 'xor.xml'))
+    return current
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2628,6 +2681,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
+            if lane == '37.3-compare' and step_id == 'KLayout.XOR':
+                check_xor_report(folder, _load(receipt))
             if step_id == 'OpenROAD.RCX':
                 validate_rcx_receipt(folder)
             _check_state(_load(folder / 'state_out.json'), outputs=True)
@@ -2703,7 +2758,10 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                 hashes[str(path.relative_to(folder))] = digest(path)
             if step_id == 'OpenROAD.STAPostPNR' and path.is_file() and path.name == 'sta.log':
                 hashes[str(path.relative_to(folder))] = digest(path)
-        write_json(receipt, {'input': fingerprint, 'sha256': hashes})
+        record = {'input': fingerprint, 'sha256': hashes}
+        if lane == '37.3-compare' and step_id == 'KLayout.XOR':
+            record = bind_xor_report(folder, record)
+        write_json(receipt, record)
         previous = folder / 'state_out.json'
         outputs.append(folder)
         # DRV standard section 1: the stage's receipt, bound to this run.

@@ -43,7 +43,7 @@ def read_current(project, record=None):
     refusal = pc.validate(project, current, step="37.3", stage="stage4",
                           tools=("librelane",),
                           required_inputs=("def", "netlist", "sdc", "technology"),
-                          required_outputs=("magic_gds", "klayout_gds", "log", "launches"),
+                          required_outputs=("magic_gds", "klayout_gds", "xor_report", "log", "launches"),
                           marker="Exit status: 0")
     _require(not refusal, refusal)
     pnr = project / "phase3/stage3/pnr"
@@ -95,6 +95,15 @@ def read_current(project, record=None):
         _require(f"--id {step} " in text and "Exit status: 0" in text,
                  "NATIVE373_NATIVE_LOG_MISSING: " + step)
     _require(len(folders) == 3, "NATIVE373_CHAIN_INCOMPLETE")
+    try:
+        report = lc.check_xor_report(folders[-1], _read(folders[-1] / "vibeic_receipt.json"))
+    except lc.Refusal as exc:
+        raise ValueError(str(exc)) from exc
+    _require(report["design"] == current["design"], "NATIVE373_REPORT_DESIGN_MISMATCH")
+    _require(pc.entry(project, folders[-1] / report["path"]) == current["outputs"]["xor_report"],
+             "NATIVE373_REPORT_OUTPUT_SWAPPED")
+    _require(type(doc.get("count")) is int and report["count"] == doc["count"],
+             "NATIVE373_REPORT_COUNT_MISMATCH")
     state = _read(folders[-1] / "state_out.json")
     for view, role, index in (("mag_gds", "magic_gds", 0), ("klayout_gds", "klayout_gds", 1)):
         path = _path(project, current["outputs"][role])
@@ -162,6 +171,7 @@ def produce(project, routed_def):
     final = _read(folders[-1] / "state_out.json")
     outputs = {"magic_gds": pc.entry(project, final["mag_gds"]),
                "klayout_gds": pc.entry(project, final["klayout_gds"]),
+               "xor_report": pc.entry(project, folders[-1] / "xor.xml"),
                "log": pc.entry(project, folders[-1] / "invocation.log"),
                "launches": pc.entry(project, journal)}
     for index, folder in enumerate(folders):
