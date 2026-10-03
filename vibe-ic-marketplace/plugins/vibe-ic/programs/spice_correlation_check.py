@@ -2947,340 +2947,38 @@ def _write_declared_correlation_refusal(project: Path, status: str,
     return out
 
 
-def run_installed_pdk_path_correlation(
-    project: Path,
-    liberty_path: str,
-    container: str = _DEFAULT_CONTAINER,
-    max_stages: int = 12,
-) -> dict:
-    """Run the BLOCKING Step 30 check from the active installed PDK.
+def run_installed_pdk_path_correlation(project: Path, liberty_path: str,
+                                       container: str = _DEFAULT_CONTAINER,
+                                       max_stages: int = 12) -> dict:
+    """Ordinary Step 30 uses the existing extracted OpenSTA path-SPICE route.
 
-    The active Liberty path is supplied by the Phase-3 PDK configuration.  Its
-    sibling cell SPICE and device-model section are discovered at runtime.
-    Only a genuinely absent ngspice executable returns ``NO_TOOL``; every
-    missing input, parse failure, non-swinging deck, or simulator failure is an
-    ``ERROR`` and cannot be promoted to a capability-gap skip.
+    No mode flag, staged report or schematic fallback can certify this row.
+    Missing matched physical inputs are NOT_MEASURED and remain blocking.
     """
+    import librelane_contract as lc
+    import path_spice_tool as pst
+    import librelane_postroute as lp
     project = Path(project)
-    if _resolve_ngspice(container) is None:
-        return _persist_declared_refusal(project, {"status": "NO_TOOL", "reason": "ngspice executable absent"})
-    liberty_text = _read_container_text(container, liberty_path)
-    if not liberty_text:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "active Liberty unreadable"})
-    netlist = _find_gate_netlist(project)
-    spef = next(iter(sorted(_pl.extracted_dir(project).glob("*.spef"))), None)
-    if not netlist or not spef:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "routed netlist or SPEF absent"})
-
-    netlist_text = netlist.read_text(errors="replace")
-    inst_map = parse_verilog_instances(netlist_text)
-    required_cells = {entry["cell"] for entry in inst_map.values()}
-    # The subckt names are only needed to SCORE the candidate STA reports, and
-    # that score does not depend on the corner, so a first discovery pass on
-    # the active Liberty is enough to choose the report. Everything the deck is
-    # actually built from is then re-derived at the report's OWN corner below.
-    probe = discover_installed_pdk_sources(
-        container, liberty_path, required_cells)
-    if not probe:
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": "installed cell SPICE or model section unresolved"})
-
-    _not_before = this_run_layout_mtime(project)
-    sta_report = _pick_sta_report(project, probe["subckt_names"], _not_before)
-    if not sta_report:
-        # R-0915-162 — REFUSE BY NAME. "critical STA path unresolved" is true
-        # of a project with no STA at all AND of one holding four post-route
-        # reports whose basis was never checked; a reader cannot act on a
-        # sentence that covers both.
-        #
-        # AND R-0915-154's DISCLOSURE IS KEPT, APPENDED (rebase onto #2540).
-        # The two answer different questions -- "was there a usable basis at
-        # all" and "which candidates were refused for unattested RC" -- so the
-        # reason carries both. Folding one into the other would let whichever
-        # ran first silence the other's evidence.
-        _why = post_route_basis_refusal(project, probe["subckt_names"],
-                                        _not_before)
-        _unv = _unverified_session_candidates(project)
-        _unv_note = ("; refused as correlation source(s): "
-                     + ", ".join(_rel_or_name(project, u) for u in _unv)
-                     + " (STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED -- "
-                     "an in-session STA with unattested RC is never a "
-                     "correlation source)") if _unv else ""
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": (_why or "critical STA path unresolved") + _unv_note})
-    sta_text = sta_report.read_text(errors="replace")
-    sta_path = parse_sta_path(sta_text)
-    if not sta_path:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical STA path unparseable"})
-
-    # ── CORNER ALIGNMENT ────────────────────────────────────────────────────
-    # Correlate the report against the library the report itself says it was
-    # produced with, never against whichever Liberty happens to be "active".
-    # See `parse_sta_corner_basis` for the measurement. A report that declares
-    # no corner, or one whose declared corner cannot be read, is NOT a licence
-    # to fall back on the active corner: the comparison would then be between
-    # two different PVT points and the number would be an artefact of the gate.
-    basis = parse_sta_corner_basis(sta_text)
-    declared_corners = basis["declared_liberties"]
-    if len(declared_corners) > 1:
-        # SPM-12. Picking one of two stamped corners is not a measurement of
-        # this design; it is a measurement of regex order.
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": f"{sta_report.name} declares "
-                          f"{len(declared_corners)} DIFFERENT corner libraries "
-                          f"({', '.join(Path(c).name for c in declared_corners)})"
-                          f", so the corner the SPICE deck must be built at is "
-                          f"unknown; refusing a cross-corner correlation rather "
-                          f"than picking one of them"})
-    corner_liberty = basis["liberty"] or ""
-    if not corner_liberty:
-        _refused = _CORNER_BINDING_REFUSED_RE.findall(sta_text)
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": f"{sta_report.name} declares no corner liberty, so "
-                          f"the corner the SPICE deck must be built at is "
-                          f"unknown; refusing a cross-corner correlation"
-                          + (f" -- its writer stamped STA_CORNER_BINDING_REFUSED "
-                             f"({sorted(set(_refused))[0]}) on {len(_refused)} "
-                             f"path(s): no attributable corner"
-                             if _refused else "")})
-    corner_text = (liberty_text if corner_liberty == liberty_path
-                   else _read_container_text(container, corner_liberty))
-    if not corner_text:
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": f"{sta_report.name} was produced with "
-                          f"{Path(corner_liberty).name}, which is unreadable; "
-                          f"refusing to correlate it against another corner"})
-    corner_aligned = corner_liberty == liberty_path
-    liberty_text = corner_text
-    sources = (probe if corner_aligned else discover_installed_pdk_sources(
-        container, corner_liberty, required_cells))
-    if not sources:
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": f"no installed device-model section resolves for "
-                          f"{Path(corner_liberty).name}, the corner "
-                          f"{sta_report.name} was produced with"})
-    resolved = resolve_path_stages(
-        sta_path, inst_map, parse_spef_caps(spef.read_text(errors="replace")),
-        sources["subckt_names"], liberty_text, max_stages)
-    if not resolved:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical path not stitchable"})
-
-    # The STA side carries the run's OCV LATE derate; the SPICE side carries
-    # no derate at all, so the raw report number is the model prediction times
-    # a deliberate margin. Divide the margin back out and record that it was:
-    # measured on `spm`, late=1.05, i.e. 5 points of the reported error was
-    # pessimism the gate was charging to the design.
-    derated_ns = sum(float(stage.get("sta_delay_ns") or 0.0)
-                     for stage in resolved["stages"])
-    ocv_late = basis["ocv_late_derate"]
-    expected_ns = derated_ns / ocv_late if ocv_late else derated_ns
-    tolerance = derive_liberty_path_tolerance(
-        liberty_text, resolved["stages"], expected_ns)
-    if not tolerance:
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": "Liberty grid tolerance could not be derived"})
-
-    subckts = {}
-    for stage in resolved["stages"]:
-        cell = stage["cell"]
-        if cell not in subckts:
-            subckt = extract_subckt(sources["cell_text"], cell, model_map={})
-            if not subckt:
-                return _persist_declared_refusal(project, {"status": "ERROR",
-                        "reason": f"cell SPICE subckt absent: {cell}"})
-            subckts[cell] = subckt
-
-    hdr = parse_liberty_header(liberty_text)
-    vdd = hdr["nom_voltage"] or 1.0
-    temp_c = hdr["nom_temperature"]
-    vth = vdd * hdr["output_threshold_fall"] / 100.0
-    def _tr_of(idx: int) -> float:
-        slew = resolved["stages"][idx].get("input_slew_ns")
-        if slew is None:
-            contribs = tolerance.get("contributions") or []
-            slew = (contribs[idx]["input_slew_ns"]
-                    if idx < len(contribs) else 0.0)
-        return pulse_tr_for_slew(
-            float(slew), hdr["slew_lower_fall"],
-            hdr["slew_upper_fall"], hdr["slew_derate"])
-
-    slew_tr = [_tr_of(i) for i in range(len(resolved["stages"]))]
-    deck = build_installed_stagewise_deck(
-        sources["model_file"], sources["model_section"],
-        sources["model_preludes"],
-        sources["cell_spice"], resolved["stages"], subckts, vdd,
-        temp_c, vth, resolved["endpoint_load_pf"], slew_tr)
-    out_dir = _pl.spice_dir(project)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    deck_path = out_dir / "correlation.spice"
-    log_path = out_dir / "correlation.log"
-    deck_path.write_text(deck)
-    ok, transcript = _run_ngspice_in(
-        container, str(Path(sources["model_file"]).parent), str(deck_path))
-    log_path.write_text(transcript or "")
-    # ngspice exits non-zero when ANY `.meas` finds no edge, and this deck
-    # DELIBERATELY contains such measures: each stage is driven at both input
-    # polarities and only the real arc can produce the declared output
-    # transition, so exactly one of the pair must fail. The exit status is
-    # therefore not the health signal here -- the parse is. A genuine
-    # simulator failure produces no complete per-stage set and is reported
-    # below, with the exit status named so it is not lost.
-    stage_ns, why = parse_stagewise_meas(
-        transcript, len(resolved["stages"]), vdd)
-    if stage_ns is None:
-        return _persist_declared_refusal(project, {"status": "ERROR",
-                "reason": (f"per-stage delay not measurable: {why}"
-                           + ("" if ok else "; ngspice also exited non-zero")),
-                "deck": str(deck_path), "log": str(log_path)})
-    direction = sta_path["endpoint_transition"]
-    spice_ns = sum(stage_ns)
-    if spice_ns <= 0 or expected_ns <= 0:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "path delay measurement absent",
-                "deck": str(deck_path), "log": str(log_path)})
-    # THE UNCORRECTED NUMBER IS KEPT, ALWAYS. It is the sum of the PDK's
-    # characterisation gap and the design's own error, and it is what this gate
-    # used to publish as if it were the design's alone. It stays in the report
-    # under its own name so neither number can be quoted without the other.
-    raw_pct_error = (spice_ns - expected_ns) / expected_ns * 100.0
-    tolerance_pct = float(tolerance["tolerance_pct"])
-
-    # (a) THE PDK's OWN GAP, MEASURED IN THIS RUN, ON THIS PDK, AT A GRID POINT.
-    pdk_ref = measure_pdk_characterisation(
-        container, sources, subckts, liberty_text, resolved["stages"],
-        out_dir, hdr)
-    design_reference_ns = characterised_reference_ns(
-        resolved["stages"], pdk_ref["ratio_by_cell"])
-
-    if design_reference_ns and design_reference_ns > 0:
-        # (b) THE DESIGN, against a reference carrying the SAME
-        # characterisation — so the design is the only variable left.
-        pct_error = ((spice_ns - design_reference_ns)
-                     / design_reference_ns * 100.0)
-        pdk_gap_pct = (design_reference_ns - expected_ns) / expected_ns * 100.0
-        basis = "liberty_cone_carried_through_measured_pdk_characterisation"
-        degraded = None
-    else:
-        # DEGRADE LOUDLY. An unmeasured PDK reference is not a PDK with no gap:
-        # falling through to the uncorrected comparison keeps the gate exactly
-        # as strict as it was, and the reason is named.
-        pct_error = raw_pct_error
-        pdk_gap_pct = None
-        basis = "uncorrected_liberty_cone (PDK reference NOT MEASURED)"
-        degraded = (
-            "the liberty<->model characterisation reference could not be "
-            "measured for every cell on the path, so the design number is the "
-            "UNCORRECTED one and still carries the PDK's own gap: "
-            + "; ".join(f"{e['cell']}: {e['reason']}"
-                        for e in pdk_ref["incomplete"]))
-    verdict = path_correlation_verdict(pct_error, tolerance_pct)
-    report = {
-        "program": "spice_correlation_check.installed_pdk_path_driver",
-        "version": "2.1.0",
-        "provenance": "real_ngspice_transistor_path",
-        "reference": {
-            "sta_report": sta_report.name,
-            "startpoint": sta_path["startpoint"],
-            "endpoint": sta_path["endpoint"],
-            "endpoint_transition": direction,
-            "sta_total_path_delay_ns": sta_path["path_delay_ns"],
-            "liberty_spef_cone_delay_ns": round(expected_ns, 9),
-            "corner_liberty": corner_liberty,
-            "corner_aligned_with_active_liberty": corner_aligned,
-            "deck_corner": f"{sources['model_section']} / {vdd:g}V / "
-                           f"{temp_c:g}C",
-            "ocv_late_derate_removed": ocv_late,
-            "sta_cone_delay_as_reported_ns": round(derated_ns, 9),
-        },
-        "unmodelled_terms": [
-            "SPEF interconnect RESISTANCE: the deck carries the SPEF net "
-            "capacitance as a lumped load and no R, so the driver does not "
-            "charge the distributed RC the STA side did",
-            "path-net FANOUT: only the next stage on the path loads each "
-            "node, so receivers on the same net that are not on the path "
-            "contribute no pin capacitance",
-        ],
-        # (c) BOTH NUMBERS, BESIDE EACH OTHER. The first is a property of the
-        # PDK and no design change can move it; the second is the design's.
-        "pdk_characterisation": {
-            "what_this_measures": (
-                "the open PDK's OWN liberty-NLDM vs ngspice-model gap, "
-                "measured in this run on single-stage reference decks at "
-                "liberty GRID POINTS (zero interpolation error by "
-                "construction). It reads no SPEF, no netlist connectivity and "
-                "no path: no design change can move it."),
-            "gap_pct": (None if pdk_gap_pct is None
-                        else round(pdk_gap_pct, 6)),
-            "cells_referenced": sorted(pdk_ref["ratio_by_cell"]),
-            "references": pdk_ref["references"],
-            "not_measured": pdk_ref["incomplete"],
-        },
-        "correlation": {
-            "spice_path_delay_ns": round(spice_ns, 9),
-            "liberty_spef_cone_delay_ns": round(expected_ns, 9),
-            "design_reference_ns": (None if design_reference_ns is None
-                                    else round(design_reference_ns, 9)),
-            "design_reference_basis": basis,
-            "pct_error": round(pct_error, 6),
-            "pct_error_uncorrected": round(raw_pct_error, 6),
-            "pct_error_uncorrected_note": (
-                "the design's error PLUS the PDK's characterisation gap. This "
-                "is the number this gate used to judge; it is kept so the two "
-                "cannot be separated silently."),
-            "degraded": degraded,
-            "tolerance_pct": round(tolerance_pct, 6),
-            "critical_tolerance_pct": round(2.0 * tolerance_pct, 6),
-            "tolerance_derivation": tolerance,
-            "stages_correlated": resolved["covered"],
-            "stages_total_combinational": resolved["total_comb"],
-            "measurement_basis": "per-stage, at the input slew and output "
-                                 "load the STA report states for that stage "
-                                 "-- the same operating points the tolerance "
-                                 "is derived at",
-            "per_stage_spice_ns": [round(v, 6) for v in stage_ns],
-            "per_stage_sta_ns": [
-                round(float(s.get("sta_delay_ns") or 0.0), 6)
-                for s in resolved["stages"]],
-            # WHICH ARTEFACT EACH STAGE'S LOAD CAME FROM. See
-            # `stagewise_stage_load_pf`: a x10 scaling of every SPEF *D_NET
-            # record moved this gate by nothing, because the STA report's own
-            # stated load wins wherever it exists.
-            "per_stage_load_source": [
-                stagewise_stage_load_pf(
-                    s, i == len(resolved["stages"]) - 1,
-                    resolved["endpoint_load_pf"])[1]
-                for i, s in enumerate(resolved["stages"])],
-            # MEMBERSHIP. A stage the SPEF never named carried NO wire load.
-            "path_nets_absent_from_spef":
-                resolved.get("nets_absent_from_spef", []),
-            "verdict": verdict,
-        },
-        "artifacts": {"deck": str(deck_path), "log": str(log_path)},
-        "model_provenance": "active installed PDK selected from Liberty path",
-        "nda_note": "Model and Liberty content were read at runtime, not emitted.",
-    }
-    report_path = _pl.reports_dir(project) / "phase3" / "spice_correlation.json"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
-    # R-0915-43 — ALSO AT THE OTHER NAME STEP 30 DECLARES.
-    #
-    # Step 30 declares `phase3/stage3/spice/correlation.json OR
-    # reports/phase3/spice_correlation.json`, and the line above satisfies the
-    # OR. What it does not do is make the FIRST name exist — and that is the
-    # name this module's own loader `_check_spice_correlation_json` reads
-    # first, and the one beside the deck and the log a reader opens when they
-    # want to know what the correlation concluded. A run that correlated and
-    # left `correlation.spice` + `correlation.log` in that directory with no
-    # `correlation.json` beside them is reporting its work in one place and
-    # its numbers in another.
-    #
-    # The SAME dict, never a second summary of it: two documents describing one
-    # correlation are two things that can disagree, and the loader reaches this
-    # one first, so a divergent copy here would silently outrank the other.
-    declared = _pl.spice_dir(project) / "correlation.json"
-    declared.parent.mkdir(parents=True, exist_ok=True)
-    declared.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
-    return {"status": "RAN", "report": report,
-            "report_path": str(report_path), "deck": str(deck_path),
-            "log": str(log_path)}
+    # Retire this row's previous publication before resolving native inputs.
+    # A refusal before run_current_step30 must not leave an older PASS visible.
+    for relative in ('reports/phase3/spice_path_tool.json',
+                     'reports/phase3/spice_correlation.json',
+                     'reports/phase3/spice_correlation.current.json',
+                     'phase3/stage3/spice/correlation.json',
+                     'phase3/stage3/spice/correlation.spice',
+                     'phase3/stage3/spice/correlation.log'):
+        (project / relative).unlink(missing_ok=True)
+    try:
+        image = lc.resolve_image(project)
+        folder, _ = lp.stapostpnr_state(project)
+        config = json.loads((folder / 'config.json').read_text())
+        pdk = config['PDK']
+        root = lc.pdk_root_resolution(project, pdk, image=image)['path']
+        doc = pst.run_current_step30(project, image, Path(root), pdk)
+        return {'status': 'RAN', 'verdict': doc['verdict'], 'report': doc}
+    except (lc.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        return _persist_declared_refusal(project, {'status': 'ERROR',
+            'measurement': 'NOT_MEASURED', 'reason': str(exc)})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -3733,199 +3431,26 @@ def _analog_not_applicable_for_class(
 
 def run_audit(project: Path, run_spice: bool = True,
               container: str = _DEFAULT_CONTAINER) -> AuditResult:
+    """BLOCKING Step-30 consumption of current executed path correlation."""
+    import path_spice_tool as pst
     result = AuditResult()
-
-    extracted = _pl.extracted_dir(project)
-    sta_dir = _pl.sta_dir(project)
-
-    if not extracted.is_dir() or not list(extracted.glob("*.spef")):
-        result.findings.append(Finding(
-            rule="SKIP_NO_SPEF",
-            severity="INFO",
-            message="No SPEF files found (step 22 Parasitic Extraction not "
-                    "reached); skipping SPICE gate",
-        ))
-        result.summary = {"skipped": True, "reason": "no_spef"}
-        return result
-
-    if not sta_dir.is_dir() or not list(sta_dir.glob("*.rpt")):
-        result.findings.append(Finding(
-            rule="SKIP_NO_STA",
-            severity="INFO",
-            message="No STA reports found (step 23 post-route STA not "
-                    "reached); skipping SPICE gate",
-        ))
-        result.summary = {"skipped": True, "reason": "no_sta"}
-        return result
-
-    # ── Canonical Step-30: run REAL ngspice cell-delay↔liberty correlation ──
-    # When the design ships a commercial-PDK ngspice bridge shim and no correlation
-    # report exists yet, characterise a representative extracted cell in real
-    # ngspice and correlate it against the liberty NLDM arc. Honest skip (no
-    # numbers fabricated) when the shim/liberty/simulator are unavailable.
-    driver_report = None
-    if run_spice and _check_spice_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            driver_report = run_commercial_pdk_cell_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice correlation driver could not run: {e}",
-            ))
-        if driver_report is not None:
-            c = driver_report.get("correlation", {})
-            result.findings.append(Finding(
-                rule="SPICE_CORRELATION_RAN",
-                severity="INFO",
-                message=(
-                    f"Real ngspice cell correlation on "
-                    f"{driver_report.get('cell')} ({driver_report.get('corner')}): "
-                    f"{c.get('samples')} arcs, max |Δ|={c.get('max_abs_pct')}% "
-                    f"vs liberty NLDM → {c.get('verdict')}"),
-            ))
-
-    # ── Step-30 (additive): REAL ngspice FULL critical-PATH correlation ──
-    # Stitch the STA critical-path cells' extracted transistor subckts into one
-    # ngspice deck and correlate the end-to-end SPICE path delay against the
-    # STA-reported path delay. Honest skip (no numbers) when inputs/simulator
-    # are unavailable or the stitched deck fails to swing.
-    path_report = None
-    if run_spice and _check_path_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            path_report = run_commercial_pdk_path_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_PATH_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice path-correlation driver could not run: {e}",
-            ))
-    else:
-        path_report = _check_path_correlation_json(project)
-    if path_report is not None:
-        pc = path_report.get("correlation", {})
-        sev = "ERROR" if pc.get("verdict") in (
-            "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
-        result.findings.append(Finding(
-            rule=("SPICE_PATH_" + ("MISMATCH" if sev == "ERROR"
-                                   else "CORRELATED")),
-            severity=sev,
-            message=(
-                f"Real ngspice path correlation "
-                f"({pc.get('stages_correlated')}/"
-                f"{pc.get('stages_total_combinational')} combinational stages): "
-                f"SPICE={pc.get('spice_path_delay_ns')}ns vs "
-                f"STA={pc.get('sta_path_delay_ns')}ns "
-                f"({pc.get('pct_error')}%) → {pc.get('verdict')}"),
-        ))
-
-    # ── Step-30 (additive): REAL ngspice TOP-N critical-PATH correlation ──
-    # Extend the proven per-path stitch from the #1 path to the top-N max-delay
-    # paths (OpenSTA report_checks -group_count N -endpoint_count 1) so the
-    # correlation spans the timing-critical CONE. Per-path honest SKIP (with a
-    # reason) for any path that can't be sensitised; the aggregate discloses N
-    # found / correlated / skipped. Honest skip of the whole gate when inputs /
-    # simulator are unavailable.
-    topN_report = None
-    if run_spice and _check_topN_path_correlation_json(project) is None \
-            and _find_bridge_shim(project) is not None:
-        try:
-            topN_report = run_commercial_pdk_topN_path_correlation(
-                project, container=container)
-        except Exception as e:  # never let the driver crash the gate
-            result.findings.append(Finding(
-                rule="SPICE_TOPN_PATH_DRIVER_ERROR",
-                severity="INFO",
-                message=f"commercial-PDK ngspice top-N path-correlation driver "
-                        f"could not run: {e}",
-            ))
-    else:
-        topN_report = _check_topN_path_correlation_json(project)
-    if topN_report is not None:
-        agg = topN_report.get("aggregate", {})
-        sev = "ERROR" if agg.get("verdict") in (
-            "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
-        result.findings.append(Finding(
-            rule=("SPICE_TOPN_PATH_" + ("MISMATCH" if sev == "ERROR"
-                                        else "CORRELATED")),
-            severity=sev,
-            message=(
-                f"Real ngspice top-N path correlation "
-                f"({agg.get('n_correlated')}/{agg.get('n_paths')} paths "
-                f"correlated, {agg.get('n_skipped')} skipped): "
-                f"worst |Δ|={agg.get('worst_abs_pct_error')}% "
-                f"mean |Δ|={agg.get('mean_abs_pct_error')}% "
-                f"vs STA → {agg.get('verdict')}"),
-        ))
-
-    spice_results = _find_spice_results(project)
-    spice_decks = _find_spice_decks(project)
-    corr_json = _check_spice_correlation_json(project)
-
-    if not spice_results and not spice_decks and not corr_json:
-        # A design whose class declares it has no analog content has nothing
-        # to correlate -- a DESIGN-DECLARED N/A, disclosed on the vacuous
-        # tier, never a silent pass and never a FAIL. Asked only on the
-        # no-evidence path: a pure-digital project that DID run SPICE is
-        # still correlated below, and a genuinely-analog class still FAILs.
-        _na = _analog_not_applicable_for_class(project)
-        if _na is not None:
-            _na_class, _na_reason = _na
-            result.findings.append(Finding(
-                rule="SKIP_ANALOG_NOT_APPLICABLE",
-                severity="INFO",
-                message=("No post-layout SPICE correlation is applicable: "
-                         + _na_reason),
-            ))
-            # The reason NAMES the class it keyed on. A disclosure that says
-            # only "not applicable" cannot be audited: the reader has to go
-            # re-derive which record exempted the design, which is the work
-            # the disclosure exists to save. Token prefix stays stable for
-            # consumers; the class rides after the colon.
-            result.summary = {
-                "skipped": True,
-                "reason": f"analog_not_applicable_for_class:{_na_class}",
-                "ic_class": _na_class,
-                "spice_decks": 0, "spice_results": 0}
-            return result
+    try:
+        doc = pst.validate_current_step30(project)
+        verdict = doc.get('verdict')
+        result.passed = verdict == 'PASS'
+        result.summary = {'skipped': False, 'pass': result.passed,
+                          'measurement': 'MEASURED' if verdict in ('PASS', 'FAIL') else 'NOT_MEASURED',
+                          'current_binding': 'CURRENT', 'verdict': verdict,
+                          'corner': doc.get('corner'), 'arms': doc.get('arms'),
+                          'companion_errors': doc.get('companion_errors', [])}
+        if not result.passed:
+            result.findings.append(Finding(rule='SPICE_CURRENT_' + str(verdict), severity='ERROR',
+                                           message='Current tool correlation: ' + str(doc.get('arms'))))
+    except (pst.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
         result.passed = False
-        result.findings.append(Finding(
-            rule="NO_SPICE_VERIFICATION",
-            severity="ERROR",
-            message=(
-                "Post-layout SPICE verification was not performed. "
-                "SPEF extraction exists (Step 20) and STA ran (Step 21), "
-                "but no SPICE decks or results found in spice/, sim_spice/, "
-                "or analog_sim/. Run eda_spice on critical paths and analog blocks."
-            ),
-        ))
-        result.summary = {
-            "skipped": False,
-            "spice_decks": 0,
-            "spice_results": 0,
-            "pass": False,
-        }
-        return result
-
-    corr_stats = check_critical_path_correlation(project, result.findings)
-    analog_stats = check_analog_coverage(project, result.findings)
-
-    has_errors = any(f.severity == "ERROR" for f in result.findings)
-    if has_errors:
-        result.passed = False
-
-    result.summary = {
-        "skipped": False,
-        "spice_decks": len(spice_decks),
-        "spice_results": len(spice_results),
-        "correlation": corr_stats,
-        "analog": analog_stats,
-        "pass": result.passed,
-    }
+        result.summary = {'skipped': False, 'pass': False, 'measurement': 'NOT_MEASURED',
+                          'current_binding': 'REFUSED', 'reason': str(exc)}
+        result.findings.append(Finding(rule='SPICE_CURRENT_INPUTS_UNBOUND', severity='ERROR', message=str(exc)))
     return result
 
 
