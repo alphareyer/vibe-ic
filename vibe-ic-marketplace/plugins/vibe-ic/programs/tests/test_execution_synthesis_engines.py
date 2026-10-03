@@ -193,6 +193,45 @@ def test_step9_pdk_config_must_be_in_current_manifest(tmp_path):
         production._require_librelane_pdk_config(root, manifest)
 
 
+def test_step9_import_selected_removes_arm_project_envelope(tmp_path):
+    project = tmp_path / "ordinary-project"
+    project.mkdir()
+    selected = tmp_path / "selected-generation"
+    netlist = selected / "project/phase2/stage2/synth/netlist.v"
+    stats = selected / "project/phase2/stage2/synth/stats.json"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top; endmodule\n")
+    stats.write_text('{"area": 13.1712}\n')
+    outputs = {
+        "project/phase2/stage2/synth/netlist.v": em.digest(netlist),
+        "project/phase2/stage2/synth/stats.json": em.digest(stats),
+    }
+    generation = {"directory": str(selected), "outputs": outputs}
+    adoption = {"status": "ADOPTED", "selected_generation": generation}
+
+    class VerifiedController:
+        def verify_adoption(self, context, run):
+            return adoption
+
+    result = production.import_selected(
+        project, object(), VerifiedController(), tmp_path / "run", adoption)
+    assert result == {
+        "status": "IMPORTED", "step_id": "9",
+        "copied": {
+            "phase2/stage2/synth/netlist.v": outputs[
+                "project/phase2/stage2/synth/netlist.v"],
+            "phase2/stage2/synth/stats.json": outputs[
+                "project/phase2/stage2/synth/stats.json"],
+        },
+        "run": str(tmp_path / "run"), "adoption": adoption,
+    }
+    assert em.digest(project / "phase2/stage2/synth/netlist.v") == outputs[
+        "project/phase2/stage2/synth/netlist.v"]
+    assert em.digest(project / "phase2/stage2/synth/stats.json") == outputs[
+        "project/phase2/stage2/synth/stats.json"]
+    assert not (project / "project").exists()
+
+
 def _native_output(tmp_path: Path, *, area: bool):
     project, liberty, ctx = _ctx(tmp_path)
     output = tmp_path / "outputs"

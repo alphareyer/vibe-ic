@@ -739,6 +739,20 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         consumed = analog.consume(runtime['project'], analog_prepared, controller, run, result)
         return dict(consumed, execution_result=result)
     if result.get('status') == 'ADOPTED':
+        if step_id == '9':
+            # Step 9's immutable generation carries its arm-local outputs
+            # below ``project/``.  Its existing product importer strips that
+            # envelope before publishing into the ordinary project's current
+            # phase2/phase3 paths and re-verifies the adoption around the
+            # write.  Sending those names through the generic Journal below
+            # instead creates ``<project>/project/...``: the Controller has
+            # adopted real bytes, but the normal consumer cannot see them.
+            from execution_production import import_selected
+            imported = import_selected(runtime['project'], context, controller,
+                                       run, result)
+            result = dict(result, consumer=imported)
+            runtime['runs'][step_id] = (run, result)
+            return dict(result, step_id=step_id, run_root=str(run))
         result = controller.verify_adoption(context, run)
         from execution_backend_snapshot import Journal
         generation = result['selected_generation']

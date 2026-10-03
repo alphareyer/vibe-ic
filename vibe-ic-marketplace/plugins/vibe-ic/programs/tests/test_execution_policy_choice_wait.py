@@ -1,5 +1,6 @@
 """Focused normal-dispatch controls for the external Ultra choice handoff."""
 import json
+from dataclasses import replace
 from pathlib import Path
 import sys
 import threading
@@ -84,6 +85,65 @@ def test_delayed_core_choice_is_adopted_and_imported_in_same_dispatch(tmp_path, 
     event = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert event['type'] == 'vibeic.ai_selection_request'
     assert event['binding'] == request['binding']
+
+
+def test_step9_adoption_uses_product_importer_for_current_project(tmp_path, monkeypatch):
+    project = (tmp_path / 'project').resolve()
+    project.mkdir()
+    input_path = project / 'source.txt'
+    input_path.write_text('one input\n')
+    arm = replace(H.adapter('a'), step_id='9')
+    registry = em.Registry()
+    registry.register(arm)
+    controller = em.Controller(registry, em.Budget(2, 512), {
+        'meta': {'test_only': True},
+        'steps': [{'id': '9', 'mandatory_gate_programs': ['transform'],
+                   'required_output_contract': ['value.txt', 'measurement.json']}],
+    })
+    neutral_route = {'kind': 'neutral-test', 'ic_ip_path': 'IC'}
+    monkeypatch.setattr(em, 'Context', H.NeutralContext)
+    monkeypatch.setattr(policy, '_fixed_inputs',
+                        lambda runtime, step: {'text.txt': input_path})
+    monkeypatch.setattr(policy, 'controller_fields', lambda **kwargs: {
+        'ic_ip_path': 'IC', 'route_receipt': neutral_route,
+        'intent_label': 'PROGRAM_DEFAULT', 'request_digest': ''})
+    runtime = {
+        'identity': ('neutral-step9',), 'project': project,
+        'policy': {'mode': 'ultra', 'choice': None, 'choice_wait_s': 0,
+                   'request_receipt': {'invocation_id': 'step9-import-test'}},
+        'route': {'source_sha': H.BASE, 'project_digest': '', 'ic_ip_path': 'IC',
+                  'route_receipt': neutral_route},
+        'parameters': {}, 'registry': registry, 'controller': controller,
+        'contexts': {}, 'bindings': {}, 'runs': {},
+    }
+    monkeypatch.setattr(policy, '_ordinary_runtime', runtime)
+    pending = policy.dispatch_fixed_step(project, '9')
+    assert pending['status'] == 'AWAITING_AI_SELECTION'
+    ctx = runtime['contexts']['9']
+    run = runtime['runs']['9'][0]
+    calls = []
+
+    def import_selected(current_project, current_context, current_controller,
+                        current_run, adoption):
+        calls.append((current_project, current_context, current_controller,
+                      current_run, adoption))
+        (current_project / 'phase2/stage2/synth').mkdir(parents=True)
+        (current_project / 'phase2/stage2/synth/netlist.v').write_text(
+            'module top; endmodule\n')
+        return {'status': 'IMPORTED', 'copied': {
+            'phase2/stage2/synth/netlist.v': 'test-digest'}}
+
+    import execution_production as production
+    monkeypatch.setattr(production, 'import_selected', import_selected)
+    adopted = policy.dispatch_fixed_step(project, '9',
+                                         choice=H.choice(ctx, run, 'a'))
+    assert adopted['status'] == 'ADOPTED'
+    assert adopted['consumer']['status'] == 'IMPORTED'
+    assert (project / 'phase2/stage2/synth/netlist.v').is_file()
+    assert not (project / 'project').exists()
+    assert len(calls) == 1
+    assert calls[0][:4] == (project, ctx, controller, run)
+    assert calls[0][4]['selected'] == 'a'
 
 
 def test_no_choice_times_out_without_adoption_or_import(tmp_path, monkeypatch):
