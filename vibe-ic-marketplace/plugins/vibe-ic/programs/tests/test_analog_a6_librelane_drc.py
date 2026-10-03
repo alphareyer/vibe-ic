@@ -224,10 +224,15 @@ def test_the_runner_runs_the_arm_only_when_selected_and_it_is_stricter(
         if any("drc_attribute" in str(x) for x in cmd) else real(cmd, *a, **k)))
     R.step_for_block(project, {"name": "blk", "type": "ldo"}, "A6_block_pv",
                      None)
-    assert calls == []
+    assert len(calls) == 1 and calls[0][3] == "librelane"
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"A6": "direct"}}))
+    R.step_for_block(project, {"name": "blk", "type": "ldo"},
+                     "A6_block_pv", None)
+    assert len(calls) == 1
     (project / "phase3/librelane_switch.json").write_text(
         json.dumps({"steps": {"A6": "dual"}}))
     res = R.step_for_block(project, {"name": "blk", "type": "ldo"},
                            "A6_block_pv", None)
-    assert len(calls) == 1 and calls[0][3] == "dual"
+    assert len(calls) == 2 and calls[-1][3] == "dual"
     assert res.status == "FAIL" and "magic:U.2" in res.detail

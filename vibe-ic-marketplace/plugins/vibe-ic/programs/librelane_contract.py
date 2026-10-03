@@ -1759,7 +1759,13 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
 #: criteria (a) and (b), or b-analog for an analog observer step). A step not
 #: named here defaults to `direct`. A project opts out of a cut-over default by
 #: naming the step `direct` in `phase3/librelane_switch.json`.
-PRODUCTION_DEFAULTS: dict[str, str] = {'2': 'librelane', '3': 'librelane'}
+PRODUCTION_DEFAULTS: dict[str, str] = {
+    # Landed Step2/Step3 defaults remain authoritative.
+    '2': 'librelane', '3': 'librelane',
+    # Analog A6/A7/A8 direct cutover. The project switch remains the
+    # explicit opt-out (for example, {"A6": "direct"}).
+    'A6': 'librelane', 'A7': 'librelane', 'A8': 'librelane',
+}
 
 #: The chip path: a die that carries its own pad ring
 #: (`_tapeout_declaration.requests_pad_ring`, the condition of step 15.5ic).
