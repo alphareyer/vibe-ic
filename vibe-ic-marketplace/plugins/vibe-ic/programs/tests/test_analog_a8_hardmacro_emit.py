@@ -447,6 +447,70 @@ END blk
     assert manifest["native_measurement"]["metric"] == "cell_leakage_power"
 
 
+def test_missing_measurement_uses_ordinary_producer_path(tmp_path: Path,
+                                                         monkeypatch):
+    project, b, _topo = _write_native_measurement_fixture(tmp_path)
+    (b / E._A8_MEASUREMENT).unlink()
+    produced = {
+        "liberty_value": 500.0,
+        "liberty_power_unit": "1uW",
+        "measurement_sha256": "m" * 64,
+        "metric": "cell_leakage_power",
+        "value": 0.0005,
+        "unit": "W",
+        "provenance": "real_ngspice",
+        "source_netlist": "phase3/analog/blk/post_layout_extracted.spice",
+        "source_netlist_sha256": "n" * 64,
+        "native_log": "phase3/analog/blk/a8_native_measurement.ngspice.log",
+        "native_log_sha256": "l" * 64,
+        "simulator": "ngspice-47",
+        "image_digest": "sha256:" + "a" * 64,
+    }
+    calls = []
+    reads = iter([(None, "missing"), (produced, "")])
+    monkeypatch.setattr(E, "load_native_measurement",
+                        lambda *a, **k: next(reads))
+    monkeypatch.setattr(E, "_native_measurement_produce",
+                        lambda *a, **k: (calls.append(a[1]) or (produced, "")))
+    monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/sky130A.magicrc")
+
+    lef = """MACRO blk
+  PIN vdd
+    PORT
+      LAYER Metal3 ; RECT 0 0 1 1 ;
+    END
+  END vdd
+  PIN vss
+    PORT
+      LAYER Metal3 ; RECT 1 0 2 1 ;
+    END
+  END vss
+  PIN vin
+    PORT
+      LAYER Metal3 ; RECT 2 0 3 1 ;
+    END
+  END vin
+  PIN vout
+    PORT
+      LAYER Metal3 ; RECT 3 0 4 1 ;
+    END
+  END vout
+  SIZE 4 BY 4 ;
+END blk
+"""
+
+    def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
+        h = project / "phase3/analog/hardmacro/blk"
+        h.mkdir(parents=True, exist_ok=True)
+        (h / "blk.lef").write_text(lef)
+        return 0, "A8_LEF_OK", ""
+
+    monkeypatch.setattr(E, "_docker_exec", fake_exec)
+    result = E.emit_block(project, "blk", "container", "/pdk")
+    assert result["emitted"] is True, result
+    assert calls == ["blk"]
+
+
 def test_declared_port_mismatch_is_not_aliased(tmp_path: Path):
     project, b, topo = _write_native_measurement_fixture(tmp_path,
                                                          declared_ports=[

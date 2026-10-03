@@ -48,6 +48,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,7 @@ from _atomic_artefact import write_json  # noqa: E402 - vibe-ic#1082
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import magic_extract_spice_emit as _mx  # noqa: E402 — ordinary A7 extraction producer
 
 
 def _docker_exec_raw(container: str, cmd: str, timeout: int = 900
@@ -88,6 +90,7 @@ def _docker_exec_raw(container: str, cmd: str, timeout: int = 900
             else ["bash", "-c", cmd])
     try:
         cp = subprocess.run(argv, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
                             timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", str(exc)
@@ -470,6 +473,321 @@ _POWER_TO_UW = {
     "pw": 0.000001,
 }
 
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
+_MAG_USE_RE = re.compile(r"(?im)^\s*use\s+(\S+)")
+_SUBCKT_HEADER_RE = re.compile(r"(?im)^\s*\.subckt\s+(\S+)(?:\s+([^\n]*))?")
+
+
+def _runtime_image_digest(container: str) -> Tuple[Optional[str], str]:
+    """Resolve the execution image identity without asking a user to author it.
+
+    A named container is checked through the shared image identity helper.  A
+    native child (``container`` empty/``host``) receives the pinned identity
+    from the launch environment; the fallback is the ordinary host resolver,
+    which is useful when this producer is run outside a child.  A missing or
+    malformed identity refuses the measurement record rather than storing a
+    free-form string.
+    """
+    if container not in ("", "host"):
+        try:
+            digest, why = _pin.container_image_digest(container)
+        except Exception as exc:  # pragma: no cover - environment refusal
+            return None, f"container image identity probe failed: {exc}"
+        if digest and _DIGEST_RE.fullmatch(str(digest)):
+            return str(digest), "container_image_digest"
+        return None, why or "container image identity is absent or malformed"
+    for name in ("VIBEIC_RUNTIME_IMAGE_DIGEST", "VIBEIC_IMAGE_DIGEST"):
+        value = os.environ.get(name, "").strip()
+        if _DIGEST_RE.fullmatch(value):
+            return value, f"environment:{name}"
+    try:
+        value = str(_pin.resolved_image_digest()).strip()
+    except Exception:
+        value = ""
+    if _DIGEST_RE.fullmatch(value):
+        return value, "host_image_resolver"
+    return None, ("native execution image digest is unavailable; the ordinary "
+                  "producer will not hand-author provenance")
+
+
+def _remote_sha256(container: str, path: str) -> Tuple[Optional[str], str]:
+    rc, out, err = _docker_exec_raw(
+        container, f"sha256sum {shlex.quote(path)} 2>/dev/null")
+    for line in (out or "").splitlines():
+        m = re.search(r"\b([0-9a-f]{64})\b", line, re.IGNORECASE)
+        if m:
+            return m.group(1).lower(), ""
+    return None, (err or out or f"sha256sum failed for {path}").strip()[:240]
+
+
+def _native_ngspice_binary(container: str) -> Tuple[Optional[str], str]:
+    """Use the same capability-probed ngspice locations as A4."""
+    probes = (
+        "command -v ngspice",
+        "test -x /foss/tools/ngspice/bin/ngspice && "
+        "echo /foss/tools/ngspice/bin/ngspice",
+        "ls /foss/tools/*/bin/ngspice 2>/dev/null | head -1",
+    )
+    for probe in probes:
+        rc, out, _err = _docker_exec_raw(container, probe)
+        if rc != 0:
+            continue
+        for line in (out or "").splitlines():
+            value = line.strip()
+            if value.startswith("/") and value.endswith("ngspice"):
+                return value, ""
+    return None, "ngspice is not reachable in the selected execution context"
+
+
+def _native_model_contract(container: str, pdk_root: str, tech: str
+                           ) -> Tuple[Optional[Dict[str, str]], str]:
+    """Find the PDK's sectioned ngspice model contract from its own files.
+
+    The old R2 deck used ``.include cornerMOSlv.lib``.  IHP's file is a
+    sectioned entry library and therefore requires ``.lib <file> mos_tt``;
+    including it makes ngspice execute the bare ``.lib mos_tt`` section token
+    and fail.  This resolver discovers the file/section pair instead of
+    spelling a model number into the fixture.
+    """
+    root = f"{pdk_root.rstrip('/')}/{tech}/libs.tech/ngspice"
+    rc, out, err = _docker_exec_raw(
+        container,
+        f"find {shlex.quote(root)} -type f "
+        f"\\( -iname '*.lib' -o -iname '*.spice' \\) -print 2>/dev/null",
+    )
+    candidates = sorted({line.strip() for line in (out or "").splitlines()
+                         if line.strip().startswith("/")})
+    scored: List[Tuple[int, str, str]] = []
+    for path in candidates:
+        rc2, text, _ = _docker_exec_raw(container, f"cat {shlex.quote(path)}")
+        if rc2 != 0 or not text.strip():
+            continue
+        sections = [m.group(1) for m in re.finditer(
+            r"(?im)^\s*\.lib\s+([A-Za-z_]\w*)\s*$", text)]
+        if not sections:
+            continue
+        basename = Path(path).name.lower()
+        for section in sections:
+            low = section.lower()
+            score = 0
+            if "corner" in basename:
+                score += 4
+            if "mos" in basename or "nmos" in text.lower() \
+                    or "pmos" in text.lower():
+                score += 4
+            if low in ("mos_tt", "tt", "typ", "typical"):
+                score += 5
+            if low.endswith("_tt"):
+                score += 2
+            scored.append((score, path, section))
+    if not scored:
+        return None, (f"no sectioned ngspice model contract under {root}: "
+                      f"{(err or out).strip()[:180]}")
+    _score, model_path, section = max(
+        scored, key=lambda item: (item[0], item[1], item[2]))
+    digest, why = _remote_sha256(container, model_path)
+    if digest is None:
+        return None, f"model source hash unavailable for {model_path}: {why}"
+    return {"path": model_path, "section": section,
+            "sha256": digest}, ""
+
+
+def _stage_layout_subtree(layout: Path, stage: Path, block: str) -> Tuple[bool, str]:
+    """Copy the A5 layout bytes as the ordinary Magic top-cell identity."""
+    try:
+        stage.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(layout, stage / f"{block}.mag")
+    except OSError as exc:
+        return False, f"cannot stage A5 top layout: {exc}"
+    pending = [layout]
+    seen = set()
+    for _depth in range(16):
+        if not pending:
+            break
+        nxt: List[Path] = []
+        for source in pending:
+            try:
+                text = source.read_text(errors="replace")
+            except OSError:
+                continue
+            for name in _MAG_USE_RE.findall(text):
+                if name in seen:
+                    continue
+                seen.add(name)
+                child = layout.parent / f"{name}.mag"
+                if not child.is_file():
+                    continue
+                try:
+                    shutil.copy2(child, stage / child.name)
+                except OSError as exc:
+                    return False, f"cannot stage layout child {child.name}: {exc}"
+                nxt.append(child)
+        pending = nxt
+    return True, f"staged top {block}.mag and {len(seen)} referenced child cell(s)"
+
+
+def _native_measurement_produce(project: Path, block: str, container: str,
+                                pdk_root: str, gds: Path,
+                                topology: Dict[str, object]
+                                ) -> Tuple[Optional[Dict[str, object]], str]:
+    """Ordinary A8 producer path: extract the A5 view, then measure power.
+
+    This is intentionally owned by the A8 producer.  A caller does not create
+    ``a8_measurement.json`` by hand; the producer writes it only after Magic
+    and ngspice return a source-bound result.
+    """
+    bdir = project / "phase3" / "analog" / block
+    layout = bdir / "layout.mag"
+    if not layout.is_file():
+        return None, f"no A5 layout.mag at {layout}"
+    tech = layout_tech(bdir)
+    if not tech:
+        return None, "A5 layout declares no Magic technology"
+    rcfile = magicrc_for(pdk_root, container, tech)
+    if rcfile is None:
+        return None, f"no Magic rcfile for A5 technology {tech!r}"
+    model, why = _native_model_contract(container, pdk_root, tech)
+    if model is None:
+        return None, why
+    ngspice_bin, why = _native_ngspice_binary(container)
+    if ngspice_bin is None:
+        return None, why
+    image_digest, image_why = _runtime_image_digest(container)
+    if image_digest is None:
+        return None, image_why
+
+    stage = bdir / ".a8_native_stage"
+    extracted = bdir / "a8_post_layout_extracted.spice"
+    extract_log = bdir / "a8_native_magic_extract.log"
+    ng_log = bdir / "a8_native_ngspice.log"
+    deck = bdir / "a8_native_measurement.sp"
+    try:
+        if stage.exists():
+            shutil.rmtree(stage)
+        ok, stage_why = _stage_layout_subtree(layout, stage, block)
+        if not ok:
+            return None, stage_why
+        tcl = _mx.build_extraction_tcl(
+            block, f"{block}_extracted.spice",
+            _mx.MagicResimExtractOptions())
+        (stage / "a8_extract.tcl").write_text(tcl)
+        magic_cmd = (
+            f"cd {shlex.quote(str(stage))} && magic -dnull -noconsole "
+            f"-rcfile {shlex.quote(rcfile)} a8_extract.tcl")
+        magic_rc, magic_out, magic_err = _docker_exec(
+            container, magic_cmd, marker="a8_extract.tcl")
+        extract_log.write_text((magic_out or "") + (magic_err or ""))
+        stage_net = stage / f"{block}_extracted.spice"
+        if magic_rc != 0 or not stage_net.is_file() \
+                or stage_net.stat().st_size == 0:
+            return None, (f"Magic extraction rc={magic_rc} did not write "
+                          f"{stage_net.name}; see {extract_log.name}")
+        try:
+            extracted.write_bytes(stage_net.read_bytes())
+        except OSError as exc:
+            return None, f"cannot publish extracted netlist: {exc}"
+
+        extracted_text = extracted.read_text(errors="replace")
+        headers = list(_SUBCKT_HEADER_RE.finditer(extracted_text))
+        header = next((hit for hit in headers if hit.group(1) == block), None)
+        if header is None:
+            # A post-layout netlist may use a producer-owned top-cell name;
+            # only a header whose ports equal the declared topology can be
+            # admitted as the block wrapper.  Never take the first device
+            # subckt merely because it appears first in the file.
+            declared = list(topology.get("ports") or [])
+            header = next((hit for hit in headers
+                           if (hit.group(2) or "").split() == declared), None)
+        if not header or not (header.group(2) or "").split():
+            return None, "extracted netlist has no non-empty .subckt port list"
+        subckt = header.group(1)
+        ports = (header.group(2) or "").split()
+        if ports != list(topology.get("ports") or []):
+            return None, (f"extracted .subckt ports {ports!r} do not match "
+                          f"topology ports {list(topology.get('ports') or [])!r}")
+
+        model_path = model["path"]
+        model_section = model["section"]
+        deck.write_text("\n".join([
+            "* A8 ordinary producer native measurement deck.",
+            f".lib {json.dumps(model_path)} {model_section}",
+            f".include {json.dumps(str(extracted))}",
+            "VDD vdd 0 1.2",
+            "VSS vss 0 0",
+            "VIN vin 0 0.6",
+            "RLOAD vout 0 1meg",
+            f"XU {' '.join(ports)} {subckt}",
+            ".control",
+            "set noaskquit",
+            # Evaluate the operating point in the control language, where
+            # i(VDD) is a native vector.  The .meas FIND/AVG forms reject a
+            # one-point sweep in ngspice-47, while this emits the same
+            # source-bound power scalar directly from the solved circuit.
+            "op",
+            "let pwr = abs(i(VDD))*1.2",
+            "print pwr",
+            "quit",
+            ".endc",
+            ".end",
+            "",
+        ]))
+        ngspice_rc, ng_out, ng_err = _docker_exec(
+            container,
+            f"cd {shlex.quote(str(Path(model_path).parent))} && "
+            f"{shlex.quote(ngspice_bin)} -b -o "
+            f"{shlex.quote(str(ng_log))} {shlex.quote(str(deck))}",
+            marker="a8_native_measurement.sp")
+        if not ng_log.is_file():
+            ng_log.write_text((ng_out or "") + (ng_err or ""))
+        log_text = ng_log.read_text(errors="replace")
+        pwr = re.search(r"(?im)^\s*pwr\s*=\s*([-+0-9.eE]+)", log_text)
+        idd = re.search(r"(?im)^\s*idd\s*=\s*([-+0-9.eE]+)", log_text)
+        if ngspice_rc != 0 or (pwr is None and idd is None):
+            return None, (f"ngspice rc={ngspice_rc} has no native idd/pwr "
+                          f"result; see {ng_log.name}")
+        if pwr is not None:
+            power_w = float(pwr.group(1))
+            measured_current = None
+        else:
+            measured_current = float(idd.group(1))
+            power_w = abs(measured_current) * 1.2
+        if not math.isfinite(power_w) or power_w <= 0:
+            return None, f"native pwr result is not finite and positive: {power_w!r}"
+
+        rec: Dict[str, object] = {
+            "schema": _A8_MEASUREMENT_SCHEMA,
+            "block": block,
+            "status": "MEASURED",
+            "provenance": "real_ngspice",
+            "metric": "cell_leakage_power",
+            "value": power_w,
+            "unit": "W",
+            "native_measurement": "op source power vector abs(I(VDD))*VDD",
+            "measured_current_a": measured_current,
+            "source_layout": str(layout.relative_to(project)),
+            "source_layout_sha256": _sha256(layout),
+            "source_gds": str(gds.relative_to(project)),
+            "source_gds_sha256": _sha256(gds),
+            "source_netlist": str(extracted.relative_to(project)),
+            "source_netlist_sha256": _sha256(extracted),
+            "native_log": str(ng_log.relative_to(project)),
+            "native_log_sha256": _sha256(ng_log),
+            "native_extraction_log": str(extract_log.relative_to(project)),
+            "native_extraction_log_sha256": _sha256(extract_log),
+            "simulator": "ngspice native post-layout .op",
+            "model_source": model_path,
+            "model_source_sha256": model["sha256"],
+            "model_section": model_section,
+            "image_digest": image_digest,
+            "declared_ports": list(topology.get("ports") or []),
+        }
+        write_json(bdir / _A8_MEASUREMENT, rec)
+        return rec, ""
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return None, f"ordinary native measurement producer failed: {exc}"
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -582,23 +900,38 @@ def load_native_measurement(project: Path, block: str, gds: Path,
 
     # The digest proves which log was consumed; this small semantic check
     # proves it is an ngspice measurement log rather than an arbitrary
-    # non-empty text file.  The native contract emits `.meas op pwr` as
-    # `pwr = ...`; no value is invented from this check.
+    # non-empty text file.  The native contract emits a control-language
+    # `pwr = ...` vector result from the solved source current.  Older
+    # receipts with a direct measured `idd = ...` remain admissible and are
+    # checked below as the same scalar contract.
     try:
         log_text = native_log_path.read_text(errors="replace") \
             if native_log_path is not None else ""
     except OSError as exc:
         return None, f"native_log is unreadable: {exc}"
-    if not re.search(r"(?im)^\s*pwr\s*=\s*[-+0-9.eE]+", log_text):
-        return None, ("native_log has no ngspice `.meas` pwr result; a typed "
+    pwr_match = re.search(r"(?im)^\s*pwr\s*=\s*([-+0-9.eE]+)", log_text)
+    idd_match = re.search(r"(?im)^\s*idd\s*=\s*([-+0-9.eE]+)", log_text)
+    if pwr_match is None and idd_match is None:
+        return None, ("native_log has no ngspice pwr/idd result; a typed "
                       "value without its measured terminal-power receipt is "
                       "not admissible")
+    if idd_match is not None:
+        expected = abs(float(idd_match.group(1))) * 1.2
+        if not math.isclose(value, expected, rel_tol=1e-6, abs_tol=1e-18):
+            return None, ("measured value does not match native I(VDD) "
+                          "receipt")
 
     if str(rec.get("simulator") or "").lower().find("ngspice") < 0:
         return None, "native measurement does not identify ngspice"
     image = rec.get("image_digest")
-    if not isinstance(image, str) or not image.startswith("sha256:"):
+    if not isinstance(image, str) or not _DIGEST_RE.fullmatch(image):
         return None, "native measurement lacks a pinned image digest"
+    if rec.get("model_source") is not None:
+        model_hash = rec.get("model_source_sha256")
+        if not isinstance(model_hash, str) \
+                or not re.fullmatch(r"[0-9a-f]{64}", model_hash,
+                                    re.IGNORECASE):
+            return None, "native measurement lacks a typed PDK model hash"
     # The input declaration is part of the typed record.  It is not used as a
     # substitute for the files above, but it keeps the producer/consumer
     # contract explicit for a later stale-input audit.
@@ -633,8 +966,18 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
     measurement, measurement_reason = load_native_measurement(
         project, block, gds, topology)
     if measurement is None:
-        return {"block": block, "emitted": False, "rc": 1,
-                "reason": measurement_reason}
+        produced, produce_reason = _native_measurement_produce(
+            project, block, container, pdk_root, gds, topology)
+        if produced is None:
+            return {"block": block, "emitted": False, "rc": 1,
+                    "reason": (f"{measurement_reason}; ordinary native "
+                               f"producer: {produce_reason}")}
+        measurement, measurement_reason = load_native_measurement(
+            project, block, gds, topology)
+        if measurement is None:
+            return {"block": block, "emitted": False, "rc": 1,
+                    "reason": ("ordinary native producer wrote a record "
+                               f"that could not be admitted: {measurement_reason}")}
     tech = layout_tech(bdir)
     rcfile = magicrc_for(pdk_root, container, tech)
     if rcfile is None:
