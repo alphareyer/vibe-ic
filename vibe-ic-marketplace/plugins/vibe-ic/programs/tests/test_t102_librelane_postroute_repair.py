@@ -1164,6 +1164,42 @@ def test_the_script_orders_the_repair_and_connects_before_it_writes():
 
 
 @pytest.mark.skipif(not __import__('shutil').which('tclsh'), reason='tclsh absent')
+def test_noop_branch_emits_real_after_route_census_before_exit(tmp_path):
+    """A valid identity/no-op still measures its unchanged input database."""
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    start = tcl.index('if {$::vic_changed == 0} {')
+    end = tcl.index('\n# ---- 6. legalize', start)
+    branch = tcl[start:end]
+    section = tmp_path / 'noop_census.tcl'
+    section.write_text(branch)
+    harness = textwrap.dedent(r"""
+        namespace eval utl {
+            proc metric_integer {name value} {lappend ::metrics [list $name $value]}
+        }
+        set ::metrics [list]
+        set ::vic_changed 0
+        set ::vic_fanout_pending 0
+        set ::vic_unrouted_before [dict create net_a 1]
+        proc vic_unrouted_nets {} {return [dict create net_a 1]}
+        proc vic_say {line} {puts $line}
+        rename exit real_exit
+        proc exit {code} {
+            puts "METRICS $::metrics"
+            puts "EXIT $code"
+            real_exit $code
+        }
+        source __SECTION__
+    """).replace('__SECTION__', str(section))
+    run = subprocess.run(['tclsh'], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert 'no-op route census after_unrouted=1 unrouted_added=0' in run.stdout
+    assert 'vibeic__prr__after__unrouted__count 1' in run.stdout
+    assert 'vibeic__prr__unrouted__added 0' in run.stdout
+    assert 'EXIT 0' in run.stdout
+
+
+@pytest.mark.skipif(not __import__('shutil').which('tclsh'), reason='tclsh absent')
 def test_the_neighbour_reader_takes_the_nets_that_share_a_violation(tmp_path):
     """The script's own proc, run by tclsh on the router's report grammar
     (recorded from the fork's DRT-0712 refusal on spm, 2026-09-27)."""

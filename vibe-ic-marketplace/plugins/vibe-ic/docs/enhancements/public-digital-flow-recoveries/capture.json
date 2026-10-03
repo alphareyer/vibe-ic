@@ -1,0 +1,328 @@
+{
+  "schema": "vibeic.enhancement-capture-manifest/v1",
+  "capture_id": "public-digital-flow-recoveries-20261003",
+  "source_release": {
+    "version": "1.27.3",
+    "commit": "dc2dc7e1fa6d65baa3ed4cf89715b672c4e2404c",
+    "tree": "8de19336270492946677ab72baec5792acaa3147"
+  },
+  "program_first": true,
+  "counts": {
+    "absorbed": 4,
+    "open_findings": 4,
+    "new_program_candidates": 1,
+    "new_skill_sections": 0,
+    "new_backlogs": 0
+  },
+  "absorbed": [
+    {
+      "id": "pdk-scoped-clock-and-portable-source",
+      "step": "phase1.ingest_render",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "When one specification carries timing targets for more than one process family, the selected run scope must choose the matching clock row. Every emitted evidence reference must remain project-relative so a copied input tree does not retain an author-machine path.",
+      "before": "A stale or unscoped timing row could replace the selected process row, and a constraint source could retain an absolute author path.",
+      "after": "The run-selected process row drives the clock contract, incompatible owners refuse, and the source identity is project-relative.",
+      "implementation": {
+        "release": "1.27.1",
+        "commit": "ca4386465f87964be1efc56ef9c34bad22596d13",
+        "tree": "94acc82a6d55a25e51285acaa6f4ae1076e784de",
+        "programs": [
+          "programs/l19_constraint_token_emit.py::_clock_target_record",
+          "programs/phase1_doc_one_shot_runner.py::_v1_9_65_post_emit_l8_pdk_scoped_clock",
+          "programs/phase1_doc_one_shot_runner.py::_post_emit_mirror_clock_resets_to_l9_v1_6_311"
+        ],
+        "tests": {
+          "passed": 26,
+          "failed": 0,
+          "selectors": [
+            "programs/tests/test_spm1002_scoped_l9_clock_propagation.py",
+            "programs/tests/test_aesic_late_clock_mirror.py",
+            "programs/tests/test_rclk_pdk_scoped_clock_refuses_foreign_target.py",
+            "programs/tests/test_sdc_gen_scope_is_the_run_not_the_declaration.py",
+            "programs/tests/test_l19_constraint_token_emit.py::test_clock_target_row_provenance_is_project_relative"
+          ]
+        }
+      },
+      "evidence": [
+        {
+          "packet": "spm-clock-scope-v1271-shipping",
+          "artifact": "RESULT.json",
+          "sha256": "cc9f04b7ce6e234e2cd704f120d06473fbadf5bd888baf207367b720afff4bd1"
+        }
+      ],
+      "claim_boundary": "Focused source and test absorption only; no fresh full Phase 1, D1, or whole-IC PASS is claimed."
+    },
+    {
+      "id": "typed-register-and-otp-absence",
+      "step": "phase1.fact_extract",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "An empty parse is not evidence of absence. A producer may emit a typed no-register-map or no-OTP fact only from explicit, field-relevant negative wording; later positive evidence in another clause must remain positive.",
+      "before": "Generic empty or negative-looking text could be promoted into an absent register map or could erase positive OTP evidence.",
+      "after": "Explicit absence is source-bound and typed, contradictory positive records remain unknown or present, and positive register and OTP controls are preserved.",
+      "implementation": {
+        "release": "1.27.2",
+        "commit": "35b020be6ea79316e40da10ba77410357745bb4e",
+        "tree": "e72eee336f128475b281ff3b993e4dfabd92266c",
+        "programs": [
+          "programs/phase1_doc_one_shot_runner.py::_has_positive_otp_evidence",
+          "programs/phase1_doc_one_shot_runner.py::_l4_explicit_no_regmap_sources",
+          "programs/spi_protocol_synth.py::_apply_universal"
+        ],
+        "tests": {
+          "shipping_scope_passed": 42,
+          "shipping_scope_failed": 0,
+          "primary_selectors": [
+            "programs/tests/test_spm_l4_explicit_absence.py",
+            "programs/tests/test_phase1_issue10_otp_geometry_l2_defaults.py::test_l4_otp_evidence_keeps_geometry",
+            "programs/tests/test_phase1_issue10_otp_geometry_l2_defaults.py::test_l4_otp_less_project_emits_null_geometry"
+          ]
+        }
+      },
+      "evidence": [
+        {
+          "packet": "spm-v1272-shipping",
+          "artifact": "RESULT.json",
+          "sha256": "aedba2ff63b082362fa8681819f0e34195ca75e9366f7b2a91ce574886fafeb7"
+        }
+      ],
+      "claim_boundary": "The 42-case shipping scope also covers the sibling synthesis handoff repair; this record claims only the typed-absence subset and its preserving positive controls."
+    },
+    {
+      "id": "receipt-bound-guest-pdk-config-currentness",
+      "step": "phase2.yosys_synth",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "A host consumer must rehash exactly the configuration-key population recorded by a container producer through the producer's receipt-bound guest-to-host mounts. Missing, changed, foreign, or additional files cannot be credited by partial comparison.",
+      "before": "Guest configuration paths were interpreted directly in the host namespace, so current producer bytes could not be revalidated correctly.",
+      "after": "The consumer maps and rehashes exactly the 40 producer-recorded configuration keys and requires complete dictionary equality. A valid empty mount list remains valid; newly visible image-only files outside the recorded keys do not expand the configuration population.",
+      "implementation": {
+        "release": "1.27.2",
+        "commit": "35b020be6ea79316e40da10ba77410357745bb4e",
+        "tree": "e72eee336f128475b281ff3b993e4dfabd92266c",
+        "programs": [
+          "programs/synth_handoff_netlist_check.py::_receipt_pdk_mounts",
+          "programs/synth_handoff_netlist_check.py::_native_synthesis"
+        ],
+        "measured_currentness": {
+          "recorded_config_keys": 40,
+          "rehashed_config_keys": 40,
+          "complete_digest_equality": true,
+          "recorded_mount_list_empty": true,
+          "image_only_files_expand_recorded_population": false,
+          "native_yosys_rerun": false
+        },
+        "tests": {
+          "shipping_scope_passed": 42,
+          "shipping_scope_failed": 0,
+          "primary_selector": "programs/tests/test_default_frontend_r2.py::test_step14_maps_guest_pdk_config_material_from_producer_mount"
+        }
+      },
+      "evidence": [
+        {
+          "packet": "spm-guest-handoff-r3-collected",
+          "artifact": "REPAIR_HANDOFF_R3.json",
+          "sha256": "eedc8e04de101f5044ce2c3e25e0c7855d41f7e0f3173974b3bc32f5482a3523"
+        },
+        {
+          "packet": "spm-v1272-shipping",
+          "artifact": "RESULT.json",
+          "sha256": "aedba2ff63b082362fa8681819f0e34195ca75e9366f7b2a91ce574886fafeb7"
+        }
+      ],
+      "claim_boundary": "The 40-of-40 check re-read an existing producer receipt without rerunning synthesis; the later bound-handoff absence remained a separate failure in that measurement."
+    },
+    {
+      "id": "structured-native-pdn-tcl-transport",
+      "step": "phase3.librelane_flow",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "When a container probe returns executable configuration text, launcher diagnostics and the payload must use separate channels. The caller accepts exactly one typed JSON payload, validates required commands, and preserves the payload bytes before appending source-owned declarations.",
+      "before": "Container startup diagnostics could be concatenated into generated Tcl and fail only when the downstream tool interpreted the contaminated file.",
+      "after": "The native Tcl is carried in one structured JSON envelope; missing, ambiguous, malformed, empty, or command-incomplete payloads refuse before the target file is published.",
+      "implementation": {
+        "release": "1.27.3",
+        "commit": "dc2dc7e1fa6d65baa3ed4cf89715b672c4e2404c",
+        "tree": "8de19336270492946677ab72baec5792acaa3147",
+        "programs": [
+          "programs/librelane_contract.py::_extract_pdn_payload",
+          "programs/librelane_contract.py::emit_pdn_cfg"
+        ],
+        "tests": {
+          "passed": 12,
+          "failed": 0,
+          "selectors": [
+            "programs/tests/test_librelane_state_bridge.py::test_pdn_cfg_is_the_images_script_plus_declared_connects",
+            "programs/tests/test_librelane_state_bridge.py::test_pdn_cfg_refuses_invalid_or_missing_payload"
+          ],
+          "coverage": "Two clean/banner positives and ten malformed, missing, ambiguous, or failed-probe reverse controls."
+        },
+        "native_measurement": {
+          "runtime_seconds": 13.951,
+          "output_state_written": true,
+          "supply_connectivity": "VDD and VSS shapes reported connected",
+          "whole_ic_pass": false
+        }
+      },
+      "evidence": [
+        {
+          "packet": "spm-v1273-shipping",
+          "artifact": "RESULT.json",
+          "sha256": "451dacb50530cb6cdbe0f91c13760a3f8fa5d6fcce4cd029e005a21be9de3d98"
+        },
+        {
+          "packet": "spm-pdn-native-progress-r1-collected",
+          "artifact": "COLLECTION.json",
+          "sha256": "cb19e53b836583c861c50e065418c7c061ca92240ff2175073ae6a7debe4308a"
+        }
+      ],
+      "claim_boundary": "Successful GeneratePDN output and connected supplies prove this repaired stage only. They do not prove Phase 3 or whole-IC completion."
+    }
+  ],
+  "expert_reconciliation": {
+    "status": "SCOPED_POST_OUTPUT_RECONCILIATION",
+    "parent_expectations": 27,
+    "conjunctive_leaves": 35,
+    "findings": 0,
+    "current_consumer_rc": 0,
+    "original_blind_parent_expectations": 27,
+    "original_blind_findings_retained": 10,
+    "original_blind_answer_sha256": "71c073a142963aee481154734c1fe492c3add424df34d7b5410a08c65ed72e77",
+    "post_output_answer_sha256": "df389ad60156c0e765dcdeddd0f7224767af47a6df9d85fe36b76a0d779dcccc",
+    "d1_final_verdict": "NOT_CLAIMED",
+    "whole_ic_pass": false,
+    "evidence": {
+      "packet": "spm-current-expert-v1273-consumed",
+      "artifact": "CONSUMED.json",
+      "sha256": "241bccdbc814a56570c7f2891cee84fa57a2b4001cac77c8cb873353381179a2"
+    },
+    "claim_boundary": "This is a current post-output reconciliation, not a fresh blind run. It does not overwrite the original findings, supply a D1 signature, or establish whole-IC PASS."
+  },
+  "open_findings": [
+    {
+      "id": "postroute-noop-missing-after-route-census",
+      "step": "phase3.librelane_flow",
+      "bucket": "A",
+      "program_first_disposition": "AUGMENT_EXISTING",
+      "status": "OPEN_NOT_RECOVERED",
+      "general_pattern": "A repair producer that returns the input artifact unchanged on a valid no-op path must still emit the same before-and-after census required from changed candidates. Returning byte-identical state does not authorize a consumer to infer an unmeasured after value.",
+      "observed": {
+        "before_unrouted": 0,
+        "after_unrouted": null,
+        "added_unrouted": null,
+        "candidate_decision": "REFUSED",
+        "step_status": "FAIL"
+      },
+      "required_next": "Emit the after and added route census in the no-op producer branch before exit, while retaining the existing consumer type, consistency, and threshold checks.",
+      "routed_program": "programs/librelane_postroute_repair.py",
+      "producer_files": [
+        "programs/librelane_plugins/librelane_plugin_vibeic/postroute_repair.tcl",
+        "programs/librelane_plugins/librelane_plugin_vibeic/postroute_repair.py"
+      ],
+      "evidence": {
+        "packet": "spm-step32-census-diagnosis-r1-collected",
+        "artifact": "findings.json",
+        "sha256": "8f669dbcf269cee26f29f58f9de0ff2ad0274eb6fad7cafe56f5ef5b373288b9"
+      },
+      "claim_boundary": "No producer repair, EDA replay, threshold change, or recovered PASS is part of this capture."
+    },
+    {
+      "id": "current-drv-cap-row-classification-unavailable",
+      "step": "phase3.sta",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM_EVIDENCE_PENDING",
+      "status": "OPEN_NOT_CLASSIFIED",
+      "general_pattern": "A design-wide electrical-limit count cannot be assigned to core logic, IO cells, or external ports without a current, source-bound connectivity and Liberty witness. Missing classification evidence must count conservatively and remain unavailable rather than silently dropping rows.",
+      "observed": {
+        "reported_cap_rows": 37,
+        "connectivity": "UNAVAILABLE",
+        "missing_current_artifact": "reports/phase3/sta/drv_signoff_bundle.json",
+        "classification": "UNPROVEN; includes conservatively counted port and IO rows"
+      },
+      "existing_programs": [
+        "programs/drv_capture_plan.py",
+        "programs/_drv_row_class.py",
+        "programs/drv_signoff_judge.py",
+        "programs/librelane_postroute_repair.py::_step32_drv_signoff"
+      ],
+      "required_next": "Produce the current sign-off bundle, bind it to the current run, netlist, SDC, linked Liberty bytes, and raw reports, then classify every row. Preserve all 37 rows until that succeeds.",
+      "evidence": {
+        "packet": "spm-pdn-native-progress-r1-collected",
+        "artifact": "NATIVE_PROGRESS.md",
+        "sha256": "19221555d91ed51b0cb9be6d124a930f2397fd87b0d2cdeb702513b29b10a704"
+      },
+      "claim_boundary": "The count is not evidence of 37 core violations, and no IO-margin waiver or row deletion is authorized."
+    },
+    {
+      "id": "native-hold-met-below-additional-reserve",
+      "step": "phase3.cts_hold_fix",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM_POLICY_BOUNDARY",
+      "status": "OPEN_CLOSURE_TARGET",
+      "general_pattern": "Tool sign-off slack and an orchestration reserve target are separate facts. When the native report already includes clock uncertainty, a positive MET slack below an additional reserve floor must remain MET at the tool layer and below-target at the policy layer.",
+      "observed": {
+        "native_hold_slack_ns": 0.185392,
+        "native_tool_status": "MET",
+        "clock_uncertainty_already_in_native_path_ns": 0.25,
+        "additional_controller_reserve_floor_ns": 0.25,
+        "reserve_target_status": "BELOW_TARGET"
+      },
+      "existing_program": "programs/librelane_postroute_repair.py::declared_timing_floor",
+      "required_next": "Keep both statuses explicit while physical closure continues. Any change to the additional reserve policy requires a declared owner decision and new source-bound evidence; this capture does not change the threshold.",
+      "evidence": [
+        {
+          "packet": "spm-pdn-native-progress-r1-collected",
+          "artifact": "stage32-hold-min-ff.rpt",
+          "sha256": "716d2a53fb7c1445c0045ada5fe8e7ff82619fff6b28e8a55f33b84cb0be9ab4"
+        },
+        {
+          "packet": "spm-pdn-native-progress-r1-collected",
+          "artifact": "NATIVE_PROGRESS.md",
+          "sha256": "19221555d91ed51b0cb9be6d124a930f2397fd87b0d2cdeb702513b29b10a704"
+        }
+      ],
+      "claim_boundary": "This is not a negative hold violation, a recovered PASS, or authority to lower the reserve floor."
+    },
+    {
+      "id": "density-fill-core-declaration-unresolved",
+      "step": "phase3.librelane_flow",
+      "bucket": "A",
+      "program_first_disposition": "OPEN_PROVENANCE_CLASSIFICATION",
+      "status": "OPEN_NOT_CLASSIFIED",
+      "general_pattern": "A density-fill producer for a pad-bearing die needs the current core rectangle that the implementation flow actually used. A missing operator declaration and a missing propagation of a program-derived floorplan are distinct causes and must be distinguished before any value is supplied.",
+      "observed": {
+        "pnr_status": "PASS",
+        "pnr_runtime_seconds": 872.76,
+        "spare_cells": 6,
+        "gds_status": "REFUSED",
+        "refusal_code": "LL_DENSITY_FILL_CORE_UNDECLARED",
+        "tapeout_declaration_core_area_um": null,
+        "placed_pad_population_present": true
+      },
+      "existing_programs": [
+        "programs/phase3_one_shot_runner.py",
+        "programs/librelane_fill_dfm.py",
+        "programs/librelane_contract.py"
+      ],
+      "required_next": "Determine whether the current normal floorplan producer emitted an authoritative core rectangle and whether that current fact was omitted from the tape-out declaration path. Bind a measured producer fact if present; otherwise keep the existing refusal and request the missing declaration. Do not derive core geometry from pad presence alone.",
+      "evidence": [
+        {
+          "packet": "spm-pdn-native-progress-r1-collected/current",
+          "artifact": "phase3_one_shot.in-progress.json",
+          "sha256": "52ab78eeae63437f44b1aa82bcbb97e8b477aeeda80b01c0147b1533574ad390"
+        },
+        {
+          "packet": "spm-pdn-native-progress-r1-collected/current",
+          "artifact": "prestream_gate.json",
+          "sha256": "a4bde2b5a1b435411e2b8e618f19514cd9196681d2e9eca9ed7ee77d295ce650"
+        }
+      ],
+      "claim_boundary": "The current report is in progress and pre-stream remains FAIL. This capture does not classify the cause, manufacture a core rectangle, or claim GDS or whole-IC PASS."
+    }
+  ]
+}

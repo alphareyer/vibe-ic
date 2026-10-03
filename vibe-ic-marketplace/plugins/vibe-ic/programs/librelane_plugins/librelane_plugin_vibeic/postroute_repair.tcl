@@ -337,6 +337,20 @@ if {$::vic_changed == 0} {
     # A repair that changed no instance hands back the INPUT database
     # (PostRouteRepair.run): re-routing an identical netlist is a fresh
     # route with its own quality lottery (v1.8.43: 13 new min-area islands).
+    # The input is the candidate, but it is still a real route that needs its
+    # own after census.  Measure the same database again and bind the added
+    # count to the before/after set difference; the Python consumer remains
+    # strict about missing or inconsistent counters.
+    set ::vic_unrouted_after [vic_unrouted_nets]
+    set ::vic_unrouted_new [list]
+    dict for {name _} $::vic_unrouted_after {
+        if {![dict exists $::vic_unrouted_before $name]} {
+            lappend ::vic_unrouted_new $name
+        }
+    }
+    utl::metric_integer vibeic__prr__after__unrouted__count [dict size $::vic_unrouted_after]
+    utl::metric_integer vibeic__prr__unrouted__added [llength $::vic_unrouted_new]
+    vic_say "no-op route census after_unrouted=[dict size $::vic_unrouted_after] unrouted_added=[llength $::vic_unrouted_new]"
     vic_say "no-op: the repair changed no instance; the input database is the candidate"
     exit 0
   }

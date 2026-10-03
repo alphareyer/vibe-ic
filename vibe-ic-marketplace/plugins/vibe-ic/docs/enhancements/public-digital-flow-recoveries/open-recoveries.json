@@ -1,0 +1,12 @@
+[
+  {
+    "step": "phase3.librelane_flow",
+    "design": "public-digital-flow-case",
+    "bucket": "A",
+    "rule_name": "postroute_noop_emits_after_route_census",
+    "pattern": "A repair producer returns the input artifact unchanged on a valid no-op branch but exits before publishing the same typed after-state census required from changed candidates, leaving the consumer unable to distinguish a measured identity result from missing evidence.",
+    "docstring": "Require every valid post-route repair result, including an unchanged no-op identity result, to publish typed before, after, and added unrouted-net counters from the producer.",
+    "expected_signal": "ERROR",
+    "fix_action": "In the no-op producer branch, measure and emit the final unrouted-net census and the set difference before returning the input state. Keep the existing consumer refusal for absent, negative, or inconsistent counters; never infer zero in the consumer."
+  }
+]
