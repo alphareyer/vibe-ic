@@ -49469,6 +49469,22 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
+    if not candidate and _step34_mode(project) == "librelane":
+        # Default has one primary stream: the admitted filled DEF, then the
+        # actual PDK GDS filler and density deck. Explicit legacy/dual modes
+        # retain their existing diagnostic paths below.
+        import librelane_fill_dfm as _lf
+        from librelane_contract import Refusal, tool_stop_reason
+        try:
+            result = _lf.default_stream(project, top, pdk, container)
+        except (Refusal, OSError, ValueError, KeyError) as exc:
+            stopped = tool_stop_reason(exc.code) if isinstance(exc, Refusal) else None
+            return StepResult("gds", "NOT_MEASURED" if stopped else "FAIL",
+                              time.time() - t0, str(exc), reason_class=stopped or "")
+        return StepResult("gds", "PASS", time.time() - t0,
+                          "KLayout.StreamOut from current filled DEF; PDK density=0",
+                          [result["canonical"]], extras={"streamout_engine": "klayout",
+                          "density_fill": True, "finishing_receipt": result["receipt"]})
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
@@ -52032,7 +52048,8 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     except Refusal as exc:
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
-        return None
+        import _physical_current as _pc
+        return _pc.direct_half(project, top, pdk, half, direct)
     t0 = time.time()
     vacuous = _vacuous_on_unrouted(project, half, t0)
     if vacuous is not None:
@@ -58619,7 +58636,8 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         try:
             existing = json.loads(clock_plan.read_text(errors="ignore"))
             cl = existing.get("clocks") if isinstance(existing, dict) else None
-            needs_refresh = not (isinstance(cl, list) and cl)
+            needs_refresh = not (isinstance(cl, list) and cl
+                                 and isinstance(existing.get("current"), dict))
         except Exception:
             existing = None
             needs_refresh = True
@@ -58679,19 +58697,20 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
             "declared clock says so; no nominal clock is invented")
         return None
 
-    clock_plan.parent.mkdir(parents=True, exist_ok=True)
-    clock_plan.write_text(json.dumps({
-        "tool": "openroad",
-        "source_log": str((pnr_out / "openroad.log").relative_to(project)),
-        "primary_clock": next(iter(clocks)),
-        "clocks": list(clocks.values()),
-        # PROVENANCE: what this plan was derived from, by CONTENT.
-        # `clock_plan_check` re-hashes exactly these paths, so the two sides
-        # cannot disagree about the inputs, and the record survives clone /
-        # copy / rsync / archive extraction the way an mtime does not.
-        "derived_from": _pl.clock_plan_sdc_digests(project, sdc_paths),
-    }, indent=2) + "\n")
-    return str(clock_plan)
+    # Step 16 is measured by OpenROAD; parsed prose alone is not production.
+    try:
+        import _physical_current as _pc
+        declared_pdk = _read_declared_pdk_target(project)
+        if not declared_pdk:
+            raise ValueError("CLOCK_PLAN_PDK_NOT_DECLARED")
+        pdk = _detect_pdk(project, declared_pdk)
+        if pdk is None:
+            raise ValueError("CLOCK_PLAN_PDK_NOT_RESOLVED")
+        floorplan = _pl.pnr_dir(project) / "floorplan.def"
+        return _pc.clock_plan(project, clock_plan, floorplan, sdc_paths, pdk)
+    except (OSError, ValueError, RuntimeError) as exc:
+        notes.append(f"clock_plan.json NOT written: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -60356,6 +60375,18 @@ def step_digital_hardmacro_gen(project: Path,
             _V.ReasonClass.NOT_EXECUTED.value),
     }.get(cp.returncode,
           (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value))
+    if cp.returncode == 0:
+        gate = PROGRAMS_DIR / "digital_hardmacro_check.py"
+        checked, stopped = _run_producer(
+            "digital_hardmacro_gen", [sys.executable, str(gate), str(project),
+                                      "--json", str(project / "reports/phase3/digital_hardmacro.json")],
+            t0, noun="the current kit check")
+        if stopped is not None:
+            return stopped
+        if checked.returncode:
+            status = "FAIL" if checked.returncode == 1 else "NOT_MEASURED"
+            reason = "" if status == "FAIL" else _V.ReasonClass.NOT_EXECUTED.value
+            msg += "; current kit consumer refused: " + (checked.stdout or checked.stderr or "").strip()[-500:]
     out: List[str] = []
     hm = project / "phase3" / "stage4" / "hardmacro"
     if hm.is_dir():
@@ -62772,9 +62803,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                             hashlib.sha256(primary_def.read_bytes()).hexdigest())
         except (OSError, ValueError):
             _em_dual_due = True
+    _em_native_due = (primary_def.is_file()
+                      and _step25_native_density_due(project, primary_def, pdk))
     if primary_def.is_file() and (_signoff_regen(ir_rpt, primary_def)
                                   or _signoff_regen(em_rpt, primary_def)
-                                  or _em_dual_due):
+                                  or _em_dual_due or _em_native_due):
         ir_ok, em_ok = _emit_ir_em_reports(
             project, top, pdk, container, ir_rpt, em_rpt, notes)
         if ir_ok:
@@ -62783,31 +62816,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         if em_ok:
             written.append(str(em_rpt))
             written.append(str(rpt_phase3 / "em.json"))
-    # Step 24 on LibreLane (`phase3/librelane_switch.json`): OpenROAD.
-    # IRDropReport on the canonical SPEF step 22 left, with the same-basis
-    # cross-check.  The direct session above still runs: step 25's EM reads it.
-    _ll_m24 = _ll_selected_mode(project, "24")
-    if primary_def.is_file() and _ll_m24 != "direct":
-        _ll_old_record = None
-        try:
-            _ll_old_record = json.loads((rpt_phase3 / _LL_IR_RECORD).read_text()).get("record")
-        except (OSError, ValueError, AttributeError):
-            pass
-        if (_signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out)
-                or (isinstance(_ll_old_record, dict) and _ll_old_record
-                    and "source_probe" not in _ll_old_record)):
-            _librelane_step24_record(project, top, pdk, _ll_m24, spef_out, written)
-        if _ll_m24 == "librelane":
-            try:
-                _ll_ir_doc = json.loads((rpt_phase3 / _LL_IR_RECORD).read_text())
-                if _ll_ir_doc.get("record") and _ll_ir_doc.get("def_sha256") == \
-                        _sha256_file(primary_def):
-                    _librelane_step24_publish(project, _ll_ir_doc)
-                elif (_ll_ir_doc.get("def_sha256") == _sha256_file(primary_def)
-                      and (_ll_ir_doc.get("judgment") or {}).get("verdict") == "NOT_MEASURED"):
-                    _librelane_step24_refusal_publish(project, _ll_ir_doc)
-            except (OSError, ValueError, KeyError) as exc:
-                notes.append(f"step 24 LibreLane publish: {exc}")
+    # The existing producer owns primary IR adoption and matching EM density.
+    # Re-publishing or re-running the former opt-in route here would change
+    # the already-bound state after the consumer contract was sealed.
 
     # --- #1215: Step 25 EM AUTHORITY comparison -------------------------
     # em.json above is a MEASUREMENT-ONLY artefact; the budget comparison
@@ -62867,7 +62878,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # Dated against the SPEF as well as the DEF: `_emit_si_crosstalk_report`
     # reads `spef_out` for the coupling capacitances the report is made OF, so
     # a re-extraction that leaves the DEF alone still supersedes this report.
-    if _signoff_regen(si_rpt, primary_def, spef_out):
+    _si_current_due = primary_def.is_file() and _step27_current_si_due(project)
+    if _signoff_regen(si_rpt, primary_def, spef_out) or _si_current_due:
         # v0.2.35: pass pdk + container so the SI emitter can ALSO run the
         # timing-window-aware ADVISORY upgrade (OpenSTA SI timing JSON →
         # window-gated watch-list) when a routed SPEF + post-route STA exist.
@@ -64228,21 +64240,22 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     except Exception as _decision_exc:  # pragma: no cover — defensive
         notes.append(f"Step-32 decision record emit failed: {_decision_exc}")
 
-    # --- Step 33: power.rpt (OpenSTA report_power best-effort) ---------
+    # --- Step 33: adopt the current STAPostPNR report_power output -----
     # `basis="post_pnr"`: this is the SIGN-OFF power number, so the session
     # links the ROUTED netlist + the extracted SPEF. Passing nothing here (the
     # default) is the pre-PnR preview basis, which is what this call used to
     # get while its own header claimed the post-PnR netlist.
     power_rpt = rpt_phase3 / "power.rpt"
-    # T106: with step 33 on `librelane`, sign-off power is STAPostPNR's
-    # per-corner report and this OpenSTA session runs only as the VCD/SAIF
-    # arm (a declared activity file); `dual` runs both and checks agreement.
+    # A new report mtime cannot certify the current routed/SPEF/library
+    # subject. Validate the retained adoption and its strict consumer before
+    # admitting the ordinary cache; re-adopt the existing tool output if due.
     from librelane_contract import selected_mode as _ll_mode33
     _m33 = _ll_mode33(project, "33")
-    _power_direct = (_m33 != "librelane" or _ppa_power.select_activity(
-        [_pl.sim_dir(project), _pl.sim_full_stack_dir(project)]) is not None)
-    _power_direct_ran = False
-    if _power_direct and _signoff_regen(power_rpt, primary_def) and primary_def.is_file():
+    _power_current_due = (primary_def.is_file()
+                          and _step33_current_power_due(project))
+    _power_direct_ran = primary_def.is_file() and not _power_current_due
+    if primary_def.is_file() and (_signoff_regen(power_rpt, primary_def)
+                                  or _power_current_due):
         # THE MOMENT THIS STEP BEGAN. A power step can fail WITHOUT the runner
         # knowing -- `docker exec` fails before bash starts, so the
         # `> power.rpt` redirect never truncates and the PREVIOUS layout's
@@ -64285,7 +64298,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 rpt_phase3 / "power.json",
                 "report_power produced no usable output for this run "
                 "(see reports/phase3/power.rpt)", notes)
-    if _m33 != "direct" and primary_def.is_file():
+    if _power_direct_ran and primary_def.is_file():
         _step33_tool_arm(project, top, pdk, _m33, power_rpt,
                          _power_direct_ran, written, notes)
 
@@ -67521,6 +67534,11 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
     doc: Dict[str, Any] = {"step": "24", "mode": mode,
                            "producer": "librelane:OpenROAD.IRDropReport",
                            "def_sha256": _sha256_file(routed)}
+    inputs = {"def": routed, "netlist": pnr / f"{top}_pnr.v",
+              "sdc": pnr / "constraint.sdc", "spef": spef}
+    doc["inputs"] = {key: {"path": str(path.relative_to(project)),
+                            "sha256": _sha256_file(path) if path.is_file() else None}
+                     for key, path in inputs.items()}
     try:
         image, root = _librelane_step_ctx(project, "24", pdk.name)
         declared = getattr(pdk, "ir_budget_pct", None)
@@ -67529,9 +67547,36 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
                   "ir_drop_budget_check._DEFAULT_BUDGET_PCT (the direct verdict's budget)")
         record = _la.run_ir(project, image, root, pdk.name, routed_def=routed,
                             netlist=pnr / f"{top}_pnr.v", sdc=pnr / "constraint.sdc",
-                            spef=spef, budget_pct=budget, budget_source=source)
+                            spef=spef, budget_pct=budget, budget_source=source,
+                            supply_nets=dict(zip(("VDD_NETS", "GND_NETS"),
+                                                  _discover_power_nets(routed))))
         doc["record"] = record
         doc["judgment"] = _la.judge_ir(record)
+        folder = Path(record["tool_state"]).parent
+        state = json.loads((folder / "state_in.json").read_text())
+        config_path = project / "phase3/librelane/24-config/OpenROAD.IRDropReport.json"
+        config = json.loads(config_path.read_text())
+        corner = config["DEFAULT_CORNER"]
+        tech_pattern = _la._pattern_for(corner, config["TECH_LEFS"])
+        spef_pattern = _la._pattern_for(corner, state["spef"])
+        mounts = [(root / pdk.name, f"/pdk/{pdk.name}")]
+        def _asset(value):
+            path = _la._host_path(value, mounts)
+            return {"path": str(path), "sha256": _sha256_file(path)}
+        doc["native_basis"] = {
+            "odb": _asset(state["odb"]), "sdc": _asset(state["sdc"]),
+            "spef": _asset(state["spef"][spef_pattern]),
+            "tech_lef": _asset(config["TECH_LEFS"][tech_pattern]),
+            "liberties": [_asset(value) for value in _la.libraries_read(folder, corner)],
+        }
+        # Retain the actual tool state, report, logs and same-basis arm bytes.
+        # Host gates can then refuse a stale state rather than adopting its label.
+        paths = [Path(record["tool_state"]), config_path]
+        for folder in (Path(record["tool_state"]).parent,
+                       project / "phase3/tool_arms/24"):
+            paths += [path for path in folder.rglob("*") if path.is_file()]
+        doc["artifacts"] = {str(path.relative_to(project)): _sha256_file(path)
+                              for path in paths}
     except Exception as exc:  # a refusal names itself; nothing falls back
         doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": [f"refused: {exc}"]}
     _aa.write_json(rpt / _LL_IR_RECORD, doc)
@@ -67608,6 +67653,7 @@ def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
         "verdict": verdict, "def_sha256": doc.get("def_sha256"),
         "tool_state": record["tool_state"], "tool_state_sha256": record["tool_state_sha256"],
         "evidence": "LibreLane OpenROAD.IRDropReport state metrics + irdrop.rpt",
+        "power_basis": doc.get("power_basis"),
     })
     # The dynamic tier, from Vibeic.TransientIR, in the direct
     # emitter's payload (its own `build_result`), or its error by name.
@@ -67628,6 +67674,69 @@ def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
                    "producer": "librelane:Vibeic.TransientIR",
                    "reason": transient.get("reason") or "no transient record"}
     _aa.write_json(rpt / "dynamic_ir.json", payload)
+
+
+def _step24_primary_mode(project: Path) -> str:
+    """Ordinary Step 24 prefers the existing LibreLane route; explicit modes win.
+
+    Kept at this owned boundary until shared selection is composed. It does
+    not write a switch into the user's project.
+    """
+    import librelane_contract as ll
+    path = project / "phase3/librelane_switch.json"
+    steps = ll._load(path).get("steps", {}) if path.is_file() else {}
+    return ll.selected_mode(project, "24") if "24" in steps else "librelane"
+
+
+def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
+                          notes: List[str]) -> Dict[str, Any]:
+    """Adopt the existing LibreLane static result; disclose a concrete refusal.
+
+    The PSM session needed for EM leaves a cross-check, not a second primary
+    IR producer. A known over-budget measurement is retained even when the
+    primary is incomplete. Missing primary evidence never turns into PASS.
+    """
+    import em_current_density_check as emc
+    import librelane_ir_antenna as la
+    rpt = _pl.reports_phase3_dir(project)
+    direct = json.loads((rpt / "ir_drop.json").read_text())
+    _aa.write_json(rpt / "ir_drop_psm_cross_check.json", direct)
+    _aa.write_text(rpt / "ir_drop_psm_cross_check.rpt", (rpt / "ir_drop.rpt").read_text())
+    doc = json.loads((rpt / _LL_IR_RECORD).read_text())
+    valid = bool(doc.get("record") and doc.get("artifacts"))
+    for row in (doc.get("inputs") or {}).values():
+        valid = valid and bool(row["sha256"] and emc._native_sha(project / row["path"]) == row["sha256"])
+    for name, digest in (doc.get("artifacts") or {}).items():
+        valid = valid and bool(digest and emc._native_sha(project / name) == digest)
+    if valid:
+        record = doc["record"]
+        valid = (record["def_sha256"] == basis["layout_sha256"]
+                 and record["spef_sha256"] == basis["spef_sha256"]
+                 and emc._native_sha(Path(record["tool_state"])) == record["tool_state_sha256"])
+    if valid:
+        doc["judgment"] = la.judge_ir(doc["record"])
+        doc["power_basis"] = basis
+        _librelane_step24_publish(project, doc)
+        notes.append(f"Step24 primary adopted LibreLane IR: {doc['judgment']['verdict']}")
+    else:
+        if doc.get("record"):
+            doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": ["LL_IR_CURRENT_BINDING_INVALID"]}
+        _librelane_step24_refusal_publish(project, doc)
+        refused = json.loads((rpt / "ir_drop.json").read_text())
+        refused["power_basis"] = basis
+        if direct.get("verdict") == "FAIL":
+            refused.update(direct)
+            refused["primary_tool_status"] = "NOT_MEASURED"
+            refused["measured_failure"] = "ir_drop_psm_cross_check.json"
+            _aa.write_text(rpt / "ir_drop.rpt", (rpt / "ir_drop_psm_cross_check.rpt").read_text())
+        _aa.write_json(rpt / "ir_drop.json", refused)
+        notes.append(f"Step24 primary NOT_MEASURED: {doc['judgment'].get('reasons')}")
+    doc["adopted"] = bool(valid)
+    doc["source_identity"] = emc.native_source_identity()
+    doc["published"] = {str(path.relative_to(project)): emc._native_sha(path)
+                         for path in (rpt / "ir_drop.json", rpt / "ir_drop.rpt")}
+    _aa.write_json(rpt / _LL_IR_RECORD, doc)
+    return doc
 
 
 def _librelane_antenna_router(project: Path, top: str, pdk: PdkConfig, mode: str,
@@ -70073,62 +70182,86 @@ exit
 def _step33_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
                      power_rpt: Path, direct_ran: bool, written: List[str],
                      notes: List[str]) -> None:
-    """Step 33 from the tool (T106): STAPostPNR's per-corner `report_power`,
-    consumed from step 23's record; the arm choice and the agreement check
-    are `_ppa.power.signoff_power_arms` (`reports/phase3/power_arms.json`).
-    On `librelane` with the tool arm canonical, the worst corner's report is
-    handed unedited to the step-33 report path (its text carries the
-    STA/POWER basis stamps) and `power.json` is written from it."""
-    import fnmatch
-    import librelane_postroute as _lp
-    rpt3 = power_rpt.parent
+    """Step 33 uses a current native report_power execution, never State-only adoption."""
+    import _opensta_current as current
     try:
-        folder, state = _lp.stapostpnr_state(project)
+        if not direct_ran:
+            if not _adopt_current_power_report(project, top, power_rpt, notes):
+                return
+        current.power_binding(project)
+        _ppa_power.emit_signoff_record(project, power_rpt, power_rpt.with_suffix('.json'),
+                                       'vectorless_sdc', notes, tool_rc=0)
+        _aa.write_json(power_rpt.parent / 'power_arms.json', {
+            'step': '33', 'mode': mode, 'canonical': 'current_opensta',
+            'current_receipt': str(power_rpt.with_suffix('.current.json')),
+            'current_receipt_sha256': current.digest(power_rpt.with_suffix('.current.json'))})
+        written.extend(map(str, [power_rpt, power_rpt.with_suffix('.json'),
+                                power_rpt.parent / 'power_arms.json']))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _ppa_power.retire_signoff_record(power_rpt.with_suffix('.json'),
+                                        f'current power NOT_MEASURED: {exc}', notes)
+
+
+def _step33_current_power_due(project: Path) -> bool:
+    """Admit only the current tool adoption and its actual scalar consumer."""
+    try:
+        import _opensta_current as current
+        current.power_binding(project)
+        report = _pl.reports_phase3_dir(project) / "power.rpt"
+        doc = json.loads(report.with_suffix(".json").read_text())
+        expected = _ppa_power.signoff_record(
+            _ppa_power.read_power_report(report), source="reports/phase3/power.rpt",
+            analysis_mode=doc.get("analysis_mode"))
+        return doc != expected or doc.get("power_measurement") != "MEASURED"
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
+def _adopt_current_power_report(project: Path, top: str, power_rpt: Path,
+                                notes: List[str]) -> bool:
+    """Ordinary Default Step 33 adopts current native STAPostPNR power.
+
+    No parallel power session or fallback report runs at this boundary.
+    """
+    import _opensta_current as current
+    import librelane_postroute as lp
+    power_rpt.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path = power_rpt.with_suffix('.current.json')
+    for path in (power_rpt, receipt_path):
+        path.unlink(missing_ok=True)
+    try:
+        if power_rpt.absolute() != (_pl.reports_phase3_dir(project) / 'power.rpt').absolute():
+            raise current.Refusal('CURRENT_POWER_OUTPUT_PATH_MISMATCH')
+        folder, _ = lp.stapostpnr_state(project)
         corners = _ppa_power.stapostpnr_corner_power(folder)
-        spefs = state.get("spef") or {}
-        tool_spef = {}
+        if not corners or any(row['status'] != 'MEASURED' for row in corners.values()):
+            raise current.Refusal('CURRENT_POWER_CORNERS_UNMEASURED')
+        # Validate every measured corner before choosing the largest total.
         for corner in corners:
-            match = [s for pat, s in spefs.items() if fnmatch.fnmatch(corner, pat)]
-            if len(match) == 1 and Path(match[0]).is_file():
-                tool_spef[corner] = _sha256_file(Path(match[0]))
-        direct_spef = _pl.extracted_dir(project) / f"{top}.spef"
-        direct = direct_report = None
-        if direct_ran and (rpt3 / "power.json").is_file():
-            direct = json.loads((rpt3 / "power.json").read_text())
-            direct_report = _ppa_power.read_power_report(power_rpt)
-        decision = _ppa_power.signoff_power_arms(
-            direct, direct_report, corners, direct_liberty=str(pdk.liberty),
-            direct_spef_sha256=(_sha256_file(direct_spef)
-                                if direct_ran and direct_spef.is_file() else None),
-            tool_spef_sha256=tool_spef)
-        state_sha = _sha256_file(folder / "state_out.json")
-        _aa.write_json(rpt3 / "power_arms.json", {
-            "step": "33", "mode": mode, "sta_state": str(folder / "state_out.json"),
-            "sta_state_sha256": state_sha, "direct_ran": direct_ran, **decision})
-        written.append(str(rpt3 / "power_arms.json"))
-        if mode == "librelane" and decision.get("canonical") == "librelane":
-            worst = decision["worst_corner"]
-            row = corners[worst]
-            # Written by this call from the recorded state, so it is bound to
-            # this run by construction; an mtime-vs-clock test would only race
-            # the filesystem's timestamp granularity.
-            # The step-33 report path the direct session writes; the text
-            # carries its own STA_BASIS / POWER_BASIS stamps.
-            _aa.write_text(power_rpt, _ppa_power.tool_power_report_text(
-                worst, row, Path(row["report"]).read_text(errors="replace"), state_sha))
-            _ppa_power.emit_signoff_record(project, power_rpt,
-                                           rpt3 / "power.json", "vectorless_sdc",
-                                           notes, tool_rc=0)
-            written += [str(power_rpt), str(rpt3 / "power.json")]
-        if (decision.get("agreement") or {}).get("verdict") == "DISAGREE":
-            notes.append("LL_POWER_ARMS_DISAGREE: the direct vectorless session and "
-                         "STAPostPNR disagree on the same netlist, SPEF and liberty "
-                         f"({decision['agreement']})")
-    except Exception as exc:  # a refusal names itself; nothing falls back
-        notes.append(f"step 33 LibreLane: {exc}")
-        if mode == "librelane" and not direct_ran:
-            _ppa_power.retire_signoff_record(
-                rpt3 / "power.json", f"step 33 on LibreLane: {exc}", notes)
+            current.tool_subject(project, top, corner=corner)
+        worst = max(corners, key=lambda corner: corners[corner]['total_w'])
+        subject, tool = current.tool_subject(project, top, corner=worst)
+        source = Path(corners[worst]['report'])
+        power_rpt.write_text(_ppa_power.current_tool_power_text(
+            worst, corners[worst], source.read_text(), current.digest(tool['state']), subject))
+        receipt = {**subject, 'schema': 'stapostpnr-power-current-v1', 'step': '33',
+                   'tool_state': str(tool['state']),
+                   'source_report': current.file_record(source, 'source_power', project),
+                   'outputs': [current.file_record(power_rpt, 'power_report', project)]}
+        _aa.write_json(receipt_path, receipt)
+        current.power_binding(project)
+        record = _ppa_power.emit_signoff_record(project, power_rpt, power_rpt.with_suffix('.json'),
+                                               'vectorless_sdc', notes, tool_rc=0)
+        if record.get('power_measurement') != 'MEASURED':
+            raise current.Refusal('CURRENT_POWER_DOWNSTREAM_NOT_MEASURED')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        receipt_path.unlink(missing_ok=True)
+        power_rpt.unlink(missing_ok=True)
+        _ppa_power.retire_signoff_record(power_rpt.with_suffix('.json'), str(exc), notes)
+        notes.append(f'Power NOT_MEASURED: {exc}')
+        return False
+    notes.append(f'Step 33 adopted current STAPostPNR power corner {worst}')
+    return True
 
 
 def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
@@ -70170,6 +70303,8 @@ def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
     all name what was ACTUALLY linked. Every line of the header is derived from
     the inputs this session read; none of it is a literal claim about a netlist
     it did not open."""
+    if basis == "post_pnr":
+        return _adopt_current_power_report(project, top, power_rpt, notes)
     pnr_out = _pl.pnr_dir(project)
     synth_netlist = _pl.synth_dir(project) / f"{top}_synth.v"
     routed_netlist = pnr_out / f"{top}_pnr.v"
@@ -70820,6 +70955,22 @@ def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig) -> Dict[
         extra = _sta_extra_liberties(project, pdk, pdk.liberty) if liberty else []
     except AttributeError:  # a duck-typed PDK stub with no library lists
         extra = []
+    # Once the primary ran, both static EM and the transient tier consume its
+    # actual library population, including the PDK's IO timing views. Merely
+    # repeating the standard-cell library is not the tool's power basis.
+    try:
+        ll_doc = json.loads((_pl.reports_phase3_dir(project) / _LL_IR_RECORD).read_text())
+        ll_libs = ll_doc["native_basis"]["liberties"]
+        if (_step24_primary_mode(project) != "direct"
+                and ll_doc["inputs"]["def"]["sha256"] == _sha256_file(def_file)
+                and ll_doc["inputs"]["sdc"]["sha256"] == _sha256_file(sdc)
+                and not spef_reason
+                and ll_doc["inputs"]["spef"]["sha256"] == _sha256_file(spef)
+                and ll_libs and all(_sha256_file(Path(row["path"])) == row["sha256"] for row in ll_libs)):
+            liberty = ll_libs[0]["path"]
+            extra = [row["path"] for row in ll_libs[1:]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     return {"def": def_file, "sdc": sdc if sdc.is_file() else None,
             "spef": None if spef_reason else spef, "spef_reason": spef_reason,
             "liberty": liberty,
@@ -70910,7 +71061,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if _em_mode == "librelane":
         raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
                          "LibreLane has no EM step; use dual for the OpenROAD audit")
-    _audit_tool = _em_mode == "dual"
+    # Default and dual use the same native PSM producer. There is no second
+    # density run or user switch required for the ordinary Step-25 consumer.
+    _audit_tool = _em_mode in ("direct", "dual")
     # The OpenROAD fork's check_current_density consumes areal A/um^2 limits.
     # LEF routing DCCURRENTDENSITY is mA/um: divide by declared THICKNESS.
     # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
@@ -70918,18 +71071,15 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
     _jmax = _emcd.parse_lef_jmax(_tlef)
     _em_limits = out_dir / "em_openroad_limits.txt"
-    _limit_rows = [
-        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - _emcd._DEFAULT_MARGIN):.12g}"
-        for row in _jmax.values()
-        if row.get("kind") == "routing" and row.get("jmax_areal_A_per_um2")
-    ]
+    _limit_rows = _emcd.native_limits(_tlef).splitlines()
+    _authority_snapshot = out_dir / "em_native_authority.tlef"
     if _audit_tool and not _limit_rows:
         notes.append("OpenROAD EM density NOT_MEASURED: tech LEF has no routing Jmax plus THICKNESS")
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
                 out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
-                out_dir / "em_openroad_ab.json", _em_limits,
+                out_dir / "em_openroad_ab.json", _em_limits, _authority_snapshot,
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
@@ -70938,6 +71088,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             pass
     if _audit_tool and _limit_rows:
         _aa.write_text(_em_limits, "\n".join(_limit_rows) + "\n")
+    # Stage the exact authority on every solve, including a changed kit.
+    # Its digest must also match the file the native session actually reads.
+    _aa.write_text(_authority_snapshot, _tlef)
     # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
@@ -70965,6 +71118,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f'-em_limits_file {out_dir_c}/{_em_limits.name} '
             f'-em_report {_density_csv} -allow_reuse}} _em_err]}} {{\n'
             f'  puts "EM_TOOL_NONFATAL {net}: $_em_err"\n'
+            f'}} else {{\n'
+            f'  puts "EM_DENSITY_DONE {net}"\n'
+            f'  puts "EM_BOUND_OUTPUT em_openroad_density_{net}.csv '
+            f'[lindex [exec sha256sum {_density_csv}] 0]"\n'
             f'}}\n' if _audit_tool and _limit_rows else '')
         psm_blocks.append(
             f'puts "=== PSM_NET {net} ==="\n'
@@ -71003,6 +71160,50 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # quasi-static, and every record carries the same basis id.
     import dynamic_ir_vectored_emit as _dyn_basis
     _basis = _step24_basis_inputs(project, def_file, pdk)
+    _primary_ir_mode = _step24_primary_mode(project)
+    if _primary_ir_mode != "direct":
+        _librelane_step24_record(project, top, pdk, _primary_ir_mode,
+                                  _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
+        _basis = _step24_basis_inputs(project, def_file, pdk)
+        liberty_c = _to_container_path(_basis["liberty"], container)
+        _oc = _liberty_operating_condition(_basis["liberty"], container)
+        _oc_tcl = (f"catch {{set_operating_conditions {_oc}}}\n" if _oc else "")
+    _source_identity = _emcd.native_source_identity()
+    _native_inputs = {}
+    _input_paths = {"layout": str(def_file), "tech_lef": str(pdk.tech_lef),
+                    "cell_lef": str(pdk.cell_lef), "liberty0": _basis["liberty"]}
+    for role in ("sdc", "spef"):
+        if _basis[role]:
+            _input_paths[role] = str(_basis[role])
+    _input_paths.update({f"liberty{i}": value for i, value in
+                         enumerate(_basis["extra_liberties"], 1)})
+    _input_paths.update({f"macro_lef{i}": str(value) for i, value in
+                         enumerate(pdk.macro_lefs)})
+    _read_layout_tcl = f"read_def {def_c}"
+    # Use the actual LibreLane IR input ODB when the route ran. It is the
+    # bridge of this current DEF and preserves the tool's PSM source subject.
+    _ll_doc_path = out_dir / _LL_IR_RECORD
+    if _primary_ir_mode != "direct":
+        _ll_doc = json.loads(_ll_doc_path.read_text())
+        if _ll_doc.get("record"):
+            _ll_state_path = Path(_ll_doc["record"]["tool_state"]).parent / "state_in.json"
+            _ll_state = json.loads(_ll_state_path.read_text())
+            _input_paths["librelane_odb"] = str(_ll_state["odb"])
+            _read_layout_tcl = f"read_db {_dyn_basis._tcl_word(_to_container_path(_ll_state['odb'], container))}"
+    for role, value in _input_paths.items():
+        path = Path(value)
+        try:
+            rel = str(path.relative_to(project))
+        except ValueError:
+            rel = None
+        _native_inputs[role] = {"declared_path": value, "project_path": rel,
+                               "sha256": _emcd._native_sha(path)}
+    _native_inputs["tech_lef"]["sha256"] = hashlib.sha256(_tlef.encode()).hexdigest()
+    def _input_digest_tcl(stage):
+        return "".join(
+            f'puts "EM_BOUND_{stage} {role} [lindex [exec sha256sum '
+            f'{_dyn_basis._tcl_word(_to_container_path(value, container))}] 0]"\n'
+            for role, value in _input_paths.items())
     _pb_libs = [_to_container_path(x, container) for x in _basis["extra_liberties"]]
     _pb_tcl = _dyn_basis.power_basis_tcl(
         _pb_libs, (_to_container_path(str(_basis["sdc"]), container)
@@ -71024,21 +71225,22 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     import _psm_source_model as _psm_sm
     tcl_path = out_dir / f"ir_em_{top}.tcl"
     tcl_path.write_text(f"""
+{_input_digest_tcl('BEFORE')}
 read_lef {tech_lef_c}
 read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
-{_oc_tcl}read_def {def_c}
+{_oc_tcl}{_read_layout_tcl}
 {_pb_tcl}{geometry_tcl}
 if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
 catch {{set_wire_rc -clock -layer {mp}5}}
-{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}exit
+{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}{_input_digest_tcl('AFTER')}exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
     cmd = (
-        f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+        f"set -o pipefail; export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
         f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/ir_em.log"
     )
@@ -71057,7 +71259,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
     # dynamic_ir.json reports the static number only under the same id.
     _basis_record = _dyn_basis.power_basis(
         def_file, _basis["sdc"], _basis["spef"],
-        [str(pdk.liberty), *_basis["extra_liberties"]],
+        [_basis["liberty"], *_basis["extra_liberties"]],
         spef_reason=_basis["spef_reason"], log=log)
     if rc != 0:
         # A failed native invocation cannot attest values from stdout or stale reports.
@@ -71119,20 +71321,28 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
         _density_rows[_net] = _counts
     _psm_model = _psm_sm.describe(log)
-    _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
+    _native_density_record = {
+        "schema": "em_native_density/1",
         "tool": "OpenROAD.check_current_density",
         "source_model": _psm_model["model"],
         "psm_source_model": _psm_model,
-        "sdc_spef_loaded": False, "nets": _density_rows,
-        "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
+        "sdc_spef_loaded": bool(_basis["sdc"] and _basis["spef"] and not _basis_record["unread"]),
+        "nets": _density_rows,
+        "verdict": ("FAIL" if any(r["violated"] for r in _density_rows.values()) else
+                    "MEASURED" if _audit_tool and _density_rows and all(
             r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
             else "NOT_MEASURED"),
         "mode": _em_mode,
         "scope": "routing wires only",
-        "via_cut_status": "NOT_MEASURED: OpenROAD density CSV omits via-cut records",
+        "via_cut_status": "NOT_MEASURED: native areal table carries no per-cut authority",
         "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
         "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
-    }, indent=2) + "\n")
+        "pdk": {"name": pdk.name, "tech_lef": str(pdk.tech_lef)},
+        "authority": {"snapshot": str(_authority_snapshot.relative_to(project))},
+        "margin": _emcd._DEFAULT_MARGIN, "source_identity": _source_identity,
+        "inputs": _native_inputs, "power_basis": _basis_record,
+        "execution": {"argv": ["bash", "-c", cmd], "native_rc": rc},
+    }
     # Parse IR + EM numbers from PSM stdout (deterministic regex).
     ir_lines = [ln for ln in log.splitlines()
                 if re.search(r"voltage|IR drop|PSM-|Supply", ln, re.I)]
@@ -71359,8 +71569,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             # disk later and compare it with itself, which is why the PDN floor
             # could be sized from a previous run's current with nothing able to
             # notice. See `_pdn_em_measures_this_layout`.
-            "subject_def": f"phase3/stage3/pnr/{_ppa_power._PDN_EM_SUBJECT_DEF}",
-            "subject_def_sha256": _ppa_power._pdn_em_subject_digest(project),
+            "subject_def": str(def_file.relative_to(project)),
+            "subject_def_sha256": _native_inputs["layout"]["sha256"],
             # NOT a sign-off verdict — see the ir_drop.json note above. The EM
             # sign-off PASS/FAIL (segment current density vs PDK Jmax) is
             # decided downstream by em_report_check (eda_report_audit --mode em)
@@ -71423,6 +71633,36 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "evidence": "analyze_power_grid -enable_em stdout",
         }, indent=2) + "\n")
         notes.append(f"EM NOT_MEASURED: {_em_why}{_em_conn}")
+    # Finalize after the reports exist: these bytes are consumed by the same
+    # Step-25 gate and downstream signoff readers. A native marker, not rc0 or
+    # a tool label, binds each density CSV. The source is frozen before probes.
+    if _primary_ir_mode != "direct" and ir_ok:
+        _ll_primary = _step24_adopt_primary(project, _basis_record, notes)
+        _native_density_record["librelane_ir"] = {
+            "adopted": _ll_primary.get("adopted", False),
+            "record": str(_ll_doc_path.relative_to(project)),
+            "record_sha256": _emcd._native_sha(_ll_doc_path),
+            "reason": (_ll_primary.get("judgment") or {}).get("reasons"),
+        }
+    for role, row in _native_inputs.items():
+        if row["sha256"] is None:
+            marker = re.search(rf"^EM_BOUND_BEFORE {re.escape(role)} ([a-f0-9]{{64}})$", log, re.M)
+            row["sha256"] = marker.group(1) if marker else None
+    _outputs = [tcl_path, out_dir / "ir_em.log", _em_limits, _authority_snapshot,
+                em_geometry, out_dir / "em_pg_geometry_subject.json", _merged,
+                ir_rpt, ir_rpt.with_suffix(".json"), em_rpt, em_rpt.with_suffix(".json"),
+                *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)]
+    if _primary_ir_mode != "direct":
+        _outputs += [_ll_doc_path]
+        _outputs += [project / path for path in (_ll_primary.get("artifacts") or {})] if ir_ok else []
+    _native_density_record["outputs"] = {str(path.relative_to(project)): _emcd._native_sha(path)
+                                         for path in _outputs}
+    _aa.write_text(out_dir / "em_openroad_density.json",
+                   json.dumps(_native_density_record, indent=2) + "\n")
+    _binding = _emcd.validate_native_density(project)
+    if not _binding["valid"]:
+        notes.append(f"EM native density NOT_MEASURED: {_binding['reason']}")
     return ir_ok, em_ok
 
 
@@ -72375,82 +72615,64 @@ def _si_timing_aware_module():
         return None
 
 
+def _step27_current_si_due(project: Path) -> bool:
+    """Check the actual current SI adoption before admitting an mtime cache."""
+    try:
+        import _opensta_current as current
+        current.si_binding(project)
+        return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
 def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str,
                          spef: Path, sdc: Path, netlist: Path, out_json: Path,
                          notes: List[str], vdd_v: float = 1.8) -> bool:
-    """Produce the OpenSTA per-pin arrival-window + slew JSON the timing-aware
-    SI screen consumes, by running build_opensta_si_tcl's recipe in the
-    container (Step 27 advisory upgrade — ADVISORY, never blocks the build).
-
-    Best-effort: if the SI program / sta tool / inputs are unavailable, logs a
-    note and returns False so the caller keeps the floating-victim fallback.
-    chip-AGNOSTIC: all paths come from the runner's pdk / project layout."""
-    mod = _si_timing_aware_module()
-    if mod is None:
-        notes.append("SI timing-aware: si_signoff_timing_aware module "
-                     "unavailable — keeping floating-victim screen.")
-        return False
-    if not (spef.is_file() and sdc.is_file() and netlist.is_file()):
-        notes.append("SI timing-aware: SPEF / SDC / netlist missing — "
-                     "keeping floating-victim screen (no over-claim).")
-        return False
-    # All Liberty / LEF paths are already container paths in PdkConfig; the
-    # translator is a passthrough for paths no mount covers (idempotent).
-    liberty_c = _to_container_path(str(pdk.liberty), container)
-    netlist_c = _to_container_path(str(netlist), container)
-    sdc_c = _to_container_path(str(sdc), container)
-    spef_c = _to_container_path(str(spef), container)
-    out_json_c = _to_container_path(str(out_json), container)
-    extra_lefs = [pdk.tech_lef, pdk.cell_lef] + list(pdk.macro_lefs)
-    extra_lefs_c = [_to_container_path(str(f), container) for f in extra_lefs]
-    extra_libs_c = [_to_container_path(str(f), container)
-                    for f in pdk.macro_libs]
-    tcl = mod.build_opensta_si_tcl(
-        liberty_c, netlist_c, top, sdc_c, spef_c, out_json_c,
-        vdd_v=vdd_v, extra_lefs=extra_lefs_c, extra_liberties=extra_libs_c)
-    tcl_path = out_json.parent / f"si_timing_{top}.tcl"
-    tcl_path.parent.mkdir(parents=True, exist_ok=True)
-    tcl_path.write_text(tcl)
-    tcl_c = _to_container_path(str(tcl_path), container)
-    log_c = _to_container_path(str(out_json.parent / "si_timing.log"), container)
-    cmd = (
-        f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
-        f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
-        f"sta -no_init -exit {tcl_c} 2>&1 | tee {log_c}"
-    )
-    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[out_json])
-    if not out_json.is_file() or out_json.stat().st_size == 0:
-        notes.append(
-            f"SI timing-aware: OpenSTA did not produce the timing JSON "
-            f"(rc={rc}; sta may be unavailable) — keeping floating-victim "
-            "screen. Install OpenSTA in the container to enable the "
-            "window-gated advisory watch-list.")
-        return False
-    # NON-EMPTY IS NOT THE SAME AS READABLE. A size-only guard passed a 1 MB
-    # file that ended mid-token, and the consumer then died on `json.load`
-    # 1 MB in while the flow reported only "screen errored" — a sentence that
-    # names no artefact and no cause. MEASURED on subservient r21:
-    #   Expecting value: line 6151 column 122 (char 1097728)
-    # on a file of exactly 1097728 bytes — 268 x 4096, a whole number of
-    # unflushed blocks — because the emitting Tcl aborted on a `---` and never
-    # reached its `close`. The fallback to the conservative floating-victim
-    # envelope is legitimate; taking it WITHOUT NAMING THE BROKEN ARTEFACT is
-    # not, because that envelope is what fails this design's step 27 by
-    # 0.266 ns while the nominal corner holds +2.5 ns.
+    """Execute current routed OpenSTA windows; refuse unbound or replayed output."""
+    import _opensta_current as current
+    import shlex
+    receipt_path = out_json.with_suffix(".current.json")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    for path in (out_json, receipt_path):
+        path.unlink(missing_ok=True)
     try:
-        json.loads(out_json.read_text(errors="replace"))
-    except Exception as exc:                                   # noqa: BLE001
-        _emit_done = "SI_TIMING_JSON_EMIT_DONE" in ((out or "") + (err or ""))
-        notes.append(
-            f"SI timing-aware: the timing JSON at {out_json.name} is present "
-            f"({out_json.stat().st_size} bytes) but DOES NOT PARSE "
-            f"({type(exc).__name__}: {exc}); the emitting OpenSTA run "
-            f"{'printed' if _emit_done else 'did NOT print'} its completion "
-            f"marker, so the file is "
-            f"{'malformed' if _emit_done else 'TRUNCATED — the emit aborted'}. "
-            f"Keeping the floating-victim screen, which is a CONSERVATIVE "
-            f"ENVELOPE and not the timing-aware reading this run was supposed "
-            f"to get.")
+        subject, tool = current.tool_subject(project, top, coupling=True)
+        libs = tool['liberties']
+        actual = {r['role']: Path(r['path']) for r in subject['inputs']}
+        if any(Path(given).absolute() != actual[role] for role, given in
+               [('spef', spef), ('sdc', sdc), ('netlist', netlist)]):
+            raise current.Refusal("CURRENT_SI_INPUT_PATH_MISMATCH")
+        expected = _pl.extracted_dir(project) / f"{top}_si_timing.json"
+        if out_json.absolute() != expected.absolute():
+            raise current.Refusal("CURRENT_SI_OUTPUT_PATH_MISMATCH")
+        mod = _si_timing_aware_module()
+        if mod is None:
+            raise current.Refusal("CURRENT_SI_TIMING_PRODUCER_MISSING")
+        tcl_path = out_json.parent / f"si_timing_{top}.tcl"
+        log = out_json.parent / "si_timing.log"
+        tcl_c = _to_container_path(str(tcl_path), container)
+        receipt = current.new_execution(subject, '27', tcl_path, log,
+                                       ['sta', '-no_init', '-exit', tcl_c])
+        tcl = mod.build_opensta_si_tcl(
+            _to_container_path(str(libs[0]), container),
+            _to_container_path(str(netlist), container), top,
+            _to_container_path(str(sdc), container),
+            _to_container_path(str(spef), container),
+            _to_container_path(str(out_json), container), vdd_v=vdd_v,
+            extra_liberties=[_to_container_path(str(lib), container) for lib in libs[1:]],
+            propagated_clock=True)
+        tcl_path.write_text(tcl + '\nputs "' + current.marker(receipt) + '"\nexit\n')
+        cmd = 'sta -no_init -exit ' + shlex.quote(tcl_c)
+        import librelane_signoff as signoff
+        done = signoff.run_sta_script(project, tool['image'], tool['mounts'], tcl_path, log)
+        rc, out, err = done.returncode, done.stdout, done.stderr
+        log.write_text((out or '') + '\n' + (err or ''))
+        current.timing_has_windows(out_json)
+        current.finish(receipt, rc, [('timing_windows', out_json)], receipt_path)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        receipt_path.unlink(missing_ok=True)
+        out_json.unlink(missing_ok=True)
+        notes.append(f"SI timing NOT_MEASURED: {exc}")
         return False
     return True
 
@@ -72563,286 +72785,82 @@ def _librelane_si_kernel_check(project: Path, top: str, tool: dict, spef: Path,
 def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
                            container: str, spef: Path, sbody: dict,
                            notes: List[str], vdd_v: float = 1.8) -> None:
-    """ADVISORY upgrade: when a routed SPEF + STA run are available, ALSO
-    produce the OpenSTA SI timing JSON and run the timing-window-aware SI
-    screen, then MERGE its watch-list fields into the SI report body `sbody`
-    IN PLACE.
-
-    HONESTY (the whole point): this is an ADVISORY SCREEN UPGRADE (switching-
-    window gating of the floating-victim coupling bound), NOT a commercial
-    pass/fail SI sign-off. It NEVER touches `violations_count` /
-    `max_crosstalk_noise` (the fields the si_crosstalk_check gate reads), so
-    the gate still PASSES (advisory). On any unavailability it leaves `sbody`
-    untouched and the floating-victim screen stands as the fallback.
-
-    Requires an STA run to exist (the per-pin arrival windows come from STA);
-    `<pnr>/sta.rpt` is the runner's post-route STA artefact. Without it we do
-    NOT fabricate windows — the floating screen stays."""
+    """Consume fresh current routed windows in the existing SI screen."""
+    import _opensta_current as current
     mod = _si_timing_aware_module()
-    if mod is None:
+    out_json = _pl.extracted_dir(project) / f"{top}_si_timing.json"
+    if mod is None or not _emit_si_timing_json(
+            project, top, pdk, container, spef,
+            _pl.pnr_dir(project) / 'constraint.sdc',
+            _pl.pnr_dir(project) / f'{top}_pnr.v', out_json, notes, vdd_v=vdd_v):
+        sbody['verdict'] = 'NOT_MEASURED'
+        sbody['current_input_reason'] = 'Current routed timing windows were not measured'
         return
-    extracted = _pl.extracted_dir(project)
-    extracted.mkdir(parents=True, exist_ok=True)
-    out_json = extracted / f"{top}_si_timing.json"
-    # Step 23 on LibreLane: the windows come from the tool's own sign-off
-    # corner (its routed netlist, SDC, SPEF and liberties), timed in its image.
-    tool = _librelane_si_corner_inputs(project)
-    if tool is not None:
-        spef = tool["spef"]
-        if _signoff_regen(out_json, spef, tool["state"]):
-            if not _librelane_si_windows_json(project, top, tool, out_json, notes,
-                                             vdd_v=vdd_v):
-                return
-    else:
-        primary_sta = _pl.pnr_dir(project) / "sta.rpt"
-        if not primary_sta.is_file():
-            notes.append("SI timing-aware: no post-route STA report — the "
-                         "switching-window advisory needs arrival windows; "
-                         "keeping the floating-victim screen (no over-claim).")
-            return
-        sdc = _pl.pnr_dir(project) / "constraint.sdc"
-        netlist = _pl.synth_dir(project) / f"{top}_synth.v"
-        # Dated against the SPEF it is read with: a re-extraction must not be
-        # scored against the previous extraction's windows.
-        if _signoff_regen(out_json, spef):
-            if not _emit_si_timing_json(project, top, pdk, container, spef, sdc,
-                                        netlist, out_json, notes, vdd_v=vdd_v):
-                return
-    try:
-        adv = mod.run_si_signoff_timing_aware(
-            spef, out_json,
-            vdd_v=vdd_v, noise_margin_mv=100.0,
-            out_json=str(extracted / f"{top}_si_timing_aware.json"),
-            out_rpt=str(_pl.reports_phase3_dir(project)
-                        / "si_crosstalk_timing_aware.rpt"),
-        )
-    except Exception as exc:  # pragma: no cover - defensive (advisory layer)
-        notes.append(f"SI timing-aware: screen errored ({exc}) — keeping the "
-                     "floating-victim screen (advisory, non-blocking).")
-        return
-    # MERGE advisory fields WITHOUT disturbing the gate-read schema. The
-    # gate reads `violations_count` + `max_crosstalk_noise`; we leave both
-    # exactly as the floating screen set them (violations_count stays 0).
-    sbody["timing_aware_advisory"] = {
-        "tool": adv.get("tool"),
-        "verdict": adv.get("verdict"),          # always SI_TIMING_AWARE_SCREEN
-        "scope": adv.get("scope"),
-        "method": adv.get("method"),
-        "vdd_v": adv.get("vdd_v"),
-        "noise_margin_mv": adv.get("noise_margin_mv"),
-        "pairs_decoupled_by_window": adv.get("pairs_decoupled_by_window"),
-        "watchlist_high_count": adv.get("watchlist_high_count"),
-        "watchlist_low_count": adv.get("watchlist_low_count"),
-        "max_base_noise_mv": adv.get("max_base_noise_mv"),
-        "max_gated_noise_mv": adv.get("max_gated_noise_mv"),
-        "watchlist": adv.get("watchlist", [])[:50],
-        "timing_json": str(out_json),
-        "honesty": (
-            "ADVISORY screen UPGRADE (switching-window gating of the "
-            "floating-victim coupling bound), NOT a commercial pass/fail SI "
-            "sign-off. It is conclusive ONLY in the decoupled-safe direction; "
-            "the HIGH watch-list is flagged-for-review, NOT a proven failure. "
-            "It does NOT change violations_count and never blocks the build."),
-    }
-    sbody["si_timing_aware_verdict"] = adv.get("verdict")
-    # TAPEOUT-SIGNOFF P1: surface the GENUINE coupling delta-delay verdict
-    # (PASS/FAIL/ADVISORY) alongside the advisory noise screen. This is a REAL
-    # verdict (a net whose modelled delta-delay is PROVEN to push a path
-    # negative against the STA slack basis is a genuine setup finding), unlike
-    # the always-advisory noise watch-list.
-    dd = adv.get("delta_delay")
-    if dd is not None:
-        sbody["delta_delay"] = {
-            "verdict": dd.get("delta_delay_verdict"),
-            "violations_count": dd.get("violations_count"),
-            "max_delta_delay_ns": dd.get("max_delta_delay_ns"),
-            "pairs_slack_checked": dd.get("pairs_slack_checked"),
-            "pairs_decoupled_by_window": dd.get("pairs_decoupled_by_window"),
-            "violations": dd.get("violations", [])[:20],
-            "scope": dd.get("scope"),
-        }
-        sbody["delta_delay_verdict"] = dd.get("delta_delay_verdict")
-    if tool is not None:
-        _librelane_si_kernel_check(project, top, tool, spef, out_json, sbody, notes)
-    notes.append(
-        "SI timing-aware (ADVISORY): "
-        f"{adv.get('pairs_decoupled_by_window', 0)} pairs decoupled by window, "
-        f"{adv.get('watchlist_high_count', 0)} HIGH / "
-        f"{adv.get('watchlist_low_count', 0)} LOW advisory watch — "
-        "violations_count unchanged (build not blocked). "
-        f"delta-delay verdict: {(dd or {}).get('delta_delay_verdict', 'n/a')}"
-        f" ({(dd or {}).get('violations_count', 0)} proven push-negative).")
+    current.validate(project, out_json.with_suffix('.current.json'), '27',
+                     [('timing_windows', out_json)])
+    adv = mod.run_si_signoff_timing_aware(spef, out_json, vdd_v=vdd_v,
+        noise_margin_mv=100.0,
+        out_json=str(_pl.extracted_dir(project) / f'{top}_si_timing_aware.json'),
+        out_rpt=str(_pl.reports_phase3_dir(project) / 'si_crosstalk_timing_aware.rpt'))
+    sbody['timing_aware_advisory'] = {**adv, 'timing_json': str(out_json)}
+    sbody['si_timing_aware_verdict'] = adv.get('verdict')
+    dd = adv.get('delta_delay') or {}
+    sbody['delta_delay'] = {**dd, 'verdict': dd.get('delta_delay_verdict')}
+    sbody['delta_delay_verdict'] = dd.get('delta_delay_verdict')
+    notes.append(f"SI current routed timing-window screen: {adv.get('verdict')}; "
+                 f"delta-delay={dd.get('delta_delay_verdict')}")
 
 
 def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
                               ir_rpt: Path, si_rpt: Path, notes: List[str],
                               pdk: Optional[PdkConfig] = None,
                               container: Optional[str] = None) -> bool:
-    """Signal-integrity / crosstalk sign-off (Step 27).
+    """Step 27's coupling screen, bound to current native OpenSTA windows.
 
-    v0.2.6: when the real OpenRCX SPEF (v0.2.5) is present, run a REAL
-    coupling-cap SI screen — per-net coupling ratio Cc/(Cc+Cg) from the extracted
-    coupling capacitances → worst-case capacitive-divider noise + a coupling-
-    dominated (ratio>0.90) violation count. Falls back to the decoupled-C
-    structural screen only when no SPEF / no coupling caps are available.
-
-    v0.2.35 ADVISORY upgrade: when a routed SPEF AND a post-route STA run are
-    both available (and `pdk`/`container` are supplied), ALSO produce the
-    OpenSTA SI timing JSON and run the timing-window-aware SI screen, then
-    merge its switching-window-gated watch-list into the SI report as ADVISORY
-    fields. This NEVER changes `violations_count` and NEVER blocks the build —
-    the si_crosstalk_check gate still PASSES (advisory). If the SI program /
-    STA / SPEF is unavailable the floating-victim screen stands as fallback.
-    chip-AGNOSTIC. Returns True if a report was written."""
+    The noise screen remains advisory. Missing execution or material inputs
+    are NOT_MEASURED, and the existing proven delta-delay FAIL is preserved.
+    """
+    import _opensta_current as current
     si_rpt.parent.mkdir(parents=True, exist_ok=True)
-    # --- preferred: real SPEF coupling-cap SI screen ---
-    if spef is not None and spef.is_file() and spef.stat().st_size > 0:
-        try:
-            cg, cc = _parse_spef_caps(spef.read_text(errors="replace"))
-        except OSError:
-            cg, cc = {}, {}
-        if cc:  # the SPEF carried inter-net coupling caps
-            m = _si_coupling_metrics(cg, cc)
-            # IMPORTANT honesty boundary: a high coupling ratio on a DRIVEN net is NOT a
-            # proven SI failure — the capacitive-divider noise bound assumes a FLOATING
-            # victim, which dense digital routing never is (mean ratio ~0.66 is normal for
-            # sky130). Proving an actual failure needs victim/aggressor timing-window +
-            # driver-strength analysis (a commercial SI tool). So this screen reports the
-            # REAL coupling distribution as ADVISORY metrics + a coupling-dominated
-            # watch-list, but does NOT manufacture violations (violations_count = 0).
-            dominated = m["violations_gt0p9"]
-            sbody = {
-                "tool": "spef-coupling-cap-si-screen",
-                "mode": "signal_integrity_crosstalk",
-                "spef": str(spef),
-                "method": ("per-net coupling ratio Cc/(Cc+Cg) from the REAL OpenRCX SPEF. "
-                           "max_crosstalk_noise = max_ratio*Vdd is the worst-case "
-                           "capacitive-divider (FLOATING-victim) UPPER bound — advisory; a "
-                           "driven victim sees far less. Coupling-dominated (>0.90) nets are "
-                           "a watch-list, NOT proven failures: a full SI sign-off needs "
-                           "timing-window + driver-strength analysis (commercial SI tool)."),
-                "vdd_mv": 1800.0,
-                "max_crosstalk_noise": m["max_crosstalk_noise_mv"],
-                "max_coupling_ratio": m["max_coupling_ratio"],
-                "mean_coupling_ratio": m["mean_coupling_ratio"],
-                "nets_analyzed": m["nets"],
-                "nets_elevated_coupling_gt0p5": m["nets_elevated_gt0p5"],
-                "nets_coupling_dominated_gt0p9": dominated,
-                "violations_count": 0,
-                # #437-comment (2026-06-06): the verdict NAMES the tier —
-                # this is a capacitive ADVISORY screen, not SI sign-off;
-                # the gate surfaces it as such instead of a clean PASS.
-                "verdict": "ADVISORY_SCREEN_ONLY",
-            }
-            # v0.2.35 ADVISORY upgrade: when a post-route STA run is available,
-            # ALSO produce the OpenSTA SI timing JSON and merge the
-            # switching-window-gated watch-list as ADVISORY fields. This NEVER
-            # touches violations_count / max_crosstalk_noise (the gate-read
-            # schema), so the si_crosstalk_check gate still PASSES. Pure
-            # fall-through if pdk/container/STA are unavailable.
-            if pdk is not None and container is not None:
-                _merge_si_timing_aware(project, top, pdk, container, spef,
-                                       sbody, notes)
-            _aa.write_text(si_rpt.parent / "si_crosstalk.json",
-                json.dumps(sbody, indent=2) + "\n")
-            # Advisory timing-window tail (only present when the upgrade ran).
-            ta = sbody.get("timing_aware_advisory")
-            ta_tail = ""
-            if ta is not None:
-                ta_tail = (
-                    "#\n"
-                    "# --- TIMING-WINDOW-AWARE ADVISORY (switching-window gating) ---\n"
-                    "# ADVISORY screen UPGRADE, NOT a commercial pass/fail SI sign-off.\n"
-                    "# Conclusive ONLY in the decoupled-safe direction; the HIGH\n"
-                    "# watch-list is flagged-for-review, NOT a proven failure. Does\n"
-                    "# NOT change violations_count and never blocks the build.\n"
-                    f"si_timing_aware_verdict: {ta.get('verdict')}\n"
-                    f"pairs_decoupled_by_window (CONCLUSIVELY SAFE): "
-                    f"{ta.get('pairs_decoupled_by_window')}\n"
-                    f"watchlist_high_count (overlap+over-margin; flagged, NOT "
-                    f"proven-fail): {ta.get('watchlist_high_count')}\n"
-                    f"watchlist_low_count (floating-bound over margin, gating "
-                    f"cleared): {ta.get('watchlist_low_count')}\n"
-                    f"max_gated_noise_mv (driven+window): "
-                    f"{ta.get('max_gated_noise_mv')}\n")
-            si_rpt.write_text(
-                "# Signal-integrity / crosstalk — REAL SPEF coupling-cap screen\n"
-                "# phase3_one_shot_runner (Step 27). Source: OpenRCX SPEF coupling caps.\n"
-                f"# SPEF: {spef}\n"
-                # The stamp `_sta_basis.declared_basis` reads. Step 27 runs on
-                # the ROUTED design and this branch is made OF the extracted
-                # SPEF, so the side of place-and-route is not a judgement call
-                # here — it is what the input file is. Unstamped, this report
-                # declared no basis and left the sign-off evidence set.
-                "# STA_BASIS: POST_ROUTE_SPEF\n#\n"
-                f"nets_analyzed: {m['nets']}\n"
-                f"max_coupling_ratio: {m['max_coupling_ratio']}\n"
-                f"mean_coupling_ratio: {m['mean_coupling_ratio']}\n"
-                f"nets_elevated (ratio>0.5): {m['nets_elevated_gt0p5']}\n"
-                f"nets_coupling_dominated (ratio>0.9, advisory watch-list): {dominated}\n"
-                f"max_crosstalk_noise: {m['max_crosstalk_noise_mv']} mV "
-                "(worst-case FLOATING-victim capacitive-divider bound @ Vdd=1.8V; "
-                "driven victims see far less)\n"
-                "violations_count: 0 (screen — coupling ratio alone is not a proven "
-                "failure; full SI sign-off needs a timing-window/driver-strength tool)\n"
-                "crosstalk: SI_SPEF_SCREEN_PASS\n"
-                + ta_tail
-                + "# end of si_crosstalk.rpt\n")
-            notes.append(
-                f"SI: REAL SPEF coupling-cap screen — {m['nets']} nets, max ratio "
-                f"{m['max_coupling_ratio']}, mean {m['mean_coupling_ratio']}, "
-                f"{dominated} coupling-dominated (advisory; screen PASS)")
-            return True
-    # --- fallback: decoupled-C structural screen (no SPEF / no coupling caps) ---
-    body = {
-        "tool": "openroad-wire-rc-screen",
-        "mode": "signal_integrity_crosstalk_screen",
-        "max_crosstalk_noise": 0.0,
-        "violations_count": 0,
-        "method": ("decoupled-C wire-RC screen on routed DB; full coupling-cap "
-                   "crosstalk needs a SPEF with coupling caps — none was produced "
-                   "for this run (e.g. routing-less DEF). When a SPEF IS present "
-                   "the runner uses the real coupling-cap screen instead (v0.2.6)."),
-        # v1.7.64 (Step 27 / d5) — was "SCREEN_PASS". The strictly-stronger
-        # SPEF sibling above already emits ADVISORY_SCREEN_ONLY; this weaker
-        # no-SPEF fallback emitted a third, unlisted string, which
-        # si_crosstalk_check's allow-list did not recognise, so the run that
-        # had the LEAST SI evidence produced the CLEANEST gate verdict
-        # (`verdict: PASS`, advisory_screen_only: false). The two ends now
-        # use one vocabulary; the checker is independently fail-closed.
-        "verdict": "ADVISORY_SCREEN_ONLY",
-        "note": ("No SPEF coupling caps available for this run; this is a "
-                 "structural screen, not a full SI sign-off. The OpenRCX SPEF "
-                 "path (v0.2.5) produces real coupling caps when the DEF is routed."),
-    }
-    _aa.write_text(si_rpt.parent / "si_crosstalk.json",
-        json.dumps(body, indent=2) + "\n")
-    si_rpt.write_text(
-        "# Signal-integrity / crosstalk screen — emitted by\n"
-        "# phase3_one_shot_runner (ORGANIC-20260531 sign-off-chain step).\n"
-        "# Tool: openroad wire-RC model (decoupled-C screen).\n"
-        # Same Step 27, same routed DB; only the SPEF is missing, and the
-        # missing SPEF is what the `NO_SPEF` suffix says. A screen that
-        # declines to name its side of PnR is dropped from the evidence set,
-        # which is a weaker statement than the honest one it can make.
-        "# STA_BASIS: POST_ROUTE_NO_SPEF\n"
-        "#\n"
-        "# A full crosstalk/noise sign-off needs SPEF coupling capacitances.\n"
-        "# No SPEF coupling caps were available for this run (the v0.2.5 OpenRCX\n"
-        "# SPEF path produces them when the DEF is routed; when present the runner\n"
-        "# uses the real coupling-cap screen). This decoupled-C bound records:\n"
-        "# with no modelled inter-net coupling, worst-case injected noise = 0.\n"
-        "# This is HONEST — it is a screen, not a sign-off.\n"
-        "#\n"
-        "max_crosstalk_noise: 0.0 mV\n"
-        "violations_count: 0\n"
-        # v1.7.64 — the .rpt headline named the tier "PASS", so a reader (or
-        # the .rpt branch of si_crosstalk_check) could take a screen for a
-        # sign-off. Name the tier the same way the JSON does.
-        "crosstalk: ADVISORY_SCREEN_ONLY (decoupled-C screen; SPEF-based SI "
-        "deferred — NOT a timing-window SI sign-off)\n"
-        "# end of si_crosstalk.rpt\n")
-    notes.append("SI: decoupled-C screen emitted (SPEF-based SI deferred)")
+    receipt_path = si_rpt.with_suffix('.current.json')
+    receipt_path.unlink(missing_ok=True)
+    body = {'tool': 'spef-coupling-cap-si-screen', 'verdict': 'NOT_MEASURED',
+            'max_crosstalk_noise': None, 'violations_count': 0,
+            'scope': 'Advisory coupling noise screen; timing-window delta-delay is separate'}
+    try:
+        if pdk is None or container is None or spef is None:
+            raise current.Refusal('CURRENT_SI_BASIS_MISSING')
+        if si_rpt.absolute() != (_pl.reports_phase3_dir(project) / 'si_crosstalk.rpt').absolute():
+            raise current.Refusal('CURRENT_SI_OUTPUT_PATH_MISMATCH')
+        cg, cc = _parse_spef_caps(spef.read_text())
+        if not cc:
+            raise current.Refusal('CURRENT_SPEF_COUPLING_MISSING')
+        m = _si_coupling_metrics(cg, cc)
+        body.update(verdict='ADVISORY_SCREEN_ONLY', spef=str(spef),
+                    max_crosstalk_noise=m['max_crosstalk_noise_mv'],
+                    max_coupling_ratio=m['max_coupling_ratio'],
+                    mean_coupling_ratio=m['mean_coupling_ratio'], nets_analyzed=m['nets'])
+        _merge_si_timing_aware(project, top, pdk, container, spef, body, notes)
+        if body['verdict'] == 'NOT_MEASURED':
+            raise current.Refusal(body['current_input_reason'])
+        timing = _pl.extracted_dir(project) / f'{top}_si_timing.json'
+        receipt = current.validate(project, timing.with_suffix('.current.json'), '27',
+                                   [('timing_windows', timing)])
+        receipt['inputs'] += [current.file_record(timing, 'timing_windows', project),
+            current.file_record(timing.with_suffix('.current.json'), 'timing_receipt', project)]
+        _aa.write_json(si_rpt.with_suffix('.json'), body)
+        si_rpt.write_text('# SI coupling screen; STA_BASIS: POST_ROUTE_SPEF\n'
+                          + json.dumps(body, indent=2) + '\n')
+        current.finish(receipt, 0, [('si_report', si_rpt),
+                                  ('si_result', si_rpt.with_suffix('.json'))], receipt_path)
+        current.si_binding(project)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        receipt_path.unlink(missing_ok=True)
+        body.update(verdict='NOT_MEASURED', current_input_reason=str(exc))
+        _aa.write_json(si_rpt.with_suffix('.json'), body)
+        si_rpt.write_text('SI NOT_MEASURED: ' + str(exc) + '\n')
+        notes.append('SI NOT_MEASURED: ' + str(exc))
+        return False
     return True
 
 
@@ -73201,6 +73219,12 @@ def _step34_odb_half(project: Path, top: str, pdk: PdkConfig, container: str,
     except Exception as exc:  # a refusal names itself; nothing falls back
         doc["refusal"] = str(exc)
     doc["tool"] = tool
+    if tool is not None:
+        try:
+            _lf.validate_fill_handoff(project, tool, routed_def=routed)
+        except Exception as exc:
+            doc["refusal"] = str(exc)
+            tool.setdefault("refusals", []).append(str(exc))
     tool_ok = tool is not None and not tool.get("refusals")
     if mode == "librelane":
         ship = "librelane" if tool_ok else None
@@ -73213,8 +73237,18 @@ def _step34_odb_half(project: Path, top: str, pdk: PdkConfig, container: str,
                             "rule": "feasible arms; a tie keeps the direct arm"}
     doc["shipped"] = ship
     if ship == "librelane":
-        _llc.handoff_to_direct(Path(tool["state"]), {"def": filled_def},
-                               arms / "odb_handoff.json")
+        try:
+            _llc.handoff_to_direct(Path(tool["state"]), {"def": filled_def},
+                                   arms / "odb_handoff.json")
+            _lf.update_record(project, "odb", doc)
+            _lf.validate_fill_consumption(project)
+        except Exception as exc:
+            doc.update(shipped=None, refusal=str(exc))
+            _lf.update_record(project, "odb", doc)
+            filled_def.unlink(missing_ok=True)
+            (pnr / "metal_fill.done").unlink(missing_ok=True)
+            notes.append(f"metal fill handoff REFUSED: {exc}")
+            return False
         _subject = _measured_subject(
             project, top, [routed, filled_def],
             tool_log=Path(tool["state"]).parent / "openroad-fillinsertion.log")
@@ -73285,6 +73319,13 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["subject"])
+        measured = _lf.validate_density_result(project, tool, layout=filled)
+        if measured.get("value") == "NOT_MEASURED":
+            doc.update(shipped=None, librelane=tool, direct=direct,
+                       shipped_sha256=None,
+                       ship_refusal="LL_FILL_GDS_UNBOUND: " + str(measured.get("reason")))
+            _lf.update_record(project, "gds", doc)
+            return False, doc["ship_refusal"]
         if tool[_lf.DENSITY_METRIC] == 0:
             def _copy_filled() -> Tuple[bool, str]:
                 shutil.copyfile(filled, gds_out)
@@ -73292,6 +73333,12 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
             (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
                 "KLayout.Filler and PDK-derived density fill (phase3_one_shot_runner step_gds)",
                 _copy_filled)
+            if _sha256_file(gds_out) != tool["subject_sha256"]:
+                doc.update(shipped=None, librelane=tool, direct=direct,
+                           shipped_sha256=None,
+                           ship_refusal="LL_FILL_GDS_NOT_CONSUMED: streamed bytes differ from measured fill")
+                _lf.update_record(project, "gds", doc)
+                return False, doc["ship_refusal"]
         result = (tool[_lf.DENSITY_METRIC] == 0,
                   f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
@@ -74190,6 +74237,16 @@ def _emit_erc_report(project: Path, top: str, pdk: PdkConfig,
     OpenROAD report_erc_metrics (floating-net / unconnected-pin electrical
     checks) on the routed DEF. Writes reports/phase3/erc.{rpt,json}.
     chip-AGNOSTIC. Best-effort."""
+    import _physical_current as _pc
+    try:
+        _erc_inputs = {role: _pc.entry(project, path, external=role.startswith("pdk_"))
+                       for role, path in (("def", _pl.pnr_dir(project) / f"{top}.def"),
+                                          ("pdk_tech_lef", pdk.tech_lef),
+                                          ("pdk_cell_lef", pdk.cell_lef),
+                                          ("pdk_liberty", pdk.liberty))}
+    except (OSError, ValueError) as exc:
+        notes.append(f"ERC NOT_MEASURED: {exc}")
+        return False
     pnr_out = _pl.pnr_dir(project)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
@@ -74218,6 +74275,7 @@ puts "=== ERC: floating nets ==="
 if {{[catch {{report_floating_nets -verbose}} _fn]}} {{ puts "ERC_FN_NONFATAL: $_fn" }}
 puts "=== ERC metrics ==="
 if {{[catch {{report_erc_metrics}} _erc]}} {{ puts "ERC_METRICS_NONFATAL: $_erc" }}
+puts "ERC_NATIVE_DONE"
 exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -74228,6 +74286,16 @@ exit
     )
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[out_dir / "erc.log"])
     log = (out or "") + "\n" + (err or "")
+    if rc or "ERC_NATIVE_DONE" not in log or "NONFATAL:" in log or "[ERROR" in log:
+        notes.append(f"ERC NOT_MEASURED: native tool did not complete (rc={rc})")
+        return False
+    _erc_inputs["recipe"] = _pc.entry(project, tcl_path)
+    for _role, _expected in _erc_inputs.items():
+        if _pc.entry(project, project / _expected["path"], external=_role.startswith("pdk_")) != _expected:
+            notes.append(f"ERC NOT_MEASURED: input changed during native tool: {_role}")
+            return False
+    (out_dir / "erc.log").write_text(log)
+
     # v0.3.16 #514: also capture the -verbose floating net/pin NAME lines
     # (e.g. " spare_aoi_0/A1") so erc.rpt carries them for the by-owner
     # classifier, not just the summary counts.
@@ -74289,6 +74357,12 @@ exit
         "note": ("open-source ERC screen; full Calibre PERC "
                  "(latch-up/ESD) deferred"),
     }, indent=2) + "\n")
+    _pc_record = _pc.build(project, "31", "stage4", _pc.design_of(def_file),
+                           pdk.name, "openroad", _erc_inputs,
+                           {"report": _pc.entry(project, erc_rpt),
+                            "log": _pc.entry(project, out_dir / "erc.log")},
+                           {"rc": rc, "argv": ["openroad", "-no_init", "-exit", str(tcl_path)]})
+    _aa.write_json(out_dir / "erc_current.json", _pc_record)
     return True
 
 
@@ -75199,6 +75273,26 @@ def _read_verdict(json_path: Path) -> Optional[str]:
         return None
 
 
+def _step25_native_density_due(project: Path, def_file: Path,
+                               pdk: PdkConfig) -> bool:
+    """Cache admission for the existing Step-24/25 producer, never a second run.
+
+    Shared canonicalization composes this predicate with its existing report
+    freshness tests. Partial but current native coverage is retained; stale
+    inputs, another kit, changed consumers or an absent execution are due.
+    """
+    import em_current_density_check as emc
+    binding = emc.validate_native_density(project)
+    if not binding["valid"]:
+        return True
+    try:
+        doc = json.loads((_pl.reports_phase3_dir(project) / "em_openroad_density.json").read_text())
+        return (doc["inputs"]["layout"]["sha256"] != emc._native_sha(def_file)
+                or doc["pdk"] != {"name": pdk.name, "tech_lef": str(pdk.tech_lef)})
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
 def _emit_em_current_authority(project: Path, pdk: PdkConfig,
                                container: str, notes: List[str]) -> bool:
     """#1215 — run the Step-25 EM AUTHORITY comparison with a REACHABLE Jmax
@@ -75244,8 +75338,8 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
                 stage_dir = project / "phase3" / "pdk_stage"
                 stage_dir.mkdir(parents=True, exist_ok=True)
                 staged = stage_dir / host_p.name
-                if not staged.is_file():
-                    staged.write_text(txt)
+                # A new declared kit must never reuse a same-named old file.
+                _aa.write_text(staged, txt)
                 tlef_arg = staged
             elif txt is not None:
                 notes.append(

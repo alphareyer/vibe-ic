@@ -746,7 +746,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `librelane_contract` | any | — | Project-local LibreLane step handoff. No Phase-3 step opts in implicitly. |
 | `librelane_cts_hold` | any | — | steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98). |
 | `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
-| `librelane_fill_dfm` | any | — | Steps 34 (fill) and 35 (DFM) on the tool, opt-in through the contract. |
+| `librelane_fill_dfm` | any | — | Default Step-34 tool fill and its existing Step-35 DFM consumer. |
 | `librelane_image_facts` | any | — | What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored. |
 | `librelane_import` | any | — | import a LibreLane run into the canonical tree (llv1 W6). |
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
@@ -2192,7 +2192,7 @@ _(no programs in this group)_
 - `librelane_contract` — Project-local LibreLane step handoff. No Phase-3 step opts in implicitly.
 - `librelane_cts_hold` — steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98).
 - `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
-- `librelane_fill_dfm` — Steps 34 (fill) and 35 (DFM) on the tool, opt-in through the contract.
+- `librelane_fill_dfm` — Default Step-34 tool fill and its existing Step-35 DFM consumer.
 - `librelane_image_facts` — What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored.
 - `librelane_import` — import a LibreLane run into the canonical tree (llv1 W6).
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.

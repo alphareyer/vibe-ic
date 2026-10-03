@@ -224,8 +224,10 @@ def _resolve_window(win: Optional[Window],
     sup_lo, sup_hi = win if win is not None else (None, None)
     lo = sup_lo if sup_lo is not None else default_min
     hi = sup_hi if sup_hi is not None else default_max
-    lo_src = supplied_label if sup_lo is not None else "generic-default"
-    hi_src = supplied_label if sup_hi is not None else "generic-default"
+    lo_src = supplied_label if sup_lo is not None else (
+        "generic-default" if default_min is not None else "not-stated")
+    hi_src = supplied_label if sup_hi is not None else (
+        "generic-default" if default_max is not None else "not-stated")
     if lo_src == hi_src:
         return lo, hi, lo_src
     return lo, hi, f"min={lo_src},max={hi_src}"
@@ -297,7 +299,10 @@ def check(report: Path, windows: Dict[str, Window],
         if win is None:
             win = report_windows.get(layer)
             label = "report"
-        lo, hi, src = _resolve_window(win, default_min, default_max, label)
+        backed = layer in prov_layers
+        pdk_stated = backed and (windows_provenance or {}).get("status") == "stated"
+        lo, hi, src = _resolve_window(win, default_min, default_max,
+                                      "PDK-stated" if pdk_stated else label)
         # PER-BOUND JUDGEMENT.
         #
         # This used to be `if lo is None or hi is None: UNCHECKED`. MEASURED on
@@ -320,7 +325,6 @@ def check(report: Path, windows: Dict[str, Window],
         # not be read as one: `(0.30, None)` from an operator is indistinguishable
         # from `(0.30, None)` produced by a failed extraction. THAT is the leak,
         # and `provenance_layers` is what closes it.
-        backed = layer in prov_layers
         if lo is None and hi is None:
             # Nothing to judge on either side.
             unchecked.append(layer)
@@ -340,6 +344,10 @@ def check(report: Path, windows: Dict[str, Window],
         # that does not say which side it is silent on reads as a two-sided one.
         if lo is None or hi is None:
             side = "minimum" if lo is None else "maximum"
+            key = "min" if lo is None else "max"
+            missing_source = "PDK-measured-absence" if pdk_stated else "source-recorded-absence"
+            entry["window_source"] = src.replace(
+                f"{key}=not-stated", f"{key}={missing_source}")
             entry["unjudged_bound"] = side
             entry["unjudged_reason"] = (
                 f"the source that supplied this layer's window states no "
@@ -373,11 +381,25 @@ def check(report: Path, windows: Dict[str, Window],
     generic_bound_layers = sorted(
         layer for layer, v in per_layer.items()
         if "generic-default" in str(v.get("window_source", "")))
-    if generic_bound_layers:
-        res["window_note"] = (
-            f"generic default window [{default_min},{default_max}] supplied at "
-            f"least one bound for: {', '.join(generic_bound_layers)} — a generic "
-            f"bound, NOT a foundry number")
+    notes = []
+    for side, value in (("minimum", default_min), ("maximum", default_max)):
+        key = "min" if side == "minimum" else "max"
+        supplied = [layer for layer in generic_bound_layers
+                    if per_layer[layer]["window_source"] == "generic-default" or
+                    f"{key}=generic-default" in per_layer[layer]["window_source"]]
+        if value is not None and supplied:
+            notes.append(f"generic {side} {value:g} supplied for: {', '.join(supplied)} "
+                         "— a generic bound, NOT a foundry number")
+    for layer, entry in per_layer.items():
+        absent = entry.get("unjudged_bound")
+        if absent:
+            stated = "maximum" if absent == "minimum" else "minimum"
+            value = entry["window"][1 if absent == "minimum" else 0]
+            source = "PDK-stated" if "PDK-stated" in entry["window_source"] else "source-stated"
+            notes.append(f"{layer}: {source} {stated} {value:g}; measured absence of "
+                         f"{absent}, which is not judged and has no invented bound")
+    if notes:
+        res["window_note"] = "; ".join(notes)
     if windows_provenance:
         res["windows_provenance"] = windows_provenance
     return res

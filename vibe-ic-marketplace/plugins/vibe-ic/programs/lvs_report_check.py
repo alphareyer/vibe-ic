@@ -227,6 +227,13 @@ def run(caller_argv, _audit=None) -> int:
                   f"hard sign-off must disclose how much it read.",
                   file=sys.stderr)
             return RC_FAIL
+        import librelane_signoff_evidence as _native
+        if not _native.tool_selected(Path(project_dir), "31"):
+            import _physical_current as _pc
+            refusal = _pc.check_direct_half(Path(project_dir), "lvs")
+            if refusal:
+                print(f"lvs_report_check: NOT_MEASURED {refusal}", file=sys.stderr)
+                return RC_FAIL
         print(f"lvs_report_check: PASS over files_found={files_found} "
               f"terminal_verdict={verdict} project={project_dir}",
               file=sys.stderr)
