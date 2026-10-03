@@ -53786,6 +53786,35 @@ def gen_l12_behavioral(project: Path,
         source_documents=_source_documents_from_extracted(project, extracted))
 
 
+def _l13_input_clauses(text: str):
+    """Keep denials as provenance, not executable lab actions or targets.
+
+    Scope polarity to a clause so an affirmative procedure following a
+    denial survives. Headings and front matter are not procedures.
+    """
+    for line in text.splitlines():
+        if re.match(r"^\s*(?:#|---\s*$)", line):
+            continue
+        for clause in re.split(
+                r"[;；]|(?<=[。！？])|,\s*(?:but|however|yet)\s+|，\s*(?:但|然而)",
+                line, flags=re.IGNORECASE):
+            clause = clause.strip()
+            topic = re.search(r"calibrat\w*|trim\w*|measur\w*|校[準准]|微調|量測",
+                              clause, re.IGNORECASE)
+            prefix = clause[:topic.end()] if topic else clause
+            negated = bool(re.search(
+                r"不需|無需|毋需|沒有|不含|無(?=[\s\x00-\x7F])|"
+                r"\b(?:no|not|without|none|absent|lacks?|excludes?)\b",
+                prefix, re.IGNORECASE))
+            if topic and re.match(
+                    r"\s*(?:(?:is|are)\s+|:\s*)?(?:not\b|n\s*/\s*a\b)|"
+                    r"\s*(?:isn['’]t|aren['’]t)\b",
+                    clause[topic.end():], re.IGNORECASE):
+                negated = True
+            if clause:
+                yield clause, negated
+
+
 def gen_l13_lab_calibration(project: Path,
                             extracted: Dict[str, str]) -> LDocResult:
     """L13: lab cal / cosim checklist from cosim_check_list / engineer-mode."""
@@ -53796,9 +53825,16 @@ def gen_l13_lab_calibration(project: Path,
         if not re.search(r"cosim|calibrat|lab|trim", fname, re.IGNORECASE):
             continue
         ev = evidence.setdefault(f"input/docs/{fname}", [])
-        for line in text.splitlines()[:80]:
-            if re.match(r"^\s*\d+\.\s+\S", line) or \
-               re.search(r"calibrat|trim|measure", line, re.IGNORECASE):
+        for line, negated in _l13_input_clauses("\n".join(text.splitlines()[:80])):
+            if negated:
+                if len(ev) < 18:
+                    ev.append({"literal": line[:80],
+                               "label": "negated calibration/lab input"})
+                continue
+            if re.match(r"^\s*\d+\.\s+\S", line) or re.search(
+                    r"\b(?:calibrate|calibrating|trim|trimming|measure|measuring|adjust|sweep|write|read|record|"
+                    r"set|connect|apply|capture|verify|compare|run)\b|量測|校[準准]|調整",
+                    line, re.IGNORECASE):
                 cal_steps.append({
                     "step": len(cal_steps) + 1,
                     "action": line.strip()[:120],
@@ -53820,8 +53856,8 @@ def gen_l13_lab_calibration(project: Path,
     # Replace each with per-source extraction; emit empty + flag when
     # no source evidence is found.
     canonical_steps = cal_steps[:32]
-    no_calibration_steps_in_input = _flag_no_X_in_input(
-        canonical_steps, evidence, "calibration_steps")
+    # A calibration filename or a cited denial is not a positive procedure.
+    no_calibration_steps_in_input = not bool(canonical_steps)
 
     # lab_equipment: harvest "<name> | <vendor>" / "equipment: <name>"
     # patterns. Chip-AGNOSTIC.
@@ -53830,6 +53866,12 @@ def gen_l13_lab_calibration(project: Path,
     _eq_re = re.compile(
         r"(?im)^\s*(?:equipment|instrument|tester|scope|board|tool)"
         r"\s*[:=]\s*([^\n,;|]{2,60})(?:\s*[,|;]\s*([^\n]{2,60}))?")
+    # The documented row form is one unbordered `<name> | <vendor>` pair.
+    # Keep markdown table/header rows out of this small extraction rule.
+    _eq_pipe_re = re.compile(
+        r"(?im)^\s*([^|\n]{2,60}?)\s*\|\s*([^|\n]{2,60}?)\s*$")
+    _eq_headers = {"name", "equipment", "instrument", "tester", "scope",
+                   "board", "tool", "vendor", "maker", "supplier"}
     for fname, text in extracted.items():
         if not re.search(r"calibrat|lab|rig|trim|equipment",
                          fname, re.IGNORECASE):
@@ -53846,8 +53888,21 @@ def gen_l13_lab_calibration(project: Path,
                 "purpose": "lab equipment (extracted)",
                 "evidence": f"input/docs/{fname}",
             })
-    no_lab_equipment_in_input = _flag_no_X_in_input(
-        lab_equipment, evidence, "lab_equipment")
+        for m in _eq_pipe_re.finditer(text):
+            nm, vendor = (part.strip().strip("`*_ ") for part in m.groups())
+            if (not nm or not vendor or nm.lower() in _eq_headers
+                    or vendor.lower() in _eq_headers):
+                continue
+            key = nm.lower()
+            if key in seen_lab:
+                continue
+            seen_lab.add(key)
+            lab_equipment.append({
+                "name": nm, "vendor": vendor,
+                "purpose": "lab equipment (extracted)",
+                "evidence": f"input/docs/{fname}",
+            })
+    no_lab_equipment_in_input = not bool(lab_equipment)
 
     # rig_pin_assignments: harvest "PIN_<X>" / "<sig> = PIN_<X>"
     # patterns. AID-class fallback removed — projects with no rig
@@ -53869,11 +53924,9 @@ def gen_l13_lab_calibration(project: Path,
                     break
         if rig_pin_assignments:
             break
-    no_rig_pin_assignments_in_input = _flag_no_X_in_input(
-        rig_pin_assignments, evidence, "rig_pin_assignments")
+    no_rig_pin_assignments_in_input = not bool(rig_pin_assignments)
 
-    no_l13_test_cases_in_input = _flag_no_X_in_input(
-        canonical_steps, evidence, "l13_test_cases")
+    no_l13_test_cases_in_input = not bool(canonical_steps)
     # v1.6.64 — closes issue #6 Bug C. The previous code emitted
     # three placeholder calibration_targets (VBG / VLDO / fOSC) for
     # every project regardless of input. Replace with extraction:
@@ -53891,6 +53944,8 @@ def gen_l13_lab_calibration(project: Path,
         r"([\d.]+)\s*([VkMHzµu]+)?"
     )
     for fname, text in extracted.items():
+        text = "\n".join(clause for clause, negated in _l13_input_clauses(text)
+                         if not negated)
         for m in _trim_re.finditer(text):
             nm = m.group(1)
             if nm in seen_targets:
@@ -53921,8 +53976,7 @@ def gen_l13_lab_calibration(project: Path,
                 "evidence": f"input/docs/{fname}",
             })
     # v1.6.78 — closes #11 FLAG-EVIDENCE CONSISTENCY for L13.lab_calibration.
-    no_lab_calibration_in_input = _flag_no_X_in_input(
-        calibration_targets, evidence, "lab_calibration")
+    no_lab_calibration_in_input = not bool(calibration_targets or canonical_steps)
 
     content = {
         "schema_version": 2,
@@ -53930,6 +53984,7 @@ def gen_l13_lab_calibration(project: Path,
         "ic_name": ic_name,
         "calibration_targets": calibration_targets[:32],
         "no_lab_calibration_in_input": no_lab_calibration_in_input,
+        "lab_calibration_present": not no_lab_calibration_in_input,
         # v1.6.79 — closes issue #12. All four fields are now empty +
         # flag when source has no calibration / lab evidence; previously
         # populated with AID-class scaffolds even on totally unrelated

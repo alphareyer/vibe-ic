@@ -106,14 +106,15 @@ R4 CORNER-LIBRARY RESOLUTION — a multi-corner claim must be backed by multiple
 
 R5 DRV (max_slew / max_capacitance / max_fanout) MUST BE SURFACED — measured:
    139 max_slew violations at the slow corner, entirely invisible to the flow's
-   check. Two distinct failures, both FAIL:
-     * `R5_DRV_VIOLATION` — the record SHOWS DRV violations. They are real
-       sign-off violations and are reported as such, with per-corner counts.
+   check. Two distinct blocking answers:
+     * `R5_DRV_VIOLATION` — FAIL on counted DRV classes; raw tool rows outside
+       that count are retained and disclosed, using the shared classifier.
      * `R5_DRV_UNQUERIED` — a sign-off corner report exists but OpenSTA was
        never asked for DRV at all (no `report_check_types`, no check-types
        marker), or the query errored. An unqueried DRV limit is
        indistinguishable from a met one — the same disease as an unreported
-       corner, which is what R2 already says about slack.
+       corner, which is what R2 already says about slack. Without a measured
+       failure this is NOT_MEASURED, never PASS.
 
 R6 REQUIRED PVT POST-ROUTE COVERAGE — every PVT corner that the design's
    sign-off requirement extractor names needs post-route SPEF
@@ -1223,32 +1224,40 @@ def _deck_args(text: str, command: str) -> List[str]:
 
 
 def _drv_class_inputs(project: Path, rpt: Optional[Path],
-                      text: str) -> Tuple[Optional[Path], List[Path], str, Optional[Path]]:
+                      text: str) -> Tuple[Optional[Path], Dict[str, List[Path]], str, Optional[Path]]:
     """(netlist, linked Liberty files, why-not) behind one STA report.
 
     A direct deck report names its netlist (`STA_BASIS_NETLIST:`); the sibling
     deck that reads that netlist names the Liberty it linked. A LibreLane
     STAPostPNR report sits in a step folder whose `state_in.json` / `config.json`
-    name the netlist and PAD_LIBS. Anything else is unresolved."""
+    name the netlist and PAD_LIBS. Anything else is unresolved.  The PAD_LIBS
+    map stays keyed by this report's typed corner; flattening all PVT views to
+    ``*`` would make a per-scene capture look incomplete."""
+    import _drv_row_class as _cls
+    report_corner = rpt.parent.name if rpt is not None else None
     if rpt is None:
-        return None, [], "no report path", None
+        return None, {}, "no report path", None
     for folder in (rpt.parent, rpt.parent.parent):
         cfg, state = folder / "config.json", folder / "state_in.json"
         if cfg.is_file() and state.is_file():
             c, st = _load_json(cfg) or {}, _load_json(state) or {}
             pads = c.get("PAD_LIBS")
-            paths = ([p for v in pads.values() for p in ([v] if isinstance(v, str) else v)]
-                     if isinstance(pads, dict) else list(pads or []))
+            if not report_corner:
+                return None, {}, "report corner identity absent", None
+            typed = _cls.pad_libs_by_corner(pads, [report_corner])
+            if not typed:
+                return None, {}, f"no PAD_LIBS mapping for report corner {report_corner}", None
+            paths = {corner: [_host_pdk_path(project, p) for p in values]
+                     for corner, values in typed.items()}
             nl = st.get("nl")
             sdc = c.get("SIGNOFF_SDC_FILE")
             if nl and paths:
-                return (_host_pdk_path(project, str(nl)),
-                        [_host_pdk_path(project, str(p)) for p in paths], "",
+                return (_host_pdk_path(project, str(nl)), paths, "",
                         _host_pdk_path(project, str(sdc)) if sdc else None)
-            return None, [], f"{folder.name}: no netlist or PAD_LIBS recorded", None
+            return None, {}, f"{folder.name}: no netlist or PAD_LIBS recorded", None
     names = set(re.findall(r"(?m)^STA_BASIS_NETLIST:\s*(\S+)", text))
     if not names:
-        return None, [], "report names no STA_BASIS_NETLIST", None
+        return None, {}, "report names no STA_BASIS_NETLIST", None
     netlists: set = set()
     libs: List[Path] = []
     sdcs: set = set()
@@ -1264,8 +1273,13 @@ def _drv_class_inputs(project: Path, rpt: Optional[Path],
         libs.extend(_host_pdk_path(project, v) for v in _deck_args(body, "read_liberty"))
         sdcs.update(_host_pdk_path(project, v) for v in _deck_args(body, "read_sdc"))
     if len(netlists) != 1:
-        return None, [], f"{len(netlists)} deck netlists match {sorted(names)}", None
-    return (next(iter(netlists)), sorted(set(libs)), "",
+        return None, {}, f"{len(netlists)} deck netlists match {sorted(names)}", None
+    if not report_corner:
+        return None, {}, "report corner identity absent", None
+    typed = {report_corner: sorted(set(libs))}
+    if not typed[report_corner]:
+        return None, {}, f"no linked Liberty files for report corner {report_corner}", None
+    return (next(iter(netlists)), typed, "",
             next(iter(sdcs)) if len(sdcs) == 1 else None)
 
 
@@ -1279,7 +1293,8 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
     values = drv.get("pin_values") or {}
     if not values:
         return {"state": "NO_ROWS", "counted": {}, "listed": []}
-    netlist, libs, why, sdc = _drv_class_inputs(project, rpt, text)
+    netlist, pad_libs, why, sdc = _drv_class_inputs(project, rpt, text)
+    libs = [path for paths in pad_libs.values() for path in paths]
     io_libs = []
     for lib in libs:
         try:
@@ -1287,7 +1302,7 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
                 io_libs.append(lib)
         except OSError as exc:
             why = why or f"Liberty {lib} unreadable: {exc}"
-    if netlist is None or not io_libs:
+    if netlist is None or not io_libs or len(pad_libs) != 1:
         return {"state": "UNAVAILABLE", "reason": why or "no linked IO (pad_cell) Liberty",
                 "counted": {k: len(v) for k, v in values.items()}, "listed": []}
     import _drv_row_class as _cls
@@ -1296,7 +1311,9 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
             margin = _cls.sdc_cap_margin(sdc.read_text()) if sdc else None
         except OSError:
             margin = None
-        classifier = _cls.Classifier(netlist, {"*": io_libs}, margin, project=project, sdc=sdc)
+        corner = next(iter(pad_libs))
+        classifier = _cls.Classifier(netlist, {corner: io_libs}, margin,
+                                     project=project, sdc=sdc)
         classify = classifier.classify
     except _cls.Unavailable as exc:
         return {"state": "UNAVAILABLE", "reason": str(exc),
@@ -1305,12 +1322,12 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
     listed: List[Dict[str, object]] = []
     for kind, rows in values.items():
         for row in rows:
-            cls = classify("*", kind, str(row["pin"]), row.get("limit"), row.get("value"))
+            cls = classify(corner, kind, str(row["pin"]), row.get("limit"), row.get("value"))
             if cls == _cls.COUNTED:
                 counted[kind] = counted.get(kind, 0) + 1
             else:
                 listed.append({"check": kind, "class": cls, **row})
-    return {"state": "CLASSIFIED", "netlist": str(netlist),
+    return {"state": "CLASSIFIED", "corner": corner, "netlist": str(netlist),
             "io_liberty": [str(p) for p in io_libs],
             "connectivity": classifier.connectivity_evidence,
             "counted": counted, "listed": listed}
@@ -1335,6 +1352,41 @@ def _drv_with_attribution(project: Path, text: str, rpt: Optional[Path] = None):
     drv["attribution"] = attribute_drv(rows, spare_instances(project))
     drv["classes"] = drv_row_classes(project, rpt, text, drv)
     return drv
+
+
+def _drv_rule_violations(drv: Dict[str, object]) -> Dict[str, int]:
+    """R-0928-DRV-IC: both callers judge counted classes, retaining raw rows.
+
+    Without classification every raw violation still counts; unqueried DRV
+    is answered separately as NOT_MEASURED, never as a measured clean count.
+    """
+    if not drv.get("queried"):
+        return {}
+    classes = drv.get("classes") or {}
+    if classes.get("state") == "CLASSIFIED":
+        return {k: v for k, v in (classes.get("counted") or {}).items() if v}
+    return drv.get("violations") or {}
+
+
+def _drv_class_disclosure(drv: Dict[str, object], rpt: str, axis: str) -> List[str]:
+    """Keep listed rows and unavailable classification visible in both arms."""
+    if not drv.get("queried") or not drv.get("violations"):
+        return []
+    classes = drv.get("classes") or {}
+    listed = classes.get("listed") or []
+    if classes.get("state") == "CLASSIFIED" and listed:
+        by = {}
+        for row in listed:
+            key = (row["class"], row["check"])
+            by[key] = by.get(key, 0) + 1
+        return [f"R5 {rpt} ({axis} axis) lists {len(listed)} DRV row(s) outside "
+                f"the std-cell DRV count: " + ", ".join(
+                    f"{c} {k} x{n}" for (c, k), n in sorted(by.items())) +
+                f" (netlist {classes.get('netlist')}; LISTED, not counted)"]
+    if classes.get("state") == "UNAVAILABLE":
+        return [f"R5 {rpt} ({axis} axis): DRV row classes unavailable "
+                f"({classes.get('reason')}); every row counts"]
+    return []
 
 
 def read_axis_evidence(project: Path,
@@ -1498,6 +1550,7 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
     table: List[Dict[str, object]] = []
     axes: List[Dict[str, object]] = []
     findings: List[str] = []
+    drv_disclosed: List[str] = []
     rules: List[str] = []
     for name, row in arm["corners"].items():                  # type: ignore[union-attr]
         native = 'ws.max.rpt' in row['files']
@@ -1580,10 +1633,15 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
             rules.append("R5_DRV_UNQUERIED")
             findings.append(f"R5 {ax['report']} carries sign-off timing but no DRV "
                             f"query (report_check_types) is recorded")
-        elif drv.get("violations"):
-            rules.append("R5_DRV_VIOLATION")
-            findings.append(f"R5 {ax['report']} reports {drv.get('total')} DRV "
-                            f"violation(s): {drv.get('violations')}")
+        else:
+            viol = _drv_rule_violations(drv)
+            drv_disclosed.extend(_drv_class_disclosure(drv, str(ax['report']),
+                                                       str(ax['axis'])))
+            if viol:
+                rules.append("R5_DRV_VIOLATION")
+                findings.append(f"R5 {ax['report']} reports {sum(viol.values())} "
+                                f"counted DRV violation(s) (of {drv.get('total')} "
+                                f"tool rows): {viol}")
     obligations = extract_signoff_requirements(project) or {}
     required = sorted({c for row in obligations.get("signoff_requirements", [])
                        if row.get("check") == "STA" and row.get("stated")
@@ -1636,14 +1694,16 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
                if r in rules]
     if any(r in ordered for r in ("R1_INCOMPLETE_CORNER_RECORD",
                                   "R2_DECLARED_BUT_UNREPORTED",
+                                  "R5_DRV_UNQUERIED",
                                   "R6_REQUIRED_PVT_NOT_MEASURED", "R7_SCENE_NOT_MEASURED")) \
             and set(ordered) <= {"R1_INCOMPLETE_CORNER_RECORD",
                                  "R2_DECLARED_BUT_UNREPORTED",
+                                 "R5_DRV_UNQUERIED",
                                  "R6_REQUIRED_PVT_NOT_MEASURED", "R7_SCENE_NOT_MEASURED"}:
         verdict = "NOT_MEASURED"
     else:
         verdict = "FAIL" if ordered else "PASS"
-    reasons = findings or [
+    reasons = findings + drv_disclosed or [
         f"timing record complete: {len(table)} STAPostPNR corner(s) (RC x process), "
         f"each reported for setup and hold, every one MET (tol {slack_tol} ns), "
         f"{len(libs)} distinct cell liberty, DRV queried and clean"
@@ -2036,28 +2096,8 @@ def evaluate(project: Path,
                 f"set_max_fanout with every tie cell excluded as constant-driven "
                 f"(vibe-ic#573). DISCLOSED, not blocking.")
 
-        viol: Dict[str, int] = drv.get("violations") or {}   # type: ignore[assignment]
-        classes = drv.get("classes") or {}
-        listed = classes.get("listed") or []
-        if viol and classes.get("state") == "CLASSIFIED":
-            # R-0928-DRV-IC / root audit U1: a bond-pad port-to-PAD row and an
-            # IO-cell pin within its IO Liberty under the std-cell margin are
-            # not std-cell DRV. They are LISTED here (never dropped); only the
-            # counted classes block. The total above stays the tool's own.
-            viol = {k: v for k, v in (classes.get("counted") or {}).items() if v}
-            if listed:
-                by = {}
-                for row in listed:
-                    by[(row["class"], row["check"])] = by.get((row["class"], row["check"]), 0) + 1
-                drv_disclosed.append(
-                    f"R5 {rpt} ({axis} axis) lists {len(listed)} DRV row(s) outside "
-                    f"the std-cell DRV count: " + ", ".join(
-                        f"{c} {k} x{n}" for (c, k), n in sorted(by.items())) +
-                    f" (netlist {classes.get('netlist')}; LISTED, not counted)")
-        elif viol and classes.get("state") == "UNAVAILABLE":
-            drv_disclosed.append(
-                f"R5 {rpt} ({axis} axis): DRV row classes unavailable "
-                f"({classes.get('reason')}); every row counts")
+        viol = _drv_rule_violations(drv)
+        drv_disclosed.extend(_drv_class_disclosure(drv, rpt, axis))
         if viol:
             rules.append("R5_DRV_VIOLATION")
             pretty = ", ".join(f"{k} x{v}" for k, v in sorted(viol.items()))
@@ -2097,8 +2137,9 @@ def evaluate(project: Path,
                            "R5_DRV_VIOLATION",
                            "R6_REQUIRED_PVT_NOT_MEASURED") if r in rules]
 
-    if "R6_REQUIRED_PVT_NOT_MEASURED" in ordered and set(ordered) <= {
-            "R2_DECLARED_BUT_UNREPORTED", "R6_REQUIRED_PVT_NOT_MEASURED"}:
+    if any(r in ordered for r in ("R5_DRV_UNQUERIED", "R6_REQUIRED_PVT_NOT_MEASURED")) \
+            and set(ordered) <= {"R2_DECLARED_BUT_UNREPORTED", "R5_DRV_UNQUERIED",
+                                 "R6_REQUIRED_PVT_NOT_MEASURED"}:
         verdict = "NOT_MEASURED"
     elif ordered:
         verdict = "FAIL"
@@ -2205,15 +2246,19 @@ def render_table(res: Dict[str, object]) -> str:
             drv = ax.get("drv")
             if isinstance(drv, dict):
                 if not drv.get("queried"):
-                    lines.append("      DRV            NOT QUERIED "
+                    lines.append("      DRV            NOT_MEASURED (NOT QUERIED) "
                                  "(max_slew/max_capacitance/max_fanout)")
-                elif drv.get("violations"):
-                    pretty = ", ".join(
-                        f"{k} x{v}"
-                        for k, v in sorted(drv["violations"].items()))
-                    lines.append(f"      DRV            VIOLATED: {pretty}")
                 else:
-                    lines.append("      DRV            queried, clean")
+                    viol = _drv_rule_violations(drv)
+                    raw = drv.get("violations") or {}
+                    if viol:
+                        pretty = ", ".join(f"{k} x{v}" for k, v in sorted(viol.items()))
+                        lines.append(f"      DRV            VIOLATED: {pretty}")
+                    elif raw:
+                        lines.append("      DRV            counted=0; raw tool rows "
+                                     f"{raw} (LISTED, not counted)")
+                    else:
+                        lines.append("      DRV            queried, clean")
     return "\n".join(lines)
 
 

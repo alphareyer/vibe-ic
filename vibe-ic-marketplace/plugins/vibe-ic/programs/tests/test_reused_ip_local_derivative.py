@@ -96,6 +96,7 @@ def test_normal_consumer_admits_complete_declared_local_derivative(tmp_path, mon
     mf=json.loads(mf_path.read_text());mf['local_derivative']=ref;_json(mf_path,mf)
     event={'event':'ip_catalog_local_derivative','kind':'LOCAL_DERIVATIVE',
            'record':ref,'current_inventory':record['current_inventory'],
+           'exit_code':0,'outputs':{'phase2/stage1/rtl/leaf.v':'sha256:'+record['current_inventory']['leaf.v']},
            'official_unmodified_files':1,'locally_adapted_reused_files':1,
            'separately_authored_files':[]}
     with (project/'provenance.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')

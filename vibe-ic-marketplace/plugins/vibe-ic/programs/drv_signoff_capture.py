@@ -213,12 +213,34 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
     spef = Path(scene["spef"]["path"])
     for path in (netlist, sdc, spef):
         _ref(path)
+    recipe = (plan.get("current") or {}).get("ocv_recipe") or {}
+    if recipe:
+        try:
+            early, late = float(recipe["early"]), float(recipe["late"])
+            refs = list(recipe["source_refs"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("DRV OCV recipe malformed") from exc
+        if not (0 < early <= 1 <= late) or not refs:
+            raise ValueError("DRV OCV recipe outside required flat-OCV bounds")
+        for item in refs:
+            if not isinstance(item, dict) or not item.get("path"):
+                raise ValueError("DRV OCV recipe source reference malformed")
+            ref = _ref(Path(item["path"]))
+            if item.get("sha256") != ref["sha256"]:
+                raise ValueError("DRV OCV recipe source changed")
+        native = recipe.get("native_measurement_ref")
+        if native is not None:
+            ref = _ref(Path(native.get("path") or ""))
+            if native.get("sha256") != ref["sha256"]:
+                raise ValueError("native OCV measurement source changed")
     prefix = "".join(f"read_liberty {_tcl(path)}\n" for path in libs)
     prefix += (f"read_verilog {_tcl(netlist)}\n"
                f"link_design {{{plan['top']}}}\n"
                f"read_sdc {_tcl(sdc)}\n"
-               f"read_spef {_tcl(spef)}\n"
-               "set_propagated_clock [all_clocks]\n")
+               + (f"set_timing_derate -early {early}\n"
+                  f"set_timing_derate -late {late}\n" if recipe else "")
+               + f"read_spef {_tcl(spef)}\n"
+               + "set_propagated_clock [all_clocks]\n")
     if control:
         limits = scene["positive_control_limits"]
         prefix += ("set_max_fanout 1 [current_design]\n"
@@ -239,6 +261,68 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
             + "".join(
                 f'puts $_f "DRV_COUNTER {kind} [sta::{kind}_violation_count]"\n'
                 for kind in KINDS) + "close $_f\n")
+
+
+def _spef_extraction_receipt(plan: dict, scene: dict, out: Path) -> dict:
+    """Bind one captured SPEF to the RCX producer record already on disk.
+
+    The capture plan carries the SPEF bytes, but it is not itself an
+    extraction receipt.  The RCX step's own ``vibeic_receipt.json`` is the
+    authority for the output digest and its recorded route input; the
+    adjacent ``COMMANDS`` file is the only command provenance we publish.
+    Missing, ambiguous, changed, or cross-corner records refuse here rather
+    than letting the judge infer provenance from file presence.
+    """
+    spef = Path(scene["spef"]["path"]).resolve()
+    rcx_dir = spef.parent.parent
+    source_receipt = rcx_dir / "vibeic_receipt.json"
+    command_path = rcx_dir / "COMMANDS"
+    if not source_receipt.is_file() or not command_path.is_file():
+        raise ValueError(f"RCX extraction receipt/command absent for {spef}")
+    try:
+        record = json.loads(source_receipt.read_text())
+        recorded_input = record["input"]
+        recorded_sha = record["sha256"]
+        if recorded_input.get("step") != "OpenROAD.RCX":
+            raise ValueError("RCX receipt names a different producer step")
+        recorded_image = recorded_input.get("image")
+        bound_image = (plan.get("identity") or {}).get("tool_image")
+        if recorded_image != bound_image:
+            raise ValueError("RCX receipt image differs from capture image")
+        rel_spef = spef.relative_to(rcx_dir).as_posix()
+        spef_sha = _sha(spef)
+        if recorded_sha.get(rel_spef) != spef_sha:
+            raise ValueError("RCX receipt SPEF digest differs from captured bytes")
+        def_items = [(path, digest) for path, digest in
+                     (recorded_input.get("state_files") or {}).items()
+                     if str(path).endswith(".def")]
+        if len(def_items) != 1:
+            raise ValueError("RCX receipt must name exactly one routed DEF")
+        _def_path, def_sha = def_items[0]
+        judged_def_sha = (((plan.get("identity") or {}).get("artifacts") or {})
+                          .get("def") or {}).get("sha256")
+        if def_sha != judged_def_sha:
+            raise ValueError("RCX receipt DEF differs from judged DEF")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(def_sha)):
+            raise ValueError("RCX receipt DEF digest malformed")
+        if scene.get("rc_corner") not in {"nom", "min", "max"}:
+            raise ValueError("scene RC corner is not an RCX corner")
+    except (OSError, TypeError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid RCX extraction receipt: {exc}") from exc
+    command_ref = _ref(command_path)
+    receipt = {
+        "schema": "vibeic.spef_extraction_receipt.v1",
+        "producer": "drv_signoff_capture",
+        "source_receipt": _ref(source_receipt),
+        "routed_def_sha256": def_sha,
+        "spef_sha256": spef_sha,
+        "rc_corner": scene["rc_corner"],
+        "extraction_command": command_ref,
+        "extraction_command_sha256": command_ref["sha256"],
+    }
+    receipt_path = out / "spef_extraction_receipt.json"
+    write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return _ref(receipt_path)
 
 
 #: What the pinned image says about its OpenROAD builds: one line per binary
@@ -396,6 +480,8 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         row.pop("excluded_pins_recorded", None)
         row.pop("excluded_pins_report", None)
         row.pop("clock_network_pins", None)
+        row["spef_extraction_receipt"] = _spef_extraction_receipt(
+            bundle, scene, scene_dir)
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
                    excluded_pins_recorded=census is not None,
                    command=_COMMAND, all_limits_max_count=max_count,

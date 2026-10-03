@@ -812,10 +812,20 @@ def verify_existing_official_pins_outcome(project: Path,
         return PIN_MISMATCH, own
     by_name = {p["ip_name"]: p for p in pins}
     unreached: List[str] = []
+    # The operator-staged canonical cache is an input, never project authority.
+    # Refuse project-contained cache entries even through a symlink.
+    for match in matches:
+        safe = "".join(c if c.isalnum() or c in "._-" else "_"
+                       for c in (match.canonical_commit or ""))
+        cached = (CACHE_ROOT / f"{match.ip_name}@{safe}").resolve()
+        if cached.is_relative_to(project.resolve()):
+            return PIN_MISMATCH, "official reference cache is inside the project"
     with tempfile.TemporaryDirectory(prefix="ip-pin-verify-") as scratch:
         reference = Path(scratch)
+        # Outputs remain isolated; the existing official pull rechecks the
+        # cached pin, canonical origin, clean RTL, complete files and errata.
         audit = pull_all_catalog_matches(reference, matches, official_only=True,
-                                         cache_root=reference / ".cache")
+                                         cache_root=CACHE_ROOT)
 
         def _scrub(text: Any) -> str:
             # The reference pull runs in a throw-away directory; its path in a
@@ -1020,6 +1030,9 @@ def _local_derivative_plan(project: Path, matches: List[CatalogMatch],
             raise ValueError(f"{key} does not bind unchanged challenge/outcome/full RTL inventory")
     local_event = {"event": "ip_catalog_local_derivative", "kind": "LOCAL_DERIVATIVE",
              "record": ref, "current_inventory": after,
+             "exit_code": 0,
+             "outputs": {"phase2/stage1/rtl/" + name: "sha256:" + after[name]
+                         for name in replacements},
              "official_unmodified_files": len(official)-len(replacements),
              "locally_adapted_reused_files": len(replacements),
              "separately_authored_files": sorted(authored)}
@@ -1097,12 +1110,16 @@ def apply_local_derivative(project: Path, matches: List[CatalogMatch],
         if _local_inventory(rtl) not in (plan["before"], plan["after"]):
             raise ValueError("current inventory is neither exact parent nor declared derivative")
         import _atomic_artefact as atomic
+        outputs = {}
         for name, data in plan["replacements"].items():
             atomic.write_bytes(rtl / name, data)
+            outputs["phase2/stage1/rtl/" + name] = "sha256:" + _sha256_file(rtl / name)
+        if outputs != plan["event"]["outputs"]:
+            raise ValueError("written derivative output differs from replayed patch")
         manifest["local_derivative"] = ref
         atomic.write_json(mf_path, manifest)
         with (project / "provenance.jsonl").open("a") as f:
-            f.write(json.dumps(plan["event"], sort_keys=True) + "\n")
+            f.write(json.dumps({**plan["event"], "outputs": outputs}, sort_keys=True) + "\n")
         return {"status": PIN_VERIFIED, "reason": why, **plan["event"]}
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return {"status": PIN_MISMATCH, "kind": "LOCAL_DERIVATIVE",

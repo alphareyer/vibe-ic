@@ -174,13 +174,14 @@ def _apply_universal(gd: Path, is_spi: bool = False) -> None:
             if is_spi else
             "No OTP / fuse / configuration-ROM content in the spec. All configuration is via the run-time register file.")
         _write(p, d)
-    # L13 lab cal N/A
+    # L13 presence comes from source-backed calibration, not protocol class.
     p = gd / "L13_LAB_CALIBRATION.json"
     if p.is_file():
         d = _read(p)
-        d.setdefault("lab_calibration_present", False)
-        d.setdefault("notes",
-            "Pure digital protocol block; no analog reference / trim / calibration loop. Baud-rate is purely from a digital divider chain of the BusClock.")
+        if d.get("calibration_targets") or d.get("calibration_steps"):
+            d.setdefault("lab_calibration_present", True)
+        elif d.get("no_lab_calibration_in_input") is True:
+            d.setdefault("lab_calibration_present", False)
         _write(p, d)
     # L19-L23 presence facts (post-skeleton overlay so 14d doesn't clobber).
     # H4 fix: `verification_plan_present="implicit"` + the generic

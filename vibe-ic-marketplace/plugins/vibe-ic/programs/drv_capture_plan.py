@@ -16,6 +16,7 @@ source of scene identity.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -435,13 +436,94 @@ def _direct_script(path: Path) -> dict:
     return result
 
 
+def _current_report_sdc(project: Path, fallback: Path) -> Path:
+    """Return the raw SDC the current direct STA report names.
+
+    A final STAPostPNR scene may point at ``signoff_scene.sdc``, a derived
+    bridge that carries the OCV commands.  The strict DRV currentness consumer
+    compares ``current.sources.signoff_sdc`` with the SDC named by the actual
+    current report, so that field must remain the direct deck's raw input.
+    The bridge/native measurement recipe stays owned by its existing STA
+    producer; this helper only chooses the authority path for the DRV receipt.
+    If no direct setup/hold decks are present, the final state's own SDC is the
+    only available raw authority.  A partial pair or disagreeing pair refuses
+    rather than silently selecting one.
+    """
+    sta_dir = project / "phase3/stage3/sta"
+    paths = [sta_dir / f"sta_mcorner_ocv_{kind}.tcl" for kind in ("setup", "hold")]
+    present = [path.is_file() for path in paths]
+    if not any(present):
+        return fallback
+    if not all(present):
+        raise ValueError("direct setup and hold decks are incomplete")
+    def literal(path: Path, command: str) -> str:
+        values = [words[1] for words in
+                  (line.strip().split() for line in path.read_text().splitlines())
+                  if len(words) == 2 and words[0] == command]
+        if len(values) != 1:
+            raise ValueError(f"direct STA deck {path} has no unique {command}")
+        return values[0]
+
+    decks = [{command: literal(path, command)
+              for command in ("read_verilog", "read_sdc", "link_design")}
+             for path in paths]
+    if any(decks[0][key] != decks[1][key]
+           for key in ("read_verilog", "read_sdc", "link_design")):
+        raise ValueError("direct setup and hold decks use different current inputs")
+    value = decks[0]["read_sdc"]
+    return _run_path(project, value)
+
+
+def _ocv_recipe(paths: list[Path]) -> dict:
+    """Bind the existing flat-OCV recipe to its source bytes.
+
+    The DRV currentness SDC is the raw report input, while the capture still
+    has to apply the same derate that the direct/native STA used.  Read the
+    recipe from the already-produced derived scene (or both direct decks),
+    verify every source reference, and refuse an incomplete or conflicting
+    pair instead of silently measuring without OCV.
+    """
+    if not paths:
+        raise ValueError("DRV OCV recipe source absent")
+    sources = [_ref(path) for path in paths]
+    recipes = []
+    for path in paths:
+        found: dict[str, float] = {}
+        for line in path.read_text(errors="replace").splitlines():
+            words = line.strip().split()
+            if not words or words[0] != "set_timing_derate":
+                continue
+            if len(words) != 3 or words[1] not in ("-early", "-late"):
+                raise ValueError(f"malformed DRV OCV recipe: {path}: {line}")
+            key = words[1][1:]
+            if key in found:
+                raise ValueError(f"duplicate DRV OCV recipe: {path}: {key}")
+            try:
+                value = float(words[2])
+            except ValueError as exc:
+                raise ValueError(f"invalid DRV OCV recipe: {path}: {line}") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"non-finite DRV OCV recipe: {path}: {line}")
+            found[key] = value
+        if set(found) != {"early", "late"}:
+            raise ValueError(f"DRV OCV recipe incomplete: {path}: {found}")
+        recipes.append(found)
+    if any(recipe != recipes[0] for recipe in recipes[1:]):
+        raise ValueError("setup/hold/derived DRV OCV recipes disagree")
+    early, late = recipes[0]["early"], recipes[0]["late"]
+    if not 0 < early <= 1 <= late:
+        raise ValueError(f"DRV OCV recipe outside flat-OCV bounds: {recipes[0]}")
+    return {"early": early, "late": late, "source_refs": sources}
+
+
 def _build_direct(project: Path) -> dict:
     """Capture the scenes a direct OCV deck really used, leaving gaps visible."""
     import _eda_image
     import librelane_contract
     sta_dir = project / "phase3/stage3/sta"
-    decks = [_direct_script(sta_dir / f"sta_mcorner_ocv_{kind}.tcl")
-             for kind in ("setup", "hold")]
+    deck_paths = [sta_dir / f"sta_mcorner_ocv_{kind}.tcl"
+                  for kind in ("setup", "hold")]
+    decks = [_direct_script(path) for path in deck_paths]
     if any(decks[0][key] != decks[1][key] for key in ("netlist", "sdc", "top")):
         raise ValueError("direct setup and hold decks use different routed identities")
     library_path = Path(decks[0]["liberties"][0])
@@ -472,6 +554,7 @@ def _build_direct(project: Path) -> dict:
                  "gds_netlist": {}, "odb": _ref(odb) if odb.is_file() else {},
                  "def": _ref(routed)}
     sdc = _run_path(project, str(decks[0]["sdc"]))
+    ocv_recipe = _ocv_recipe(deck_paths)
     config = root / pdk / "libs.tech/librelane" / library / "config.tcl"
     sources = {"signoff_sdc": _ref(sdc), "pdk_config": _ref(config)}
     for layer in ("L7", "L9"):
@@ -526,12 +609,14 @@ def _build_direct(project: Path) -> dict:
               "default_fanout_ceiling": fanout,
               "period_ns": period, "io_delay_ns": io_delay}
     frozen = {"sources": {k: v["sha256"] for k, v in sources.items()},
+              "ocv_recipe": ocv_recipe,
               "liberties": {k: v["sha256"] for k, v in linked_all.items()},
               "values": values, "scope": "whole final netlist", "scenes": expected,
               "scene_profile_sha256": _sha(_SCENE_PROFILES),
               "scene_liberties": scene_libs, "rc_corners": profile["rc_corners"],
               "pvt": pvt_headers}
-    current = {"sources": sources, "liberties": list(linked_all.values()),
+    current = {"sources": sources, "ocv_recipe": ocv_recipe,
+               "liberties": list(linked_all.values()),
                "values": values, "scope": frozen["scope"], "scenes": expected,
                "scene_liberties": scene_libs}
     identity = {"project": str(project), **_run_identity(project), "pdk": pdk,
@@ -637,14 +722,29 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     if signoff_sdc is None:
         raise ValueError("sign-off SDC absent")
     pdk_config = root / pdk / "libs.tech/librelane" / env["STD_CELL_LIBRARY"] / "config.tcl"
-    sources = {"pdk_config": _ref(pdk_config), "signoff_sdc": _ref(signoff_sdc)}
+    # ``signoff_sdc`` is the raw SDC named by the current direct STA report.
+    # ``signoff_scene.sdc`` remains the derived bridge consumed by its native
+    # STA producer; it must not masquerade as the strict consumer's authority.
+    raw_signoff_sdc = _current_report_sdc(project,
+                                          _run_path(project, state["sdc"]))
+    derived_signoff_sdc = _ref(signoff_sdc)
+    ocv_recipe = _ocv_recipe([signoff_sdc])
+    sources = {"pdk_config": _ref(pdk_config),
+               "signoff_sdc": _ref(raw_signoff_sdc),
+               "signoff_sdc_derived": derived_signoff_sdc}
+    native_measurement = (state_path.parent.parent /
+                          "01-vibeic-postrouterepair/native_signoff/measurement_scene.sdc")
+    if native_measurement.is_file():
+        native_ref = _ref(native_measurement)
+        sources["native_measurement_sdc"] = native_ref
+        ocv_recipe["native_measurement_ref"] = native_ref
     for layer in ("L7", "L9"):
         paths = [p for directory in ("input/docs", "phase1/generated_docs")
                  for p in sorted((project / directory).glob(layer + "*")) if p.is_file()]
         if not paths:
             raise ValueError(f"{layer} declaration absent")
         sources[layer.lower()] = _ref(paths[0])
-    sdc_text = signoff_sdc.read_text()
+    sdc_text = raw_signoff_sdc.read_text()
     pdk_text = pdk_config.read_text()
     from declared_knob_applied_parity import collect_declared
     declared = collect_declared(project, pdk=pdk, library=env["STD_CELL_LIBRARY"])
@@ -661,6 +761,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                            ("cap_pf", "set_max_capacitance")):
         observed[field] = _sdc_values(sdc_text, command)
     frozen = {"sources": {k: v["sha256"] for k, v in sources.items()},
+              "ocv_recipe": ocv_recipe,
               "liberties": {k: v["sha256"] for k, v in liberties.items()},
               "values": values, "scope": "whole final netlist",
               "scenes": expected_order, "scene_profile_sha256": _sha(_SCENE_PROFILES),
@@ -669,7 +770,8 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                                                      if item["name"] == scene["liberty"])).read_text())
                       for name in sorted(expected)
                       for scene in scenes if scene["name"] == name}}
-    current = {"sources": sources, "liberties": list(liberties.values()),
+    current = {"sources": sources, "ocv_recipe": ocv_recipe,
+               "liberties": list(liberties.values()),
                "values": values, "scope": frozen["scope"],
                "scenes": frozen["scenes"], "scene_liberties": scene_libs,
                "applied_sdc": observed}
