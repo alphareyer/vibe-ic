@@ -926,16 +926,91 @@ def netlist_content(block_dir) -> BoundedContent:
           NETLIST_CONTENT_KEYS)])
 
 
+def _a8_declared_content(block_dir: Path) -> Optional[BoundedContent]:
+    """Read the existing A3/A8 join; never produce or repair any artefact.
+
+    Import lazily: the producer itself imports this shared module. Its two
+    filesystem validators remain the authority for native measurement and
+    current A3 identity. The package must consume that exact measurement.
+    """
+    if (block_dir.parent.name != "analog"
+            or block_dir.parent.parent.name != "phase3"):
+        return None
+    import analog_a8_hardmacro_emit as producer
+
+    project, block = block_dir.parents[2], block_dir.name
+    try:
+        topology = json.loads((block_dir / "topology.json").read_text())
+        if not isinstance(topology, dict):
+            return None
+        measurement, _ = producer.load_native_measurement(
+            project, block, block_dir / f"{block}.gds", topology)
+        if measurement is None:
+            return None
+        binding, _ = producer._declared_a3_subject_binding(
+            project, block, block_dir, topology)
+        if binding is None or measurement.get("subject_binding") != binding:
+            return None
+        content = measurement.get(DESIGN_CONTENT_FIELD)
+        if not content_disclosed(content) or content != binding[DESIGN_CONTENT_FIELD]:
+            return None
+        for field in ("netlist_provenance", "a3_netlist", "topology", "spec",
+                      "declared_block_list"):
+            hit, _ = producer._project_file(project, binding[field], field=field)
+            if hit is None:
+                return None
+
+        hdir = project / "phase3/analog/hardmacro" / block
+        manifest = json.loads((hdir / "a8_views_provenance.json").read_text())
+        if (not isinstance(manifest, dict)
+                or manifest.get("schema") != "vibe-ic/analog_a8_views/1"
+                or manifest.get("producer") != "analog_a8_hardmacro_emit"
+                or manifest.get("block") != block
+                or manifest.get("source_gds") != measurement["source_gds"]
+                or manifest.get("source_gds_sha256") != measurement["source_gds_sha256"]):
+            return None
+        source = block_dir / producer._A8_MEASUREMENT
+        native = manifest.get("native_measurement")
+        if (not isinstance(native, dict)
+                or native.get("path") != str(source.relative_to(project))
+                or native.get("sha256") != measurement["measurement_sha256"]
+                or native.get("subject_binding") != binding
+                or native.get(DESIGN_CONTENT_FIELD) != content):
+            return None
+        if any(key not in measurement or measurement[key] != value
+               for key, value in native.items() if key not in ("path", "sha256")):
+            return None
+        views = manifest.get("views")
+        if not isinstance(views, dict):
+            return None
+        for suffix in (".lef", ".lib", ".gds", ".v"):
+            path = hdir / f"{block}{suffix}"
+            row = views.get(suffix)
+            if (not isinstance(row, dict)
+                    or row.get("path") != str(path.relative_to(project))
+                    or row.get("sha256") != producer._sha256(path)):
+                return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    klass = classify_design_content(content)
+    return BoundedContent(klass, source, klass,
+                          block_dir / NETLIST_PROVENANCE_ARTEFACT, None)
+
+
 def hardmacro_content(block_dir) -> BoundedContent:
     """THE content rule for the packaged hardmacro (LEF / Liberty / GDS /
     Verilog), for every gate that certifies it. *block_dir* is the per-block
-    ANALOG directory — not the hardmacro directory: nothing in the package
-    carries `design_content`, so the whole answer is the baseline's, and asking
-    the package its own question would classify every tree undisclosed and fail
-    the honest one too.
+    ANALOG directory — not the hardmacro directory. An existing corner record
+    retains precedence, even when silent or malformed. Without a corner record,
+    the ordinary A8 package may disclose the current A3 subject through its
+    validated native measurement and exact four-view manifest.
     """
-    return content_class_bounded(
-        [Path(block_dir) / CONTENT_GATE_OF_RECORD_ARTEFACT])
+    block_dir = Path(block_dir)
+    corner = block_dir / CONTENT_GATE_OF_RECORD_ARTEFACT
+    baseline = content_class_bounded([corner])
+    if corner.exists() or corner.is_symlink():
+        return baseline
+    return _a8_declared_content(block_dir) or baseline
 
 
 def structure_only_disclosure(gate_name: str, blocks: list,
