@@ -1828,7 +1828,7 @@ def _archive_repair_input(problem_id: str, project: Path, run_p: Path,
     return candidate
 
 
-def _required_scorer_top(entry: dict) -> str | None:
+def _required_scorer_top(entry: dict, fmt: str | None = None) -> str | None:
     """The one module name this benchmark's scorer will instantiate, if it
     fixes one. Driven by the registry's `module_name_strategy`; no per-benchmark
     branch and no problem-specific knowledge.
@@ -1848,6 +1848,10 @@ def _required_scorer_top(entry: dict) -> str | None:
             f"{type(entry).__name__} {entry!r}. Inside the solve/resume workers "
             "the local `entry` is the runner's entry STEP; pass "
             "_entry(bench) instead.")
+    # Explicit Shape D replaces the default I/O protocol, including any
+    # nonagentic scorer's fixed top-name constraint. Its scorer is external.
+    if fmt == "agentic":
+        return None
     strategy = ((entry or {}).get("layout") or {}).get("module_name_strategy")
     return "TopModule" if strategy == "always_TopModule" else None
 
@@ -4744,6 +4748,10 @@ def cmd_score(bench: str, run: str, dataset: str | None,
               golden_db: str | None = None,
               scorer_root: str | None = None, threads: int = 4):
     e = _entry(bench)
+    if _dispatch_format(bench, Path(run).resolve()) == "agentic":
+        raise SystemExit("SHAPED_SCORE_REFUSED: Shape D requires its official "
+                         "coordinator-side scorer after general AI acceptance; "
+                         "the nonagentic scorer cannot consume this protocol")
     if bench not in _BENCH_FORMAT:
         raise SystemExit(
             f"--score has no general I/O binding for {bench!r}. "
@@ -4915,6 +4923,56 @@ _BENCH_FORMAT = {
     "rtllm": "rtllm",
     "cvdp-open": "cvdp",
 }
+
+
+def _dispatch_format(bench: str, run_p: Path | None = None,
+                     shape: str | None = None) -> str | None:
+    """Select only an I/O protocol; task nature always uses the shared router."""
+    selected = "agentic" if shape == "D" else _BENCH_FORMAT.get(bench)
+    if shape not in {None, "D"}:
+        raise ValueError("unsupported explicit I/O shape")
+    if run_p is not None:
+        try:
+            config = json.loads((run_p / ".bench_config.json").read_text())
+            solve = json.loads((run_p / "solve_report.json").read_text())
+            tasks = _read_jsonl(run_p / _ROUTE_WORKLIST)
+            formats = {_issued_route_task_format(task, run_p) for task in tasks}
+            if len(formats) != 1:
+                raise ValueError("missing or inconsistent issued I/O format")
+            bound = formats.pop()
+            if (config.get("bench") != bench or solve.get("bench") != bench
+                    or config.get("format") != bound
+                    or solve.get("format") != bound
+                    or bound not in {"agentic", _BENCH_FORMAT.get(bench)}
+                    or (shape == "D" and bound != "agentic")):
+                raise ValueError("continuation differs from issued I/O format")
+            selected = bound
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"IO_FORMAT_BINDING_REFUSED: {exc}") from exc
+    return selected
+
+
+def _shape_d_problems(dataset: Path, run_p: Path) -> list[dict]:
+    """BLOCKING blind staging via agentic_jsonl_to_shape_d.py, the sole parser.
+
+    The extraction tree is coordinator/scorer-owned and is outside the run
+    and every solver project. Only the extractor's visible work/input files
+    cross benchmark_io_adapter.stage; hidden score/ and metadata never do.
+    """
+    import agentic_jsonl_to_shape_d as shaped             # noqa: PLC0415
+    root = run_p.parent / (run_p.name + ".shape_d_scorer")
+    if root.exists() or root.is_symlink():
+        raise ValueError("SHAPED_INPUT_REFUSED: occupied coordinator extraction root")
+    if not dataset.is_dir():
+        raise ValueError("SHAPED_INPUT_REFUSED: expected a JSONL dataset directory")
+    root.mkdir(mode=0o700)
+    stats = shaped.extract_dataset(dataset, root, "*.jsonl")
+    if not stats["ids"]:
+        raise ValueError("SHAPED_INPUT_REFUSED: no agentic rows recognized")
+    _atomic_write_json(root / "manifest.json", {
+        "schema": "vibeic.benchmark.shape_d_scorer.v1",
+        "extractor": "agentic_jsonl_to_shape_d.py", **stats})
+    return [{"id": pid, "root": root / pid} for pid in stats["ids"]]
 
 # ── THE SAME COMPLETENESS ENGINE, PER FORMAT ─────────────────────────────────
 # `benchmark_completeness` is the THIN-ADAPTER layer over the ONE general
@@ -5128,7 +5186,7 @@ def _route_contract_sha256() -> str:
 
 
 def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
-                        proposal: dict, run_p: Path) -> dict:
+                        proposal: dict, run_p: Path, fmt: str) -> dict:
     """Issue an input-only route question before any design runner executes."""
     import task_nature_route as tnr                       # noqa: PLC0415
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
@@ -5138,6 +5196,7 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
     task = {
         "schema": _ROUTE_TASK_SCHEMA,
         "id": str(problem_id),
+        "io_format": fmt,
         "project": str(project),
         "prompt_path": str(prompt),
         "prompt_sha256": prompt_sha,
@@ -5175,6 +5234,21 @@ def _claim_names_nature(claim: str, nature: str) -> bool:
     return f" {norm(nature)} " in f" {norm(claim)} "
 
 
+def _issued_route_task_format(task: dict, run_p: Path) -> str:
+    """Read the I/O protocol from the existing hash-bound coordinator issue."""
+    task_hash = task["task_sha256"]
+    body = {k: v for k, v in task.items() if k != "task_sha256"}
+    if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
+        raise ValueError("issued route task identity changed")
+    issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
+    if json.loads(issued.read_text()) != task:
+        raise ValueError("route task differs from coordinator issue")
+    fmt = task.get("io_format")
+    if not isinstance(fmt, str) or fmt not in {"agentic", *_BENCH_FORMAT.values()}:
+        raise ValueError("missing or invalid issued I/O format")
+    return fmt
+
+
 def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
     """Fail closed on an unsigned, stale, non-blind, or ungrounded route."""
     import task_nature_route as tnr                       # noqa: PLC0415
@@ -5182,12 +5256,7 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
     reasons = _public_input_reasons(task)
     try:
         task_hash = task["task_sha256"]
-        body = {k: v for k, v in task.items() if k != "task_sha256"}
-        if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
-            raise ValueError("issued route task identity changed")
-        issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
-        if json.loads(issued.read_text()) != task:
-            raise ValueError("route task differs from coordinator issue")
+        _issued_route_task_format(task, run_p)
         project = Path(str(task["project"])).resolve()
         if project != run_p / "projects" / _safe_problem_id(str(task["id"])):
             raise ValueError("route project is not owned by this run/task")
@@ -5596,7 +5665,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                       jobs: int = 1, heavy_jobs: int | None = None,
                       worker_threads: int = 0,
                       routed_tasks: list[dict] | None = None,
-                      route_decisions: dict[str, dict] | None = None) -> int:
+                      route_decisions: dict[str, dict] | None = None,
+                      shape: str | None = None) -> int:
     """Solve every problem through the GENERAL flow.
 
     This verb did not exist. A separate scaffold prepared the run and
@@ -5641,7 +5711,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     except Exception as exc:                              # noqa: BLE001
         _assessors, _assess_why = {}, f"UNAVAILABLE: {type(exc).__name__}: {exc}"
 
-    fmt = _BENCH_FORMAT.get(bench)
+    fmt = _dispatch_format(bench, Path(run).resolve() if routed_tasks is not None
+                           else None, shape)
     if fmt is None:
         print(f"ERROR: no IO adapter bound for {bench!r}. Known: "
               f"{sorted(_BENCH_FORMAT)}", file=sys.stderr)
@@ -5667,7 +5738,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     runner_budget = _RunnerBudget(jobs, heavy_jobs, worker_threads)
     if fresh:
         problem_rows = []
-        for index, prob in enumerate(bio.problems(fmt, ds)):
+        problems = (_shape_d_problems(ds, run_p) if fmt == "agentic"
+                    else bio.problems(fmt, ds))
+        for index, prob in enumerate(problems):
             if limit and index >= limit:
                 break
             problem_rows.append((index, prob))
@@ -5705,7 +5778,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             route_tasks.append(_make_ai_route_task(
-                pid, proj, staged, proposal, run_p))
+                pid, proj, staged, proposal, run_p, fmt))
         _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
         for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
             _write_jsonl(run_p / name, [])
@@ -5810,7 +5883,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             rc = int(process.rc)
             got = _collect_runner_result(
                 process, argv, fmt, pid, proj,
-                required_top=_required_scorer_top(_entry(bench)))
+                required_top=_required_scorer_top(_entry(bench), fmt))
             diagnostic = got.get("runner_diagnostics")
             pre_gate_blocked = bool(diagnostic and diagnostic.get("reason"))
             waive = None if pre_gate_blocked else _rtl_gen_waive(proj)
@@ -5876,7 +5949,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 backup_task = _make_ai_backup_task(
                     pid, proj, backup_skills, str(backup_source),
                     backup_detail, bench, ds, run_p,
-                    required_top=_required_scorer_top(_entry(bench)),
+                    required_top=_required_scorer_top(_entry(bench), fmt),
                     expected_public_input=staged["public_original_input"])
             state = ("candidate->AI-review" if got.get("ok")
                      else ("WAIVE->AI" if backup_source == "rtl_gen_waive"
@@ -6013,13 +6086,14 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
 
 def cmd_solve(bench: str, dataset: str, run: str, limit: int = 0,
               jobs: int = 1, heavy_jobs: int | None = None,
-              worker_threads: int = 0) -> int:
+              worker_threads: int = 0, shape: str | None = None) -> int:
     """Run the sole solve coordinator under an exclusive run-root lock."""
     try:
         with _run_root_coordinator_lock(Path(run), "solve"):
             return _cmd_solve_locked(
                 bench, dataset, run, limit=limit, jobs=jobs,
-                heavy_jobs=heavy_jobs, worker_threads=worker_threads)
+                heavy_jobs=heavy_jobs, worker_threads=worker_threads,
+                shape=shape)
     except _CoordinatorBusy as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -6064,7 +6138,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         print("ERROR: this solve predates the current Program First + AI Review "
               "proof schemas; start a fresh --solve run", file=sys.stderr)
         return 2
-    fmt = _BENCH_FORMAT.get(bench)
+    fmt = _dispatch_format(bench, run_p)
     if fmt is None:
         print(f"ERROR: no IO adapter bound for {bench!r}", file=sys.stderr)
         return 2
@@ -6213,7 +6287,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             got = _collect_runner_result(
                 process, argv, fmt, pid, proj, supplied_rtl=supplied_rtl,
                 **collect_kwargs,
-                required_top=_required_scorer_top(_entry(bench)))
+                required_top=_required_scorer_top(_entry(bench), fmt))
             payload = json.dumps(got)
         except Exception as exc:                          # noqa: BLE001
             return _ResumeRunnerOutcome(
@@ -6352,7 +6426,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             backup.append(_make_ai_backup_task(
                 pid, proj, backup_skills, str(backup_source), backup_detail,
                 bench, Path(dataset).resolve(), run_p,
-                required_top=_required_scorer_top(_entry(bench))))
+                required_top=_required_scorer_top(_entry(bench), fmt)))
             existing_backup_ids.add(pid)
         print(f"  {pid:44s} Program worker retry completed (rc={rc})")
 
@@ -6982,7 +7056,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             repair_contract=((task.get("repair_provenance") or {}).get("repair_contract")
                              if task.get("candidate_origin") == "AI_REPAIR" else None),
             require_repair_contract=(task.get("candidate_origin") == "AI_REPAIR"),
-            required_top=_required_scorer_top(_entry(bench)))
+            required_top=_required_scorer_top(_entry(bench), fmt))
         if (not got.get("ok")
                 or _sha256_text(str(got.get("completion") or ""))
                 != task.get("rtl_sha256")):
@@ -7752,7 +7826,7 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
     result = matches[0]
     if result.get("exit") not in tnr.flow_step_ids():
         refuse("missing or unsupported declared exit")
-    fmt = _BENCH_FORMAT.get(bench)
+    fmt = _dispatch_format(bench, run_p)
     if fmt is None:
         refuse("no bound IO adapter")
     acceptance_path = _regate_path(run_p / _ACCEPTANCE_REPORT, run_p, exists=False)
@@ -8169,6 +8243,10 @@ def main():
                          + _program_retry_removal_clause() + ".")
     ap.add_argument("--limit", type=int, default=0,
                     help="with --solve: stop after N problems (0 = all)")
+    ap.add_argument("--shape", choices=["D"],
+                    help="with --solve: select the general agentic JSONL I/O "
+                         "protocol only; --resume retains this protocol. "
+                         "Task nature still requires the shared named-AI handoff")
     ap.add_argument("--dataset", help="dataset path on disk")
     ap.add_argument("--run", help="run dir")
     ap.add_argument("--jobs", type=int, default=1,
@@ -8203,6 +8281,8 @@ def main():
                     help="OPT-IN: score even if the run lacks Vibe-IC runner entry evidence "
                          "(NON-CANONICAL). Default HARD-BLOCKs direct-agent authoring/patching.")
     a = ap.parse_args()
+    if a.shape and not a.solve:
+        ap.error("--shape selects I/O at --solve; --resume retains that selection")
     if a.review_correction and (not a.resume or a.solve or a.score or a.show or a.list):
         ap.error("--review-correction requires --resume alone")
     if a.program_regate and (not a.resume or a.solve or a.score or a.show or a.list):
@@ -8276,7 +8356,8 @@ def main():
             raise SystemExit("--solve requires --dataset and --run")
         sys.exit(cmd_solve(
             a.bench, a.dataset, a.run, limit=a.limit, jobs=a.jobs,
-            heavy_jobs=a.heavy_jobs, worker_threads=a.worker_threads))
+            heavy_jobs=a.heavy_jobs, worker_threads=a.worker_threads,
+            shape=a.shape))
     # default: show plan + env status
     env = _env_check()
     print(f"# Environment: iverilog={'OK' if env['iverilog'] else 'MISSING'}, "

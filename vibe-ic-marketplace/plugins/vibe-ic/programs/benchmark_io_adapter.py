@@ -101,6 +101,10 @@ FORMATS: Dict[str, Dict[str, Any]] = {
         "context_from": "input.context",
         "response": {"kind": "jsonl_record", "fields": ["id", "completion"]},
     },
+    "agentic": {
+        "kind": "agentic_project",
+        "response": {"kind": "jsonl_record", "fields": ["id", "completion"]},
+    },
 }
 
 # What a user is likely to type -> the registry key. A front door that answers
@@ -297,7 +301,19 @@ def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, An
     staged: List[str] = []
     ctx = {}
 
-    if fmt["kind"] == "jsonl":
+    if fmt["kind"] == "agentic_project":
+        # The general extractor alone parses the JSONL. This adapter reads
+        # only its visible work/input output; score and row metadata stay in
+        # the coordinator's separate extraction root, never the solver tree.
+        root = Path(problem["root"])
+        prompt = (root / "input" / "phase1_prompt.md").read_text()
+        ctx = {}
+        for path in sorted((root / "work").rglob("*")):
+            if path.is_symlink():
+                raise ValueError("SHAPED_INPUT_PATH_INVALID: linked visible input")
+            if path.is_file() and path != root / "work" / "PROMPT.txt":
+                ctx[path.relative_to(root / "work").as_posix()] = path.read_text()
+    elif fmt["kind"] == "jsonl":
         rec = problem["record"]
         prompt = ((rec.get("input") or {}).get("prompt")) or ""
         ctx = (rec.get("input") or {}).get("context") or {}
@@ -322,6 +338,12 @@ def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, An
         staged.append(str(f.relative_to(project)))
     (project / "input" / "phase1_prompt.md").write_text(prompt)
     (project / "input" / "docs" / "design_description.md").write_text(prompt)
+    if fmt["kind"] == "agentic_project":
+        (project / "input" / "docs" / "design_description.md").write_text(
+            (root / "input" / "docs" / "design_description.md").read_text())
+        _public_write_once(project / "work" / "PROMPT.txt", prompt.encode())
+        for name, text in ctx.items():
+            _public_write_once(project / "work" / _public_relative(name), text.encode())
     staged += ["input/phase1_prompt.md", "input/docs/design_description.md"]
     return {"id": problem["id"], "project": str(project), "staged": staged,
             "prompt_chars": len(prompt), "public_original_input": original}

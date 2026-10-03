@@ -94,7 +94,13 @@ def _emit_files(root: Path, mapping: dict) -> int:
     for rel, content in mapping.items():
         if not isinstance(rel, str) or not rel:
             continue
-        dst = root / rel
+        relative = Path(rel)
+        if (relative.is_absolute() or ".." in relative.parts
+                or "\\" in rel or relative.as_posix() != rel or rel == "."):
+            raise ValueError("SHAPED_INPUT_PATH_INVALID: unsafe relative path")
+        dst = root / relative
+        if dst.is_symlink() or any(p.is_symlink() for p in dst.parents):
+            raise ValueError("SHAPED_INPUT_PATH_INVALID: linked destination")
         dst.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, bytes):
             dst.write_bytes(content)
@@ -107,6 +113,9 @@ def _emit_files(root: Path, mapping: dict) -> int:
 def extract_row(row: dict, rundir: Path) -> Path:
     """Emit one Shape-D project dir for an agentic row. Returns the project dir."""
     pid = row[ROW_ID_KEY]
+    if (Path(pid).name != pid or pid in {".", ".."} or "\\" in pid
+            or (rundir / pid).is_symlink()):
+        raise ValueError("SHAPED_INPUT_PATH_INVALID: unsafe problem id")
     proj = rundir / pid
     work = proj / "work"
     score = proj / "score"

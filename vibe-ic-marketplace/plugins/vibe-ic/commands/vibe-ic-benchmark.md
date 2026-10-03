@@ -1,14 +1,14 @@
 ---
 name: vibe-ic-benchmark
 description: Run any known open IC-design benchmark (VerilogEval-v2/Human, RTLLM, CVDP, …) through the same general IC-design path, then invoke its official scorer. Use when "run benchmark X", "score benchmark X", "benchmark this", "reproduce X benchmark", "跑 benchmark", "重跑 RTLLM", "score VerilogEval".
-argument-hint: <bench> [--solve|--resume|--score --dataset <path> --run <path>] [--list]
+argument-hint: <bench> [--solve|--resume|--score --dataset <path> --run <path>] [--shape D] [--list]
 ---
 
 **First: IC path or IP path?** Read [IC Expert § 0.0](../agents/ic-expert-agent.md) before Phase 1. Use the visible prompt's delivery request or ask the operator if unclear; record the owner answer in `input/step_0_5ic_answers.json`. Each IC or IP run has one stated delivery route. This delivery choice precedes the benchmark task-nature decision below.
 
 # /vibe-ic-benchmark — turnkey benchmark runner
 
-This command is the **general-flow front door** for dispatchable Shape B/C open
+This command is the **general-flow front door** for dispatchable Shape B/C/D open
 benchmarks and the registry guide for the other open run shapes. It enforces the
 methodology from `open-benchmark-methodology` skill (§ 2 decision matrix → § 3
 substitution disclosure → § 4 triage rubric) by routing to the correct run-shape
@@ -38,23 +38,31 @@ python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench>
 python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
     --solve --dataset <path-to-dataset> --run <run-dir>
 
+# 3D. Explicit generic Shape-D JSONL I/O (for any dispatchable <bench>).
+#     The selector chooses the protocol only, never the task nature.
+python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
+    --shape D --solve --dataset <agentic-jsonl-dir> --run <fresh-run-dir>
+
 # 4. After a named AI actor completes needs_ai_routing.jsonl, validate every
 #    route and run Program First. Repeat --resume for declared AI backup,
 #    exact-candidate semantic review, and any evidence-backed repair.
 python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
     --resume --dataset <path-to-dataset> --run <run-dir>
 
-# 5. Score only after program_first_ai_review_acceptance.json says COMPLETE
+# 5. B/C score only after program_first_ai_review_acceptance.json says COMPLETE.
+#    Shape-D official scoring is external/NOT_MEASURED; --score refuses agentic runs.
 python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
     --score --dataset <path-to-dataset> --run <run-dir>
 ```
 
 ## Mandatory AI task-nature handoff
 
-The canonical sequence for the four dispatcher suites is:
+The canonical sequence for every dispatchable protocol is:
 
 ```text
-benchmark_io_adapter.stage (visible prompt/context only)
+Shape D: agentic_jsonl_to_shape_d.extract_dataset / extract_row
+  -> separate coordinator/scorer extraction root
+benchmark_io_adapter.stage (visible prompt/context only; B/C/D)
   -> task_nature_route Program proposal
   -> needs_ai_routing.jsonl
   -> named AI CONFIRM / OVERRIDE / NEEDS_CLARIFICATION
@@ -86,6 +94,18 @@ AI model, states that no oracle was accessed, and supplies a rationale. An
 the selected nature. A missing, stale, unattributed, ungrounded, or
 `NEEDS_CLARIFICATION` response keeps the whole issued batch pending and launches
 zero design runners.
+
+For Shape D, the coordinator owns `<run-dir>.shape_d_scorer/` beside the run
+directory. Only extracted prompt/context/supplied RTL reaches
+`<run-dir>/projects/<id>/`, the public-input manifest, and the runner project.
+Harness, score and other row metadata remain in the separate coordinator tree.
+`--resume` takes the I/O protocol from the hash-bound route task, verifies that
+task against its immutable coordinator issue, and requires `.bench_config.json`
+and `solve_report.json` to agree with it; omit `--shape` on resume. Issuances
+created before `io_format` was bound into the route task are refused and require
+a fresh `--solve` issuance. Debug and optimization reuse normal D1 provenance
+before their fixed mid-flow entries. Official Shape-D scoring is external and
+`NOT_MEASURED`, independent of routing completion.
 
 Visible partial RTL remains input evidence. In particular, a VerilogEval-Human
 prompt that asks to complete supplied partial HDL is preserved byte-for-byte in
@@ -121,7 +141,7 @@ not VerilogEval, RTLLM, or CVDP evaluation results.
 | **B** | general `benchmark_dispatch --solve` → `task_nature_route` → `vibe_ic_one_shot_runner` | `benchmark/score_iverilog_tb.py` | RTLLM |
 | **C** | the same general solve path; shape affects only scorer-facing packaging | `benchmark/score_iverilog_tb.py` | VerilogEval-v2, VerilogEval-Human |
 | **C (CVDP nonagentic)** | the same general solve path; CVDP JSONL is a thin I/O adapter only | official `run_benchmark.py` via `benchmark/score_cvdp_open.py` | CVDP open nonagentic tracks |
-| **D (CVDP agentic)** | the benchmark's official Docker agent harness; this dispatcher has no Shape-D verb | official agentic harness | CVDP open agentic tracks |
+| **D (agentic JSONL)** | general `benchmark_dispatch --shape D --solve` → general extractor → the same named-AI handoff and runner lifecycle | external official Shape-D scorer, NOT_MEASURED; dispatcher scoring refused | CVDP open agentic tracks |
 | **E** | n/a — blocked / out-of-scope, document only | n/a | PyHDL-Eval (golden gated), RTL-Repo (wrong metric), MetRex / ResBench (different task / toolchain), CVDP-full (gated) |
 
 For every runnable open evaluation driven by `--solve`, Program emits the first candidate and

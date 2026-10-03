@@ -9,6 +9,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 
 
@@ -186,3 +188,37 @@ def test_program_does_not_mention_any_benchmark_name():
     ]
     for s in forbidden_branches:
         assert s not in src, f"Found benchmark-name branch {s!r} in general extractor"
+
+
+@pytest.mark.parametrize("field,key", [
+    ("id", "../escaped"),
+    ("context", "../outside.sv"),
+    ("harness", "../work/leaked.sv"),
+    ("harness", "/tmp/shape_d_forbidden_escape"),
+    ("harness", "..\\work\\leaked.sv"),
+])
+def test_extract_row_refuses_escaping_paths(tmp_path, field, key):
+    """Hidden file keys cannot escape scorer storage into visible inputs."""
+    mod = _load()
+    row = {"id": "neutral", "prompt": "Visible specification.",
+           "context": {"docs/spec.md": "Visible requirement."},
+           "harness": {"src/test.py": "SYNTHETIC_HIDDEN_SENTINEL"}}
+    row[field] = key if field == "id" else {key: "SYNTHETIC_HIDDEN_SENTINEL"}
+    with pytest.raises(ValueError, match="SHAPED_INPUT_PATH_INVALID"):
+        mod.extract_row(row, tmp_path / "coordinator")
+    assert not (tmp_path / "escaped").exists()
+    assert not (tmp_path / "coordinator/neutral/work/leaked.sv").exists()
+
+
+def test_extract_row_refuses_linked_hidden_destination(tmp_path):
+    mod = _load()
+    scorer = tmp_path / "coordinator/neutral/score"
+    scorer.mkdir(parents=True)
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    (scorer / "src").symlink_to(visible, target_is_directory=True)
+    with pytest.raises(ValueError, match="SHAPED_INPUT_PATH_INVALID"):
+        mod.extract_row({"id": "neutral", "prompt": "Visible specification.",
+                         "harness": {"src/test.py": "SYNTHETIC_HIDDEN_SENTINEL"}},
+                        tmp_path / "coordinator")
+    assert list(visible.iterdir()) == []
