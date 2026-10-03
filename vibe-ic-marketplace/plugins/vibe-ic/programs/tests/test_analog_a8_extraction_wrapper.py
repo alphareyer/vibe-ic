@@ -116,6 +116,11 @@ def test_actual_full_header_normal_caller_and_consumers(tmp_path, monkeypatch):
     assert wrapper["native_subckt"] != wrapper["wrapper_subckt"]
     manifest = json.loads((project / "phase3/analog/hardmacro/ldo_open/a8_views_provenance.json").read_text())
     assert manifest["native_measurement"]["extraction_wrapper"] == wrapper
+    # The manifest field names the measurement JSON bytes themselves.  It must
+    # not be the digest of the wrapper file consumed by the deck.
+    measurement_file = b / E._A8_MEASUREMENT
+    assert manifest["native_measurement"]["sha256"] == \
+        hashlib.sha256(measurement_file.read_bytes()).hexdigest()
     report = project / "fresh-explicit-a8.json"
     rc = G.main([str(project), "--block", "ldo_open", "--json", str(report)])
     assert rc == 0

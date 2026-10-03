@@ -1030,6 +1030,7 @@ def load_native_measurement(project: Path, block: str, gds: Path,
         ("source_netlist", None),
         ("native_log", None),
     )
+    measurement_path = path
     source_netlist_path: Optional[Path] = None
     native_log_path: Optional[Path] = None
     for field, expected in required:
@@ -1073,10 +1074,12 @@ def load_native_measurement(project: Path, block: str, gds: Path,
                 project, block, source_netlist_path, topology)
             if wrapper != expected:
                 return None, "extraction_wrapper mapping/current A3 subject is stale"
-            path, why = _project_file(project, expected["path"], field="extraction_wrapper")
-            if path is None:
+            wrapper_path, why = _project_file(
+                project, expected["path"], field="extraction_wrapper")
+            if wrapper_path is None:
                 return None, why
-            if path.read_bytes() != text.encode() or _sha256(path) != expected["sha256"]:
+            if (wrapper_path.read_bytes() != text.encode() or
+                    _sha256(wrapper_path) != expected["sha256"]):
                 return None, "extraction_wrapper bytes/hash do not match positional map"
             if (rec.get("subject_binding") != expected["subject_binding"] or
                     rec.get(DESIGN_CONTENT_FIELD) != expected["subject_binding"][DESIGN_CONTENT_FIELD]):
@@ -1089,7 +1092,7 @@ def load_native_measurement(project: Path, block: str, gds: Path,
             wanted = _measurement_deck_text(
                 source_netlist_path, list(topology.get("ports") or []),
                 expected["wrapper_subckt"], rec.get("model_source"),
-                rec.get("model_section"), path)
+                rec.get("model_section"), wrapper_path)
             if (deck.read_bytes() != wanted.encode() or
                     _sha256(deck) != rec.get("measurement_deck_sha256")):
                 return None, "measurement_deck bypasses raw/wrapper group or is stale"
@@ -1157,7 +1160,10 @@ def load_native_measurement(project: Path, block: str, gds: Path,
     out = dict(rec)
     out["liberty_value"] = value * _POWER_TO_UW[unit]
     out["liberty_power_unit"] = "1uW"
-    out["measurement_sha256"] = _sha256(path)
+    # This is the receipt's own JSON, not the extraction wrapper that was
+    # validated above.  Keep the two paths distinct: reusing ``path`` here
+    # would publish the wrapper digest under ``measurement_sha256``.
+    out["measurement_sha256"] = _sha256(measurement_path)
     return out, ""
 
 

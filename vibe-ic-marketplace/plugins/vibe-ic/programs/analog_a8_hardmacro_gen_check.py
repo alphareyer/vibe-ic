@@ -291,6 +291,58 @@ def _tech_lef_text(rows: list) -> str:
     return "\n".join(out) + "\n"
 
 
+def _normal_core_followpin(project: Path, block: str,
+                           routing: List[str]) -> tuple:
+    """Re-read A5's captured stdcell LEF with the normal-core PG parser.
+
+    Neither tech-LEF order nor Magic metal order identifies a stdcell rail.
+    The producer records the actual resolved asset, its bytes and the PG
+    discovery result. Missing, changed or inconsistent facts refuse PG
+    measurement rather than selecting a follow-pin layer by position.
+    """
+    prov = project / "phase3" / "analog" / block / "layout_provenance.json"
+    try:
+        doc = json.loads(prov.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "A5 layout provenance is unreadable"
+    basis = doc.get("pins_basis") if isinstance(doc, dict) else None
+    pg = basis.get("core_pg") if isinstance(basis, dict) else None
+    if not isinstance(pg, dict) or pg.get("result") != "MEASURED":
+        return None, "A5 standard-cell LEF PG facts are absent or not measured"
+    if pg.get("method") != "phase3_one_shot_runner._discover_pg_from_lef":
+        return None, "A5 standard-cell PG discovery method is unsupported"
+    expected = project / "phase3" / "analog" / block / "a5_stdcell_pg.lef"
+    if pg.get("snapshot") != str(expected.relative_to(project)):
+        return None, "A5 standard-cell LEF snapshot path is inconsistent"
+    source, digest = pg.get("source"), pg.get("source_sha256")
+    if not isinstance(source, str) or not source or not isinstance(digest, str):
+        return None, "A5 standard-cell LEF source identity is missing"
+    try:
+        raw = expected.read_bytes()
+    except OSError:
+        return None, "A5 standard-cell LEF snapshot is unreadable"
+    if hashlib.sha256(raw).hexdigest() != digest:
+        return None, "A5 standard-cell LEF snapshot digest is stale"
+    # If the original PDK asset is mounted, it must still match the captured
+    # bytes. A portable consumer otherwise reads the source-owned snapshot.
+    original = Path(source)
+    if original.is_file() and hashlib.sha256(original.read_bytes()).hexdigest() != digest:
+        return None, "A5 standard-cell LEF source digest is stale"
+    prefix = pg.get("metal_prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return None, "A5 standard-cell LEF metal prefix is absent"
+    import phase3_one_shot_runner as p3
+    measured = p3._discover_pg_from_lef(str(expected), prefix)
+    recorded = (pg.get("power_pin"), pg.get("ground_pin"),
+                pg.get("followpin_layer"), pg.get("rail_width_um"))
+    if measured is None or recorded != measured:
+        return None, "A5 standard-cell LEF PG facts disagree with its bytes"
+    followpin = measured[2]
+    if followpin not in routing:
+        return None, "the measured stdcell follow-pin layer is absent from the tech LEF"
+    return followpin, source
+
+
 def _pin_access_findings(project: Path, block: str, lef_text: str,
                          rel: str) -> List[dict]:
     declared, tech = _declared_pins(project, block)
@@ -361,7 +413,14 @@ def _pin_access_findings(project: Path, block: str, lef_text: str,
              f"supply-pin reach is NOT MEASURED")
         return out
     tech_text = _tech_lef_text(tech)
-    followpin = routing[0] if routing else ""
+    followpin, followpin_source = _normal_core_followpin(
+        project, block, routing)
+    if not followpin:
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             "the normal-core follow-pin layer is NOT MEASURED: "
+             f"{followpin_source}; refusing to infer it from tech LEF "
+             "declaration order")
+        return out
     straps = _p3._auto_pdn_straps_from_techlef(tech_text, followpin) or {}
     outcome = _p3._macro_pdn_grid_outcome([lef_text], tech_text,
                                           straps.get("stripes") or [],

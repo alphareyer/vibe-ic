@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -374,6 +376,25 @@ class FakeStage:
 class CielSky130Stage(FakeStage):
     """A Ciel sky130A tree: consolidated Tcl/tech filenames only."""
 
+    TECH_LEF = """VERSION 5.8 ;
+LAYER met1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.48 ;
+  WIDTH 0.14 ;
+  DCCURRENTDENSITY AVERAGE 1 ;
+END met1
+LAYER via1
+  TYPE CUT ;
+END via1
+LAYER met2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.48 ;
+  WIDTH 0.14 ;
+  DCCURRENTDENSITY AVERAGE 1 ;
+END met2
+"""
     CIEL_TECH = (
         DRC_TECH + MAGIC_TECH
     )
@@ -388,7 +409,11 @@ class CielSky130Stage(FakeStage):
                 return 0, FET_TCL + RES_TCL, ""
             if path.endswith("/sky130A.tech"):
                 return 0, self.CIEL_TECH, ""
+            if path.endswith("sky130_fd_sc_hd__nom.tlef"):
+                return 0, self.TECH_LEF, ""
         if cmd.startswith("ls "):
+            if "techlef" in cmd:
+                return 0, "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef\n", ""
             return 0, "/pdk/sky130A/libs.tech/magic/sky130A.tcl\n", ""
         return super().sh(cmd, timeout)
 
@@ -422,7 +447,142 @@ def test_default_ciel_resolver_uses_consolidated_pdk_files():
     assert facts is not None, why
     assert facts.sources["gencell_tcl"].endswith("/sky130A.tcl")
     assert facts.sources["drc_tech"].endswith("/sky130A.tech")
+    assert facts.sources["tech_lef"].endswith("/sky130_fd_sc_hd__nom.tlef")
     assert facts.m1_space_um == 0.18
+
+
+class _RealFilesystemStage:
+    """Run resolver probes through a real bash filesystem, not canned output."""
+
+    def __init__(self):
+        self.commands = []
+
+    def sh(self, cmd, timeout=120):
+        self.commands.append(cmd)
+        cp = subprocess.run(["bash", "-lc", cmd], capture_output=True,
+                             text=True, timeout=timeout)
+        return cp.returncode, cp.stdout, cp.stderr
+
+
+@pytest.mark.parametrize("family", ["gf180mcuD", "gf180mcu"])
+def test_ciel_tech_lef_glob_expands_on_real_filesystem(tmp_path, family):
+    """A registry wildcard reaches bash and keeps sorted-first semantics."""
+    pdk_root = tmp_path / "pdk root with spaces"
+    root = (pdk_root / "ciel" / "gf180mcu" / "versions" / "v1"
+            / "gf180mcuD" / "libs.ref" / "gf180mcu_fd_sc_mcu7t5v0"
+            / "techlef")
+    root.mkdir(parents=True)
+    first = root / "gf180mcu_fd_sc_mcu7t5v0__nom.tlef"
+    second = root / "zz__nom.tlef"
+    first.write_text("VERSION 5.8 ;\n")
+    second.write_text("VERSION 5.8 ;\n")
+    stage = _RealFilesystemStage()
+
+    got = A5E._resolved_tech_lef(stage, str(pdk_root), family)
+
+    assert got == str(first)
+    assert any("ls -1d " in c and "*__nom.tlef" in c
+               for c in stage.commands), stage.commands
+
+
+def test_pin_layers_align_lef_routing_with_magic_metal_identity():
+    """Sky130's leading li1 does not become the writer's metal1 level."""
+    lef = "\n".join(
+        f"LAYER {name}\n TYPE ROUTING ;\n DIRECTION {direction} ;\n"
+        f"END {name}"
+        for name, direction in (
+            ("li1", "VERTICAL"), ("met1", "HORIZONTAL"),
+            ("met2", "VERTICAL"), ("met3", "HORIZONTAL"),
+            ("met4", "VERTICAL"), ("met5", "HORIZONTAL")))
+    magic = "\n".join(
+        ["tech", "planes"]
+        + [f"  metal{i},m{i},met{i}" for i in range(1, 6)]
+        + ["end", "types"]
+        + [f"  metal{i} m{i} met{i} metal{i}" for i in range(1, 6)]
+        + ["end"])
+    layers = A5L.layer_identity(magic, "Magic layer fixture")
+
+    signal, supply, basis = A5E.pin_layers(
+        A5E.tech_lef_layers(lef), [1, 2, 3, 4, 5], layers)
+
+    assert basis["leading_non_magic_routing_layers"] == ["li1"]
+    assert basis["routing_layers"] == ["met1", "met2", "met3", "met4", "met5"]
+    assert (signal, supply) == (3, 4)
+    assert basis["signal_layer"] == "met3"
+    assert basis["supply_layer"] == "met4"
+
+
+def test_pin_spec_metadata_uses_the_same_trimmed_lef_table():
+    """LEF names in the record follow the Magic-aligned levels."""
+    lef = "\n".join(
+        f"LAYER {name}\n TYPE ROUTING ;\n DIRECTION {direction} ;\n"
+        f"END {name}"
+        for name, direction in (
+            ("li1", "VERTICAL"), ("met1", "HORIZONTAL"),
+            ("met2", "VERTICAL"), ("met3", "HORIZONTAL"),
+            ("met4", "VERTICAL"), ("met5", "HORIZONTAL")))
+    magic = "\n".join(
+        ["tech", "planes"]
+        + [f"  metal{i},m{i},met{i}" for i in range(1, 6)]
+        + ["end", "types"]
+        + [f"  metal{i} m{i} met{i} metal{i}" for i in range(1, 6)]
+        + ["end"])
+    facts = A5E.PdkFacts()
+    facts.tech_lef = A5E.tech_lef_layers(lef)
+    facts.layers = A5L.layer_identity(magic, "Magic layer fixture")
+    facts.sources["tech_lef"] = "/pdk/sky130.tlef"
+    facts.tech_lef_sha256 = "fixture"
+    geo = A5E.Geo(A5L.deck_rules(DRC_TECH), 0.18, 100, 0.30, 0.15)
+
+    spec, basis = A5E.pin_spec_for(
+        ["vdd", "vout"], {"vdd": "vdd"}, {}, facts, geo)
+
+    assert basis["routing_layers"] == ["met1", "met2", "met3", "met4", "met5"]
+    assert spec["ports"]["vdd"]["lef_layer"] == "met4"
+    assert spec["ports"]["vout"]["lef_layer"] == "met3"
+
+
+def test_pin_stack_boxes_supports_a_direct_metal2_signal_pin():
+    """A signal selected on metal2 has no via sequence to enumerate."""
+    geo = SimpleNamespace(
+        via_pad={1: 13, 2: 14},
+        long_half={2: 2},
+        wire={2: 30},
+        rules_via_space=lambda _k: 1,
+    )
+
+    paint, bars = A5E._pin_stack_boxes(100, 200, 2, 2, geo, 1)
+
+    assert bars[2] == (85, 185, 115, 215)
+    assert paint == [("metal2", bars[2])]
+
+
+def test_pin_site_without_a_clear_position_is_refused_not_drawn():
+    """A pin fallback must not manufacture a known cross-net short."""
+    plan = A5E.Plan()
+
+    class NoClear:
+        def clear(self, *_args):
+            return False
+
+    geo = SimpleNamespace(
+        via_pad={1: 13, 2: 14},
+        long_half={2: 2, 3: 2},
+        wire={2: 30, 3: 30},
+        space={2: 4, 3: 4},
+        default_space=4,
+        rules_via_space=lambda _k: 1,
+    )
+    pin_spec = {"ports": {"sig": {
+        "index": 1, "rail": False, "level": 3,
+        "direction": "HORIZONTAL", "width_lam": 10, "cuts": 1,
+        "lef_layer": "met3", "lef_type": "ROUTING", "use": "signal",
+    }}}
+
+    with pytest.raises(A5E.Refusal, match="pin_site_clearance"):
+        A5E._draw_pins(plan, ["sig"], {"sig": (100, 100, 200, 120)},
+                       pin_spec, geo, NoClear(), 500, 16)
+    assert plan.shapes == []
 
 
 # A device the PDK permits and this emitter has never drawn: the round-20

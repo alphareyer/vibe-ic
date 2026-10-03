@@ -8,6 +8,9 @@ from pathlib import Path
 
 PROG = (Path(__file__).resolve().parent.parent / "analog_a8_hardmacro_gen_check.py")
 
+import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
+import analog_a8_hardmacro_gen_check as A8
+
 
 def _block_list(project: Path, blocks: list) -> None:
     p = project / "phase3" / "analog"
@@ -78,6 +81,125 @@ def _run(project: Path, *args: str) -> subprocess.CompletedProcess:
          "--json", str(project / "report.json"), *args],
         capture_output=True, text=True,
     )
+
+
+def _captured_core_pg(project: Path, block: str) -> tuple:
+    import hashlib
+    d = project / "phase3" / "analog" / block
+    d.mkdir(parents=True)
+    cell = """MACRO stdcell
+SIZE 2.0 BY 3.0 ;
+PIN VPWR
+ USE POWER ;
+ PORT
+  LAYER met1 ;
+  RECT 0.0 2.5 2.0 3.0 ;
+ END
+END VPWR
+PIN VGND
+ USE GROUND ;
+ PORT
+  LAYER met1 ;
+  RECT 0.0 0.0 2.0 0.5 ;
+ END
+END VGND
+END stdcell
+"""
+    original = project / "declared_stdcell.lef"
+    original.write_text(cell)
+    snapshot = d / "a5_stdcell_pg.lef"
+    snapshot.write_bytes(original.read_bytes())
+    rows = [
+        {"name": "li1", "type": "ROUTING", "direction": "VERTICAL",
+         "pitch": 0.46, "width": 0.17},
+        {"name": "met1", "type": "ROUTING", "direction": "HORIZONTAL",
+         "pitch": 0.34, "width": 0.14},
+        {"name": "met2", "type": "ROUTING", "direction": "VERTICAL",
+         "pitch": 0.46, "width": 0.14},
+        {"name": "met3", "type": "ROUTING", "direction": "HORIZONTAL",
+         "pitch": 0.68, "width": 0.30},
+        {"name": "met4", "type": "ROUTING", "direction": "VERTICAL",
+         "pitch": 0.92, "width": 0.30},
+        {"name": "met5", "type": "ROUTING", "direction": "HORIZONTAL",
+         "pitch": 3.40, "width": 1.60},
+    ]
+    doc = {"pins": [{"net": n, "rail": True, "lef_layer": "met4"}
+                     for n in ("vdd", "vss")], "pins_basis": {
+        "tech_lef_layers": rows,
+        "core_pg": {"result": "MEASURED",
+            "method": "phase3_one_shot_runner._discover_pg_from_lef",
+            "source": str(original),
+            "source_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+            "snapshot": str(snapshot.relative_to(project)),
+            "metal_prefix": "met", "power_pin": "VPWR",
+            "ground_pin": "VGND", "followpin_layer": "met1",
+            "rail_width_um": 0.5}}}
+    (d / "layout_provenance.json").write_text(json.dumps(doc))
+    return d, doc, original
+
+
+def test_pg_followpin_uses_actual_stdcell_lef_for_normal_core(
+        tmp_path: Path) -> None:
+    d, doc, original = _captured_core_pg(tmp_path, "ldo")
+    macro = """MACRO ldo
+SIZE 100.0 BY 100.0 ;
+PIN vdd
+ USE POWER ;
+ PORT
+  LAYER met4 ;
+  RECT 1.0 0.0 1.3 100.0 ;
+ END
+END vdd
+PIN vss
+ USE GROUND ;
+ PORT
+  LAYER met4 ;
+  RECT 2.0 0.0 2.3 100.0 ;
+ END
+END vss
+END ldo
+"""
+    # The ordinary access consumer must use the stdcell rail on met1.
+    # The previous li1-derived met3/met4 plan rejects these same met4 pins.
+    findings = A8._pin_access_findings(tmp_path, "ldo", macro, "ldo.lef")
+    assert not findings, findings
+    follow, source = A8._normal_core_followpin(
+        tmp_path, "ldo", ["li1", "met1", "met2", "met3", "met4", "met5"])
+    assert (follow, source) == ("met1", str(original))
+
+
+def test_pg_followpin_rejects_changed_snapshot_source_and_recorded_fact(
+        tmp_path: Path) -> None:
+    d, doc, original = _captured_core_pg(tmp_path, "ldo")
+    snapshot = d / "a5_stdcell_pg.lef"
+    raw = snapshot.read_bytes()
+    snapshot.write_bytes(raw + b"# changed snapshot\n")
+    follow, reason = A8._normal_core_followpin(tmp_path, "ldo", ["li1", "met1"])
+    assert follow is None and "snapshot digest is stale" in reason
+    snapshot.write_bytes(raw)
+    original.write_bytes(raw + b"# changed PDK source\n")
+    follow, reason = A8._normal_core_followpin(tmp_path, "ldo", ["li1", "met1"])
+    assert follow is None and "source digest is stale" in reason
+    original.write_bytes(raw)
+    doc["pins_basis"]["core_pg"]["followpin_layer"] = "li1"
+    (d / "layout_provenance.json").write_text(json.dumps(doc))
+    follow, reason = A8._normal_core_followpin(tmp_path, "ldo", ["li1", "met1"])
+    assert follow is None and "disagree with its bytes" in reason
+
+
+def test_pg_followpin_missing_plan_facts_refuses_inference(
+        tmp_path: Path) -> None:
+    block = "ldo"
+    d = tmp_path / "phase3" / "analog" / block
+    d.mkdir(parents=True)
+    (d / "layout_provenance.json").write_text(json.dumps({
+        "pins_basis": {"tech_lef_layers": [
+            {"name": "li1", "type": "ROUTING"}]}
+    }))
+    follow, reason = A8._normal_core_followpin(
+        tmp_path, block, ["li1", "met1"])
+    assert follow is None
+    assert "not measured" in reason
 
 
 def test_happy_path(tmp_path: Path) -> None:

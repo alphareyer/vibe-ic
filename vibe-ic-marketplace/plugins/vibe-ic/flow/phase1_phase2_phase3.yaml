@@ -9645,10 +9645,19 @@ steps:
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
-      - path: "phase2/stage2/constraints/*.upf"
-      - path: "phase3/stage3/pnr/*_pnr.v"
-      - path: "phase3/stage3/pnr/*.def"
-      - path: "input/pdk/liberty/*.lib"
+      # These caller-supplied paths are required by the M2 producer contract,
+      # but are not exact entries in another step's required_outputs. UPF is
+      # conditional at step 7; routed Verilog and the DEF fallback are not
+      # canonical output spellings; Liberty is staged by the caller. External
+      # identifies that contract boundary and still requires each path.
+      - from: external
+        path: "phase2/stage2/constraints/*.upf"
+      - from: external
+        path: "phase3/stage3/pnr/*_pnr.v"
+      - from: external
+        path: "phase3/stage3/pnr/*.def"
+      - from: external
+        path: "input/pdk/liberty/*.lib"
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]

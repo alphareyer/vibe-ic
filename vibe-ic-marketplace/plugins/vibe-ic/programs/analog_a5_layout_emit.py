@@ -133,6 +133,7 @@ import _gate_denominator as _den  # noqa: E402 — no clean list without a denom
 import _path_layout as _pl  # noqa: E402
 import _analog_producer_common as _pc  # noqa: E402 — content identity
 import analog_a5_pdk_device_limits as _lim  # noqa: E402
+import pdk_family_identity as _pdk_identity  # noqa: E402
 from _analog_a_check_common import load_block_list  # noqa: E402
 import magic_gencell_layout_lib as _gl  # noqa: E402
 from analog_hardmacro_gds_emit import Stage  # noqa: E402
@@ -159,6 +160,112 @@ class Refusal(RuntimeError):
 # own choice of routing style. CLI-overridable; recorded in the provenance.
 DEFAULT_WIRE_W_UM = 0.30
 DEFAULT_VIA_PAD_HALF_UM = 0.15
+
+
+def _resolved_tech_lef(stage: Stage, pdk_root: str, family: str,
+                       *, asset_key: str = "tech_lef_glob"
+                       ) -> Optional[str]:
+    """Resolve the installed PDK's technology LEF through its registry.
+
+    Phase 3/LibreLane already treats ``pdk_registry.json``'s
+    ``tech_lef_glob`` as the authority for ``TECH_LEFS``.  A5 used a separate
+    ``*tech*.lef`` probe, which missed the Sky130 registry asset (the shipped
+    file is a ``.tlef``) and silently left every port at its zero-area label.
+    Reuse the same declared relative glob here, including Ciel's
+    content-addressed ``container_path_glob`` roots.  Multiple matches follow
+    the registry resolver's deterministic sorted-first selection; no guessed
+    filename or alternate PDK path is introduced.
+    """
+    try:
+        registry = json.loads(
+            (Path(__file__).with_name("pdk_registry.json")).read_text(
+                encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entries = registry.get("pdks") if isinstance(registry, dict) else None
+    if not isinstance(entries, list):
+        return None
+    entry = next((row for row in entries
+                  if isinstance(row, dict) and row.get("name") == family),
+                 None)
+    if entry is None:
+        # Preserve the shared family aliases before considering legacy paths.
+        _canonical, entry = _pdk_identity.canonical_entry(family)
+    if not entry:
+        if asset_key != "tech_lef_glob":
+            return None
+        # A synthetic/legacy caller may provide a family that is deliberately
+        # absent from the shipped registry (the unit seam uses ``x``).  Keep
+        # that caller's existing explicit tech-LEF probe; production PDK names
+        # still take the registry path above and never guess an asset.
+        legacy_prefix = (pdk_root.rstrip("/") + "/" + family
+                         + "/libs.ref/")
+        legacy_arg = shlex.quote(legacy_prefix) + "*/lef/*tech*.lef"
+        rc, out, _err = stage.sh(
+            f"ls -1 {legacy_arg} 2>/dev/null | sort", timeout=120)
+        if rc != 0:
+            return None
+        root_prefix = pdk_root.rstrip("/") + "/"
+        for raw in sorted(out.splitlines()):
+            candidate = raw.strip()
+            if (candidate.startswith(root_prefix)
+                    and stage.sh(f"test -f {shlex.quote(candidate)}",
+                                 timeout=120)[0] == 0):
+                return candidate
+        return None
+    if not isinstance(entry, dict):
+        return None
+    pattern = str(entry.get(asset_key) or "").strip()
+    if not pattern:
+        return None
+    declared_root = str(entry.get("container_path_glob") or
+                        entry.get("container_path") or "").strip()
+    if not declared_root:
+        return None
+    # The command-line root is the mounted PDK root.  Preserve a registry
+    # Ciel version suffix while replacing only its conventional /foss/pdks
+    # prefix when tests or a caller mount the same image elsewhere.
+    if declared_root.startswith("/foss/pdks/"):
+        root = pdk_root.rstrip("/") + declared_root[len("/foss/pdks"):]
+    else:
+        root = declared_root
+    full = root.rstrip("/") + "/" + pattern.lstrip("/")
+    if not any(ch in full for ch in "*?["):
+        rc, _out, _err = stage.sh(
+            f"test -f {shlex.quote(full)}", timeout=120)
+        return full if rc == 0 else None
+    # The registry's suffix is shell glob syntax, but the caller-supplied PDK
+    # root is a literal path and may contain spaces.  Quote that literal
+    # prefix only, leaving the registry-owned suffix's ``*``/``?``/``[...]``
+    # active.  Quoting the complete path would make a present Ciel asset look
+    # absent; leaving the complete path raw would split a root such as
+    # ``/tmp/pdk root``.  The canonical resolver uses the same composition.
+    caller_prefix = pdk_root.rstrip("/") + "/"
+    if full.startswith(caller_prefix):
+        glob_arg = (shlex.quote(caller_prefix)
+                    + full[len(caller_prefix):])
+    else:
+        # Registry entries normally compose below the command-line root.  For
+        # an absolute registry root, quote its literal prefix through the first
+        # metacharacter while preserving only the declared glob suffix.
+        first_meta = min((i for i, ch in enumerate(full)
+                          if ch in "*?["), default=-1)
+        glob_arg = (shlex.quote(full) if first_meta < 0 else
+                    shlex.quote(full[:first_meta]) + full[first_meta:])
+    rc, out, _err = stage.sh(
+        f"ls -1d {glob_arg} 2>/dev/null | sort", timeout=120)
+    if rc != 0:
+        return None
+    mount_root = pdk_root.rstrip("/") + "/"
+    for raw in sorted(out.splitlines()):
+        candidate = raw.strip()
+        if not candidate.startswith(mount_root):
+            continue
+        rc2, _o2, _e2 = stage.sh(
+            f"test -f {shlex.quote(candidate)}", timeout=120)
+        if rc2 == 0:
+            return candidate
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -237,6 +344,9 @@ class PdkFacts:
         # the tech LEF's ROUTING/CUT table (`tech_lef_layers`), or None
         self.tech_lef: Optional[List[dict]] = None
         self.tech_lef_sha256: Optional[str] = None
+        self.core_pg: dict = {"result": "NOT_MEASURED",
+                             "reason": "no resolved standard-cell LEF"}
+        self.cell_lef_text: Optional[str] = None
 
     def limits_for(self, model: str) -> Tuple[Optional[float], Optional[float],
                                               Optional[str]]:
@@ -410,22 +520,48 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
 
     # THE TECH LEF: which routing layers exist, their preferred directions and
     # their DC current density — what the macro's pins are placed and sized
-    # by. NOT fatal: without it the pins cannot be derived, and the record
-    # says so (`pins_basis`) instead of this emitter guessing a layer.
+    # by. Resolve the same registry-declared asset LibreLane records in
+    # TECH_LEFS. NOT fatal: without it the pins cannot be derived, and the
+    # record says so (`pins_basis`) instead of this emitter guessing a layer.
     lp = tech_lef
     if not lp:
-        rc, out, _ = stage.sh(
-            f"ls -1 {shlex.quote(pdk_root)}/{shlex.quote(family)}"
-            f"/libs.ref/*/lef/*tech*.lef", timeout=120)
-        found = sorted(t for t in (out or "").split() if t.endswith(".lef")) \
-            if rc == 0 else []
-        lp = found[0] if found else None
+        lp = _resolved_tech_lef(stage, pdk_root, family)
     if lp:
         rc, out, _ = stage.sh(f"cat {shlex.quote(lp)}", timeout=120)
         if rc == 0 and tech_lef_layers(out):
             facts.tech_lef = tech_lef_layers(out)
             facts.sources["tech_lef"] = lp
             facts.tech_lef_sha256 = hashlib.sha256(out.encode()).hexdigest()
+    cp = _resolved_tech_lef(stage, pdk_root, family,
+                            asset_key="cell_lef_glob")
+    if cp:
+        rc, text, _ = stage.sh(f"cat {shlex.quote(cp)}", timeout=120)
+        if rc == 0 and text:
+            import phase3_one_shot_runner as p3
+            # Discovery reads the exact Stage bytes through the existing
+            # normal-core parser. The snapshot is retained with the layout
+            # so a portable A8 check can re-read it without a mounted PDK.
+            import pdk_analog_layout_minima as families
+            _canonical, entry = families.resolve_family(family)
+            prefix = entry.get("metal_prefix")
+            if prefix:
+                with tempfile.TemporaryDirectory(prefix="a5_core_pg.") as tmp:
+                    captured = Path(tmp) / "stdcell.lef"
+                    captured.write_text(text, encoding="utf-8")
+                    pg = p3._discover_pg_from_lef(str(captured), prefix)
+                if pg:
+                    power, ground, followpin, width = pg
+                    facts.sources["cell_lef"] = cp
+                    facts.cell_lef_text = text
+                    facts.core_pg = {
+                        "result": "MEASURED",
+                        "method": "phase3_one_shot_runner._discover_pg_from_lef",
+                        "source": cp,
+                        "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                        "metal_prefix": prefix,
+                        "power_pin": power, "ground_pin": ground,
+                        "followpin_layer": followpin, "rail_width_um": width,
+                    }
     return facts, ""
 
 
@@ -2554,7 +2690,8 @@ def tech_lef_layers(text: str) -> List[dict]:
     return [r for r in out if r["type"] in ("ROUTING", "CUT")]
 
 
-def pin_layers(lef_layers: Sequence[dict], wired: Sequence[int]
+def pin_layers(lef_layers: Sequence[dict], wired: Sequence[int],
+               magic_layers: Optional["_lim.LayerIdentity"] = None
                ) -> Tuple[Optional[int], Optional[int], dict]:
     """(signal level, supply level, basis) from the tech LEF's layer table.
 
@@ -2569,8 +2706,33 @@ def pin_layers(lef_layers: Sequence[dict], wired: Sequence[int]
     this generator's own lanes and rails are on it) that is not one of those
     two strap layers. Vertical, because the pin sits on the bottom edge and is
     approached along the layer's preferred direction.
+    If there is no such vertical layer, a HORIZONTAL layer at ROUTE_LEVEL
+    may carry a side-facing pin via an extension of the existing metal2 rail.
     None for either means the LEF does not offer one; the caller records it."""
     routing = [r for r in lef_layers if r["type"] == "ROUTING"]
+    # The LEF may list a local-interconnect routing layer before the first
+    # Magic ``metal1`` alias.  It is electrically real, but it is not the
+    # ``metal1`` that the existing A5 writer paints.  Use the Magic
+    # technology's own aliases to align the LEF rows with the writer's
+    # ``metalN`` levels; only a leading run before the first matched alias is
+    # removed.  Later unmatched rows (for example vendor top-metal aliases)
+    # remain visible to the existing strap selection instead of being guessed
+    # away.
+    if magic_layers is not None:
+        aliases = set()
+        for alias, canonical in magic_layers.canon.items():
+            plane = magic_layers.plane_of.get(canonical, "")
+            if re.fullmatch(r"metal\d+", str(plane), re.IGNORECASE):
+                aliases.add(str(alias).lower())
+        first = next((i for i, row in enumerate(routing)
+                      if str(row.get("name", "")).lower() in aliases), None)
+        if first:
+            dropped = routing[:first]
+            routing = routing[first:]
+        else:
+            dropped = []
+    else:
+        dropped = []
     lvl = {i + 1: r for i, r in enumerate(routing)}
     top2 = sorted(lvl)[-2:]
     supply = next((k for k in sorted(top2, reverse=True)
@@ -2578,10 +2740,20 @@ def pin_layers(lef_layers: Sequence[dict], wired: Sequence[int]
     signal = next((k for k in sorted(lvl)
                    if k > ROUTE_LEVEL and k not in top2 and k in wired
                    and lvl[k]["direction"] == "VERTICAL"), None)
+    if signal is None:
+        # A downward signal stub on metal2 crosses the other metal2 rails.
+        # A horizontal layer can instead face the side boundary, reached by
+        # extending that port's own metal2 rail on its existing row.  Keep
+        # the strap pair reserved and derive the direction from the same LEF.
+        signal = next((k for k in sorted(lvl)
+                       if k >= ROUTE_LEVEL and k not in top2 and k in wired
+                       and lvl[k]["direction"] == "HORIZONTAL"), None)
     basis = {"routing_layers": [r["name"] for r in routing],
              "strap_pair": [lvl[k]["name"] for k in top2],
              "signal_layer": lvl[signal]["name"] if signal else None,
              "supply_layer": lvl[supply]["name"] if supply else None}
+    if dropped:
+        basis["leading_non_magic_routing_layers"] = [r["name"] for r in dropped]
     return signal, supply, basis
 
 
@@ -2629,28 +2801,31 @@ def pin_spec_for(ports: Sequence[str], rails: Optional[dict],
     cuts per via, each with the source it came from. (None, basis) when the
     tech LEF offers no layer to put it on — recorded, never guessed."""
     basis: dict = {"tech_lef": facts.sources.get("tech_lef"),
-                   "tech_lef_sha256": facts.tech_lef_sha256}
+                   "tech_lef_sha256": facts.tech_lef_sha256,
+                   "core_pg": dict(facts.core_pg)}
     if not facts.tech_lef:
         basis["result"] = "NOT_DETERMINED"
         basis["reason"] = ("no tech LEF was readable, so the routing layers, "
                            "their directions and the PDK's strap layers are "
                            "unknown; the ports keep their rail labels")
         return None, basis
-    signal, supply, lb = pin_layers(facts.tech_lef, sorted(geo.wire))
+    signal, supply, lb = pin_layers(facts.tech_lef, sorted(geo.wire),
+                                    facts.layers)
     basis.update(lb)
     # the PDK's own layer table, as read, so a reader of the abstract (the A8
     # gate) can ask the same PDN planner PnR uses without the PDK on its host
     basis["tech_lef_layers"] = [dict(r) for r in facts.tech_lef]
-    routing = [r for r in facts.tech_lef if r["type"] == "ROUTING"]
+    routing = [r for r in facts.tech_lef if r["type"] == "ROUTING"
+               and r["name"] in lb["routing_layers"]]
     # The cut BETWEEN routing layers k and k+1 is Magic's `via{k}`: the CUT
     # the LEF declares after its k-th ROUTING layer. A cut before the first
     # routing layer (the device contact) is no via of this stack.
     cut_of: Dict[int, dict] = {}
-    seen = 0
+    seen = -len(lb.get("leading_non_magic_routing_layers", []))
     for r in facts.tech_lef:
         if r["type"] == "ROUTING":
             seen += 1
-        elif seen and seen not in cut_of:
+        elif seen > 0 and seen not in cut_of:
             cut_of[seen] = r
     if rails is None:
         basis["pin_roles_source"] = "absent"
@@ -2675,6 +2850,7 @@ def pin_spec_for(ports: Sequence[str], rails: Optional[dict],
         lef = routing[level - 1]
         rec = {"index": i + 1, "rail": is_rail, "level": level,
                "lef_layer": lef["name"], "lef_type": lef["type"],
+               "direction": lef["direction"],
                "use": (RAIL_ROLE_USE.get(role_of[net]) if is_rail
                        else "signal"),
                "width_lam": geo.wire.get(level, 1), "cuts": 1,
@@ -2717,7 +2893,12 @@ def _pin_stack_boxes(x: int, y: int, lo: int, hi: int, geo: "Geo",
     metal bar per level enclosing its cuts at the deck's surround and area
     (`Geo.long_half`, which is sized for both)."""
     vias = list(range(lo, hi))
-    p = max(2 * geo.via_pad[k] + geo.rules_via_space(k) for k in vias)
+    # A signal pin may legitimately land on the generator's metal2 rail.  In
+    # that case the stack has no via levels; it still needs one real metal2
+    # rectangle, but taking ``max`` over an empty via sequence would abort A5
+    # before the geometry is emitted.
+    p = (max(2 * geo.via_pad[k] + geo.rules_via_space(k) for k in vias)
+         if vias else 1)
     offs = [i * p - ((cuts - 1) * p) // 2 for i in range(cuts)]
     paint: List[Tuple[str, Tuple[int, ...]]] = []
     bars: Dict[int, Tuple[int, int, int, int]] = {}
@@ -2744,9 +2925,9 @@ def _draw_pins(plan: "Plan", ports: Sequence[str],
     the deck's space from every other conductor, and record the pin.
 
     Supplies first: a stripe spans the whole block and is the harder one to
-    seat, and every signal stub is then placed clear of it. A port no
-    position clears is DRAWN at the rail's left end and recorded as a
-    deviation — this emitter records shortfalls, the deck adjudicates."""
+    seat, and every signal stub is then placed clear of it. A port with no
+    clear site is a producer refusal: emitting that fallback would make a
+    known cross-net short part of the layout."""
     order = sorted(ports, key=lambda n: (not pin_spec["ports"][n]["rail"],
                                          ports.index(n)))
     for net in order:
@@ -2756,6 +2937,41 @@ def _draw_pins(plan: "Plan", ports: Sequence[str],
         y = (ry1 + ry2) // 2
         half = max(spec["width_lam"] // 2, geo.wire.get(level, 1) // 2, 1)
         cuts = max(1, spec["cuts"])
+        if not spec["rail"] and spec.get("direction") == "HORIZONTAL":
+            # Leave on the port's own rail row, below the device routing,
+            # then rise at the side margin.  A vertical metal2 pin would
+            # electrically join every lower rail it crossed (R1c native).
+            edge = min([0] + [r["box"][0] for r in plan.shapes]
+                       + [r["box"][0] for r in plan.device_shapes])
+            x = edge + pitch
+            paint, bars = _pin_stack_boxes(x, y, 2, level, geo, cuts)
+            hw2 = max(geo.wire[2] // 2, 1)
+            connection = (min(x, rx1) - hw2, y - hw2,
+                          max(x, rx1) + hw2, y + hw2)
+            strip = (edge, y - half, bars[level][2], y + half)
+            objects = paint + [("metal2", connection),
+                               (f"metal{level}", strip)]
+            if any(not sites.clear(box, [layer], None, net)
+                   for layer, box in objects):
+                raise Refusal(
+                    f"pin_site_clearance: no clear side pin site for {net}; "
+                    "refusing to emit a cross-net pin geometry")
+            for layer, box in objects:
+                plan.paint(net, layer, *box)
+            label = (edge, y - half,
+                     bars[level][0] - geo.space.get(level, geo.default_space),
+                     y + half)
+            if label[2] <= label[0]:
+                raise Refusal(f"no positive pure-metal label length for {net}")
+            plan.pins.append({
+                "net": net, "index": spec["index"],
+                "layer": f"metal{level}", "lef_layer": spec.get("lef_layer"),
+                "lef_type": spec.get("lef_type"), "use": spec["use"],
+                "rail": False, "label_box": tuple(label),
+                "strip_box": tuple(strip), "cuts_per_via": cuts,
+                "width_lam": strip[3] - strip[1],
+            })
+            continue
         layers = ([f"metal{k}" for k in range(2, level + 1)]
                   + [f"via{k}" for k in range(2, level)])
         stepv = max(1, pitch // 4)
@@ -2784,16 +3000,25 @@ def _draw_pins(plan: "Plan", ports: Sequence[str],
             chosen = (x, paint, bars, strip)
             break
         if chosen is None:
+            if not spec["rail"]:
+                raise Refusal(
+                    f"pin_site_clearance: no position along the {net} rail "
+                    f"seats its metal{level} pin and via stack clear of "
+                    "every other conductor; refusing to emit a cross-net "
+                    "pin geometry")
+            # A power stripe is intentionally full-height and is allowed to
+            # span its own macro geometry.  Preserve the existing rail
+            # shortfall record; the non-rail fallback above is the unsafe
+            # case that can join a different port's metal2 rail.
             x = rx1 + (rx2 - rx1) // 4
             paint, bars = _pin_stack_boxes(x, y, 2, level, geo, cuts)
             top = bars[level]
-            strip = ((x - half, 0, x + half, top_y) if spec["rail"]
-                     else (x - half, 0, x + half, top[3]))
+            strip = (x - half, 0, x + half, top_y)
             chosen = (x, paint, bars, strip)
             plan.deviate({"name": f"port {net}"}, "pin_site_clearance", 1, 0,
                          f"no position along the {net} rail seats its "
                          f"metal{level} pin and via stack clear of every "
-                         f"other conductor; DRAWN at x={x} and recorded")
+                         "other conductor; power stripe drawn and recorded")
         x, paint, bars, strip = chosen
         for layer, b in paint:
             plan.paint(net, layer, *b)
@@ -3264,6 +3489,10 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
                                         _read_json(bdir / "spec.json"),
                                         facts, geo)
     report["pins_basis"] = pins_basis
+    if facts.cell_lef_text is not None:
+        snapshot = bdir / "a5_stdcell_pg.lef"
+        snapshot.write_text(facts.cell_lef_text, encoding="utf-8")
+        pins_basis["core_pg"]["snapshot"] = str(snapshot.relative_to(project))
     plan = build_plan(devs, ports, cells, facts, geo, tap_clear, pin_spec)
     clearance_deviations(plan, geo, devs)
     # A GEOMETRY THE PDK'S GENCELL CLAMPED. Recorded like every other
