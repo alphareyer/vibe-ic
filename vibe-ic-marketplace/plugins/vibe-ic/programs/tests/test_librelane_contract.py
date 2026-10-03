@@ -63,6 +63,7 @@ def test_local_resolver_requires_host_cid_and_records_provenance(local_image):
     assert resolved == local_image.image
     recorded = json.loads((project / 'phase3/librelane_image.provenance.json').read_text())
     assert recorded['attestation_sha256'] == contract.digest(local_image.receipt)
+    assert recorded['repo_digests'] == [local_image.image]
     local_image.receipt.unlink()
     with pytest.raises(contract.Refusal, match='LL_LOCAL_IMAGE_UNATTESTED'):
         contract.resolve_image(project)

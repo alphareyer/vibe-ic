@@ -97,6 +97,18 @@ printf 'yosys_version='; yosys -V
 def _image_identity(image_ref: str, docker: str) -> tuple[str, tuple[str, ...]]:
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image_ref):
         raise em.Refusal("STEP9_IMAGE_NOT_PINNED", image_ref)
+    import _container_exec as container_exec
+    if container_exec.no_container_route():
+        import librelane_contract as ll
+        identity = ll.local_image_attestation(image_ref)
+        image_id = identity.get("image_id")
+        repo_digests = tuple(identity.get("repo_digests") or ())
+        if (not isinstance(image_id, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+                or image_ref not in repo_digests
+                or not all(isinstance(ref, str) for ref in repo_digests)):
+            raise em.Refusal("STEP9_IMAGE_IDENTITY_MISMATCH", image_ref)
+        return image_id, repo_digests
     try:
         done = subprocess.run([docker, "image", "inspect", "--format",
                                "{{.Id}} {{json .RepoDigests}}", image_ref],

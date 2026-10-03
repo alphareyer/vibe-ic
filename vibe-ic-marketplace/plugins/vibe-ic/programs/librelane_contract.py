@@ -64,7 +64,11 @@ def local_image_attestation(image: str | None = None) -> dict[str, Any]:
         host_config = inspected.get('HostConfig', {})
         if not isinstance(host_config, dict):
             raise ValueError('HostConfig is not an inspection object')
-        held = [_eda_pin.reference_digest(ref) for ref in host_image.get('RepoDigests', [])]
+        repo_digests = host_image.get('RepoDigests', [])
+        if (not isinstance(repo_digests, list)
+                or not all(isinstance(ref, str) for ref in repo_digests)):
+            raise ValueError('host image RepoDigests is not a string list')
+        held = [_eda_pin.reference_digest(ref) for ref in repo_digests]
         if (not re.fullmatch(r'[0-9a-f]{64}', cid)
                 or inspected['Id'] != cid
                 or inspected['Config']['Hostname'] != socket.gethostname()
@@ -78,7 +82,8 @@ def local_image_attestation(image: str | None = None) -> dict[str, Any]:
             raise ValueError('host CID/image inspection does not bind this LOCAL process')
     except (OSError, ValueError, TypeError, KeyError, AttributeError, StopIteration) as exc:
         raise Refusal('LL_LOCAL_IMAGE_UNATTESTED', f'{path}: {exc}') from None
-    return {'image': reference, 'image_id': inspected['Image'], 'cid': cid,
+    return {'image': reference, 'image_id': inspected['Image'],
+            'repo_digests': list(repo_digests), 'cid': cid,
             'network_mode': host_config.get('NetworkMode'),
             'memory': host_config.get('Memory'),
             'memory_swap': host_config.get('MemorySwap'),

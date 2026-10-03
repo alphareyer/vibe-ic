@@ -103,6 +103,33 @@ def test_tool_image_accepts_pinned_reference_but_returns_measured_image_id(monke
     assert missing == ["measured_image_reference"]
 
 
+def test_step9_image_identity_uses_current_local_attestation_without_docker(monkeypatch):
+    image_id = "sha256:" + "1" * 64
+    reference = "registry.invalid/tools@sha256:" + "2" * 64
+    import _container_exec as container_exec
+    import librelane_contract as ll
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(ll, "local_image_attestation", lambda image: {
+        "image": reference, "image_id": image_id, "repo_digests": [reference]})
+    monkeypatch.setattr(installation.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("LOCAL identity reached Docker"))
+
+    assert installation._image_identity(reference, "docker") == (image_id, (reference,))
+
+
+def test_step9_local_image_identity_refuses_foreign_reference(monkeypatch):
+    reference = "registry.invalid/tools@sha256:" + "2" * 64
+    import _container_exec as container_exec
+    import librelane_contract as ll
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(ll, "local_image_attestation", lambda image: {
+        "image": reference, "image_id": "sha256:" + "1" * 64,
+        "repo_digests": ["registry.invalid/foreign@sha256:" + "2" * 64]})
+
+    with pytest.raises(em.Refusal, match="STEP9_IMAGE_IDENTITY_MISMATCH"):
+        installation._image_identity(reference, "docker")
+
+
 def test_missing_tool_is_not_measured_even_with_a_real_image_digest(tmp_path, monkeypatch):
     _, _, ctx = _ctx(tmp_path)
     monkeypatch.setattr(production, "_tool_and_image", lambda image: (
