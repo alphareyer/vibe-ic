@@ -136,6 +136,8 @@ def produce(project, routed_def):
         overlay = pv.tech_lef_overlay(project) or {}
         overlay["VERILOG_FILES"] = ([str(sources["netlist"])],
                                      "current routed netlist consumed by Step37.3")
+        overlay["FALLBACK_SDC"] = (str(sources["sdc"]),
+                                    "current routed constraints consumed by Step37.3")
         configs = lc.resolve_step_configs(project, image, pdk, list(STEPS),
                                            pdk_root=pdk_root, docker=launcher,
                                            folder="37.3-config", overlay=overlay)

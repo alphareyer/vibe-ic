@@ -840,9 +840,7 @@ def gds_connectivity(project: Path, live_sha256: str,
         try:
             measured = _bounded.connectivity(project, comparison)
             measured["basis"] = CONNECTIVITY_BASES[0]
-            return {"subject_sha256": live_sha256, "measurements": [measured],
-                    "not_measured_by": [], "verdict": measured["verdict"],
-                    "basis": measured["basis"]}
+            found.append(measured)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             return {"subject_sha256": live_sha256, "measurements": [],
                     "not_measured_by": [str(exc)], "verdict": "NOT_DETERMINED", "basis": None,

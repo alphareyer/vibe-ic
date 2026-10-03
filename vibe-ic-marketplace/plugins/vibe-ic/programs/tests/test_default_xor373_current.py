@@ -1,6 +1,7 @@
 """Current native Step37.3 artefacts and substantive refusal controls."""
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -81,7 +82,11 @@ def test_current_native_refusal(project, mutation):
                 del fp["config_files"][key]
             else:
                 fp["config_files"][str(project / "absent.pdk")] = fp["config_files"].pop(key)
+            edit(folder / "input_fingerprint.json", fp)
+            receipt["sha256"]["input_fingerprint.json"] = pc.digest(folder / "input_fingerprint.json")
             edit(receipt_path, receipt)
+            current["outputs"]["producer_0_vibeic_receipt.json"] = pc.entry(project, receipt_path)
+            edit(dep_path, dep)
         elif mutation in ("mount", "image", "native_log", "native_execution"):
             folder = project / dep["folders"][-1]
             if mutation == "mount":
@@ -98,13 +103,23 @@ def test_current_native_refusal(project, mutation):
                 edit(folder / "invocation.log", b"no execution\n")
             else:
                 path = project / current["outputs"]["launches"]["path"]
-                edit(path, b'{}\n')
+                launches = [json.loads(line) for line in path.read_text().splitlines()]
+                launches = [run for run in launches if "KLayout.XOR" not in run["argv"]]
+                edit(path, ("\n".join(json.dumps(run) for run in launches) + "\n").encode())
+                current["outputs"]["launches"] = pc.entry(project, path)
+                edit(dep_path, dep)
         else:
             current["outputs"]["magic_gds"] = current["outputs"]["klayout_gds"]
             if mutation == "stream_swapped":
                 report["current"]["inputs"]["reference"] = report["current"]["inputs"]["shipped"]
                 edit(report_path, report)
             edit(dep_path, dep)
+        # Rebind the actual mutated dependency bytes in the outer comparison.
+        # This forces the typed consumer to judge the changed native evidence,
+        # rather than allowing only an outer receipt hash to catch the change.
+        if dep_path in saved:
+            report["current"]["inputs"]["connectivity"] = pc.entry(project, dep_path)
+            edit(report_path, report)
         rc, _, _ = xor.judge_receipt(project, xor.REPORT_REL)
         assert rc != 0
     finally:
@@ -129,3 +144,34 @@ def test_material_bytes_and_mount_are_read(tmp_path, scenario):
         deck.unlink()
         with pytest.raises(lc.Refusal, match="LL_CONFIG_MATERIAL_MISSING"):
             lc._current_config_material(config, mounts)
+
+
+def test_real_geometry_change_is_measured_failure(project, tmp_path):
+    """A native GDS mutation must reach the measured-defect arm of the gate."""
+    report = json.loads((project / xor.REPORT_REL).read_text())
+    shipped = project / report["current"]["inputs"]["shipped"]["path"]
+    paths = [shipped, project / xor.REPORT_REL, project / "reports/phase3/gds_xor_native.log",
+             project / "reports/phase3/gds_xor_native.rb"]
+    saved = {path: path.read_bytes() for path in paths}
+    script = project / "reports/phase3/xor_reverse_geometry.py"
+    script.write_text('import klayout.db as db,sys\n'
+                      'p=sys.argv[1]; layout=db.Layout(); layout.read(p)\n'
+                      'layout.top_cell().shapes(layout.layer(68,20)).insert(db.Box(1000,1000,1400,1400))\n'
+                      'layout.write(p)\n')
+    image = native.read_current(project)["image"]
+    try:
+        argv = ["docker", "run", "--rm", "--network", "none", "--cpus", "2", "--memory", "6g",
+                "--memory-swap", "6g", "-v", f"{project}:{project}", image, "--skip",
+                "/usr/bin/time", "-v", "python3", str(script), str(shipped)]
+        cp = lc.run_container(argv, supervised=True, log=project / "reports/phase3/xor_reverse_geometry.log")
+        (project / "reports/phase3/xor_reverse_geometry.log").write_text(cp.stdout + "\n" + cp.stderr)
+        assert cp.returncode == 0
+        assert xor.main([str(project), "--json", str(project / xor.REPORT_REL)]) == 1
+        rc, _, measured = xor.judge_receipt(project, xor.REPORT_REL)
+        assert rc == 1
+        assert measured["design__xor_difference__count"] > 0
+        (project / "GEOMETRY_REVERSE.json").write_text(json.dumps(measured, indent=2))
+    finally:
+        for path, content in saved.items():
+            path.write_bytes(content)
+        script.unlink()
