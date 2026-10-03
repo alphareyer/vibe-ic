@@ -34,6 +34,8 @@ def main():
     runner._RUN_STARTED_AT = __import__("time").time()
     put(project, "input/README.md", spec["scope"] + "\n")
     put(project, "input/source.json", source.read_text())
+    put(project, "input/submission_template/SELF_TAPEOUT.txt",
+        "Declared HARDMACRO tool fixture; input/source.json supplies the route.\n")
     put(project, "reports/phase3/technology_units.json", json.dumps({"pdk": spec["pdk"]}))
     declaration = td.blank_declaration()
     declaration["answers"]["deliverable"] = spec["route"]
