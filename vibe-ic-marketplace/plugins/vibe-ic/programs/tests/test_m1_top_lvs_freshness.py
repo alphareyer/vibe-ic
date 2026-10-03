@@ -27,6 +27,8 @@ chip-AGNOSTIC: monkeypatched container + synthetic fixtures.
 """
 import json
 import hashlib
+import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -38,6 +40,12 @@ TOP = "chip_top"
 
 
 def _project(tmp_path):
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "routed.def").write_text(
+        f"DESIGN {TOP} ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+        "COMPONENTS 1 ;\n- u_ldo ldo + FIXED ( 0 0 ) N ;\n"
+        "END COMPONENTS\nEND DESIGN\n")
     g = tmp_path / "phase3" / "stage4" / "gds"
     g.mkdir(parents=True)
     (g / f"{TOP}.gds").write_bytes(b"\x00\x06digital")
@@ -47,7 +55,9 @@ def _project(tmp_path):
     (hm / "ldo.v").write_text("module ldo(input en, output vout);\nendmodule\n")
     sy = tmp_path / "phase2" / "stage2" / "synth"
     sy.mkdir(parents=True)
-    (sy / f"{TOP}_synth.v").write_text(f"module {TOP}();\nendmodule\n")
+    (sy / f"{TOP}_synth.v").write_text(
+        f"module {TOP}(input en, output vout);\n"
+        "ldo u_ldo (.en(en), .vout(vout));\nendmodule\n")
     return tmp_path
 
 
@@ -168,16 +178,6 @@ def test_a_reused_merged_gds_is_disclosed_by_name(tmp_path):
     """
     p = _carried_forward(_project(tmp_path))
     ms, rp = _ms(p), _rpt(p)
-    pnr = p / "phase3/stage3/pnr"
-    pnr.mkdir(parents=True)
-    (pnr / "routed.def").write_text(
-        f"DESIGN {TOP} ;\nUNITS DISTANCE MICRONS 1000 ;\n"
-        "COMPONENTS 1 ;\n- u_ldo ldo + FIXED ( 0 0 ) N ;\n"
-        "END COMPONENTS\nEND DESIGN\n")
-    (p / f"phase2/stage2/synth/{TOP}_synth.v").write_text(
-        f"module {TOP}(input en, output vout);\n"
-        "ldo u_ldo (.en(en), .vout(vout));\nendmodule\n")
-    import os
     os.utime(p / f"phase3/stage4/gds/{TOP}.gds", None)
     calls = []
 
@@ -249,6 +249,27 @@ def test_m1_accepts_a_valid_a8_manifest_bound_to_consumed_views(tmp_path):
         if cmd.startswith("command -v") or cmd.startswith("test -f") \
                 or cmd.startswith("test -d"):
             return 0, "", ""
+        if "M1_TOOL_IDENTITY" in cmd:
+            return 0, json.dumps({"executable": "/tools/klayout",
+                                  "sha256": "d" * 64,
+                                  "version": "KLayout fixture"}), ""
+        if "klayout -b" in cmd:
+            tokens = shlex.split(cmd)
+            env = dict(t.split("=", 1) for t in tokens if "=" in t)
+            out = Path(env["MERGED_OUT"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"fresh merged gds")
+            (ms / "merge.log").write_text("KLAYOUT_MERGE_DONE\n")
+            placement = json.loads(
+                Path(env["PLACEMENTS_JSON"]).read_text())["placements"]
+            placed = [{"macro": cell, **item}
+                      for cell, items in placement.items() for item in items]
+            Path(env["MERGE_JSON"]).write_text(json.dumps({
+                "design_top": TOP, "single_top": True,
+                "top_cells_after": [TOP], "placed": placed,
+                "macros": [{"macro": "ldo", "action": "added"}],
+            }))
+            return 0, "KLAYOUT_MERGE_DONE", ""
         if "magic" in cmd:
             (ms / f"{TOP}_merged_extracted.sp").write_text(
                 f".subckt {TOP} a b\n.ends\n")
@@ -275,7 +296,16 @@ def test_m1_refuses_a_mismatched_a8_manifest_before_lvs(tmp_path):
     _write_a8_manifest(p, source_sha="0" * 64,
                        view_shas={suffix: "1" * 64
                                   for suffix in (".lef", ".lib", ".gds", ".v")})
-    rep = TL.run(p, TOP, "x", "sky130A")
+    def fake(container, cmd, timeout=600, **_):
+        if cmd.startswith("command -v") or cmd.startswith("test -f") \
+                or cmd.startswith("test -d"):
+            return 0, "", ""
+        return 1, "", "not reached"
+    TL._docker_exec, orig = fake, TL._docker_exec
+    try:
+        rep = TL.run(p, TOP, "x", "sky130A")
+    finally:
+        TL._docker_exec = orig
     assert rep["verdict"] == "SKIP" and rep["rc"] == 2
     assert "A8_VIEW_PROVENANCE_INVALID" in rep["reason"]
 
@@ -288,7 +318,16 @@ def test_m1_refuses_the_reviewer_manifest_shape_without_required_views(tmp_path)
         "views": {"gds": {"sha256": "1" * 64},
                   "verilog": {"sha256": "2" * 64}},
     }))
-    rep = TL.run(p, TOP, "x", "sky130A")
+    def fake(container, cmd, timeout=600, **_):
+        if cmd.startswith("command -v") or cmd.startswith("test -f") \
+                or cmd.startswith("test -d"):
+            return 0, "", ""
+        return 1, "", "not reached"
+    TL._docker_exec, orig = fake, TL._docker_exec
+    try:
+        rep = TL.run(p, TOP, "x", "sky130A")
+    finally:
+        TL._docker_exec = orig
     assert rep["verdict"] == "SKIP" and rep["rc"] == 2
     assert "A8_VIEW_PROVENANCE_INVALID" in rep["reason"]
 
