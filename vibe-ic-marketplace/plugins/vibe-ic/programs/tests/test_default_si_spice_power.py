@@ -217,6 +217,31 @@ def test_missing_current_tool_refuses_even_with_copied_green_report(tmp_path, mo
     assert gate(p, step) == 1
 
 
+
+@pytest.mark.parametrize('mutation', ['missing_json', 'missing_receipt', 'spef_drift', 'three_part'])
+def test_DSR1_001_text_fallback_refuses_stale_current_subject(tmp_path, monkeypatch, mutation):
+    p, folder, lib = project(tmp_path)
+    assert produce(p, folder, lib, monkeypatch, '27') is True
+    assert gate(p, '27') == 0
+    assert json.loads((p / 'si-gate.json').read_text())['summary']['pass'] is True
+    rpt = p / 'reports/phase3/si_crosstalk.rpt'
+    text_before = rpt.read_bytes()
+    if mutation in ('missing_json', 'three_part'):
+        rpt.with_suffix('.json').unlink()
+    if mutation in ('missing_receipt', 'three_part'):
+        rpt.with_suffix('.current.json').unlink()
+    if mutation in ('spef_drift', 'three_part'):
+        spef = p / 'phase3/stage3/extracted/neutral.spef'
+        spef.write_bytes(spef.read_bytes() + b'\n ')
+    # The retained report and its scalar claims are unchanged in every arm.
+    assert rpt.read_bytes() == text_before
+    assert gate(p, '27') == 1
+    doc = json.loads((p / 'si-gate.json').read_text())
+    assert doc['summary']['pass'] is False
+    assert any(f['severity'] == 'ERROR' and f['category'] == 'SI_CURRENT_INPUTS_UNBOUND'
+               for f in doc['findings'])
+
+
 def test_measured_si_fail_is_not_promoted_by_an_advisory_screen(tmp_path, monkeypatch):
     p, folder, lib = project(tmp_path)
     import si_signoff_timing_aware as aware

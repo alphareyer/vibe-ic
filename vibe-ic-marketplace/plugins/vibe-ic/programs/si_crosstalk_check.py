@@ -166,6 +166,17 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     waiver = project_dir / "waivers.json"
     stats = {"report_found": False, "format": "", "violations": 0}
 
+    # Both formats consume the same strict producer evidence. Removing the
+    # JSON companion must not let retained text bypass current validation.
+    if jsn.exists() or rpt.exists():
+        import _opensta_current as current
+        try:
+            current.si_binding(project_dir)
+            stats['current_binding'] = 'CURRENT'
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            stats['current_binding'] = 'NOT_MEASURED'
+            findings.append(Finding('ERROR', 'SI_CURRENT_INPUTS_UNBOUND', str(exc)))
+
     if jsn.exists():
         stats["report_found"] = True
         stats["format"] = "json"
@@ -175,14 +186,6 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             findings.append(Finding("ERROR", "BAD_JSON",
                                     f"Cannot parse si_crosstalk.json: {exc}"))
             return findings, stats
-
-        import _opensta_current as current
-        try:
-            current.si_binding(project_dir)
-            stats['current_binding'] = 'CURRENT'
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            stats['current_binding'] = 'NOT_MEASURED'
-            findings.append(Finding('ERROR', 'SI_CURRENT_INPUTS_UNBOUND', str(exc)))
 
         for key in ("max_crosstalk_noise", "violations_count"):
             if key not in data:
