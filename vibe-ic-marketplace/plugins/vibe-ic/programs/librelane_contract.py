@@ -3277,10 +3277,22 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         write_json(folder / 'input_fingerprint.json', fingerprint)
         write_json(folder / 'pdk_root.json', pdk_record)
         volume_args = ['-v', f'{project.resolve()}:{project.resolve()}']
+        # LibreLane's Yosys ABC path already emits the exact temporary script
+        # with ``-showtmp``.  Keep that tool-owned temp directory on the
+        # existing same-path project mount so the receipt owner can copy the
+        # script named by invocation.log after the container returns.  This is
+        # capture/persistence only; it does not enable ABC buffering.
+        abc_tmp = None
+        if step_id == 'Yosys.Synthesis':
+            abc_tmp = folder / 'vibeic_abc_tmp'
+            abc_tmp.mkdir(parents=True, exist_ok=True)
+            volume_args += ['--workdir', str(folder.resolve())]
         for host, guest in mounts or []:
             volume_args += ['-v', f'{host.resolve()}:{guest}:ro']
         if home:
             volume_args += ['-e', f'HOME={home.resolve()}']
+        if abc_tmp is not None:
+            volume_args += ['-e', f'TMPDIR={abc_tmp.resolve()}']
         volume_args += _plugin_args([step_id])
         cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volume_args,
                '--entrypoint', 'python3', image,
@@ -3306,6 +3318,12 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         (folder / 'invocation.log').write_text(completed.stdout + '\n' + completed.stderr)
         if completed.returncode or not (folder / 'state_out.json').exists():
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
+        if step_id == 'Yosys.Synthesis':
+            # Use the existing receipt owner and the actual tool log.  A
+            # missing or guest-only path remains absent and therefore keeps
+            # the downstream synth receipt NOT_VERIFIED/FAIL.
+            _drv_stages.keep_abc_script(
+                project, folder, (folder / 'invocation.log').read_text(errors='replace'))
         out_state = _load(folder / 'state_out.json')
         _check_state(out_state, outputs=True)
         if step_id == 'OpenROAD.STAPostPNR' and fingerprint['liberty_files'] != \

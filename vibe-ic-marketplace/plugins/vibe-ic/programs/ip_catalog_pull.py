@@ -1101,7 +1101,52 @@ def apply_local_derivative(project: Path, matches: List[CatalogMatch],
             if manifest["local_derivative"] != ref:
                 raise ValueError("another local derivative is already declared")
             state, why = verify_existing_reused_pins_outcome(project, matches, manifest)
-            return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+            if state == PIN_VERIFIED:
+                return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+            if why != "LOCAL_DERIVATIVE_REFUSED: local derivative producer provenance missing or changed":
+                return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+
+            # A pre-output producer event is recoverable only when every field
+            # other than the not-yet-introduced outputs map matches exactly.
+            # Re-derive the complete plan first, including the independent
+            # official parent, exact patch, current inventory and input proof.
+            record_events = [event for event in
+                (json.loads(line) for line in (project / "provenance.jsonl").read_text().splitlines())
+                if isinstance(event, dict) and event.get("event") == "ip_catalog_local_derivative"
+                and event.get("record") == ref]
+            state, why, plan = _local_derivative_plan(project, matches, manifest, ref,
+                                                     allow_parent=True)
+            if plan is None:
+                return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+            if _local_inventory(project / "phase2/stage1/rtl") != plan["after"]:
+                raise ValueError("legacy output recovery requires the exact current derivative inventory")
+            # The preserved pre-contract event predates both publication
+            # fields (`exit_code` and `outputs`); recognize only that exact
+            # historical shape, with every other value equal to today's plan.
+            legacy_event = {key: value for key, value in plan["event"].items()
+                            if key not in ("exit_code", "outputs")}
+            if len(record_events) != 1 or record_events[0] != legacy_event:
+                raise ValueError("legacy output recovery requires one exact output-less producer event")
+
+            # Recheck immediately before publication; a changed receipt or RTL
+            # remains a refusal. The historical line is retained byte-for-byte.
+            current_lines = (project / "provenance.jsonl").read_bytes().splitlines(keepends=True)
+            current_events = [json.loads(line) for line in current_lines]
+            if current_events.count(legacy_event) != 1 or \
+                    _local_inventory(project / "phase2/stage1/rtl") != plan["after"]:
+                raise ValueError("legacy producer event or current inventory changed during recovery")
+            import _atomic_artefact as atomic
+            rtl = project / "phase2/stage1/rtl"
+            outputs = {}
+            for name, data in plan["replacements"].items():
+                atomic.write_bytes(rtl / name, data)
+                outputs["phase2/stage1/rtl/" + name] = "sha256:" + _sha256_file(rtl / name)
+            if outputs != plan["event"]["outputs"]:
+                raise ValueError("recovered producer output bytes differ from the verified patch")
+            with (project / "provenance.jsonl").open("ab") as stream:
+                stream.write((json.dumps({**plan["event"], "outputs": outputs},
+                                        sort_keys=True) + "\n").encode())
+            return {"status": PIN_VERIFIED, "reason": why, **plan["event"]}
         state, why, plan = _local_derivative_plan(project, matches, manifest, ref,
                                                  allow_parent=True)
         if plan is None:

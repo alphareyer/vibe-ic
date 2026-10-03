@@ -120,6 +120,78 @@ def test_declared_derivative_runs_through_producer_and_normal_consumer(tmp_path,
     assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
 
 
+def _replace_last_derivative_event(provenance, transform):
+    lines = provenance.read_bytes().splitlines(keepends=True)
+    event = json.loads(lines[-1])
+    assert event['event'] == 'ip_catalog_local_derivative'
+    lines[-1] = (json.dumps(transform(event), sort_keys=True) + '\n').encode()
+    provenance.write_bytes(b''.join(lines))
+
+
+def test_producer_recovers_exact_legacy_outputless_event_and_preserves_history(tmp_path, monkeypatch):
+    project, match, ref, _ = _fixture(tmp_path, monkeypatch)
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    provenance = project/'provenance.jsonl'
+    _replace_last_derivative_event(provenance, lambda event: {k:v for k,v in event.items() if k not in ('exit_code', 'outputs')})
+    legacy_bytes = provenance.read_bytes()
+
+    recovered = _apply(project, match, ref)
+    assert recovered['status'] == pull.PIN_VERIFIED, recovered
+    assert provenance.read_bytes().startswith(legacy_bytes)
+    current = json.loads(provenance.read_bytes().splitlines()[-1])
+    assert current['event'] == 'ip_catalog_local_derivative'
+    assert current['outputs'] == {
+        'phase2/stage1/rtl/leaf.v': 'sha256:'+_h(project/'phase2/stage1/rtl/leaf.v')}
+    assert current != json.loads(legacy_bytes.splitlines()[-1])
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    assert result.extras['ip_fetch']['reuse_kind'] == 'LOCAL_DERIVATIVE'
+
+
+def test_recovered_current_producer_event_is_idempotent(tmp_path, monkeypatch):
+    project, match, ref, _ = _fixture(tmp_path, monkeypatch)
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    provenance = project/'provenance.jsonl'
+    _replace_last_derivative_event(provenance, lambda event: {k:v for k,v in event.items() if k not in ('exit_code', 'outputs')})
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    before = provenance.read_bytes()
+    result = _apply(project, match, ref)
+    assert result['status'] == pull.PIN_VERIFIED, result
+    assert provenance.read_bytes() == before
+
+
+@pytest.mark.parametrize('mutation', ['changed_event', 'changed_output_digest',
+                                      'missing_event', 'current_bytes'])
+def test_legacy_output_recovery_refuses_nonlegacy_or_drift(tmp_path, monkeypatch, mutation):
+    project, match, ref, _ = _fixture(tmp_path, monkeypatch)
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    provenance = project/'provenance.jsonl'
+    lines = provenance.read_bytes().splitlines(keepends=True)
+    event = json.loads(lines[-1])
+    if mutation == 'missing_event':
+        lines.pop()
+    elif mutation == 'changed_event':
+        event.pop('outputs')
+        event['exit_code'] = 7
+        lines[-1] = (json.dumps(event, sort_keys=True) + '\n').encode()
+    elif mutation == 'changed_output_digest':
+        event['outputs']['phase2/stage1/rtl/leaf.v'] = 'sha256:'+'0'*64
+        lines[-1] = (json.dumps(event, sort_keys=True) + '\n').encode()
+    else:
+        (project/'phase2/stage1/rtl/leaf.v').write_text('module leaf; wire drift; endmodule\n')
+        event.pop('outputs')
+        event.pop('exit_code')
+        lines[-1] = (json.dumps(event, sort_keys=True) + '\n').encode()
+    provenance.write_bytes(b''.join(lines))
+    before = provenance.read_bytes()
+    rtl = project/'phase2/stage1/rtl'
+    before_rtl = {p.name: p.read_bytes() for p in rtl.iterdir() if p.is_file()}
+    result = _apply(project, match, ref)
+    assert result['status'] == pull.PIN_MISMATCH, result
+    assert provenance.read_bytes() == before
+    assert {p.name: p.read_bytes() for p in rtl.iterdir() if p.is_file()} == before_rtl
+
+
 @pytest.mark.parametrize('mutation', ['adapted_drift', 'extra_file', 'undeclared_change',
     'missing_parent', 'missing_patch', 'missing_evidence', 'missing_input',
     'producer_receipt', 'forged_parent', 'patch_context', 'symlink', 'record_drift'])
