@@ -203,6 +203,26 @@ def test_every_declaration_carries_auditable_provenance(tmp_path):
         assert rec["evidence"], "a declaration with no evidence row"
 
 
+def test_clock_target_row_provenance_is_project_relative(tmp_path):
+    """The L19 clock-target row is a design artefact, so its row text must
+    not embed the checkout path that the provenance resolver reports."""
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "L9_constraints_floorplan.md").write_text(
+        "# Constraints\n\n"
+        "| library | clock period (ns) |\n|---|---|\n"
+        "| gf180mcu_* | 24 |\n",
+        encoding="utf-8")
+
+    target = EMIT._clock_target_record(
+        tmp_path, {"pdk_target": "gf180mcuD"})
+
+    assert target is not None
+    assert str(tmp_path) not in target["row"]
+    assert "input/docs/L9_constraints_floorplan.md:5" in target["row"]
+    assert target["period_ns"] == 24.0
+
+
 # ─────────────────────────── 2. the two orientations, and the value bind ──
 def test_column_oriented_table_keeps_the_designs_own_scope(tmp_path):
     """A per-family setting has TWO values, and each belongs to its row.

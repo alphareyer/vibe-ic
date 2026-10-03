@@ -157,6 +157,11 @@ import l_doc_generator_stamp as _stamp
 # the record that owns the name (stated rule, no guessing) and REFUSES —
 # recording an explicit conflict on the document — for anything else.
 import clock_contract as _cc
+# Use the same run-PDK identity and family matcher as the L8 consumers.  The
+# late L8 -> L9 mirror must distinguish a matching scoped producer from a
+# foreign or unscoped declaration before it classifies an L9 prose row as a
+# stale pre-scope snapshot.
+import _l8_clock_scope as _clock_scope
 # v1.6.95 — Capability 1 of GitHub issue #27. Deeper README parser
 # extracts key sizes / block width / S-box parallelism / supported
 # cipher modes / cited public-standard URLs from README prose and
@@ -61322,7 +61327,10 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             # carry a primary row from before that input was read. Reconcile
             # its timing while retaining integration-only metadata.
             l19 = _try_load_l_doc(project, "L19_CONSTRAINTS_PDK") or {}
-            target = str((l19.get("fields") or {}).get("pdk_target") or "").lower()
+            target, _target_source = _clock_scope.run_pdk_target(project)
+            if not target:
+                target = str((l19.get("fields") or {}).get(
+                    "pdk_target") or "").strip()
 
             def _sdc_identity(entry: dict) -> str:
                 evidence = str(entry.get("evidence") or "")
@@ -61337,15 +61345,24 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
                 if not isinstance(cd, dict):
                     continue
                 name = str(cd.get("name") or "").strip()
-                scope = str(cd.get("pdk_scoped_target") or "").lower()
-                if not name or (scope and scope != target):
+                scope_values = _clock_scope.scope_values(cd)
+                if not name or (scope_values and not
+                                _clock_scope.matches_target(target,
+                                                            scope_values)):
                     continue
+                scope_value = str(cd.get("pdk_scoped_target") or "").strip()
+                if not scope_value:
+                    scope_value = next(iter(scope_values), "")
+                matching_scoped_l8 = bool(
+                    scope_values and target and
+                    _clock_scope.matches_target(target, scope_values))
                 same_name = [row for row in existing
                              if isinstance(row, dict)
                              and str(row.get("name") or "").lower() == name.lower()]
                 matches = [row for row in same_name
-                           if not row.get("pdk_scoped_target") or
-                           str(row["pdk_scoped_target"]).lower() == target]
+                           if (not _clock_scope.scope_values(row) or
+                               (target and _clock_scope.matches_target(
+                                   target, _clock_scope.scope_values(row))))]
                 if not matches:
                     # The old mirror left an out-of-scope same-name row
                     # untouched. Keep that behavior until the downstream
@@ -61384,6 +61401,41 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
                     # pre-SDC snapshot that the final L8 record supersedes.
                     independent_sdc = (l9_sdc and l9_sdc != l8_sdc
                                        and l9_sdc != "input/constraints/*.sdc")
+                    # The prose/fmax and top-port clock records are emitted
+                    # before the run-PDK scoped row is selected.  They are a
+                    # stale snapshot when the selected L8 producer carries a
+                    # matching scope, has no concrete SDC identity, and the
+                    # L9 record itself is unscoped.  Preserve its observation
+                    # as an alternate mention, then let the scoped producer
+                    # own the contract.  Other owner records remain genuine
+                    # conflicts and continue through the refusal branch.
+                    stale_l9_scope_snapshot = (
+                        matching_scoped_l8 and not _clock_scope.scope_values(row)
+                        and not l9_sdc
+                        and str(row.get("extraction_strategy") or "") in {
+                            "clock_domain_doc_prose_fmax",
+                            "l9_top_port_clock_derive",
+                        })
+                    if incompatible and stale_l9_scope_snapshot:
+                        mention = dict(row)
+                        mention["role"] = "displaced_by_pdk_scoped_row"
+                        _cc.record_alternate_mention(row, mention)
+                        for key in (
+                                "period_ns", "freq_hz", "freq_mhz",
+                                "freq_low_mhz", "freq_high_mhz", "low_mhz",
+                                "high_mhz", "source", "evidence",
+                                "period_source", "pdk_scoped_target",
+                                "extraction_strategy"):
+                            if key in cd and row.get(key) != cd[key]:
+                                row[key] = cd[key]
+                                changed = True
+                        # A row with no matching scope is now explicitly tied
+                        # to the selected producer, so later consumers make
+                        # the same choice without re-reading stale prose.
+                        if row.get("pdk_scoped_target") != scope_value:
+                            row["pdk_scoped_target"] = scope_value
+                            changed = True
+                        continue
                     if incompatible and ((l8_sdc and independent_sdc) or
                                          (not l8_sdc and
                                           _cc.entry_owns_name(cd) and
@@ -61407,6 +61459,38 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
                             if key in cd and row.get(key) != cd[key]:
                                 row[key] = cd[key]
                                 changed = True
+                # L9.clocks is a second consumer-facing view of the same
+                # clock.  Keep it aligned with the scoped clock_domains row
+                # when it is the known top-port-derived stale snapshot.  Do
+                # not rewrite independently sourced clock declarations.
+                if matching_scoped_l8 and not conflicts:
+                    for clock_row in (l9.get("clocks") or []):
+                        if not isinstance(clock_row, dict):
+                            continue
+                        if str(clock_row.get("name") or "").lower() != name.lower():
+                            continue
+                        if _clock_scope.scope_values(clock_row):
+                            continue
+                        if _sdc_identity(clock_row):
+                            continue
+                        if str(clock_row.get("extraction_strategy") or "") \
+                                != "l9_top_port_clock_derive":
+                            continue
+                        old_clock = dict(clock_row)
+                        old_clock["role"] = "displaced_by_pdk_scoped_row"
+                        _cc.record_alternate_mention(clock_row, old_clock)
+                        for key in (
+                                "period_ns", "freq_hz", "freq_mhz",
+                                "freq_low_mhz", "freq_high_mhz", "low_mhz",
+                                "high_mhz", "source", "evidence",
+                                "period_source", "pdk_scoped_target",
+                                "extraction_strategy"):
+                            if key in cd and clock_row.get(key) != cd[key]:
+                                clock_row[key] = cd[key]
+                                changed = True
+                        if clock_row.get("pdk_scoped_target") != scope_value:
+                            clock_row["pdk_scoped_target"] = scope_value
+                            changed = True
     if conflicts:
         if l9.get("clock_contract_conflicts") != conflicts:
             l9["clock_contract_conflicts"] = conflicts

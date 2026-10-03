@@ -562,6 +562,38 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
         rel, _outside = _ldc.project_relative_source(path or cite, project)
         return f"{rel}:{tail}" if path else rel
 
+    def _rel_row(row):
+        """Relativise an input path embedded in the resolver's row prose.
+
+        ``clock_target_provenance`` is a run-record producer and therefore
+        cites its source absolutely.  This row is copied into L19, a portable
+        design artefact, so only the embedded source path is normalised; the
+        numeric declaration and surrounding evidence text stay byte-for-byte
+        otherwise.
+        """
+        if not (isinstance(row, str) and row):
+            return row
+        out = row
+        bases = sorted({str(project), str(project.resolve())},
+                       key=len, reverse=True)
+        for base in bases:
+            prefix = base.rstrip("/")
+            if not prefix:
+                continue
+            pattern = re.compile(re.escape(prefix) + r"/[^\s—]+")
+
+            def _replace(match):
+                token = match.group(0)
+                path, sep, line = token.rpartition(":")
+                suffix = f":{line}" if sep and line.isdigit() else ""
+                raw_path = path if suffix else token
+                rel, _outside = _ldc.project_relative_source(
+                    raw_path, project)
+                return rel + suffix
+
+            out = pattern.sub(_replace, out)
+        return out
+
     # ── the run's own record wins, when there is one ────────────────────────
     run = _run_bound_provenance(project, _ctp)
     if run is not None:
@@ -573,7 +605,7 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
                 "pdk_source": "run_provenance",
                 "pdk_target_declared": pdk or None,
                 "evidence": _rel_cite(run.get("cite")) or _ctp.PROVENANCE_REL,
-                "row": run.get("row", ""),
+                "row": _rel_row(run.get("row", "")),
                 "note": ("mirrors the run's own clock-target provenance at "
                          f"{_ctp.PROVENANCE_REL}; the PDK named here is the "
                          "one the run built against")}
@@ -601,7 +633,7 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
                 "pdk_target_declared": pdk or None,
                 "tier": rep["tier"],
                 "evidence": cite,
-                "row": rep.get("row", "")}
+                "row": _rel_row(rep.get("row", ""))}
     return {"status": "NOT_STATED",
             "period_ns": None,
             "pdk": None,
