@@ -74,6 +74,7 @@ chip-AGNOSTIC: no design, PDK, cell or corner literal selects a branch.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -431,6 +432,12 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
     left to its schematic subckt and named in `kept_schematic`."""
     work = out_dir / 'extract'
     work.mkdir(parents=True, exist_ok=True)
+    # These exports belong to this producer. Absence before Magic makes a
+    # subsequently consumed export evidence of this invocation, not a retry's.
+    for cell in cells:
+        for suffix in ('.spice', '.ext'):
+            (work / (cell + suffix)).unlink(missing_ok=True)
+    (out_dir / 'cells_extracted.spice').unlink(missing_ok=True)
     tcl = work / 'extract.tcl'
     tcl.write_text(extraction_tcl(gds, cells, work))
     run = _docker(image, project, mounts,
@@ -438,9 +445,12 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
                   env={'PDK_ROOT': guest_root})
     (work / 'magic.log').write_text(run.stdout + '\n' + run.stderr)
     kept: Dict[str, str] = {}
+    missing_exports = []
     body: List[str] = []
     for cell in cells:
         path = work / f'{cell}.spice'
+        if not path.is_file() or not path.stat().st_size:
+            missing_exports.append(cell)
         text = path.read_text(errors='replace') if path.is_file() else ''
         ports, devices = subckt_devices(text).get(cell, ([], 0))
         start = re.search(r'^\.subckt\s+' + re.escape(cell) + r'\b.*$', text, re.M | re.I)
@@ -460,7 +470,8 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
             'magic_execution': {'tool': 'Magic', 'rc': run.returncode,
                 'argv': ['magic', '-dnull', '-noconsole', '-rcfile', magicrc, str(tcl)],
                 'script': str(tcl), 'log': str(work / 'magic.log')},
-            'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept}
+            'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept,
+            'missing_exports': missing_exports}
 
 
 def cell_view(image: str, project: Path, mounts: List[Tuple[Path, str]], *, config: dict,
@@ -749,6 +760,8 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
                      guest_root=str(Path(guest).parent), pdk=pdk,
                      netlist=project / inputs['sta_netlist'], cell_sources=cell_sources,
                      out_dir=out_dir)
+    if view.get('missing_exports'):
+        raise Refusal('LL_SPICE_CURRENT_CELL_EXPORT_MISSING', str(view['missing_exports']))
     cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
                          ground, out_dir / 'cells_folded.spice')
     cells['cell_view'] = {k: v for k, v in view.items() if k != 'sources'}
@@ -860,11 +873,12 @@ def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, A
     unresponsive = [r for r in response if r['responds'] is False]
     worst = max(rows, key=lambda r: abs(r.get('error_pct') or 0.0))
     verdicts = {r.get('verdict') for r in rows}
-    verdict = ('SPEF_UNRESPONSIVE' if unresponsive else
+    verdict = ('CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
+               'MISMATCH' if 'MISMATCH' in verdicts else
+               'SPEF_UNRESPONSIVE' if unresponsive else
                'MUTATION_NOT_MEASURED' if unmeasured else
                'CORRELATED' if verdicts == {'CORRELATED'} else
-               'CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
-               'MISMATCH' if 'MISMATCH' in verdicts else 'TOLERANCE_UNDERIVABLE')
+               'TOLERANCE_UNDERIVABLE')
     return {'verdict': verdict, 'worst_path': worst['path'],
             'worst_error_pct': worst.get('error_pct'), 'mutation': response}
 
@@ -1114,6 +1128,57 @@ def _current_executions(tool: dict):
     return executions
 
 
+def _current_companion_errors(project: Path, tool: dict, subject: dict, context: dict):
+    """Keep a bound base mismatch decisive when its companion is incomplete.
+
+    This exception cannot admit PASS, a failed base execution, an unmeasured
+    base, or a result from another state/corner/material subject. Every error's
+    script/log and all measured products remain mandatory current byte bindings.
+    """
+    errors, incomplete = [], False
+    for simulator, arm in tool['detail'].items():
+        base, changed = arm.get('base') or {}, arm.get('mutated') or {}
+        incomplete |= any(row.get('status') == 'MEASURED' and not any(
+            other.get('status') == 'MEASURED'
+            and other.get('startpoint') == row.get('startpoint')
+            and other.get('endpoint') == row.get('endpoint')
+            for other in changed.get('paths') or []) for row in base.get('paths') or [])
+        for variant in ('base', 'mutated'):
+            for execution in _current_executions({'detail': {simulator: {variant: arm.get(variant)}}}):
+                if type(execution.get('rc')) is not int:
+                    raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
+                if execution['rc'] != 0:
+                    errors.append({'simulator': simulator, 'variant': variant, **execution})
+    if not errors and not incomplete:
+        return []
+    if tool.get('verdict') != 'FAIL' or any(error['variant'] != 'mutated' for error in errors):
+        raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(errors))
+    state = next(row for row in subject['inputs'] if row['role'] == 'sta_state')
+    if (tool.get('sta_state') != state['path'] or tool.get('sta_state_sha256') != state['sha256']
+            or tool.get('corner') != context['corner']):
+        raise Refusal('CURRENT_STEP30_FAIL_SUBJECT_MISMATCH', str(state))
+    inputs = post_pnr_timing_inputs(project, Path(state['path']), context['corner'])
+    for simulator, arm in tool['detail'].items():
+        base = arm.get('base') or {}
+        if (base.get('inputs') != inputs or base.get('spef') != str(project / inputs['spef'])
+                or base.get('spef_sha256') != inputs['sha256']['spef']):
+            raise Refusal('CURRENT_STEP30_FAIL_SUBJECT_MISMATCH', str(base.get('inputs')))
+        if (base.get('sta_execution') or {}).get('rc') != 0:
+            continue
+        for row in base.get('paths') or []:
+            execution = row.get('simulator_execution') or {}
+            values = [row.get(key) for key in ('sta_ns', 'spice_ns', 'tolerance_pct')]
+            if (row.get('status') != 'MEASURED' or execution.get('rc') != 0
+                    or execution.get('tool') != simulator
+                    or not all(type(value) in (int, float) and math.isfinite(value) for value in values)
+                    or values[0] <= 0 or values[1] < 0 or values[2] < 0):
+                continue
+            measured = _scc.path_correlation_verdict((values[1] - values[0]) / values[0] * 100, values[2])
+            if measured == row.get('verdict') and measured in ('MISMATCH', 'CRITICAL_MISMATCH'):
+                return errors
+    raise Refusal('CURRENT_STEP30_MEASURED_FAILURE_MISSING', str(errors))
+
+
 def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     """Ordinary Step 30: existing write_path_spice route, one native simulator.
 
@@ -1133,6 +1198,7 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     tool = run_step30(project, image, pdk_root, pdk, paths=1, simulators=('ngspice',))
     if current_context(project, image, pdk_root, pdk) != (subject, context):
         raise Refusal('CURRENT_STEP30_INPUT_CHANGED_DURING_RUN', str(project))
+    companion_errors = _current_companion_errors(project, tool, subject, context)
     executions, outputs = _current_executions(tool), []
     for arm in tool['detail'].values():
         for variant in ('base', 'mutated'):
@@ -1145,7 +1211,7 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
         raise Refusal('CURRENT_STEP30_EXECUTION_MISSING', str(tool.get('arms')))
     execution_files = []
     for index, execution in enumerate(executions):
-        if type(execution.get('rc')) is not int or execution['rc'] != 0:
+        if type(execution.get('rc')) is not int:
             raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
         for role in ('script', 'log'):
             execution_files.append(current.file_record(execution[role], f'{role}:{index}', project))
@@ -1159,6 +1225,8 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     outputs += [('canonical_deck', canonical_deck), ('canonical_log', canonical_log)]
     doc = {**tool, 'program': 'spice_correlation_check.current_write_path_spice',
            'current_subject': subject, 'current_context': context}
+    if companion_errors:
+        doc['companion_errors'] = companion_errors
     write_json(report, doc)
     declared_result = canonical_deck.with_suffix('.json')
     write_json(declared_result, doc)
@@ -1168,6 +1236,8 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
     receipt = {**subject, 'schema': 'step30-current-v1', 'step': '30', 'context': context,
                'execution': executions, 'execution_files': execution_files,
                'outputs': [current.file_record(path, role, project) for role, path in outputs]}
+    if companion_errors:
+        receipt['companion_errors'] = companion_errors
     write_json(receipt_path, receipt)
     validate_current_step30(project)
     return doc
@@ -1194,7 +1264,7 @@ def validate_current_step30(project: Path):
         raise Refusal('CURRENT_STEP30_WRITE_PATH_SPICE_NOT_RUN', str(report))
     expected_files = {}
     for i, ex in enumerate(executions):
-        if type(ex.get('rc')) is not int or ex['rc'] != 0 or not ex.get('argv'):
+        if type(ex.get('rc')) is not int or not ex.get('argv'):
             raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(ex))
         expected_files.update({f'{role}:{i}': ex[role] for role in ('script', 'log')})
     if {r['role']: r['path'] for r in receipt['execution_files']} != expected_files:
@@ -1212,6 +1282,10 @@ def validate_current_step30(project: Path):
     doc = _load(report)
     if any(doc.get(k) != v for k, v in tool.items()):
         raise Refusal('CURRENT_STEP30_ADOPTION_MISMATCH', str(report))
+    companion_errors = _current_companion_errors(project, tool, subject, context)
+    if (doc.get('companion_errors', []) != companion_errors
+            or receipt.get('companion_errors', []) != companion_errors):
+        raise Refusal('CURRENT_STEP30_COMPANION_ERROR_ADOPTION_MISMATCH', str(report))
     decks = {r['path'] for r in receipt['outputs'] if r['role'].startswith('deck:')}
     named = {r['deck'] for arm in tool['detail'].values() for variant in ('base', 'mutated')
              for r in (arm.get(variant) or {}).get('paths') or [] if r.get('deck')}

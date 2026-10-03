@@ -3777,7 +3777,8 @@ def run_audit(project: Path, run_spice: bool = True,
         result.summary = {'skipped': False, 'pass': result.passed,
                           'measurement': 'MEASURED' if verdict in ('PASS', 'FAIL') else 'NOT_MEASURED',
                           'current_binding': 'CURRENT', 'verdict': verdict,
-                          'corner': doc.get('corner'), 'arms': doc.get('arms')}
+                          'corner': doc.get('corner'), 'arms': doc.get('arms'),
+                          'companion_errors': doc.get('companion_errors', [])}
         if not result.passed:
             result.findings.append(Finding(rule='SPICE_CURRENT_' + str(verdict), severity='ERROR',
                                            message='Current tool correlation: ' + str(doc.get('arms'))))
