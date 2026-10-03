@@ -70,9 +70,14 @@ def test_ordinary_cache_caller_binds_current_ir_em_before_following_row(tmp_path
 def test_backend_defaults_preserve_frontend_and_current_step14_policy(tmp_path):
     assert LL.selected_mode(tmp_path, "2") == "librelane"
     assert LL.selected_mode(tmp_path, "3") == "librelane"
-    assert LL.selected_mode(tmp_path, "24") == "librelane"
+    assert LL.selected_mode(tmp_path, "24") == "direct"
+    assert R._step24_primary_mode(tmp_path) == "librelane"
     assert LL.selected_mode(tmp_path, "25") == "direct"
     assert LL.selected_mode(tmp_path, "14") == "direct"
+    switch = tmp_path / "phase3/librelane_switch.json"
+    switch.parent.mkdir(parents=True, exist_ok=True)
+    switch.write_text(json.dumps({"steps": {"24": "direct"}}))
+    assert R._step24_primary_mode(tmp_path) == "direct"
 
 
 @pytest.mark.parametrize("subject", ["CURRENT", "RECEIPT_MISSING", "COMPANION_CHANGED",
