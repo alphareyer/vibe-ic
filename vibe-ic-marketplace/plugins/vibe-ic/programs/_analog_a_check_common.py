@@ -977,6 +977,13 @@ def _a8_declared_content(block_dir: Path) -> Optional[BoundedContent]:
                 or native.get("subject_binding") != binding
                 or native.get(DESIGN_CONTENT_FIELD) != content):
             return None
+        # Wrapped extraction is a complete consumed group, never an optional
+        # hash that an older manifest can omit while still disclosing content.
+        if "extraction_wrapper" in measurement and any(
+                key not in native or native[key] != measurement.get(key)
+                for key in ("extraction_wrapper", "measurement_deck",
+                            "measurement_deck_sha256")):
+            return None
         if any(key not in measurement or measurement[key] != value
                for key, value in native.items() if key not in ("path", "sha256")):
             return None

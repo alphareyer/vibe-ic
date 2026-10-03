@@ -215,6 +215,90 @@ def _mag_from_script(script: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def test_internal_rail_anchors_are_not_top_level_labels():
+    """Only declared pins may become Magic extraction interface metadata.
+
+    The routing plan records rail anchors in ``plan.ports`` for geometry
+    bookkeeping.  Magic promotes a top-cell label to an extracted subckt
+    port, so emitting an undeclared anchor widens the A3 interface.  This
+    checks only the metadata boundary; the native extraction still decides
+    whether a physical open remains.  The declared-pin path remains covered
+    by the pin tests below.
+    """
+    plan = A5E.Plan()
+    plan.ports = [("nbias", 10, 20)]
+    plan.port_nets = ["vdd", "vss", "vref", "vout"]
+    script = A5E.layout_tcl("blk", plan, "/stage")
+    assert "label nbias " not in script
+    assert "port make" not in script
+
+
+def test_body_tap_contact_is_derived_from_tech_residues():
+    """The body tap must use the PDK's local-to-metal1 contact.
+
+    The Sky130 body label is on a device-contact layer, not on metal1.  A
+    guessed via stack leaves the extracted B terminals on ``d9/B``; this
+    control requires the producer to derive the bridge from the technology
+    contact table and to refuse the answer when that bridge is absent.
+    """
+    class Layers:
+        connects = {
+            "viali": ("locali", "metal1"),
+            "via1": ("metal1", "metal2"),
+        }
+        plane_of = {"locali": "locali", "metal1": "metal1",
+                    "metal2": "metal2"}
+        canon = {"li": "locali", "m1": "metal1"}
+        contact_heads = [("mcon", ("li", "m1"))]
+
+    class NoBridge:
+        connects = {"via1": ("metal1", "metal2")}
+        plane_of = Layers.plane_of
+
+    assert A5E.body_tap_contact_layer(Layers()) == "viali"
+    assert A5E.body_tap_metal_contact_layer(Layers()) == "mcon"
+    assert A5E.body_tap_local_layer(Layers()) == "locali"
+    assert A5E.body_tap_contact_layer(NoBridge()) is None
+    assert A5E.body_tap_metal_contact_layer(NoBridge()) is None
+    assert A5E.body_tap_local_layer(NoBridge()) is None
+
+
+def test_direct_m1_body_tap_uses_declared_ring_residue(tmp_path, monkeypatch):
+    """A gencell contact that already reaches Metal1 needs no bridge tile.
+
+    The fixture's ``nsc nsubdiff metal1`` declaration is the authority: the
+    ring contact itself carries the body to M1.  The producer must therefore
+    suppress the locali-to-M1 shortfall without naming that contact or
+    inventing a PDK-specific alias.  A missing M1 residue remains a real
+    shortfall (the negative assertion below).
+    """
+    layers = A5L.layer_identity(MAGIC_TECH, "MAGIC_TECH fixture")
+    cell = A5E.parse_cell(CHILD_MAG, layers)
+    ring = A5E.ring_layer_of(cell)
+    assert ring == "nsubdiffcont"
+    assert A5E.body_tap_direct_m1_layer(layers, ring) == ring
+
+    class MissingM1:
+        canon = {"ring": "ring", "active": "active", "locali": "locali"}
+        connects = {"ring": ("active", "locali")}
+        plane_of = {"ring": "active", "active": "active",
+                    "locali": "locali"}
+
+    assert A5E.body_tap_direct_m1_layer(MissingM1(), "ring") is None
+
+    project = _project(
+        tmp_path,
+        ".subckt blk d g s b\nxm1 d g s b xx_lv_nmos w=1u l=0.5u\n.ends\n",
+    )
+    rc, doc = _run(monkeypatch, project, FakeStage())
+    rep = doc["blocks"]["blk"]
+    assert rc == A5E.RC_OK, doc
+    assert rep["result"] == "OK", rep
+    assert rep["bulk_tap"]["examined"] == 1
+    assert not [d for d in rep["deviations"]
+                if d["quantity"] == "body_tap_contact_layer"]
+
+
 class FakeStage:
     """Stands in for the container, and records what was asked of it."""
 
