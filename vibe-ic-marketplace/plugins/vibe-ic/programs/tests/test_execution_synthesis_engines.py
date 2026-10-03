@@ -88,16 +88,19 @@ def test_tool_image_accepts_pinned_reference_but_returns_measured_image_id(monke
 
     import librelane_image_facts as image_facts
     monkeypatch.setattr(image_facts, "image_facts", lambda image: (
-        seen.append(image) or {"image_id": image_id, "librelane_version": "measured"}))
+        seen.append(image) or {"image": image, "image_id": image_id,
+                               "librelane_version": "measured"}))
 
     measured, facts, missing = production._tool_and_image(reference)
     assert seen == [reference]
     assert measured == image_id and facts["image_id"] == image_id and missing == []
 
-    wrong = "registry.invalid/tools@sha256:" + "2" * 64
-    measured, _, missing = production._tool_and_image(wrong)
-    assert measured == "UNMEASURED:measured_image_id"
-    assert missing == ["measured_image_id"]
+    monkeypatch.setattr(image_facts, "image_facts", lambda image: {
+        "image": "registry.invalid/other@sha256:" + "2" * 64,
+        "image_id": image_id, "librelane_version": "measured"})
+    measured, _, missing = production._tool_and_image(reference)
+    assert measured == "UNMEASURED:measured_image_reference"
+    assert missing == ["measured_image_reference"]
 
 
 def test_missing_tool_is_not_measured_even_with_a_real_image_digest(tmp_path, monkeypatch):

@@ -130,9 +130,8 @@ def _tool_and_image(image: object, project: Path | None = None) -> tuple[str, di
     image_text = str(image)
     import _eda_pin
     digest = _eda_pin.reference_digest(image_text)
-    expected_id = (image_text if re.fullmatch(r"sha256:[0-9a-f]{64}", image_text)
-                   else digest if digest else None)
-    if expected_id is None:
+    bare_id = image_text if re.fullmatch(r"sha256:[0-9a-f]{64}", image_text) else None
+    if bare_id is None and digest is None:
         missing.append("image_id")
         return "UNMEASURED:image_id", {}, missing
     try:
@@ -140,11 +139,16 @@ def _tool_and_image(image: object, project: Path | None = None) -> tuple[str, di
         measured = facts.image_facts(image_text)
     except Exception as exc:  # absent Docker/EDA is an honest NM arm
         return "UNMEASURED:image_facts", {}, ["image_facts:" + type(exc).__name__]
-    if not isinstance(measured, dict) or measured.get("image_id") != expected_id:
+    measured_id = measured.get("image_id") if isinstance(measured, dict) else None
+    if not isinstance(measured_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", measured_id):
         missing.append("measured_image_id")
+    elif bare_id is not None and measured_id != bare_id:
+        missing.append("measured_image_id")
+    elif digest is not None and measured.get("image") != image_text:
+        missing.append("measured_image_reference")
     if not measured.get("librelane_version"):
         missing.append("librelane_version")
-    return (expected_id if not missing else "UNMEASURED:" + ",".join(missing),
+    return (measured_id if not missing else "UNMEASURED:" + ",".join(missing),
             measured if isinstance(measured, dict) else {}, missing)
 
 
