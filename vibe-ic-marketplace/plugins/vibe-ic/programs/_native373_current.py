@@ -85,6 +85,8 @@ def read_current(project, record=None):
         _require(matches, "NATIVE373_EXECUTION_MISSING: " + step)
         run = matches[-1]
         argv = run["argv"]
+        if step == STEPS[-1]:
+            _require(current["execution"] == run, "NATIVE373_RECORDED_EXECUTION_CHANGED")
         _require(run["rc"] == 0 and argv[argv.index(doc["image"]) + 1] == "--skip"
                  and argv[argv.index("-c") + 1] == str(config_root / f"{step}.json")
                  and argv[argv.index("--pdk-root") + 1] == "/pdk",
