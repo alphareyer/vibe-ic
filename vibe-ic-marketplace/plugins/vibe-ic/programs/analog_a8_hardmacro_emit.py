@@ -691,15 +691,11 @@ def _native_measurement_produce(project: Path, block: str, container: str,
         headers = list(_SUBCKT_HEADER_RE.finditer(extracted_text))
         header = next((hit for hit in headers if hit.group(1) == block), None)
         if header is None:
-            # A post-layout netlist may use a producer-owned top-cell name;
-            # only a header whose ports equal the declared topology can be
-            # admitted as the block wrapper.  Never take the first device
-            # subckt merely because it appears first in the file.
-            declared = list(topology.get("ports") or [])
-            header = next((hit for hit in headers
-                           if (hit.group(2) or "").split() == declared), None)
-        if not header or not (header.group(2) or "").split():
-            return None, "extracted netlist has no non-empty .subckt port list"
+            return None, (f"extracted netlist has no exact declared top-cell "
+                          f".subckt {block!r}; aliases are not admissible")
+        if not (header.group(2) or "").split():
+            return None, (f"exact declared .subckt {block!r} has no non-empty "
+                          "port list")
         subckt = header.group(1)
         ports = (header.group(2) or "").split()
         if ports != list(topology.get("ports") or []):
@@ -915,11 +911,20 @@ def load_native_measurement(project: Path, block: str, gds: Path,
         return None, ("native_log has no ngspice pwr/idd result; a typed "
                       "value without its measured terminal-power receipt is "
                       "not admissible")
+    native_power_w: Optional[float] = None
+    if pwr_match is not None:
+        native_power_w = float(pwr_match.group(1))
     if idd_match is not None:
-        expected = abs(float(idd_match.group(1))) * 1.2
-        if not math.isclose(value, expected, rel_tol=1e-6, abs_tol=1e-18):
-            return None, ("measured value does not match native I(VDD) "
-                          "receipt")
+        idd_power_w = abs(float(idd_match.group(1))) * 1.2
+        if native_power_w is not None and not math.isclose(
+                native_power_w, idd_power_w, rel_tol=1e-6, abs_tol=1e-18):
+            return None, ("native pwr and I(VDD) receipts disagree")
+        native_power_w = idd_power_w
+    record_power_w = value / _POWER_TO_UW[unit]
+    if native_power_w is None or not math.isclose(
+            record_power_w, native_power_w, rel_tol=1e-6, abs_tol=1e-18):
+        return None, ("measured value does not match native pwr/ I(VDD) "
+                      "receipt")
 
     if str(rec.get("simulator") or "").lower().find("ngspice") < 0:
         return None, "native measurement does not identify ngspice"

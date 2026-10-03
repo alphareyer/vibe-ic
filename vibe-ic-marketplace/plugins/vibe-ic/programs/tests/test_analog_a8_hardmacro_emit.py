@@ -395,6 +395,42 @@ def test_stale_native_measurement_refuses(tmp_path: Path):
     assert got is None and "source_gds_sha256" in why
 
 
+def test_native_measurement_value_must_match_native_log(tmp_path: Path):
+    project, b, topo = _write_native_measurement_fixture(tmp_path, value=0.9)
+    got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
+    assert got is None and "does not match native" in why
+
+
+def test_extraction_requires_exact_declared_top_cell(tmp_path: Path,
+                                                    monkeypatch):
+    project, b, topo = _write_native_measurement_fixture(tmp_path)
+    monkeypatch.setattr(E, "layout_tech", lambda _b: "sky130A")
+    monkeypatch.setattr(E, "magicrc_for", lambda *a, **k: "/pdk/sky130A.magicrc")
+    monkeypatch.setattr(E, "_native_model_contract", lambda *a, **k: (
+        {"path": "/pdk/models.lib", "section": "mos_tt",
+         "sha256": "a" * 64}, ""))
+    monkeypatch.setattr(E, "_native_ngspice_binary",
+                        lambda *a, **k: ("/usr/bin/ngspice", ""))
+    monkeypatch.setattr(E, "_runtime_image_digest",
+                        lambda *a, **k: ("sha256:" + "b" * 64, ""))
+    monkeypatch.setattr(E._mx, "build_extraction_tcl",
+                        lambda *a, **k: "extract")
+
+    def fake_exec(container, cmd, timeout=900, *, marker=None, log_path=None):
+        if "magic" in cmd:
+            stage = b / ".a8_native_stage"
+            stage.mkdir(parents=True, exist_ok=True)
+            (stage / "blk_extracted.spice").write_text(
+                ".subckt wrong_block vdd vss vin vout\n.ends wrong_block\n")
+            return 0, "Cell wrong_block read from current working directory\n", ""
+        raise AssertionError("ngspice must not run after wrong top-cell refusal")
+
+    monkeypatch.setattr(E, "_docker_exec", fake_exec)
+    rec, why = E._native_measurement_produce(
+        project, "blk", "container", "/pdk", b / "blk.gds", topo)
+    assert rec is None and "exact declared top-cell" in why
+
+
 def test_nonpositive_native_measurement_refuses(tmp_path: Path):
     project, b, topo = _write_native_measurement_fixture(tmp_path, value=0.0)
     got, why = E.load_native_measurement(project, "blk", b / "blk.gds", topo)
