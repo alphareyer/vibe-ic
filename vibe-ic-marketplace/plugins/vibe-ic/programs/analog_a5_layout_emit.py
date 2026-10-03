@@ -320,9 +320,24 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
              ) -> Tuple[Optional[PdkFacts], str]:
     """Read every PDK fact this emitter needs, or say which file was
     unreadable. Never a default: a limit that cannot be read is ABSENT."""
-    gp = gencell_tcl or _lim.GENCELL_TCL.format(root=pdk_root, family=family)
-    dp = drc_tech or _lim.DRC_TECH.format(root=pdk_root, family=family)
-    tp = magic_tech or _lim.MAGIC_TECH.format(root=pdk_root, family=family)
+    def read_source(paths: Sequence[str]) -> Tuple[str, str, str]:
+        errors = []
+        for path in paths:
+            rc, text, err = stage.sh(f"cat {shlex.quote(path)}", timeout=120)
+            if rc == 0 and text.strip():
+                return path, text, ""
+            errors.append(f"{path}: {(err or text).strip()[:160]}")
+        return paths[0], "", "; ".join(errors)
+
+    gp_paths = ([gencell_tcl] if gencell_tcl else
+                _lim.pdk_file_candidates(pdk_root, family, "gencell"))
+    dp_paths = ([drc_tech] if drc_tech else
+                _lim.pdk_file_candidates(pdk_root, family, "drc"))
+    tp_paths = ([magic_tech] if magic_tech else
+                _lim.pdk_file_candidates(pdk_root, family, "magic"))
+    gp, gtext, gerr = read_source(gp_paths)
+    dp, dtext, derr = read_source(dp_paths)
+    tp, ttext, terr = read_source(tp_paths)
     tech_dir = str(Path(gp).parent)
 
     facts = PdkFacts()
@@ -330,22 +345,20 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
     facts.sources["drc_tech"] = dp
     facts.sources["magic_tech"] = tp
 
-    rc, out, err = stage.sh(f"cat {shlex.quote(gp)}", timeout=120)
-    if rc != 0 or not out.strip():
+    if not gtext:
         return None, (f"ENV_UNAVAILABLE: the PDK gencell definitions are "
-                      f"unreadable at {gp} ({(err or out).strip()[:160]}). "
+                      f"unreadable at {gp} ({gerr[:160]}). "
                       f"Device limits are DERIVED from the PDK; a limit this "
                       f"program cannot read is ABSENT, never a default.")
-    facts.mos_limits = _lim.fet_limits(out)
-    facts.gencells.update(_lim.gencell_defaults(out, gp))
+    facts.mos_limits = _lim.fet_limits(gtext)
+    facts.gencells.update(_lim.gencell_defaults(gtext, gp))
 
-    rc, out, err = stage.sh(f"cat {shlex.quote(dp)}", timeout=120)
-    if rc != 0 or not out.strip():
+    if not dtext:
         return None, (f"ENV_UNAVAILABLE: the PDK DRC deck is unreadable at "
-                      f"{dp} ({(err or out).strip()[:160]}). The Metal1 "
+                      f"{dp} ({derr[:160]}). The Metal1 "
                       f"spacing rule is DERIVED from it, never assumed.")
-    facts.m1_space_um = _lim.m1_space_um(out)
-    facts.deck = _lim.deck_rules(out)
+    facts.m1_space_um = _lim.m1_space_um(dtext)
+    facts.deck = _lim.deck_rules(dtext)
     if facts.m1_space_um is None:
         return None, (f"ENV_UNAVAILABLE: {dp} states no Metal1 minimum-space "
                       f"rule this program can read. The bulk-tap clearance "
@@ -357,15 +370,14 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
     # files above are: without it this emitter reads a TYPE NAME, and a PDK
     # that spells a capacitor's top plate `mimcapcontact` gets both of that
     # device's terminals painted onto its bottom plate.
-    rc, out, err = stage.sh(f"cat {shlex.quote(tp)}", timeout=120)
-    if rc != 0 or not out.strip():
+    if not ttext:
         return None, (f"ENV_UNAVAILABLE: the PDK technology file is "
-                      f"unreadable at {tp} ({(err or out).strip()[:160]}). "
+                      f"unreadable at {tp} ({terr[:160]}). "
                       f"Which conductor plane each drawn type occupies is "
                       f"DERIVED from it; reading the type's NAME instead is "
                       f"what shorts a capacitor whose plates are not spelled "
                       f"metalN.")
-    facts.layers = _lim.layer_identity(out, tp)
+    facts.layers = _lim.layer_identity(ttext, tp)
     if not facts.layers.plane_of:
         return None, (f"ENV_UNAVAILABLE: {tp} declares no `types` section "
                       f"this program can read, so no drawn type has a plane. "

@@ -76,6 +76,28 @@ DRC_TECH = "{root}/{family}/libs.tech/magic/{family}-drc.tech"
 MAGIC_TECH = "{root}/{family}/libs.tech/magic/{family}.tech"
 
 
+def pdk_file_candidates(root: str, family: str, kind: str) -> list[str]:
+    """Return the shipped PDK filenames for one A5 input, in priority order.
+
+    Older Magic PDKs split MOS gencells and the DRC deck into
+    ``<family>-fet.tcl``/``<family>-drc.tech``.  Ciel's current open PDKs use
+    the same technology files Magic sources: ``<family>.tcl`` and
+    ``<family>.tech``.  The caller still reads the actual file and refuses if
+    every candidate is absent; this is filename resolution, never a default
+    or a fabricated deck.
+    """
+    templates = {
+        "gencell": (GENCELL_TCL, "{root}/{family}/libs.tech/magic/{family}.tcl"),
+        "drc": (DRC_TECH, "{root}/{family}/libs.tech/magic/{family}.tech"),
+        "magic": (MAGIC_TECH,),
+    }
+    try:
+        selected = templates[kind]
+    except KeyError as exc:
+        raise ValueError(f"unknown A5 PDK input kind: {kind}") from exc
+    return [p.format(root=root, family=family) for p in selected]
+
+
 def _read(path: str, container: Optional[str]) -> Optional[str]:
     """Read a PDK file. It usually lives in the EDA image, not on the host."""
     if container:
