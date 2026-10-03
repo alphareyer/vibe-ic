@@ -1,0 +1,203 @@
+{
+  "block": "ldo_open",
+  "block_type": "ldo",
+  "_provenance": {
+    "schema": 1,
+    "producer": "analog_a3_netlist_emit",
+    "producer_fingerprint": "7db62e2fd178b02d",
+    "produced_at": "2026-10-03T01:05:48Z",
+    "rendered_from": {
+      "topology_json": {
+        "path": "phase3/analog/ldo_open/topology.json",
+        "sha256": "2c7d82b96611f10657d24fcaf6a33e47d6c7162e49526dac6d2f1243d40f6c2a"
+      },
+      "spec_json": {
+        "path": "phase3/analog/ldo_open/spec.json",
+        "sha256": "d880c51b22e84223c31681aa947246f5743f9fe08bb4cacd5668880b81f64878"
+      }
+    },
+    "has_own_netlist_template": false,
+    "run_ref": "2ba06d6e7b1e",
+    "provenance_ref": "2ba06d6e7b1e/phase3/analog/ldo_open/ldo_open.sp@ea8a58493569",
+    "content_sha256": "ea8a584935695fe37bd7b5697ff0845d42992de7b01968705fcbd52eca7a2ec7",
+    "artifact_sha256": "39e1aaac08167304ae0f31e811333e6563950393e6256d4352b6ba159f0d1622",
+    "testbench_content_sha256": "07cc5b5b43461283a2b1740723eb414f7df3e135c9ec4abff84534c19e77ba83",
+    "content_digest_definition": "sha256 over the artefact with every `* _provenance:` line removed — the design content, not the run. Stable across runs of the same inputs; the `sha256=` values under rendered_from are NOT, because their subjects embed a timestamp and an absolute path.",
+    "design_content": "structure_only",
+    "design_content_meaning": "structure_only — the circuit class came from the topology library and NO bound spec value reached any device parameter; the geometry below is a library nominal. The netlist exists because a spec IS bound for this block (see fields_bound), but it is not sized to it.",
+    "fields_bound": [
+      "dropout",
+      "dropout_max",
+      "iout",
+      "iout_max",
+      "iout_min",
+      "iq",
+      "iq_max",
+      "psrr",
+      "psrr_min",
+      "vin",
+      "vin_max",
+      "vin_min",
+      "vout",
+      "vout_max",
+      "vout_min"
+    ],
+    "fields_defaulted": [
+      "divider_ratio"
+    ],
+    "defaults_used": true,
+    "spec_bound_params": [],
+    "library_nominal_params": [
+      "cc.l",
+      "cc.w",
+      "mn1.l",
+      "mn1.w",
+      "mn2.l",
+      "mn2.w",
+      "mn_bias.l",
+      "mn_bias.w",
+      "mn_tail.l",
+      "mn_tail.w",
+      "mp1.l",
+      "mp1.w",
+      "mp2.l",
+      "mp2.w",
+      "mp_pass.l",
+      "mp_pass.m",
+      "mp_pass.w",
+      "r1.l",
+      "r1.w",
+      "r2.l",
+      "r2.w",
+      "r_bias.l",
+      "r_bias.w"
+    ],
+    "ai_handoff": {
+      "track": "skill",
+      "skill": "analog-sizing",
+      "reason": "23 device parameter(s) carry the topology library's nominal value because no bound spec value determines them; solving them against the spec is sizing judgment",
+      "scope": "device_geometry",
+      "unsized_params": [
+        "cc.l",
+        "cc.w",
+        "mn1.l",
+        "mn1.w",
+        "mn2.l",
+        "mn2.w",
+        "mn_bias.l",
+        "mn_bias.w",
+        "mn_tail.l",
+        "mn_tail.w",
+        "mp1.l",
+        "mp1.w",
+        "mp2.l",
+        "mp2.w",
+        "mp_pass.l",
+        "mp_pass.m",
+        "mp_pass.w",
+        "r1.l",
+        "r1.w",
+        "r2.l",
+        "r2.w",
+        "r_bias.l",
+        "r_bias.w"
+      ]
+    },
+    "limits": "the STRUCTURE is the topology library's circuit class and the bound spec values entered only the parameters listed in spec_bound_params; every other geometry is a library nominal, not a solution of this design's spec."
+  },
+  "pdk": {
+    "family": "sky130A",
+    "registry_family": "sky130A",
+    "model_lib": "/foss/pdks/sky130A/libs.tech/ngspice/sky130.lib.spice",
+    "typ_section": "tt",
+    "corner_sections": [
+      "ss",
+      "tt",
+      "ff"
+    ],
+    "role_models": {
+      "cap": "sky130_fd_pr__cap_mim_m3_1",
+      "nmos": "sky130_fd_pr__nfet_01v8",
+      "pmos": "sky130_fd_pr__pfet_01v8",
+      "res": "sky130_fd_pr__res_high_po_0p35"
+    },
+    "role_model_election": {
+      "bound_by": {
+        "cap": "registry",
+        "nmos": "deck_context",
+        "pmos": "deck_context",
+        "res": "registry"
+      },
+      "deck_context": {
+        "scope": "known-family-table",
+        "roles": {
+          "nmos": {
+            "elected": "sky130_fd_pr__nfet_01v8",
+            "basis": "known-family-table",
+            "rejected": [],
+            "voltage_domains": []
+          },
+          "pmos": {
+            "elected": "sky130_fd_pr__pfet_01v8",
+            "basis": "known-family-table",
+            "rejected": [],
+            "voltage_domains": []
+          }
+        },
+        "multi_domain_roles": [],
+        "domain_scope": "chip-global",
+        "domain": null
+      },
+      "domain": {
+        "volts": 2.0,
+        "elevated": false
+      }
+    }
+  },
+  "testbench": {
+    "path": "tb_ldo_open.sp",
+    "conditions": [
+      "supply = vin = 1.8 V",
+      "vref = vout / divider_ratio = 0.6",
+      "poweron_sequence=not applied: no_transient",
+      "vector_retention=not applied: no_transient"
+    ]
+  },
+  "verification": {
+    "checkers": [
+      {
+        "checker": "a3_gate",
+        "rc": 0,
+        "detail": "PASS_STRUCTURE_ONLY: analog_a3_netlist_gen_check — 1/1 block(s) clean\nSTRUCTURE_ONLY: 1 <block>.sp artefact(s) (ldo_open) came from a library default, not a bound input [analog_a3_netlist_gen_check]"
+      },
+      {
+        "checker": "pdk",
+        "rc": 0,
+        "detail": "device models but L19.fields.pdk_target is not declared — the #438b PDK-mismatch gate cannot compare; populate L19 (Phase 1 extracts it from the input docs since #451) or declare the target explicitly"
+      },
+      {
+        "checker": "connectivity",
+        "rc": 0,
+        "detail": "[PASS] analog_netlist_connectivity_check"
+      },
+      {
+        "checker": "include_order",
+        "rc": 0,
+        "detail": "[PASS] analog_netlist_include_order_check: examined 2 SPICE netlist deck(s) (*.sp) read and put through the model-include ordering rule"
+      },
+      {
+        "checker": "path_lint",
+        "rc": 0,
+        "detail": "[PASS] analog_netlist_path_lint: examined 2 SPICE netlist deck(s) (*.sp) read and put through the absolute-path rule"
+      }
+    ],
+    "simulation": {
+      "simulation_verified": false,
+      "simulation_status": "NOT_ATTEMPTED"
+    }
+  },
+  "outputs": [
+    "ldo_open.sp",
+    "tb_ldo_open.sp"
+  ]
+}

@@ -62,6 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import magic_extract_spice_emit as _mx  # noqa: E402 — ordinary A7 extraction producer
+import _analog_a8_extraction_wrapper as _aw  # noqa: E402
 from _analog_a_check_common import (  # noqa: E402
     DESIGN_CONTENT_FIELD, content_disclosed, load_block_list,
 )
@@ -480,7 +481,6 @@ _POWER_TO_W = {unit: factor * 1e-6
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 _MAG_USE_RE = re.compile(r"(?im)^\s*use\s+(\S+)")
-_SUBCKT_HEADER_RE = re.compile(r"(?im)^\s*\.subckt\s+(\S+)(?:\s+([^\n]*))?")
 
 
 def _runtime_image_digest(container: str) -> Tuple[Optional[str], str]:
@@ -631,6 +631,44 @@ def _stage_layout_subtree(layout: Path, stage: Path, block: str) -> Tuple[bool, 
     return True, f"staged top {block}.mag and {len(seen)} referenced child cell(s)"
 
 
+def _extraction_wrapper_contract(project: Path, block: str, extracted: Path,
+                                 topology: Dict) -> Tuple[Dict, str]:
+    """Reconstruct from current raw/A3 bytes, in both producer and consumer."""
+    bdir = project / "phase3" / "analog" / block
+    binding, why = _declared_a3_subject_binding(project, block, bdir, topology)
+    if binding is None:
+        raise ValueError(f"current A3 subject required for wrapper: {why}")
+    declared = list(topology.get("ports") or [])
+    a3_ports = _aw.native_ports((bdir / f"{block}.sp").read_text(), block)
+    if a3_ports != declared:
+        raise ValueError("current A3 netlist ports do not equal topology ports")
+    text, interface = _aw.build_wrapper(extracted.read_text(), block, declared)
+    path = bdir / "a8_extraction_wrapper.spice"
+    if path.resolve() == extracted.resolve():
+        raise ValueError("wrapper cannot replace raw native extraction")
+    return {"path": str(path.relative_to(project)),
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            **interface, "subject_binding": binding}, text
+
+
+def _measurement_deck_text(extracted: Path, ports: List[str], subckt: str,
+                           model_path: str, model_section: str,
+                           wrapper: Optional[Path] = None) -> str:
+    if not isinstance(model_path, str) or not model_path or not isinstance(
+            model_section, str) or not re.fullmatch(r"[\w.+-]+", model_section):
+        raise ValueError("measurement deck has no explicit PDK model/section")
+    includes = [f".include {json.dumps(str(extracted))}"]
+    if wrapper is not None:
+        includes.append(f".include {json.dumps(str(wrapper))}")
+    return "\n".join([
+        "* A8 ordinary producer native measurement deck.",
+        f".lib {json.dumps(model_path)} {model_section}", *includes,
+        "VDD vdd 0 1.2", "VSS vss 0 0", "VIN vin 0 0.6",
+        "RLOAD vout 0 1meg", f"XU {' '.join(ports)} {subckt}",
+        ".control", "set noaskquit", "op", "let pwr = abs(i(VDD))*1.2",
+        "print pwr", "quit", ".endc", ".end", ""])
+
+
 def _native_measurement_produce(project: Path, block: str, container: str,
                                 pdk_root: str, gds: Path,
                                 topology: Dict[str, object]
@@ -693,51 +731,45 @@ def _native_measurement_produce(project: Path, block: str, container: str,
             return None, f"cannot publish extracted netlist: {exc}"
 
         extracted_text = extracted.read_text(errors="replace")
-        headers = list(_SUBCKT_HEADER_RE.finditer(extracted_text))
-        header = next((hit for hit in headers if hit.group(1) == block), None)
-        if header is None:
-            return None, (f"extracted netlist has no exact declared top-cell "
-                          f".subckt {block!r}; aliases are not admissible")
-        if not (header.group(2) or "").split():
-            return None, (f"exact declared .subckt {block!r} has no non-empty "
-                          "port list")
-        subckt = header.group(1)
-        ports = (header.group(2) or "").split()
-        if ports != list(topology.get("ports") or []):
-            return None, (f"extracted .subckt ports {ports!r} do not match "
-                          f"topology ports {list(topology.get('ports') or [])!r}")
+        ports = _aw.native_ports(extracted_text, block)
+        declared = list(topology.get("ports") or [])
+        wrapper_contract = None
+        wrapper_path = None
+        subckt = block
+        if ports != declared:
+            wrapper_contract, wrapper_text = _extraction_wrapper_contract(
+                project, block, extracted, topology)
+            wrapper_path = project / wrapper_contract["path"]
+            wrapper_path.write_text(wrapper_text)
+            ports = declared
+            subckt = wrapper_contract["wrapper_subckt"]
 
         model_path = model["path"]
         model_section = model["section"]
-        deck.write_text("\n".join([
-            "* A8 ordinary producer native measurement deck.",
-            f".lib {json.dumps(model_path)} {model_section}",
-            f".include {json.dumps(str(extracted))}",
-            "VDD vdd 0 1.2",
-            "VSS vss 0 0",
-            "VIN vin 0 0.6",
-            "RLOAD vout 0 1meg",
-            f"XU {' '.join(ports)} {subckt}",
-            ".control",
-            "set noaskquit",
-            # Evaluate the operating point in the control language, where
-            # i(VDD) is a native vector.  The .meas FIND/AVG forms reject a
-            # one-point sweep in ngspice-47, while this emits the same
-            # source-bound power scalar directly from the solved circuit.
-            "op",
-            "let pwr = abs(i(VDD))*1.2",
-            "print pwr",
-            "quit",
-            ".endc",
-            ".end",
-            "",
-        ]))
+        deck.write_text(_measurement_deck_text(
+            extracted, ports, subckt, model_path, model_section, wrapper_path))
+        # Freeze the files actually consumed. Refuse any mutation during the
+        # native call, rather than stamping its result with post-call inputs.
+        consumed = [extracted, layout, gds, deck]
+        if wrapper_path is not None:
+            consumed.append(wrapper_path)
+        frozen = {p: _sha256(p) for p in consumed}
         ngspice_rc, ng_out, ng_err = _docker_exec(
             container,
             f"cd {shlex.quote(str(Path(model_path).parent))} && "
             f"{shlex.quote(ngspice_bin)} -b -o "
             f"{shlex.quote(str(ng_log))} {shlex.quote(str(deck))}",
             marker="a8_native_measurement.sp")
+        if any(_sha256(p) != digest for p, digest in frozen.items()):
+            return None, "native measurement input group changed during ngspice"
+        if wrapper_contract is not None:
+            try:
+                current_contract, _ = _extraction_wrapper_contract(
+                    project, block, extracted, topology)
+            except ValueError as exc:
+                return None, f"current A3/wrapper subject changed during ngspice: {exc}"
+            if current_contract != wrapper_contract:
+                return None, "current A3/wrapper subject changed during ngspice"
         if not ng_log.is_file():
             ng_log.write_text((ng_out or "") + (ng_err or ""))
         log_text = ng_log.read_text(errors="replace")
@@ -782,6 +814,12 @@ def _native_measurement_produce(project: Path, block: str, container: str,
             "image_digest": image_digest,
             "declared_ports": list(topology.get("ports") or []),
         }
+        if wrapper_contract is not None:
+            rec["extraction_wrapper"] = wrapper_contract
+            rec["measurement_deck"] = str(deck.relative_to(project))
+            rec["measurement_deck_sha256"] = frozen[deck]
+            rec["subject_binding"] = wrapper_contract["subject_binding"]
+            rec[DESIGN_CONTENT_FIELD] = rec["subject_binding"][DESIGN_CONTENT_FIELD]
         write_json(bdir / _A8_MEASUREMENT, rec)
         return rec, ""
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -1027,16 +1065,44 @@ def load_native_measurement(project: Path, block: str, gds: Path,
             if source_netlist_path is not None else ""
     except OSError as exc:
         return None, f"source_netlist is unreadable: {exc}"
-    header = next((hit for hit in _SUBCKT_HEADER_RE.finditer(extracted_text)
-                   if hit.group(1) == block), None)
-    if header is None:
-        return None, (f"source_netlist has no exact declared top-cell "
-                      f".subckt {block!r}; aliases are not admissible")
-    extracted_ports = (header.group(2) or "").split()
-    if extracted_ports != list(topology.get("ports") or []):
-        return None, (f"source_netlist .subckt {block!r} ports "
-                      f"{extracted_ports!r} do not match topology ports "
-                      f"{list(topology.get('ports') or [])!r}")
+    try:
+        extracted_ports = _aw.native_ports(extracted_text, block)
+        wrapper = rec.get("extraction_wrapper")
+        if "extraction_wrapper" in rec:
+            expected, text = _extraction_wrapper_contract(
+                project, block, source_netlist_path, topology)
+            if wrapper != expected:
+                return None, "extraction_wrapper mapping/current A3 subject is stale"
+            path, why = _project_file(project, expected["path"], field="extraction_wrapper")
+            if path is None:
+                return None, why
+            if path.read_bytes() != text.encode() or _sha256(path) != expected["sha256"]:
+                return None, "extraction_wrapper bytes/hash do not match positional map"
+            if (rec.get("subject_binding") != expected["subject_binding"] or
+                    rec.get(DESIGN_CONTENT_FIELD) != expected["subject_binding"][DESIGN_CONTENT_FIELD]):
+                return None, "wrapped measurement lacks current A3 subject binding"
+            deck, why = _project_file(project, rec.get("measurement_deck"), field="measurement_deck")
+            if deck is None:
+                return None, why
+            if deck != (bdir / "a8_native_measurement.sp").resolve():
+                return None, "measurement_deck is not the ordinary A8 deck"
+            wanted = _measurement_deck_text(
+                source_netlist_path, list(topology.get("ports") or []),
+                expected["wrapper_subckt"], rec.get("model_source"),
+                rec.get("model_section"), path)
+            if (deck.read_bytes() != wanted.encode() or
+                    _sha256(deck) != rec.get("measurement_deck_sha256")):
+                return None, "measurement_deck bypasses raw/wrapper group or is stale"
+            if _sha256(source_netlist_path) != rec["source_netlist_sha256"]:
+                return None, "raw native extraction changed while reading wrapper group"
+        elif extracted_ports != list(topology.get("ports") or []):
+            return None, (f"source_netlist .subckt {block!r} ports "
+                          f"{extracted_ports!r} do not match topology ports; "
+                          "expanded extraction requires a bound wrapper")
+        elif "measurement_deck" in rec or "measurement_deck_sha256" in rec:
+            return None, "measurement deck without extraction_wrapper group"
+    except (OSError, ValueError, TypeError) as exc:
+        return None, f"native extraction/wrapper group refused: {exc}"
 
     # The digest proves which log was consumed; this small semantic check
     # proves it is an ngspice measurement log rather than an arbitrary
@@ -1218,6 +1284,9 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
             "image_digest": measurement["image_digest"],
         },
     }
+    for key in ("extraction_wrapper", "measurement_deck", "measurement_deck_sha256"):
+        if key in measurement:
+            manifest["native_measurement"][key] = measurement[key]
     if DESIGN_CONTENT_FIELD in measurement:
         manifest["native_measurement"][DESIGN_CONTENT_FIELD] = \
             measurement[DESIGN_CONTENT_FIELD]
