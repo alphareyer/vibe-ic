@@ -253,4 +253,3 @@ def test_real_declared_row_gate_consumes_the_current_report(tmp_path, monkeypatc
     (folder / 'invocation.log').unlink()
     clause = FC._check_program_exit_zero(p, command)
     assert clause[0] is False, clause
-

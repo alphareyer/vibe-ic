@@ -41,4 +41,3 @@ def test_ordinary_aggregation_and_its_gate_bind_both_current_products(tmp_path, 
         doc['measured'] += 1
         BF.put(report, doc)
     assert AGG.main([str(tmp_path), '--check']) == (0 if mutation == 'none' else 1)
-
