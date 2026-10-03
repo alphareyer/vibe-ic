@@ -263,6 +263,42 @@ def test_body_tap_contact_is_derived_from_tech_residues():
     assert A5E.body_tap_local_layer(NoBridge()) is None
 
 
+def test_direct_m1_body_tap_uses_declared_ring_residue(tmp_path, monkeypatch):
+    """A gencell contact that already reaches Metal1 needs no bridge tile.
+
+    The fixture's ``nsc nsubdiff metal1`` declaration is the authority: the
+    ring contact itself carries the body to M1.  The producer must therefore
+    suppress the locali-to-M1 shortfall without naming that contact or
+    inventing a PDK-specific alias.  A missing M1 residue remains a real
+    shortfall (the negative assertion below).
+    """
+    layers = A5L.layer_identity(MAGIC_TECH, "MAGIC_TECH fixture")
+    cell = A5E.parse_cell(CHILD_MAG, layers)
+    ring = A5E.ring_layer_of(cell)
+    assert ring == "nsubdiffcont"
+    assert A5E.body_tap_direct_m1_layer(layers, ring) == ring
+
+    class MissingM1:
+        canon = {"ring": "ring", "active": "active", "locali": "locali"}
+        connects = {"ring": ("active", "locali")}
+        plane_of = {"ring": "active", "active": "active",
+                    "locali": "locali"}
+
+    assert A5E.body_tap_direct_m1_layer(MissingM1(), "ring") is None
+
+    project = _project(
+        tmp_path,
+        ".subckt blk d g s b\nxm1 d g s b xx_lv_nmos w=1u l=0.5u\n.ends\n",
+    )
+    rc, doc = _run(monkeypatch, project, FakeStage())
+    rep = doc["blocks"]["blk"]
+    assert rc == A5E.RC_OK, doc
+    assert rep["result"] == "OK", rep
+    assert rep["bulk_tap"]["examined"] == 1
+    assert not [d for d in rep["deviations"]
+                if d["quantity"] == "body_tap_contact_layer"]
+
+
 class FakeStage:
     """Stands in for the container, and records what was asked of it."""
 

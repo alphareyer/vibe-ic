@@ -996,6 +996,30 @@ def body_tap_local_layer(layers) -> Optional[str]:
     return None
 
 
+def body_tap_direct_m1_layer(layers, ring_layer) -> Optional[str]:
+    """Return a body-ring contact that already reaches Metal1.
+
+    Some Magic technologies put the body contact directly between a device
+    electrode (for example, diffusion) and ``metal1``.  Such a gencell needs
+    no separate local-interconnect-to-M1 bridge.  This answer is derived from
+    the loaded technology's canonical contact table and the ring layer found
+    in the child cell; no contact or PDK alias is named here.
+    """
+    if layers is None or not ring_layer:
+        return None
+    ring = layers.canon.get(ring_layer, ring_layer)
+    residues = layers.connects.get(ring)
+    if not residues:
+        return None
+    ring_plane = layers.plane_of.get(ring)
+    planes = {layers.plane_of.get(layers.canon.get(r, r))
+              for r in residues}
+    if (ring_plane and not _lim._PLANE_LEVEL_RE.match(ring_plane)
+            and "metal1" in planes):
+        return ring
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 5. the bulk tap — I3, the search that must cover the whole structure
 # ──────────────────────────────────────────────────────────────────────
@@ -2171,7 +2195,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                              "every position on the guard ring lies in the "
                              "escape band of another terminal row; the tap "
                              "is drawn at the clearest of them")
-            if body_tap_contact is None:
+            direct_m1 = body_tap_direct_m1_layer(facts.layers, ring)
+            dev_body_tap_contact = None if direct_m1 else body_tap_contact
+            if dev_body_tap_contact is None and direct_m1 is None:
                 plan.deviate(
                     dev, "body_tap_contact_layer", 1, 0,
                     "the loaded Magic technology declares no contact joining "
@@ -2181,9 +2207,13 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                            "escape_y": ty, "strapped": False,
                            "labels": [{"x": tx, "y": ty, "level": 1,
                                        "name": "tap"}],
-                           "body_tap_contact": body_tap_contact,
-                           "body_tap_metal_contact": body_tap_metal_contact,
-                           "body_tap_local": body_tap_local,
+                           "body_tap_contact": dev_body_tap_contact,
+                           "body_tap_metal_contact": (None
+                                                       if direct_m1
+                                                       else body_tap_metal_contact),
+                           "body_tap_local": (None if direct_m1
+                                               else body_tap_local),
+                           "body_tap_direct_m1": direct_m1,
                            "level": 1})
 
         # two groups escaping at one height take opposite sides, so their
