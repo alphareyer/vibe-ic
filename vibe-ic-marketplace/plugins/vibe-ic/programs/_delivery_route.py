@@ -13,6 +13,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 from datetime import date
 from pathlib import Path
+import hashlib
+import subprocess
 from typing import Optional
 
 import _atomic_artefact as _aa
@@ -21,6 +23,16 @@ import _tapeout_declaration as _td
 
 
 ROUTES = {"ic": _td.DELIVERABLE_DIE, "ip": _td.DELIVERABLE_HARDMACRO}
+
+
+def issue_typed_receipt(project, route, **_unused):
+    """Consume the immutable route issued by the isolated canonical entry."""
+    from execution_authority import consume
+    from execution_modes import Refusal
+    receipt = consume()['route']
+    if receipt['project'] != str(Path(project).resolve()) or receipt['route'] != route:
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'project/route does not match live issuer')
+    return receipt
 
 
 def _disclose_undeclared(reason: str, doc: object) -> str:

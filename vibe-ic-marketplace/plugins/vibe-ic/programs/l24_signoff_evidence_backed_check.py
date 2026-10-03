@@ -876,7 +876,10 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             where_looked = (f"searched reports/ excluding reports/audit for "
                             f"{'/'.join(_signoff_tokens(check))}")
         measured = [(p, v) for p, v in found
-                    if v is not None and v not in _ABSENT_VERDICTS]
+                    if v is not None and v not in _ABSENT_VERDICTS
+                    # The XOR producer explicitly uses NOT_DETERMINED when
+                    # it could not compare. That receipt supplies no reading.
+                    and not (check == "GDS_XOR" and v == "not_determined")]
         # FX_P2 review: the SAME dating `_phase3_has_run` applies. A phase-3
         # record older than this run's phase-2 netlist measured a netlist that
         # no longer exists, so its PASS backs nothing here -- it is read as

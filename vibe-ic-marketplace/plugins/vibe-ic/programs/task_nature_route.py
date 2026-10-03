@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_right
+import hashlib
 import json
 import bisect
 import re
@@ -216,6 +217,201 @@ DELIVERY_TARGETS: Dict[str, Dict[str, Any]] = {
         "note": "only in scope when the run is actually shipping to a foundry",
     },
 }
+
+# Prompt-derived delivery is a deterministic lower bound.  It is deliberately
+# a small vocabulary of explicit delivery phrases: category, mode and benchmark
+# metadata never select a physical route, and vague prose must not silently
+# upgrade or downgrade a run.
+PROMPT_DELIVERY_REQUIREMENTS_SCHEMA = "vibeic.prompt_delivery_requirements.v1"
+PROMPT_DELIVERY_RULES_VERSION = "r5"
+_DELIVERY_ORDER = {
+    "rtl": 0,
+    "gds": 1,
+    "shippable_gds": 2,
+    "foundry_handoff": 3,
+}
+_PROMPT_DELIVERY_PATTERNS = (
+    ("foundry_handoff", re.compile(
+        r"\b(?:foundry\s+handoff|hand\s*off\s+to\s+(?:the\s+)?foundry)\b", re.I)),
+    ("shippable_gds", re.compile(
+        r"\b(?:shippable\s+gds|tape[- ]?out\s+precheck|tape[- ]?out\s+ready\s+gds)\b", re.I)),
+    ("gds", re.compile(
+        r"\b(?:stream[- ]?out\s+gds(?:ii)?|produce\s+(?:a\s+)?gds(?:ii)?|"
+        r"deliver\s+(?:a\s+)?gds(?:ii)?|gds(?:ii)?\s+delivery|"
+        r"generate\s+gds(?:ii)?|as\s+gds(?:ii)?)\b", re.I)),
+)
+_DIE_ROUTE = re.compile(
+    r"\b(?:die|chip|integrated\s+circuit|ic|tape[- ]?out|shuttle|gdsii?)\b",
+    re.I)
+_HARDMACRO_ROUTE = re.compile(
+    r"\b(?:ip\s+(?:hard[- ]?macro|path|deliverable|block)|"
+    r"hard[- ]?macro|macro\s+deliverable)\b", re.I)
+# Requested objects are independent of component and later use-site nouns.
+_DIE_OBJECT = r"(?:die|chip|ic|integrated\s+circuit)"
+_IP_OBJECT = r"(?:ip\s+)?hard[- ]?macro"
+_REQUESTED_DIE = re.compile(
+    r"\b(?:design|build|create|deliver|produce|complete|output(?:\s+is)?)\s+"
+    r"(?:(?:a|an|the)\s+)?(?:(?:complete|whole|full|standalone)\s+)?"
+    + _DIE_OBJECT + r"\b", re.I)
+_REQUESTED_IP = re.compile(
+    r"\b(?:deliver|produce|output(?:\s+is)?)\s+"
+    r"(?:(?:a|an|the|separate)\s+)*(?:standalone\s+)?"
+    + _IP_OBJECT + r"\b", re.I)
+_STANDALONE_IP = re.compile(r"\bstandalone\s+" + _IP_OBJECT + r"\b", re.I)
+_CHIP_CONTAINMENT = re.compile(
+    _DIE_OBJECT + r"\b[^.;]*\b(?:contain(?:s|ing)?|incorporat(?:e|es|ing)|"
+    r"includ(?:e|es|ing))\b[^.;]*" + _IP_OBJECT, re.I)
+_CHIP_INTEGRATION = re.compile(
+    r"\b(?:integrat(?:e|ed|ing)|inside|within|into)\b[^.;]*"
+    + _DIE_OBJECT + r"\b", re.I)
+
+
+def _delivered_object_families(text: str) -> list[str]:
+    """Conservative object selection; unresolved physical choices are blocking."""
+    text = " ".join(text.split())
+    hardmacro = bool(_HARDMACRO_ROUTE.search(text))
+    die = bool(_REQUESTED_DIE.search(text))
+    ip = bool(_REQUESTED_IP.search(text))
+    standalone = bool(_STANDALONE_IP.search(text))
+    if hardmacro and re.search(r"\b(?:either|not\s+(?:yet\s+)?chosen|"
+                              r"has\s+not\s+chosen)\b", text, re.I):
+        return ["DIE", "HARDMACRO"]
+    if hardmacro and re.search(
+            r"\b(?:chip|die|ic)\b[^.;]*\bor\b[^.;]*hard[- ]?macro|"
+            r"hard[- ]?macro\b[^.;]*\bor\b[^.;]*\b(?:chip|die|ic)\b",
+            text, re.I):
+        return ["DIE", "HARDMACRO"]
+    if die:
+        # A separately requested block is a second delivered object. A block
+        # nested in the requested chip does not select a second route.
+        if ip or re.search(r"\b(?:and\s+a\s+separate|separately\s+deliver)\b",
+                           text, re.I) and standalone:
+            return ["DIE", "HARDMACRO"]
+        return ["DIE"]
+    if standalone or ip:
+        return ["HARDMACRO"]
+    if hardmacro:
+        if _CHIP_CONTAINMENT.search(text) or _CHIP_INTEGRATION.search(text):
+            return ["DIE"]
+        # GDS, LEF and Liberty describe block views, not a host chip. A bare
+        # host noun without an object/use-site relationship stays unresolved.
+        if re.search(r"\b" + _DIE_OBJECT + r"\b", text, re.I):
+            return ["DIE", "HARDMACRO"]
+        return ["HARDMACRO"]
+    return ["DIE"] if _DIE_ROUTE.search(text) else []
+
+
+def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
+    """Derive an immutable delivery floor from explicit user prompt language."""
+    text = str(prompt or "")
+    route_hits = _delivered_object_families(text)
+    matches = []
+    for target, rx in _PROMPT_DELIVERY_PATTERNS:
+        hit = rx.search(text)
+        if hit:
+            matches.append({"target": target, "excerpt": hit.group(0)})
+    route_family = None
+    status = "UNSPECIFIED"
+    minimum_target = None
+    reasons = []
+    if len(set(route_hits)) > 1:
+        status = "CONFLICT"
+        reasons.append("prompt names both DIE and HARDMACRO delivery")
+    elif route_hits:
+        route_family = route_hits[0]
+        status = "EXPLICIT_ROUTE"
+    if matches:
+        strongest = max(matches, key=lambda row: _DELIVERY_ORDER[row["target"]])
+        minimum_target = strongest["target"]
+        if status == "UNSPECIFIED":
+            status = "DELIVERY_ONLY"
+        if route_family == "HARDMACRO":
+            # GDS/GDSII and similar tokens are valid hardmacro view names.
+            # The family decision above already separated them from DIE.
+            pass
+        elif route_family == "DIE" and minimum_target == "ip_hardmacro":
+            status = "CONFLICT"
+            reasons.append("DIE prompt cannot request an IP delivery target")
+    if route_family == "HARDMACRO":
+        minimum_target = "ip_hardmacro"
+    elif route_family == "DIE" and not minimum_target:
+        # "for tapeout" is an owner-visible shippability request even when it
+        # does not repeat the words GDS or precheck.
+        if re.search(r"\btape[- ]?out\b", text, re.I):
+            minimum_target = "shippable_gds"
+    payload = {
+        "schema": PROMPT_DELIVERY_REQUIREMENTS_SCHEMA,
+        "rules_version": PROMPT_DELIVERY_RULES_VERSION,
+        "prompt_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "status": status,
+        "route_family": route_family,
+        "minimum_target": minimum_target,
+        "evidence": matches,
+        "reasons": reasons,
+    }
+    payload["requirements_sha256"] = hashlib.sha256(json.dumps(
+        {k: v for k, v in payload.items() if k != "requirements_sha256"},
+        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return payload
+
+
+def resolve_prompt_delivery_target(requirements: Dict[str, Any],
+                                   requested_target: Optional[str]) -> Dict[str, Any]:
+    """Resolve an AI target without permitting a prompt-bound downgrade/flip."""
+    if not isinstance(requirements, dict):
+        return {"ok": False, "reason": "prompt delivery requirements missing"}
+    if requirements.get("schema") != PROMPT_DELIVERY_REQUIREMENTS_SCHEMA:
+        return {"ok": False, "reason": "prompt delivery requirements schema invalid"}
+    if requirements.get("rules_version") != PROMPT_DELIVERY_RULES_VERSION:
+        return {"ok": False, "reason": "prompt delivery requirements rules version invalid"}
+    if requirements.get("requirements_sha256") != hashlib.sha256(json.dumps(
+            {k: v for k, v in requirements.items() if k != "requirements_sha256"},
+            sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest():
+        return {"ok": False, "reason": "prompt delivery requirements digest invalid"}
+    if requirements.get("status") == "CONFLICT":
+        return {"ok": False, "reason": "prompt delivery requirements conflict"}
+    target = requested_target
+    if target is not None and not isinstance(target, str):
+        return {"ok": False, "reason": "delivery_target must be a string"}
+    if target is not None and target not in DELIVERY_TARGETS:
+        return {"ok": False, "reason": "delivery_target is not a product target"}
+    family = requirements.get("route_family")
+    minimum = requirements.get("minimum_target")
+    if family == "HARDMACRO":
+        if target is not None and target != "ip_hardmacro":
+            return {"ok": False, "reason": "AI target flips HARDMACRO to a DIE route"}
+        return {"ok": True, "target": "ip_hardmacro", "route_family": "HARDMACRO",
+                "source": "prompt_derived" if target is None else "ai_compatible"}
+    if family == "DIE" and target == "ip_hardmacro":
+        return {"ok": False, "reason": "AI target flips DIE to an IP route"}
+    if minimum is not None:
+        if minimum not in _DELIVERY_ORDER:
+            return {"ok": False, "reason": "prompt delivery floor is invalid"}
+        if target is None:
+            target = minimum
+            source = "prompt_derived"
+        elif target != "ip_hardmacro" and _DELIVERY_ORDER[target] < _DELIVERY_ORDER[minimum]:
+            return {"ok": False, "reason": "AI target downgrades prompt delivery floor"}
+        else:
+            source = "ai_compatible"
+    else:
+        target = target or "rtl"
+        if requested_target is not None and target != "rtl":
+            return {"ok": False,
+                    "reason": "physical delivery requires owner-visible prompt evidence"}
+        source = "ai_compatible" if requested_target is not None else "default"
+    if family == "DIE" and target == "ip_hardmacro":
+        return {"ok": False, "reason": "AI target flips DIE to an IP route"}
+    return {"ok": True, "target": target,
+            "route_family": family or ("DIE" if target in _DELIVERY_ORDER and target != "rtl" else None),
+            "source": source}
+
+
+def delivery_route_for_target(target: str, route_family: Optional[str] = None) -> str:
+    """Map a fixed delivery target to the canonical IC/IP runner front door."""
+    if route_family == "DIE" or target in {"gds", "shippable_gds", "foundry_handoff"}:
+        return "ic"
+    return "ip"
 
 # `route` and `entry_step` answer DIFFERENT questions, and conflating them is how
 # the first draft lost information: `route` says which loop OWNS the transform,
@@ -898,6 +1094,38 @@ def route_task(prompt: str = "",
                nature: Optional[str] = None) -> Dict[str, Any]:
     """Route ONE general IC-design task (not a benchmark record)."""
     return classify_task_nature(prompt, bool(rtl_paths), nature)
+
+
+def semantic_routing_payload(prompt: str, *, context: Optional[Dict[str, Any]] = None,
+                             requested_evidence: Optional[str] = None,
+                             delivery_target: Optional[str] = None) -> Dict[str, Any]:
+    """Return the identity-free payload a semantic route reviewer may read."""
+    from route_decision import build_semantic_payload  # noqa: PLC0415
+    return build_semantic_payload(
+        prompt, context=context, requested_evidence=requested_evidence,
+        delivery_target=delivery_target)
+
+
+def route_decision_receipt(prompt: str, *, nature: str,
+                           requested_evidence: Optional[str] = None,
+                           delivery_target: str = "rtl",
+                           source_sha256: Optional[str] = None,
+                           context: Optional[Dict[str, Any]] = None,
+                           explicit_user_evidence: Any = None) -> Dict[str, Any]:
+    """Derive a typed route receipt from semantic facts, never AI step ids."""
+    from route_decision import make_route_receipt  # noqa: PLC0415
+    payload = semantic_routing_payload(
+        prompt, context=context, requested_evidence=requested_evidence,
+        delivery_target=delivery_target)
+    evidence = requested_evidence or NATURE_ENTRY[nature]["default_evidence"]
+    return make_route_receipt(
+        nature=nature, requested_evidence=evidence,
+        delivery_target=delivery_target,
+        semantic_payload_sha256=payload["semantic_payload_sha256"],
+        source_sha256=source_sha256 or payload["prompt_sha256"],
+        nature_table=NATURE_ENTRY, evidence_table=EVIDENCE_EXIT,
+        delivery_table=DELIVERY_TARGETS,
+        explicit_user_evidence=explicit_user_evidence)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

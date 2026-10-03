@@ -125,6 +125,25 @@ When AI authors the chip-top wrapper, it MUST:
 
 5. AI MUST run `iverilog -g2012 -t null <project>/phase2/stage1/rtl/*.v` as final sanity check before declaring success.
 
+### Synchronous reset at an external memory interface
+
+When the complete input contract declares a clock-sampled transaction interface
+with no separately declared asynchronous safety-inhibit requirement, qualify
+its transaction strobes at the declared reset sampling edge. In that scope, a
+raw combinational reset qualifier would change the external transaction during
+a between-edge pulse without a reset sampling edge. The complete interface and
+protocol contract takes precedence: an explicitly declared asynchronous safety
+inhibit must follow its specified behavior even if internal reset is synchronous.
+Preserve write-enable/address/data alignment; delaying only
+write-enable while leaving address/data on the old cycle changes the transaction.
+State the memory protocol's reset boundary: a synchronous external memory can
+consume the preceding valid transaction at the edge that samples reset, before
+the reset output state takes effect. Check held-reset retention and normal boot
+with that protocol, rather than promising asynchronous cancellation. For a
+proven violation, retain the original independent control unchanged, run it on
+the repaired candidate, and add only the affected reset/alignment positive.
+Keep imported IP hashes and authored-glue corrections separately attributed.
+
 ## SOURCE_MANIFEST.json — the keystone reused-IP artifact (mandatory)
 
 `phase2/stage1/rtl/SOURCE_MANIFEST.json` is the **keystone** that turns on

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from _atomic_artefact import write_json
 from l_doc_consumer_contract import load_l_doc, l_doc_fields
+from execution_mixed_subject import project_subject
 
 PROGRAM = "mixed_signal_m3_run"
 SCHEMA = "vibeic.mixed_signal.m3.unmeasured.v1"
@@ -57,7 +58,7 @@ def read(path):
 def subject(project, top):
     if not isinstance(top, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", top):
         raise Refusal("INVALID_DESIGN", "an explicit top module is required")
-    return {"project": str(project.resolve()), "top": top}
+    return {"project": project_subject(project), "top": top}
 
 
 def inputs(project, top):
@@ -157,9 +158,9 @@ def verify(project, kind):
         return native.verify(project, record, kind)
     if record.get("schema") != SCHEMA or record.get("program") != PROGRAM:
         raise Refusal("WRONG_PRODUCER", "no M3 current-input production")
-    if record.get("project") != str(project.resolve()):
-        raise Refusal("WRONG_PROJECT", "receipt belongs to another project")
     top = record.get("top")
+    if record.get("project") != subject(project, top)["project"]:
+        raise Refusal("WRONG_PROJECT", "receipt belongs to another project")
     if inputs(project, top) != record.get("inputs"):
         raise Refusal("STALE_INPUT", "current M3 inputs differ from production")
     if set(record.get("outputs", {})) != set(OUTPUTS.values()):

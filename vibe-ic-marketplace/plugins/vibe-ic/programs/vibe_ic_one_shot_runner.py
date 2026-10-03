@@ -80,6 +80,10 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
+def _configure_execution_policy(args, **_rejected_mint_arguments):
+    """Consume a launcher-issued policy; imported calls cannot issue it."""
+    import execution_policy
+    return execution_policy.configure(args)
 
 
 def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
@@ -638,7 +642,19 @@ def _run_phase(label: str, runner: Path, args: List[str],
     # ORGANIC #588 — pass the re-entrancy env so the spawned standalone
     # phase runner re-enters THIS orchestrator's project lock instead of
     # being refused by it.
-    cp = subprocess.run([sys.executable, str(runner), *args], env=env)
+    import execution_policy as _execution
+    policy_cli_children = {
+        "phase1_one_shot_runner.py", "phase2_one_shot_runner.py",
+        "design_one_shot_runner.py",
+        "phase23_one_shot_runner.py", "phase3_one_shot_runner.py",
+        "analog_one_shot_runner.py",
+    }
+    supports_execution_policy = runner.name in policy_cli_children
+    args = _execution.child_arguments(
+        args, supports_execution_policy=supports_execution_policy)
+    cp = subprocess.run([sys.executable, str(runner), *args], env=env,
+                        pass_fds=(_execution.child_pass_fds()
+                                   if supports_execution_policy else ()))
     return cp.returncode
 
 
@@ -652,6 +668,33 @@ def _positive_completed_rung_cap(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _controller_mixed_step(execution, project: Path, step_id: str,
+                           audit_path: Path):
+    """Dispatch one mixed row through the already-issued shared Controller.
+
+    ``None`` is the unchanged Default-mode signal; active Registry modes return
+    a report-shaped result for the existing fixed sequence and gates.
+    """
+    result = execution.dispatch_fixed_step(project, step_id)
+    if result is None:
+        return None
+    status = str(result.get("status", "NOT_MEASURED"))
+    verdict = ("PASS" if status == "ADOPTED" else
+               "FAIL" if status == "FAIL" or "FAIL" in
+               (result.get("candidate_statuses") or {}).values() else
+               "NOT_READY" if status in ("AWAITING_AI_SELECTION", "NOT_APPLICABLE") else
+               "NOT_MEASURED")
+    report = {"program": {"M1": "mixed_signal_top_lvs_run",
+                          "M2": "mixed_signal_power_domain_run",
+                          "M3": "mixed_signal_m3_run",
+                          "M4": "mixed_signal_signoff_run"}[step_id],
+              "verdict": verdict, "controller_status": status,
+              "controller_result": result}
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    return (0 if verdict == "PASS" else 1 if verdict == "FAIL" else 2, report)
 
 
 def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
@@ -1466,6 +1509,16 @@ ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
 
 
 def main() -> int:
+    """Canonical CLI contract: fail-closed authority refusal is always rc=2."""
+    from execution_modes import Refusal
+    try:
+        return _main()
+    except Refusal as exc:
+        print(f'REFUSED: {exc}', file=sys.stderr)
+        return 2
+
+
+def _main() -> int:
     _line_buffer_own_stream()
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
@@ -1572,7 +1625,41 @@ def main() -> int:
                         "runs the flow_compliance gate matrix for true "
                         "PASS/SKIP/WAIVED verdicts; TTL-cached ~15s). Slower "
                         "than the default fast file-stat view.")
+    import execution_policy as _execution
+    p.add_argument('--route-authority-only', action='store_true', help='Verify the live route and emit its receipt without running producers.')
+    p.add_argument('--receipt-channel-fd', type=int, help=argparse.SUPPRESS)
+    _execution.add_arguments(p)
     args = p.parse_args()
+    # The owner answer is recorded/validated before checking execution authority.
+    # Imported API calls may express a route, but cannot start any producer.
+    project = args.project.resolve()
+    if not project.is_dir():
+        print(f'ERROR: not a directory: {project}', file=sys.stderr)
+        return 2
+    route_refusal = _delivery_route.admit(project, args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        return 2
+    if 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
+        from execution_modes import Refusal
+        raise Refusal('REQUEST_CAPABILITY_REQUIRED', 'enter through the canonical CLI')
+    execution_policy_value = _configure_execution_policy(args)
+
+
+    if args.route_authority_only:
+        from execution_authority import consume
+        issued = consume()
+        if args.receipt_channel_fd is not None:
+            import socket, struct
+            channel = socket.socket(fileno=args.receipt_channel_fd)
+            packet = json.dumps(dict(issued, socket=os.environ['VIBEIC_EXECUTION_AUTH_SOCKET'])).encode() + b'\n'
+            sent = channel.sendmsg([packet], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                              struct.pack('i', int(os.environ['VIBEIC_EXECUTION_CAP_FD'])))])
+            channel.sendall(packet[sent:])
+            channel.recv(1)
+        else:
+            print(json.dumps(issued, sort_keys=True))
+        return 0
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect
@@ -1601,6 +1688,11 @@ def main() -> int:
         print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
         lock.release()
         return 2
+    from execution_authority import consume
+    execution_route = consume()['route']
+    _execution.bootstrap(project, parameters={"top": args.top_name,
+        "container": args.container, "pdk_name": args.pdk,
+        "skip_analog": bool(args.skip_analog)})
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and
@@ -2499,14 +2591,17 @@ def main() -> int:
         # the CLI value when phase 3 did not run — an unresolvable name is the
         # producer's rc=2 skip naming the missing tech, never a guess.
         _ms_pdk = (reports.get("phase3") or {}).get("pdk") or args.pdk
-        rc = _run_phase(
-            "MIXED-SIGNAL M1 (A+D GDS merge → Magic extract → netgen LVS)",
-            PROGRAMS_DIR / "mixed_signal_top_lvs_run.py",
-            [str(project), "--top", phase3_top,
-             "--container", args.container, "--pdk", str(_ms_pdk),
-             "--json", str(_ms_json)],
-            env=_phase_env)
-        rep = _read_report(_ms_json)
+        dispatched = _controller_mixed_step(_execution, project, "M1", _ms_json)
+        if dispatched is None:
+            rc = _run_phase(
+                "MIXED-SIGNAL M1 (A+D GDS merge → Magic extract → netgen LVS)",
+                PROGRAMS_DIR / "mixed_signal_top_lvs_run.py",
+                [str(project), "--top", phase3_top,
+                 "--container", args.container, "--pdk", str(_ms_pdk),
+                 "--json", str(_ms_json)], env=_phase_env)
+            rep = _read_report(_ms_json)
+        else:
+            rc, rep = dispatched
         # rc 2 is the producer's documented disclosed skip (inputs / tools /
         # PDK tech absent) — record it as SKIP, never as a pass.
         verdict = rep.get("verdict") or {0: "PASS", 2: "SKIP"}.get(rc, "FAIL")
@@ -2518,13 +2613,17 @@ def main() -> int:
         if rc == 0 and verdict == "PASS":
             _m2_json = project / "reports/analog/mixed_signal/power_domain_producer_audit.json"
             _m2_json.unlink(missing_ok=True)
-            _m2_rc = _run_phase(
+            _m2_dispatched = _controller_mixed_step(_execution, project, "M2", _m2_json)
+            if _m2_dispatched is None:
+                _m2_rc = _run_phase(
                 "MIXED-SIGNAL M2 (placed power-domain protection paths)",
                 PROGRAMS_DIR / "mixed_signal_power_domain_run.py",
                 [str(project), "--top", phase3_top,
                  "--container", args.container, "--json", str(_m2_json)],
                 env=_phase_env)
-            _m2_rep = _read_report(_m2_json)
+                _m2_rep = _read_report(_m2_json)
+            else:
+                _m2_rc, _m2_rep = _m2_dispatched
             # An exit status cannot stand in for a tool measurement. Missing
             # or contradictory producer output is never a passing M2 row.
             if (_m2_rc == 0
@@ -2546,12 +2645,16 @@ def main() -> int:
         if _m2_rc == 0 and _m2_verdict == "PASS":
             _m3_json = project / "reports/analog/mixed_signal/m3_producer_audit.json"
             _m3_json.unlink(missing_ok=True)
-            _m3_rc = _run_phase(
+            _m3_dispatched = _controller_mixed_step(_execution, project, "M3", _m3_json)
+            if _m3_dispatched is None:
+                _m3_rc = _run_phase(
                 "MIXED-SIGNAL M3 (current simulation / interface SI evidence)",
                 PROGRAMS_DIR / "mixed_signal_m3_run.py",
                 [str(project), "--top", phase3_top, "--container", args.container,
                  "--json", str(_m3_json)], env=_phase_env)
-            _m3_rep = _read_report(_m3_json)
+                _m3_rep = _read_report(_m3_json)
+            else:
+                _m3_rc, _m3_rep = _m3_dispatched
             _m3_verdict = "NOT_READY" if _m3_rc == 2 else "FAIL"
             # Even a producer rc=0 cannot bypass the existing strict gates.
             _m3_gates_ok = True
@@ -2581,11 +2684,15 @@ def main() -> int:
         if _m3_rc == 0 and _m3_verdict == "PASS":
             _m4_json = project / "reports/analog/mixed_signal/signoff_producer_audit.json"
             _m4_json.unlink(missing_ok=True)
-            _m4_rc = _run_phase(
+            _m4_dispatched = _controller_mixed_step(_execution, project, "M4", _m4_json)
+            if _m4_dispatched is None:
+                _m4_rc = _run_phase(
                 "MIXED-SIGNAL M4 (derived mixed-signal / top-level PV verdict)",
                 PROGRAMS_DIR / "mixed_signal_signoff_run.py",
                 [str(project), "--top", phase3_top, "--json", str(_m4_json)], env=_phase_env)
-            _m4_rep = _read_report(_m4_json)
+                _m4_rep = _read_report(_m4_json)
+            else:
+                _m4_rc, _m4_rep = _m4_dispatched
             _m4_gate_json = project / "reports/analog/mixed_signal/signoff_audit.json"
             _m4_gate_json.unlink(missing_ok=True)
             _m4_gate_rc = _run_phase(
@@ -2841,4 +2948,25 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if 'VIBEIC_EXECUTION_CAP_FD' not in os.environ and '--help' not in sys.argv and '-h' not in sys.argv:
+        # Exec the isolated canonical issuer. Its only child is this fixed
+        # runner, launched with -I so caller PYTHONPATH/sitecustomize cannot
+        # intercept the issued credential before canonical entry.
+        entry = argparse.ArgumentParser(add_help=False)
+        entry.add_argument('project', type=Path)
+        entry.add_argument('--route', choices=('ic', 'ip'))
+        entry.add_argument('--execution-mode', choices=('default', 'ultra'), default='default')
+        entry.add_argument('--receipt-channel-fd', type=int)
+        selected, _ = entry.parse_known_args()
+        route_refusal = _delivery_route.admit(selected.project.resolve(), selected.route)
+        if route_refusal:
+            print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+            sys.exit(2)
+        route = selected.route or _delivery_route.report_label(selected.project)['delivery_route'].lower()
+        command = [str(Path(sys.executable).resolve()), '-I', '-S',
+                   str(PROGRAMS_DIR / 'execution_authority.py'), '--project', str(selected.project.resolve()),
+                   '--route', route, '--execution-mode', selected.execution_mode]
+        if selected.receipt_channel_fd is not None:
+            command += ['--channel-fd', str(selected.receipt_channel_fd)]
+        os.execv(command[0], command + ['--', *sys.argv[1:]])
     sys.exit(main())

@@ -17332,6 +17332,22 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     every yosys command below is byte-identical to what it was, so a run that
     never overflows its die cannot tell this parameter exists.
     """
+    # The current fixed-row dispatcher owns Ultra execution and AI adoption.
+    # Default has no ordinary runtime and falls through to the unchanged
+    # native-mode/area-retry implementation below.
+    from execution_production import dispatch_site
+    _step9 = dispatch_site(("9",), project, {
+        "top": top, "pdk": pdk, "container": container,
+        "period_relax": period_relax,
+    })
+    if _step9 is not None:
+        _status = ("FAIL" if _step9.get("status") == "FAIL" or
+                   "FAIL" in _step9.get("candidate_statuses", {}).values() else
+                   "PASS" if _step9.get("status") == "ADOPTED" else "NOT_MEASURED")
+        return StepResult("synth", _status, 0.0,
+                          str(_step9.get("reason", _step9.get("status", "NOT_MEASURED"))),
+                          extras={"execution_result": _step9},
+                          reason_class="tool_absent" if _status == "NOT_MEASURED" else "")
     import librelane_contract as _ll
     _mode = _ll.selected_mode(project, "9")
     if _mode == "librelane":
@@ -60328,6 +60344,9 @@ def step_digital_hardmacro_gen(project: Path,
     if the kit is incomplete `digital_hardmacro_check` refuses it on its own
     evidence rather than on this step's exit code.
     """
+    dispatched = _ordinary_phase3_row(project, 'digital_hardmacro_gen')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     _na, _cited, _evidence = _ip_delivery_declared_na(project)
     if _na:
@@ -60472,6 +60491,9 @@ def step_ip_release_docs_gen(
     absent or wrong, `release_docs_check` refuses the step on its own evidence
     rather than on this step's exit code.
     """
+    dispatched = _ordinary_phase3_row(project, 'ip_release_docs_gen')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     _na, _cited, _evidence = _ip_delivery_declared_na(project)
     if _na:
@@ -60837,6 +60859,9 @@ def step_signoff_metrics_aggregate(project: Path) -> StepResult:
     that contradicts the reports it cites. None of those may be carried into
     the release documents that read it.
     """
+    dispatched = _ordinary_phase3_row(project, 'signoff_metrics_aggregate')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     prog = PROGRAMS_DIR / "signoff_metrics_aggregate.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
@@ -60898,6 +60923,9 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
     gate. A producer refusal is recorded as SKIP here and is then rejected by
     37.5ic's existing ``program_exit_zero`` clause and required-output check.
     """
+    dispatched = _ordinary_phase3_row(project, 'tapeout_docs_gen')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     applies, why = _canonical_step_condition(project, "37.5ic")
     if applies is None:
@@ -60969,6 +60997,9 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
     the producer reads the sign-off GDS, the routed DEF and the sign-off records
     that canonicalisation puts at their declared paths.
     """
+    dispatched = _ordinary_phase3_row(project, 'ic_release_docs_gen')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     applies, why = _canonical_step_condition(project, "37.5ic")
     if applies is None:
@@ -61947,6 +61978,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     Best-effort: any individual emission failure logs WARN but the step
     continues. The downstream gates verify substance.
     """
+    dispatched = _ordinary_phase3_row(project, 'canonicalize_artefacts')
+    if dispatched is not None:
+        return dispatched
     t0 = time.time()
     written: List[str] = []
     notes: List[str] = []
@@ -67227,9 +67261,43 @@ def _librelane_rcx_publish(project: Path, top: str, pdk: PdkConfig,
     """Step 22 on the tool: RCX, then hand every corner SPEF (and the nominal
     one) to the paths the direct consumers read, bound by sha256."""
     import librelane_signoff as _ls
+    pnr_def = _pl.pnr_dir(project) / f'{top}.def'
+    physical_top = _librelane_rcx_physical_top(project, top, pnr_def)
     result = _librelane_signoff_run(project, top, pdk, extract=True, time=False,
                                    refresh=refresh)
-    _ls.publish_spefs(result, top, spef_out, corner_dir, receipt)
+    _ls.publish_spefs(result, top, spef_out, corner_dir, receipt,
+                       physical_top=physical_top)
+
+
+def _librelane_rcx_physical_top(project: Path, logical_top: str,
+                                def_file: Path) -> str:
+    """Resolve RCX's physical subject from the existing pad-top producer.
+
+    The logical runner top remains the filename/publication alias.  When the
+    routed DEF names a different physical cell, the existing
+    ``io_pad_chip_top_gen`` record must bind that core/physical pair; mapping
+    fields that disagree with the current DEF are refused before any SPEF is copied.
+    """
+    import librelane_contract as _ll
+    physical_top, _note = _streamout_top(def_file, logical_top)
+    record_path = project / 'reports/phase3/io_pad_chip_top.json'
+    if physical_top == logical_top and not record_path.is_file():
+        return physical_top
+    try:
+        record = json.loads(record_path.read_text(errors='replace'))
+    except (OSError, ValueError) as exc:
+        raise _ll.Refusal('LL_RCX_OUTPUT_UNBOUND',
+                          f'physical-top record unreadable: {record_path}: {exc}') from exc
+    if (record.get('verdict') != 'WROTE' or
+            record.get('core_module') != logical_top or
+            record.get('chip_top_module') != physical_top):
+        raise _ll.Refusal(
+            'LL_RCX_OUTPUT_UNBOUND',
+            f'physical-top mapping disagrees with routed DEF: '
+            f'logical_top={logical_top!r}, DEF_DESIGN={physical_top!r}, '
+            f'record core_module={record.get("core_module")!r}, '
+            f'chip_top_module={record.get("chip_top_module")!r}')
+    return physical_top
 
 
 def _librelane_handed_spefs(receipt: Path) -> Dict[str, Path]:
@@ -76223,6 +76291,18 @@ _PHASE3_CANONICALIZER_IDS = frozenset({"23", "24", "25", "26", "26.5ic", "27",
                                        "28", "29", "30", "32", "33", "34", "35"})
 
 
+def _ordinary_phase3_row(project: Path, name: str):
+    import execution_policy as _execution
+    if _execution._ordinary_runtime is None:
+        return None
+    import _flow_yaml
+    declared = _phase3_steps_of_row(name)
+    ordered = tuple(str(row['id']) for row in _flow_yaml.load()['steps']
+                    if str(row['id']) in declared)
+    return _execution.dispatch_ordinary_rows(project, ordered, name,
+                                              _preflight_refusal(name))
+
+
 def _phase3_steps_of_row(name: str) -> FrozenSet[str]:
     """The canonical step ids a Phase-3 report row answers for, from the
     same sources the window's dispatch reads, plus the flow's own
@@ -77126,6 +77206,13 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     No canonicalisation, derived generators or whole-flow summary is called:
     those are separate whole-flow producers and may rewrite unrelated steps.
     """
+    import execution_policy
+    ultra = execution_policy.dispatch_ordinary_rows(project,
+        _phase3_window_steps(args.entry_step, args.exit_step), 'phase3_window',
+        _preflight_refusal('phase3_window'))
+    if ultra is not None:
+        print(json.dumps({'status': ultra.status, **ultra.extras}, sort_keys=True))
+        return 0 if ultra.status == 'PASS' else 1
     window_run_id = _phase3_window_run_id()
     # Spelled as one f-string so a path reader (the d7 artefact graph) sees
     # the whole directory, `reports/audit/windows/*/`: this bounded record is
@@ -77456,7 +77543,10 @@ def main() -> int:
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     p.add_argument("--diagnostic-continue", action="store_true",
                    help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
     args.density_from_tool_default = not any(
         arg == "--util" or arg.startswith("--util=") for arg in sys.argv[1:])
     if bool(args.entry_step) != bool(args.exit_step):
@@ -77606,6 +77696,9 @@ def main() -> int:
     args.util = norm_util
 
     pdk = _detect_pdk(project, args.pdk)
+    _execution.bootstrap(project, parameters={'top': args.top_name, 'pdk': pdk,
+        'design_name': args.top_name, 'pdk_name': args.pdk, 'container': args.container,
+        'die_um': args.die_um, 'util': args.util})
     if pdk is None:
         print("[SKIP] phase3_one_shot_runner: no usable PDK detected. "
               "Provide input/pdk/{liberty,lef}/ or use --pdk sky130A.")

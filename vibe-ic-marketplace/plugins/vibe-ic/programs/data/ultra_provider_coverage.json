@@ -1,0 +1,2408 @@
+{
+  "backend_row_count": 23,
+  "release_row_count": 14,
+  "row_count": 37,
+  "rows": [
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_15",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/floorplan.def",
+        "phase3/stage3/pnr/pdn.tcl OR phase3/stage3/pnr/pdn.done",
+        "reports/phase2/gates/stage2_compliance.json"
+      ],
+      "consumer_gates": [
+        "stage2_compliance",
+        "stage_on_pass_review",
+        "floorplan_pdn_check",
+        "macro_obs_load_parity_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_config",
+          "id": "15-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "15-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "15-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "15-H4",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "15-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:librelane",
+          "id": "15-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "15-H7",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "15-H8",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "15-H9",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "15-H10",
+          "kind": "lesson"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "15-H11",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "15-H12",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "15-H13",
+          "kind": "feature"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:step_prepnr",
+        "librelane_contract.py:run_chain"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "15",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "unknown: route marker and deliverable declaration required",
+        "IP": "unknown: route marker and deliverable declaration required"
+      },
+      "arm_id": "backend_15_5ic",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/padring.def",
+        "reports/phase3/padring.json",
+        "reports/phase3/pad_assignment.json",
+        "reports/phase3/io_pad_chip_top.json"
+      ],
+      "consumer_gates": [
+        "pad_assignment_gen",
+        "pad_ring_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_config",
+          "id": "15.5ic-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "15.5ic-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "15.5ic-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:librelane",
+          "id": "15.5ic-H4",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "15.5ic-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "15.5ic-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "15.5ic-H7",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "15.5ic-H8",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "15.5ic-H9",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:step_pad_ring_gen"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "15.5ic",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_17",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/placed.def",
+        "reports/phase3/placement_legality.json"
+      ],
+      "consumer_gates": [
+        "pnr_timing_repair_completeness_check",
+        "placement_legality_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "drop",
+          "id": "17-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "17-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "17-H3",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "17-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "17-H5",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "librelane_contract.py:run_chain"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "17",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_18",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/spare_cells.json",
+        "reports/spare_cell_coverage.json"
+      ],
+      "consumer_gates": [
+        "spare_cell_coverage_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_custom_step",
+          "id": "18-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "18-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "18-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "18-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "18-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "18-H6",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "librelane_contract.py:run_chain"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "18",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_19",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/post_cts.def",
+        "phase3/stage3/cts/clock_tree.rpt"
+      ],
+      "consumer_gates": [
+        "cts_quality_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_custom_step",
+          "id": "19-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "19-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "19-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "19-H4",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "19-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "19-H6",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "19-H7",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "19-H8",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "librelane_cts_hold.py:execute"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "19",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_20",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/post_hold.def"
+      ],
+      "consumer_gates": [
+        "hold_closure_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "drop",
+          "id": "20-H1",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "20-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "20-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "20-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "20-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "20-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "20-H7",
+          "kind": "enhancement"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "librelane_cts_hold.py:execute"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "20",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_21",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/routed.def",
+        "phase3/stage3/pnr/openroad.log",
+        "phase3/stage3/pnr/routed.drc.rpt",
+        "reports/phase3/drc_router.rpt",
+        "reports/phase3/drc_router.json"
+      ],
+      "consumer_gates": [
+        "drc_report_check",
+        "def_stage_progression_check",
+        "provenance_check",
+        "route_congestion_trade_disclosure",
+        "macro_obs_geometry_intersect_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "21-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "21-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "21-H3",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "21-H4",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "21-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "21-H6",
+          "kind": "lesson"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "21-H7",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "21-H8",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "21-H9",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "drop",
+          "id": "21-H10",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "21-H11",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "librelane_route.py:execute",
+        "librelane_postroute_repair.py:run"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "21",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_22",
+      "canonical_outputs": [
+        "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef",
+        "reports/phase2/gates/spef_extraction.json"
+      ],
+      "consumer_gates": [
+        "spef_extraction_check",
+        "provenance_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_custom_step",
+          "id": "22-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "22-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "22-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "22-H4",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "22-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "22-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:vibeic-eda",
+          "id": "22-H7",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "22-H8",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_librelane_rcx_publish"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "22",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_23",
+      "canonical_outputs": [
+        "phase3/stage3/sta/post_route_timing.rpt",
+        "reports/phase3/sta_spef_based.rpt",
+        "reports/phase3/sta/post_route_summary.json",
+        "reports/phase3/sta/sta_corner_record_completeness.json",
+        "reports/phase3/sta/post_route_signoff_corner.json",
+        "reports/phase3/sta/architectural_residual.json"
+      ],
+      "consumer_gates": [
+        "achieved_period_recorded_check",
+        "hold_corner_coverage_check",
+        "sta_report_check",
+        "sta_corner_record_completeness_check",
+        "pad_input_drive_check",
+        "drv_signoff_judge",
+        "sta_architectural_residual_check",
+        "sta_assumed_clock_disclosure_check",
+        "clock_target_record_agreement_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "opensta"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_config",
+          "id": "23-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "23-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "23-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "23-H4",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "23-H5",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "23-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "23-H7",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "23-H8",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:librelane",
+          "id": "23-H9",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "23-H10",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "23-H11",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_spef_sta",
+        "librelane_signoff.py:run"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "23",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_24",
+      "canonical_outputs": [
+        "reports/phase3/ir_drop.rpt",
+        "reports/phase3/ir_drop.json",
+        "reports/phase3/ir_drop_signoff.json",
+        "reports/phase3/dynamic_ir.json"
+      ],
+      "consumer_gates": [
+        "ir_drop_report_check",
+        "dynamic_ir_drop_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:librelane (take the max over all per-net matches and record how many nets were analysed); vibeic_gate (psm_analysis_coverage rule)",
+          "id": "24-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_custom_step (a Checker.IRDrop that compares ir__drop__worst with the declared budget)",
+          "id": "24-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "24-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop (static); librelane_custom_step (keep inside the dynamic-IR step)",
+          "id": "24-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_custom_step (a dynamic-IR step after OpenROAD.IRDropReport) + vibeic_gate (the scaled_static_bound disclosure)",
+          "id": "24-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:librelane (add optional -enable_em -em_outfile to irdrop.tcl so one SDC+SPEF session produces both IR and EM)",
+          "id": "24-H6",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config (generate VSRC_LOC_FILES from the pad ring's supply pads on the DIE path)",
+          "id": "24-H7",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "24-H8",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_librelane_step24_record"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "24",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_25",
+      "canonical_outputs": [
+        "reports/phase3/em.rpt",
+        "reports/phase3/em.json",
+        "reports/phase3/em_signoff.json",
+        "reports/phase3/em_current_authority.json"
+      ],
+      "consumer_gates": [
+        "em_report_check",
+        "em_peak_current_authority_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "vibeic_gate (now); fork_patch:OpenROAD if an A/B shows check_current_density lacks per-layer LEF Jmax",
+          "id": "25-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "25-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:OpenROAD (emit segment width in -em_outfile) + vibeic_gate until then",
+          "id": "25-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "25-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config (PDN width/pitch/supply pads chosen BEFORE routing by a PPA sweep); drop the post-route re-PnR loop",
+          "id": "25-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/\u2026)",
+          "id": "25-H6",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config (VSRC_LOC_FILES) + vibeic_gate (the EM verdict records its source model)",
+          "id": "25-H7",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_ir_em_reports",
+        "phase3_one_shot_runner.py:_emit_em_current_authority"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "25",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_26",
+      "canonical_outputs": [
+        "reports/phase3/antenna.rpt",
+        "reports/phase3/antenna.json",
+        "reports/phase3/antenna_signoff.json"
+      ],
+      "consumer_gates": [
+        "antenna_report_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "vibeic_gate (antenna evidence bound to the shipped DEF/GDS digest); drop the log-scraping re-emit",
+          "id": "26-H1",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "26-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "26-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop (the problem disappears with the tool path); lesson kept as vibeic_gate",
+          "id": "26-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:klayout (the engine stays in vibeic/klayout gds-antenna/) + vibeic_gate (fail when OpenROAD antenna__violating__nets and klayout__antenna_error__count disagree)",
+          "id": "26-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "26-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (for any post-route ECO); drop for the tool path",
+          "id": "26-H7",
+          "kind": "bug_fix"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_librelane_antenna_router"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "26",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "unknown: route marker and deliverable declaration required",
+        "IP": "unknown: route marker and deliverable declaration required"
+      },
+      "arm_id": "backend_26_5ic",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt",
+        "reports/phase3/die_finishing.json"
+      ],
+      "consumer_gates": [
+        "die_finishing_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:librelane (fail unless the output exists and contains new seal-ring marker geometry)",
+          "id": "26.5ic-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:librelane",
+          "id": "26.5ic-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:librelane (interface detection; check the transposition on a non-square ihp die, NOT_MEASURED)",
+          "id": "26.5ic-H3",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_config (macros use the Classic flow or leave KLAYOUT_SEALRING_SCRIPT unset) + vibeic_gate",
+          "id": "26.5ic-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config (derive the CORE/DIE margin) + vibeic_gate (refuse to seal a core in the band)",
+          "id": "26.5ic-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "26.5ic-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "26.5ic-H7",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "26.5ic-H8",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_die_finishing"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "26.5ic",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_27",
+      "canonical_outputs": [
+        "reports/phase3/si_crosstalk.rpt OR reports/phase3/si_crosstalk.json",
+        "reports/phase3/si_mcf_sta.json",
+        "reports/phase3/si_mcf_sta.rpt"
+      ],
+      "consumer_gates": [
+        "si_crosstalk_check",
+        "flow_step_output_content_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "opensta"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "27-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "27-H2",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "27-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "27-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "27-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "27-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "27-H7",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_si_timing_json",
+        "si_signoff_timing_aware.py:run_si_signoff_timing_aware",
+        "si_mcf_sta.py:run"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "27",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_28",
+      "canonical_outputs": [
+        "reports/phase3/perc_equivalent.json",
+        "reports/phase3/perc_equivalent.rpt",
+        "reports/phase3/PERC_SIGNOFF_MEMO.md",
+        "reports/phase2/gates/perc_signoff.json"
+      ],
+      "consumer_gates": [
+        "perc_signoff_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config (read FP_TAPCELL_DIST) + vibeic_gate (screen radius = pitch/2)",
+          "id": "28-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H6",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "28-H7",
+          "kind": "bug_fix"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_perc_equivalent"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "28",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_29",
+      "canonical_outputs": [
+        "phase3/stage3/sim_postlayout/results.log OR phase3/stage3/sim_postlayout/pass.flag",
+        "reports/phase2/gates/post_layout_sim.json"
+      ],
+      "consumer_gates": [
+        "post_layout_sim_check",
+        "synth_wrapper_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "iverilog"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "drop",
+          "id": "29-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "29-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "29-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "29-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:iverilog",
+          "id": "29-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "29-H6",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_sdf",
+        "phase3_one_shot_runner.py:_step29_tool_arm"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "29",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_30",
+      "canonical_outputs": [
+        "phase3/stage3/spice/*.sp OR phase3/stage3/spice/*.spice OR sim_spice/*.sp",
+        "phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json"
+      ],
+      "consumer_gates": [
+        "spice_correlation_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "opensta",
+        "ngspice"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "drop",
+          "id": "30-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "30-H7",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "30-H8",
+          "kind": "feature"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "path_spice_tool.py:run_step30"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "30",
+      "tool_id": "ngspice"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_32",
+      "canonical_outputs": [
+        "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
+      ],
+      "consumer_gates": [
+        "flow_step_output_content_check",
+        "postroute_timing_repair_audit"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:OpenROAD",
+          "id": "32-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "32-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "32-H3",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "32-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "32-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "32-H6",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "32-H7",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "32-H8",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:step_postroute_repair_librelane"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "32",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_33",
+      "canonical_outputs": [
+        "reports/phase3/power.rpt",
+        "reports/phase3/power.json"
+      ],
+      "consumer_gates": [
+        "power_report_check",
+        "power_total_vs_budget_check",
+        "upf_syntax_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "opensta"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "drop (take sign-off power from STAPostPNR); keep the lesson as vibeic_gate (a power record names the netlist it linked)",
+          "id": "33-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (+ fork_patch:librelane: optional SAIF/VCD read and a power__activity_basis / annotated-count metric)",
+          "id": "33-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "33-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "33-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_custom_step (use OpenROAD read_upf as the check)",
+          "id": "33-H5",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_step33_tool_arm",
+        "librelane_signoff.py:run"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "33",
+      "tool_id": "opensta"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_34",
+      "canonical_outputs": [
+        "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done",
+        "reports/density.json OR reports/phase3/density.json",
+        "reports/density.rpt OR reports/phase3/density.rpt"
+      ],
+      "consumer_gates": [
+        "metal_fill_density_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "openroad"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:OpenROAD (a region/density-cap option for filler_placement) or fork_patch:librelane (an optional fill region)",
+          "id": "34-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate (read LibreLane's DPL filler count and the odb row utilisation)",
+          "id": "34-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop (keep the ordering lesson)",
+          "id": "34-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "34-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "34-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:klayout (the engine stays as a second arm) + vibeic_gate (UNREACHABLE_BY_ANY_FILL refusal)",
+          "id": "34-H6",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:klayout",
+          "id": "34-H7",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "34-H8",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "34-H9",
+          "kind": "feature"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:_emit_metal_fill",
+        "phase3_one_shot_runner.py:_emit_metal_density_report",
+        "librelane_fill_dfm.py:run_fill_insertion"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "34",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_37_librelane",
+      "canonical_outputs": [
+        "phase3/stage4/gds/*.gds",
+        "phase3/stage3/pnr/*stream_out.log",
+        "phase3/stage3/pnr/*.stream_inputs.json",
+        "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py",
+        "reports/phase3/pad_ring_route_evidence.json",
+        "reports/phase3/gates/stage3_compliance.json",
+        "reports/phase3/layout_receipts.json"
+      ],
+      "consumer_gates": [
+        "layout_receipt_identity_check",
+        "stage3_compliance",
+        "stage_on_pass_review",
+        "gds_size_check",
+        "gds_substance_check",
+        "gds_port_label_check",
+        "reported_figure_artifact_backing_check",
+        "provenance_check",
+        "flow_stage_check",
+        "gate_evidence_completeness_check",
+        "gds_ip_attribution"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "magic",
+        "klayout"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "vibeic_gate (also fork_patch:librelane: an element-count checker after Magic.StreamOut)",
+          "id": "37-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "37-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_custom_step (run Magic.DRC+KLayout.DRC on MAG_GDS and KLAYOUT_GDS, promote the cleaner one) fed to the PPA layer",
+          "id": "37-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "37-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "fork_patch:librelane (use x1-x0/y1-y0; verify the ihp width/height order)",
+          "id": "37-H6",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop (keep a vibeic_gate: no step writes under input/)",
+          "id": "37-H7",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37-H8",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step (non-deferred checker set before Magic.StreamOut)",
+          "id": "37-H9",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37-H10",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "37-H11",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:step_gds",
+        "librelane_step37.py:run"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "37",
+      "tool_id": "librelane"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_37_3",
+      "canonical_outputs": [
+        "reports/phase3/gds_xor.json"
+      ],
+      "consumer_gates": [
+        "gds_xor_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "klayout"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "librelane_custom_step (a Checker after KLayout.Filler that runs xor.drc between the pre-SealRing GDS state and the final GDS, with KLAYOUT_XOR_IGNORE_LAYERS = layers the SealRing/Filler steps added)",
+          "id": "37.3-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:librelane (print a per-layout cell/shape census in xor.drc) + vibeic_gate",
+          "id": "37.3-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "fork_patch:librelane (missing metric under RUN_KLAYOUT_XOR=true is an error)",
+          "id": "37.3-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.3-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "37.3-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "librelane_config (KLAYOUT_XOR_IGNORE_LAYERS)",
+          "id": "37.3-H6",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "drop",
+          "id": "37.3-H7",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "gds_xor_check.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "37.3",
+      "tool_id": "klayout"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "backend_31",
+      "canonical_outputs": [
+        "reports/phase3/drc_signoff.rpt",
+        "reports/phase3/lvs.rpt",
+        "reports/phase3/erc.rpt",
+        "reports/phase3/lvs.json",
+        "reports/phase2/gates/erc_density.json",
+        "reports/phase3/magic_illegal_overlap.json",
+        "reports/phase3/lvs_verdict.json",
+        "reports/phase3/drc_signoff.json",
+        "reports/phase3/perc_sweep.json"
+      ],
+      "consumer_gates": [
+        "drc_vacuous_pass_check",
+        "drc_report_check",
+        "magic_illegal_overlap_record_check",
+        "magic_illegal_overlap_check",
+        "lvs_report_check",
+        "lvs_signoff_guard",
+        "pg_rail_geometry_check",
+        "provenance_check",
+        "provenance_check",
+        "erc_density_check",
+        "waiver_growth_check",
+        "sweep_reach_check",
+        "mcp_execution_verify"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "magic",
+        "klayout",
+        "netgen"
+      ],
+      "family": "backend",
+      "harvest": [
+        {
+          "destination": "fork_patch:librelane (a missing metric under RUN_*=true is an error) + vibeic_gate",
+          "id": "31-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop (waivers must be explicit human waivers, e.g. waiver_growth_check)",
+          "id": "31-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop (keep signoff_drc_format.classify_file as a vibeic_gate)",
+          "id": "31-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (wrap LibreLane step invocation in the progress supervisor)",
+          "id": "31-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (region clustering over LibreLane feedback.xml)",
+          "id": "31-H5",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_custom_step (KLayout.SVRFDRC wrapping the fork engine); engine stays fork_patch:klayout",
+          "id": "31-H6",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "31-H7",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate (classifier over the Netgen JSON report)",
+          "id": "31-H8",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "31-H9",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "31-H10",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "31-H11",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "31-H12",
+          "kind": "bug_fix"
+        }
+      ],
+      "notes": "One complete producer; wrappers/checkers sharing an engine family are not additional Ultra arms.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:step_drc",
+        "phase3_one_shot_runner.py:step_lvs",
+        "phase3_one_shot_runner.py:_emit_erc_report",
+        "perc_corpus_sweep.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "31",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_14",
+      "canonical_outputs": [
+        "phase2/stage2/synth/netlist.v",
+        "reports/analog/stage_analog_compliance.json"
+      ],
+      "consumer_gates": [
+        "flow_step_output_content_check",
+        "flow_step_output_content_check",
+        "flow_compliance_check",
+        "stage_on_pass_review",
+        "yosys_tiecell_recipe_order_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "yosys"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "14-H1",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "14-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "drop",
+          "id": "14-H3",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "14-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "14-H5",
+          "kind": "feature"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "flow_compliance_check.py:main",
+        "synth_handoff_netlist_check.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "14",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_16",
+      "canonical_outputs": [
+        "phase3/stage3/cts/clock_plan.json"
+      ],
+      "consumer_gates": [
+        "clock_plan_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "opensta"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "16-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "16-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "16-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "16-H4",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "phase3_one_shot_runner.py:emit_clock_plan"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "16",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_35",
+      "canonical_outputs": [
+        "reports/phase3/dfm_screen.json"
+      ],
+      "consumer_gates": [
+        "flow_step_output_content_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "klayout"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "35-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "35-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "35-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "35-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "35-H5",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "35-H6",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "dfm_screen_check.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "35",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_36",
+      "canonical_outputs": [
+        "reports/audit/tapeout_checklist.json"
+      ],
+      "consumer_gates": [
+        "tapeout_signoff_check",
+        "report_belongs_to_project_check",
+        "step_internal_fail_bubble_up_check",
+        "declared_pdk_is_the_pdk_used_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "vibeic"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "36-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "fork_patch:librelane (N/A for an enabled RUN_* engine is a failure)",
+          "id": "36-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "36-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "36-H4",
+          "kind": "feature"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "tapeout_checklist_gen.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "36",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_37_4",
+      "canonical_outputs": [
+        "phase3/final/metrics.json",
+        "reports/phase3/signoff_metrics_aggregate.json"
+      ],
+      "consumer_gates": [
+        "signoff_metrics_aggregate"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "vibeic"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "fork_patch:librelane (emit an explicit NOT_MEASURED marker for enabled-but-unrun metric producers)",
+          "id": "37.4-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.4-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop",
+          "id": "37.4-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop",
+          "id": "37.4-H4",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.4-H5",
+          "kind": "feature"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "signoff_metrics_aggregate.py:aggregate"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "37.4",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "unknown: route marker and deliverable declaration required",
+        "IP": "unknown: route marker and deliverable declaration required"
+      },
+      "arm_id": "release_37_5ip",
+      "canonical_outputs": [
+        "phase3/stage4/hardmacro/*.lef",
+        "phase3/stage4/hardmacro/*.lib",
+        "phase3/stage4/hardmacro/*.gds",
+        "phase3/stage4/hardmacro/*.v",
+        "reports/phase3/digital_hardmacro.json",
+        "phase3/stage4/documentation/ip/*/IP_DATASHEET.md",
+        "phase3/stage4/documentation/ip/*/IP_INTEGRATION_GUIDE.md",
+        "phase3/stage4/documentation/ip/*/RELEASE_NOTES.md",
+        "phase3/stage4/documentation/ip/*/ERRATA.md",
+        "phase3/stage4/documentation/ip/*/DELIVERABLES_MANIFEST.md",
+        "phase3/stage4/documentation/ip/*/documentation_manifest.yaml"
+      ],
+      "consumer_gates": [
+        "digital_hardmacro_check",
+        "release_docs_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "magic",
+        "opensta"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "fork_patch:OpenSTA (option to emit pg_pin from design power nets)",
+          "id": "37.5ip-H1",
+          "kind": "enhancement"
+        },
+        {
+          "destination": "drop (use the per-corner libs; keep the 'never characterise from pre-route' rule as a vibeic_gate)",
+          "id": "37.5ip-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "drop (keep 'each PIN once, with DIRECTION/USE' as a vibeic_gate in digital_hardmacro_check)",
+          "id": "37.5ip-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "librelane_config",
+          "id": "37.5ip-H4",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.5ip-H5",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.5ip-H6",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Magic WriteLEF/write_abstract_lef plus STAPostPNR; preserve PG annotation because GDS route drops USE. Native engine receipt required.",
+      "producer_sites": [
+        "digital_hardmacro_gen.py:run",
+        "phase3_one_shot_runner.py:step_ip_release_docs_gen"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "37.5ip",
+      "tool_id": "magic"
+    },
+    {
+      "applicability": {
+        "IC": "unknown: route marker and deliverable declaration required",
+        "IP": "unknown: route marker and deliverable declaration required"
+      },
+      "arm_id": "release_37_5ic",
+      "canonical_outputs": [
+        "reports/phase3/tapeout_precheck.json",
+        "reports/phase3/general_precheck.json",
+        "reports/phase3/shuttle_precheck.json",
+        "reports/phase3/docs/SIGNOFF_*.html",
+        "reports/phase3/docs/BRIEF_*.html",
+        "phase3/stage4/documentation/ic/*/PRELIMINARY_DATASHEET.md",
+        "phase3/stage4/documentation/ic/*/RELEASE_NOTES.md",
+        "phase3/stage4/documentation/ic/*/ERRATA.md",
+        "phase3/stage4/documentation/ic/*/documentation_manifest.yaml"
+      ],
+      "consumer_gates": [
+        "tapeout_precheck",
+        "tapeout_docs_gen",
+        "release_docs_check",
+        "every_required_metric_key_has_a_producer",
+        "closed_loop_metric_reaches_its_producer",
+        "closed_loop_executed_reentry_census"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "vibeic"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "37.5ic-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "librelane_custom_step",
+          "id": "37.5ic-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "drop the marker writer after migrating 31/37; keep the disclosure rung as a vibeic_gate",
+          "id": "37.5ic-H3",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.5ic-H4",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "37.5ic-H5",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (keep; host-runnable)",
+          "id": "37.5ic-H6",
+          "kind": "enhancement"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "tapeout_precheck.py:main",
+        "tapeout_docs_gen.py:main",
+        "ic_release_docs_gen.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "37.5ic",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable",
+        "IP": "applicable"
+      },
+      "arm_id": "release_38",
+      "canonical_outputs": [
+        "phase3/stage4/foundry_handoff/mask_spec.json",
+        "phase3/stage4/foundry_handoff/wat_plan.json",
+        "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",
+        "phase3/stage4/foundry_handoff/corner_test_vectors.json"
+      ],
+      "consumer_gates": [
+        "foundry_handoff_package_check"
+      ],
+      "default_rank": 0,
+      "disposition": "implemented",
+      "engine_families": [
+        "vibeic"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "38-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate (keep the refusal), drop the cause",
+          "id": "38-H2",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "38-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "38-H4",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [
+        "foundry_handoff_pack_gen.py:main"
+      ],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "38",
+      "tool_id": "vibeic"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: design-dependent FPGA evidence; absent hardware is excluded/NOT_MEASURED",
+        "IP": "applicable: design-dependent FPGA evidence; absent hardware is excluded/NOT_MEASURED"
+      },
+      "arm_id": "release_39",
+      "canonical_outputs": [
+        "phase2/stage1/fpga/final/*.sof",
+        "reports/phase2/fpga/on_board_pass.json"
+      ],
+      "consumer_gates": [
+        "stage4_compliance",
+        "stage_on_pass_review",
+        "fpga_on_board_attestation_check",
+        "hw_vs_rtl_verdict_check"
+      ],
+      "default_rank": 0,
+      "disposition": "unavailable",
+      "engine_families": [
+        "fpga"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "39-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "39-H2",
+          "kind": "bug_fix"
+        }
+      ],
+      "notes": "Existing absent-FPGA exclusion is retained; no software producer is invented.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "39",
+      "tool_id": "external"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: external physical handoff",
+        "IP": "inapplicable: physical IC delivery lane"
+      },
+      "arm_id": "release_40",
+      "canonical_outputs": [
+        "phase3/stage5_manufacturing/mask_set_received.json",
+        "phase3/stage5_manufacturing/wafer_lot_received.json"
+      ],
+      "consumer_gates": [
+        "manufacturing_fab_intake_check"
+      ],
+      "default_rank": 0,
+      "disposition": "external",
+      "engine_families": [
+        "foundry"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "40-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "40-H2",
+          "kind": "lesson"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "40-H3",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "40",
+      "tool_id": "external"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: external physical handoff",
+        "IP": "inapplicable: physical IC delivery lane"
+      },
+      "arm_id": "release_41",
+      "canonical_outputs": [
+        "phase3/stage5_manufacturing/wafer_sort_yield.json",
+        "phase3/stage5_manufacturing/wafer_map.csv"
+      ],
+      "consumer_gates": [
+        "wafer_sort_yield_check"
+      ],
+      "default_rank": 0,
+      "disposition": "external",
+      "engine_families": [
+        "ate"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "41-H1",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "41-H2",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "41",
+      "tool_id": "external"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: external physical handoff",
+        "IP": "inapplicable: physical IC delivery lane"
+      },
+      "arm_id": "release_42",
+      "canonical_outputs": [
+        "phase3/stage5_manufacturing/packaging_log.json"
+      ],
+      "consumer_gates": [
+        "packaging_intake_check"
+      ],
+      "default_rank": 0,
+      "disposition": "external",
+      "engine_families": [
+        "assembly"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "42-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "42-H2",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "42",
+      "tool_id": "external"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: external physical handoff",
+        "IP": "inapplicable: physical IC delivery lane"
+      },
+      "arm_id": "release_43",
+      "canonical_outputs": [
+        "phase3/stage5_manufacturing/final_test_yield.json",
+        "phase3/stage5_manufacturing/burn_in_results.json"
+      ],
+      "consumer_gates": [
+        "final_test_attestation_check"
+      ],
+      "default_rank": 0,
+      "disposition": "external",
+      "engine_families": [
+        "ate"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "43-H1",
+          "kind": "feature"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "43",
+      "tool_id": "external"
+    },
+    {
+      "applicability": {
+        "IC": "applicable: external physical handoff",
+        "IP": "inapplicable: physical IC delivery lane"
+      },
+      "arm_id": "release_44",
+      "canonical_outputs": [
+        "phase3/stage5_manufacturing/htol_results.json"
+      ],
+      "consumer_gates": [
+        "htol_attestation_check"
+      ],
+      "default_rank": 0,
+      "disposition": "external",
+      "engine_families": [
+        "qualification"
+      ],
+      "family": "release",
+      "harvest": [
+        {
+          "destination": "vibeic_gate",
+          "id": "44-H1",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "44-H2",
+          "kind": "feature"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "44-H3",
+          "kind": "bug_fix"
+        },
+        {
+          "destination": "vibeic_gate",
+          "id": "44-H4",
+          "kind": "lesson"
+        }
+      ],
+      "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
+      "producer_sites": [],
+      "runtime_status": "NOT_MEASURED",
+      "step_id": "44",
+      "tool_id": "external"
+    }
+  ],
+  "schema": "vibeic/provider-coverage/1"
+}

@@ -1138,7 +1138,10 @@ def gate(project: Path, runner: str, site: str,
         print(f"[preflight] {site}: {dec.verdict} — {dec.detail}",
               file=sys.stderr, flush=True)
 
-    result = _scoped_dispatch(Path(project), site, flow_def, fn, args, kwargs)
+    import execution_policy
+    result = execution_policy.dispatch_ordinary_site(project, runner, site, refusal_factory)
+    if result is None:
+        result = _scoped_dispatch(Path(project), site, flow_def, fn, args, kwargs)
 
     status = getattr(result, "status", None)
     if status is None and isinstance(result, (list, tuple)):

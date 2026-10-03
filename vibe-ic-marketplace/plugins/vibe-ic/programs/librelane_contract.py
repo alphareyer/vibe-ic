@@ -6,24 +6,218 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import _container_exec as _ce  # noqa: E402 — the existing in-image route
 
 
 class Refusal(RuntimeError):
     def __init__(self, code: str, detail: str):
         self.code = code
         super().__init__(f"{code}: {detail}")
+
+
+LOCAL_ATTESTATION_ENV = 'VIBEIC_LIBRELANE_LOCAL_ATTESTATION'
+
+
+def local_image_attestation(image: str | None = None) -> dict[str, Any]:
+    """Read the host's live launch receipt, bound to THIS container and image.
+
+    The host mounts its ordinary launch_identity.json read-only after inspecting
+    the fresh CID. An image environment string alone is never execution proof.
+    This is deliberately uncached: changed/absent authority refuses even on reuse.
+    """
+    path = Path(os.environ.get(LOCAL_ATTESTATION_ENV, ''))
+    try:
+        raw = path.read_bytes()
+        def unique(pairs):
+            out = {}
+            for key, value in pairs:
+                if key in out:
+                    raise ValueError(f'duplicate key {key}')
+                out[key] = value
+            return out
+        record = json.loads(raw, object_pairs_hook=unique)
+        inspected = record['container_inspect']
+        cid, reference = record['cid'], record['image']
+        import _eda_pin
+        wanted = image or os.environ.get('VIBEIC_EDA_IMAGE') or reference
+        image_digest = _eda_pin.reference_digest(reference)
+        host_images = record['image_inspect']
+        host_image = next(item for item in host_images
+                          if item['Id'] == inspected['Image'])
+        manifest = inspected.get('ImageManifestDescriptor', {}).get('digest')
+        host_config = inspected.get('HostConfig', {})
+        if not isinstance(host_config, dict):
+            raise ValueError('HostConfig is not an inspection object')
+        held = [_eda_pin.reference_digest(ref) for ref in host_image.get('RepoDigests', [])]
+        if (not re.fullmatch(r'[0-9a-f]{64}', cid)
+                or inspected['Id'] != cid
+                or inspected['Config']['Hostname'] != socket.gethostname()
+                or not socket.gethostname().startswith(cid[:12])
+                or inspected['State']['Running'] is not True
+                or inspected['State'].get('Paused') or inspected['State'].get('Dead')
+                or not image_digest or '@sha256:' not in reference
+                or _eda_pin.reference_digest(wanted) != image_digest
+                or _eda_pin.reference_digest(inspected['Config']['Image']) != image_digest
+                or not (manifest == image_digest or image_digest in held)):
+            raise ValueError('host CID/image inspection does not bind this LOCAL process')
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, StopIteration) as exc:
+        raise Refusal('LL_LOCAL_IMAGE_UNATTESTED', f'{path}: {exc}') from None
+    return {'image': reference, 'image_id': inspected['Image'], 'cid': cid,
+            'network_mode': host_config.get('NetworkMode'),
+            'memory': host_config.get('Memory'),
+            'memory_swap': host_config.get('MemorySwap'),
+            'auto_remove': host_config.get('AutoRemove'),
+            'attestation_path': str(path.resolve()),
+            'attestation_sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def _local_memory_bytes(value: str) -> int:
+    """Decode the Docker byte/unit values emitted by this owner."""
+    if value == '-1':
+        return -1
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)([kmgtp]?)(?:b)?', value.lower())
+    if not match:
+        raise Refusal('LL_LOCAL_LAUNCH_UNSUPPORTED', f'invalid memory limit {value!r}')
+    power = 'bkmgtp'.index(match[2] or 'b')
+    return int(Decimal(match[1]) * (1024 ** power))
+
+
+def _run_local(argv: list[str], *, probe_deadline_s: float | None,
+               supervised: bool, log: Path | None, **kw: Any) -> subprocess.CompletedProcess:
+    """Execute only the Docker-run shapes emitted by this LibreLane owner.
+
+    Reuse the existing mount-path conversion and host process supervision.
+    The enclosing fresh image supplies the environment and cgroup memory bound.
+    Unknown launch options refuse rather than silently discarding their meaning.
+    """
+    mounts, variables, entrypoint = [], {}, None
+    network, memory, memory_swap, auto_remove = None, None, None, False
+    at = argv.index('run') + 1
+    while at < len(argv) and argv[at].startswith('-'):
+        option = argv[at]
+        if option == '--rm':
+            auto_remove = True
+            at += 1
+            continue
+        if option not in ('-v', '-e', '--entrypoint', '--memory', '--memory-swap', '--network'):
+            raise Refusal('LL_LOCAL_LAUNCH_UNSUPPORTED', option)
+        value = argv[at + 1]
+        if option == '-v':
+            host, guest, *mode = value.split(':')
+            if mode not in ([], ['ro']) or not Path(host).exists():
+                raise Refusal('LL_LOCAL_MOUNT_INVALID', value)
+            mounts.append((guest, str(Path(host).resolve())))
+        elif option == '-e':
+            key, value = value.split('=', 1)
+            variables[key] = value
+        elif option == '--entrypoint':
+            entrypoint = value
+        elif option == '--network':
+            network = value
+        elif option == '--memory':
+            memory = _local_memory_bytes(value)
+        elif option == '--memory-swap':
+            memory_swap = _local_memory_bytes(value)
+        at += 2
+    image = argv[at]
+    attestation = local_image_attestation(image)
+    if network is not None and attestation['network_mode'] != network:
+        raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                      f"requested --network {network}; current CID {attestation['cid']} "
+                      f"has NetworkMode={attestation['network_mode']!r}")
+    for requested, key, code in ((memory, 'memory', 'LL_LOCAL_MEMORY_UNATTESTED'),
+                                (memory_swap, 'memory_swap', 'LL_LOCAL_SWAP_UNATTESTED')):
+        if requested is None:
+            continue
+        actual = attestation[key]
+        # Zero memory is unlimited; zero swap is an unspecified Docker default.
+        unbounded_request = requested == 0 if key == 'memory' else requested == -1
+        valid = type(actual) is int and (actual >= 0 if key == 'memory' else actual == -1 or actual > 0)
+        if (not valid or (key == 'memory' and requested < 0)
+                or (not unbounded_request and not (0 < actual <= requested))):
+            raise Refusal(code, f"current CID {attestation['cid']} has {key}={actual!r}; "
+                          f'requested {requested} bytes; a finite outer limit may be stricter')
+    if auto_remove and attestation['auto_remove'] is not True:
+        raise Refusal('LL_LOCAL_AUTOREMOVE_UNATTESTED',
+                      f"requested --rm; current CID {attestation['cid']} "
+                      f"has AutoRemove={attestation['auto_remove']!r}")
+    command = argv[at + 1:]
+    if entrypoint:
+        command = [entrypoint, *command]
+    elif command[:1] == ['--skip']:
+        command = command[1:]
+    else:
+        raise Refusal('LL_LOCAL_LAUNCH_UNSUPPORTED', 'missing explicit --skip command')
+    command = [_ce.localise_mounted_paths(part, mounts) for part in command]
+    environment = dict(kw.pop('env', None) or os.environ)
+    environment.update({key: _ce.localise_mounted_paths(value, mounts)
+                        for key, value in variables.items()})
+    _ce.local_exec_mode('librelane_contract')
+    with _ce.local_engine_cwd() as scratch:
+        kw.setdefault('cwd', scratch)
+        if probe_deadline_s is not None:
+            # A probe timeout kills the native group, including descendants.
+            # A tool's natural rc=124 remains an ordinary tool failure.
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, start_new_session=True, env=environment, **kw) as child:
+                try:
+                    out, err = child.communicate(timeout=probe_deadline_s)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    out, err = child.communicate()
+                    raise Refusal('LL_TOOL_DEADLINE', f'LOCAL probe passed {probe_deadline_s:g} s; '
+                                  f'{_salvage(out, err, log)}') from None
+                result = subprocess.CompletedProcess(command, child.returncode, out, err)
+        else:
+            import _watchdog as _wd
+            grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
+            result = _wd.run_host_supervised(command, env=environment,
+                stall_grace_s=grace, hard_ceiling_s=TOOL_BUDGET_S,
+                ceiling_notice=_ce.default_ceiling_notice('LOCAL LibreLane', TOOL_BUDGET_S), **kw)
+            if result.outcome == 'stalled':
+                raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
+                              f'{_salvage(result.out, result.err, log)}')
+            result = _wd.completed_process(command, result)
+    if local_image_attestation(image) != attestation:
+        raise Refusal('LL_LOCAL_ATTESTATION_CHANGED', attestation['attestation_path'])
+    return result
+
+
+def _local_config_source(source: Path, mounts: list[tuple[Path, str]]) -> Path:
+    """Project a declared config's mount paths without changing its bytes."""
+    if not _ce.no_container_route():
+        return source
+    mapping = [(guest, str(host.resolve())) for host, guest in mounts]
+    def paths(value):
+        if isinstance(value, str):
+            return _ce.localise_mounted_paths(value, mapping)
+        if isinstance(value, list):
+            return [paths(item) for item in value]
+        if isinstance(value, dict):
+            return {key: paths(item) for key, item in value.items()}
+        return value
+    native = source.with_name(source.stem + '.local.json')
+    write_json(native, paths(_load(source)))
+    write_json(native.with_suffix('.provenance.json'), {
+        'source': str(source), 'source_sha256': digest(source),
+        'native_sha256': digest(native), 'mounts': mapping, 'execution_route': 'LOCAL'})
+    return native
 
 
 #: The refusals that say the TOOL was stopped, not what the design is, and the
@@ -208,6 +402,9 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """
     if (probe_deadline_s is None) == (not supervised):
         raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
+    if _ce.no_container_route():
+        return _run_local(list(argv), probe_deadline_s=probe_deadline_s,
+                          supervised=supervised, log=log, **kw)
     # Use the image's normal environment, with its explicit skip front door.
     # Overriding ENTRYPOINT bypassed that environment for resolved tool steps.
     argv = list(argv)
@@ -265,7 +462,6 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     def launch(cmd: list[str], **k: Any) -> _Client:
         clients.append(_Client(cmd, **k))
         return clients[-1]
-    import _container_exec as _ce
     result = _wd.run_host_supervised(
         named, popen_factory=launch, kill=_dw.ephemeral_container_reap(name, runner=rebound),
         cpu_probe=cpu_probe, stall_grace_s=grace, hard_ceiling_s=TOOL_BUDGET_S,
@@ -458,6 +654,196 @@ def declaration_config(project: Path) -> tuple[dict[str, Any], dict[str, str]]:
             raise Refusal('LL_DEF_TEMPLATE_DIE_MISMATCH',
                           f'{path} DIEAREA {die} vs declared {result["DIE_AREA"]}')
     return result, sources
+
+
+def settled_floorplan_geometry(project: Path) -> tuple[list[float | int],
+                                                         list[float | int], str]:
+    """Return the run's settled die/core, bound to its Floorplan step.
+
+    The tape-out declaration is the owner input and remains authoritative when
+    it answers ``core_area_um``.  This helper is only the derived fallback for
+    consumers whose owner answer is ``NOT_DETERMINED``.  It deliberately binds
+    the runner record to the resolved LibreLane config and the actual
+    ``OpenROAD.Floorplan`` receipt; a rectangle copied from a stale report or
+    guessed from DIE_AREA alone is refused.
+    """
+    import _declared_die as DD
+
+    record_path = Path(project) / DD.FLOORPLAN_RECTANGLES_REL
+    try:
+        record = _load(record_path)
+    except (OSError, ValueError, Refusal) as exc:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{record_path}: {type(exc).__name__}: {exc}') from exc
+
+    def rect(value: Any, name: str, *, numeric_strings: bool = False) -> list[float]:
+        def number(v: Any) -> float | None:
+            if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+                return None
+            if isinstance(v, str) and not numeric_strings:
+                return None
+            try:
+                result = float(v)
+            except (TypeError, ValueError):
+                return None
+            return result if math.isfinite(result) else None
+        values = [number(v) for v in value] if isinstance(value, (list, tuple)) else []
+        if not (len(values) == 4 and all(v is not None for v in values) and
+                values[0] < values[2] and values[1] < values[3]):
+            raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                          f'{record_path}: invalid {name} {value!r}')
+        return [float(v) for v in values]
+
+    die = rect(record.get('die_rect_um'), 'die_rect_um')
+    floorplan = record.get('floorplan_rect_um')
+    if floorplan is not None:
+        core = rect(floorplan, 'floorplan_rect_um')
+        basis = f'{DD.FLOORPLAN_RECTANGLES_REL}.floorplan_rect_um'
+    else:
+        pad = record.get('core_pad_um')
+        if (not isinstance(pad, (int, float)) or isinstance(pad, bool) or
+                not math.isfinite(float(pad)) or float(pad) < 0):
+            raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                          f'{record_path}: no usable floorplan_rect_um or core_pad_um')
+        p = float(pad)
+        core = [die[0] + p, die[1] + p, die[2] - p, die[3] - p]
+        basis = (f'{DD.FLOORPLAN_RECTANGLES_REL}.die_rect_um inset by '
+                 f'{DD.FLOORPLAN_RECTANGLES_REL}.core_pad_um')
+    if not (core[0] >= die[0] and core[1] >= die[1] and
+            core[2] <= die[2] and core[3] <= die[3]):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{record_path}: core {core} outside die {die}')
+
+    config_path = Path(project) / 'phase3/librelane/15-config/OpenROAD.Floorplan.json'
+    try:
+        config = _load(config_path)
+    except (OSError, ValueError, Refusal) as exc:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{config_path}: {type(exc).__name__}: {exc}') from exc
+    config_die = rect(config.get('DIE_AREA'), 'OpenROAD.Floorplan DIE_AREA',
+                      numeric_strings=True)
+    config_core = rect(config.get('CORE_AREA'), 'OpenROAD.Floorplan CORE_AREA',
+                       numeric_strings=True)
+    if _rect_differs(config_die, die) or _rect_differs(config_core, core):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{config_path}: resolved geometry {config_die}/{config_core} '
+                      f'differs from {record_path} {die}/{core}')
+    design_name = config.get('DESIGN_NAME')
+    if (not isinstance(design_name, str) or not design_name or
+            Path(design_name).name != design_name):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{config_path}: invalid DESIGN_NAME {design_name!r}')
+
+    step = Path(project) / 'phase3/librelane/15-floorplan/02-openroad-floorplan'
+    receipt_path = step / 'vibeic_receipt.json'
+    state_path = step / 'state_out.json'
+    resolved_config_path = step / 'config.json'
+    try:
+        receipt = _load(receipt_path)
+        state = _load(state_path)
+        resolved = _load(resolved_config_path)
+    except (OSError, ValueError, Refusal) as exc:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{step}: incomplete Floorplan receipt: '
+                      f'{type(exc).__name__}: {exc}') from exc
+    if (receipt.get('input', {}).get('step') != 'OpenROAD.Floorplan' or
+            not isinstance(receipt.get('sha256'), dict)):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{receipt_path}: not an OpenROAD.Floorplan receipt')
+    if resolved.get('DIE_AREA') != [int(v) if v.is_integer() else v for v in die] or \
+            resolved.get('CORE_AREA') != [int(v) if v.is_integer() else v for v in core]:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{resolved_config_path}: resolved geometry is stale')
+    if resolved.get('DESIGN_NAME') != design_name:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{resolved_config_path}: DESIGN_NAME {resolved.get("DESIGN_NAME")!r} '
+                      f'differs from {config_path} {design_name!r}')
+    state_def = state.get('def')
+    if not isinstance(state_def, str) or not state_def:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{state_path}: missing resolved DEF for DESIGN_NAME {design_name!r}')
+    recorded_def = Path(state_def)
+    expected_def_name = f'{design_name}.def'
+    if recorded_def.name != expected_def_name:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{state_path}: DEF {state_def!r} is not the resolved '
+                      f'{design_name}.def in {step}')
+    # A readback may bind the same producer under a different container path.
+    # When the recorded path is under this project, retain the stronger exact
+    # relative-path check; otherwise require the complete producer-step suffix
+    # (never a directory glob or an unrelated same-named DEF).
+    project_root = Path(project).resolve()
+    try:
+        recorded_rel = (recorded_def.resolve() if recorded_def.is_absolute()
+                        else (step / recorded_def).resolve()).relative_to(project_root)
+    except (OSError, ValueError):
+        recorded_rel = None
+    expected_rel = step.resolve().relative_to(project_root) / expected_def_name
+    if recorded_rel is not None and recorded_rel != expected_rel:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{state_path}: DEF {state_def!r} is outside the '
+                      f'resolved producer path {expected_rel}')
+    if recorded_rel is None:
+        suffix = tuple(expected_rel.parts)
+        if (recorded_def.is_absolute() and
+                tuple(recorded_def.parts[-len(suffix):]) != suffix) or \
+                (not recorded_def.is_absolute() and recorded_def != Path(expected_def_name)):
+            raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                          f'{state_path}: DEF {state_def!r} is not bound to '
+                          f'the resolved producer path {expected_rel}')
+    def_path = (step / expected_def_name).resolve()
+    metrics = state.get('metrics') or {}
+    if not metrics.get('design__die__bbox') or not metrics.get('design__core__bbox'):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{state_path}: missing settled die/core metrics')
+    def metric_rect(value: Any, name: str) -> list[float]:
+        raw = ([str(v) for v in value] if isinstance(value, (list, tuple))
+               else re.findall(r'-?(?:\d+(?:\.\d*)?|\.\d+)', str(value)))
+        try:
+            values = [float(v) for v in raw]
+        except (TypeError, ValueError):
+            values = []
+        if (len(values) != 4 or not all(math.isfinite(v) for v in values) or
+                values[0] >= values[2] or values[1] >= values[3]):
+            raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                          f'{state_path}: invalid {name} {value!r}')
+        return values
+    state_die = metric_rect(metrics['design__die__bbox'], 'die metric')
+    state_core = metric_rect(metrics['design__core__bbox'], 'core metric')
+    if _rect_differs(state_die, die) or not (
+            state_core[0] >= die[0] and state_core[1] >= die[1] and
+            state_core[2] <= die[2] and state_core[3] <= die[3] and
+            state_core[0] >= core[0] and state_core[1] >= core[1] and
+            state_core[2] <= core[2] and state_core[3] <= core[3]):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{state_path}: settled metrics {state_die}/{state_core} '
+                      f'do not fit {die}/{core}')
+    for path in (resolved_config_path, state_path, def_path):
+        name = path.name
+        want = receipt['sha256'].get(name)
+        if not path.is_file() or not isinstance(want, str) or digest(path) != want:
+            raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                          f'{receipt_path}: {name} is missing or changed')
+    if _def_design_name(def_path) != design_name:
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{def_path}: DESIGN does not match resolved DESIGN_NAME '
+                      f'{design_name!r}')
+    def_die = DD.def_diearea_um(def_path.read_text(errors='replace'))
+    if def_die is None or _rect_differs(def_die, die):
+        raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                      f'{def_path}: DIEAREA {def_die} differs from {die}')
+    source = (f'{basis}; bound to {config_path.relative_to(project)} '
+              f'(sha256:{digest(config_path)}) and '
+              f'{receipt_path.relative_to(project)} '
+              f'(DESIGN_NAME={design_name}, DEF={def_path.relative_to(project)}; '
+              f'state/config/DEF digests verified)')
+    return _whole(die), _whole(core), source
+
+
+def settled_floorplan_core(project: Path) -> tuple[list[float | int], str]:
+    """Compatibility view of :func:`settled_floorplan_geometry`."""
+    _die, core, source = settled_floorplan_geometry(project)
+    return core, source
 
 
 def aux_tie_dont_touch(chip_top_record: dict[str, Any]) -> list[str]:
@@ -1406,6 +1792,12 @@ def image_pdk_root(image: str, docker: str = 'docker') -> dict[str, str]:
     this host holds under another repository name is inspected by that name.
     An image not on this host, or one declaring no absolute `PDK_ROOT`, refuses.
     """
+    if _ce.no_container_route():
+        identity = local_image_attestation(image)
+        root = os.environ.get('PDK_ROOT', '')
+        if not root.startswith('/') or not Path(root).is_dir():
+            raise Refusal('LL_IMAGE_PDK_ROOT_UNDECLARED', f'{image}: PDK_ROOT={root!r}')
+        return {'image_id': identity['image_id'], 'pdk_root': root.rstrip('/') or '/'}
     def _inspect(ref: str) -> subprocess.CompletedProcess:
         try:
             return subprocess.run([docker, 'image', 'inspect', '--format',
@@ -1456,6 +1848,12 @@ def _materialise_image_pdk(image: str, found: dict[str, str], pdk: str,
     is written last, so a reader sees a finished tree or none. Returns the host
     root (which holds `<pdk>/`) and whether it was `copied` or `reused`.
     """
+    if _ce.no_container_route():
+        local_image_attestation(image)
+        root = Path(found['pdk_root'])
+        if not (root / pdk).is_dir():
+            raise Refusal('LL_IMAGE_PDK_ABSENT', str(root / pdk))
+        return root, 'native'
     root = _pdk_root_cache() / found['image_id'].split(':', 1)[1]
     marker = root / f'{pdk}{PDK_ROOT_MARKER}'
     guest = f"{found['pdk_root']}/{pdk}"
@@ -1628,7 +2026,9 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
         answer = {'path': str(root), 'source': 'resolved',
                   'derivation': {'image': image, 'image_id': found['image_id'],
                                  'image_pdk_root': found['pdk_root'],
-                                 'image_pdk_root_from': 'docker image inspect Config.Env PDK_ROOT',
+                                 'image_pdk_root_from': ('attested LOCAL environment PDK_ROOT'
+                                                        if how == 'native' else
+                                                        'docker image inspect Config.Env PDK_ROOT'),
                                  'pdk': str(pdk), 'pdk_from': pdk_source,
                                  'guest_path': f"{found['pdk_root']}/{pdk}",
                                  'host_path': str(root / str(pdk)),
@@ -1658,6 +2058,12 @@ def resolve_image(project: Path | None = None) -> str:
     """
     path = project / 'phase3/librelane_switch.json' if project else None
     declared = _load(path).get('image') if path and path.is_file() else None
+    if _ce.no_container_route():
+        identity = local_image_attestation(declared or os.environ.get('VIBEIC_LIBRELANE_IMAGE'))
+        if project is not None and (project / 'phase3').is_dir():
+            write_json(project / 'phase3/librelane_image.provenance.json',
+                       {**identity, 'source': 'host-CID attested LOCAL image'})
+        return identity['image']
     if declared or os.environ.get('VIBEIC_LIBRELANE_IMAGE'):
         return str(declared or os.environ['VIBEIC_LIBRELANE_IMAGE'])
     import _eda_pin
@@ -1718,6 +2124,8 @@ def _parse_tcl_probe(text: str) -> tuple[dict[str, str], list[str], dict[str, li
 
 
 def image_capability(image: str, docker: str = 'docker') -> dict:
+    if _ce.no_container_route():
+        local_image_attestation(image)
     key = (image, docker)
     if key in _CAPABILITY:
         return _CAPABILITY[key]
@@ -2412,10 +2820,11 @@ Path(output, "flow_gates.json").write_text(json.dumps({
     for step_id in json.loads(Path(requested).read_text()) if step_id in gates},
     indent=2, default=str) + "\\n")
 '''
+    runtime_design = _local_config_source(design, [(pdk_root, '/pdk')])
     cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm',
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
-           '--entrypoint', 'python3', image, '-c', script, str(design),
+           '--entrypoint', 'python3', image, '-c', script, str(runtime_design),
            str(requested), str(root), pdk, str(project.resolve()), image]
     result = run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S, log=root / 'resolution.log')
     (root / 'resolution.log').write_text(result.stdout + '\n' + result.stderr)
@@ -2541,6 +2950,7 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
                         *, mounts: list[tuple[Path, str]] | None = None,
                         pdk_root: str | None = None, docker: str = 'docker') -> Path:
     """Ask LibreLane to apply its PDK config before the step-only CLI runs."""
+    source = _local_config_source(source, mounts or [])
     script = (
         'import json,os,tempfile;'
         'from librelane.config import Config;'
@@ -2745,6 +3155,15 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                                       for host, guest in mounts or []
                                       if guest == root or guest.startswith(root + '/')],
                   'stated_by': 'run_chain(pdk_root=...)'}
+    if _ce.no_container_route():
+        pdk_root = _ce.localise_mounted_paths(str(pdk_root),
+            [(guest, str(host.resolve())) for host, guest in mounts or []])
+        logical_mounts = pdk_record['mounts_under_it']
+        pdk_record.update(cli_pdk_root=pdk_root, requested_pdk_root=root,
+            execution_route='LOCAL', requested_mounts=logical_mounts,
+            mounts_under_it=[[host, _ce.localise_mounted_paths(guest,
+                [(g, str(h.resolve())) for h, g in mounts or []])]
+                for host, guest in logical_mounts])
     capability = image_capability(image, docker)
     outputs = []
     previous: Path | None = None
@@ -2788,6 +3207,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        # are inputs too: an edited deck must re-run the step.
                        'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
+        if _ce.no_container_route():
+            fingerprint['local_image'] = local_image_attestation(image)
         if lane in ('37.3-magic', '37.3-compare'):
             fingerprint['config_files'] = _current_config_material(
                 _load(config), mounts or [])

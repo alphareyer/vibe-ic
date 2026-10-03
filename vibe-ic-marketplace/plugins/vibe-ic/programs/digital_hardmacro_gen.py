@@ -1552,7 +1552,13 @@ def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
                     pdk_root: str, magicrc: str, full_lef: bool,
                     pinonly: bool, timeout_s: int) -> Tuple[bool, str]:
     """Magic in THIS process's environment — the path taken inside the image."""
-    with tempfile.TemporaryDirectory() as td:
+    # Native admission permits dynamic paths only in the frozen project/output
+    # namespace.  Keep Magic's staged GDS/DEF/Tcl there so the observed leaf
+    # argv can be checked without allowing arbitrary /tmp commands.
+    project_root = out_lef.parents[3]
+    private_root = project_root / "reports" / "phase3" / "native-release-work"
+    private_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(private_root)) as td:
         work = Path(td)
         staged = work / f"{top}.gds"
         shutil.copy(gds, staged)
@@ -1842,9 +1848,13 @@ def characterise_liberty(project: Path, design: str, container: str,
     except (OSError, ValueError) as exc:
         rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM", why=str(exc))
         return None, rec
-    cmd = f"export PATH=/foss/tools/bin:$PATH; sta -no_splash -exit {tcl}"
-    argv = (["bash", "-lc", cmd] if shutil.which("sta") or not container
-            else _ce.docker_exec_argv(container, "bash", "-lc", cmd))
+    if container and not shutil.which("sta"):
+        argv = _ce.docker_exec_argv(container, "sta", "-no_splash", "-exit", str(tcl))
+    else:
+        # Keep OpenSTA as the directly observed leaf.  A shell wrapper would
+        # make the worker observe bash while the actual STA PID escaped.
+        sta_binary = shutil.which("sta") or "/foss/tools/bin/sta"
+        argv = [sta_binary, "-no_splash", "-exit", str(tcl)]
     rc, out, err = _sh(argv)
     text = lib_out.read_text(errors="replace") if lib_out.is_file() else ""
     arcs = len(re.findall(r"\btiming\s*\(", text))

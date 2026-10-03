@@ -1,0 +1,713 @@
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+import os
+import shutil
+import uuid
+from pathlib import Path
+import subprocess
+import sys
+from dataclasses import asdict, replace
+
+import pytest
+
+PROGRAMS = Path(__file__).resolve().parents[1]
+if str(PROGRAMS) not in sys.path:
+    sys.path.insert(0, str(PROGRAMS))
+
+import execution_modes as em
+from execution_adapters_backend import (
+    _step30_simulators,
+    _step37_route_specs,
+    _site_path,
+    register_backend_adapters,
+    validate,
+    validate_streamout_receipt,
+)
+from execution_backend_worker import resolve_input_contract
+import execution_backend_consumer
+from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table, current_source_identity
+
+BASE = current_source_identity()
+PRE_FIX_BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
+
+
+def test_pre_fix_base_could_not_reach_backend_factory(tmp_path):
+    path = "vibe-ic-marketplace/plugins/vibe-ic/programs/execution_adapters_backend.py"
+    assert subprocess.run(["git", "cat-file", "-e", f"{PRE_FIX_BASE}:{path}"]).returncode != 0
+    proc = subprocess.run([sys.executable, "-c", "import execution_adapters_backend"],
+                          cwd=tmp_path, env={"PATH": "/usr/bin:/bin", "PYTHONPATH": ""},
+                          text=True, capture_output=True)
+    assert proc.returncode != 0
+    assert "ModuleNotFoundError" in proc.stderr
+
+
+def test_all_backend_rows_register_one_reachable_provider():
+    registry = register_backend_adapters(source_sha=BASE, available=True)
+    assert tuple(a.step_id for a in registry._adapters.values()) == BACKEND_IDS
+    assert all(len(registry.adapters(step)) == 1 for step in BACKEND_IDS)
+    assert all(a.role == "producer" for a in registry._adapters.values())
+    assert all(a.qualification_evidence.endswith(".py") or "producer site=" in a.qualification_evidence
+               for a in registry._adapters.values())
+
+
+def test_machine_readable_owned_coverage_has_exact_dispositions():
+    table = coverage_table()
+    assert table["row_count"] == 37
+    assert table["backend_row_count"] == 23
+    assert table["release_row_count"] == 14
+    assert sum(row["disposition"] == "implemented" for row in table["rows"]) == 31
+    assert sum(row["disposition"] == "unavailable" for row in table["rows"]) == 1
+    assert sum(row["disposition"] == "external" for row in table["rows"]) == 5
+    assert {row["step_id"] for row in table["rows"]} == set(BACKEND_IDS) | {
+        "14", "16", "35", "36", "37.4", "37.5ip", "37.5ic", "38", "39",
+        "40", "41", "42", "43", "44"}
+
+
+def test_default_call_path_is_source_only_and_unmeasured():
+    registry = register_backend_adapters(source_sha=BASE, available=False)
+    adapter = registry.adapters("15")[0]
+    assert adapter.available is False
+    assert adapter.availability_reason == "NATIVE_EXECUTION_NOT_MEASURED"
+    assert adapter.tool_id == "librelane"
+    assert adapter.engine_families == ("openroad",)
+
+
+def test_backend_argv_binds_complete_typed_parameter_envelope():
+    registry = register_backend_adapters(
+        source_sha=BASE, available=False,
+        parameters={"pdk_name": "gf180mcuD", "image_id": "vibeic-eda:review",
+                    "pdk_root": "/pdk", "top": "chip_top", "die_um": [100, 100],
+                    "util": 0.55})
+    argv = registry.adapters("15")[0].components[0].argv
+    params = json.loads(argv[argv.index("--params-json") + 1])
+    assert params["pdk_name"] == "gf180mcuD"
+    assert params["image_id"] == "vibeic-eda:review"
+    assert params["pdk_root"] == "/pdk"
+    assert params["top"] == "chip_top"
+    assert params["die_um"] == [100, 100] and params["util"] == 0.55
+    assert "input_contract" in params and "source_sha" in params
+    assert len(params["source_sha"]) == len(params["source_tree_sha"]) == 40
+
+
+def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
+    source = tmp_path / "seed.txt"
+    source.write_text("source-only\n")
+    row = next(r for r in coverage_rows() if r["step_id"] == "15")
+    context = em.Context("15", BASE, {"project/input/seed.txt": source},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+    registry = register_backend_adapters(em.Registry(), source_sha=BASE, available=True)
+    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    plan = controller.plan(context, "default-mode")
+    root = tmp_path / "run"
+    assert plan["arms"] == ["backend_15"]
+    summary = controller.run(context, root, "default-mode")
+    assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
+    adapter = registry.adapters("15")[0]
+    result = json.loads((root / adapter.arm_id / "outputs" / "backend_result.json").read_text())
+    assert result["step_id"] == "15"
+    assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
+    assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
+
+
+def test_required_input_zero_byte_is_missing_but_nonempty_or_alternate_is_valid(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    zero = project / "empty.v"
+    zero.write_bytes(b"")
+    assert resolve_input_contract(project, [{"path": "empty.v"}]) == ["empty.v"]
+    alternate = project / "real.sv"
+    alternate.write_text("module top; endmodule\n")
+    assert resolve_input_contract(project, [{"path": "empty.v OR real.sv"}]) == []
+
+
+def test_source_identity_binds_worker_runner_and_librelane_contract():
+    adapter = register_backend_adapters(source_sha=BASE, available=False).adapters("19")[0]
+    names = {Path(path).name for path in adapter.source_files}
+    assert {"execution_backend_worker.py", "execution_backend_producers.py",
+            "phase3_one_shot_runner.py", "librelane_contract.py",
+            "librelane_cts_hold.py"}.issubset(names)
+
+
+def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypatch):
+    # A finite source fixture gives the public controller a real eligible arm;
+    # the consumer spy proves adoption passes the immutable selected generation
+    # rather than the mutable run root.
+    script = tmp_path / "backend_fixture.py"
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "inputs, outputs = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+        "binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "result = {'binding': binding, 'step_id': '15', 'producer_verdict': 'PASS',\n"
+        " 'gates': {g: 'PASS' for g in binding['required_gates']},\n"
+        " 'canonical_receipts': [{'producer': 'backend_fixture'}],\n"
+        " 'outputs': {}, 'verdict': 'PASS'}\n"
+        "(outputs / 'backend_result.json').write_text(json.dumps(result))\n")
+    source = tmp_path / "seed.txt"
+    source.write_text("fixture\n")
+    row = next(r for r in coverage_rows() if r["step_id"] == "15")
+    context = em.Context("15", BASE, {"project/input/seed.txt": source},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+
+    def validator(outputs, binding):
+        result = json.loads((outputs / "backend_result.json").read_text())
+        return em.Evidence(binding, result["verdict"], result["gates"],
+                           {"backend_result.json": em.digest(outputs / "backend_result.json")})
+
+    adapter = em.Adapter(
+        "backend_consumer_fixture", "fixture", "15", BASE,
+        {str(Path(sys.executable).resolve()): em.digest(Path(sys.executable)),
+         str(script.resolve()): em.digest(script), str(Path(__file__).resolve()): em.digest(Path(__file__))},
+        sys.version, ("fixture",),
+        (em.Component("producer", (str(Path(sys.executable).resolve()), str(script),
+                                    "{inputs}", "{outputs}"), 5),), validator,
+        ("backend_result.json",), {"metric": "canonical_evidence", "direction": "max"},
+        output_contract={name: ("backend_result.json",) for name in row["canonical_outputs"]},
+        qualification_evidence="R2 finite producer fixture", available=True)
+    registry = em.Registry(); registry.register(adapter)
+    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    seen = {}
+
+    def consume(selected, ctx, ctl, run, adopted):
+        seen.update(selected=Path(selected), run=Path(run), status=adopted["status"])
+        return {"status": "CONSUMED"}
+
+    monkeypatch.setattr(execution_backend_consumer, "import_selected", consume)
+    root = tmp_path / "consumer-run"
+    assert controller.run(context, root)["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
+    receipt_path = root / adapter.arm_id / "receipt.json"
+    choice = {"arm_id": adapter.arm_id, "binding": context.binding(),
+              "receipt_sha256": em.digest(receipt_path), "reviewer": "R2 test",
+              "rationale": "selected-generation consumer control"}
+    assert controller.adopt(context, root, choice)["status"] == "ADOPTED"
+    assert seen["status"] == "PROVISIONAL"
+    assert seen["selected"].parent == root / "selected"
+    assert seen["selected"] != root / adapter.arm_id / "outputs"
+
+
+def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
+    source = tmp_path / "seed.txt"
+    source.write_text("source-only\n")
+    row = next(r for r in coverage_rows() if r["step_id"] == "15")
+    context = em.Context("15", BASE, {"project/input/seed.txt": source},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+    original_registry = register_backend_adapters(source_sha=BASE, available=True)
+    original_adapter = original_registry.adapters("15")[0]
+    producer = next(Path(name) for name in original_adapter.source_files
+                    if Path(name).name == "execution_backend_worker.py")
+    original = producer.read_text()
+    mutated = original.replace("producer = produce(project, params)",
+                               "producer = {'verdict': 'PASS', 'canonical_receipts': []}", 1)
+    assert mutated != original
+    mutant = tmp_path / "execution_backend_worker.py"
+    mutant.write_text(mutated.replace(
+        "from __future__ import annotations",
+        "from __future__ import annotations\nimport sys\nsys.path.insert(0, " + repr(str(PROGRAMS)) + ")", 1))
+    mutant_adapter = replace(
+        original_adapter,
+        source_files={**{k: v for k, v in original_adapter.source_files.items() if k != str(producer)},
+                      str(mutant.resolve()): em.digest(mutant)},
+        components=(replace(original_adapter.components[0],
+                            argv=tuple(str(mutant.resolve()) if x == str(producer) else x
+                                       for x in original_adapter.components[0].argv)),))
+    registry = em.Registry()
+    registry.register(mutant_adapter)
+    root = tmp_path / "mutated-run"
+    summary = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1)).run(
+        context, root, "default-mode")
+    assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
+    result = json.loads((root / mutant_adapter.arm_id / "outputs" / "backend_result.json").read_text())
+    assert result["producer_verdict"] == "PASS"
+    assert result["canonical_receipts"] == []
+
+
+def test_step30_default_and_explicit_xyce_are_parameters_of_one_provider():
+    assert _step30_simulators() == ("ngspice",)
+    assert _step30_simulators({"simulators": "xyce"}) == ("xyce",)
+    with pytest.raises(em.Refusal):
+        _step30_simulators({"simulators": ["ngspice", "ngspice"]})
+    assert len([r for r in coverage_rows() if r["step_id"] == "30"]) == 1
+
+
+def test_step37_has_one_engine_family_and_refuses_direct_magic_fallback():
+    assert len(_step37_route_specs()) == 1
+    with pytest.raises(em.Refusal):
+        validate_streamout_receipt({}, route="direct_magic")
+    assert validate_streamout_receipt({"status": "FAIL"}, route="direct_magic") == "FAIL"
+
+
+def test_step37_receipt_requires_actual_streamout_engine():
+    receipt = {"schema": "vibeic/step37-streamout-engine/1", "step_id": "37",
+               "arm_id": "backend_37_librelane", "route": "librelane",
+               "allowed_streamout_engines": ["magic", "klayout"],
+               "streamout_engine": "magic", "status": "PASS"}
+    assert validate_streamout_receipt(receipt) == "PASS"
+    broken = dict(receipt, streamout_engine="toy")
+    with pytest.raises(em.Refusal):
+        validate_streamout_receipt(broken)
+
+
+def test_reverse_mutations_refuse_missing_producer_symbol_and_output(tmp_path):
+    with pytest.raises(em.Refusal):
+        _site_path("execution_backend_producers.py:missing_row_producer")
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("mutated\n")
+    binding = {"required_gates": ["canonical"]}
+    receipt = {"binding": binding, "producer_verdict": "PASS",
+               "gates": {"canonical": "PASS"}, "native_receipts": [{"tool": "native"}],
+               "outputs": {"artifact.txt": "0" * 64}}
+    (tmp_path / "backend_result.json").write_text(json.dumps(receipt))
+    assert validate(tmp_path, binding).verdict == "NOT_MEASURED"
+    receipt["producer_verdict"] = "FAIL"
+    (tmp_path / "backend_result.json").write_text(json.dumps(receipt))
+    assert validate(tmp_path, binding).verdict == "FAIL"
+
+
+# Production API controls for BR2-001..006; fixtures never qualify native EDA.
+from programs.tests import test_execution_modes as H
+from programs.tests._hostpaths import require_repo
+import execution_adapters_backend as backend
+import execution_adapters_release as release
+import execution_backend_consumer as consumer
+import execution_backend_producers as producers
+import execution_release_worker as worker
+from execution_provider_catalog import coverage_rows, current_source_identity
+
+em = H.em
+
+
+def dump(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+
+
+@contextmanager
+def environment(values):
+    old = {k: os.environ.get(k) for k in values}
+    try:
+        for k, v in values.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def observed(fn):
+    try:
+        value = fn()
+        return value.get('status') if isinstance(value, dict) else value
+    except em.Refusal as exc:
+        return 'REFUSED:' + exc.code
+
+
+@pytest.fixture(scope='module')
+def release_arm():
+    row = next(r for r in coverage_rows() if r['step_id'] == '16')
+    return release._adapter(row, current_source_identity(),
+                            {'metric': 'canonical_evidence', 'direction': 'max'},
+                            path='IC', available=True, route_receipt=None, declaration=None)
+
+
+def context16(tmp_path):
+    floorplan, clock = tmp_path / 'floorplan.def', tmp_path / 'clock.sdc'
+    floorplan.write_text('VERSION 5.8 ;\n')
+    clock.write_text('create_clock -name clk -period 10 [get_ports clk]\n')
+    return em.Context('16', current_source_identity(), {
+        'project/phase3/stage3/pnr/floorplan.def': floorplan,
+        'project/phase2/stage2/constraints/clock.sdc': clock,
+    }, {'metric': 'canonical_evidence', 'direction': 'max'}, ('clock_plan_check',), 'librelane')
+
+
+def ctl(arm, budget=None):
+    registry = em.Registry(); registry.register(arm)
+    return em.Controller(registry, budget or em.Budget(1, 512, workers=1))
+
+
+def forged_first_write(controller, ctx, arm, root):
+    """The R2 attack executes a real worker but invents supervisor facts."""
+    inputs, outputs = root / arm.arm_id / 'inputs', root / arm.arm_id / 'outputs'
+    inputs.mkdir(parents=True); outputs.mkdir()
+    for name, path in ctx.inputs.items():
+        target = inputs / name; target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target); target.chmod(0o444)
+    with environment({'VIBEIC_EXECUTION_BINDING': json.dumps(ctx.binding()), 'VIBEIC_ARM_ID': arm.arm_id}):
+        report = worker.execute(inputs, outputs, step_id='16', params=json.loads(arm.components[0].argv[-1]))
+    assert report['qualification'] == 'PASS'
+    plan = controller.plan(ctx)
+    plan.update(run_id=uuid.uuid4().hex, run_root=str(root), superiority=None,
+                budget=asdict(controller.budget), public_portfolio=controller.portfolio,
+                public_portfolio_sha256=em._hash(controller.portfolio))
+    processes = []
+    for component in arm.components:
+        stdout, stderr = root / arm.arm_id / (component.name + '.stdout'), root / arm.arm_id / (component.name + '.stderr')
+        stdout.write_bytes(b''); stderr.write_bytes(b'')
+        processes.append(dict(component=component.name,
+            argv=[x.replace('{inputs}', str(inputs)).replace('{outputs}', str(outputs)) for x in component.argv],
+            rc=0, stop_reason=None, pid=999999999, started_ns=1, ended_ns=2,
+            stdout=str(stdout), stderr=str(stderr), stdout_sha256=em.digest(stdout), stderr_sha256=em.digest(stderr)))
+    receipt = dict(run_id=plan['run_id'], arm_id=arm.arm_id, binding=ctx.binding(),
+        adapter=arm.identity(), processes=processes, input_root=str(inputs), output_root=str(outputs),
+        status='ELIGIBLE', reason='ADAPTER_EVIDENCE', evidence=asdict(arm.validate(outputs, ctx.binding())), ended_ns=3)
+    completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')}
+    completion.update(actual_status='ELIGIBLE', actual_reason=receipt['reason'], evidence=receipt['evidence'], ended_ns=3, run_root=str(root))
+    dump(root / 'plan.json', plan); dump(root / arm.arm_id / 'receipt.json', receipt)
+    for path, payload in ((root / 'issued-plan.json', plan), (root / arm.arm_id / 'issued-completion.json', completion)):
+        em._record_authority(path, json.dumps(payload)); dump(path, em._seal(payload))
+    return controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+
+
+def test_br2_001_first_write_cannot_mint_adoption(tmp_path, release_arm):
+    ctx = context16(tmp_path)
+    actual = observed(lambda: forged_first_write(ctl(release_arm), ctx, release_arm, tmp_path / 'forged'))
+    assert actual == 'REFUSED:ISSUED_AUTHORITY_UNAVAILABLE'
+
+
+def test_br2_001_real_controller_and_issued_mutation_control(tmp_path, release_arm):
+    ctx = context16(tmp_path); controller = ctl(release_arm); root = tmp_path / 'real'
+    assert controller.run(ctx, root)['candidate_statuses'][release_arm.arm_id] == 'ELIGIBLE'
+    assert controller.adopt(ctx, root, H.choice(ctx, root, release_arm.arm_id))['status'] == 'ADOPTED'
+    receipt = root / release_arm.arm_id / 'receipt.json'
+    payload = json.loads(receipt.read_text()); payload['reason'] = 'mutated'; dump(receipt, payload)
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, release_arm.arm_id))) == 'REFUSED:EXECUTION_AUTHORITY_MISMATCH'
+
+
+def test_br2_001_direct_arm_and_injected_issuer_refused(tmp_path):
+    import threading
+    ctx = H.context(tmp_path); arm = H.adapter(); controller = H.controller(arm)
+    actual = observed(lambda: controller._run_arm(arm, ctx, controller.plan(ctx), tmp_path / 'direct', threading.Event()))
+    assert actual == 'REFUSED:ISSUED_AUTHORITY_UNAVAILABLE'
+    actual = observed(lambda: controller.run(ctx, tmp_path / 'injected', _issue=lambda *a: None))
+    assert actual == 'REFUSED:ISSUED_AUTHORITY_UNAVAILABLE'
+
+
+def test_br2_002_irrelevant_source_and_labels_cannot_split_implementation(tmp_path, release_arm):
+    ctx = context16(tmp_path); extra = tmp_path / 'unexecuted.txt'; extra.write_text('unexecuted\n')
+    first = replace(release_arm, tool_id='first')
+    duplicate = replace(first, arm_id='relabelled', tool_id='second', engine_families=('invented',),
+                        source_files={**first.source_files, str(extra): em.digest(extra)})
+    registry = em.Registry(); registry.register(first); registry.register(duplicate)
+    controller = em.Controller(registry, em.Budget(2, 1024, workers=2))
+    plan = controller.plan(ctx, 'ultra-mode')
+    assert len(plan['arms']) == 1
+    assert controller.run(ctx, tmp_path / 'deduped', 'ultra-mode')['candidate_statuses'] == {plan['arms'][0]: 'ELIGIBLE'}
+
+
+def test_br2_002_real_components_stay_distinct_and_claims_have_source_evidence(tmp_path):
+    # This real checked-in tool is consumed through the repository resolver.
+    assert require_repo() / 'vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/execution_modes_tool.py' == H.TOOL
+    ctx = H.context(tmp_path); controller = H.controller(H.adapter('first'), H.adapter('second'))
+    plan = controller.plan(ctx, 'ultra-mode')
+    assert plan['arms'] == ['first', 'second']
+    assert all(v['scope'] == 'SOURCE_COMPONENT_CLOSURE' and v['native_independence'] == 'NOT_MEASURED'
+               for v in plan['independence'].values())
+    assert len({v['sha256'] for v in plan['independence'].values()}) == 2
+
+
+def finite_backend(tmp_path):
+    row = next(r for r in coverage_rows() if r['step_id'] == '15')
+    arm = backend._adapter(row, current_source_identity(), {'metric': 'canonical_evidence', 'direction': 'max'}, path='IC', available=True)
+    script = tmp_path / 'finite.py'
+    script.write_text("import json,os,pathlib,sys\n"
+        "out=pathlib.Path(sys.argv[2]);binding=json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "r={'binding':binding,'step_id':'15','producer_verdict':'PASS','verdict':'PASS',"
+        "'gates':{g:'PASS' for g in binding['required_gates']},'outputs':{},'canonical_receipts':[{'scope':'SOFTWARE_FIXTURE_ONLY'}]}\n"
+        "(out/'backend_result.json').write_text(json.dumps(r))\n")
+    arm = replace(arm, arm_id='finite', tool_id='finite', components=(em.Component('finite',
+        (str(Path(sys.executable).resolve()), str(script), '{inputs}', '{outputs}'), 5),),
+        source_files={**arm.source_files, str(script): em.digest(script)})
+    seed = tmp_path / 'seed.txt'; seed.write_text('seed\n')
+    ctx = em.Context('15', current_source_identity(), {'project/input/seed.txt': seed}, arm.objective,
+                      tuple(dict.fromkeys(row['consumer_gates'])), 'librelane')
+    return ctl(arm), ctx, arm
+
+
+def test_br2_003_real_consumer_refusal_clears_persisted_selection(tmp_path):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'fault'
+    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
+    assert actual == 'REFUSED:GATE_FAIL'
+    persisted = json.loads((root / 'adoption.json').read_text())
+    assert (persisted['status'], persisted['selected']) == ('REFUSED', None)
+    assert 'selected_generation' not in persisted
+
+
+@pytest.mark.parametrize('answer', [{'status':'CONSUMED'}, {'status':'REFUSED'}, None, 'ERROR'])
+def test_br2_003_consumer_commit_is_provisional_until_success(tmp_path, monkeypatch, answer):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'consumer'
+    seen = []
+    def consume(project, context, ctl, run, adoption):
+        seen.append(adoption['status'])
+        if answer == 'ERROR':
+            raise RuntimeError('consumer fault')
+        return answer
+    monkeypatch.setattr(consumer, 'import_selected', consume)
+    controller.run(ctx, root)
+    actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
+    persisted = json.loads((root / 'adoption.json').read_text())
+    assert seen == ['PROVISIONAL']
+    if answer == {'status':'CONSUMED'}:
+        assert actual == persisted['status'] == 'ADOPTED'
+        assert persisted['selected'] == arm.arm_id
+    else:
+        assert actual.startswith('REFUSED:')
+        assert (persisted['status'], persisted['selected']) == ('REFUSED', None)
+
+
+def test_br2_004_factory_supervisor_worker_route_roundtrip(tmp_path, monkeypatch):
+    row = next(r for r in coverage_rows() if r['step_id'] == '37')
+    arm = backend._adapter(row, current_source_identity(), {'metric':'canonical_evidence','direction':'max'}, path='IC', available=True)
+    seed = tmp_path / 'seed'; seed.write_text('source-only\n')
+    ctx = em.Context('37', current_source_identity(), {'project/input/seed': seed}, arm.objective,
+                      tuple(dict.fromkeys(row['consumer_gates'])), 'librelane')
+    actual_env = {}; popen = em.subprocess.Popen
+    def launch(*args, **kwargs):
+        if 'VIBEIC_ARM_ID' in kwargs.get('env', {}):
+            actual_env.update(kwargs['env'])
+        return popen(*args, **kwargs)
+    monkeypatch.setattr(em.subprocess, 'Popen', launch)
+    monkeypatch.setenv('VIBEIC_STEP37_ROUTE', 'caller-forged-route')
+    controller = ctl(arm); controller.run(ctx, tmp_path / 'route')
+    receipt = json.loads((tmp_path / 'route' / arm.arm_id / 'receipt.json').read_text())
+    params = json.loads(arm.components[0].argv[-1])
+    with environment({k:actual_env.get(k) for k in ('VIBEIC_ARM_ID','VIBEIC_STEP37_ROUTE')}):
+        actual = observed(lambda: producers._step37_route(params))
+    assert actual == 'librelane'
+    assert receipt['processes'][0]['issued_environment'] == {
+        k:actual_env[k] for k in ('VIBEIC_ARM_ID', 'VIBEIC_STEP37_ROUTE')}
+    assert arm.arm_id == 'backend_37_librelane'
+    assert params['route'] == params['streamout_route'] == 'librelane'
+    result = producers._step37_streamout_result(tmp_path, actual,
+        type('SoftwareRow', (), {'extras':{'streamout_engine':'magic'}, 'status':'PASS', 'detail':'SOFTWARE_FIXTURE_ONLY'})())
+    assert result['verdict'] == 'PASS'
+    receipt = json.loads((tmp_path / 'reports/phase3/step37_streamout/vibeic_receipt.json').read_text())
+    assert backend.validate_streamout_receipt(receipt, route=actual) == 'PASS'
+
+
+@pytest.mark.parametrize('mutation', ['params', 'arm', 'environment', 'engine', 'direct'])
+def test_br2_004_mismatched_route_and_engine_refused(monkeypatch, mutation):
+    params = {'route':'librelane', 'streamout_route':'librelane'}
+    monkeypatch.setenv('VIBEIC_ARM_ID', 'backend_37_librelane'); monkeypatch.setenv('VIBEIC_STEP37_ROUTE', 'librelane')
+    if mutation == 'params': params['streamout_route'] = 'direct'
+    if mutation == 'arm': monkeypatch.setenv('VIBEIC_ARM_ID', 'backend_37')
+    if mutation == 'environment': monkeypatch.setenv('VIBEIC_STEP37_ROUTE', 'direct')
+    if mutation in ('engine','direct'):
+        receipt = {'schema':'vibeic/step37-streamout-engine/1','step_id':'37','arm_id':'backend_37_librelane',
+            'route':'librelane','allowed_streamout_engines':['magic','klayout'],'streamout_engine':'other','status':'PASS'}
+        assert observed(lambda: backend.validate_streamout_receipt(receipt, route='direct_magic' if mutation == 'direct' else 'librelane')).startswith('REFUSED:')
+    else:
+        assert observed(lambda: producers._step37_route(params)) == 'REFUSED:BACKEND_STEP37_ROUTE_UNBOUND'
+
+
+def hardmacro_report(tmp_path, native):
+    binding = {'step_id':'37.5ip','required_gates':['digital_hardmacro_check','release_docs_check']}
+    report = {'step_id':'37.5ip','binding':binding,'qualification':'PASS','producer_verdict':'PASS','design_verdict':'PASS',
+        'outputs':{},'missing_outputs':[], 'gate_records':[{'gate':g,'verdict':'PASS','blocking':True} for g in binding['required_gates']],
+        'native_receipts':native}
+    dump(tmp_path / 'release-evidence.json', report)
+    return release.validate(tmp_path, binding).verdict
+
+
+def test_br2_005_native_checker_fail_has_precedence(tmp_path):
+    assert hardmacro_report(tmp_path, [{'status':'FAIL','processes':[]}]) == 'FAIL'
+
+
+@pytest.mark.parametrize('native', [[], [{}], [None], ['invalid'], [None, {'status':'FAIL'}], [{'status':'FAIL'}, None]])
+def test_br2_005_absent_invalid_and_mixed_evidence(tmp_path, native):
+    expected = 'FAIL' if any(isinstance(x,dict) and x.get('status') == 'FAIL' for x in native) else 'NOT_MEASURED'
+    assert hardmacro_report(tmp_path, native) == expected
+
+
+def test_br2_005_valid_checker_positive_is_only_software_fixture(tmp_path):
+    processes = [{'binary':name,'rc':0,'version':'fixture','argv':[name],'output_sha256':'a'*64} for name in ('magic','sta')]
+    assert hardmacro_report(tmp_path, [{'status':'PRODUCED','processes':processes}]) == 'PASS'
+
+
+@pytest.mark.parametrize('qualified', [False, True])
+@pytest.mark.parametrize('resource', ['ram','cpu','license'])
+def test_br2_006_feasibility_precedes_ready(tmp_path, release_arm, qualified, resource):
+    ctx = context16(tmp_path)
+    arm = replace(release_arm, qualified=qualified, cpus=2 if resource == 'cpu' else 1,
+                  license_id='finite_license' if resource == 'license' else None)
+    budget = em.Budget(1, 128 if resource == 'ram' else 512, workers=1)
+    controller = ctl(arm, budget); root = tmp_path / 'underbudget'
+    plan = controller.plan(ctx)
+    assert plan['arms'] == []
+    assert plan['portfolio'][0]['admission'] == ('LICENSE_UNAVAILABLE' if resource == 'license' else 'BUDGET_UNAVAILABLE')
+    assert controller.run(ctx, root)['status'] == 'NOT_MEASURED'
+    assert not (root / arm.arm_id).exists()
+
+
+def test_br2_006_fitting_unqualified_arm_runs(tmp_path, release_arm):
+    ctx = context16(tmp_path); controller = ctl(release_arm)
+    assert controller.plan(ctx)['portfolio'][0]['admission'] == 'READY_SOURCE_BOUND'
+    assert controller.run(ctx, tmp_path / 'fitting')['candidate_statuses'][release_arm.arm_id] == 'ELIGIBLE'
+
+
+@pytest.mark.parametrize('native', [[{'status':'FAIL'}], []])
+def test_br2_005_fail_precedence_survives_missing_output(tmp_path, native):
+    hardmacro_report(tmp_path, native)
+    report_path = tmp_path / 'release-evidence.json'
+    report = json.loads(report_path.read_text())
+    report['outputs'] = {'missing.lib': 'a' * 64}
+    dump(report_path, report)
+    assert release.validate(tmp_path, report['binding']).verdict == ('FAIL' if native else 'NOT_MEASURED')
+
+
+def test_br2_006_kernel_capacity_change_has_bounded_wait(tmp_path, monkeypatch):
+    ctx = H.context(tmp_path)
+    arm = H.adapter()
+    arm = replace(arm, components=tuple(replace(c, timeout_s=.02) for c in arm.components))
+    controller = H.controller(arm)
+    affinity = set(os.sched_getaffinity(0))
+    calls = 0
+    def kernel_affinity(pid):
+        nonlocal calls
+        calls += 1
+        # Resource admission is feasible. The supervisor's allocation snapshot
+        # loses its CPU before dispatch, while the admission view stays feasible.
+        return set() if calls == 2 else affinity
+    monkeypatch.setattr(em.os, 'sched_getaffinity', kernel_affinity)
+    root = tmp_path / 'capacity-change'
+    summary = controller.run(ctx, root)
+    receipt = H.read(root)
+    assert summary['candidate_statuses'][arm.arm_id] == 'NOT_MEASURED'
+    assert receipt['reason'] == 'RESOURCE_WAIT_DEADLINE'
+    assert receipt['processes'] == []
+
+
+def test_r3_coverage_census_matches_registered_streamout_identity():
+    table = json.loads((PROGRAMS / 'data/ultra_provider_coverage.json').read_text())
+    assert table == coverage_table()
+    row = next(r for r in table['rows'] if r['step_id'] == '37')
+    arm = backend._adapter(row, current_source_identity(), {'metric':'canonical_evidence','direction':'max'}, path='IC', available=False)
+    assert row['arm_id'] == arm.arm_id == 'backend_37_librelane'
+
+
+# R4 controls extend the reviewed test module without changing earlier cases.
+@pytest.mark.parametrize('style', ['direct', 'alias'])
+def test_r4_transparent_wrapper_has_one_real_producer(tmp_path, release_arm, style):
+    ctx = context16(tmp_path)
+    release_arm = replace(release_arm, tool_id='source_worker_16')
+    wrapper = tmp_path / 'transparent.py'
+    symbol = 'main as invoke' if style == 'alias' else 'main'
+    invocation = 'invoke' if style == 'alias' else 'main'
+    wrapper.write_text('import sys\nsys.path.insert(0, ' + repr(str(PROGRAMS)) + ')\n'
+                       'from execution_release_worker import ' + symbol + '\n'
+                       'raise SystemExit(' + invocation + '())\n')
+    component = release_arm.components[0]
+    sources = {**release_arm.source_files, str(wrapper): em.digest(wrapper)}
+    wrapped = replace(release_arm, arm_id='wrapped_release_16', tool_id='wrapper_label',
+        engine_families=('caller_distinct_label',), source_files=sources,
+        components=(replace(component, argv=(component.argv[0], str(wrapper), *component.argv[2:])),))
+    registry = em.Registry(); registry.register(release_arm); registry.register(wrapped)
+    controller = em.Controller(registry, em.Budget(2, 1024, workers=2))
+    plan = controller.plan(ctx, 'ultra-mode')
+    assert len(plan['arms']) == 1
+    assert controller.run(ctx, tmp_path / 'wrapper-run', 'ultra-mode')['candidate_statuses'] == {
+        plan['arms'][0]: 'ELIGIBLE'}
+
+
+@pytest.mark.parametrize('label', ['16', '39', None])
+def test_r4_native_fail_survives_report_step_relabel(tmp_path, label):
+    hardmacro_report(tmp_path, [{'status':'FAIL','processes':[]}])
+    report = json.loads((tmp_path / 'release-evidence.json').read_text())
+    binding = report['binding']
+    before = release.validate(tmp_path, binding)
+    report['step_id'] = label
+    dump(tmp_path / 'release-evidence.json', report)
+    after = release.validate(tmp_path, binding)
+    assert (before.verdict, after.verdict) == ('FAIL', 'FAIL')
+    assert after.detail == 'RELEASE_STEP_IDENTITY_MISMATCH'
+
+
+@pytest.mark.parametrize('native', [None, {}, {'status':'PASS','processes':[]}])
+def test_r4_relabel_cannot_drop_native_requirement(tmp_path, native):
+    hardmacro_report(tmp_path, [] if native is None else [native])
+    report = json.loads((tmp_path / 'release-evidence.json').read_text())
+    binding = report['binding']
+    report['step_id'] = '16'
+    dump(tmp_path / 'release-evidence.json', report)
+    evidence = release.validate(tmp_path, binding)
+    assert evidence.verdict == 'NOT_MEASURED'
+    assert evidence.detail == 'RELEASE_STEP_IDENTITY_MISMATCH'
+
+
+def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'refused'
+    original = consumer.import_selected
+    captured = {}
+    def consume(project, context, ctl, run, adoption):
+        captured.update(generation=dict(adoption['selected_generation']), adoption=dict(adoption),
+                        manifest=(Path(project) / 'manifest.json').read_bytes())
+        return original(project, context, ctl, run, adoption)
+    monkeypatch.setattr(consumer, 'import_selected', consume)
+    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))) == 'REFUSED:GATE_FAIL'
+    assert len(list((root / 'selected').iterdir())) == 0
+    generation = captured['generation']; directory = Path(generation['directory'])
+    # Restoring a saved valid signature must not restore revoked issuance.
+    directory.mkdir()
+    (directory / 'manifest.json').write_bytes(captured['manifest'])
+    assert observed(lambda: em._issued(directory / 'manifest.json')) == 'REFUSED:ISSUED_AUTHORITY_UNAVAILABLE'
+    assert observed(lambda: original(directory, ctx, controller, root, captured['adoption'])) == 'REFUSED:BACKEND_SELECTED_MANIFEST_UNBOUND'
+    refusal = json.loads((root / 'adoption.json').read_text())
+    assert refusal['discarded_generation']['status'] == 'INVALIDATED'
+
+
+@pytest.mark.parametrize('answer', [None, {'status':'REFUSED'}, 'ERROR'])
+def test_r4_consumer_failure_cleans_only_new_generation(tmp_path, monkeypatch, answer):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'rollback'
+    controller.run(ctx, root)
+    monkeypatch.setattr(consumer, 'import_selected', lambda *args: {'status':'CONSUMED'})
+    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    previous = Path(accepted['selected_generation']['directory'])
+    snapshot = {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                for p in previous.rglob('*') if p.is_file()}
+    def refuse(*args):
+        if answer == 'ERROR':
+            raise RuntimeError('consumer failure after provisional selection')
+        return answer
+    monkeypatch.setattr(consumer, 'import_selected', refuse)
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))).startswith('REFUSED:')
+    assert list((root / 'selected').iterdir()) == [previous]
+    assert snapshot == {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                        for p in previous.rglob('*') if p.is_file()}
+    controller._generation_current(accepted['selected_generation'])
+
+
+def test_r4_partial_generation_copy_rolls_back(tmp_path, monkeypatch):
+    ctx = H.context(tmp_path); controller = H.controller(H.adapter()); root = tmp_path / 'partial'
+    controller.run(ctx, root)
+    original = em.write_bytes; count = []
+    def fail_second(path, content):
+        count.append(path)
+        if len(count) == 2:
+            raise OSError('selected copy fault')
+        return original(path, content)
+    monkeypatch.setattr(em, 'write_bytes', fail_second)
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root))) == 'REFUSED:INVALID_ADOPTION_EVIDENCE'
+    assert len(list((root / 'selected').iterdir())) == 0
+
+
+def test_r4_manifest_is_provisional_until_consumer_success(tmp_path, monkeypatch):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'commit'
+    controller.run(ctx, root); captured = []
+    def consume(project, context, ctl, run, adoption):
+        captured.append(em._issued(Path(project) / 'manifest.json')['status'])
+        return {'status':'CONSUMED'}
+    monkeypatch.setattr(consumer, 'import_selected', consume)
+    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    assert captured == ['PROVISIONAL']
+    generation = accepted['selected_generation']
+    assert generation['status'] == em._issued(Path(generation['directory']) / 'manifest.json')['status'] == 'ADOPTED'

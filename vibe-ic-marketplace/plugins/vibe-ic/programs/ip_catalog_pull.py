@@ -867,6 +867,248 @@ def verify_existing_official_pins_outcome(project: Path,
     return PIN_VERIFIED, "every pin reproduced by an independent pull"
 
 
+LOCAL_DERIVATIVE_SCHEMA = "vibeic.reused_ip_local_derivative.v1"
+
+
+def _local_json(path: Path) -> Dict[str, Any]:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+    value = json.loads(path.read_text(), object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise ValueError("local derivative JSON must be an object")
+    return value
+
+
+def _local_path(project: Path, rel: Any, *, directory=False) -> Path:
+    if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or \
+            any(p in (".", "..") for p in rel.split("/")):
+        raise ValueError(f"invalid project-relative local path: {rel!r}")
+    root = project.resolve()
+    path = root / rel
+    if not path.resolve().is_relative_to(root) or \
+            any(p.is_symlink() for p in (path, *path.parents) if p != root):
+        raise ValueError(f"local path escapes project or contains symlink: {rel}")
+    if not (path.is_dir() if directory else path.is_file()):
+        raise ValueError(f"local source/patch/evidence missing: {rel}")
+    return path
+
+
+def _local_ref(project: Path, ref: Any) -> Path:
+    if not isinstance(ref, dict):
+        raise ValueError("local derivative reference must bind path and sha256")
+    path = _local_path(project, ref.get("path"))
+    if _sha256_file(path) != ref.get("sha256"):
+        raise ValueError(f"local source/patch/evidence digest differs: {ref.get('path')}")
+    return path
+
+
+def _local_inventory(rtl: Path) -> Dict[str, str]:
+    """All staged files, including headers; the keystone is checked separately."""
+    result = {}
+    for path in sorted(rtl.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("symlink in local derivative inventory")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError("nonregular file in local derivative inventory")
+        rel = path.relative_to(rtl).as_posix()
+        if rel != "SOURCE_MANIFEST.json":
+            result[rel] = _sha256_file(path)
+    return result
+
+
+def _local_derivative_plan(project: Path, matches: List[CatalogMatch],
+                           manifest: Dict[str, Any], ref: Dict[str, Any], *,
+                           allow_parent=False):
+    """Verify data and the independent official parent; replay exact byte edits.
+
+    BLOCKING source admission only. This cannot judge the semantic correction
+    or supply RTL-to-current-synthesis LEC, which remains an ordinary obligation.
+    The official verifier above is unchanged and never accepts derivative bytes.
+    """
+    record = _local_json(_local_ref(project, ref))
+    if record.get("schema") != LOCAL_DERIVATIVE_SCHEMA or \
+            record.get("kind") != "LOCAL_DERIVATIVE":
+        raise ValueError("local derivative schema/kind missing")
+    provenance = record.get("local_provenance")
+    if not isinstance(provenance, dict) or \
+            any(not isinstance(provenance.get(k), str) or not provenance[k].strip()
+                for k in ("actor", "reason", "owner_ruling")):
+        raise ValueError("local provenance actor/reason/owner_ruling missing")
+    parent = _local_path(project, record.get("parent_project"), directory=True)
+    if parent == project.resolve():
+        raise ValueError("official parent must be separate from derivative project")
+    pm = _local_json(_local_ref(project, record.get("parent_manifest")))
+    parent_mf = parent / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    if _local_ref(project, record["parent_manifest"]) != parent_mf or \
+            _local_ref(project, record.get("parent_provenance")) != parent / "provenance.jsonl":
+        raise ValueError("parent manifest/provenance do not belong to parent project")
+    if "local_derivative" in pm or manifest.get("reused_ip") is not True or \
+            manifest.get("ip_list") != pm.get("ip_list") or \
+            manifest.get("generated_by") != "ip_catalog_pull" or \
+            pm.get("source_pins") != manifest.get("source_pins") or \
+            pm.get("generated_by") != "ip_catalog_pull":
+        raise ValueError("official parent pins/identity changed or derivative mislabeled")
+    official = {}
+    for pin in pm.get("source_pins") or []:
+        for rel, digest in pin.get("files_sha256", {}).items():
+            name = Path(rel).name
+            if name in official:
+                raise ValueError("colliding official inventory basenames")
+            official[name] = digest
+    if not official or _local_inventory(parent / "phase2/stage1/rtl") != official:
+        raise ValueError("official parent full inventory differs from its pins")
+    authored = {}
+    for row in manifest.get("ai_authored_files") or []:
+        name, digest = row["path"], row["sha256"]
+        if name in official or name in authored:
+            raise ValueError("authored glue overlaps official reused-IP inventory")
+        authored[name] = digest
+    before = {**official, **authored}
+    patch = _local_json(_local_ref(project, record.get("patch")))
+    if patch.get("format") != "exact_utf8_replacements.v1" or \
+            not isinstance(patch.get("files"), list) or not patch["files"]:
+        raise ValueError("finite exact local patch missing")
+    replacements = {}
+    after = dict(before)
+    for row in patch["files"]:
+        name = row["path"]
+        if name not in official or name in replacements:
+            raise ValueError("patch file undeclared, repeated, or not a reused-IP file")
+        data = _local_path(parent, "phase2/stage1/rtl/" + name).read_bytes()
+        if row.get("sha256_before") != official[name]:
+            raise ValueError("patch before digest differs from official parent")
+        if not isinstance(row.get("edits"), list) or not row["edits"]:
+            raise ValueError("exact patch edits missing")
+        for edit in row["edits"]:
+            old, new = edit["before"].encode("utf-8"), edit["after"].encode("utf-8")
+            if not old or data.count(old) != 1:
+                raise ValueError("exact patch context missing or ambiguous")
+            data = data.replace(old, new, 1)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != row.get("sha256_after") or digest == official[name]:
+            raise ValueError("replayed patch after digest differs or patch is empty")
+        after[name], replacements[name] = digest, data
+    if record.get("current_inventory") != after:
+        raise ValueError("declared complete current inventory differs from patch/parent/glue")
+    acceptable = (before, after) if allow_parent else (after,)
+    if _local_inventory(project / "phase2/stage1/rtl") not in acceptable:
+        raise ValueError("current full inventory drift, extra file, or undeclared modification")
+    obligations = record.get("input_obligations")
+    if not isinstance(obligations, list) or not obligations:
+        raise ValueError("prompt-defined input obligation missing")
+    for obligation in obligations:
+        path = _local_ref(project, obligation)
+        if not path.is_relative_to(project.resolve() / "input") or \
+                not isinstance(obligation.get("quote"), str) or \
+                not obligation["quote"] or obligation["quote"] not in path.read_text():
+            raise ValueError("input obligation quote/source binding differs")
+    proof = record.get("proof") or {}
+    challenge = _local_ref(project, proof.get("challenge"))
+    for key, want, inventory in (("parent_red", 1, before), ("candidate_green", 0, after)):
+        receipt = _local_json(_local_ref(project, proof.get(key)))
+        outcomes = {r["name"]: r["rc"] for r in receipt.get("results", [])}
+        if outcomes.get("compile") != 0 or outcomes.get("run") != want or \
+                receipt.get("tb_sha256") != _sha256_file(challenge) or \
+                receipt.get("rtl") != inventory:
+            raise ValueError(f"{key} does not bind unchanged challenge/outcome/full RTL inventory")
+    local_event = {"event": "ip_catalog_local_derivative", "kind": "LOCAL_DERIVATIVE",
+             "record": ref, "current_inventory": after,
+             "official_unmodified_files": len(official)-len(replacements),
+             "locally_adapted_reused_files": len(replacements),
+             "separately_authored_files": sorted(authored)}
+    if not allow_parent:
+        # Existing consumers already owe this producer event. Known local
+        # corruption must outrank an unavailable independent parent replay;
+        # new-producer staging has not emitted its event yet.
+        events = [json.loads(line) for line in (project / "provenance.jsonl").read_text().splitlines()]
+        if local_event not in events:
+            raise ValueError("local derivative producer provenance missing or changed")
+    # Fresh independent upstream reproduction is mandatory even when all local
+    # receipts agree. Its UNAVAILABLE outcome never becomes source acceptance.
+    state, why = verify_existing_official_pins_outcome(parent, matches, pm)
+    if state != PIN_VERIFIED:
+        return state, "official parent: " + why, None
+    for reference in [ref, record["parent_manifest"], record["parent_provenance"],
+                      record["patch"], *obligations, proof["challenge"],
+                      proof["parent_red"], proof["candidate_green"]]:
+        _local_ref(project, reference)
+    current_events = [json.loads(line) for line in (project / "provenance.jsonl").read_text().splitlines()]
+    parent_events = [json.loads(line) for line in (parent / "provenance.jsonl").read_text().splitlines()]
+    for event in parent_events:
+        if event.get("event") == "ip_catalog_pull" and not any(
+                all(e.get(k) == event.get(k) for k in _PULL_EVENT_KEYS)
+                for e in current_events if isinstance(e, dict)):
+            raise ValueError("current project dropped or changed official parent pull provenance")
+    return PIN_VERIFIED, "LOCAL_DERIVATIVE: independent official parent plus exact declared local patch", {
+        "record": record, "before": before, "after": after,
+        "replacements": replacements,
+        "event": local_event,
+    }
+
+
+def verify_existing_reused_pins_outcome(project: Path, matches: List[CatalogMatch],
+                                       manifest: Dict[str, Any]) -> Tuple[str, str]:
+    """Ordinary runner admission: official bytes or explicit LOCAL DERIVATIVE."""
+    if "local_derivative" not in manifest:
+        return verify_existing_official_pins_outcome(project, matches, manifest)
+    try:
+        # Do not accept a caller's manifest while the actual keystone differs.
+        if _local_json(project / "phase2/stage1/rtl/SOURCE_MANIFEST.json") != manifest:
+            raise ValueError("current local derivative manifest changed")
+        ref = manifest["local_derivative"]
+        state, why, plan = _local_derivative_plan(project, matches, manifest, ref)
+        if plan is None:
+            return state, why
+        if _local_inventory(project / "phase2/stage1/rtl") != plan["after"]:
+            raise ValueError("current full inventory drift, extra file, or undeclared modification")
+        if _local_json(project / "phase2/stage1/rtl/SOURCE_MANIFEST.json") != manifest:
+            raise ValueError("current local derivative manifest changed during verification")
+        events = [json.loads(line) for line in (project / "provenance.jsonl").read_text().splitlines()]
+        if plan["event"] not in events:
+            raise ValueError("local derivative producer provenance missing or changed")
+        return state, why
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return PIN_MISMATCH, "LOCAL_DERIVATIVE_REFUSED: " + str(exc)
+
+
+def apply_local_derivative(project: Path, matches: List[CatalogMatch],
+                           ref: Dict[str, Any]) -> Dict[str, Any]:
+    """Existing pull producer stages only the finite replay, retaining parent data."""
+    try:
+        mf_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+        manifest = _local_json(mf_path)
+        if "local_derivative" in manifest:
+            if manifest["local_derivative"] != ref:
+                raise ValueError("another local derivative is already declared")
+            state, why = verify_existing_reused_pins_outcome(project, matches, manifest)
+            return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+        state, why, plan = _local_derivative_plan(project, matches, manifest, ref,
+                                                 allow_parent=True)
+        if plan is None:
+            return {"status": state, "reason": why, "kind": "LOCAL_DERIVATIVE"}
+        rtl = project / "phase2/stage1/rtl"
+        if _local_inventory(rtl) not in (plan["before"], plan["after"]):
+            raise ValueError("current inventory is neither exact parent nor declared derivative")
+        import _atomic_artefact as atomic
+        for name, data in plan["replacements"].items():
+            atomic.write_bytes(rtl / name, data)
+        manifest["local_derivative"] = ref
+        atomic.write_json(mf_path, manifest)
+        with (project / "provenance.jsonl").open("a") as f:
+            f.write(json.dumps(plan["event"], sort_keys=True) + "\n")
+        return {"status": PIN_VERIFIED, "reason": why, **plan["event"]}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return {"status": PIN_MISMATCH, "kind": "LOCAL_DERIVATIVE",
+                "reason": "LOCAL_DERIVATIVE_REFUSED: " + str(exc)}
+
+
 # ---------------------------------------------------------------------------
 def main(argv: List[str]) -> int:
     import argparse
@@ -879,6 +1121,8 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--ic-name", default=None,
                     help="IC-under-test name (strengthens the #187 self-match "
                          "guard; L1/L3/L9 identity is used when omitted)")
+    ap.add_argument("--local-derivative", metavar="RECORD",
+                    help="apply an explicit project-relative LOCAL DERIVATIVE record; independently verify its official parent, exact patch, full inventory and retained challenge evidence")
     ap.add_argument("--allow-self-match", action="store_true",
                     help="Do NOT refuse a catalog entry that supplies the IC's "
                          "OWN design (#187 — requires explicit acknowledgement)")
@@ -896,6 +1140,22 @@ def main(argv: List[str]) -> int:
     args = ap.parse_args(argv)
 
     project = Path(args.project)
+
+    if args.local_derivative:
+        try:
+            path = _local_path(project, args.local_derivative)
+            from ip_catalog_query import load_project_facts, versioned_reuse_evidence
+            facts = load_project_facts(project)
+            matches = [m for m in query_catalog(
+                project, min_confidence=args.min_confidence,
+                catalog_dir=Path(args.catalog_dir) if args.catalog_dir else None)
+                if versioned_reuse_evidence(facts, m)[0]]
+            outcome = apply_local_derivative(project, matches,
+                                            {"path": args.local_derivative, "sha256": _sha256_file(path)})
+        except (OSError, ValueError, TypeError) as exc:
+            outcome = {"status": PIN_MISMATCH, "reason": str(exc)}
+        print(json.dumps(outcome, indent=2))
+        return 0 if outcome["status"] == PIN_VERIFIED else 1
 
     # Prune / supersede path — record the removal instead of leaving a
     # dangling pull entry.

@@ -256,13 +256,17 @@ def _current_tool_handoff(tmp_path, pdk="pdk_neutral"):
         'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
     put(folder / 'reports/stat.json', {'modules': {'\\top': {'num_cells': 1, 'num_submodules': 0}}})
     put(folder / 'pdk_root.json', {'cli_pdk_root': '/pdk',
-                                 'mounts_under_it': [[str(root), '/pdk']]})
+                                  'mounts_under_it': [[str(root), '/pdk']],
+                                  'stated_by': 'run_chain(pdk_root=...)'})
     def refresh():
         put(folder / 'config.json', cfg)
         put(p / 'phase3/librelane/synthesis_resolved.json', cfg)
-        receipt = {'input': {'step': 'Yosys.Synthesis',
-                   'config': LC.digest(p / 'phase3/librelane/synthesis_resolved.json'),
-                   'config_files': {str(rtl.resolve()): LC.digest(rtl)}, 'state_files': {}},
+        fingerprint = {'step': 'Yosys.Synthesis',
+                       'config': LC.digest(p / 'phase3/librelane/synthesis_resolved.json'),
+                       'config_files': {str(rtl.resolve()): LC.digest(rtl)},
+                       'state_files': {}}
+        put(folder / 'input_fingerprint.json', fingerprint)
+        receipt = {'input': fingerprint,
                    'sha256': {str(f.relative_to(folder)): LC.digest(f)
                               for f in folder.rglob('*') if f.is_file() and f.name != 'vibeic_receipt.json'}}
         put(folder / 'vibeic_receipt.json', receipt)

@@ -1,0 +1,36 @@
+[
+  {
+    "step": "phase2.canonical_admission",
+    "design": "clock-sampled memory integration",
+    "bucket": "A",
+    "rule_name": "canonical_native_owner_source_identity",
+    "docstring": "A native consumer source change must reopen canonical admission even when its callers and flow YAML are unchanged.",
+    "expected_signal": "AUTO-FIX",
+    "fix_action": "Include existing `librelane_contract.py` in `canonical_program_paths`; preserve ordinary same-identity and report-only duplicate refusal.",
+    "before": "Actual canonical refusal before Phase2; focused parent 2 failed/2 passed.",
+    "after": "Focused candidate4 passed; fresh canonical continuation not yet measured.",
+    "owner": "programs/canonical_run_admission.py",
+    "evidence_packets": [
+      {
+        "name": "canonical-admission-controls-r1.tar",
+        "sha256": "212e512db0f8b53ca6e2458d813897dc38f35609f09c8eaad9d088b1ba47161e"
+      }
+    ],
+    "remaining": "Current native continuation and independent acceptance unmeasured; no D1/fullIC/LEC claim.",
+    "pattern": "A changed existing native consumer owner must invalidate canonical admission even when top-level callers are unchanged; unchanged source and input remain duplicate.",
+    "current_results": {
+      "run": "continuation-005",
+      "receipt": {
+        "name": "continuation-005/RESULT.json",
+        "sha256": "da7a46b6aa64ab33bdab36e9595fb22f3a511188578ad1e75e6efd40ca62f66e"
+      },
+      "admission": "RECOVERED",
+      "native_lint": "PASS",
+      "native_synth_current_handoff": "PASS",
+      "whole_ic": "FAIL; Phase3 pad/core port mismatch",
+      "LEC": "NOT_MEASURED; no report",
+      "D1": "NOT_MEASURED",
+      "derivative_adopted": false
+    }
+  }
+]

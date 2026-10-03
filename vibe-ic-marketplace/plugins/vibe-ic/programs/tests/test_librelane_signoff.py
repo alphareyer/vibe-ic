@@ -119,14 +119,15 @@ def _tool_edge(tmp_path, *, rulesets=RULESETS, calls=None):
         if 'librelane.steps run --help' in text or 'bash' in cmd:
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         if 'from librelane.flows.chip import Chip' in text:
-            design, requested, output = Path(cmd[-5]), Path(cmd[-4]), Path(cmd[-3])
+            design, requested, output = Path(cmd[-6]), Path(cmd[-5]), Path(cmd[-4])
             for step in json.loads(requested.read_text()):
-                cfg = {'meta': {'step': step}, 'DESIGN_NAME': 'chip_top',
+                cfg = {'meta': {'step': step},
                        'TECH_LEFS': {'nom_*': '/pdk/gf/source-fixture/' + tech_lef.name},
                        'RCX_RULESETS': fixture_rules,
                        'STA_CORNERS': [c for c in CORNERS if c.split('_', 1)[0] + '_*' in rulesets],
                        'TIME_DERATING_CONSTRAINT': 5,
-                       **json.loads(design.read_text())}
+                       **json.loads(design.read_text()),
+                       'DESIGN_NAME': 'chip_top'}
                 put(output / f'{step}.json', cfg)
                 ins = ['def'] if step == 'OpenROAD.RCX' else ['nl', 'spef', 'odb']
                 outs = ['spef'] if step == 'OpenROAD.RCX' else ['sdf', 'lib']
@@ -165,7 +166,7 @@ def _project(tmp_path):
     put(p / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {})
     put(p / 'input/submission_template/tapeout_declaration.json', {'answers': {'top_cell': 'spm'}})
     pnr = p / 'phase3/stage3/pnr'
-    write(pnr / 'spm.def', 'VERSION 5.8 ;\nDESIGN spm ;\nCOMPONENTS 0 ;\n')
+    write(pnr / 'spm.def', 'VERSION 5.8 ;\nDESIGN chip_top ;\nCOMPONENTS 0 ;\n')
     write(pnr / 'spm_pnr.v', 'module spm(); endmodule\n')
     write(pnr / 'constraint.sdc', 'create_clock -period 24 [get_ports clk]\n')
     root = tmp_path / 'pdkroot'
@@ -218,7 +219,8 @@ def test_rcx_spefs_reach_the_direct_consumers_bound_by_sha(tmp_path, monkeypatch
     extracted = p / 'phase3/stage3/extracted'
     write(extracted / 'spef_corners/spm.max.spef', 'an older direct corner')
     receipt = p / 'reports/phase3/librelane_rcx_handoff.json'
-    signoff.publish_spefs(result, 'spm', extracted / 'spm.spef', extracted / 'spef_corners', receipt)
+    signoff.publish_spefs(result, 'spm', extracted / 'spm.spef', extracted / 'spef_corners', receipt,
+                          physical_top='chip_top')
     assert (extracted / 'spm.spef').read_text() == RCX_FIXTURE_SPEFS['nom_*']
     assert (extracted / 'spef_corners/spm.max.spef').read_text() == RCX_FIXTURE_SPEFS['max_*']
     runner = importlib.import_module('phase3_one_shot_runner')
@@ -240,11 +242,35 @@ def test_a_missing_nominal_corner_names_the_state_it_searched(tmp_path, monkeypa
     extracted = p / 'phase3/stage3/extracted'
     with pytest.raises(contract.Refusal) as caught:
         signoff.publish_spefs(result, 'spm', extracted / 'spm.spef', extracted / 'spef_corners',
-                              p / 'reports/phase3/librelane_rcx_handoff.json')
+                              p / 'reports/phase3/librelane_rcx_handoff.json',
+                              physical_top='chip_top')
     assert caught.value.code == 'LL_RCX_NOMINAL_MISSING'
     assert str(result['rcx'] / 'state_out.json') in str(caught.value)
     assert "['max_*', 'min_*']" in str(caught.value)
     assert not (extracted / 'spm.spef').exists()
+
+
+def test_rcx_publication_rejects_foreign_physical_subject(tmp_path, monkeypatch):
+    p, pnr, root = _project(tmp_path)
+    monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path))
+    result = signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def',
+                         netlist=pnr / 'spm_pnr.v', sdc=pnr / 'constraint.sdc',
+                         extract=True, time=False)
+    extracted = p / 'phase3/stage3/extracted'
+    with pytest.raises(contract.Refusal, match='physical subject'):
+        signoff.publish_spefs(result, 'spm', extracted / 'spm.spef',
+                              extracted / 'spef_corners',
+                              p / 'reports/phase3/librelane_rcx_handoff.json',
+                              physical_top='foreign_top')
+    assert not (extracted / 'spm.spef').exists()
+
+
+def test_rcx_caller_resolves_existing_pad_top_mapping(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    p, pnr, _root = _project(tmp_path)
+    put(p / 'reports/phase3/io_pad_chip_top.json', {
+        'verdict': 'WROTE', 'core_module': 'spm', 'chip_top_module': 'chip_top'})
+    assert runner._librelane_rcx_physical_top(p, 'spm', pnr / 'spm.def') == 'chip_top'
 
 
 def test_a_corner_absent_from_the_direct_map_names_the_corners_offered(tmp_path, monkeypatch):
@@ -292,9 +318,9 @@ SPEF = '''*SPEF "IEEE 1481-1998"
 
 
 RCX_FIXTURE_SPEFS = {
-    'nom_*': '// SOURCE_FIXTURE nominal; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
-    'min_*': '// SOURCE_FIXTURE minimum; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
-    'max_*': '// SOURCE_FIXTURE maximum; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
+    'nom_*': '// SOURCE_FIXTURE nominal; no native extraction claim\n' + SPEF,
+    'min_*': '// SOURCE_FIXTURE minimum; no native extraction claim\n' + SPEF,
+    'max_*': '// SOURCE_FIXTURE maximum; no native extraction claim\n' + SPEF,
 }
 
 

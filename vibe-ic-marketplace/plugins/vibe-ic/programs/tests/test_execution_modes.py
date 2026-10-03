@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
+import subprocess
 import threading
 import time
 
@@ -18,8 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import execution_modes as em
 from programs.tests._hostpaths import require_repo
 
-BASE = 'f88175263d96c3a76b4cb18f72c7714c68ec6627'
+BASE = subprocess.check_output(
+    ['git', '-C', str(require_repo()), 'rev-parse', 'HEAD'], text=True).strip()
 TOOL = Path(__file__).parent / 'fixtures/execution_modes_tool.py'
+VARIANTS = Path(__file__).parent / 'fixtures/provider_variants'
 OBJECTIVE = {'goal': 'uppercase', 'metric': 'cost', 'direction': 'min'}
 
 
@@ -36,10 +40,17 @@ def validate_text(outputs, binding):
 
 
 def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
+    # Each named neutral arm is an explicit source fixture.  This keeps the
+    # test's two independent producers distinct by source bytes while the
+    # production controller remains immune to tool_id relabeling.
     source = {str(p.resolve()): em.digest(p.resolve()) for p in
               (Path(sys.executable), TOOL, Path(__file__))}
+    variant = VARIANTS / f'{arm}.py'
+    selected_tool = variant if variant.is_file() else TOOL
+    source[str(selected_tool.resolve())] = em.digest(selected_tool)
+    source.update({str(p): em.digest(p) for p in em._source_closure(source)})
     components = tuple(em.Component(action, (
-        str(Path(sys.executable).resolve()), str(TOOL.resolve()), '{inputs}',
+        str(Path(sys.executable).resolve()), str(selected_tool.resolve()), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
         for action in ('transform', 'measure'))
     return em.Adapter(arm, 'neutral_' + arm, '1', BASE, source, sys.version,
@@ -50,10 +61,32 @@ def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
                                        'measurement.json': ('measurement.json',)}, **kw)
 
 
+class NeutralContext(em.Context):
+    """Protocol-only fixture boundary; absent from production authority."""
+    def binding(self):
+        if self.route_receipt.get('kind') != 'neutral-test':
+            return super().binding()
+        if self.native_mode not in ('direct', 'librelane', 'dual'):
+            raise em.Refusal('AMBIGUOUS_NATIVE_IDENTITY', self.native_mode)
+        if self.ic_ip_path != self.route_receipt.get('ic_ip_path'):
+            raise em.Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
+        if not re.fullmatch(r'[0-9a-f]{40}', self.source_sha):
+            raise em.Refusal('INVALID_SOURCE_SHA', self.source_sha)
+        return dict(step_id=self.step_id, source_sha=self.source_sha,
+                    controller_sha256=em.digest(Path(em.__file__)),
+                    inputs={n: em.digest(Path(p)) for n,p in self.inputs.items()},
+                    objective=dict(self.objective), required_gates=list(self.required_gates),
+                    native_mode=self.native_mode, ic_ip_path=self.ic_ip_path,
+                    route_receipt=dict(self.route_receipt), project_digest=self.project_digest,
+                    route_receipt_sha256=em._hash(self.route_receipt),
+                    intent_label=self.intent_label, request_digest=self.request_digest)
+
+
 def context(tmp_path):
     p = tmp_path / 'original.txt'
     p.write_text('one input\n')
-    return em.Context('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',))
+    return NeutralContext('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',),
+                         ic_ip_path='IC', route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
 
 
 def controller(*arms, budget=None):
@@ -73,6 +106,11 @@ def read(root, arm='a'):
 
 
 def choice(ctx, root, arm='a'):
+    # A refused run has no arm receipt to choose. Keep the staged independent
+    # caller's run/adopt sequence meaningful without inventing missing evidence.
+    refusal = root / 'refusal.json'
+    if refusal.is_file() and not (root / arm / 'receipt.json').exists():
+        return None
     return {'arm_id': arm, 'binding': ctx.binding(),
             'receipt_sha256': em.digest(root / arm / 'receipt.json'),
             'reviewer': 'test AI decision consumer',
@@ -93,17 +131,13 @@ def test_invalid_alias_refused(value):
 
 def test_default_picks_exactly_one_ranked_available_applicable_primary(tmp_path):
     ctx = context(tmp_path)
-    # Policy labels only, no EDA command is run in this planner test.
-    ll, native, other = [replace(adapter(x), tool_id=t) for x, t in
-                         [('ll', 'librelane'), ('or', 'openroad'), ('other', 'qualified_other')]]
-    c = controller(other, native, ll)
-    assert c.plan(ctx)['arms'] == ['ll']
-    c = controller(other, native, replace(ll, applicability='inapplicable',
-                                        applicability_reason='No compatible input adapter'))
-    assert c.plan(ctx)['arms'] == ['or']
-    c = controller(other, replace(native, available=False, availability_reason='Missing executable'),
-                   replace(ll, available=False, availability_reason='Missing executable'))
-    assert c.plan(ctx)['arms'] == ['other']
+    # A caller cannot relabel the Python fixture as a known EDA tool.  The
+    # production registry refuses those labels before planning; neutral tools
+    # remain deterministic by arm order.
+    ll = replace(adapter('ll'), tool_id='librelane')
+    with pytest.raises(em.Refusal, match='TOOL_ID_UNBOUND'):
+        controller(ll)
+    assert controller(adapter('other')).plan(ctx)['arms'] == ['other']
 
 
 @pytest.mark.parametrize('state', ['unavailable', 'unknown', 'applicable'])
@@ -140,6 +174,17 @@ def test_checker_is_not_alternate_producer_and_same_family_disclosed(tmp_path):
         'a': 'READY', 'b': 'SAME_ENGINE_FAMILY', 'checker': 'COMPLEMENTARY_CHECKER'}
 
 
+def test_ultra_deduplicates_same_implementation_after_tool_relabel(tmp_path):
+    ctx = context(tmp_path)
+    first = adapter('same-implementation')
+    relabelled = replace(first, arm_id='relabelled', tool_id='invented-tool',
+                         engine_families=('invented-family',))
+    plan = controller(first, relabelled).plan(ctx, 'ultra-mode')
+    assert len(plan['arms']) == 1
+    discarded = next(row for row in plan['portfolio'] if row['arm_id'] not in plan['arms'])
+    assert discarded['admission'] == 'SAME_ENGINE_FAMILY'
+
+
 def test_license_unavailable_is_named_and_not_runnable(tmp_path):
     ctx = context(tmp_path)
     licensed = adapter(license_id='neutral_license')
@@ -169,9 +214,8 @@ def test_source_mismatch_cannot_register(tmp_path):
 
 def test_wrong_source_is_not_admitted(tmp_path):
     ctx = context(tmp_path)
-    plan = controller(replace(adapter(), source_sha='0' * 40)).plan(ctx)
-    assert plan['arms'] == []
-    assert plan['portfolio'][0]['admission'] == 'WRONG_SOURCE'
+    with pytest.raises(em.Refusal, match='SOURCE_AUTHORITY_UNAVAILABLE'):
+        controller(replace(adapter(), source_sha='0' * 40))
 
 
 def test_unequal_objective_and_ambiguous_native_identity_fail_closed(tmp_path):
@@ -267,6 +311,10 @@ def test_program_gate_actual_outputs_fail_closed(tmp_path, fault, status, reason
     assert r['reason'] == reason
     with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
         c.adopt(ctx, root, choice(ctx, root))
+    if fault == 'fail_gate':
+        missing_observation = dict(r, gate_receipts={})
+        with pytest.raises(em.Refusal, match='GATE_FAIL'):
+            c._eligible(missing_observation, ctx, c.registry.adapters(ctx.step_id)[0])
     if fault == 'process_error':
         assert r['processes'][0]['rc'] == 7
         assert len(r['processes']) == 1
@@ -329,7 +377,20 @@ def test_cancel_deadline_actual_rc_partial_logs_reaped(tmp_path, stop):
     c = controller(a)
     root = tmp_path / 'run'
     cancel = threading.Event()
-    timer = threading.Timer(.12, cancel.set) if stop == 'cancel' else None
+    def cancel_partial_process():
+        # Admission now verifies more source before Popen. Keep the original
+        # cancellation delay relative to the real tool start, so this control
+        # still measures reaping a running process with preserved partial output.
+        stdout = root / 'a/transform.stdout'
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if stdout.is_file() and 'neutral tool started' in stdout.read_text():
+                time.sleep(.12)
+                cancel.set()
+                return
+            time.sleep(.001)
+        cancel.set()
+    timer = threading.Thread(target=cancel_partial_process) if stop == 'cancel' else None
     if timer:
         timer.start()
     try:
@@ -394,7 +455,8 @@ def test_real_canonical_portfolio_preserves_final_source_policy_and_blocks_unreg
     assert len(data['tools']) == 63
     assert sum(len(s['ultra_tools']) for s in data['steps']) == 333
     assert data['meta']['inventory_sha256'] == 'd364f39fc37b77f5ba711cea7cab879345de56c157784cf847a66108ebc518bc'
-    assert data['meta']['source_commit'] == BASE
+    assert data['meta']['canonical_flow_git_blob'] == subprocess.check_output(
+        ['git', '-C', str(require_repo()), 'hash-object', str(em._canonical_flow_path())], text=True).strip()
     assert data['meta']['policy_globally_implemented'] is False
     a9 = next(s for s in data['steps'] if s['id'] == 'A9')
     assert a9['policy_default']['tool_ids'] == ['ngspice']

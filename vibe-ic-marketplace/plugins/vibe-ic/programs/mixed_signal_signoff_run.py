@@ -127,7 +127,7 @@ def derive(project, top):
 def verify(project):
     data = m3.read(project / OUTPUT)
     if (data.get("program") != PROGRAM or data.get("schema") != SCHEMA
-            or data.get("project") != str(project.resolve())):
+            or data.get("project") != m3.subject(project, data.get("top"))["project"]):
         raise m3.Refusal("WRONG_PRODUCER_OR_PROJECT", "M4 needs current deterministic production")
     expected = derive(project, data.get("top"))
     if data != expected:

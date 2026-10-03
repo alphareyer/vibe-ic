@@ -75,6 +75,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
 import re
 import subprocess
 import sys
@@ -348,10 +350,20 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
         volumes += ['-v', f'{Path(host).resolve()}:{guest}:ro']
     for key, value in (env or {}).items():
         volumes += ['-e', f'{key}={value}']
-    return subprocess.run([docker, 'run', '--rm', '--network', 'none',
-                           *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
-                           '--entrypoint', argv[0], image, *argv[1:]],
-                          capture_output=True, text=True)
+    command = [docker, 'run', '--rm', '--network', 'none',
+               *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
+               '--entrypoint', argv[0], image, *argv[1:]]
+    # The producer is called inside execution_resource_lease.native_boundary.
+    # Calling the source-owned runner lets that boundary bind the issued
+    # share, watchdog, CID, cancellation and terminal command record.
+    import librelane_contract as ll
+    started = time.monotonic_ns()
+    result = ll.run_container(command, supervised=True)
+    ended = time.monotonic_ns()
+    result._vibeic_lifecycle = {'pid': os.getpid(), 'cid': None,
+                                'rc': result.returncode,
+                                'start_ns': started, 'end_ns': ended}
+    return result
 
 
 # --- the cell view: the layout the liberty was characterised on ------------
@@ -797,6 +809,7 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
             'sta_execution': {'tool': 'OpenSTA', 'rc': sta.returncode,
                 'argv': ['sta', '-no_init', '-no_splash', '-exit', str(tcl)],
                 'script': str(tcl), 'log': str(out_dir / 'sta.log')},
+            'sta_lifecycle': getattr(sta, '_vibeic_lifecycle', None),
             'image': image, 'project': project, 'mounts': mounts, 'header': header,
             'liberty_text': '\n'.join(lib_texts)}
 
@@ -833,6 +846,8 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
                if stages else None)
         row.update(startpoint=parsed['startpoint'], endpoint=parsed['endpoint'],
                    sta_ns=sta_ns, stages=len(stages), sim_rc=sim.returncode, **got)
+        if getattr(sim, '_vibeic_lifecycle', None):
+            row['lifecycle'] = sim._vibeic_lifecycle
         if got.get('status') == 'MEASURED':
             err = (got['spice_ns'] - sta_ns) / sta_ns * 100.0 if sta_ns else None
             row.update(error_pct=err, abs_error_ns=abs(got['spice_ns'] - sta_ns),

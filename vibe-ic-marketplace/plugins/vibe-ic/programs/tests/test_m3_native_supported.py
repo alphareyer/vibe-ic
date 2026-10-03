@@ -10,6 +10,7 @@ import mixed_signal_m3_run as m3
 import mixed_signal_signoff_run as m4
 import mixed_signal_cosim_check as cosim_gate
 import mixed_signal_interface_si_check as si_gate
+from programs.tests.test_execution_receipt_chain import isolated_transport, real_entry
 
 FIXTURE = Path(__file__).parent / "fixtures/m3_native"
 
@@ -175,8 +176,7 @@ def test_actual_failed_measurement_propagates_to_m4(project, damage):
 
 def test_fixed_runner_uses_real_native_producer_and_both_gates(project, monkeypatch):
     import vibe_ic_one_shot_runner as runner
-    from _route_fixture import stage_owner_route
-    stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     analog = project / "phase3/analog/analog_block_list.json"
     analog.parent.mkdir(parents=True)
     shutil.copyfile(project / "phase1/analog/analog_block_list.json", analog)

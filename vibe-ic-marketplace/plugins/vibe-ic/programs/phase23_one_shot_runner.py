@@ -62,7 +62,18 @@ PROGRAMS_DIR = Path(__file__).resolve().parent
 def _run_phase(name: str, runner: Path, args: list[str]
                ) -> tuple[int, dict]:
     print(f"\n{'='*70}\n=== {name} → {runner.name}\n{'='*70}")
-    cp = subprocess.run([sys.executable, str(runner), *args])
+    import execution_policy as _execution
+    policy_cli_children = {
+        "phase1_one_shot_runner.py", "design_one_shot_runner.py",
+        "phase23_one_shot_runner.py", "phase3_one_shot_runner.py",
+        "analog_one_shot_runner.py",
+    }
+    supports_execution_policy = runner.name in policy_cli_children
+    args = _execution.child_arguments(
+        args, supports_execution_policy=supports_execution_policy)
+    cp = subprocess.run([sys.executable, str(runner), *args],
+                        pass_fds=(_execution.child_pass_fds()
+                                  if supports_execution_policy else ()))
     return cp.returncode, {}
 
 
@@ -232,7 +243,10 @@ def main() -> int:
                         "/loop close-loop monitoring where re-running an "
                         "idempotent PASS_WITH_WAIVERS pipeline burns CI "
                         "without value.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     project = args.project.resolve()
     if not project.is_dir():

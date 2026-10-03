@@ -140,6 +140,101 @@ def test_a_threshold_stated_in_the_clause_is_captured(tmp_path):
     assert row["threshold"] == {"value": 50.0, "unit": "mV"}
 
 
+def test_lvs_engines_are_aggregated_from_the_input_citations(tmp_path):
+    proj = _project(tmp_path,
+                    plan_md="| LVS | 100% clean(magic + netgen) |\n",
+                    constraints_md="- ✅ LVS clean(magic + netgen)\n")
+    row = _rows(proj)["LVS"]
+    assert row["engines"] == ["magic", "netgen"], row
+    assert row["requirement"] == "clean"
+    assert row["all_citations"] == [
+        {"document": "input/docs/constraints.md", "line": 1},
+        {"document": "input/docs/plan.md", "line": 1}]
+
+
+def test_gds_xor_zero_difference_is_a_typed_input_requirement(tmp_path):
+    proj = _project(tmp_path, plan_md=(
+        "| GDS XOR(magic vs klayout) | 0 difference |\n"))
+    rows = _rows(proj)
+    row = rows.get("GDS_XOR")
+    assert row is not None, rows
+    assert row["stated"] is True
+    assert row["requirement"] == "zero_difference", row
+    assert row["threshold"] == {"value": 0.0, "unit": "difference"}
+    assert row["engines"] == ["klayout", "magic"]
+    assert row["citation"] == {
+        "document": "input/docs/plan.md", "line": 1,
+        "text": "| GDS XOR(magic vs klayout) | 0 difference |",
+        "clause": "GDS XOR(magic vs klayout) | 0 difference |"}
+    assert X.report_tokens_for("GDS_XOR") == ("gds_xor",)
+
+
+def test_the_normal_emitter_extracts_a_gds_xor_only_input(tmp_path):
+    proj = _project(tmp_path, plan_md=(
+        "GDS XOR(magic vs klayout) requires 0 differences.\n"))
+    doc = _emit_l24(proj)
+    assert doc["extraction_status"] == "EXTRACTED", doc
+    assert doc["applicability"] == "APPLICABLE"
+    rows = {r["check"]: r for r in doc["fields"]["signoff_requirements"]}
+    assert rows["GDS_XOR"]["threshold"] == {"value": 0.0, "unit": "difference"}
+    for key in ("drc_status", "lvs_status", "sta_status", "ir_drop_status",
+                "antenna_status"):
+        assert doc["fields"][key] is None
+    assert doc["fields"]["tapeout_gates"] == []
+    for row in rows.values():
+        assert not {"status", "verdict", "result"}.intersection(row)
+
+
+def test_engine_and_difference_associations_stop_at_the_next_check(tmp_path):
+    proj = _project(tmp_path, plan_md=(
+        "DRC clean (Magic + KLayout), LVS clean (Magic + Netgen), "
+        "GDS XOR(Magic vs KLayout) 0 difference.\n"))
+    rows = _rows(proj)
+    assert rows["LVS"]["engines"] == ["magic", "netgen"], rows
+    assert rows["DRC"]["engines"] == ["klayout", "magic"]
+    assert rows["LVS"]["threshold"] is None
+    assert rows["DRC"]["threshold"] is None
+    assert rows["GDS_XOR"]["engines"] == ["klayout", "magic"]
+    assert rows["GDS_XOR"]["requirement"] == "zero_difference"
+
+
+@pytest.mark.parametrize("text", [
+    "DRC clean (Magic + KLayout), LVS clean (Magic + Netgen).\n",
+    "The logic XOR gate has 0 differences in its truth table.\n",
+    "The gdshader XOR operation is discussed here.\n",
+    "GDS XOR(Magic vs KLayout) is not required to have 0 differences.\n",
+    "No GDS XOR(Magic vs KLayout) requirement: 0 differences is an example.\n",
+])
+def test_missing_or_denied_gds_xor_is_not_a_requirement(tmp_path, text):
+    rows = _rows(_project(tmp_path, plan_md=text))
+    row = rows.get("GDS_XOR")
+    assert row is not None, rows
+    assert row["stated"] is False, row
+    assert row["requirement"] is None
+    assert row["threshold"] is None
+    assert row["citation"] is None
+    assert row["searched"]["documents"] == ["input/docs/plan.md"]
+
+
+@pytest.mark.parametrize("text,threshold,requirement", [
+    ("GDS XOR(Magic vs KLayout) is discussed.\n", None, None),
+    ("GDS XOR(Magic vs KLayout) requires 5 differences.\n",
+     {"value": 5.0, "unit": "difference"}, None),
+    ("GDS XOR(Magic vs KLayout) requires zero differences.\n",
+     {"value": 0.0, "unit": "difference"}, "zero_difference"),
+    ("LVS is not required; GDS XOR(Magic vs KLayout) requires 0 differences.\n",
+     {"value": 0.0, "unit": "difference"}, "zero_difference"),
+])
+def test_gds_xor_does_not_invent_a_zero_threshold(tmp_path, text, threshold,
+                                               requirement):
+    rows = _rows(_project(tmp_path, plan_md=text))
+    row = rows.get("GDS_XOR")
+    assert row is not None, rows
+    assert row["stated"] is True
+    assert row["threshold"] == threshold, row
+    assert row["requirement"] == requirement, row
+
+
 @pytest.mark.parametrize("decoy", [
     "The state machine holds status bits.\n",
     "Installation notes follow.\n",
@@ -256,6 +351,21 @@ def _proj_requiring_drc(tmp_path):
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
     return _phase3_ran(proj)
+
+
+@pytest.mark.parametrize("report", [None, {"verdict": "FAIL"},
+                                  {"verdict": "NOT_DETERMINED"}])
+def test_gds_xor_requirement_has_no_pass_without_a_measured_report(tmp_path,
+                                                               report):
+    proj = _project(tmp_path, plan_md=(
+        "Sign-off: GDS XOR(Magic vs KLayout) requires 0 differences.\n"))
+    _emit_l24(proj)
+    _phase3_ran(proj)
+    if report is not None:
+        _report(proj, "phase3/gds_xor.json", report)
+    rc, out = _run_gate(proj)
+    assert rc == 1, out
+    assert "the input REQUIRES GDS_XOR zero_difference" in out
 
 
 def test_a_requirement_the_run_measures_is_backed(tmp_path):

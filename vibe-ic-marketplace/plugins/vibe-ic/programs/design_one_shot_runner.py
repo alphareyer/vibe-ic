@@ -8404,7 +8404,7 @@ def _step_rtl_gen_bound(
 
         if versioned_matches:
             from ip_catalog_pull import (pull_all_catalog_matches as _pull_versioned,
-                                         verify_existing_official_pins_outcome as _verify_pins,
+                                         verify_existing_reused_pins_outcome as _verify_pins,
                                          PIN_VERIFIED as _PIN_OK,
                                          PIN_UNAVAILABLE as _PIN_UNAVAILABLE)
             source_manifest = (_pl.rtl_dir(project) / "SOURCE_MANIFEST.json")
@@ -8438,6 +8438,10 @@ def _step_rtl_gen_bound(
                 pull_audit = {"status": "ALREADY_FETCHED",
                               "n_ips_pulled": len(versioned_matches),
                               "source_manifest": str(source_manifest)}
+                if "local_derivative" in existing:
+                    pull_audit.update(reuse_kind="LOCAL_DERIVATIVE",
+                                      source_admission=_pin_why,
+                                      local_derivative=existing["local_derivative"])
             else:
                 pull_audit = _pull_versioned(
                     project, versioned_matches, official_only=True)
@@ -8454,8 +8458,10 @@ def _step_rtl_gen_bound(
             names = [m.ip_name for m in versioned_matches]
             return StepResult(
                 "rtl_gen", "PASS_WITH_WAIVERS", time.time() - t0,
-                f"Fetched declared versioned reused IP {names}; SoC glue "
-                "remains for catalog-glue-author to author from the design input."
+                (f"Admitted LOCAL DERIVATIVE of declared versioned reused IP {names}; SoC glue "
+                 if pull_audit.get("reuse_kind") == "LOCAL_DERIVATIVE" else
+                 f"Fetched declared versioned reused IP {names}; SoC glue ")
+                + "remains for catalog-glue-author to author from the design input."
                 + skill_hint + lessons_hint,
                 extras={"fallback_skill": "catalog-glue-author",
                         **catalog_sk_extras, **hint_extras,
@@ -18075,6 +18081,48 @@ def _phase2_synth_timeout_s() -> int:
         return 300
 
 
+def _phase2_pdk_config(project: Path):
+    """Resolve the one Phase-2 PDK contract used by synthesis and Ultra.
+
+    This is deliberately the existing normal-flow declaration and Phase-3
+    resolver.  Ultra does not own a second PDK lookup or a set of tool paths.
+    """
+    import librelane_contract as _ll
+    import phase3_one_shot_runner as _p3
+
+    declared_pdk, _ = _ll.phase2_pdk(project)
+    pdk = _p3._detect_pdk(project, declared_pdk)
+    if pdk is None or pdk.name != declared_pdk:
+        raise _ll.Refusal(
+            "LL_PHASE2_PDK_UNRESOLVED",
+            "declared PDK did not resolve exactly")
+    return pdk
+
+
+def _bootstrap_execution_policy(execution, project: Path, *, top: str,
+                                container: str, ic_class: Optional[str],
+                                skip_analog: bool):
+    """Give Ultra the normal runner's typed PDK without changing Default."""
+    parameters = {
+        "top": top,
+        "container": container,
+        "ic_class": ic_class,
+        "skip_analog": bool(skip_analog),
+    }
+    if execution.request()["mode"] == "ultra":
+        import librelane_contract as _ll
+        try:
+            pdk = _phase2_pdk_config(project)
+        except (_ll.Refusal, OSError, ValueError) as exc:
+            # Other fixed rows remain runnable.  Step 9 registers an
+            # unavailable external adapter carrying this exact refusal.
+            parameters["pdk_refusal"] = str(exc)
+        else:
+            parameters["pdk"] = pdk
+            parameters["pdk_name"] = pdk.name
+    return execution.bootstrap(project, parameters=parameters)
+
+
 def step_yosys_synth(project: Path, top_name: str = "chip_top",
                      container: str = _pin.default_container_name(),
                      ic_class: Optional[str] = None) -> StepResult:
@@ -18438,10 +18486,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     try:
         if _ll.selected_mode(project, "9") == "librelane":
             import phase3_one_shot_runner as _p3
-            declared_pdk, _ = _ll.phase2_pdk(project)
-            pdk = _p3._detect_pdk(project, declared_pdk)
-            if pdk is None or pdk.name != declared_pdk:
-                raise _ll.Refusal("LL_PHASE2_PDK_UNRESOLVED", "declared PDK did not resolve exactly")
+            pdk = _phase2_pdk_config(project)
             row = _p3.step_synth(project, synth_top, pdk, container)
             row.name = "yosys_synth"
             return row
@@ -19343,6 +19388,19 @@ def step_qsf_gen(project: Path, top_name: str = "chip_top",
     return StepResult("qsf_gen", "FAIL",
                       time.time() - t0,
                       f"rc={rc} out={_evidence_tail(out, 500)} err={_evidence_tail(err, 500)}")
+
+
+def step_sdc_validation(project: Path) -> StepResult:
+    import execution_policy as _execution
+    result = _execution.dispatch_fixed_step(project, '8')
+    if result is None:
+        return StepResult('sdc_validation', 'NOT_MEASURED', 0.0,
+                          'CORE_CONTEXT_UNBOUND', reason_class=_V.ReasonClass.INPUT_ABSENT)
+    status = ('PASS' if result['status'] == 'ADOPTED' else
+              'FAIL' if result['status'] == 'FAIL' else 'NOT_MEASURED')
+    return StepResult('sdc_validation', status, 0.0, str(result.get('reason','')),
+                      extras={'execution_result':result},
+                      reason_class=_V.ReasonClass.INPUT_ABSENT if status=='NOT_MEASURED' else '')
 
 
 def step_sdc_gen(project: Path, top_name: str = "chip_top",
@@ -24940,12 +24998,19 @@ def main() -> int:
                         "For the operator who wants the roll-ups rebuilt after "
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     global _FORCE_RTL_REGEN
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)
 
     project = args.project.resolve()
+    _bootstrap_execution_policy(
+        _execution, project, top=args.top_name, container=args.container,
+        ic_class=getattr(args, 'ic_class', None),
+        skip_analog=bool(args.skip_analog))
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
@@ -25853,6 +25918,8 @@ def main() -> int:
     # so the QSF/SDC artefacts are present for downstream lints/audits.
     plan.append(step_qsf_gen(project, args.top_name, ic_class))
     plan.append(step_sdc_gen(project, args.top_name, ic_class))
+    if _execution._ordinary_runtime is not None:
+        plan.append(step_sdc_validation(project))
 
     if not args.skip_hardware:
         otp_sr = step_otp_image_check(project)

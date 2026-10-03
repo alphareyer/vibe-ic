@@ -1119,6 +1119,16 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
     refuse. The VERDICT on those records is not taken here; it belongs to the
     step's own two gate clauses, which `flow_compliance_check` evaluates.
     """
+    import execution_policy
+    if execution_policy._ordinary_runtime is not None:
+        _, bound_answers, error = _step_0_5ic_answers(project)
+        if error:
+            return 1
+        operator = (bound_answers or {}).get('operator_template') or {}
+        parameters = {'template': operator.get('path'), 'slot': operator.get('slot'),
+                      'no_template_reason': operator.get('absent_reason')}
+        result = execution_policy.dispatch_fixed_step(project, '0.5ic', parameters=parameters)
+        return 0 if result['status'] == 'ADOPTED' else 1
     answers_path, answers, err = _step_0_5ic_answers(project)
     if err is not None:
         print(f"      ERROR: the design's step-0.5ic answers could not be "
@@ -1721,8 +1731,12 @@ def main() -> int:
                         "`vibe_ic_one_shot_runner` when a delivered answer is "
                         "on disk and the track's own record says nobody has "
                         "read it.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args, extras = p.parse_known_args()
+    _execution.configure(args)
     project = args.project.resolve()
+    _execution.bootstrap(project, parameters={"ic_name": args.ic_name})
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2

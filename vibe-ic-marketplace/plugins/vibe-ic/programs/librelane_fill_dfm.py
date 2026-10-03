@@ -53,6 +53,7 @@ from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa:
                                 DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
                                 state_from_direct, run_container, config_file_hashes,
+                                settled_floorplan_geometry,
                                 validate_step_receipt, _def_design_name, resolve_image)
 
 ODB_FILL_STEP = 'OpenROAD.FillInsertion'
@@ -526,18 +527,33 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
             raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
                           f'{declaration}: {type(exc).__name__}: {exc}') from exc
         core = declared.get('CORE_AREA')
+        core_source = sources.get('CORE_AREA')
+        record = project / 'reports/phase3/floorplan_rectangles.json'
+        derived_die = derived_core = derived_source = None
+        if record.is_file():
+            derived_die, derived_core, derived_source = settled_floorplan_geometry(project)
+        if not core:
+            if derived_core is not None:
+                core, core_source = derived_core, derived_source
+            else:
+                raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
+                              f'{declaration}: no core_area_um answer for the '
+                              f'placed pads {placed_pads}')
         if core:
-            edge = _core_edge_keepout(cfg.get('DIE_AREA') or [], core)
+            configured_die = cfg.get('DIE_AREA')
+            if configured_die and derived_die and any(
+                    abs(float(a) - float(b)) > 1e-6
+                    for a, b in zip(configured_die, derived_die)):
+                raise Refusal('LL_FLOORPLAN_CORE_PROVENANCE',
+                              f'{density_config}: DIE_AREA {configured_die} '
+                              f'differs from settled {derived_die}')
+            edge = _core_edge_keepout(configured_die or derived_die or [], core)
             fill_cfg['keepout_edge_um'] = max(
                 float(fill_cfg.get('keepout_edge_um') or 0), edge)
             fill_cfg['_derivation']['pad_ring_exclusion'] = {
                 'region': 'outside declared core', 'edge_um': edge,
-                'core': core, 'source': sources.get('CORE_AREA'),
+                'core': core, 'source': core_source,
                 'placed_pad_masters': placed_pads}
-        else:
-            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
-                          f'{declaration}: no core_area_um answer for the '
-                          f'placed pads {placed_pads}')
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / 'pdk_fill_config.json'
     out = root / (gds.stem + '.topped.gds')

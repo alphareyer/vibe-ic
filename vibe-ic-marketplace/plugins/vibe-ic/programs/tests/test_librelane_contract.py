@@ -1,6 +1,8 @@
 """Real contract consumer with EDA file writes substituted at the process edge."""
 import importlib
 import json
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -12,12 +14,212 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
+container_exec = importlib.import_module('_container_exec')
 
 
 def put(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj))
     return path
+
+
+@pytest.fixture
+def local_image(tmp_path, monkeypatch):
+    """Host launch receipt shape, without asking the host for an image."""
+    cid, image_id = 'ab' * 32, 'sha256:' + 'cd' * 32
+    image = 'registry.invalid/tools@sha256:' + 'ef' * 32
+    receipt = put(tmp_path / 'launch_identity.json', {
+        'image': image, 'cid': cid,
+        'image_inspect': [{'Id': image_id, 'RepoDigests': [image]}],
+        'container_inspect': {'Id': cid, 'Image': image_id,
+            'Config': {'Hostname': cid[:12], 'Image': image},
+            'HostConfig': {'NetworkMode': 'none', 'Memory': 2 * 1024**3,
+                           'MemorySwap': 2 * 1024**3, 'AutoRemove': True},
+            'State': {'Running': True, 'Paused': False, 'Dead': False}}})
+    monkeypatch.setenv('VIBEIC_LIBRELANE_LOCAL_ATTESTATION', str(receipt))
+    monkeypatch.setenv('VIBEIC_EDA_IMAGE', image)
+    monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
+    monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: True)
+    monkeypatch.setattr(socket, 'gethostname', lambda: cid[:12])
+    # The pre-fix arm cannot pull a fictional fixture image. Native processes
+    # still run normally; only an attempted Docker edge is the absent client.
+    original_run = subprocess.run
+    def no_docker(argv, **kw):
+        if argv[0] == 'docker':
+            return subprocess.CompletedProcess(argv, 125, '', 'NO_DOCKER_IN_IMAGE')
+        return original_run(argv, **kw)
+    monkeypatch.setattr(subprocess, 'run', no_docker)
+    return SimpleNamespace(image=image, receipt=receipt, tmp=tmp_path)
+
+
+def test_local_resolver_requires_host_cid_and_records_provenance(local_image):
+    project = local_image.tmp / 'project'
+    (project / 'phase3').mkdir(parents=True)
+    try:
+        resolved = contract.resolve_image(project)
+    except contract.Refusal as exc:
+        resolved = str(exc)
+    assert resolved == local_image.image
+    recorded = json.loads((project / 'phase3/librelane_image.provenance.json').read_text())
+    assert recorded['attestation_sha256'] == contract.digest(local_image.receipt)
+    local_image.receipt.unlink()
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_IMAGE_UNATTESTED'):
+        contract.resolve_image(project)
+
+
+@pytest.mark.parametrize('change', ['cid', 'image', 'hostname', 'stopped', 'duplicate'])
+def test_local_changed_identity_refuses_before_execution(local_image, change):
+    record = json.loads(local_image.receipt.read_text())
+    if change == 'cid':
+        record['cid'] = '11' * 32
+    elif change == 'image':
+        record['image'] = 'registry.invalid/tools@sha256:' + '12' * 32
+    elif change == 'hostname':
+        record['container_inspect']['Config']['Hostname'] = 'different'
+    elif change == 'stopped':
+        record['container_inspect']['State']['Running'] = False
+    put(local_image.receipt, record)
+    if change == 'duplicate':
+        local_image.receipt.write_text('{"cid":"bad",' + local_image.receipt.read_text()[1:])
+    marker = local_image.tmp / 'should-not-exist'
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_IMAGE_UNATTESTED'):
+        contract.run_container(['docker', 'run', '--rm', '--entrypoint', sys.executable,
+            local_image.image, '-c', f'from pathlib import Path;Path({str(marker)!r}).touch()'],
+            probe_deadline_s=3)
+    assert not marker.exists()
+
+
+def test_local_pdk_reads_native_tree_without_docker_copy(local_image, monkeypatch):
+    root = local_image.tmp / 'native-pdks'
+    (root / 'processA').mkdir(parents=True)
+    monkeypatch.setenv('PDK_ROOT', str(root))
+    answer = contract.pdk_root_resolution(pdk='processA', image=local_image.image)
+    assert answer['path'] == str(root)
+    assert answer['derivation']['cache'] == 'native'
+    with pytest.raises(contract.Refusal, match='LL_IMAGE_PDK_ABSENT'):
+        contract.pdk_root_resolution(pdk='missing', image=local_image.image)
+
+
+@pytest.mark.parametrize('supervised', [False, True])
+def test_local_execution_maps_mounts_env_and_preserves_tool_rc(local_image, supervised):
+    source = local_image.tmp / 'mount'
+    source.mkdir()
+    (source / 'input.txt').write_text('current bytes')
+    script = 'import os,sys;from pathlib import Path;print(Path("/pdk/input.txt").read_text());print(os.environ["OWNED_ROOT"]);sys.exit(124)'
+    result = contract.run_container(['docker', 'run', '--memory', '2g', '--memory-swap', '2g',
+        '--rm', '-v', f'{source}:/pdk:ro', '-e', 'OWNED_ROOT=/pdk',
+        '--entrypoint', sys.executable, local_image.image, '-c', script],
+        **({'supervised': True} if supervised else {'probe_deadline_s': 3}))
+    assert result.returncode == 124  # a natural tool rc is not a timeout
+    assert result.stdout.splitlines() == ['current bytes', str(source)]
+
+
+def test_local_attestation_change_during_probe_refuses_result(local_image):
+    script = f'from pathlib import Path;p=Path({str(local_image.receipt)!r});p.write_text(p.read_text()+" ")'
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_ATTESTATION_CHANGED'):
+        contract.run_container(['docker', 'run', '--rm', local_image.image, '--skip',
+                                sys.executable, '-c', script], probe_deadline_s=3)
+
+
+@pytest.mark.parametrize('network_mode', ['bridge', 'none', None])
+@pytest.mark.parametrize('supervised', [False, True])
+def test_local_network_none_requires_current_outer_isolation(local_image, network_mode, supervised):
+    record = json.loads(local_image.receipt.read_text())
+    record['container_inspect']['HostConfig']['NetworkMode'] = network_mode
+    put(local_image.receipt, record)
+    marker = local_image.tmp / 'tool-executed'
+    argv = ['docker', 'run', '--rm', '--network', 'none', local_image.image,
+            '--skip', sys.executable, '-c',
+            f'from pathlib import Path;Path({str(marker)!r}).write_text("current tool bytes")']
+    bounds = {'supervised': True} if supervised else {'probe_deadline_s': 3}
+    if network_mode == 'none':
+        result = contract.run_container(argv, **bounds)
+        assert result.returncode == 0
+        assert marker.read_text() == 'current tool bytes'
+    else:
+        with pytest.raises(contract.Refusal, match='LL_LOCAL_NETWORK_UNATTESTED'):
+            contract.run_container(argv, **bounds)
+        assert not marker.exists()
+
+
+@pytest.mark.parametrize('field,option,code', [
+    ('Memory', '--memory', 'LL_LOCAL_MEMORY_UNATTESTED'),
+    ('MemorySwap', '--memory-swap', 'LL_LOCAL_SWAP_UNATTESTED')])
+@pytest.mark.parametrize('actual', [1024**3, 2 * 1024**3, 3 * 1024**3, 0, -1, None, True])
+def test_local_requested_memory_requires_finite_outer_bound(local_image, field, option, code, actual):
+    record = json.loads(local_image.receipt.read_text())
+    record['container_inspect']['HostConfig'][field] = actual
+    put(local_image.receipt, record)
+    marker = local_image.tmp / 'bounded-tool-executed'
+    argv = ['docker', 'run', option, '2g', '--rm', local_image.image,
+            '--skip', sys.executable, '-c',
+            f'from pathlib import Path;Path({str(marker)!r}).touch()']
+    if type(actual) is int and 0 < actual <= 2 * 1024**3:
+        assert contract.run_container(argv, probe_deadline_s=3).returncode == 0
+        assert marker.is_file()
+    else:
+        with pytest.raises(contract.Refusal, match=code):
+            contract.run_container(argv, probe_deadline_s=3)
+        assert not marker.exists()
+
+
+@pytest.mark.parametrize('actual', [True, False, None, 1])
+def test_local_rm_requires_current_outer_auto_remove(local_image, actual):
+    record = json.loads(local_image.receipt.read_text())
+    record['container_inspect']['HostConfig']['AutoRemove'] = actual
+    put(local_image.receipt, record)
+    marker = local_image.tmp / 'removed-tool-executed'
+    argv = ['docker', 'run', '--rm', local_image.image, '--skip', sys.executable,
+            '-c', f'from pathlib import Path;Path({str(marker)!r}).touch()']
+    if actual is True:
+        assert contract.run_container(argv, probe_deadline_s=3).returncode == 0
+        assert marker.is_file()
+    else:
+        with pytest.raises(contract.Refusal, match='LL_LOCAL_AUTOREMOVE_UNATTESTED'):
+            contract.run_container(argv, probe_deadline_s=3)
+        assert not marker.exists()
+
+
+def test_local_config_resolution_preserves_declared_mount_paths(local_image, monkeypatch):
+    import ast
+    root = local_image.tmp / 'native-pdk'
+    root.mkdir()
+    (root / 'cells.lib').write_text('native library bytes')
+    source = put(local_image.tmp / 'declared.json', {
+        'meta': {'step': 'Yosys.Synthesis'}, 'SYNTH_LIB': ['/pdk/cells.lib']})
+    before = source.read_bytes()
+    output = local_image.tmp / 'resolved.json'
+    def resolver_edge(argv, **kw):
+        script = argv[-1]
+        projected = Path(ast.literal_eval(script.split('p=', 1)[1].split('; out=', 1)[0]))
+        config = json.loads(projected.read_text())
+        if not Path(config['SYNTH_LIB'][0]).is_file():
+            return subprocess.CompletedProcess(argv, 1, '', 'declared library is not readable')
+        put(output, config)
+        return subprocess.CompletedProcess(argv, 0, '', '')
+    monkeypatch.setattr(contract, 'run_container', resolver_edge)
+    try:
+        resolved = contract.resolve_step_config(local_image.tmp, local_image.image,
+            source, output, mounts=[(root, '/pdk')], pdk_root='/pdk')
+    except contract.Refusal as exc:
+        resolved = str(exc)
+    assert resolved == output
+    assert json.loads(output.read_text())['SYNTH_LIB'] == [str(root / 'cells.lib')]
+    assert source.read_bytes() == before
+
+
+def test_local_probe_deadline_kills_native_descendant(local_image):
+    pid_file = local_image.tmp / 'child.pid'
+    script = ('import subprocess,time;from pathlib import Path;'
+        'p=subprocess.Popen(["sleep","60"]);'
+        f'Path({str(pid_file)!r}).write_text(str(p.pid));time.sleep(60)')
+    with pytest.raises(contract.Refusal, match='LL_TOOL_DEADLINE'):
+        contract.run_container(['docker', 'run', '--rm', local_image.image, '--skip',
+                                sys.executable, '-c', script], probe_deadline_s=.3)
+    pid = int(pid_file.read_text())
+    stat = Path(f'/proc/{pid}/stat')
+    assert not stat.exists() or stat.read_text().split()[2] == 'Z'
 
 
 def design(tmp_path):

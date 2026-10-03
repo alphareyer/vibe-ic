@@ -170,6 +170,7 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
     return (
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
+        programs_dir / "librelane_contract.py",
         programs_dir.parent / "flow" / "phase1_phase2_phase3.yaml",
     )
 

@@ -28,10 +28,12 @@ def failed_measurement(tmp_path):
     ctx = H.context(tmp_path)
     arm = H.adapter()
     measure = arm.components[1]
-    wrapper = ('import runpy,sys;sys.argv=sys.argv[1:];'
-               'runpy.run_path(sys.argv[0],run_name="__main__");sys.exit(7)')
-    measure = replace(measure, argv=(measure.argv[0], '-c', wrapper, *measure.argv[1:]))
-    arm = replace(arm, components=(arm.components[0], measure))
+    # Keep the same real rc7 after producing measurement, with a tracked entry
+    # instead of an unbound inline interpreter program.
+    wrapper = Path(__file__).parent / 'fixtures/execution_measure_failure.py'
+    measure = replace(measure, argv=(measure.argv[0], str(wrapper.resolve()), *measure.argv[1:]))
+    sources = dict(arm.source_files, **{str(wrapper.resolve()): M.digest(wrapper)})
+    arm = replace(arm, components=(arm.components[0], measure), source_files=sources)
     c = H.controller(arm)
     root = tmp_path / 'run'
     c.run(ctx, root)
@@ -57,6 +59,16 @@ def test_serialized_completion_cannot_replace_observed_process_authority(tmp_pat
     assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_INVALID'
 
 
+def test_same_process_authority_ledger_rejects_co_mutation(tmp_path):
+    c, ctx, root = failed_measurement(tmp_path)
+    path = root / 'a/issued-completion.json'
+    payload = json.loads(path.read_text())['payload']
+    with pytest.raises(AttributeError):
+        M._ISSUED_AUTHORITY._entries = {}
+    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_REWRITE'):
+        M._ISSUED_AUTHORITY[str(path)] = json.dumps({**payload, 'actual_status': 'ELIGIBLE'})
+
+
 def test_a_signature_alone_cannot_create_source_owned_completion(tmp_path):
     c, ctx, root = failed_measurement(tmp_path)
     path = root / 'a/issued-completion.json'
@@ -64,8 +76,8 @@ def test_a_signature_alone_cannot_create_source_owned_completion(tmp_path):
     payload['processes'][-1]['rc'] = 0
     # Even signature plumbing does not replace the immutable transcript
     # captured at Popen.wait. The source run, not the signer, issues authority.
-    path.write_text(json.dumps(M._seal(payload)))
-    assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_CHANGED'
+    path.write_text(json.dumps(dict(payload=payload, signature=M._hash(payload))))
+    assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_INVALID'
 
 
 @pytest.mark.parametrize('resource', ['cpu', 'ram'])
@@ -88,9 +100,9 @@ def test_current_default_policy_is_bound_to_the_original_run(tmp_path):
     original = H.controller(arm)
     root = tmp_path / 'run'
     original.run(ctx, root)
-    preferred = replace(H.adapter('ll'), tool_id='librelane')
+    preferred = replace(H.adapter('0ll'), arm_id='0ll', tool_id='neutral_ll')
     current = H.controller(arm, preferred)
-    assert current.plan(ctx)['arms'] == ['ll']
+    assert current.plan(ctx)['arms'] == ['0ll']
     assert observed(current, ctx, root, H.choice(ctx, root)) == 'REFUSED:CURRENT_POLICY_REJECTED'
 
 
@@ -110,6 +122,27 @@ def test_adoption_commits_the_exact_validated_artifact_generation(tmp_path):
     (root / 'a/outputs/value.txt').write_text('later mutable native candidate output')
     assert (directory / 'value.txt').read_text() == 'ONE INPUT\n'
     c._generation_current(generation)
+
+
+def test_registered_source_manifest_is_immutable_against_caller_rehash(tmp_path):
+    ctx = H.context(tmp_path)
+    arm = H.adapter()
+    registry = M.Registry()
+    registry.register(arm)
+    frozen = dict(registry.adapters('1')[0].source_files)
+    # The old attack rehashed a caller-owned dict. Registration now owns its
+    # own tracked snapshot, so changing this dict cannot replace any authority.
+    tool = tmp_path / 'execution_modes_tool.py'
+    tool.write_text('MUTATED_TRANSITIVE_SOURCE\n')
+    arm.source_files.clear()
+    arm.source_files[str(tool)] = M.digest(tool)
+    assert dict(registry.adapters('1')[0].source_files) == frozen
+    with pytest.raises(TypeError):
+        registry.adapters('1')[0].source_files[str(tool)] = M.digest(tool)
+    controller = M.Controller(registry, M.Budget(2, 512), H.controller().portfolio)
+    result = controller.run(ctx, tmp_path / 'run')
+    assert result['status'] == 'ADOPTED'
+    assert (Path(result['selected_generation']['directory']) / 'value.txt').read_text() == 'ONE INPUT\n'
 
 
 @pytest.mark.parametrize('arm_id', ['issued-plan.json', 'refusal.json', 'selected'])
@@ -146,3 +179,28 @@ def test_current_measured_default_override_remains_adoptable(tmp_path):
     selected_run = tmp_path / 'default-override'
     assert c.run(ctx, selected_run, superiority=superiority)['candidate_statuses'] == {'b': 'ELIGIBLE'}
     assert c.adopt(ctx, selected_run, H.choice(ctx, selected_run, 'b'))['selected'] == 'b'
+
+
+def test_manifest_route_mutation_cannot_be_bought_with_mutable_receipts(tmp_path):
+    ctx = H.context(tmp_path)
+    c = H.controller(H.adapter())
+    root = tmp_path / 'run'
+    c.run(ctx, root)
+    receipt_path = root / 'a/receipt.json'
+    manifest_path = root / 'a/inputs/issued_manifest.json'
+    receipt = H.read(root)
+    arm = c.registry.adapters(ctx.step_id)[0]
+    mutated = {'step_id': '8', 'parameters': {'route': 'other'}, 'files': {}}
+    manifest_path.chmod(0o644)
+    manifest_path.write_text(json.dumps(mutated, sort_keys=True) + '\n')
+    # The adversary controls the mutable cache, receipt and AI choice digest.
+    M._ISSUED_AUTHORITY[str(manifest_path)] = M.digest(manifest_path)
+    receipt['manifest_payload'] = mutated
+    receipt['manifest_sha256'] = M.digest(manifest_path)
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(M.Refusal, match='ISSUED_MANIFEST_CHANGED'):
+        M.Controller._eligible(receipt, ctx, arm)
+    choice = H.choice(ctx, root)
+    choice['receipt_sha256'] = M.digest(receipt_path)
+    with pytest.raises(M.Refusal):
+        c.adopt(ctx, root, choice)

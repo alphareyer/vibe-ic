@@ -32,10 +32,11 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 
-import argparse, atexit, hashlib, json, os, shutil, subprocess, sys, tempfile
+import argparse, atexit, hashlib, hmac, json, os, secrets, shutil, subprocess, sys, tempfile
 import concurrent.futures
 import contextlib
 import fcntl
+import math
 import re
 import signal
 import shlex
@@ -44,7 +45,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional, TypeVar
+from typing import Callable, Iterable, Mapping, Optional, TypeVar
 
 from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
@@ -57,6 +58,40 @@ REGISTRY = HARNESS / "BENCHMARK_REGISTRY.json"
 EXPERT_AGENT_MD = Path(__file__).resolve().parent.parent / "agents" / "ic-expert-agent.md"
 
 _COORDINATOR_LOCK = ".benchmark_dispatch.coordinator.lock"
+
+
+def _reject_duplicate_json_pairs(pairs):
+    """Build one JSON object while refusing every repeated member name.
+
+    ``json.loads`` otherwise applies last-key-wins semantics.  Route responses
+    are signed evidence, so a payload whose meaning depends on that overwrite
+    is malformed at every object depth, including nested metadata and evidence
+    records.
+    """
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value):
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number is forbidden: {value}")
+    return parsed
+
+
+def _strict_json_loads(raw):
+    """Parse RFC8259 JSON evidence with duplicate and non-finite refusal."""
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs,
+                      parse_constant=_reject_nonfinite_json_constant,
+                      parse_float=_finite_json_float)
 
 
 class _CoordinatorBusy(RuntimeError):
@@ -166,7 +201,7 @@ def _bind_runner_report(summary: dict, project: Path, producer: str,
         raw = os.environ.get(_RUNNER_CONTEXT_ENV)
         if raw is None:
             return summary
-        context = json.loads(raw)
+        context = _strict_json_loads(raw)
     project = Path(project).resolve()
     if context["project"] != str(project):
         return summary  # an internal isolated child has its own report subject
@@ -197,7 +232,7 @@ def _runner_report_snapshot(project: Path) -> dict:
         try:
             raw = path.read_bytes()
             stat = path.stat()
-            document = json.loads(raw)
+            document = _strict_json_loads(raw)
             valid = isinstance(document, dict)
         except (OSError, ValueError):
             continue
@@ -341,9 +376,9 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     }
     try:
         raw = Path(diagnostic["receipt_path"] or "").read_bytes()
-        receipt = json.loads(raw)
+        receipt = _strict_json_loads(raw)
         _runner_receipt_paths(project, receipt)
-        latest = json.loads((project / "reports" / "orchestrator" / "runner_invocations"
+        latest = _strict_json_loads((project / "reports" / "orchestrator" / "runner_invocations"
                              / "latest.json").read_bytes())
         if not (hashlib.sha256(raw).hexdigest() == process.receipt_sha256
                 and receipt["invocation_id"] == process.invocation_id == latest["invocation_id"]
@@ -460,7 +495,7 @@ def _runner_reentry_reason(task: dict, result: dict) -> str | None:
                 if (regate is None or invocation_project !=
                         (Path(regate["archive_path"]) / "staged_project").resolve()):
                     raise ValueError("invocation project is not this task's gate producer")
-            if json.loads(Path(invocation["record_path"]).read_text()) != invocation:
+            if _strict_json_loads(Path(invocation["record_path"]).read_text()) != invocation:
                 raise ValueError("invocation record changed")
             diagnostic = _stored_runner_diagnostics(invocation)
             if diagnostic and diagnostic.get("reason"):
@@ -488,7 +523,7 @@ def _stored_runner_diagnostics(invocation: dict) -> dict | None:
     """Re-use the live collection contract for a frozen invocation record."""
     path = Path(invocation["record_path"])
     raw = path.read_bytes()
-    if json.loads(raw) != invocation:
+    if _strict_json_loads(raw) != invocation:
         raise ValueError("invocation record changed")
     process = _ProcessOutcome(
         rc=invocation["rc"], error=invocation["error"],
@@ -722,6 +757,17 @@ class _RunnerBudget:
                         "invocation_id": invocation_id, "argv": argv,
                         "project": str(project), "source": source_before,
                     }, sort_keys=True)
+                launch_snapshot = getattr(_D1_LAUNCH_CONTEXT, "snapshot", None)
+                if launch_snapshot is not None:
+                    owner_project, task, route, activation = _D1_LAUNCH_CONTEXT.authority
+                    _require_route_admission(owner_project.parent.parent, task, route)
+                    if (_read_current_receipt(owner_project, "route_decision")["receipt"] != route
+                            or _read_current_receipt(owner_project, "d1_activation")["receipt"] != activation):
+                        raise ValueError("D1_SNAPSHOT_CURRENT_AUTHORITY_REPLACED")
+                    _assert_d1_snapshot_current(launch_snapshot)
+                    context = _strict_json_loads(kwargs["env"][_RUNNER_CONTEXT_ENV])
+                    context["d1_snapshot_sha256"] = launch_snapshot.digest
+                    kwargs["env"][_RUNNER_CONTEXT_ENV] = json.dumps(context, sort_keys=True)
                 proc = subprocess.run(argv, **kwargs)
                 rc = int(proc.returncode)
                 stdout = getattr(proc, "stdout", None)
@@ -761,6 +807,7 @@ class _RunnerBudget:
             receipt = {
                 "schema": "vibeic.runner_invocation.v1", "invocation_id": invocation_id,
                 "argv": argv, "project": str(project), "rc": rc, "error": error,
+                "d1_snapshot_sha256": getattr(getattr(_D1_LAUNCH_CONTEXT, "snapshot", None), "digest", None),
                 "stdout": stdout, "stderr": stderr,
                 "started_ns": started_ns, "finished_ns": finished_ns,
                 "reports_before": before, "reports_after": after,
@@ -837,7 +884,7 @@ from _lesson_digest import render_lesson_digest as _render_lesson_digest  # noqa
 
 
 def _load_registry() -> dict:
-    return json.loads(REGISTRY.read_text())
+    return _strict_json_loads(REGISTRY.read_text())
 
 
 def _entry(name: str) -> dict:
@@ -1032,7 +1079,7 @@ def capture_goldens(run_p: Path, bench: str, ai_model: str,
     if not summary_p.is_file():
         return {"captured": 0, "passing": 0,
                 "why": f"no {summary_p} — the scorer wrote no verdict to capture"}
-    doc = json.loads(summary_p.read_text())
+    doc = _strict_json_loads(summary_p.read_text())
     shape = doc.get("shape", "")
     results = doc.get("results") or []
     ident = "design" if shape == "B" else "problem"
@@ -1072,6 +1119,7 @@ _AI_REPAIR_RECORD_SCHEMA = "vibeic.benchmark.ai_repair_record.v1"
 _ROUTE_TASK_SCHEMA = "vibeic.task_route_task.v1"
 _AI_ROUTE_SCHEMA = "vibeic.task_route_review.v1"
 _ROUTE_WORKLIST = "needs_ai_routing.jsonl"
+_ROUTE_INPUT_ANCHOR = "route_input_anchor.json"
 _REVIEW_WORKLIST = "needs_ai_review.jsonl"
 _BACKUP_WORKLIST = "needs_ai_backup.jsonl"
 _REPAIR_WORKLIST = "needs_ai_repair.jsonl"
@@ -1366,7 +1414,7 @@ def _program_gate_escalations(project: Optional[Path]) -> list:
     if project is None:
         return []
     try:
-        doc = json.loads(
+        doc = _strict_json_loads(
             (Path(project) / "reports" / "orchestrator"
              / "phase2_one_shot.json").read_text(errors="replace"))
     except (OSError, ValueError):
@@ -1559,8 +1607,8 @@ def _write_immutable_json(path: Path, value: dict) -> None:
     path = Path(path)
     if path.is_file():
         try:
-            current = json.loads(path.read_text(errors="replace"))
-        except (OSError, json.JSONDecodeError) as exc:
+            current = _strict_json_loads(path.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
             raise ValueError(
                 f"immutable evidence unreadable at {path}: {exc}") from exc
         if current != value:
@@ -1700,8 +1748,8 @@ def _pre_gate_input_manifest(regate: dict) -> dict | None:
     """
     path = Path(str((regate or {}).get("input_manifest_path") or ""))
     try:
-        preserved = json.loads(path.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError):
+        preserved = _strict_json_loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
         return None
     if not isinstance(preserved, dict) \
             or preserved.get("schema") != _PRE_GATE_INPUT_SCHEMA:
@@ -1799,16 +1847,16 @@ def _validate_candidate_snapshot(candidate: dict, problem_id: str) -> list[str]:
         except OSError as exc:
             reasons.append(f"candidate snapshot RTL is unreadable: {exc}")
     try:
-        payload = json.loads(payload_path.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = _strict_json_loads(payload_path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         reasons.append(f"candidate snapshot response payload is unreadable: {exc}")
     else:
         if _sha256_text(str(payload.get("completion") or "")) != expected_hash:
             reasons.append("candidate snapshot response payload does not match RTL")
     manifest_path = Path(str(candidate.get("manifest_path") or ""))
     try:
-        manifest = json.loads(manifest_path.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = _strict_json_loads(manifest_path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         reasons.append(f"candidate snapshot manifest is unreadable: {exc}")
     else:
         if manifest != candidate:
@@ -2214,8 +2262,8 @@ def _read_jsonl(path: Path) -> list[dict]:
         if not raw.strip():
             continue
         try:
-            row = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            row = _strict_json_loads(raw)
+        except (ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"{path}:{lineno}: invalid JSON: {exc}") from exc
         if not isinstance(row, dict):
             raise ValueError(f"{path}:{lineno}: row is not an object")
@@ -2314,9 +2362,8 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
     reasons: list[str] = _public_input_reasons(task)
     try:
         raw = path.read_text(errors="replace")
-        record = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(
-            ValueError(f"non-finite JSON constant {value}")))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        record = _strict_json_loads(raw)
+    except (OSError, ValueError) as exc:
         return None, [f"AI repair record is absent or unreadable: {exc}"]
     if not isinstance(record, dict):
         return None, ["AI repair record is not a JSON object"]
@@ -2448,8 +2495,8 @@ def _validate_embedded_repair_provenance(task: dict) -> list[str]:
     path = Path(str(provenance.get("path") or ""))
     try:
         raw = path.read_text(errors="replace")
-        disk = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
+        disk = _strict_json_loads(raw)
+    except (OSError, ValueError) as exc:
         reasons.append(f"repair_provenance file is absent or unreadable: {exc}")
     else:
         embedded = {k: v for k, v in provenance.items()
@@ -2507,8 +2554,11 @@ def _verified_prompt_evidence(items, prompt_text: str) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        excerpt = re.sub(r"\s+", " ", str(item.get("excerpt") or "")).strip()
-        supports = str(item.get("supports") or "").strip()
+        if (not isinstance(item.get("excerpt"), str)
+                or not isinstance(item.get("supports"), str)):
+            continue
+        excerpt = re.sub(r"\s+", " ", item.get("excerpt")).strip()
+        supports = item.get("supports").strip()
         if (len(excerpt) >= 8 and excerpt in normalized_prompt
                 and len(supports) >= 12):
             verified.append({"excerpt": excerpt, "supports": supports})
@@ -3119,7 +3169,7 @@ def _challenge_execution_declaration(run_p: Path) -> dict:
             and not (Path(run_p) / ".bench_config.json").exists()):
         return {"backend": "host", "selection": "legacy caller without runtime pair"}
     try:
-        pair = json.loads(path.read_text())
+        pair = _strict_json_loads(path.read_text())
     except (OSError, ValueError) as exc:
         return {"backend": "native", "error": f"runtime pair unreadable: {exc}"}
     if (not isinstance(pair, dict)
@@ -3213,7 +3263,7 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             cp = subprocess.run(inspect_argv, capture_output=True, text=True, timeout=30)
             receipt["commands"].append({"stage": "mounts", "argv": inspect_argv,
                 "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr})
-            mounts = json.loads(cp.stdout) if cp.returncode == 0 else []
+            mounts = _strict_json_loads(cp.stdout) if cp.returncode == 0 else []
             if not isinstance(mounts, list):
                 raise ValueError("container mounts are not a list")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -3441,8 +3491,8 @@ def _validate_ai_review(task: dict) -> dict:
         return {"status": "PENDING", "review_path": str(review_path),
                 "reasons": task_reasons + ["AI review file is absent"]}
     try:
-        review = json.loads(review_path.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        review = _strict_json_loads(review_path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         return {"status": "REJECTED", "review_path": str(review_path),
                 "reasons": [f"AI review is unreadable: {type(exc).__name__}: {exc}"]}
     reasons: list[str] = task_reasons
@@ -3479,7 +3529,7 @@ def _validate_ai_review(task: dict) -> dict:
                     or provenance["gated_rtl_sha256"] != task["rtl_sha256"]):
                 raise ValueError("backup input/output lineage differs")
             root = Path(provenance["input_root"])
-            if json.loads((root.parent / "author_record.json").read_text()) != record:
+            if _strict_json_loads((root.parent / "author_record.json").read_text()) != record:
                 raise ValueError("archived author record differs")
             import benchmark_io_adapter as bio          # noqa: PLC0415
             for row in record["output_manifest"]:
@@ -4058,8 +4108,8 @@ def _require_program_first_ai_acceptance(run_p: Path) -> None:
     if not solve_p.is_file():
         return                         # historical/manual runs keep old policy
     try:
-        solve = json.loads(solve_p.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError):
+        solve = _strict_json_loads(solve_p.read_text(errors="replace"))
+    except (OSError, ValueError):
         return                         # the clean-room gate reports this later
     policy = solve.get("acceptance_policy") or {}
     if policy.get("required") is not True:
@@ -4074,8 +4124,8 @@ def _require_program_first_ai_acceptance(run_p: Path) -> None:
                          "no acceptance report; "
                          "run --resume after completing needs_ai_review.jsonl")
     try:
-        acceptance = json.loads(acc_p.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        acceptance = _strict_json_loads(acc_p.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         raise SystemExit("Program First + AI Review acceptance BLOCKED: "
                          f"unreadable {acc_p}: {exc}")
     if (acceptance.get("schema") != _ACCEPTANCE_SCHEMA
@@ -4107,8 +4157,8 @@ def _require_program_first_ai_acceptance(run_p: Path) -> None:
             continue
         response = Path(str(task.get("response_path") or ""))
         try:
-            payload = json.loads(response.read_text(errors="replace"))
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = _strict_json_loads(response.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
             failures.append(f"{pid}: accepted response unreadable: {exc}")
             continue
         if _sha256_text(str(payload.get("completion") or "")) != task.get("rtl_sha256"):
@@ -4402,7 +4452,7 @@ def _export_accepted_shape_c_samples(bench: str, run_p: Path) -> None:
                              f"name strategy {strategy!r} is unsupported")
         try:
             tasks = _read_jsonl(run_p / _REVIEW_WORKLIST)
-            solve = json.loads(
+            solve = _strict_json_loads(
                 (run_p / "solve_report.json").read_text(errors="replace"))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(
@@ -4541,7 +4591,7 @@ def _export_accepted_shape_b_samples(bench: str, dataset: Path,
                     for row in bio.problems(fmt, dataset)}
         tasks = _read_jsonl(run_p / _REVIEW_WORKLIST)
         solve_p = run_p / "solve_report.json"
-        solve = (json.loads(solve_p.read_text(errors="replace"))
+        solve = (_strict_json_loads(solve_p.read_text(errors="replace"))
                  if solve_p.is_file() else None)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise SystemExit(f"accepted sample export setup failed: {exc}") from exc
@@ -4625,7 +4675,7 @@ def _export_accepted_cvdp_responses(bench: str, dataset: Path,
     dataset = Path(dataset).resolve()
     try:
         tasks = _read_jsonl(run_p / _REVIEW_WORKLIST)
-        solve = json.loads(
+        solve = _strict_json_loads(
             (run_p / "solve_report.json").read_text(errors="replace"))
         contracts = bio.cvdp_scorer_contracts(dataset)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -4760,8 +4810,8 @@ def cmd_score(bench: str, run: str, dataset: str | None,
     run_p = Path(run).resolve()
     config_path = run_p / ".bench_config.json"
     try:
-        config = json.loads(config_path.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        config = _strict_json_loads(config_path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         raise SystemExit(
             "canonical scoring requires the clean-room metadata written by "
             f"--solve: {config_path}: {exc}") from exc
@@ -4933,8 +4983,8 @@ def _dispatch_format(bench: str, run_p: Path | None = None,
         raise ValueError("unsupported explicit I/O shape")
     if run_p is not None:
         try:
-            config = json.loads((run_p / ".bench_config.json").read_text())
-            solve = json.loads((run_p / "solve_report.json").read_text())
+            config = _strict_json_loads((run_p / ".bench_config.json").read_text())
+            solve = _strict_json_loads((run_p / "solve_report.json").read_text())
             tasks = _read_jsonl(run_p / _ROUTE_WORKLIST)
             formats = {_issued_route_task_format(task, run_p) for task in tasks}
             if len(formats) != 1:
@@ -5013,8 +5063,8 @@ def _rtl_gen_waive(project: Path) -> dict | None:
     if not rep.is_file():
         return None
     try:
-        d = json.loads(rep.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError):
+        d = _strict_json_loads(rep.read_text(errors="replace"))
+    except (OSError, ValueError):
         return None
     for st in d.get("steps") or []:
         if st.get("name") == "rtl_gen" and st.get("status") == "WAIVED":
@@ -5025,7 +5075,8 @@ def _rtl_gen_waive(project: Path) -> dict | None:
     return None
 
 
-def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
+def _solver_argv(runner: Path, proj: Path, entry, exit_step,
+                 delivery_route: str = "ip") -> list:
     """One problem's runner argv, assembled from the routing verdict.
 
     Open RTL evaluations deliver IP/module evidence, so explicitly choose the
@@ -5038,8 +5089,10 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import task_nature_route as tnr                       # noqa: PLC0415
+    if delivery_route not in {"ic", "ip"}:
+        raise ValueError(f"invalid delivery runner route: {delivery_route!r}")
     argv = [sys.executable, str(runner), str(proj),
-            "--route", "ip", "--skip-analog", "--skip-hardware"]
+            "--route", delivery_route, "--skip-analog", "--skip-hardware"]
     if exit_step and exit_step in tnr.flow_step_ids():
         order = {s: i for i, s in enumerate(tnr.flow_step_ids())}
         if order.get(exit_step, 99) < order.get("15", 99):
@@ -5055,7 +5108,7 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
 
 
 def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
-                        entry, exit_step) -> list:
+                        entry, exit_step, delivery_route: str = "ip") -> list:
     """Re-enter one routed problem without losing its declared exit.
 
     AI backup/repair supplies RTL, so it resumes at the first RTL-validation
@@ -5063,10 +5116,16 @@ def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
     behavioural task into synthesis/DFT/LEC work.
     """
     effective_entry = "2" if supplied_rtl else entry
-    return _solver_argv(runner, proj, effective_entry, exit_step)
+    return _solver_argv(runner, proj, effective_entry, exit_step, delivery_route)
 
 
-def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict:
+def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
+                             *, force_current: bool = False,
+                             route_receipt: dict | None = None,
+                             task_sha256: str | None = None,
+                             source_sha256: str | None = None,
+                             ldoc_root_handle: str | None = None,
+                             delivery_route: str = "ip") -> dict:
     """Materialize canonical Phase-1 provenance before a mid-flow entry.
 
     This prerequisite is BLOCKING: missing or mutable provenance must stop the
@@ -5080,10 +5139,11 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     handoff after it has emitted all hash-bound L-docs.
     """
     import emit_attestation as emit_attestation          # noqa: PLC0415
+    import route_decision as rd                          # noqa: PLC0415
 
     project = Path(project).resolve()
     existing = emit_attestation.phase1_provenance(project)
-    if existing.get("ran") is True:
+    if existing.get("ran") is True and not force_current:
         return {"status": "REUSED", "runner_rc": None,
                 "provenance": existing}
 
@@ -5095,7 +5155,7 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
         return {"status": "BLOCKED", "runner_rc": None,
                 "reason": f"front-door input is unreadable: {exc}"}
 
-    argv = _solver_argv(runner, project, "D1", "D1")
+    argv = _solver_argv(runner, project, "D1", "D1", delivery_route)
     argv.append("--no-dashboard")
     process = runner_budget.run(argv)
     diagnostic = _runner_diagnostics(process, argv, project, require_phase2=False)
@@ -5120,8 +5180,764 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     if provenance.get("ran") is not True:
         return {"status": "BLOCKED", "runner_rc": process.rc,
                 "reason": "D1-only front door emitted no hash-bound L-doc provenance", **diagnostics}
-    return {"status": "GENERATED", "runner_rc": process.rc,
-            "provenance": provenance, **diagnostics}
+    result = {"status": "GENERATED", "runner_rc": process.rc,
+              "provenance": provenance, **diagnostics}
+    if force_current:
+        # The report producer is the authority for D1's typed verdict.  A
+        # digest and ``ran: true`` alone describe provenance, not gate success.
+        import _path_layout as _pl                    # noqa: PLC0415
+        report_path = _pl.report_path(project, "phase1_one_shot.json")
+        try:
+            report_bytes = report_path.read_bytes()
+            report = _strict_json_loads(report_bytes.decode("utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            return {**result, "d1_gate_error": f"D1_GATE_REPORT_UNREADABLE: {exc}"}
+        if not isinstance(report, dict) or not isinstance(report.get("verdict"), str):
+            return {**result, "d1_gate_error": "D1_GATE_REPORT_SCHEMA_INVALID"}
+        binding = report.get("runner_binding")
+        invocation_id = str(process.invocation_id or "")
+        if (not invocation_id or not isinstance(binding, dict)
+                or binding.get("schema") != "vibeic.runner_report_binding.v1"
+                or binding.get("invocation_id") != invocation_id
+                or binding.get("project") != str(project)
+                or binding.get("report_name") != "phase1_one_shot.json"
+                or not isinstance(binding.get("argv"), list)
+                or any(not isinstance(arg, str) for arg in binding.get("argv"))
+                or not isinstance(binding.get("source"), dict)
+                or not isinstance(binding.get("producer"), dict)
+                or not isinstance(binding.get("material"), dict)):
+            return {**result, "d1_gate_error": "D1_GATE_REPORT_NOT_CURRENT_CALL"}
+        if source_sha256 is None or task_sha256 is None or ldoc_root_handle is None:
+            return {**result, "d1_gate_error": "D1_GATE_BINDING_INPUT_MISSING"}
+        result["d1_gate"] = rd.make_d1_gate(
+            verdict=str(report.get("verdict") or ""),
+            route_receipt=route_receipt or {},
+            provenance=provenance,
+            source_sha256=source_sha256,
+            task_sha256=task_sha256,
+            ldoc_root_handle=ldoc_root_handle,
+            invocation_id=invocation_id,
+            report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+            waiver_receipt=(report.get("waiver_receipt")
+                            if isinstance(report.get("waiver_receipt"), dict)
+                            else None))
+    return result
+
+
+def _receipt_store_path(project: Path, kind: str, digest: str) -> Path:
+    """Immutable per-run receipt location; the digest is part of the path."""
+    if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        raise ValueError(f"receipt digest is not canonical: {digest!r}")
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            str(kind) / f"{digest}.json")
+
+
+def _receipt_current_pointer(project: Path, kind: str) -> Path:
+    """Mutable atomic pointer to the latest immutable receipt of ``kind``."""
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.current.json")
+
+
+_RECEIPT_ENVELOPE_SCHEMA = "vibeic.run_receipt_envelope.v1"
+_RECEIPT_POINTER_SCHEMA = "vibeic.current_receipt_pointer.v2"
+_RECEIPT_HISTORY_SCHEMA = "vibeic.receipt_history_entry.v1"
+_RECEIPT_HISTORY_HEAD_SCHEMA = "vibeic.receipt_history_head.v1"
+_RECEIPT_UNSET = object()
+
+
+def _receipt_sha256_json(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _write_bound_route_record(path: Path, value: dict) -> None:
+    """Publish a route/activation record once; changed bytes are a refusal."""
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError(f"route record path is linked: {path}")
+    if path.is_file():
+        current = _strict_json_loads(path.read_text(errors="replace"))
+        if current != value:
+            raise ValueError(f"route record changed after issue: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(path, value)
+
+
+def _receipt_lock_path(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.current.lock")
+
+
+def _receipt_history_dir(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            str(kind) / "history")
+
+
+def _receipt_history_path(project: Path, kind: str, sequence: int) -> Path:
+    if int(sequence) < 1:
+        raise ValueError("RECEIPT_HISTORY_SEQUENCE_INVALID")
+    return _receipt_history_dir(project, kind) / f"{int(sequence)}.json"
+
+
+def _receipt_history_head(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.history.head.json")
+
+
+def _read_json_regular(path: Path) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"receipt is not a regular file: {path}")
+    try:
+        value = _strict_json_loads(path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"receipt is unreadable: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"receipt is not an object: {path}")
+    return value
+
+
+def _read_receipt_history(project: Path, kind: str) -> tuple[dict, list[dict]]:
+    """Verify the append-only sequence and every immutable run envelope."""
+    head_path = _receipt_history_head(project, kind)
+    head = _read_json_regular(head_path)
+    if set(head) != {
+            "schema", "kind", "sequence", "receipt_digest", "run_id",
+            "head_sha256"}:
+        raise ValueError("RECEIPT_HISTORY_HEAD_SCHEMA_INVALID")
+    if head.get("schema") != _RECEIPT_HISTORY_HEAD_SCHEMA or head.get("kind") != kind:
+        raise ValueError("RECEIPT_HISTORY_HEAD_INVALID")
+    head_body = {key: head.get(key) for key in (
+        "schema", "kind", "sequence", "receipt_digest", "run_id")}
+    if head.get("head_sha256") != _receipt_sha256_json(head_body):
+        raise ValueError("RECEIPT_HISTORY_HEAD_DIGEST_MISMATCH")
+    head_sequence = head.get("sequence")
+    if (isinstance(head_sequence, bool) or not isinstance(head_sequence, int)
+            or head_sequence < 1):
+        raise ValueError("RECEIPT_HISTORY_HEAD_SEQUENCE_INVALID")
+    history_dir = _receipt_history_dir(project, kind)
+    if history_dir.is_symlink() or not history_dir.is_dir():
+        raise ValueError("RECEIPT_HISTORY_MISSING")
+    indexed = []
+    for path in history_dir.glob("*.json"):
+        if path.is_symlink():
+            raise ValueError("RECEIPT_HISTORY_LINKED")
+        try:
+            indexed.append(int(path.stem))
+        except ValueError:
+            raise ValueError("RECEIPT_HISTORY_FILENAME_INVALID") from None
+    if sorted(indexed) != list(range(1, head_sequence + 1)):
+        raise ValueError("RECEIPT_HISTORY_SEQUENCE_GAP")
+    entries = []
+    previous_digest = None
+    for sequence in range(1, head_sequence + 1):
+        entry_path = _receipt_history_path(project, kind, sequence)
+        entry = _read_json_regular(entry_path)
+        required = {
+            "schema", "kind", "sequence", "run_id", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest",
+            "history_sha256",
+        }
+        if set(entry) != required:
+            raise ValueError("RECEIPT_HISTORY_ENTRY_SCHEMA_INVALID")
+        body = {key: entry.get(key) for key in (
+            "schema", "kind", "sequence", "run_id", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest")}
+        if entry.get("history_sha256") != _receipt_sha256_json(body):
+            raise ValueError("RECEIPT_HISTORY_ENTRY_DIGEST_MISMATCH")
+        entry_sequence = entry.get("sequence")
+        if (entry.get("kind") != kind or isinstance(entry_sequence, bool)
+                or not isinstance(entry_sequence, int)
+                or entry_sequence != sequence):
+            raise ValueError("RECEIPT_HISTORY_ENTRY_SEQUENCE_INVALID")
+        if entry.get("predecessor_digest") != previous_digest:
+            raise ValueError("RECEIPT_HISTORY_PREDECESSOR_INVALID")
+        envelope_path = _receipt_store_path(project, kind, str(entry["receipt_digest"]))
+        envelope = _read_json_regular(envelope_path)
+        if set(envelope) != {
+                "schema", "kind", "run_id", "sequence", "predecessor_digest",
+                "payload_digest_field", "payload_digest", "payload"}:
+            raise ValueError("RECEIPT_HISTORY_ENVELOPE_SCHEMA_INVALID")
+        envelope_body = {key: envelope.get(key) for key in (
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "payload")}
+        if _receipt_sha256_json(envelope_body) != entry["receipt_digest"]:
+            raise ValueError("RECEIPT_HISTORY_ENVELOPE_DIGEST_MISMATCH")
+        for key in ("kind", "run_id", "sequence", "predecessor_digest",
+                    "payload_digest_field", "payload_digest"):
+            if envelope.get(key) != entry.get(key):
+                raise ValueError("RECEIPT_HISTORY_ENVELOPE_BINDING_MISMATCH")
+        payload = envelope.get("payload")
+        field = envelope.get("payload_digest_field")
+        if (not isinstance(payload, dict) or not isinstance(field, str)
+                or payload.get(field) != envelope.get("payload_digest")):
+            raise ValueError("RECEIPT_HISTORY_PAYLOAD_DIGEST_MISMATCH")
+        previous_digest = entry["receipt_digest"]
+        entries.append(entry)
+    if not entries:
+        raise ValueError("RECEIPT_HISTORY_EMPTY")
+    if (head.get("sequence") != entries[-1]["sequence"]
+            or head.get("receipt_digest") != entries[-1]["receipt_digest"]
+            or head.get("run_id") != entries[-1]["run_id"]):
+        raise ValueError("RECEIPT_HISTORY_HEAD_CURRENT_MISMATCH")
+    return head, entries
+
+
+def _read_current_receipt(project: Path, kind: str) -> dict:
+    """Read and verify the current pointer and its immutable predecessor chain."""
+    project = Path(project).resolve()
+    pointer_path = _receipt_current_pointer(project, kind)
+    pointer = _read_json_regular(pointer_path)
+    if set(pointer) != {
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "receipt_digest",
+            "receipt_path"}:
+        raise ValueError("RECEIPT_CURRENT_POINTER_SCHEMA_INVALID")
+    if pointer.get("schema") != _RECEIPT_POINTER_SCHEMA or pointer.get("kind") != kind:
+        raise ValueError("RECEIPT_CURRENT_POINTER_INVALID")
+    sequence = pointer.get("sequence")
+    if (isinstance(sequence, bool) or not isinstance(sequence, int)
+            or sequence < 1):
+        raise ValueError("RECEIPT_CURRENT_SEQUENCE_INVALID")
+    history_head, history_entries = _read_receipt_history(project, kind)
+    if (pointer.get("sequence") != history_head.get("sequence")
+            or pointer.get("receipt_digest") != history_head.get("receipt_digest")
+            or pointer.get("run_id") != history_head.get("run_id")):
+        raise ValueError("RECEIPT_CURRENT_HISTORY_MISMATCH")
+    receipt_digest = str(pointer.get("receipt_digest") or "")
+    immutable = _receipt_store_path(project, kind, receipt_digest)
+    if Path(str(pointer.get("receipt_path") or "")).resolve() != immutable.resolve():
+        raise ValueError("RECEIPT_CURRENT_PATH_MISMATCH")
+    envelope = _read_json_regular(immutable)
+    if set(envelope) != {
+            "schema", "kind", "run_id", "sequence", "predecessor_digest",
+            "payload_digest_field", "payload_digest", "payload"}:
+        raise ValueError("RECEIPT_ENVELOPE_SCHEMA_INVALID")
+    if envelope.get("schema") != _RECEIPT_ENVELOPE_SCHEMA:
+        raise ValueError("RECEIPT_ENVELOPE_INVALID")
+    body = {key: envelope.get(key) for key in (
+        "schema", "kind", "run_id", "sequence", "predecessor_digest",
+        "payload_digest_field", "payload_digest", "payload")}
+    if _receipt_sha256_json(body) != receipt_digest:
+        raise ValueError("RECEIPT_ENVELOPE_DIGEST_MISMATCH")
+    for key in ("kind", "run_id", "sequence", "predecessor_digest",
+                "payload_digest_field", "payload_digest"):
+        if pointer.get(key) != envelope.get(key):
+            raise ValueError(f"RECEIPT_CURRENT_{key.upper()}_MISMATCH")
+    if not isinstance(envelope.get("payload"), dict):
+        raise ValueError("RECEIPT_PAYLOAD_INVALID")
+    payload_field = envelope.get("payload_digest_field")
+    if (not isinstance(payload_field, str)
+            or envelope["payload"].get(payload_field) != envelope.get("payload_digest")):
+        raise ValueError("RECEIPT_PAYLOAD_DIGEST_MISMATCH")
+
+    # A pointer may never be moved back to an older immutable receipt.  The
+    # append-only history above is the authority for the maximum sequence; the
+    # top-level scan also rejects unindexed newer envelopes.
+    store = immutable.parent
+    sequences = []
+    for candidate in store.glob("*.json"):
+        if candidate.is_symlink() or candidate == pointer_path:
+            continue
+        try:
+            item = _read_json_regular(candidate)
+        except ValueError:
+            continue
+        if (item.get("schema") == _RECEIPT_ENVELOPE_SCHEMA
+                and item.get("kind") == kind):
+            try:
+                sequences.append(int(item.get("sequence")))
+            except (TypeError, ValueError):
+                raise ValueError("RECEIPT_SEQUENCE_INVALID") from None
+    if (not sequences or sequence != max(sequences)
+            or len(history_entries) != sequence):
+        raise ValueError("RECEIPT_CURRENT_POINTER_ROLLBACK")
+    predecessor = envelope.get("predecessor_digest")
+    if sequence == 1:
+        if predecessor is not None:
+            raise ValueError("RECEIPT_FIRST_PREDECESSOR_INVALID")
+    else:
+        if (not isinstance(predecessor, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", predecessor)):
+            raise ValueError("RECEIPT_PREDECESSOR_INVALID")
+        previous = _receipt_store_path(project, kind, predecessor)
+        prior = _read_json_regular(previous)
+        if prior.get("kind") != kind or int(prior.get("sequence", -1)) != sequence - 1:
+            raise ValueError("RECEIPT_PREDECESSOR_CHAIN_INVALID")
+    return {"pointer": pointer, "envelope": envelope,
+            "receipt": envelope["payload"], "path": immutable}
+
+
+def _publish_current_receipt(project: Path, kind: str, value: dict,
+                             *, digest_field: str, run_id: str | None = None,
+                             expected_predecessor_digest: str | None | object = _RECEIPT_UNSET,
+                             expected_sequence: int | object = _RECEIPT_UNSET) -> Path:
+    """Append one run receipt and CAS-advance its current pointer.
+
+    The semantic payload may repeat across runs, but every immutable envelope
+    has a fresh run id, sequence, and predecessor.  A replayed run id or an
+    A→B→A pointer update is refused while the pointer remains atomically
+    replaceable for a legitimate next invocation.
+    """
+    project = Path(project).resolve()
+    digest = str(value.get(digest_field) or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"receipt digest is not canonical: {digest!r}")
+    run_id = str(run_id or uuid.uuid4().hex)
+    if not run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError("RECEIPT_RUN_ID_INVALID")
+    root = _receipt_current_pointer(project, kind).parent
+    root.mkdir(parents=True, exist_ok=True)
+    lock = _receipt_lock_path(project, kind)
+    with lock.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            pointer = _receipt_current_pointer(project, kind)
+            current = None
+            if pointer.exists():
+                current = _read_current_receipt(project, kind)["pointer"]
+            current_digest = current.get("receipt_digest") if current else None
+            current_sequence = int(current.get("sequence", 0)) if current else 0
+            if (expected_predecessor_digest is not _RECEIPT_UNSET
+                    and expected_predecessor_digest != current_digest):
+                raise ValueError("RECEIPT_PREDECESSOR_COMPARE_FAILED")
+            if (expected_sequence is not _RECEIPT_UNSET
+                    and int(expected_sequence) != current_sequence):
+                raise ValueError("RECEIPT_SEQUENCE_COMPARE_FAILED")
+            store = _receipt_store_path(project, kind, digest).parent
+            store.mkdir(parents=True, exist_ok=True)
+            for candidate in store.glob("*.json"):
+                if candidate.is_symlink() or candidate == pointer:
+                    continue
+                try:
+                    prior = _read_json_regular(candidate)
+                except ValueError:
+                    continue
+                if (prior.get("schema") == _RECEIPT_ENVELOPE_SCHEMA
+                        and prior.get("kind") == str(kind)
+                        and prior.get("run_id") == run_id):
+                    raise ValueError("RECEIPT_RUN_ID_REPLAY")
+            predecessor = current_digest
+            sequence = current_sequence + 1
+            envelope_body = {
+                "schema": _RECEIPT_ENVELOPE_SCHEMA,
+                "kind": str(kind), "run_id": run_id,
+                "sequence": sequence, "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest, "payload": value,
+            }
+            envelope_digest = _receipt_sha256_json(envelope_body)
+            immutable = _receipt_store_path(project, kind, envelope_digest)
+            _write_bound_route_record(immutable, envelope_body)
+            history_body = {
+                "schema": _RECEIPT_HISTORY_SCHEMA, "kind": str(kind),
+                "sequence": sequence, "run_id": run_id,
+                "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest, "receipt_digest": envelope_digest,
+            }
+            history_entry = {**history_body,
+                             "history_sha256": _receipt_sha256_json(history_body)}
+            _write_bound_route_record(
+                _receipt_history_path(project, kind, sequence), history_entry)
+            head_body = {
+                "schema": _RECEIPT_HISTORY_HEAD_SCHEMA, "kind": str(kind),
+                "sequence": sequence, "receipt_digest": envelope_digest,
+                "run_id": run_id,
+            }
+            _atomic_write_json(
+                _receipt_history_head(project, kind),
+                {**head_body, "head_sha256": _receipt_sha256_json(head_body)})
+            # Re-read the compare point immediately before replacing the
+            # pointer.  Cooperative publishers therefore cannot overwrite a
+            # concurrent advancement with a stale predecessor.
+            if pointer.exists():
+                latest = _read_json_regular(pointer)
+                if (latest.get("receipt_digest") != current_digest
+                        or int(latest.get("sequence", -1)) != current_sequence):
+                    raise ValueError("RECEIPT_CURRENT_COMPARE_FAILED")
+            if pointer.is_symlink():
+                raise ValueError(f"receipt current pointer is linked: {pointer}")
+            pointer_body = {
+                "schema": _RECEIPT_POINTER_SCHEMA, "kind": str(kind),
+                "run_id": run_id, "sequence": sequence,
+                "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest,
+                "receipt_digest": envelope_digest,
+                "receipt_path": str(immutable),
+            }
+            _atomic_write_json(pointer, pointer_body)
+            return immutable
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
+                       runner: Path, runner_budget,
+                       *, run_scope: str | None = None,
+                       delivery_route: str = "ip") -> tuple[dict, dict, dict]:
+    """Run/consume D1 and return (frontdoor, pending, activation).
+
+    D1 is a two-stage admission: the pending record is visible before the
+    canonical D1-only runner, and activation is published only after the
+    runner emitted current L-doc provenance. A runner refusal or missing
+    provenance therefore cannot unlock any later step.
+    """
+    import emit_attestation as emit_attestation          # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
+
+    project = Path(project).resolve()
+    run_scope = str(run_scope or uuid.uuid4().hex)
+    if not run_scope or "/" in run_scope or "\\" in run_scope:
+        raise ValueError("D1_RUN_SCOPE_INVALID")
+    run_p = project.parent.parent
+    decision, reasons = _validate_ai_route(task, run_p)
+    if decision is None or decision.get("route_receipt") != route_receipt:
+        raise ValueError("ROUTE_ADMISSION_AI_INVALID: " + ", ".join(reasons))
+    _seal_route_admission(run_p, task, decision)
+    source_sha = str(route_receipt.get("source_sha256") or "")
+    if not source_sha:
+        raise ValueError("D1_ACTIVATION_SOURCE_MISSING")
+    task_sha = str(task.get("task_sha256") or "")
+    pending = rd.write_d1_pending(
+        _receipt_current_pointer(project, "d1_pending"), route_receipt=route_receipt,
+        source_sha256=source_sha, task_sha256=task_sha)
+    _publish_current_receipt(project, "d1_pending", pending,
+                             digest_field="activation_sha256",
+                             run_id=f"{task_sha}:d1-pending:{run_scope}")
+    pending_current = _read_current_receipt(project, "d1_pending")
+    if pending_current["receipt"].get("activation_sha256") != pending.get("activation_sha256"):
+        raise ValueError("D1_PENDING_CURRENT_POINTER_MISMATCH")
+    rd.admit_canonical_step(
+        step="D1", pending=pending, activation=None,
+        route_receipt=route_receipt, task_sha256=task_sha,
+        source_sha256=source_sha)
+    ldoc_root = project / "phase1" / "generated_docs"
+    ldoc_handle = _sha256_text(str(ldoc_root.resolve()))
+    frontdoor = _ensure_phase1_frontdoor(
+        runner, project, runner_budget, force_current=True,
+        route_receipt=route_receipt, task_sha256=task_sha,
+        source_sha256=source_sha, ldoc_root_handle=ldoc_handle,
+        delivery_route=delivery_route)
+    if frontdoor.get("status") == "BLOCKED":
+        # Keep the named pending state. Never manufacture activation on a
+        # refusal, even if stale L-docs happen to be on disk.
+        raise RuntimeError(
+            "D1_ENTRY_PENDING: canonical D1 did not activate: "
+            f"{frontdoor.get('reason')}")
+    provenance = frontdoor.get("provenance") or emit_attestation.phase1_provenance(project)
+    d1_gate = frontdoor.get("d1_gate")
+    if not isinstance(d1_gate, dict):
+        raise RuntimeError(frontdoor.get("d1_gate_error") or
+                           "D1_ENTRY_PENDING: current D1 gate receipt missing")
+    activation = rd.activate_d1(
+        pending=pending, route_receipt=route_receipt,
+        provenance=provenance, source_sha256=source_sha,
+        task_sha256=task_sha, ldoc_root_handle=ldoc_handle,
+        d1_gate=d1_gate)
+    _publish_current_receipt(project, "d1_activation", activation,
+                             digest_field="activation_sha256",
+                             run_id=(f"{task_sha}:d1-activation:{run_scope}:"
+                                     f"{d1_gate.get('invocation_id')}"))
+    activation_current = _read_current_receipt(project, "d1_activation")
+    if (activation_current["receipt"].get("activation_sha256")
+            != activation.get("activation_sha256")):
+        raise ValueError("D1_ACTIVATION_CURRENT_POINTER_MISMATCH")
+    _seal_owned_d1_admission(run_p, task, activation)
+    return frontdoor, pending, activation
+
+
+@dataclass(frozen=True)
+class _D1EvidenceSnapshot:
+    project: Path
+    report: tuple
+    prompt: tuple
+    ldocs: tuple
+    directories: tuple
+    activation_sha256: str | None
+    digest: str
+
+
+_D1_LAUNCH_CONTEXT = threading.local()
+
+
+def _d1_file_generation(path: Path) -> tuple:
+    st = path.lstat()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("D1_SNAPSHOT_FILE_NOT_REGULAR")
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
+    """Read each evidence file once; bytes and file generations are immutable."""
+    import _path_layout as _pl                     # noqa: PLC0415
+    project = Path(project).resolve()
+    docs = project / "phase1" / "generated_docs"
+    report_path = _pl.report_path(project, "phase1_one_shot.json")
+    directories = []
+    for root in (docs, report_path.parent, project / "input"):
+        for directory in (root, *root.parents):
+            if directory == project.parent:
+                break
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError("D1_SNAPSHOT_DIRECTORY_INVALID")
+            st = directory.stat()
+            generation = (st.st_dev, st.st_ino)
+            if (directory, generation) not in directories:
+                directories.append((directory, generation))
+    def capture(path):
+        generation = _d1_file_generation(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (opened.st_dev, opened.st_ino) != generation[:2]:
+                raise ValueError("D1_SNAPSHOT_PATH_REPLACED")
+            data = handle.read()
+        if generation != _d1_file_generation(path):
+            raise ValueError("D1_SNAPSHOT_GENERATION_CHANGED")
+        return (path, data, generation)
+    prompt = capture(project / "input" / "phase1_prompt.md")
+    report = capture(report_path)
+    ldocs = tuple(capture(p) for p in sorted(docs.glob("L*.json")))
+    if not ldocs:
+        raise ValueError("D1_SNAPSHOT_LDOCS_MISSING")
+    try:
+        activation_sha = _read_current_receipt(project, "d1_activation")["receipt"]["activation_sha256"]
+    except (OSError, ValueError, KeyError):
+        activation_sha = None
+    digest = _receipt_sha256_json({
+        "project": str(project),
+        "files": [{"path": str(p), "sha256": hashlib.sha256(b).hexdigest(),
+                   "generation": g} for p, b, g in (prompt, report, *ldocs)],
+    })
+    snapshot = _D1EvidenceSnapshot(project, report, prompt, ldocs,
+                                   tuple(directories), activation_sha, digest)
+    _assert_d1_snapshot_current(snapshot)
+    return snapshot
+
+
+def _assert_d1_snapshot_current(snapshot: _D1EvidenceSnapshot) -> None:
+    """Refuse generation replacement, including identical bytes at a new path."""
+    for path, generation in snapshot.directories:
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError("D1_SNAPSHOT_DIRECTORY_REPLACED")
+        st = path.stat()
+        if (st.st_dev, st.st_ino) != generation:
+            raise ValueError("D1_SNAPSHOT_DIRECTORY_REPLACED")
+    docs = snapshot.project / "phase1" / "generated_docs"
+    if tuple(sorted(docs.glob("L*.json"))) != tuple(p for p, _, _ in snapshot.ldocs):
+        raise ValueError("D1_SNAPSHOT_LDOC_SET_CHANGED")
+    for path, _, generation in (snapshot.prompt, snapshot.report, *snapshot.ldocs):
+        if _d1_file_generation(path) != generation:
+            raise ValueError("D1_SNAPSHOT_GENERATION_CHANGED")
+
+
+def _d1_invalidation_path(project: Path, activation_sha: str) -> Path:
+    return (_route_anchor_dir(project.parent.parent) / "d1_invalidations" /
+            project.name / f"{activation_sha}.json")
+
+
+def _validate_d1_snapshot(snapshot: _D1EvidenceSnapshot, route_receipt: dict,
+                          activation: dict, task_sha256: str,
+                          *, authority_project: Path | None = None) -> None:
+    """Validate exactly the captured bytes; never re-read the report for a PASS."""
+    import route_decision as _rd                   # noqa: PLC0415
+    project = Path(authority_project or snapshot.project).resolve()
+    _rd.require_d1_activation(
+        activation, route_receipt, task_sha256=str(task_sha256),
+        ldoc_root_handle=_sha256_text(str((project / "phase1" / "generated_docs").resolve())))
+    if _d1_invalidation_path(project, activation["activation_sha256"]).exists():
+        raise ValueError("D1_CURRENT_ACTIVATION_INVALIDATED")
+    gate = activation.get("d1_gate")
+    if not isinstance(gate, dict) or gate.get("verdict") != "PASS":
+        raise ValueError("D1_CURRENT_GATE_NOT_PLAIN_PASS")
+    if _sha256_text(snapshot.prompt[1].decode("utf-8")) != route_receipt.get("source_sha256"):
+        raise ValueError("D1_CURRENT_PROMPT_PROVENANCE_MISMATCH")
+    provenance = hashlib.sha256()
+    for p, data, _ in snapshot.ldocs:
+        # L-docs are authority too: ambiguous JSON is never a valid generation.
+        _strict_json_loads(data.decode("utf-8"))
+        provenance.update(p.name.encode("utf-8") + b"\0" +
+                          hashlib.sha256(data).hexdigest().encode("utf-8") + b"\n")
+    if provenance.hexdigest() != activation.get("d1_provenance_sha256"):
+        raise ValueError("D1_CURRENT_LDOC_PROVENANCE_MISMATCH")
+    report_bytes = snapshot.report[1]
+    report = _strict_json_loads(report_bytes.decode("utf-8"))
+    if not isinstance(report, dict) or report.get("verdict") != "PASS":
+        raise ValueError("D1_CURRENT_REPORT_NOT_PASS")
+    if hashlib.sha256(report_bytes).hexdigest() != gate.get("report_sha256"):
+        raise ValueError("D1_CURRENT_REPORT_DIGEST_MISMATCH")
+    binding = report.get("runner_binding")
+    if (not isinstance(binding, dict)
+            or binding.get("schema") != "vibeic.runner_report_binding.v1"
+            or binding.get("invocation_id") != gate.get("invocation_id")
+            or binding.get("project") != str(project)
+            or binding.get("report_name") != "phase1_one_shot.json"):
+        raise ValueError("D1_CURRENT_REPORT_INVOCATION_MISMATCH")
+    _assert_d1_snapshot_current(snapshot)
+
+
+def _validate_live_d1_for_launch(project: Path, route_receipt: dict,
+                                 activation: dict, task_sha256: str) -> _D1EvidenceSnapshot:
+    """BLOCKING: a historical or invalidated D1 is never a live launch permit."""
+    snapshot = _capture_d1_evidence(project)
+    _validate_d1_snapshot(snapshot, route_receipt, activation, task_sha256)
+    return snapshot
+
+
+def _run_from_d1_snapshot(budget, argv: list, snapshot: _D1EvidenceSnapshot,
+                          receipt: dict, activation: dict, task_sha: str,
+                          *, authority_project: Path | None = None):
+    """Validate one captured generation and bind that generation to submission."""
+    try:
+        owner_project = Path(authority_project or snapshot.project).resolve()
+        run_p = owner_project.parent.parent
+        task = _read_json_regular(run_p / "ai_route_tasks" / f"{task_sha}.json")
+        _require_route_admission(run_p, task, receipt)
+        if (_read_current_receipt(owner_project, "route_decision")["receipt"] != receipt
+                or _read_current_receipt(owner_project, "d1_activation")["receipt"] != activation):
+            raise ValueError("D1_SNAPSHOT_CURRENT_AUTHORITY_REPLACED")
+        _validate_d1_snapshot(snapshot, receipt, activation, task_sha,
+                              authority_project=authority_project)
+        _D1_LAUNCH_CONTEXT.snapshot = snapshot
+        _D1_LAUNCH_CONTEXT.authority = (owner_project, task, receipt, activation)
+        _assert_d1_snapshot_current(snapshot)
+        return budget.run(argv)
+    except (OSError, ValueError, TypeError) as exc:
+        return _ProcessOutcome(rc=None, error=f"D1_SNAPSHOT_LAUNCH_REFUSED: {exc}")
+    finally:
+        _D1_LAUNCH_CONTEXT.snapshot = None
+        _D1_LAUNCH_CONTEXT.authority = None
+        _restore_d1_evidence(snapshot)
+
+
+def _restore_d1_evidence(snapshot: _D1EvidenceSnapshot) -> None:
+    """Record invalidation instead of writing historical bytes to live paths.
+
+    The name is retained for the existing span-finalization call sites. Any
+    changed evidence, even an identical-byte path replacement, invalidates this
+    activation permanently. Only a new typed D1 invocation can create a permit.
+    """
+    try:
+        _assert_d1_snapshot_current(snapshot)
+        return
+    except (OSError, ValueError) as exc:
+        reason = str(exc)
+    archive = (snapshot.project / "reports" / "orchestrator" / "d1_history" /
+               snapshot.digest)
+    history = {
+        "schema": "vibeic.invalidated_d1_snapshot.v1",
+        "snapshot_sha256": snapshot.digest, "reason": reason,
+        "activation_sha256": snapshot.activation_sha256,
+        "files": [{"path": str(p), "bytes_hex": b.hex(), "generation": g}
+                  for p, b, g in (snapshot.prompt, snapshot.report, *snapshot.ldocs)],
+    }
+    # Invalidation is outside the downstream-writable root. The archive is
+    # historical evidence and cannot be consumed as a current pointer.
+    if snapshot.activation_sha256:
+        _write_immutable_json(
+            _d1_invalidation_path(snapshot.project, snapshot.activation_sha256),
+            {"schema": history["schema"], "reason": reason,
+             "activation_sha256": snapshot.activation_sha256,
+             "snapshot_sha256": snapshot.digest})
+    _write_immutable_json(archive / "snapshot.json", history)
+
+
+def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
+                                   fmt: str | None, run_p: Path, pid: str,
+                                   result: dict, route_worklist: list[dict],
+                                   allow_d1_only: bool,
+                                   supplied_rtl: bool = False,
+                                   snapshot_sink: dict | None = None,
+                                   d1_snapshot: _D1EvidenceSnapshot | None = None) -> dict:
+    """Single route/D1 admission used by resume and explicit Program re-entry."""
+    import route_decision as _rd                   # noqa: PLC0415
+    import task_nature_route as _tnr                # noqa: PLC0415
+
+    task = next((row for row in route_worklist
+                 if isinstance(row, dict) and str(row.get("id")) == str(pid)), None)
+    if not isinstance(task, dict):
+        return {"status": "REFUSED", "reason": "ROUTE_REENTRY_TASK_MISSING"}
+    if dataset is not None and fmt is not None:
+        try:
+            _validate_route_input_anchor(
+                bench, fmt, Path(dataset).resolve(), run_p, list(route_worklist))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            return {"status": "REFUSED", "reason": f"ROUTE_REENTRY_ANCHOR_INVALID: {exc}"}
+    project = Path(str(task.get("project") or "")).resolve()
+    expected_project = run_p / "projects" / _safe_problem_id(str(pid))
+    if project != expected_project:
+        return {"status": "REFUSED", "reason": "ROUTE_REENTRY_PROJECT_INVALID"}
+    stored_receipt = result.get("route_receipt")
+    if not isinstance(stored_receipt, dict):
+        stored_receipt = (result.get("routing_verdict") or {}).get("route_receipt")
+    try:
+        current_route = _read_current_receipt(project, "route_decision")
+        receipt = current_route["receipt"]
+        if not isinstance(stored_receipt, dict):
+            raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_MISSING")
+        if stored_receipt.get("receipt_sha256") != receipt.get("receipt_sha256"):
+            raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_STALE")
+        errors = _rd.validate_route_receipt(receipt)
+        if errors:
+            raise ValueError("ROUTE_REENTRY_ROUTE_INVALID: " + ", ".join(errors))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"status": "REFUSED", "reason": str(exc)}
+
+    expected_exit = str(receipt["verify_through"])
+    expected_route = _tnr.delivery_route_for_target(
+        str(receipt["delivery_target"]),
+        "DIE" if str(receipt["delivery_target"]) in
+        {"gds", "shippable_gds", "foundry_handoff"} else None)
+    if result.get("exit") is not None and str(result.get("exit")) != expected_exit:
+        return {"status": "REFUSED", "reason": "ROUTE_REENTRY_EXIT_MUTATION"}
+    if (result.get("delivery_route") is not None
+            and str(result.get("delivery_route")) != expected_route):
+        return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ROUTE_MUTATION"}
+    if result.get("entry") is not None and str(result.get("entry")) != str(receipt["entry_step"]):
+        return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ENTRY_MUTATION"}
+
+    current_activation = None
+    try:
+        current_activation = _read_current_receipt(project, "d1_activation")
+        activation = current_activation["receipt"]
+        if activation.get("route_receipt_sha256") != receipt.get("receipt_sha256"):
+            raise ValueError("ROUTE_REENTRY_D1_ROUTE_MISMATCH")
+        if d1_snapshot is None:
+            launch_snapshot = _validate_live_d1_for_launch(
+                project, receipt, activation, str(task.get("task_sha256") or ""))
+        else:
+            launch_snapshot = d1_snapshot
+            _validate_d1_snapshot(launch_snapshot, receipt, activation,
+                                  str(task.get("task_sha256") or ""))
+        if snapshot_sink is not None:
+            prior = snapshot_sink.get(str(pid))
+            if prior is not None and prior.digest != launch_snapshot.digest:
+                raise ValueError("D1_SNAPSHOT_PLANNED_GENERATION_CHANGED")
+            snapshot_sink[str(pid)] = launch_snapshot
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        # Only a genuinely absent activation may be retried at D1.  Existing
+        # but stale/foreign evidence is a hard refusal and may not be used to
+        # authorize even a later D1 span.
+        if allow_d1_only and current_activation is None:
+            try:
+                _require_route_admission(run_p, task, receipt, require_d1=False)
+            except (OSError, ValueError, TypeError, KeyError) as authority_error:
+                return {"status": "REFUSED", "reason": str(authority_error)}
+            return {"status": "D1_ONLY", "reason": str(exc),
+                    "route_receipt": receipt, "task": task, "project": project}
+        return {"status": "REFUSED", "reason": f"ROUTE_REENTRY_D1_INVALID: {exc}"}
+    try:
+        _require_route_admission(run_p, task, receipt)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"status": "REFUSED", "reason": str(exc)}
+    return {"status": "ACTIVE", "route_receipt": receipt, "task": task,
+            "project": project, "activation": activation,
+            "entry_step": str(receipt["entry_step"]),
+            "exit_step": expected_exit, "delivery_route": expected_route,
+            "effective_entry": "2" if supplied_rtl else str(receipt["entry_step"])}
 
 
 def _declared_route_ai_backup(routing: dict) -> dict:
@@ -5180,19 +5996,47 @@ def _public_input_reasons(task: dict) -> list[str]:
 def _route_contract_sha256() -> str:
     """Bind an AI decision to the general nature-to-flow mapping it selects."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     return _sha256_text(json.dumps(
-        {"nature_entry": tnr.NATURE_ENTRY, "evidence_exit": tnr.EVIDENCE_EXIT},
+        {"nature_entry": tnr.NATURE_ENTRY,
+         "evidence_exit": tnr.EVIDENCE_EXIT,
+         "delivery_targets": tnr.DELIVERY_TARGETS,
+         "prompt_delivery_requirements_schema": tnr.PROMPT_DELIVERY_REQUIREMENTS_SCHEMA,
+         "prompt_delivery_rules_version": tnr.PROMPT_DELIVERY_RULES_VERSION,
+         "canonical_dag_sha256": rd.canonical_dag()["sha256"]},
         sort_keys=True))
 
 
 def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
-                        proposal: dict, run_p: Path, fmt: str) -> dict:
+                        proposal: dict, run_p: Path, fmt: str,
+                        benchmark: str | None = None,
+                        dataset_path: Path | None = None) -> dict:
     """Issue an input-only route question before any design runner executes."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
     prompt = project / "input" / "phase1_prompt.md"
     prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
     safe = _safe_problem_id(str(problem_id))
+    prompt_text = prompt.read_text(errors="replace")
+    prompt_delivery = tnr.prompt_delivery_requirements(prompt_text)
+    semantic_payload = tnr.semantic_routing_payload(
+        prompt_text,
+        context={"program_proposal": {
+            "nature": proposal.get("nature"),
+            "entry_nature": proposal.get("entry_nature"),
+            "source": proposal.get("source"),
+            "needs_ai_parse": proposal.get("needs_ai_parse"),
+        }})
+    response_path = str((run_p / "ai_routes" / safe /
+                         f"{prompt_sha}.json").resolve())
+    coordinator_binding = rd.build_coordinator_binding(
+        benchmark=benchmark, problem_id=str(problem_id),
+        project_path=str(project), prompt_path=str(prompt),
+        response_path=response_path,
+        semantic_payload_sha256=semantic_payload["semantic_payload_sha256"],
+        dataset_path=str(Path(dataset_path).resolve()) if dataset_path is not None else None,
+        harness_digest=None, golden_digest=None, expected_digest=None)
     task = {
         "schema": _ROUTE_TASK_SCHEMA,
         "id": str(problem_id),
@@ -5203,10 +6047,16 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
         "prompt_chars": int(staged.get("prompt_chars") or 0),
         "public_original_input": staged["public_original_input"],
         "program_proposal": proposal,
+        # This is the semantic handoff.  It contains no benchmark label,
+        # problem id, coordinator path, harness/golden/expected answer, or
+        # other opaque identity.  Those values live in the separate binding.
+        "semantic_payload": semantic_payload,
+        "semantic_payload_sha256": semantic_payload["semantic_payload_sha256"],
+        "prompt_delivery_requirements": prompt_delivery,
+        "coordinator_binding": coordinator_binding,
         "routing_contract_sha256": _route_contract_sha256(),
         "allowed_natures": sorted(tnr.NATURE_ENTRY),
-        "response_path": str((run_p / "ai_routes" / safe /
-                              f"{prompt_sha}.json").resolve()),
+        "response_path": response_path,
         "response_contract": {
             "schema": _AI_ROUTE_SCHEMA,
             "bindings": ["id", "task_sha256", "prompt_sha256",
@@ -5219,12 +6069,274 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
                                 "only; OVERRIDE needs >=1 exact excerpt whose "
                                 "supports claim names ai_nature"),
             "rationale": "<at least 24 characters>",
+            "semantic_decision": {
+                "nature": "one allowed_natures member",
+                "requested_evidence": "optional evidence class; the Program maps it to a step",
+                "delivery_target": "optional delivery target; the Program maps it to a step",
+                "semantic_payload_sha256": semantic_payload["semantic_payload_sha256"],
+                "step_fields_forbidden": ["entry_step", "answer_step", "verify_through"],
+            },
         },
     }
     task["task_sha256"] = _sha256_text(json.dumps(task, sort_keys=True))
     _write_immutable_json(run_p / "ai_route_tasks" /
                           f"{task['task_sha256']}.json", task)
     return task
+
+
+def _route_input_anchor(bench: str, fmt: str, dataset: Path,
+                        route_tasks: list[dict]) -> dict:
+    """Create the owner-visible input/task anchor body used by resume."""
+    body = {
+        "schema": "vibeic.route_input_anchor.v1",
+        "benchmark": str(bench),
+        "format": str(fmt),
+        "dataset_handle": hashlib.sha256(
+            str(Path(dataset).resolve()).encode("utf-8")).hexdigest(),
+        "tasks": [{
+            "id": str(task["id"]),
+            "task_sha256": str(task["task_sha256"]),
+            "project": str(task["project"]),
+            "prompt_path": str(task["prompt_path"]),
+            "prompt_sha256": str(task["prompt_sha256"]),
+            "response_path": str(task["response_path"]),
+            "source_sha256": str(task["public_original_input"].get("source_sha256")),
+            "semantic_payload_sha256": str(task["semantic_payload_sha256"]),
+        } for task in route_tasks],
+    }
+    body["anchor_sha256"] = _sha256_text(json.dumps(body, sort_keys=True))
+    return body
+
+
+def _route_anchor_dir(run_p: Path) -> Path:
+    """Return the owner-controlled anchor directory outside the run root.
+
+    Worker projects and generated artefacts live below ``run_p``.  The anchor
+    and its process capability deliberately live in a sibling namespace so a
+    worker that can rewrite every run-root file cannot rewrite the authority it
+    is being checked against.
+    """
+    run_p = Path(run_p).resolve()
+    run_key = hashlib.sha256(str(run_p).encode("utf-8")).hexdigest()
+    return run_p.parent / ".vibeic_route_anchors" / run_key
+
+
+def _route_anchor_paths(run_p: Path) -> tuple[Path, Path]:
+    root = _route_anchor_dir(run_p)
+    return root / "anchor.json", root / "capability.bin"
+
+
+def _publish_route_input_anchor(run_p: Path, anchor: dict) -> None:
+    """Publish an immutable, HMAC-bound anchor outside the worker root."""
+    anchor_path, capability_path = _route_anchor_paths(run_p)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    if capability_path.is_symlink() or anchor_path.is_symlink():
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: linked authority")
+    if capability_path.is_file():
+        capability = capability_path.read_bytes()
+    else:
+        capability = secrets.token_bytes(32)
+        fd = os.open(str(capability_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, capability)
+        finally:
+            os.close(fd)
+    if len(capability) != 32:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability")
+    body = {k: v for k, v in anchor.items()
+            if k not in {"anchor_mac", "capability_sha256"}}
+    body["capability_sha256"] = hashlib.sha256(capability).hexdigest()
+    body_bytes = json.dumps(body, sort_keys=True).encode("utf-8")
+    body["anchor_mac"] = hmac.new(capability, body_bytes, hashlib.sha256).hexdigest()
+    _write_immutable_json(anchor_path, body)
+
+
+def _read_route_input_anchor(run_p: Path) -> dict:
+    """Read the immutable coordinator anchor and verify its capability MAC."""
+    path, capability_path = _route_anchor_paths(run_p)
+    if (path.is_symlink() or capability_path.is_symlink()
+            or not path.is_file() or not capability_path.is_file()):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: authority missing")
+    capability = capability_path.read_bytes()
+    if len(capability) != 32:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability")
+    anchor = _strict_json_loads(path.read_text(errors="replace"))
+    if not isinstance(anchor, dict) or anchor.get("schema") != "vibeic.route_input_anchor.v1":
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: schema")
+    digest = anchor.get("anchor_sha256")
+    mac = anchor.get("anchor_mac")
+    cap_digest = anchor.get("capability_sha256")
+    body = {k: v for k, v in anchor.items()
+            if k not in {"anchor_sha256", "anchor_mac", "capability_sha256"}}
+    if not isinstance(digest, str) or _sha256_text(json.dumps(body, sort_keys=True)) != digest:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: digest")
+    signed = {k: v for k, v in anchor.items() if k != "anchor_mac"}
+    if (cap_digest != hashlib.sha256(capability).hexdigest()
+            or not isinstance(mac, str)
+            or not hmac.compare_digest(
+                mac, hmac.new(capability,
+                              json.dumps(signed, sort_keys=True).encode("utf-8"),
+                              hashlib.sha256).hexdigest())):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability binding")
+    return anchor
+
+
+def _validate_route_input_anchor(bench: str, fmt: str, dataset: Path,
+                                 run_p: Path, route_tasks: list[dict]) -> None:
+    """Reject co-mutated inputs against the external capability-bound anchor."""
+    anchor = _read_route_input_anchor(run_p)
+    if (anchor.get("benchmark") != str(bench)
+            or anchor.get("format") != str(fmt)
+            or anchor.get("dataset_handle") != hashlib.sha256(
+                str(Path(dataset).resolve()).encode("utf-8")).hexdigest()):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: current run identity")
+    expected = anchor.get("tasks")
+    actual = [{
+        "id": str(task.get("id")),
+        "task_sha256": str(task.get("task_sha256")),
+        "project": str(task.get("project")),
+        "prompt_path": str(task.get("prompt_path")),
+        "prompt_sha256": str(task.get("prompt_sha256")),
+        "response_path": str(task.get("response_path")),
+        "source_sha256": str((task.get("public_original_input") or {}).get("source_sha256")),
+        "semantic_payload_sha256": str(task.get("semantic_payload_sha256")),
+    } for task in route_tasks]
+    if expected != actual:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: issued task/input identity changed")
+
+
+def _route_admission_path(run_p: Path, task: dict) -> Path:
+    digest = str(task.get("task_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("ROUTE_ADMISSION_TASK_DIGEST_INVALID")
+    return _route_anchor_dir(run_p) / "admissions" / f"{digest}.json"
+
+
+def _seal_route_admission(run_p: Path, task: dict, decision: dict) -> None:
+    """Seal validated AI authority outside the worker-writable run root.
+
+    A changed response requires a new issued task/anchor and a fresh typed D1
+    call. Publishing a replacement route, mode or activation is insufficient.
+    """
+    anchor = _read_route_input_anchor(run_p)
+    _, capability_path = _route_anchor_paths(run_p)
+    body = {
+        "schema": "vibeic.coordinator_route_admission.v1",
+        "anchor_sha256": anchor["anchor_sha256"],
+        "task_sha256": task["task_sha256"],
+        "prompt_sha256": task["prompt_sha256"],
+        "source_sha256": task["public_original_input"].get("source_sha256"),
+        "ai_response_sha256": decision["ai_route_response_sha256"],
+        "route_receipt": decision["route_receipt"],
+    }
+    body["admission_mac"] = hmac.new(
+        capability_path.read_bytes(),
+        json.dumps(body, sort_keys=True, allow_nan=False).encode("utf-8"),
+        hashlib.sha256).hexdigest()
+    path = _route_admission_path(run_p, task)
+    if path.parent.is_symlink():
+        raise ValueError("ROUTE_ADMISSION_AUTHORITY_LINKED")
+    _write_bound_route_record(path, body)
+
+
+def _require_route_admission(run_p: Path, task: dict, receipt: dict,
+                              *, require_d1: bool = True) -> None:
+    """BLOCKING: writable receipts never create AI or user mode authority."""
+    anchor = _read_route_input_anchor(run_p)
+    task_hash = task.get("task_sha256")
+    task_body = {k: v for k, v in task.items() if k != "task_sha256"}
+    if _sha256_text(json.dumps(task_body, sort_keys=True)) != task_hash:
+        raise ValueError("ROUTE_ADMISSION_TASK_CHANGED")
+    anchored = next((row for row in anchor["tasks"] if row["id"] == str(task["id"])), None)
+    expected = _route_input_anchor(
+        anchor["benchmark"], anchor["format"], Path("/unused"), [task])["tasks"][0]
+    if anchored != expected:
+        raise ValueError("ROUTE_ADMISSION_ORIGINAL_ANCHOR_MISMATCH")
+    issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
+    if _read_json_regular(issued) != task:
+        raise ValueError("ROUTE_ADMISSION_ISSUED_TASK_CHANGED")
+    reasons = _public_input_reasons(task)
+    if reasons:
+        raise ValueError("ROUTE_ADMISSION_ORIGINAL_INPUT_CHANGED: " + ", ".join(reasons))
+    path = _route_admission_path(run_p, task)
+    if path.parent.is_symlink():
+        raise ValueError("ROUTE_ADMISSION_AUTHORITY_LINKED")
+    sealed = _read_json_regular(path)
+    body = {k: v for k, v in sealed.items() if k != "admission_mac"}
+    _, capability_path = _route_anchor_paths(run_p)
+    expected_mac = hmac.new(
+        capability_path.read_bytes(),
+        json.dumps(body, sort_keys=True, allow_nan=False).encode("utf-8"),
+        hashlib.sha256).hexdigest()
+    if (sealed.get("schema") != "vibeic.coordinator_route_admission.v1"
+            or not isinstance(sealed.get("admission_mac"), str)
+            or not hmac.compare_digest(sealed["admission_mac"], expected_mac)
+            or sealed.get("anchor_sha256") != anchor["anchor_sha256"]
+            or sealed.get("task_sha256") != task_hash
+            or sealed.get("prompt_sha256") != task["prompt_sha256"]
+            or sealed.get("source_sha256") != task["public_original_input"].get("source_sha256")):
+        raise ValueError("ROUTE_ADMISSION_OWNER_BINDING_INVALID")
+    response = Path(task["response_path"])
+    if response.is_symlink() or hashlib.sha256(response.read_bytes()).hexdigest() != sealed.get("ai_response_sha256"):
+        raise ValueError("ROUTE_ADMISSION_AI_RESPONSE_CHANGED")
+    if receipt != sealed.get("route_receipt"):
+        raise ValueError("ROUTE_ADMISSION_ROUTE_OR_MODE_REPLACED")
+    import route_decision as _rd                   # noqa: PLC0415
+    pending = _read_current_receipt(Path(task["project"]), "d1_pending")["receipt"]
+    expected_pending = _rd.write_d1_pending(
+        _receipt_current_pointer(Path(task["project"]), "d1_pending"),
+        route_receipt=receipt, source_sha256=receipt["source_sha256"],
+        task_sha256=task_hash)
+    if pending != expected_pending:
+        raise ValueError("ROUTE_ADMISSION_PENDING_REPLACED")
+    if require_d1:
+        activation = _read_current_receipt(Path(task["project"]), "d1_activation")["receipt"]
+        d1_path = _owned_d1_admission_path(run_p, task, activation)
+        if d1_path.parent.is_symlink() or d1_path.parent.parent.is_symlink():
+            raise ValueError("D1_OWNER_ADMISSION_LINKED")
+        owned = _read_json_regular(d1_path)
+        owned_body = {k: v for k, v in owned.items() if k != "admission_mac"}
+        owned_mac = hmac.new(
+            capability_path.read_bytes(),
+            json.dumps(owned_body, sort_keys=True, allow_nan=False).encode("utf-8"),
+            hashlib.sha256).hexdigest()
+        if (not isinstance(owned.get("admission_mac"), str)
+                or not hmac.compare_digest(owned["admission_mac"], owned_mac)
+                or owned.get("schema") != "vibeic.coordinator_d1_admission.v1"
+                or owned.get("anchor_sha256") != anchor["anchor_sha256"]
+                or owned.get("task_sha256") != task_hash
+                or owned.get("activation") != activation):
+            raise ValueError("D1_OWNER_ADMISSION_REPLACED")
+
+
+
+def _owned_d1_admission_path(run_p: Path, task: dict, activation: dict) -> Path:
+    digest = str(activation.get("activation_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("D1_OWNER_ADMISSION_DIGEST_INVALID")
+    return _route_admission_path(run_p, task).parent / "d1" / task["task_sha256"] / f"{digest}.json"
+
+
+def _seal_owned_d1_admission(run_p: Path, task: dict, activation: dict) -> None:
+    """Seal only D1 gates measured by the coordinator's fresh typed call.
+
+    A worker can replace all its JSON, but cannot issue a new D1 generation
+    just by rewriting the invocation id, report digest and activation together.
+    """
+    anchor = _read_route_input_anchor(run_p)
+    _, capability = _route_anchor_paths(run_p)
+    body = {
+        "schema": "vibeic.coordinator_d1_admission.v1",
+        "anchor_sha256": anchor["anchor_sha256"],
+        "task_sha256": task["task_sha256"], "activation": activation,
+    }
+    body["admission_mac"] = hmac.new(
+        capability.read_bytes(), json.dumps(body, sort_keys=True, allow_nan=False).encode("utf-8"),
+        hashlib.sha256).hexdigest()
+    path = _owned_d1_admission_path(run_p, task, activation)
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise ValueError("D1_OWNER_ADMISSION_LINKED")
+    _write_bound_route_record(path, body)
 
 
 def _claim_names_nature(claim: str, nature: str) -> bool:
@@ -5241,7 +6353,7 @@ def _issued_route_task_format(task: dict, run_p: Path) -> str:
     if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
         raise ValueError("issued route task identity changed")
     issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
-    if json.loads(issued.read_text()) != task:
+    if _strict_json_loads(issued.read_text()) != task:
         raise ValueError("route task differs from coordinator issue")
     fmt = task.get("io_format")
     if not isinstance(fmt, str) or fmt not in {"agentic", *_BENCH_FORMAT.values()}:
@@ -5249,14 +6361,26 @@ def _issued_route_task_format(task: dict, run_p: Path) -> str:
     return fmt
 
 
-def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
+def _validate_ai_route(task: dict, run_p: Path, *,
+                       benchmark: str | None = None,
+                       dataset: Path | None = None) -> tuple[dict | None, list[str]]:
     """Fail closed on an unsigned, stale, non-blind, or ungrounded route."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     run_p = Path(run_p).resolve()
     reasons = _public_input_reasons(task)
     try:
         task_hash = task["task_sha256"]
         _issued_route_task_format(task, run_p)
+        binding = task.get("coordinator_binding")
+        if not isinstance(binding, dict):
+            raise ValueError("coordinator binding is missing")
+        binding_digest = binding.get("binding_sha256")
+        binding_body = {k: v for k, v in binding.items()
+                        if k != "binding_sha256"}
+        if (not isinstance(binding_digest, str)
+                or rd.sha256_json(binding_body) != binding_digest):
+            raise ValueError("coordinator binding digest mismatch")
         project = Path(str(task["project"])).resolve()
         if project != run_p / "projects" / _safe_problem_id(str(task["id"])):
             raise ValueError("route project is not owned by this run/task")
@@ -5264,8 +6388,29 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         prompt_text = prompt.read_text(errors="replace")
         if _sha256_text(prompt_text) != task["prompt_sha256"]:
             raise ValueError("route prompt changed after issue")
+        prompt_delivery = tnr.prompt_delivery_requirements(prompt_text)
+        if task.get("prompt_delivery_requirements") != prompt_delivery:
+            raise ValueError("prompt delivery requirements changed after issue")
+        if benchmark is not None and dataset is not None:
+            expected_binding = rd.build_coordinator_binding(
+                benchmark=benchmark, problem_id=str(task["id"]),
+                project_path=str(project), prompt_path=str(prompt),
+                response_path=str(task["response_path"]),
+                semantic_payload_sha256=str(task["semantic_payload_sha256"]),
+                dataset_path=str(Path(dataset).resolve()),
+                harness_digest=None, golden_digest=None, expected_digest=None)
+            if binding != expected_binding:
+                raise ValueError("coordinator binding differs from current run identity")
         if task.get("routing_contract_sha256") != _route_contract_sha256():
             raise ValueError("general route table changed after issue")
+        semantic_payload = task.get("semantic_payload")
+        if not isinstance(semantic_payload, dict) or task.get(
+                "semantic_payload_sha256") != semantic_payload.get("semantic_payload_sha256"):
+            raise ValueError("semantic route payload is missing or stale")
+        if rd.sha256_json({k: v for k, v in semantic_payload.items()
+                           if k != "semantic_payload_sha256"}) != semantic_payload.get(
+                               "semantic_payload_sha256"):
+            raise ValueError("semantic route payload digest mismatch")
         response_path = Path(str(task["response_path"]))
         expected_path = (run_p / "ai_routes" / _safe_problem_id(str(task["id"])) /
                          f"{task['prompt_sha256']}.json")
@@ -5279,7 +6424,8 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             raise ValueError("route response path is not coordinator-owned regular path")
         if not response_path.is_file():
             return None, reasons + ["AI_ROUTE_PENDING: no response"]
-        response = json.loads(response_path.read_text(errors="replace"))
+        response_bytes = response_path.read_bytes()
+        response = _strict_json_loads(response_bytes.decode("utf-8"))
         if not isinstance(response, dict):
             raise ValueError("route response must be an object")
         required = {
@@ -5294,23 +6440,66 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             if key not in response or response.get(key) != value:
                 reasons.append(f"AI_ROUTE_INVALID: {key} is stale or wrong")
         author = response.get("author")
-        if (not isinstance(author, dict) or author.get("kind") != "AI"
-                or not str(author.get("model") or "").strip()
-                or str(author.get("model")).lower() in
+        if (not isinstance(author, dict)
+                or not isinstance(author.get("kind"), str)
+                or author.get("kind") != "AI"
+                or not isinstance(author.get("model"), str)
+                or not author.get("model").strip()
+                or author.get("model").lower() in
                 {"unknown", "unspecified", "n/a"}):
             reasons.append("AI_ROUTE_INVALID: named AI author required")
         blind = response.get("blind")
         if not isinstance(blind, dict) or blind.get("oracle_accessed") is not False:
             reasons.append("AI_ROUTE_INVALID: blind.oracle_accessed must be false")
-        if len(str(response.get("rationale") or "").strip()) < 24:
+        if (not isinstance(response.get("rationale"), str)
+                or len(response.get("rationale").strip()) < 24):
             reasons.append("AI_ROUTE_INVALID: route rationale too short")
         disposition = response.get("disposition")
-        if disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}:
+        if (not isinstance(disposition, str)
+                or disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}):
             reasons.append("AI_ROUTE_INVALID: unknown disposition")
-        nature = response.get("ai_nature")
+        semantic = response.get("semantic_decision")
+        typed_route = isinstance(semantic, dict)
+        if "semantic_decision" in response and not isinstance(semantic, dict):
+            reasons.append("AI_ROUTE_INVALID: semantic_decision must be an object")
+            semantic = {}
+        semantic = semantic or {}
+        if any(key in semantic for key in ("entry_step", "answer_step", "verify_through")):
+            reasons.append("AI_ROUTE_INVALID: semantic decision may not choose flow steps")
+        if ("semantic_payload_sha256" in semantic
+                and (not isinstance(semantic.get("semantic_payload_sha256"), str)
+                     or semantic.get("semantic_payload_sha256") != task.get("semantic_payload_sha256"))):
+            reasons.append("AI_ROUTE_INVALID: semantic payload binding is stale")
+        nature = semantic.get("nature", response.get("ai_nature"))
+        requested_evidence = semantic.get("requested_evidence")
+        delivery_target = semantic.get("delivery_target")
+        if nature is not None and not isinstance(nature, str):
+            reasons.append("AI_ROUTE_INVALID: ai_nature must be a string")
+        if ("requested_evidence" in semantic
+                and not isinstance(requested_evidence, str)):
+            reasons.append("AI_ROUTE_INVALID: requested_evidence must be a string")
+        if ("delivery_target" in semantic
+                and not isinstance(delivery_target, str)):
+            reasons.append("AI_ROUTE_INVALID: delivery_target must be a string")
+        prompt_evidence = response.get("prompt_evidence")
+        if prompt_evidence is not None:
+            if not isinstance(prompt_evidence, list):
+                reasons.append("AI_ROUTE_INVALID: prompt_evidence must be an array")
+            elif any(not isinstance(item, dict)
+                     or not isinstance(item.get("excerpt"), str)
+                     or not isinstance(item.get("supports"), str)
+                     for item in prompt_evidence):
+                reasons.append("AI_ROUTE_INVALID: prompt evidence fields must be strings")
         if disposition != "NEEDS_CLARIFICATION":
             if nature not in tnr.NATURE_ENTRY:
                 reasons.append("AI_ROUTE_INVALID: ai_nature is not a product nature")
+            if requested_evidence is not None and requested_evidence not in tnr.EVIDENCE_EXIT:
+                reasons.append("AI_ROUTE_INVALID: requested_evidence is not a product evidence class")
+            resolved_delivery = tnr.resolve_prompt_delivery_target(
+                prompt_delivery, delivery_target)
+            if not resolved_delivery.get("ok"):
+                reasons.append("AI_ROUTE_INVALID: " + str(
+                    resolved_delivery.get("reason") or "delivery target refused"))
             if (disposition == "CONFIRM"
                     and nature != task["program_proposal"].get("entry_nature")):
                 reasons.append("AI_ROUTE_INVALID: CONFIRM differs from proposal")
@@ -5341,13 +6530,50 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         if disposition == "NEEDS_CLARIFICATION":
             return None, ["AI_ROUTE_NEEDS_CLARIFICATION: AI could not select a route"]
         entry = tnr.NATURE_ENTRY[nature]
+        requested_evidence = requested_evidence or entry["default_evidence"]
+        resolved_delivery = tnr.resolve_prompt_delivery_target(
+            prompt_delivery, delivery_target)
+        if not resolved_delivery.get("ok"):
+            return None, reasons + ["AI_ROUTE_INVALID: " + str(
+                resolved_delivery.get("reason") or "delivery target refused")]
+        delivery_target = str(resolved_delivery["target"])
+        delivery_route = tnr.delivery_route_for_target(
+            delivery_target, resolved_delivery.get("route_family"))
+        # The prompt itself is the only user-owned source available at this
+        # boundary. Reviewer prose and benchmark metadata are never Ultra
+        # evidence. The Program derives all flow steps from this receipt.
+        explicit_ultra = rd.explicit_ultra_evidence(prompt_text, source="user")
+        route_receipt = tnr.route_decision_receipt(
+            prompt_text, nature=nature,
+            requested_evidence=requested_evidence,
+            delivery_target=delivery_target,
+            # The route receipt is semantic evidence.  Bind it to the visible
+            # prompt bytes so opaque benchmark IDs and staging paths cannot
+            # alter the route decision; public-input identity remains sealed
+            # separately by the task/coordinator binding and its digest.
+            source_sha256=str(task["prompt_sha256"]),
+            explicit_user_evidence=explicit_ultra,
+            context=semantic_payload.get("context"))
         return {
             "nature": nature, "entry_nature": nature,
             "route": entry["route"], "plugin_entry": entry["plugin_entry"],
             "source": "ai_confirmed" if disposition == "CONFIRM" else "ai_override",
             "needs_ai_parse": False,
-            "ai_route_response_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+            "ai_route_response_sha256": hashlib.sha256(response_bytes).hexdigest(),
             "program_proposal": task["program_proposal"],
+            "requested_evidence": requested_evidence,
+            "delivery_target": delivery_target,
+            "delivery_route": delivery_route,
+            "prompt_delivery_requirements": prompt_delivery,
+            "route_receipt": route_receipt,
+            "semantic_payload_sha256": task["semantic_payload_sha256"],
+            "coordinator_binding": task.get("coordinator_binding"),
+            # The Program has normalized both the new semantic object and the
+            # legacy top-level nature into the same typed receipt.  This is
+            # deliberately always true at the execution boundary: callers
+            # cannot choose a weaker barrier by changing response shape.
+            "typed_route": True,
+            "normalized_legacy_semantic": not typed_route,
         }, []
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         return None, reasons + [f"AI_ROUTE_INVALID: {exc}"]
@@ -5387,7 +6613,7 @@ def _validate_backup_completion(item: dict, run_p: Path) -> tuple[dict | None, l
         if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
             raise ValueError("issued backup task identity changed")
         issued = Path(run_p) / "ai_backup_tasks" / f"{task_hash}.json"
-        if json.loads(issued.read_text()) != item:
+        if _strict_json_loads(issued.read_text()) != item:
             raise ValueError("backup does not match the coordinator-issued handoff")
         prompt_text = (project / "input" / "phase1_prompt.md").read_text()
         if _sha256_text(prompt_text) != item["prompt_sha256"]:
@@ -5396,7 +6622,7 @@ def _validate_backup_completion(item: dict, run_p: Path) -> tuple[dict | None, l
         if path.is_symlink() or any(p.is_symlink() for p in path.parents):
             raise ValueError("author completion record path is linked")
         raw_record = path.read_bytes()
-        record = json.loads(raw_record)
+        record = _strict_json_loads(raw_record)
         outputs = _backup_output_manifest(project)
         rtl = _rtl_files(project)
         if not rtl or any(not p.read_bytes().strip() for p in rtl):
@@ -5695,6 +6921,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     import benchmark_entry_surface_check as bes           # noqa: PLC0415
     import flow_phase_attribution as fpa                  # noqa: PLC0415
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
 
     entry_audit = bes.audit(Path(__file__).resolve().parents[1])
     if entry_audit.get("verdict") != "PASS":
@@ -5727,7 +6954,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     if fresh:
         _prepare_general_solve_run(bench, ds, run_p, fmt, limit)
     else:
-        config = json.loads((run_p / ".bench_config.json").read_text())
+        config = _strict_json_loads((run_p / ".bench_config.json").read_text())
         if (config.get("bench") != bench or config.get("format") != fmt
                 or config.get("dataset") != str(ds)
                 or config.get("diagnostic_limit") != int(limit or 0)):
@@ -5778,7 +7005,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             route_tasks.append(_make_ai_route_task(
-                pid, proj, staged, proposal, run_p, fmt))
+                pid, proj, staged, proposal, run_p, fmt, benchmark=bench,
+                dataset_path=ds))
+        _publish_route_input_anchor(
+            run_p, _route_input_anchor(bench, fmt, ds, route_tasks))
         _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
         for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
             _write_jsonl(run_p / name, [])
@@ -5822,6 +7052,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         ev = None
         exit_step = None
         verdict: dict = {}
+        route_receipt = None
+        activation = None
+        effective_entry = None
         # Two facts a failing row must still report. The route-level
         # AI-backup declaration is a pure function of the routing verdict, so
         # it is known the moment routing returns; the Phase-1 front door's
@@ -5834,6 +7067,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         route_backup: dict = {"status": "NOT_MEASURED", "skills": []}
         phase1_frontdoor = None
         process = None
+        argv: list[str] = []
         try:
             route_task = task_by_route_id[pid]
             if proj.resolve() != Path(route_task["project"]):
@@ -5860,30 +7094,77 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
 
             verdict = route_decisions[pid]
             nature = verdict["nature"]
-            # `entry_nature` is the NATURE_ENTRY key on every branch; `nature`
-            # may be the disclosing unpinned-transform label, which is not.
-            entry_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
-            entry = entry_row.get("entry_step")
-            ev = entry_row.get("default_evidence")
-            exit_step = (tnr.EVIDENCE_EXIT.get(ev) or {}).get("exit_step")
+            route_receipt = verdict.get("route_receipt")
+            if not isinstance(route_receipt, dict):
+                raise ValueError("ROUTE_RECEIPT_MISSING")
+            receipt_errors = rd.validate_route_receipt(route_receipt)
+            if receipt_errors:
+                raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(receipt_errors))
+            run_scope = uuid.uuid4().hex
+            _publish_current_receipt(
+                proj, "route_decision", route_receipt,
+                digest_field="receipt_sha256",
+                run_id=f"{route_task['task_sha256']}:route:{run_scope}")
+            current_route = _read_current_receipt(proj, "route_decision")
+            if (current_route["receipt"].get("receipt_sha256")
+                    != route_receipt.get("receipt_sha256")):
+                raise ValueError("ROUTE_RECEIPT_CURRENT_POINTER_MISMATCH")
+            # `entry_step` and `verify_through` are derived by the Program
+            # receipt. The semantic reviewer never supplies or overrides them.
+            entry = str(route_receipt["entry_step"])
+            ev = str(route_receipt["requested_evidence"])
+            exit_step = str(route_receipt["verify_through"])
             route_backup = _declared_route_ai_backup(verdict)
-
-            if entry != "D1":
-                phase1_frontdoor = _ensure_phase1_frontdoor(
-                    runner, proj, runner_budget)
-                if phase1_frontdoor.get("status") == "BLOCKED":
-                    raise RuntimeError(
-                        "canonical Phase-1 front door failed before routed "
-                        f"entry {entry}: {phase1_frontdoor.get('reason')}")
-
-            argv = _solver_argv(runner, proj, entry, exit_step)
-            process = runner_budget.run(argv)
-            if process.error is not None:
-                raise RuntimeError(process.error)
-            rc = int(process.rc)
-            got = _collect_runner_result(
-                process, argv, fmt, pid, proj,
-                required_top=_required_scorer_top(_entry(bench), fmt))
+            # Every accepted response is normalized into the Program receipt,
+            # and every newly executed route crosses the same two-stage D1
+            # barrier.  Response shape cannot opt into a legacy bypass.
+            phase1_frontdoor, pending, activation = _activate_route_d1(
+                proj, route_task, route_receipt, runner, runner_budget,
+                run_scope=run_scope,
+                delivery_route=str(verdict.get("delivery_route") or "ip"))
+            if entry == "D1":
+                nature_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
+                candidates = [str(x) for x in nature_row.get("then") or []]
+                order = {sid: i for i, sid in enumerate(rd.canonical_dag()["steps"])}
+                effective_entry = next(
+                    (sid for sid in candidates
+                     if sid in order and order[sid] <= order[exit_step]), None)
+            else:
+                effective_entry = entry
+            rd.require_d1_activation(
+                activation, route_receipt, task_sha256=route_task["task_sha256"],
+                ldoc_root_handle=_sha256_text(str((proj / "phase1" / "generated_docs").resolve())))
+            planned_snapshot = _validate_live_d1_for_launch(
+                proj, route_receipt, activation, route_task["task_sha256"])
+            admitted_steps = rd.admit_route_closure(
+                pending=pending, activation=activation,
+                route_receipt=route_receipt,
+                task_sha256=route_task["task_sha256"],
+                source_sha256=route_receipt["source_sha256"],
+                ldoc_root_handle=_sha256_text(
+                    str((proj / "phase1" / "generated_docs").resolve())))
+            if effective_entry is None:
+                # A D1-only proof still has a receipt and activation but no
+                # downstream runner span to launch.
+                process = _ProcessOutcome(rc=0, stdout="", stderr="")
+                got = {"ok": True, "completion": "", "rtl_gen": None}
+                rc = 0
+            else:
+                argv = _solver_argv(
+                    runner, proj, effective_entry, exit_step,
+                    str(verdict.get("delivery_route") or "ip"))
+                d1_snapshot = _capture_d1_evidence(proj)
+                if d1_snapshot.digest != planned_snapshot.digest:
+                    raise ValueError("D1_SNAPSHOT_PLANNED_GENERATION_CHANGED")
+                process = _run_from_d1_snapshot(
+                    runner_budget, argv, d1_snapshot, route_receipt, activation,
+                    route_task["task_sha256"])
+                if process.error is not None:
+                    raise RuntimeError(process.error)
+                rc = int(process.rc)
+                got = _collect_runner_result(
+                    process, argv, fmt, pid, proj,
+                    required_top=_required_scorer_top(_entry(bench), fmt))
             diagnostic = got.get("runner_diagnostics")
             pre_gate_blocked = bool(diagnostic and diagnostic.get("reason"))
             waive = None if pre_gate_blocked else _rtl_gen_waive(proj)
@@ -5920,6 +7201,11 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "routing_verdict": verdict, "phases": phases,
                 "public_original_input": staged["public_original_input"],
                 "phase1_frontdoor": phase1_frontdoor,
+                "route_receipt": route_receipt,
+                "delivery_route": verdict.get("delivery_route") or "ip",
+                "d1_activation": activation,
+                "effective_entry": effective_entry,
+                "admitted_steps": admitted_steps,
                 "candidate_origin": (
                     "PROGRAM" if got.get("ok") else
                     ("AI_BACKUP_PENDING" if awaiting_backup else "NONE")),
@@ -5985,6 +7271,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "routing_verdict": verdict,
                 "phases": _phase_error_attribution(),
                 "phase1_frontdoor": phase1_frontdoor,
+                "route_receipt": route_receipt,
+                "delivery_route": verdict.get("delivery_route") or "ip",
+                "d1_activation": activation,
+                "effective_entry": effective_entry,
                 "candidate_origin": "NONE",
                 "route_ai_backup": route_backup,
                 "program_first_ai_review": {"status": "NOT_MEASURED"},
@@ -6007,12 +7297,12 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     backlog: list[dict] = []
     review_tasks: list[dict] = []
     for outcome in outcomes:
-        result = json.loads(outcome.result_json)
+        result = _strict_json_loads(outcome.result_json)
         results.append(result)
         if outcome.review_task_json:
-            review_tasks.append(json.loads(outcome.review_task_json))
+            review_tasks.append(_strict_json_loads(outcome.review_task_json))
         if outcome.backup_task_json:
-            backlog.append(json.loads(outcome.backup_task_json))
+            backlog.append(_strict_json_loads(outcome.backup_task_json))
         print(outcome.log_line)
 
     if backlog:
@@ -6076,12 +7366,17 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     })
     ok = sum(1 for r in results if r["ok"])
     waiting = sum(1 for r in results if r.get("awaiting_ai"))
+    unmeasured = any(
+        r.get("worker_status") == "ERROR"
+        or any(isinstance(row, Mapping) and row.get("status") == "NOT_MEASURED"
+               for row in (r.get("phases") or {}).values())
+        for r in results)
     print(f"\n{ok}/{len(results)} produced a gated candidate; 0 accepted"
           + (f", {waiting} awaiting AI review/backup" if waiting else "")
           + f" -> {run_p}/solve_report.json")
     # 2 = handed off, not failed. Even when every PROGRAM candidate exists, no
     # response is accepted until the blind AI review agrees.
-    return 2 if results and waiting == len(results) else 1
+    return 2 if results and (waiting == len(results) or unmeasured) else 1
 
 
 def cmd_solve(bench: str, dataset: str, run: str, limit: int = 0,
@@ -6126,8 +7421,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
               file=sys.stderr)
         return 2
     try:
-        solve = json.loads(solve_p.read_text(errors="replace"))
-    except (OSError, json.JSONDecodeError) as exc:
+        solve = _strict_json_loads(solve_p.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
         print(f"ERROR: unreadable solve report {solve_p}: {exc}",
               file=sys.stderr)
         return 2
@@ -6145,7 +7440,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     if solve.get("routing_phase") == "PENDING":
         try:
             route_tasks = _read_jsonl(run_p / _ROUTE_WORKLIST)
-            config = json.loads((run_p / ".bench_config.json").read_text())
+            config = _strict_json_loads((run_p / ".bench_config.json").read_text())
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             print(f"ERROR: AI route worklist unreadable: {exc}", file=sys.stderr)
             return 2
@@ -6155,10 +7450,17 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print("ERROR: AI route worklist differs from issued solve population",
                   file=sys.stderr)
             return 2
+        try:
+            _validate_route_input_anchor(bench, fmt, Path(dataset).resolve(),
+                                         run_p, route_tasks)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"ERROR: AI route input anchor refused: {exc}", file=sys.stderr)
+            return 2
         decisions = {}
         pending = []
         for task in route_tasks:
-            decision, reasons = _validate_ai_route(task, run_p)
+            decision, reasons = _validate_ai_route(
+                task, run_p, benchmark=bench, dataset=Path(dataset).resolve())
             if decision is None:
                 pending.append((task.get("id"), reasons))
             else:
@@ -6191,6 +7493,21 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         print("ERROR: duplicate problem id in solve report or review worklist",
               file=sys.stderr)
         return 2
+    try:
+        route_worklist = _read_jsonl(run_p / _ROUTE_WORKLIST)
+    except ValueError:
+        route_worklist = []
+    route_task_by_id = {str(t.get("id")): t for t in route_worklist}
+
+    planned_d1_snapshots: dict[str, _D1EvidenceSnapshot] = {}
+
+    def _route_reentry_state(pid: str, result: dict, *, allow_d1_only: bool,
+                             d1_snapshot=None) -> dict:
+        return _validated_route_reentry_state(
+            bench=bench, dataset=dataset, fmt=fmt, run_p=run_p, pid=str(pid),
+            result=result, route_worklist=list(route_worklist),
+            allow_d1_only=allow_d1_only, supplied_rtl=False,
+            snapshot_sink=planned_d1_snapshots, d1_snapshot=d1_snapshot)
 
     refreshed_obligation_ids = [
         pid for pid, task in task_by_id.items()
@@ -6257,6 +7574,10 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             phase1_blocked[pid] = (
                 "canonical D1-entry run emitted no Phase-1 provenance")
             continue
+        admission = _route_reentry_state(pid, result, allow_d1_only=False)
+        if admission.get("status") != "ACTIVE":
+            phase1_blocked[pid] = str(admission.get("reason") or "ROUTE_REENTRY_REFUSED")
+            continue
         frontdoor = _ensure_phase1_frontdoor(runner, proj, runner_budget)
         if frontdoor.get("status") == "BLOCKED":
             phase1_blocked[pid] = str(
@@ -6268,14 +7589,56 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             task["phase1_provenance"] = current
     def _run_and_collect(job) -> _ResumeRunnerOutcome:
         pid, proj, supplied_rtl, entry, exit_step, *extra = job
-        collect_kwargs = extra[0] if extra else {}
+        collect_kwargs = extra.pop() if extra and isinstance(extra[-1], dict) else {}
+        delivery_route = extra[0] if extra else "ip"
+        d1_only = extra[1] if len(extra) > 1 else False
+        if d1_only:
+            state = _route_reentry_state(str(pid), result_by_id.get(str(pid)) or {},
+                                         allow_d1_only=True)
+            if state.get("status") != "D1_ONLY":
+                return _ResumeRunnerOutcome(
+                    problem_id=pid, rc=None, collected_json=None,
+                    error=str(state.get("reason") or "D1_ONLY_REENTRY_REFUSED"))
+            latest = proj / "reports" / "orchestrator" / "runner_invocations" / "latest.json"
+            prior_latest = latest.read_bytes() if latest.is_file() else None
+            try:
+                frontdoor, _, _ = _activate_route_d1(
+                    proj, state["task"], state["route_receipt"], runner, runner_budget,
+                    delivery_route=delivery_route)
+            except Exception as exc:                     # noqa: BLE001
+                invocation = None
+                if latest.is_file() and latest.read_bytes() != prior_latest:
+                    pointer = _read_json_regular(latest)
+                    record = latest.parent / f"{pointer['invocation_id']}.json"
+                    if record.is_file():
+                        invocation = _read_json_regular(record)
+                return _ResumeRunnerOutcome(
+                    problem_id=pid, rc=(invocation or {}).get("rc"), collected_json=None,
+                    error=f"D1_ONLY_REENTRY_REFUSED: {exc}", invocation=invocation)
+            return _ResumeRunnerOutcome(
+                problem_id=pid, rc=frontdoor.get("runner_rc"), collected_json=None,
+                error="D1_ONLY_REENTRY_COMPLETED_WITHOUT_DOWNSTREAM_SPAN",
+                invocation=frontdoor.get("runner_invocation"))
+        # The caller performs a state check before constructing a job. Repeat
+        # it here at the actual fan-out seam so a pointer/anchor mutation after
+        # planning cannot turn a valid plan into a later-span bypass.
+        d1_snapshot = _capture_d1_evidence(proj)
+        state = _route_reentry_state(str(pid), result_by_id.get(str(pid)) or {},
+                                     allow_d1_only=False, d1_snapshot=d1_snapshot)
+        if state.get("status") != "ACTIVE":
+            return _ResumeRunnerOutcome(
+                problem_id=pid, rc=None, collected_json=None,
+                error=str(state.get("reason") or "ROUTE_REENTRY_REFUSED"))
         # AI backup/repair has already authored the candidate. Re-enter at the
         # first RTL-validation step so program-first does not author again and
         # overwrite the hash whose semantics the AI just repaired. The routed
         # exit still applies; otherwise resume expands a step-2/4 task into LEC.
         argv = _resume_solver_argv(
-            runner, proj, supplied_rtl, entry, exit_step)
-        process = runner_budget.run(argv)
+            runner, proj, supplied_rtl, state["entry_step"],
+            state["exit_step"], state["delivery_route"])
+        process = _run_from_d1_snapshot(
+            runner_budget, argv, d1_snapshot, state["route_receipt"],
+            state["activation"], state["task"]["task_sha256"])
         diagnostic = _runner_diagnostics(process, argv, proj)
         diagnostics_json = json.dumps(diagnostic) if diagnostic else None
         if process.error is not None:
@@ -6341,21 +7704,34 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     # that Program invocation; successful projects already committed in the
     # solve report are never discarded or re-authored.
     retry_plans = []
+    retry_blocked = []
     for result in results:
         if (result.get("worker_status") == "ERROR"
                 and result.get("worker_retryable") is True):
             pid = str(result.get("id"))
+            reentry_state = _route_reentry_state(pid, result, allow_d1_only=True)
+            if reentry_state.get("status") == "REFUSED":
+                retry_blocked.append((pid, str(reentry_state.get("reason"))))
+                result.update({"accepted": False, "candidate_ready": False,
+                               "worker_error": str(reentry_state.get("reason")),
+                               "worker_retryable": False})
+                continue
             retry_plans.append({
                 "id": pid, "result": result,
                 "project": (run_p / "projects" /
                             re.sub(r"[^\w.-]", "_", pid)),
+                "reentry_state": reentry_state,
             })
+    for pid, reason in retry_blocked:
+        repairs.append({"id": pid, "status": "ROUTE_REENTRY_BLOCKED",
+                        "reasons": [reason]})
     gate_rc = _runtime_pair_before_fan_out(retry_plans, run_p, "resume:retry")
     if gate_rc is not None:
         return gate_rc
     retry_outcomes = _ordered_parallel_map(
         [(p["id"], p["project"], False, p["result"].get("entry"),
-          p["result"].get("exit"))
+          p["result"].get("exit"), p["result"].get("delivery_route", "ip"),
+          p["reentry_state"].get("status") == "D1_ONLY")
          for p in retry_plans], _run_and_collect, jobs)
     existing_backup_ids = {str(item.get("id")) for item in backup}
     for plan, outcome in zip(retry_plans, retry_outcomes):
@@ -6365,7 +7741,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if outcome.error is not None:
             result.pop("runner_diagnostics", None)
             if outcome.diagnostics_json:
-                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
+                result["runner_diagnostics"] = _strict_json_loads(outcome.diagnostics_json)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
                 "id": pid, "project": str(proj),
@@ -6381,7 +7757,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print(f"  {pid:44s} Program worker retry ERROR: {outcome.error}")
             continue
         rc = int(outcome.rc)
-        got = json.loads(str(outcome.collected_json))
+        got = _strict_json_loads(str(outcome.collected_json))
         _refresh_result(result, proj, rc, got)
         result["runner_invocation"] = outcome.invocation
         if got.get("ok"):
@@ -6490,9 +7866,19 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             backup_plans.append({"kind": "no_rtl", "item": item, "id": pid,
                                  "result": result, "reasons": [str(exc)]})
             continue
+        reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+        if reentry_state.get("status") != "ACTIVE":
+            backup_plans.append({
+                "kind": "route_blocked", "item": item, "id": pid,
+                "result": result,
+                "reasons": [str(reentry_state.get("reason") or
+                                 "ROUTE_REENTRY_D1_INVALID")],
+            })
+            continue
         backup_plans.append({
             "kind": "run", "item": item, "id": pid, "result": result,
             "project": proj, "rtl_dir": rtl_dir, "provenance": provenance,
+            "reentry_state": reentry_state,
         })
 
     backup_run_plans = [p for p in backup_plans if p["kind"] == "run"]
@@ -6511,7 +7897,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         return _run_and_collect(job)
 
     backup_outcomes = iter(_ordered_parallel_map(
-        [(p["id"], p["project"], True, None, p["result"].get("exit"))
+        [(p["id"], p["project"], True, None, p["result"].get("exit"),
+          p["result"].get("delivery_route", "ip"))
          for p in backup_run_plans],
         _run_completed_backup, jobs))
     for plan in backup_plans:
@@ -6539,11 +7926,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print(f"  {pid:44s} AI backup completion PENDING: "
                   + "; ".join(plan["reasons"]))
             continue
+        if kind == "route_blocked":
+            remaining_backup.append(item)
+            result.update({"accepted": False, "awaiting_ai_backup": True,
+                           "awaiting_ai_review": False, "awaiting_ai": True,
+                           "route_reentry_blocked": plan["reasons"]})
+            repairs.append({"id": pid, "status": "ROUTE_REENTRY_BLOCKED",
+                            "reasons": plan["reasons"]})
+            print(f"  {pid:44s} AI backup blocked by route/D1 boundary")
+            continue
         outcome = next(backup_outcomes)
         if outcome.error is not None:
             result.pop("runner_diagnostics", None)
             if outcome.diagnostics_json:
-                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
+                result["runner_diagnostics"] = _strict_json_loads(outcome.diagnostics_json)
             remaining_backup.append(item)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
@@ -6565,7 +7961,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print(f"  {pid:44s} AI backup worker ERROR: {outcome.error}")
             continue
         rc = int(outcome.rc)
-        got = json.loads(str(outcome.collected_json))
+        got = _strict_json_loads(str(outcome.collected_json))
         proj = plan["project"]
         _refresh_result(result, proj, rc, got)
         result["runner_invocation"] = outcome.invocation
@@ -6624,6 +8020,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         invocation_reason = _runner_reentry_reason(task, result)
         if invocation_reason:
+            reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+            if reentry_state.get("status") != "ACTIVE":
+                reason = str(reentry_state.get("reason") or
+                             "ROUTE_REENTRY_D1_INVALID")
+                repair_plans.append({"kind": "report", "id": pid,
+                                     "repair": {
+                                         "id": pid,
+                                         "status": "ROUTE_REENTRY_BLOCKED",
+                                         "reasons": [reason],
+                                     }})
+                result.update({"accepted": False, "candidate_ready": False,
+                               "awaiting_ai_review": False,
+                               "route_reentry_blocked": [reason]})
+                continue
             # A legacy pre-run refusal is not a completed gate invocation.
             # Re-enter the SAME frozen bytes; no edit or author signature is
             # authorised here. Keep old review/test/task records for audit.
@@ -6662,6 +8072,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             repair_plans.append({
                 "kind": "regate", "id": pid, "task": task, "result": result,
                 "project": proj, "challenge": None, "review_key": key,
+                "reentry_state": reentry_state,
                 "archive": archive, "repair_parent_candidate": task.get("repair_parent_candidate_snapshot"),
                 "repair_provenance": task.get("repair_provenance"),
                 "repair_input_candidate": task.get("repair_input_candidate_snapshot"),
@@ -6773,6 +8184,22 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 },
             })
             continue
+        reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+        if reentry_state.get("status") != "ACTIVE":
+            reason = str(reentry_state.get("reason") or
+                         "ROUTE_REENTRY_D1_INVALID")
+            repair_plans.append({"kind": "report", "id": pid,
+                                 "pre_logs": pre_logs,
+                                 "repair": {
+                                     "id": pid,
+                                     "status": "ROUTE_REENTRY_BLOCKED",
+                                     "reasons": [reason],
+                                 }})
+            result.update({"accepted": False, "awaiting_ai": True,
+                           "awaiting_ai_review": False,
+                           "ai_repair_required": True,
+                           "route_reentry_blocked": [reason]})
+            continue
         # Freeze the signed bytes BEFORE the gates can normalize them in
         # place.  Without this the only copy of what the author signed is
         # destroyed, and a later Program fix has nothing to re-enter from.
@@ -6798,6 +8225,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         repair_plans.append({
             "kind": "run", "id": pid, "pre_logs": pre_logs,
             "task": task, "result": result, "project": proj,
+            "reentry_state": reentry_state,
             "challenge": challenge, "repair_provenance": repair_provenance,
             "repair_parent_candidate": task.get("candidate_snapshot"),
             "pre_gate_input": preserved,
@@ -6839,7 +8267,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if outcome.error is not None:
             result.pop("runner_diagnostics", None)
             if outcome.diagnostics_json:
-                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
+                result["runner_diagnostics"] = _strict_json_loads(outcome.diagnostics_json)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
                 "id": pid, "project": str(proj),
@@ -6860,7 +8288,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             print(f"  {pid:44s} AI repair worker ERROR: {outcome.error}")
             continue
         rc = int(outcome.rc)
-        got = json.loads(str(outcome.collected_json))
+        got = _strict_json_loads(str(outcome.collected_json))
         _refresh_result(result, proj, rc, got)
         result["runner_invocation"] = outcome.invocation
         program_first_phases = plan["program_first_phases"]
@@ -7105,8 +8533,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         payload_path = Path(str((task.get("candidate_snapshot") or {}).get(
             "response_payload_path") or ""))
         try:
-            frozen_payload = json.loads(payload_path.read_text(errors="replace"))
-        except (OSError, json.JSONDecodeError) as exc:
+            frozen_payload = _strict_json_loads(payload_path.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
                 "id": pid, "project": task.get("project"),
@@ -7201,9 +8629,14 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     _write_jsonl(run_p / _ENHANCEMENT_WORKLIST, enhancements)
 
     total = len(results)
+    unmeasured_pending = any(
+        r.get("worker_status") == "ERROR"
+        or any(isinstance(row, Mapping) and row.get("status") == "NOT_MEASURED"
+               for row in (r.get("phases") or {}).values())
+        for r in results)
     complete = (total > 0 and len(accepted_ids) == total
                 and len(ordered_tasks) == total and not remaining_backup
-                and not repairs)
+                and not repairs and not unmeasured_pending)
     solve.update({
         "solved": sum(1 for r in results if r.get("candidate_ready")),
         "accepted": len(accepted_ids),
@@ -7236,7 +8669,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
           f"{acceptance['status']} -> {run_p / _ACCEPTANCE_REPORT}")
     if complete:
         return 0
-    return 2 if (remaining_backup or repairs or ordered_tasks) else 1
+    return 2 if (remaining_backup or repairs or ordered_tasks
+                 or unmeasured_pending) else 1
 
 
 _CORRECTION_REFUSED = "REVIEW_CORRECTION_REFUSED"
@@ -7297,7 +8731,7 @@ def _correction_path(path: str | Path, run_p: Path | None = None,
 def _correction_object(path: Path,
                        token: str = _CORRECTION_REFUSED) -> tuple[dict, str]:
     raw = path.read_bytes().decode("utf-8")
-    obj = json.loads(raw)
+    obj = _strict_json_loads(raw)
     if not isinstance(obj, dict):
         raise ValueError(f"{token}: not a JSON object: {path}")
     return obj, raw
@@ -7624,18 +9058,18 @@ def _guard_program_regate_journals(run_p: Path) -> None:
             continue
         reason = None
         try:
-            plan = json.loads(intent.read_text())
+            plan = _strict_json_loads(intent.read_text())
             request_path = _regate_path(archive / "request.json", run_p)
-            request = json.loads(request_path.read_text())
+            request = _strict_json_loads(request_path.read_text())
             if (plan.get("schema") != _PROGRAM_REGATE_SCHEMA or plan.get("request") != request
                     or _sha256_text(request_path.read_text()) != archive.name
                     or plan.get("program_identity") != request.get("program_identity")
                     or _review_task_digest(plan["prior_task"]) != request.get("task_sha256")):
                 raise ValueError("intent/request binding differs")
             if completed.exists() and not failed.exists():
-                marker = json.loads(completed.read_text())
+                marker = _strict_json_loads(completed.read_text())
                 transition_path = _regate_path(archive / "transition.json", run_p)
-                transition = json.loads(transition_path.read_text())
+                transition = _strict_json_loads(transition_path.read_text())
                 if (marker.get("schema") != _PROGRAM_REGATE_SCHEMA
                         or marker.get("request_sha256") != archive.name
                         or marker.get("archive_path") != str(archive)
@@ -7644,7 +9078,7 @@ def _guard_program_regate_journals(run_p: Path) -> None:
                         or transition["new_task"].get("program_regate") != marker):
                     raise ValueError("completion/transition binding differs")
             elif failed.exists() and not completed.exists():
-                marker = json.loads(failed.read_text())
+                marker = _strict_json_loads(failed.read_text())
                 if (marker.get("schema") != _PROGRAM_REGATE_SCHEMA
                         or marker.get("request_sha256") != archive.name
                         or marker.get("intent_sha256") != _review_task_digest(plan)
@@ -7679,8 +9113,8 @@ def _regate_request_field(request: dict, primary: str, legacy: str):
     return request.get(legacy)
 
 
-def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
-                          worker_threads: int) -> int:
+def _apply_program_regate(bench: str, dataset: str | Path, run_p: Path,
+                          request_path: Path, worker_threads: int) -> int:
     """The ONE Program re-entry operation: re-run the FIXED Program on ONE
     preserved, signed pre-gate input, under BOTH Program identities.
 
@@ -7736,7 +9170,7 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         return path
 
     def obj(path):
-        value = json.loads(bound(path).read_text(encoding="utf-8"))
+        value = _strict_json_loads(bound(path).read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             refuse("expected a JSON object")
         return value
@@ -7841,6 +9275,16 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
     project = _regate_path(task.get("project"), run_p, exists=False)
     if project != run_p / "projects" / _safe_problem_id(pid) or not project.is_dir():
         refuse("project is not the runner-owned project")
+    try:
+        route_worklist = _read_jsonl(run_p / _ROUTE_WORKLIST)
+    except (OSError, ValueError, TypeError) as exc:
+        refuse("route worklist is unreadable: " + str(exc))
+    admission = _validated_route_reentry_state(
+        bench=bench, dataset=dataset, fmt=fmt, run_p=run_p, pid=pid,
+        result=result, route_worklist=route_worklist,
+        allow_d1_only=False, supplied_rtl=True)
+    if admission.get("status") != "ACTIVE":
+        refuse(str(admission.get("reason") or "ROUTE_REENTRY_REFUSED"))
     tree = _regate_project_tree(project)
     prompt = bound(task.get("prompt_path"))
     if prompt != project / "input" / "phase1_prompt.md" or _sha256_text(prompt.read_text()) != task["prompt_sha256"]:
@@ -8009,8 +9453,14 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         if phase2_report.exists():
             phase2_report.unlink()  # staged copy only; require fresh gate evidence
         runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
-        argv = _resume_solver_argv(runner, staged, True, result.get("entry"), result["exit"])
-        process = _RunnerBudget(1, 1, worker_threads).run(argv)
+        argv = _resume_solver_argv(
+            runner, staged, True, admission["entry_step"],
+            admission["exit_step"], admission["delivery_route"])
+        d1_snapshot = _capture_d1_evidence(staged)
+        process = _run_from_d1_snapshot(
+            _RunnerBudget(1, 1, worker_threads), argv, d1_snapshot,
+            admission["route_receipt"], admission["activation"],
+            admission["task"]["task_sha256"], authority_project=project)
         if (ea.phase1_provenance(staged) != task["phase1_provenance"]
                 or _sha256_text((staged / "input" / "phase1_prompt.md").read_text())
                 != task["prompt_sha256"]):
@@ -8052,7 +9502,8 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         project.rename(archive / "prior_project")
         promotion_project.rename(project)
         phases = fpa.attribute(project, routing=result.get("routing_verdict") or {},
-                               entry="2", evidence=result.get("evidence"), exit_step=result["exit"],
+                               entry="2", evidence=result.get("evidence"),
+                               exit_step=admission["exit_step"],
                                rtl_present=True, artefact_collected=True)
         new_task = _make_ai_review_task(
             pid, project, got, result.get("routing_verdict") or {}, int(process.rc), run_p, "AI_REPAIR",
@@ -8081,7 +9532,7 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
                   "author_signature_unchanged": True,
                   "repair_authorized": False,
                   "status": "FRESH_REVIEW_REQUIRED",
-                  "entry": "2", "exit": result["exit"], "runner_rc": process.rc,
+                  "entry": "2", "exit": admission["exit_step"], "runner_rc": process.rc,
                   "accepted": False}
         new_task["program_regate"] = action
         tasks[ids.index(pid)] = new_task
@@ -8172,8 +9623,9 @@ def cmd_resume(bench: str, dataset: str, run: str, jobs: int = 1,
                                      f"{type(exc).__name__}: {exc}") from exc
             if program_regate is not None:
                 try:
-                    return _apply_program_regate(bench, Path(run).resolve(),
-                                                 Path(program_regate), worker_threads)
+                    return _apply_program_regate(
+                        bench, dataset, Path(run).resolve(),
+                        Path(program_regate), worker_threads)
                 except (KeyError, TypeError, AttributeError, IndexError) as exc:
                     raise ValueError(f"{_REGATE_REFUSED}: malformed evidence: "
                                      f"{type(exc).__name__}: {exc}") from exc
@@ -8307,7 +9759,7 @@ def main():
     # ``cvdp`` is a historical Shape-D row while the alias table deliberately
     # routes current work to ``cvdp-open``.  ``--show`` keeps an exact registry
     # key so the historical row remains inspectable.
-    _reg_keys = json.loads(REGISTRY.read_text())["benchmarks"]
+    _reg_keys = _strict_json_loads(REGISTRY.read_text())["benchmarks"]
     if a.bench and not (a.show and a.bench in _reg_keys):
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -8321,7 +9773,7 @@ def main():
             a.bench = _resolved
 
     if a.show:
-        reg = json.loads(REGISTRY.read_text())["benchmarks"]
+        reg = _strict_json_loads(REGISTRY.read_text())["benchmarks"]
         if a.bench not in reg:
             raise SystemExit(f"unknown benchmark: {a.bench} (see --list)")
         print(json.dumps({a.bench: reg[a.bench]}, ensure_ascii=False,

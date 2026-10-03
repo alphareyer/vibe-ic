@@ -525,7 +525,7 @@ _INPUT_SUBJECT_TERMS: Dict[str, Tuple[str, ...]] = {
     # 'Look for signoff / tapeout / sign-off checklist sections.'
     # 'Capture DRC / LVS / STA / antenna / IR-drop status per gate.'
     "L24": ("signoff", "sign-off", "tapeout", "checklist", "DRC", "LVS",
-            "STA", "antenna", "IR-drop"),
+            "STA", "antenna", "IR-drop", "GDS XOR", "GDS_XOR", "GDS-XOR"),
     # 'Look for reliability / qualification / mission-profile sections.'
     # 'Capture qual standard (JESD47, AEC-Q100/Q200) if stated.'
     # 'Capture temperature range, EM budget, NBTI/HCI aging margins.'
@@ -1026,6 +1026,7 @@ def _extraction_hints_for(l_doc_code: str) -> List[str]:
         "L24": [
             "Look for signoff / tapeout / sign-off checklist sections.",
             "Capture DRC / LVS / STA / antenna / IR-drop status per gate.",
+            "Capture GDS XOR / GDS_XOR / GDS-XOR requirements, never outcomes.",
             "Capture the tapeout gate list + any waiver references.",
         ],
         "L25": [

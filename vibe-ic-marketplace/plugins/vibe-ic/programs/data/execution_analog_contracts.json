@@ -1,0 +1,3461 @@
+{
+  "schema": 1,
+  "original_input_sha256": "20399b995eddf22ae2f99247cd23d8adb639e2b3d7abf2dac3f00ddf13d96746",
+  "source_base": "8f8142248cc9912a096012cfee13003bfea879af",
+  "steps": [
+    {
+      "step_id": "A1",
+      "canonical_row": {
+        "id": "A1",
+        "name": "Analog Spec Extraction",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "D1",
+            "path": "phase1/generated_docs/L1_DATASHEET.json"
+          },
+          {
+            "from": "D1",
+            "path": "phase1/generated_docs/L5_ADI_SPEC.json"
+          }
+        ],
+        "skills": [
+          "analog-spec-extract"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
+              ]
+            },
+            {
+              "program_exit_zero": "analog_a1_spec_extract_check . --json reports/analog/a1_spec.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "D1"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A1",
+        "title_en": "Analog Spec Extraction",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A1",
+            "programs": [
+              "analog_a1_spec_extract_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=A1",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "vibeic"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Source-bound analog specification extraction",
+          "component_tool_ids": [],
+          "status": "verified",
+          "selection_reason": "No LibreLane/OpenROAD analog-spec extractor.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A1_vibeic_1",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Analog units, corners, performance limits and evidence",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A1_cace_2",
+            "tool_id": "cace",
+            "role": "orchestrator",
+            "applicability": "Consume the resulting characterization datasheet",
+            "integration_status": "proposed",
+            "independence_family": "cace",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "No arbitrary analog-spec extraction capability.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Design specifications remain source-bound choices; CACE and SPICE consume them, not infer missing requirements.",
+        "mandatory_gate_programs": [
+          "analog_a1_spec_extract_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 2,
+        "items": [
+          {
+            "id": "A1-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/0",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The gate could not encode an honest absence: a body with specs:[] and extraction_status NO_SPEC_IN_DOCS was rc1 A1_SPEC_NO_FIELDS (a fabricated FAIL), and per-type defaults would have been a fabricated PASS. So the fix is to write spec_gap.json with rc 2",
+            "prior_tool_support_claim": "n/a - no tool does this step",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A1-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/1",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "No default spec numbers: the static TARGETS table graded a bandgap against 1.205 V, a target no document stated",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A2",
+      "canonical_row": {
+        "id": "A2",
+        "name": "Analog Topology Selection",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A1",
+            "path": "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
+          }
+        ],
+        "skills": [
+          "analog-topology-select"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/topology.md OR phase2/analog/*/topology.md"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/topology.md OR phase2/analog/*/topology.md"
+              ]
+            },
+            {
+              "program_exit_zero": "analog_a2_topology_select_check . --json reports/analog/a2_topology.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A1"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A2",
+        "title_en": "Analog Topology Selection",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A2",
+            "programs": [
+              "analog_a2_topology_select_check"
+            ],
+            "capture_routes": [
+              {
+                "id": "analog.A2_topology",
+                "program": "programs/analog_a2_topology_select_check.py",
+                "skill": "skills/analog-topology-select/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=A2",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "vibeic"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Explicit topology choice with the existing bounded sizing path",
+          "component_tool_ids": [
+            "ngspice"
+          ],
+          "status": "verified",
+          "selection_reason": "No source-integrated external topology selector is proven for the current circuit. PyOPUS is a proposed parameter optimizer, not a replacement for topology selection; adopt it only after compatible simulator/target measurements.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A2_pyopus_1",
+            "tool_id": "pyopus",
+            "role": "orchestrator",
+            "applicability": "Bounded sizing/optimization",
+            "integration_status": "proposed",
+            "independence_family": "pyopus",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Adapter and import need verification.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A2_ngspice_2",
+            "tool_id": "ngspice",
+            "role": "checker",
+            "applicability": "Candidate circuit performance",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "No automatic unrestricted topology selector.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A2_xyce_3",
+            "tool_id": "xyce",
+            "role": "checker",
+            "applicability": "Independent candidate simulation",
+            "integration_status": "proposed",
+            "independence_family": "xyce",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Independent circuit solver with external coupling and mixed-signal interfaces. PDK model compatibility is not assumed from installation.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A2_vibeic_4",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Topology selection remains explicit program/AI design work. PyOPUS optimizes parameters; it does not prove arbitrary topology choice.",
+        "mandatory_gate_programs": [
+          "analog_a2_topology_select_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/topology.md OR phase2/analog/*/topology.md"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 5,
+        "items": [
+          {
+            "id": "A2-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/0",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Closed-loop CIFB coefficient bug: A2 applied an open-loop ramp bound, giving ci/cs = 183.5 where the loop needs about 4. The fix is a = min(swing/(4*vref), 0.25), giving ci/cs = 4.0016",
+            "prior_tool_support_claim": "false - no installed topology/sizing tool",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A2-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/1",
+            "kind": "enhancement",
+            "declared_destination": "vibeic_gate",
+            "item": "Two-term capacitor sizing (area + perimeter). A capacitor above the gencell maximum becomes an N-unit parallel array that keeps the value (error 2.2e-16 vs 1e-3 tolerance)",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A2-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/2",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The A2 gate measures vocabulary, not structure: any file over 200 bytes with one circuit word passes (a content-free memo headed '# Topology - ldo' passed)",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A2-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/3",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "Grade at the declared operating clock, not the fclk_max ceiling; publish the ceiling margin as INFO",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A2-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/4",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Floor every drawn width to the PDK's own rule. A static res width of 0.35 made KLayout-extract -> netgen report property mismatches (vibe-ic#1952)",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A3",
+      "canonical_row": {
+        "id": "A3",
+        "name": "Analog Netlist Generation",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A2",
+            "path": "phase3/analog/*/topology.md OR phase2/analog/*/topology.md"
+          },
+          {
+            "from": "external",
+            "check": "none",
+            "what": "the PDK device models / tech decks (PDK_ROOT — outside the project tree)"
+          }
+        ],
+        "skills": [
+          "analog-netlist-gen"
+        ],
+        "mcp_tools": [
+          "eda_xschem_netlist"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
+              ]
+            },
+            {
+              "program_exit_zero": "analog_netlist_pdk_check . --json reports/phase2/gates/analog_netlist_pdk.json"
+            },
+            {
+              "program_exit_zero": "analog_a3_netlist_gen_check . --json reports/analog/a3_netlist.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A2"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A3",
+        "title_en": "Analog Netlist Generation",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "ngspice"
+          ],
+          "label_en": "Current source adapter: ngspice / XSPICE",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A3",
+            "programs": [
+              "analog_a3_netlist_gen_check",
+              "analog_netlist_pdk_check"
+            ],
+            "capture_routes": [
+              {
+                "id": "analog.A3_netlist_gen",
+                "program": "programs/analog_a3_netlist_gen_check.py",
+                "skill": "skills/analog-netlist-gen/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=A3",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Runner analog_one_shot_runner.py:1048-1068 passes --verify-sim to analog_a3_netlist_emit.py; ngspice is validation, own program is netlist producer."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "vibeic"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Current topology-to-SPICE producer with ngspice validation",
+          "component_tool_ids": [
+            "ngspice"
+          ],
+          "status": "verified",
+          "selection_reason": "The source-integrated netlist emitter covers the current topology. Xschem requires an authored schematic/adapter and has no same-input producer evidence; retain it as an ultra proposed netlisting arm.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A3_xschem_1",
+            "tool_id": "xschem",
+            "role": "producer",
+            "applicability": "Schematic-to-SPICE netlist",
+            "integration_status": "proposed",
+            "independence_family": "xschem",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Only if a valid schematic or adapter exists.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A3_ngspice_2",
+            "tool_id": "ngspice",
+            "role": "checker",
+            "applicability": "Parse and execute emitted SPICE",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Current circuit generator is own code.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A3_xyce_3",
+            "tool_id": "xyce",
+            "role": "checker",
+            "applicability": "Model/netlist compatibility cross-check",
+            "integration_status": "proposed",
+            "independence_family": "xyce",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Independent circuit solver with external coupling and mixed-signal interfaces. PDK model compatibility is not assumed from installation.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A3_vibeic_4",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Automatic topology-to-netlist translation still needs Vibe-IC intent conversion; xschem is not a drop-in generator for every current topology.",
+        "mandatory_gate_programs": [
+          "analog_netlist_pdk_check",
+          "analog_a3_netlist_gen_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 6,
+        "items": [
+          {
+            "id": "A3-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/0",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Emit '.options trtol=1' in every testbench. With ngspice's default trtol=7, delta_sigma aborted with 'Timestep too small ... node xdut.nbias'. Loosening tolerances or using gmin/gear/rshunt all still failed; only trtol=1 completed",
+            "prior_tool_support_claim": "ngspice has the option; its SPICE3 default (7) is the problem, not a defect",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A3-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/1",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "A relative .lib path resolves against the deck file's directory in ngspice-47. An absolute host path baked into decks made copied projects unrunnable",
+            "prior_tool_support_claim": "yes (ngspice behaviour measured)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A3-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/2",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Transient .meas on every internal net (railx_* prefix). A +3.34 V excursion on a 1.2 V block was invisible in the DC operating-point table",
+            "prior_tool_support_claim": "false (ngspice measures only what the deck asks)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A3-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/3",
+            "kind": "lesson",
+            "declared_destination": "fork_patch:ngspice",
+            "item": "ngspice answers 'no such vector' and measures nothing on a run that still exits 0",
+            "prior_tool_support_claim": "NOT_MEASURED (whether ngspice strict_errorhandling turns a failed .meas into a non-zero exit was not checked)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A3-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The four netlist checkers printed PASS over 126 flat corner decks with files_with_subckt: 0, a green sign-off over zero block netlists",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A3-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/5",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The stale-netlist check must compare content digests with produced_at stripped. A re-emitted topology.json with a new timestamp failed A3 with A3_NETLIST_STALE_VS_IR",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "ngspice (docker exec, --verify-sim)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A4",
+      "canonical_row": {
+        "id": "A4",
+        "name": "Analog Corner Sweep (PVT)",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A3",
+            "path": "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
+          },
+          {
+            "from": "A1",
+            "path": "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
+          }
+        ],
+        "skills": [
+          "analog-sizing-loop"
+        ],
+        "mcp_tools": [
+          "eda_spice_corner"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/corner_results.json OR phase2/analog/*/corner_results.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/corner_results.json OR phase2/analog/*/corner_results.json"
+              ]
+            },
+            {
+              "program_exit_zero": "analog_a4_corner_sweep_check . --json reports/phase2/gates/analog_corner_sweep.json"
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_adc_enob_corner_check . --json reports/analog/analog_adc_enob_corner_check.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_sigma_delta_gain_floor_check .",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_corner_lib_realism_lint .",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything."
+              }
+            }
+          ]
+        },
+        "blocks_on": [
+          "A3"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A4",
+        "title_en": "Analog Corner Sweep (PVT)",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "ngspice"
+          ],
+          "label_en": "Current source adapter: ngspice / XSPICE",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A4",
+            "programs": [
+              "analog_a4_corner_sweep_check",
+              "analog_adc_enob_corner_check",
+              "analog_corner_lib_realism_lint",
+              "analog_sigma_delta_gain_floor_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=A4",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "ngspice"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Current ngspice corner sweep with mandatory performance grading",
+          "component_tool_ids": [
+            "vibeic"
+          ],
+          "status": "verified",
+          "selection_reason": "The current ngspice sweep is source-integrated. CACE remains useful proposed characterization orchestration, but changing orchestration has no measured better target result yet.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A4_cace_1",
+            "tool_id": "cace",
+            "role": "orchestrator",
+            "applicability": "PVT/Monte Carlo sweep and grading",
+            "integration_status": "proposed",
+            "independence_family": "cace",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Shares its selected simulator family; not an independent solver.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_ngspice_2",
+            "tool_id": "ngspice",
+            "role": "producer",
+            "applicability": "Analog corner simulation",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Current default analog solver.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_xyce_3",
+            "tool_id": "xyce",
+            "role": "producer",
+            "applicability": "Independent corner simulation",
+            "integration_status": "proposed",
+            "independence_family": "xyce",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Match models, stimuli and grader.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_vacask_4",
+            "tool_id": "vacask",
+            "role": "producer",
+            "applicability": "Alternate analog solver",
+            "integration_status": "proposed",
+            "independence_family": "vacask",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Compatible model/netlist adaptation required.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_pyopus_5",
+            "tool_id": "pyopus",
+            "role": "orchestrator",
+            "applicability": "Sizing/MC/corner orchestration",
+            "integration_status": "proposed",
+            "independence_family": "pyopus",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Simulation-based sizing/optimization; simulator adapter must match supported interfaces. It does not select arbitrary circuit topology by itself.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_spectre_6",
+            "tool_id": "spectre",
+            "role": "producer",
+            "applicability": "Independent commercial circuit simulation",
+            "integration_status": "needslicensed",
+            "independence_family": "spectre",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Optional independent analog solver. AMS mode combines Spectre with a digital simulator; libraries, license and adapter are prerequisites.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A4_vibeic_7",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Full corner/stimulus coverage and ENOB/coherent-tone grading stay mandatory. A second orchestrator driving ngspice is not another simulator.",
+        "mandatory_gate_programs": [
+          "analog_a4_corner_sweep_check",
+          "analog_adc_enob_corner_check",
+          "analog_sigma_delta_gain_floor_check",
+          "analog_corner_lib_realism_lint"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/corner_results.json OR phase2/analog/*/corner_results.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 8,
+        "items": [
+          {
+            "id": "A4-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/0",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "A4 never ran under the orchestrator: one of seven sites omitted getattr(args,'container'), exited without running, and was reported as 'invoke skill ams-sim'. A producer that cannot reach its tool is ENV_UNAVAILABLE, not WAIVED",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/1",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The A4 gate certified a record with 1 of 9 corners executed, and corners were ended by a 120 s clock",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/2",
+            "kind": "enhancement",
+            "declared_destination": "vibeic_gate",
+            "item": "Admit corners by aggregate host RAM (about 1-24 GiB per corner measured); the docker-inspect probe template was refused by Docker",
+            "prior_tool_support_claim": "false (ngspice has no admission control)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/3",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The gf180mcuD ngspice library names its MOS corners typical/ff/ss/fs/sf with no 'tt' ('section definition tt not found'); section names must be read from the PDK lib",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "'.option scale=1u' silently zeroes the subckt's mismatch arithmetic, which consumes raw w; the operating point stays identical to six digits",
+            "prior_tool_support_claim": "n/a (ngspice behaviour)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/5",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Corner-lib realism: a deck that includes a real PDK lib and also inlines a LEVEL=1 override is invisible to analog_netlist_pdk_check",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H7",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/6",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The tone bin at band_bins//3 folded the loop's periodic error onto the signal bin (a false-green ENOB); the tone must be coprime with the window",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A4-H8",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/7",
+            "kind": "feature",
+            "declared_destination": "fork_patch:ngspice",
+            "item": "Structured measurements via the vibeic/ngspice fork's --json-measure (#29), probed at runtime because some images lack it",
+            "prior_tool_support_claim": "already a fork patch; carriage in 0.3.76 NOT_MEASURED",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "ngspice (docker exec)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A5",
+      "canonical_row": {
+        "id": "A5",
+        "name": "Analog Layout",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A3",
+            "path": "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
+          }
+        ],
+        "skills": [
+          "analog-layout"
+        ],
+        "mcp_tools": [
+          "eda_analog_layout"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/layout.mag",
+                "phase3/analog/*/*.gds"
+              ],
+              "any_of": true
+            },
+            {
+              "program_exit_zero": "analog_a5_layout_check . --json reports/analog/a5_layout.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A4"
+        ],
+        "notes": "RESOLVED (was: KNOWN UNRESOLVED COUPLING). Resolution (a) of the two\noptions previously recorded here was taken; the record is kept so the\ndecision is auditable rather than silent.\n\nTHE CYCLE. `analog_a5_layout_check` used to ALSO require\n`phase3/analog/<block>/drc_clean.flag` and `lvs_match.flag`\n(A5_DRC_FLAG_MISSING / A5_LVS_FLAG_MISSING). Those two files are A6's\nOWN declared required_outputs and A6 declares `blocks_on: [A5]`, so the\ndeclared ordering ran A6 -> A5 while the real read ran A5 -> A6. No\n`blocks_on` value can express that: `blocks_on: [A4, A6]` is a literal\ncycle.\n\nWHICH SIDE WAS WRONG, AND HOW IT WAS DECIDED — not by preference:\n  * A6 cannot run without A5's artefact. `analog_a6_block_pv_check`\n    emits `A6_PV_BLOCK_DIR_MISSING` (\"A5 layout did not run for this\n    block\"); DRC and LVS are run ON the layout. A5 -> A6 is the DATA\n    dependency.\n  * A5 does not need PV evidence to PRODUCE a layout. The flag reads\n    were a verification-SCOPE choice, not a data need.\n  * The flags are physically written by the A6 STEP:\n    `analog_one_shot_runner._emit_deterministic_stub` writes\n    `layout.mag` under `step_name == \"A5_layout\"` and both flags under\n    `\"A6_block_pv\"`, and the runner executes A5 before A6. With the flag\n    rules in place A5 reported FAIL on every correct single-pass run,\n    for a condition A5 itself cannot satisfy — a false red.\n\nWHAT MOVED, AND WHY NO DEFECT CLASS WAS LOST. The PV verdict is now\nA6's alone, over A6's own richer evidence (drc.report / *.lyrdb /\ndrc.rpt / comp.json / lvs.report before the flags), which rejects a\nbare or verdict-less flag and FAILs — never SKIPs — on a block dir with\nno evidence. Every input A5 used to reject is re-run through the A6\ngate and asserted rc=1 in\n`programs/tests/test_analog_a5_layout_check.py`, section\n\"A5 -> A6 PV OWNERSHIP\".\n\nONE PRECONDITION HAD TO BE FIXED FIRST. `analog_a6_block_pv_check`\nprobed only `phase3/analog/` and the legacy `analog/` for the block\nlist, NOT `phase1/analog/` — the root THIS STEP'S OWN `condition`\nnames. On a project carrying the block list only there, A6 returned\n`SKIP (no analog blocks)` with rc=2, which `flow_compliance_check`\ncredits as VACUOUS_PASS, while A5's flag rules were still catching the\ngap. That reader now probes the same roots as the shared\n`_analog_a_check_common.block_list_path`, so the move does not open a\nhole. Do NOT re-add the flag rules to A5.\n"
+      },
+      "portfolio_policy": {
+        "id": "A5",
+        "title_en": "Analog Layout",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "magic"
+          ],
+          "label_en": "Current source adapter: Magic",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A5",
+            "programs": [
+              "analog_a5_layout_check"
+            ],
+            "capture_routes": [
+              {
+                "id": "analog.A5_layout",
+                "program": "programs/analog_a5_layout_check.py",
+                "skill": "skills/analog-layout/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=A5",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "magic"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Magic PDK gencells and validated layout assembly",
+          "component_tool_ids": [],
+          "status": "verified",
+          "selection_reason": "No LibreLane/OpenROAD transistor-level analog layout producer.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A5_magic_1",
+            "tool_id": "magic",
+            "role": "producer",
+            "applicability": "Supported PDK analog layout/gencells",
+            "integration_status": "verified",
+            "independence_family": "magic",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Current target path.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A5_align_2",
+            "tool_id": "align",
+            "role": "producer",
+            "applicability": "Constrained analog netlist-to-layout",
+            "integration_status": "proposed",
+            "independence_family": "align",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Target PDK abstraction missing.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A5_gdsfactory_3",
+            "tool_id": "gdsfactory",
+            "role": "producer",
+            "applicability": "Parametric geometry and device layout",
+            "integration_status": "proposed",
+            "independence_family": "gdsfactory",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Needs complete target circuit generator.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A5_glayout_4",
+            "tool_id": "glayout",
+            "role": "producer",
+            "applicability": "Mapped-PDK analog circuit generators",
+            "integration_status": "toolmissing",
+            "independence_family": "gdsfactory",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Target circuit/PDK support must be demonstrated.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A5_vibeic_5",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "No complete alternative was runnable for the target in review70. Layout-framework presence is not a target-ready analog layout arm.",
+        "mandatory_gate_programs": [
+          "analog_a5_layout_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 5,
+        "items": [
+          {
+            "id": "A5-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/0",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "'A5 paints what it places': u_hawaii_adc's two blocks went from DRC 2780 and 264 to 0",
+            "prior_tool_support_claim": "n/a for Magic gencells; ALIGN NOT_MEASURED",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A5-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/1",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Ask Magic what a layer IS (layer identity), not what its section is called. This took 13 MiM shorts to 0; a drawn short is BLOCKING with its witness path",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A5-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/2",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "A PDK gencell above its maximum CLAMPS and draws, so eight netlist capacitors became two drawn cells. Now refused as A5_DEVICE_ABOVE_PDK_MAXIMUM",
+            "prior_tool_support_claim": "false (the clamp is the PDK gencell's silent behaviour)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A5-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/3",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Guard-ring layer resolved from the PDK technology file; the bulk-tap search runs on every gencell child (it previously examined nothing)",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A5-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "A generator refused a legal w=1.0u l=0.5u device because its tap scan walked one direction from a label; limits must come from the PDK, not from probed widths",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "magic (PDK gencells, gds write)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A6",
+      "canonical_row": {
+        "id": "A6",
+        "name": "Analog Physical Verification (per-block DRC + LVS before merge)",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A5",
+            "path": "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
+          }
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "skills": [
+          "drc-fix",
+          "lvs-triage"
+        ],
+        "programs": [
+          "analog_a6_block_pv_check"
+        ],
+        "required_outputs": [
+          "phase3/analog/*/drc_clean.flag OR phase3/analog/*/drc.report OR phase3/analog/*/*.lyrdb OR phase3/analog/*/drc.rpt",
+          "phase3/analog/*/lvs_match.flag OR phase3/analog/*/lvs.report OR phase3/analog/*/comp.json OR phase3/analog/*/lvs.rpt"
+        ],
+        "gate": {
+          "program_exit_zero": "analog_a6_block_pv_check . --json reports/phase2/gates/analog_block_pv.json"
+        },
+        "blocks_on": [
+          "A5"
+        ],
+        "notes": "Each analog block must have DRC-clean + LVS-match BEFORE A7\npost-layout resim runs. Catches per-block layout errors that\ntop-level PV (Step 31) would otherwise mask via merge.\n"
+      },
+      "portfolio_policy": {
+        "id": "A6",
+        "title_en": "Analog Physical Verification (per-block DRC + LVS before merge)",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "klayout",
+            "magic",
+            "klayout_fork"
+          ],
+          "label_en": "Current source adapter: KLayout, Magic, Vibe-IC KLayout extensions",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A6",
+            "programs": [
+              "analog_a6_block_pv_check"
+            ],
+            "capture_routes": [
+              {
+                "id": "analog.A6_block_pv",
+                "program": "programs/analog_a6_block_pv_check.py",
+                "skill": "skills/drc-fix/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=A6",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "librelane"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "LibreLane physical checks on each analog block",
+          "component_tool_ids": [
+            "klayout",
+            "magic",
+            "netgen"
+          ],
+          "status": "proposed",
+          "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A6_librelane_1",
+            "tool_id": "librelane",
+            "role": "orchestrator",
+            "applicability": "KLayout.DRC / Magic.DRC / extraction + LVS",
+            "integration_status": "proposed",
+            "independence_family": "librelane_composite",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Qualified analog decks/models required.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A6_klayout_2",
+            "tool_id": "klayout",
+            "role": "checker",
+            "applicability": "PDK DRC/LVS",
+            "integration_status": "verified",
+            "independence_family": "klayout",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Independent LVS from Netgen where a supported deck exists.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A6_magic_3",
+            "tool_id": "magic",
+            "role": "checker",
+            "applicability": "PDK DRC / transistor extraction",
+            "integration_status": "verified",
+            "independence_family": "magic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Extraction is not an LVS verdict.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A6_netgen_4",
+            "tool_id": "netgen",
+            "role": "checker",
+            "applicability": "Transistor-level LVS",
+            "integration_status": "verified",
+            "independence_family": "netgen",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Bind extracted and source devices without inappropriate macro blackboxing.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A6_vibeic_5",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "KLayout LVS PDK allow-lists and analog Spice-model loading need target adapters. Unsupported/skipped checker outputs never count as clean.",
+        "mandatory_gate_programs": [
+          "analog_a6_block_pv_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/drc_clean.flag OR phase3/analog/*/drc.report OR phase3/analog/*/*.lyrdb OR phase3/analog/*/drc.rpt",
+          "phase3/analog/*/lvs_match.flag OR phase3/analog/*/lvs.report OR phase3/analog/*/comp.json OR phase3/analog/*/lvs.rpt"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 6,
+        "items": [
+          {
+            "id": "A6-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "A second engine adjudicates rules the sign-off deck never grades. The ihp-sg13g2 deck has its MiM include commented out (ihp-sg13g2.drc:522), so '0 of 560' was silence about MIM.i; Magic saw 8 violations on the flow's own paint",
+            "prior_tool_support_claim": "false: LibreLane runs Magic.DRC and KLayout.DRC separately and only compares totals (magic.py:545-559; resolved.json ERROR_ON_MAGIC_DRC / ERROR_ON_KLAYOUT_DRC); there is no per-rule union and no own-paint attribution",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A6-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/1",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "DRC attribution: which violations belong to the PDK's own gencell (60 M2.d rectangles on ldo, 816 on delta_sigma), to placement, or to the flow's paint",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A6-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/2",
+            "kind": "enhancement",
+            "declared_destination": "librelane_custom_step",
+            "item": "Comparison-side prep for a sign-off LVS runset: X-subckt device calls rewritten to M/R/C element letters from role_models, .lib lines stripped, only declared-port labels kept, parameters grid-snapped",
+            "prior_tool_support_claim": "false: LibreLane KLayout.LVS expects a ready CDL and only concatenates CELL_CDLS/EXTRA_CDLS (klayout.py:806-816); there is no SPICE->CDL conversion",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A6-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/3",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "svrfdrc handed an open PDK's KLayout-DSL runset reports '0 layers, 122 derivations, 0 rules' with an empty tally and no error; the same runset under klayout -b -r found 4 real violations in 5 s",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A6-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "drop",
+            "item": "klayout_pdk_lvs generic example-layer-map extraction as the analog LVS arm: on any PDK other than the example's it recognized nothing and died with an AttributeError",
+            "prior_tool_support_claim": "true - the PDK KLayout LVS runset and Magic+Netgen do device-level LVS on open PDKs",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A6-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/5",
+            "kind": "bug_fix",
+            "declared_destination": "librelane_config",
+            "item": "Rung-2 PDK availability set no decks, so A6 was NO_EVIDENCE on every open-PDK project. Decks must be derived from the PDK volume, as LibreLane's PDK config does (KLAYOUT_DRC_RUNSET etc.)",
+            "prior_tool_support_claim": "true (LibreLane PDK config names the runsets)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "klayout (PDK DRC/LVS runsets)",
+          "magic (drc full, second engine)",
+          "svrfdrc (SVRF decks only)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A7",
+      "canonical_row": {
+        "id": "A7",
+        "name": "🔁 Post-Layout Resimulation",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "A5",
+            "path": "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
+          }
+        ],
+        "closed_loop": {
+          "fallback_to": "A3",
+          "trigger": "Performance degradation > 10% post-extraction"
+        },
+        "skills": [
+          "analog-extraction-resim"
+        ],
+        "mcp_tools": [
+          "eda_spice_corner"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/analog/*/pre_vs_post.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "files_exist": [
+                "phase3/analog/*/pre_vs_post.json"
+              ]
+            },
+            {
+              "program_exit_zero": "analog_pre_vs_post_layout_check . --json reports/phase2/gates/pre_vs_post.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A6"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A7",
+        "title_en": "🔁 Post-Layout Resimulation",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A7",
+            "programs": [
+              "analog_pre_vs_post_layout_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=A7",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "active_call_sites": [
+              {
+                "file": "vibe-ic-marketplace/plugins/vibe-ic/programs/analog_one_shot_runner.py",
+                "lines": [
+                  1949,
+                  1965
+                ]
+              }
+            ]
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Source-integrated opt-in T94 producer supersedes historical stub-only review70 description; the production default has not cut over."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "librelane"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "LibreLane Magic.RCX followed by analog resimulation",
+          "component_tool_ids": [
+            "magic",
+            "ngspice",
+            "vibeic"
+          ],
+          "status": "proposed",
+          "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A7_librelane_1",
+            "tool_id": "librelane",
+            "role": "orchestrator",
+            "applicability": "Magic.RCX",
+            "integration_status": "proposed",
+            "independence_family": "librelane_composite",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Analog extraction producer only; resimulation and grades remain mandatory.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_magic_2",
+            "tool_id": "magic",
+            "role": "producer",
+            "applicability": "Transistor-level RC extraction",
+            "integration_status": "proposed",
+            "independence_family": "magic",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Direct default retains skill handoff; source-integrated opt-in LibreLane Magic.RCX producer exists.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_kpex_3",
+            "tool_id": "kpex",
+            "role": "producer",
+            "applicability": "FasterCap/analytical PEX backend",
+            "integration_status": "proposed",
+            "independence_family": "kpex",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Magic backend shares Magic; identify the actual backend.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_cace_4",
+            "tool_id": "cace",
+            "role": "orchestrator",
+            "applicability": "-s rcx / pex characterization",
+            "integration_status": "proposed",
+            "independence_family": "cace",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Characterization/sweep orchestration, commonly drives ngspice. Converter and design-specific graders still need integration; not a new simulator engine.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_ngspice_5",
+            "tool_id": "ngspice",
+            "role": "checker",
+            "applicability": "Extracted-netlist graded resimulation",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Analog transient/DC/AC/noise and mixed-mode simulation; circuit models, corner set and graded measurements are separate obligations.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_xyce_6",
+            "tool_id": "xyce",
+            "role": "checker",
+            "applicability": "Independent resimulation",
+            "integration_status": "proposed",
+            "independence_family": "xyce",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Independent circuit solver with external coupling and mixed-signal interfaces. PDK model compatibility is not assumed from installation.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A7_vibeic_7",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Live main has opt-in LibreLane Magic.RCX + ngspice resimulation; default remains skill handoff. OpenRCX digital SPEF cannot replace transistor-level analog PEX.",
+        "mandatory_gate_programs": [
+          "analog_pre_vs_post_layout_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/*/pre_vs_post.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 6,
+        "items": [
+          {
+            "id": "A7-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/0",
+            "kind": "lesson",
+            "declared_destination": "drop",
+            "item": "'ext2spice lvs' resets cthresh/rthresh to infinite, so thresholds must be asserted after it",
+            "prior_tool_support_claim": "true - LibreLane spice_rcx.tcl:62-67 runs 'ext2spice lvs' and then 'ext2spice cthresh'",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A7-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/1",
+            "kind": "lesson",
+            "declared_destination": "drop",
+            "item": "'ext2spice rthresh 0.0' is a parse error that Magic silently refuses (it wants an integer)",
+            "prior_tool_support_claim": "true - spice_rcx.tcl never sets rthresh (spice_rcx.tcl:66-69)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A7-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/2",
+            "kind": "bug_fix",
+            "declared_destination": "fork_patch:librelane",
+            "item": "The emitted recipe put extresist before extract and armed it incompletely, giving 0 parasitics while --validate passed. Full R needs extresist extout on + extresist all + ext2spice extresist on",
+            "prior_tool_support_claim": "NOT_MEASURED - spice_rcx.tcl uses 'extract do resistance' + 'ext2spice extresist on' with no 'extresist all' (spice_rcx.tcl:45-68); whether Magic 8.3.684 then emits R elements was not run",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A7-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/3",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Audit the extracted netlist: 0 R and 0 C = FAIL (a re-sim would be pre-layout again); report the depth achieved (RC / C_ONLY) in pre_vs_post provenance",
+            "prior_tool_support_claim": "false - Magic.RCX emits the SPICE_RCX view with no parasitic-count metric (magic.py:785-790)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A7-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "A post-layout comparison of every number against itself must name evidence that resolves",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A7-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/5",
+            "kind": "lesson",
+            "declared_destination": "drop",
+            "item": "The MCP eda_extraction pdk enum has no ihp, yet the only analog IC (u_hawaii_adc) is on ihp-sg13g2",
+            "prior_tool_support_claim": "true - Magic.RCX takes the PDK's own magicrc via LibreLane config",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "none by the runner (stub only); the skill path runs magic via MCP eda_extraction"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A8",
+      "canonical_row": {
+        "id": "A8",
+        "name": "Hardmacro Generation (LEF + Liberty + GDS + Verilog)",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "skills": [
+          "analog-hardmacro-gen"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "programs": [
+          "analog_hardmacro_gds_emit"
+        ],
+        "required_outputs": [
+          "phase3/analog/hardmacro/*/*.lef",
+          "phase3/analog/hardmacro/*/*.lib",
+          "phase3/analog/hardmacro/*/*.gds",
+          "phase3/analog/hardmacro/*/*.v"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "program_exit_zero": "analog_hardmacro_check . --json reports/phase2/gates/hardmacro.json"
+            },
+            {
+              "program_exit_zero": "analog_lef_gds_outline_check . --json reports/phase2/gates/a8_lef_gds_outline.json"
+            },
+            {
+              "program_exit_zero": "analog_macro_rtl_interface_check . --json reports/phase2/gates/a8_macro_rtl_interface.json"
+            },
+            {
+              "program_exit_zero": "analog_topology_behaviour_check . --json reports/phase2/gates/a8_topology_behaviour.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A7"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A8",
+        "title_en": "Hardmacro Generation (LEF + Liberty + GDS + Verilog)",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "magic"
+          ],
+          "label_en": "Current source adapter: Magic",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A8",
+            "programs": [
+              "analog_hardmacro_check",
+              "analog_hardmacro_gds_emit",
+              "analog_lef_gds_outline_check",
+              "analog_macro_rtl_interface_check",
+              "analog_topology_behaviour_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=A8",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "librelane"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "LibreLane Magic.WriteLEF with characterized macro views",
+          "component_tool_ids": [
+            "magic",
+            "vibeic"
+          ],
+          "status": "proposed",
+          "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A8_librelane_1",
+            "tool_id": "librelane",
+            "role": "orchestrator",
+            "applicability": "Magic.WriteLEF GDS route",
+            "integration_status": "proposed",
+            "independence_family": "librelane_composite",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Fork DEF-optional support was probed in0.3.80; target runtime still required.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A8_magic_2",
+            "tool_id": "magic",
+            "role": "producer",
+            "applicability": "GDS / abstract LEF",
+            "integration_status": "verified",
+            "independence_family": "magic",
+            "same_output_interchangeable": true,
+            "selection_group": "candidate_producer",
+            "note_en": "Same engine as LibreLane step.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A8_cace_3",
+            "tool_id": "cace",
+            "role": "orchestrator",
+            "applicability": "Behavior/corner characterization",
+            "integration_status": "proposed",
+            "independence_family": "cace",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Characterization is distinct from physical abstraction.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A8_openroad_4",
+            "tool_id": "openroad",
+            "role": "checker",
+            "applicability": "pin_access / LEF/IP import",
+            "integration_status": "proposed",
+            "independence_family": "openroad",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Not transistor-level Liberty characterization.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A8_vibeic_5",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Analog Liberty timing/power/PG contracts require characterized measurements. write_timing_model alone does not characterize arbitrary analog behavior.",
+        "mandatory_gate_programs": [
+          "analog_hardmacro_check",
+          "analog_lef_gds_outline_check",
+          "analog_macro_rtl_interface_check",
+          "analog_topology_behaviour_check"
+        ],
+        "required_output_contract": [
+          "phase3/analog/hardmacro/*/*.lef",
+          "phase3/analog/hardmacro/*/*.lib",
+          "phase3/analog/hardmacro/*/*.gds",
+          "phase3/analog/hardmacro/*/*.v"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 7,
+        "items": [
+          {
+            "id": "A8-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/0",
+            "kind": "enhancement",
+            "declared_destination": "vibeic_gate",
+            "item": "Magic 'lef write' emits pins with no DIRECTION and no USE, so supplies reach pdngen as signals. The fix adds DIRECTION INOUT + USE POWER/GROUND from the block's declared rails",
+            "prior_tool_support_claim": "partial: LibreLane lef.tcl:44 only does 'lef nocheck VDD GND'. Whether Magic emits USE natively from a 'port ... use power' property set at A5 is NOT_MEASURED in the kit",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/1",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "OBS carve around pins: 'lef write -hide' tiles OBS up to each pin, and OpenROAD detailed route refused every macro with DRT-0073 No access point. A later measurement found the carve unnecessary once A5 paints a 2.0 x 1.5 um port pad",
+            "prior_tool_support_claim": "true for the check: OpenROAD pin_access (tool_inventory:149); Magic -pinonly is not the remedy (analog_a8_hardmacro_emit.py:317-318)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/2",
+            "kind": "feature",
+            "declared_destination": "librelane_config",
+            "item": "Interface Liberty for an analog macro: pg_pins for declared rails, inout is_analog pins, interface_timing false, no invented arcs",
+            "prior_tool_support_claim": "false (no installed generator for analog macro .lib)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/3",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The declared .gds was produced by nothing: the GDS producer was dispatched 0 times at A8, so M1 could never merge a macro",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/4",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "LEF SIZE vs GDS bounding box numeric check (500 bytes of non-GDS noise passed analog_hardmacro_check)",
+            "prior_tool_support_claim": "false (no LibreLane Checker compares a macro LEF to its GDS; Checker list tool_inventory:40-60)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/5",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Macro pins vs the digital RTL instantiation in both directions: a vss PG pin no RTL blackbox declares, and vin vs vdd disagreements",
+            "prior_tool_support_claim": "partial - OpenROAD reports only STA-0201 warnings after ORD-2013 clears (yaml:4298-4300)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A8-H7",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/6",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Topology behaviour check: a delta-sigma modulator whose bitstream density moved 0.0012 across a 0.40/0.60/0.80 V sweep passes every other gate",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "magic (lef write -hide, gds write)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "A9",
+      "canonical_row": {
+        "id": "A9",
+        "name": "🔁 Co-Simulation (+ HW correlation when bench data exists)",
+        "stage": "stage_analog",
+        "phase_scope": "agnostic",
+        "closed_loop": {
+          "fallback_to": "A3",
+          "trigger": "HW mismatch; netlist or analog/hardmacro fix"
+        },
+        "skills": [
+          "mixed-signal-cosim",
+          "analog-hw-tuning-loop"
+        ],
+        "mcp_tools": [
+          "eda_spice",
+          "eda_simulate"
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "required_outputs": [
+          "phase3/mixed_signal/cosim/*_cosim_results.json OR phase3/mixed_signal/cosim/mixed_signal_results.json OR phase3/analog/*/hw_measurements.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "program_exit_zero": "mixed_signal_cosim_check . --json reports/phase2/gates/cosim.json"
+            },
+            {
+              "optional_program_exit_zero": {
+                "command": "analog_hw_spice_correlation_check . --json reports/phase2/gates/hw_spice_corr.json",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason": "Scoped to bench-hardware availability, the analog analogue of --skip-hardware. The clause correlates MEASURED silicon against SPICE; with no lab measurement there are not two things to correlate. Simulation-only closure stays legal and is no longer silent: A9 is in _ANALOG_BENCH_STEP_IDS so --skip-hardware waives it the way it waives step 6, and the same gate runs analog_a9_hw_verify_check, whose rc 2 surfaces a simulation-only close as VACUOUS_PASS rather than PASS."
+              }
+            },
+            {
+              "program_exit_zero": "analog_a9_hw_verify_check . --json reports/phase2/gates/a9_hw_verify.json"
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_hil_report_schema_check . --json reports/phase2/gates/hil_report_schema.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything.",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason_class": "EXTERNAL",
+                "absent_condition_reason": "This HIL schema gate consumes hardware-bench output. When no block has hw_measurements.json, the lab campaign is external to this headless run and there is no tuning report to validate."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_hil_iteration_cap_check . --json reports/phase2/gates/hil_iteration_cap.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything.",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason_class": "EXTERNAL",
+                "absent_condition_reason": "This iteration-cap gate consumes hardware-bench tuning history. With no hw_measurements.json, the lab campaign is external to this headless run and no hardware iteration denominator exists."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_hil_single_knob_check . --json reports/phase2/gates/hil_single_knob.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything.",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason_class": "EXTERNAL",
+                "absent_condition_reason": "This single-knob gate consumes hardware-bench sizing history. With no hw_measurements.json, the lab campaign is external to this headless run and there are no hardware iterations to compare."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_hw_tb_de10lite_budget_check phase3/analog --json reports/phase2/gates/a9_de10lite_budget.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything.",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason_class": "EXTERNAL",
+                "absent_condition_reason": "This board-budget gate applies to a hardware-bench campaign. With no hw_measurements.json, the DE10-Lite work is external to this headless run and no board build is claimed."
+              }
+            },
+            {
+              "advisory_program_exit_zero": {
+                "command": "analog_hil_convergence_log_check .",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured.",
+                "condition_files_exist": [
+                  "phase3/analog/*/hw_measurements.json"
+                ],
+                "absent_condition_reason_class": "EXTERNAL",
+                "absent_condition_reason": "This convergence gate consumes a real SPICE-to-hardware tuning campaign. With no hw_measurements.json, the hardware bench is external to this headless run and absence of a HIL log is not a design defect."
+              }
+            }
+          ]
+        },
+        "blocks_on": [
+          "A8"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "A9",
+        "title_en": "🔁 Co-Simulation (+ HW correlation when bench data exists)",
+        "phase": "analog",
+        "canonical_stage": "stage_analog",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "vibeic",
+            "ngspice",
+            "iverilog"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates, ngspice / XSPICE, Icarus Verilog / vvp",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "A9",
+            "programs": [
+              "analog_a9_hw_verify_check",
+              "analog_hil_convergence_log_check",
+              "analog_hil_iteration_cap_check",
+              "analog_hil_report_schema_check",
+              "analog_hil_single_knob_check",
+              "analog_hw_tb_de10lite_budget_check",
+              "mixed_signal_cosim_check"
+            ],
+            "capture_routes": [
+              {
+                "id": "analog.A9_hw_verify",
+                "program": "programs/analog_a9_hw_verify_check.py",
+                "skill": "skills/analog-hw-measure/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=A9",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "active_call_sites": [
+              {
+                "file": "vibe-ic-marketplace/plugins/vibe-ic/programs/analog_one_shot_runner.py",
+                "lines": [
+                  2504,
+                  2529,
+                  2799
+                ]
+              },
+              {
+                "file": "vibe-ic-marketplace/plugins/vibe-ic/programs/analog_a9_cosim_emit.py",
+                "lines": [
+                  485,
+                  490,
+                  532,
+                  599,
+                  721
+                ]
+              }
+            ]
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "analog_one_shot_runner.py:2504-2529 and2799 call analog_a9_cosim_emit.py. L22 scenario chooses analog ngspice or ngspice d_cosim with absolute-path Icarus libvvp; not SpiceBind."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "ngspice"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Current L22-selected ngspice / d_cosim with Icarus libvvp",
+          "component_tool_ids": [
+            "iverilog",
+            "vibeic"
+          ],
+          "status": "verified",
+          "selection_reason": "Use the source-integrated analog or d_cosim arm selected by the declared L22 scenario. SpiceBind remains an ultra proposed bridge; a future default override requires qualified same-input accuracy, coverage, synchronization and runtime evidence.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "A9_spicebind_1",
+            "tool_id": "spicebind",
+            "role": "orchestrator",
+            "applicability": "Icarus plus ngspice co-simulation",
+            "integration_status": "proposed",
+            "independence_family": "ngspice_cosim",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Bridge, not a new analog solver.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_cocotbext_ams_2",
+            "tool_id": "cocotbext_ams",
+            "role": "orchestrator",
+            "applicability": "cocotb plus ngspice/Xyce bridge",
+            "integration_status": "proposed",
+            "independence_family": "ngspice_cosim",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Select actual analog engine and time-sync evidence.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_ngspice_3",
+            "tool_id": "ngspice",
+            "role": "producer",
+            "applicability": "XSPICE mixed-mode simulation",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Digital behavioral model requires interface validation.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_spectre_4",
+            "tool_id": "spectre",
+            "role": "producer",
+            "applicability": "Licensed transistor/HDL AMS simulation",
+            "integration_status": "needslicensed",
+            "independence_family": "spectre",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Optional independent analog solver. AMS mode combines Spectre with a digital simulator; libraries, license and adapter are prerequisites.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_pyvisa_5",
+            "tool_id": "pyvisa",
+            "role": "orchestrator",
+            "applicability": "Real HW correlation",
+            "integration_status": "proposed",
+            "independence_family": "pyvisa",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Only when instruments and bench samples exist.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_vibeic_6",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_iverilog_7",
+            "tool_id": "iverilog",
+            "role": "producer",
+            "applicability": "libvvp digital engine for ngspice d_cosim",
+            "integration_status": "verified",
+            "independence_family": "iverilog",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Current source arm, selected only for applicable L22 scenarios.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "A9_ngspice_8",
+            "tool_id": "ngspice",
+            "role": "producer",
+            "applicability": "Current L22 analog and XSPICE d_cosim scenario solver",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Source-integrated; runtime and hardware correlation are separate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Current source executes L22-selected ngspice analog or ngspice d_cosim + Icarus libvvp arms. Missing declarations, unloaded libvvp and ungraded bounds stay NOT_MEASURED; simulation does not discharge hardware correlation.",
+        "mandatory_gate_programs": [
+          "mixed_signal_cosim_check",
+          "analog_a9_hw_verify_check",
+          "analog_hil_report_schema_check",
+          "analog_hil_iteration_cap_check",
+          "analog_hil_single_knob_check",
+          "analog_hw_tb_de10lite_budget_check",
+          "analog_hil_convergence_log_check"
+        ],
+        "required_output_contract": [
+          "phase3/mixed_signal/cosim/*_cosim_results.json OR phase3/mixed_signal/cosim/mixed_signal_results.json OR phase3/analog/*/hw_measurements.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 4,
+        "items": [
+          {
+            "id": "A9-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Anti-fabrication: walk every declared scenario instead of trusting the self-produced all_scenarios_passed; zero scenarios = FAIL; absence with analog blocks = FAIL, never VACUOUS_PASS",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A9-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/1",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The step was renamed from 'HW Verification'. A run with cosim results and zero hw_measurements.json used to report a bare PASS; a simulation-only close is now VACUOUS_PASS",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A9-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/2",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The aggregate mixed_signal_results.json did not match the declared *_cosim_results.json glob, so check_step returned MISSING before the gate ever ran",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "A9-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/3",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The HIL gates are advisory because nothing in the repo writes hw_tuning_report.json / hw_sizing_history.json. A blocking gate over an artefact with no producer certifies nothing",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "M1",
+      "canonical_row": {
+        "id": "M1",
+        "name": "Mixed-Signal Top-Level Integration (A+D GDS merge + macro placement)",
+        "stage": "stage_mixed_signal",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": 37,
+            "path": "phase3/stage4/gds/*.gds"
+          },
+          {
+            "from": "A8",
+            "outputs": "all"
+          }
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "skills": [
+          "analog-flow-orchestrate"
+        ],
+        "programs": [
+          "mixed_signal_top_lvs_run",
+          "mixed_signal_merge_check"
+        ],
+        "required_outputs": [
+          "phase3/mixed_signal/top_merged.gds",
+          "reports/analog/mixed_signal/merge.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "advisory_program_exit_zero": {
+                "command": "mixed_signal_top_lvs_run . --json reports/analog/mixed_signal/top_lvs_run.json",
+                "advisory_reason": "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything."
+              }
+            },
+            {
+              "program_exit_zero": "mixed_signal_merge_check . --json reports/analog/mixed_signal/merge.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "A8",
+          15,
+          37
+        ],
+        "notes": "Merge each analog analog/hardmacro GDS into the digital top GDS at\nits assigned floorplan position. Verify no overlap, all macro\npins land on routable tracks, and macro-halo / blockage rules\nfrom PDK are honoured.\n\ntop_lvs_run.json is deliberately NOT a required_output: on the\nproducer's honest rc=2 skip it still exists (carrying the named gap),\nso declaring it would let the gate's own side effect satisfy M1's\nartefact check. The two declared outputs are design artefacts.\n\nLIMIT OF THAT PRINCIPLE — stated here so it is not read as absolute.\n`reports/analog/mixed_signal/merge.json` IS declared above and IS a\ngate-member side effect, twice over: `mixed_signal_merge_check` writes\nit as its own `--json` report, and `mixed_signal_top_lvs_run` writes a\nsecond copy of it directly (mixed_signal_top_lvs_run.py:258). Both\nwrites pre-date this wiring; naming the producer in the gate did not\ncreate the overlap, it only made the second writer reachable. It is\nleft declared because `required_outputs` is ALL-of-N and the other\nentry, `phase3/mixed_signal/top_merged.gds`, is a real design artefact\nno checker fabricates — so merge.json alone can never satisfy M1 — and\nbecause the BLOCKING verdict belongs to `mixed_signal_merge_check`,\nwhich reads `top_lvs.json`, a file no checker writes. Aligning it\nproperly (dropping merge.json from required_outputs, or moving the\nchecker's report off the declared path) is a separate change with its\nown blast radius and is NOT done here.\n\nREACHABILITY LIMIT. The producer is dispatched from exactly one place,\n`vibe_ic_one_shot_runner` (:813); `phase3_one_shot_runner` and\n`phase23_one_shot_runner` do not dispatch it. Since `check_step`\nreturns MISSING on absent `required_outputs` before it ever evaluates\nthis gate, M1 becomes reachable on a fresh project only via\n`/vibe-ic-all`. `/vibe-ic-phase3` and `/vibe-ic-phase23` still never\nreach it. Widening that is a runner change, not a declaration change.\n"
+      },
+      "portfolio_policy": {
+        "id": "M1",
+        "title_en": "Mixed-Signal Top-Level Integration (A+D GDS merge + macro placement)",
+        "phase": "mixed_signal",
+        "canonical_stage": "stage_mixed_signal",
+        "current_default": {
+          "mode": "direct_adapter",
+          "tool_ids": [
+            "klayout",
+            "magic",
+            "netgen"
+          ],
+          "label_en": "Current source adapter: KLayout, Magic, Netgen LVS",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "M1",
+            "programs": [
+              "mixed_signal_merge_check",
+              "mixed_signal_top_lvs_run"
+            ],
+            "capture_routes": [
+              {
+                "id": "mixed_signal.M_top_merge",
+                "program": "programs/mixed_signal_merge_check.py",
+                "skill": "skills/mixed-signal-cosim/SKILL.md"
+              }
+            ],
+            "review_row": "review70_final.json#/rows/step_id=M1",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current route merges with KLayout, extracts with Magic and checks with Netgen. OpenROAD placement is an applicable proposed component, not inferred current execution."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "librelane"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "LibreLane macro placement and mixed-signal stream integration",
+          "component_tool_ids": [
+            "openroad",
+            "klayout",
+            "magic",
+            "netgen",
+            "vibeic"
+          ],
+          "status": "proposed",
+          "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "M1_librelane_1",
+            "tool_id": "librelane",
+            "role": "orchestrator",
+            "applicability": "MACROS / ManualMacroPlacement / StreamOut / extraction + LVS",
+            "integration_status": "proposed",
+            "independence_family": "librelane_composite",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Must include transistor-level analog macro models, not only blackbox interfaces.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M1_openroad_2",
+            "tool_id": "openroad",
+            "role": "producer",
+            "applicability": "Macro placement and physical integration",
+            "integration_status": "verified",
+            "independence_family": "openroad",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Same physical engine.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M1_klayout_3",
+            "tool_id": "klayout",
+            "role": "producer",
+            "applicability": "Final hierarchical merge/stream",
+            "integration_status": "verified",
+            "independence_family": "klayout",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Same LibreLane stream engine.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M1_magic_4",
+            "tool_id": "magic",
+            "role": "producer",
+            "applicability": "Independent merge/stream/extraction",
+            "integration_status": "verified",
+            "independence_family": "magic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Extraction + Netgen is one LVS chain.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M1_netgen_5",
+            "tool_id": "netgen",
+            "role": "checker",
+            "applicability": "Full top-level LVS",
+            "integration_status": "verified",
+            "independence_family": "netgen",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "SPICE/Verilog netlist equivalence for LVS; extraction, setup and analog macro models determine actual scope.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M1_vibeic_6",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Default Macro.spice handling and blackbox mode are insufficient for arbitrary analog transistor coverage; required setup is explicit.",
+        "mandatory_gate_programs": [
+          "mixed_signal_top_lvs_run",
+          "mixed_signal_merge_check"
+        ],
+        "required_output_contract": [
+          "phase3/mixed_signal/top_merged.gds",
+          "reports/analog/mixed_signal/merge.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 10,
+        "items": [
+          {
+            "id": "M1-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Per-macro shape count before and after the merge, with the action taken (added/filled/kept_digital), recorded in merge.json so a doubled or missing macro body shows up in the artefact",
+            "prior_tool_support_claim": "partial. Checked stream_out.py:152-181: LibreLane clears non-top cells before reading macro GDS, so doubling cannot happen, and it errors on ghost cells, but it records no per-macro shape count. The Magic path uses 'gds noduplicates true' (mag_gds.tcl:22)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/1",
+            "kind": "bug_fix",
+            "declared_destination": "drop",
+            "item": "Macros are instantiated at their DEF COMPONENTS positions, and a merged GDS with more than one top cell is refused (#612)",
+            "prior_tool_support_claim": "true. The KLayout stream-out reads the DEF itself, which carries the instances, then copy_tree of DESIGN_NAME only (stream_out.py:145-168). Magic runs read_def (mag_gds.tcl:49-53). All 8 orientations are supported (config/variable.py:65-83), whereas our map refuses FE/FW (:123-129)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/2",
+            "kind": "bug_fix",
+            "declared_destination": "drop",
+            "item": "Placements are read from the DEF the sign-off GDS was streamed from (def_rank), and sibling DEFs that disagree are disclosed (#626/#633)",
+            "prior_tool_support_claim": "true. LibreLane passes exactly one DEF view through State (steps/klayout.py:306 state_in[DesignFormat.DEF.id]), so there are no sibling DEFs to choose between",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/3",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Freshness check: each tool's log must have been rewritten by THIS invocation and carry its completion marker. A top_merged.gds that is reused is named in merge_provenance",
+            "prior_tool_support_claim": "true for producing. Every LibreLane step writes into a new runs/<tag>/NN-<step> directory (librelane_spm_run/tmp/ll_steps.txt 01..79)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/4",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "SKIP is not a mismatch: when no comparison ran, report MERGE_LVS_NOT_RUN with the producer's reason verbatim, and never let a skip overwrite a completed comparison (#614)",
+            "prior_tool_support_claim": "partial. Checker.LVS fails on design__lvs_error__count, but a missing or unrun LVS metric must still read as NOT_MEASURED on vibe-ic's side",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/5",
+            "kind": "bug_fix",
+            "declared_destination": "drop",
+            "item": "The netgen schematic side is the gate netlist plus N macro .v files read into one netlist, with the top referenced as {fnum cell}",
+            "prior_tool_support_claim": "true. Netgen.LVS runs 'set circuit2 [readnet verilog /dev/null]' then 'readnet ... $circuit2' for each file, then 'lvs \"$circuit1 D\" \"$circuit2 D\"' (steps/netgen.py:216-255)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H7",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/6",
+            "kind": "bug_fix",
+            "declared_destination": "drop",
+            "item": "Top cell and PDK are derived from the DEF DESIGN line and the back-end artefacts instead of the 'chip_top'/'sky130A' literals",
+            "prior_tool_support_claim": "true. LibreLane takes DESIGN_NAME and PDK from config (resolved.json PDK=gf180mcuD)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H8",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/7",
+            "kind": "feature",
+            "declared_destination": "librelane_config",
+            "item": "The top-level LVS includes the analog hardmacros (the schematic side adds each A8 hardmacro .v)",
+            "prior_tool_support_claim": "partial. Netgen.LVS always passes -blackbox and reads macro Verilog only with LVS_INCLUDE_MARCO_NETLISTS (netgen.py:228-239). Macro.spice is ignored (netgen.py:172-190). A transistor-level macro compare needs MAGIC_EXT_USE_GDS=true (magic.py:584) + EXTRA_SPICE_MODELS (netgen.py:182)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H9",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/8",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "The A8 hardmacro GDS must carry a PR-boundary layer before LibreLane Magic.StreamOut will accept it",
+            "prior_tool_support_claim": "n/a: the tool requires it and vibe-ic's A8 does not check for it (NOT_MEASURED whether present)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M1-H10",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/9",
+            "kind": "lesson",
+            "declared_destination": "drop",
+            "item": "Cut the rows under the macro halo before PDN (7 PDN-0178 channels, then PDN-0179; 105 of 151 DRC were M1.b from rails through macro metal)",
+            "prior_tool_support_claim": "true. LibreLane's Chip flow runs OpenROAD.CutRows with FP_MACRO_HORIZONTAL/VERTICAL_HALO directly after Odb.ManualMacroPlacement (steps/openroad.py:2301-2325; ll_steps 18-19)",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [
+          "klayout (own pya merge script, mixed_signal_top_lvs_run.py:302-409)",
+          "magic (extract all + ext2spice, :411-423)",
+          "netgen (lvs, :610-650)"
+        ],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "M2",
+      "canonical_row": {
+        "id": "M2",
+        "name": "Mixed-Signal Power Domain + Level Shifter / Isolation Verification",
+        "stage": "stage_mixed_signal",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "M1",
+            "path": "phase3/mixed_signal/top_merged.gds"
+          }
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "skills": [
+          "ir-drop-triage"
+        ],
+        "programs": [
+          "power_domain_crossing_check",
+          "level_shifter_required_check",
+          "isolation_cell_required_check",
+          "power_domain_signal_crossing_check"
+        ],
+        "known_gap": "no program in this plugin writes M2's required_outputs; closing this needs a real emitter that reads the UPF and the post-PnR netlist for INSERTED protection cells — an owner decision, not a declaration edit",
+        "required_outputs": [
+          "reports/analog/mixed_signal/power_domain.json",
+          "reports/analog/mixed_signal/level_shifter.json",
+          "reports/analog/mixed_signal/isolation.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "program_exit_zero": "power_domain_crossing_check . --json reports/analog/mixed_signal/power_domain_crossing_audit.json"
+            },
+            {
+              "program_exit_zero": "level_shifter_required_check . --json reports/analog/mixed_signal/level_shifter_audit.json"
+            },
+            {
+              "program_exit_zero": "isolation_cell_required_check . --json reports/analog/mixed_signal/isolation_audit.json"
+            },
+            {
+              "program_exit_zero": "power_domain_signal_crossing_check . --json reports/phase2/gates/power_domain_signal_crossing.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "M1"
+        ],
+        "notes": "For each net crossing analog/digital power domain boundary:\nlevel shifter required when source/sink Vdd differ; isolation\ncell required when one domain can be powered down. Audit\nagainst `analog/<block>/spec.json#power_domain` declarations.\n"
+      },
+      "portfolio_policy": {
+        "id": "M2",
+        "title_en": "Mixed-Signal Power Domain + Level Shifter / Isolation Verification",
+        "phase": "mixed_signal",
+        "canonical_stage": "stage_mixed_signal",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "M2",
+            "programs": [
+              "isolation_cell_required_check",
+              "level_shifter_required_check",
+              "power_domain_crossing_check",
+              "power_domain_signal_crossing_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=M2",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "openroad"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "OpenROAD UPF representation with domain/crossing checks",
+          "component_tool_ids": [
+            "vibeic"
+          ],
+          "status": "proposed",
+          "selection_reason": "Use OpenROAD partial power-intent support; retain uncovered rules as program checks.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "M2_openroad_1",
+            "tool_id": "openroad",
+            "role": "producer",
+            "applicability": "UPF / power domains / isolation / level-shifter intent",
+            "integration_status": "proposed",
+            "independence_family": "openroad",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Available commands not yet integrated into current checker.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M2_yosys_2",
+            "tool_id": "yosys",
+            "role": "producer",
+            "applicability": "Elaborated cross-domain connectivity",
+            "integration_status": "verified",
+            "independence_family": "yosys",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Facts only; not power intent authority.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M2_calibre_perc_3",
+            "tool_id": "calibre_perc",
+            "role": "checker",
+            "applicability": "Qualified cross-domain reliability checks",
+            "integration_status": "needslicensed",
+            "independence_family": "calibre_perc",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Optional topology-plus-layout reliability checking with qualified decks. Not installed; generic geometry screens are not PERC equivalence.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M2_vibeic_4",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "LibreLane has no complete multi-voltage UPF flow in the reviewed build. Declared domain transitions and actual isolation/level-shifter instances require evidence.",
+        "mandatory_gate_programs": [
+          "power_domain_crossing_check",
+          "level_shifter_required_check",
+          "isolation_cell_required_check",
+          "power_domain_signal_crossing_check"
+        ],
+        "required_output_contract": [
+          "reports/analog/mixed_signal/power_domain.json",
+          "reports/analog/mixed_signal/level_shifter.json",
+          "reports/analog/mixed_signal/isolation.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 6,
+        "items": [
+          {
+            "id": "M2-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Derivation engine: the level-shifter/isolation requirement comes from the domains' nominal voltage and OFF/CORRUPT power states, so a bare {net, driver_domain, receiver_domain} crossing is enough",
+            "prior_tool_support_claim": "false. None of OpenROAD's 665 commands derives or audits crossing requirements",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M2-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/1",
+            "kind": "enhancement",
+            "declared_destination": "librelane_custom_step",
+            "item": "The UPF regex parser (_RE_PD/_RE_ISO/_RE_LS) should be replaced by OpenROAD read_upf, and a producer added for the known_gap sidecars",
+            "prior_tool_support_claim": "partial. read_upf parses UPF, but nothing emits power_domain.json/level_shifter.json/isolation.json from the post-PnR netlist's INSERTED cells",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M2-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/2",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "Recompute all_crossings_protected / all_required_inserted from the substance; never trust the boolean the producer wrote",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M2-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/3",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "The L21 producer and its consumer never agreed on a key, so no voltage ever arrived (#598)",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M2-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/4",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "An absent protection statement is not a statement that no protection is needed (#379)",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M2-H6",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/5",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "DEF-based supply-family discovery (power nets carried in NETS, not SPECIALNETS; the Caravel single-supply mis-count)",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "M3",
+      "canonical_row": {
+        "id": "M3",
+        "name": "Mixed-Signal Verification (AMS co-sim + RNM + interface signal integrity)",
+        "stage": "stage_mixed_signal",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "M1",
+            "path": "phase3/mixed_signal/top_merged.gds"
+          }
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "skills": [
+          "mixed-signal-cosim",
+          "ams-sim"
+        ],
+        "programs": [
+          "mixed_signal_cosim_check",
+          "mixed_signal_interface_si_check"
+        ],
+        "required_outputs": [
+          "phase3/mixed_signal/cosim/mixed_signal_results.json",
+          "reports/analog/mixed_signal/interface_si.json"
+        ],
+        "gate": {
+          "all_of": [
+            {
+              "program_exit_zero": "mixed_signal_cosim_check . --json reports/analog/mixed_signal/cosim_audit.json"
+            },
+            {
+              "program_exit_zero": "mixed_signal_interface_si_check . --json reports/analog/mixed_signal/interface_si_audit.json"
+            }
+          ]
+        },
+        "blocks_on": [
+          "M2"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "M3",
+        "title_en": "Mixed-Signal Verification (AMS co-sim + RNM + interface signal integrity)",
+        "phase": "mixed_signal",
+        "canonical_stage": "stage_mixed_signal",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "M3",
+            "programs": [
+              "mixed_signal_cosim_check",
+              "mixed_signal_interface_si_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=M3",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "vibeic"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "Current interface-evidence grader; reuse proven A9 solver where applicable",
+          "component_tool_ids": [
+            "ngspice",
+            "iverilog"
+          ],
+          "status": "proposed",
+          "selection_reason": "No current complete M3 interface producer is integrated. Retain the existing grader; proposed reuse of the source-integrated A9 ngspice/d_cosim solver must satisfy M3 interface contracts. cocotbext-ams and SpiceBind are future adapters, not proven better defaults.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "M3_cocotbext_ams_1",
+            "tool_id": "cocotbext_ams",
+            "role": "orchestrator",
+            "applicability": "Digital plus ngspice/Xyce co-simulation",
+            "integration_status": "proposed",
+            "independence_family": "ngspice_cosim",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Package presence is not an executed mixed-signal path.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_spicebind_2",
+            "tool_id": "spicebind",
+            "role": "orchestrator",
+            "applicability": "VPI analog/digital bridge",
+            "integration_status": "proposed",
+            "independence_family": "ngspice_cosim",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Same ngspice backend if selected.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_ngspice_3",
+            "tool_id": "ngspice",
+            "role": "producer",
+            "applicability": "XSPICE/mixed-mode analog behavior",
+            "integration_status": "verified",
+            "independence_family": "ngspice",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Analog transient/DC/AC/noise and mixed-mode simulation; circuit models, corner set and graded measurements are separate obligations.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_xyce_4",
+            "tool_id": "xyce",
+            "role": "producer",
+            "applicability": "Independent analog solver through supported bridge",
+            "integration_status": "proposed",
+            "independence_family": "xyce",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Independent circuit solver with external coupling and mixed-signal interfaces. PDK model compatibility is not assumed from installation.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_opensta_fork_5",
+            "tool_id": "opensta_fork",
+            "role": "checker",
+            "applicability": "Timing/coupling boundary evidence",
+            "integration_status": "verified",
+            "independence_family": "opensta",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Complement to functional AMS.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_spectre_6",
+            "tool_id": "spectre",
+            "role": "producer",
+            "applicability": "Licensed AMS with RNM/HDL/SPICE",
+            "integration_status": "needslicensed",
+            "independence_family": "spectre",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Optional independent analog solver. AMS mode combines Spectre with a digital simulator; libraries, license and adapter are prerequisites.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M3_vibeic_7",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Functional AMS, RNM model agreement and post-route interface SI are complementary. A bridge cannot stand in for all three.",
+        "mandatory_gate_programs": [
+          "mixed_signal_cosim_check",
+          "mixed_signal_interface_si_check"
+        ],
+        "required_output_contract": [
+          "phase3/mixed_signal/cosim/mixed_signal_results.json",
+          "reports/analog/mixed_signal/interface_si.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 5,
+        "items": [
+          {
+            "id": "M3-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "Walk every scenario, parse PASS/FAIL tokens, and fail a set of zero scenarios",
+            "prior_tool_support_claim": "false. The simulators produce waveforms, not a scenario verdict",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M3-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/1",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "SI_LIMIT_UNSTATED: never invent a limit. A measured value with no stated bound fails, and a self-verdict that disagrees with the recomputed bound fails",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M3-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/2",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "Stub hole: an aggregate carrying a deterministic_stub marker returns pass with scenarios_total 0, which contradicts the zero-scenario rule; per-block stubs count as simulated",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M3-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/3",
+            "kind": "feature",
+            "declared_destination": "librelane_custom_step",
+            "item": "interface_si.json has no producer",
+            "prior_tool_support_claim": "partial. OpenROAD/OpenSTA can report slew, capacitance, slack and noise_glitch_peak at the macro pins, but no step emits this artefact",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M3-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "A co-sim run against A8's behavioural Verilog (skill Approach 1) verifies the model, not the macro",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    },
+    {
+      "step_id": "M4",
+      "canonical_row": {
+        "id": "M4",
+        "name": "Mixed-Signal Sign-Off (top-level PV + final verdict)",
+        "stage": "stage_mixed_signal",
+        "phase_scope": "agnostic",
+        "required_inputs": [
+          {
+            "from": "M1",
+            "path": "phase3/mixed_signal/top_merged.gds"
+          }
+        ],
+        "condition_kind": "design_dependent",
+        "condition": {
+          "files_exist": [
+            "phase1/analog/analog_block_list.json"
+          ]
+        },
+        "skills": [
+          "tapeout-checklist"
+        ],
+        "programs": [
+          "mixed_signal_signoff_check"
+        ],
+        "required_outputs": [
+          "reports/analog/mixed_signal/signoff.json"
+        ],
+        "gate": {
+          "program_exit_zero": "mixed_signal_signoff_check . --json reports/analog/mixed_signal/signoff_audit.json"
+        },
+        "blocks_on": [
+          "M3"
+        ]
+      },
+      "portfolio_policy": {
+        "id": "M4",
+        "title_en": "Mixed-Signal Sign-Off (top-level PV + final verdict)",
+        "phase": "mixed_signal",
+        "canonical_stage": "stage_mixed_signal",
+        "current_default": {
+          "mode": "program_only",
+          "tool_ids": [
+            "vibeic"
+          ],
+          "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+          "source": {
+            "repo": "https://github.com/vibeic/vibe-ic",
+            "ref": "origin/main",
+            "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+            "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+            "canonical_step_id": "M4",
+            "programs": [
+              "mixed_signal_signoff_check"
+            ],
+            "capture_routes": [],
+            "review_row": "review70_final.json#/rows/step_id=M4",
+            "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+          },
+          "verified": true,
+          "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+          "runtime_verified_now": false,
+          "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+        },
+        "policy_default": {
+          "tool_ids": [
+            "librelane"
+          ],
+          "primary_arm_count": 1,
+          "label_en": "LibreLane top-level PV with mixed-signal completeness audit",
+          "component_tool_ids": [
+            "klayout",
+            "magic",
+            "netgen",
+            "vibeic"
+          ],
+          "status": "proposed",
+          "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+          "is_deployed_current": false,
+          "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+          "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+          "mode_framework_implemented": false
+        },
+        "ultra_tools": [
+          {
+            "arm_id": "M4_librelane_1",
+            "tool_id": "librelane",
+            "role": "orchestrator",
+            "applicability": "Final DRC/LVS/density/manufacturability",
+            "integration_status": "proposed",
+            "independence_family": "librelane_composite",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Qualified full analog and digital content coverage required.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M4_klayout_2",
+            "tool_id": "klayout",
+            "role": "checker",
+            "applicability": "Top-level PDK DRC/LVS",
+            "integration_status": "verified",
+            "independence_family": "klayout",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Layout processing, DRC and LVS with a supplied deck; an installed binary alone provides no PDK signoff coverage.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M4_magic_3",
+            "tool_id": "magic",
+            "role": "checker",
+            "applicability": "Independent DRC/transistor extraction",
+            "integration_status": "verified",
+            "independence_family": "magic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Layout/gencells, DRC, extraction, LEF and GDS; applicable PDK technology and models are mandatory.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M4_netgen_4",
+            "tool_id": "netgen",
+            "role": "checker",
+            "applicability": "Top-level extracted/source LVS",
+            "integration_status": "verified",
+            "independence_family": "netgen",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "SPICE/Verilog netlist equivalence for LVS; extraction, setup and analog macro models determine actual scope.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          },
+          {
+            "arm_id": "M4_vibeic_5",
+            "tool_id": "vibeic",
+            "role": "checker",
+            "applicability": "Intent, completeness and artifact provenance",
+            "integration_status": "verified",
+            "independence_family": "vibeic",
+            "same_output_interchangeable": false,
+            "selection_group": "complementary_evidence",
+            "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+            "runtime_verified_now": false,
+            "adapter_verification_scope": "PINNED_SOURCE",
+            "controller_executor": "NOT_REGISTERED",
+            "controller_runnable": false
+          }
+        ],
+        "limitations_en": "Analog macro blackboxing is not full transistor signoff. Final mixed-signal verdict includes A7/A9/M2/M3 obligations and exact top GDS.",
+        "mandatory_gate_programs": [
+          "mixed_signal_signoff_check"
+        ],
+        "required_output_contract": [
+          "reports/analog/mixed_signal/signoff.json"
+        ],
+        "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+      },
+      "original_harvest": {
+        "original_item_count": 5,
+        "items": [
+          {
+            "id": "M4-H1",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/0",
+            "kind": "feature",
+            "declared_destination": "vibeic_gate",
+            "item": "OVERCLAIM cross-check: ready_for_tapeout=true must be backed by every upstream M1-M3 substance field",
+            "prior_tool_support_claim": "false. Misc.ReportManufacturability summarises results but does not audit a readiness claim",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M4-H2",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/1",
+            "kind": "bug_fix",
+            "declared_destination": "vibeic_gate",
+            "item": "M4 accepts PASS_WITH_STUB and PASS_WITH_STUB_PARTIAL from merge.json",
+            "prior_tool_support_claim": "n/a",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M4-H3",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/2",
+            "kind": "feature",
+            "declared_destination": "librelane_config",
+            "item": "No DRC runs on the merged A+D top, although the step is named 'top-level PV'",
+            "prior_tool_support_claim": "true. The Chip flow runs Magic.DRC + KLayout.DRC + KLayout.Antenna on the macro-bearing stream-out",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M4-H4",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/3",
+            "kind": "enhancement",
+            "declared_destination": "vibeic_gate",
+            "item": "signoff.json is a hand-typed boolean that no program writes",
+            "prior_tool_support_claim": "false",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          },
+          {
+            "id": "M4-H5",
+            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/4",
+            "kind": "lesson",
+            "declared_destination": "vibeic_gate",
+            "item": "'Earned zero': a DRC count of zero counts only when the layout the deck ran over had shapes",
+            "prior_tool_support_claim": "false. Checker.MagicDRC/KLayoutDRC read only the count",
+            "accepted_destination_binding": "REUSE_EXISTING_ACCEPTED_HARVEST_PACKETS; not newly adjudicated by this collection"
+          }
+        ],
+        "historical_unresolved_index": [],
+        "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
+      },
+      "original_review": {
+        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4",
+        "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
+        "historical_native_calls": [],
+        "catalog_runtime_false_retained": true
+      }
+    }
+  ]
+}

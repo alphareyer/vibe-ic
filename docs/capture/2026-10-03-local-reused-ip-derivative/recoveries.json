@@ -1,0 +1,63 @@
+[
+  {
+    "at": "2026-10-03T15:47:27.247604+00:00",
+    "bucket": "A",
+    "step": "phase2.rtl_gen.reused_ip_local_derivative",
+    "historical_step": "phase2.rtl_gen",
+    "rule_name": "explicit_local_derivative_of_independently_verified_official_parent",
+    "pattern": "For an explicitly declared local derivative of reused IP, treating adapted bytes as official checksum bytes rejects valid lineage, while replaying an unavailable parent before validating current consumer provenance can hide a known admission defect.",
+    "docstring": "Admit declared derivatives only when an independently verified official parent, a finite exact patch, and complete current source, proof and producer provenance are bound.",
+    "expected_signal": "ERROR",
+    "fix_action": "Use the existing declared local derivative producer and normal Step 1 consumer; reject missing or drifted consumer events before parent replay, preserve `NOT_MEASURED` for pure parent unavailability, and keep the official checksum verifier strict.",
+    "implementation_status": "ALREADY-PROGRAM; capture metadata for the accepted source implementation, not a new runtime rule",
+    "owner_layer": "programs/ip_catalog_pull.py::apply_local_derivative/verify_existing_reused_pins_outcome; design_one_shot_runner.py::step_rtl_gen",
+    "source_base": "59427916abd60ca1d97197407c9f09acbaa2d0d1",
+    "official_verifier_unchanged": true,
+    "before_state": "Ordinary Step1 refuses complete declared local derivative as official own-receipt mismatch; exact behavioral pre-fix control1fail/1pass in r2. Original real baseline NOT_ACCEPTED retained.",
+    "after_state": "r3 new16controls pass; preceding r2 official8controls pass. Actual copied-project normal producer0; ordinary Step1 PASS_WITH_WAIVERS explicitly LOCAL_DERIVATIVE; strict official checker still MISMATCH for adapted bytes.",
+    "lineage": "22 reused files =21 unmodified official +1 locally adapted; original authored glue separately identified. WEN correction is a separate candidate/proof.",
+    "enforcement": "Blocking source admission in ordinary Step1; drift/missing source/patch/evidence refuses. Earlier symlink staged-closure guard returns honest NOT_MEASURED and local source verifier MISMATCH. No design/PDK literal or new transport framework.",
+    "data_contract": "Project-relative sha-bound parent snapshot, official pins/event independent reproduction, finite exact UTF8 replacement patch, complete staged inventory, input quote/hash, unchanged real challenge with parent-red/candidate-green full RTL hashes, and producer provenance.",
+    "source_proof": "Semantic challenge previously native compile/run0/1 ->0/0, exact TB b21ffef6; no rerun or equivalence claim upstreambug vsintentionalcorrection.",
+    "LEC": "NOT_MEASURED ordinary currentRTL-to-new synthesis obligation; no LEC bytes invented",
+    "evidence_packet": "local-derivative-admission-evidence-r1.tar",
+    "evidence_sha256": {
+      "local-derivative-parent-challenge-freeze-r1.json": "28f7bf0231753a73e5885b6e6eb14f723d4e3ee0c0e83843f5e0bd90101bc588",
+      "local-derivative-admission-r3/candidate.xml": "66150d720590ea6aa17a70e632dece4827403aa1f977002cfaafb0bc1845b055",
+      "local-derivative-admission-r2/base.xml": "f8a87e78cedd7218d8a4d21e21dd588b346184da90519794b2220c2f1b37e9c0",
+      "local-derivative-admission-r3/real-producer.json": "93d97f2533365ad38300962c51029821e22313a69bb5514f5e293119e77b764b",
+      "local-derivative-admission-r3/real-normal-consumer.json": "959b2fae2ee14fbb918368ec382fc9d56db8b13759d5dbd58c2b601bee019796",
+      "local-derivative-admission-r3/real-official-checker.json": "3a8832e144fe684edca7624f96cc5ecb8626f9d46d857112c584f4595fefb747",
+      "local-derivative-admission-r3/launch.json": "a860c6ce4e7f7ee70f96f106eb3586e4278919910408d2f7473d992855b80af2",
+      "local-derivative-project-r1/local/record.json": "0baed61f60e657febca3a772c64ee3bae937ce4d98ca1d35b2db54490415574d"
+    },
+    "remaining": "Independent source review by root; LC owner/network authority is separate. Canonical primary unchanged. Expert77/83 consumed/FINDINGS7 with D1 NM. WholeIC/ISA/physical INCOMPLETE.",
+    "source_only_reviews": [
+      {
+        "at": "2026-10-03T17:06:09.663977+00:00",
+        "local_date": "2026-10-04 Asia/Taipei",
+        "revision": "R2",
+        "verdict": "ACCEPT_COMPONENT",
+        "scope": "Producer-provenance refusal precedence only; the R1 fields above remain the historical snapshot",
+        "source_tip": "e7506df9b47c2c6eec6bd67f7ef034c84ee7b81c",
+        "source_tree": "382c6ac812e449cce494953c461168735e2d1c8d",
+        "source_base": "fb0bfb9e9f1210cceb585303b06a03fc7ecdb83a",
+        "result": "Unchanged reviewer counterexample: R1 red 1 failed, final R2 4 passed with ordinary positive, pure unavailable-parent NOT_MEASURED and producer staging controls. Intermediate 3 failed/1 passed retained; no runtime or native replay for this capture correction.",
+        "official_verifier_unchanged": true,
+        "evidence_packet": "local-derivative-provenance-r2.tar",
+        "evidence_sha256": {
+          "local-derivative-provenance-r2.tar": "7b5aeb3461911fddbfd3053dec590675d51a353a815ff0712bb07072f172f7e0",
+          "local-derivative-precedence-r2-red/focused.xml": "ab10347d947c2fddf9fe4c4c3c04119c6dcb2955e101a1189613e840f649c603",
+          "local-derivative-precedence-r2-green/focused.xml": "d7ed89dc0789175a94de351a51da5c24a41fcfd0e3ac43f7438f17a300051063",
+          "local-derivative-precedence-r2-green2/focused.xml": "f482022059418314cbd87cf65995fb70dabd26ace42b2237b2a32d35db68343a",
+          "subservient-local-derivative-independent-r2/HANDOFF.md": "01c59e52be2c39e3ec3c9506208074bfc6e4de9884f6cd70aa10467ff42b5b4e"
+        },
+        "LEC": "NOT_MEASURED",
+        "D1": "NOT_MEASURED",
+        "derivative": "NOT_ADOPTED",
+        "whole_ic": "INCOMPLETE",
+        "remaining": "Root final review and shipping, then current design qualification with composed owner sources; source acceptance does not satisfy those obligations"
+      }
+    ]
+  }
+]

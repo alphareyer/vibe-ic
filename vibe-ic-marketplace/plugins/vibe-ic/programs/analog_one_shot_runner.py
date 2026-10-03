@@ -1373,6 +1373,15 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     skill (spec extract, topology select, etc.); mark them WAIVED with
     the skill name if no deterministic program exists.
     """
+    if step_name in ('A6_block_pv', 'A7_post_layout_resim', 'A8_hardmacro_gen'):
+        from execution_analog_caller import dispatch_site
+        routed = dispatch_site(project, block, step_name)
+        if routed is not None:
+            return StepResult(step_name, block.get('name', ''), routed['status'], 0.0,
+                routed.get('reason', 'ANALOG_NATIVE_ADMISSION_UNAVAILABLE'),
+                extras={'execution_result': routed},
+                reason_class=_V.ReasonClass.TOOL_ABSENT.value
+                    if routed['status'] == 'NOT_MEASURED' else '')
     t0 = time.time()
     bname = block.get("name") or block.get("type") or "unknown"
     out_dir = _pl.analog_dir(project) / bname
@@ -2710,7 +2719,10 @@ def main() -> int:
                          "CONTRADICTS the design's own L19 declaration the run "
                          "REFUSES with both named; when it is absent the "
                          "declaration is used; there is no literal default."))
+    import execution_policy as execution
+    execution.add_arguments(p)
     args = p.parse_args()
+    execution.configure(args)
 
     project = args.project.resolve()
     if not project.is_dir():
@@ -2812,6 +2824,12 @@ def main() -> int:
                        indent=2, ensure_ascii=False)
             + "\n", encoding="utf-8")
 
+    # Freeze the resolved declaration before registration. A1-A5 products are
+    # still collected by the ordinary dispatcher when each later row runs.
+    from execution_analog_installation import prepare_entry_request
+    entry_request = prepare_entry_request(project, args) if execution.request()['mode'] == 'ultra' else None
+    execution.bootstrap(project, parameters={'analog_request': entry_request})
+
     plan: List[StepResult] = []
     # No refusal is inherited from a previous run of this process.
     reset_env_refusals()
@@ -2821,71 +2839,125 @@ def main() -> int:
         print(f"  {sr.status:6} {sr.name:24} block={sr.block:16} "
               f"{_rsum.summary_detail(sr.detail, sr.status, width=60)}")
 
-    for blk in blocks:
-        _bname = blk.get("name") or blk.get("type") or "unknown"
-        # ── PRE-FLIGHT, ONE SITE PER CANONICAL A-STEP ─────────────────────
-        # Written out rather than looped, for the reason the wiring control
-        # (`test_step_preflight.test_every_declared_site_is_wired_at_a_real_
-        # call_site`) exists: a site name reached only through a loop variable
-        # is a site no reader — and no static control — can confirm is wired.
-        # The order below IS `_AI_STEP_NAMES` and IS the `RUNNER_PLANS` site
-        # order, which is what makes "has this producer already had its
-        # chance?" answerable at each site.
-        #
-        # PER-BLOCK, and honest about what that does and does not bind: the
-        # flow declares A2's input as `phase3/analog/*/topology.md`, whose `*`
-        # is the BLOCK directory. The pre-flight probes the pattern AS
-        # DECLARED, so on a MULTI-BLOCK design block 2's A2 is satisfied by
-        # block 1's topology.md. That is the wildcard-does-not-bind defect,
-        # which is not this change's to fix; `_preflight_note` puts the block
-        # in the ledger so the under-binding is visible in the record instead
-        # of being invisible in it.
-        _note = f"block={_bname}"
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A1",
-            _preflight_refusal("A1_spec_extract", _bname),
-            step_for_block, project, blk, "A1_spec_extract", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A2",
-            _preflight_refusal("A2_topology_select", _bname),
-            step_for_block, project, blk, "A2_topology_select", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A3",
-            _preflight_refusal("A3_netlist_gen", _bname),
-            step_for_block, project, blk, "A3_netlist_gen", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A4",
-            _preflight_refusal("A4_corner_sweep", _bname),
-            step_for_block, project, blk, "A4_corner_sweep", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A5",
-            _preflight_refusal("A5_layout", _bname),
-            step_for_block, project, blk, "A5_layout", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A6",
-            _preflight_refusal("A6_block_pv", _bname),
-            step_for_block, project, blk, "A6_block_pv", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A7",
-            _preflight_refusal("A7_post_layout_resim", _bname),
-            step_for_block, project, blk, "A7_post_layout_resim", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A8",
-            _preflight_refusal("A8_hardmacro_gen", _bname),
-            step_for_block, project, blk, "A8_hardmacro_gen", args=args,
-            _preflight_note=_note))
-        _dispatched(_spf.gate(
-            project, "analog_one_shot_runner", "A9",
-            _preflight_refusal("A9_hw_verify", _bname),
-            step_for_block, project, blk, "A9_hw_verify", args=args,
-            _preflight_note=_note))
+    if execution.request()['mode'] == 'ultra':
+        # Every declared block must get its A1-A5 producer opportunity before
+        # the first unified fixed A6/A7/A8 Context is cached by the ordinary
+        # Controller. Keep one literal preflight call site per canonical row.
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A1",
+                _preflight_refusal("A1_spec_extract", _bname),
+                step_for_block, project, blk, "A1_spec_extract", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A2",
+                _preflight_refusal("A2_topology_select", _bname),
+                step_for_block, project, blk, "A2_topology_select", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A3",
+                _preflight_refusal("A3_netlist_gen", _bname),
+                step_for_block, project, blk, "A3_netlist_gen", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A4",
+                _preflight_refusal("A4_corner_sweep", _bname),
+                step_for_block, project, blk, "A4_corner_sweep", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A5",
+                _preflight_refusal("A5_layout", _bname),
+                step_for_block, project, blk, "A5_layout", args=args,
+                _preflight_note=_note))
+
+        # Keep each unified row's full block population together before the
+        # next row. In particular, all A7 producer opportunities precede the
+        # first A8 dispatch, so every block's current A7 product is settled
+        # before the ordinary fixed A8 census is created.
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A6",
+                _preflight_refusal("A6_block_pv", _bname),
+                step_for_block, project, blk, "A6_block_pv", args=args,
+                _preflight_note=_note))
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A7",
+                _preflight_refusal("A7_post_layout_resim", _bname),
+                step_for_block, project, blk, "A7_post_layout_resim", args=args,
+                _preflight_note=_note))
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A8",
+                _preflight_refusal("A8_hardmacro_gen", _bname),
+                step_for_block, project, blk, "A8_hardmacro_gen", args=args,
+                _preflight_note=_note))
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A9",
+                _preflight_refusal("A9_hw_verify", _bname),
+                step_for_block, project, blk, "A9_hw_verify", args=args,
+                _preflight_note=_note))
+    else:
+        # Default deliberately retains its released block-major A1-A9 order.
+        for blk in blocks:
+            _bname = blk.get("name") or blk.get("type") or "unknown"
+            _note = f"block={_bname}"
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A1",
+                _preflight_refusal("A1_spec_extract", _bname),
+                step_for_block, project, blk, "A1_spec_extract", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A2",
+                _preflight_refusal("A2_topology_select", _bname),
+                step_for_block, project, blk, "A2_topology_select", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A3",
+                _preflight_refusal("A3_netlist_gen", _bname),
+                step_for_block, project, blk, "A3_netlist_gen", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A4",
+                _preflight_refusal("A4_corner_sweep", _bname),
+                step_for_block, project, blk, "A4_corner_sweep", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A5",
+                _preflight_refusal("A5_layout", _bname),
+                step_for_block, project, blk, "A5_layout", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A6",
+                _preflight_refusal("A6_block_pv", _bname),
+                step_for_block, project, blk, "A6_block_pv", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A7",
+                _preflight_refusal("A7_post_layout_resim", _bname),
+                step_for_block, project, blk, "A7_post_layout_resim", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A8",
+                _preflight_refusal("A8_hardmacro_gen", _bname),
+                step_for_block, project, blk, "A8_hardmacro_gen", args=args,
+                _preflight_note=_note))
+            _dispatched(_spf.gate(
+                project, "analog_one_shot_runner", "A9",
+                _preflight_refusal("A9_hw_verify", _bname),
+                step_for_block, project, blk, "A9_hw_verify", args=args,
+                _preflight_note=_note))
 
     # q5 — A9's co-simulation is CHIP-level: its scenarios cross blocks, so it
     # runs once, after every block's A1-A9, against the ids Phase 1 declared in

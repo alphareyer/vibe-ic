@@ -72,6 +72,9 @@ SIGNOFF_CHECKS: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
     ("DRC", ("DRC", "design rule check"), ("drc",)),
     ("LVS", ("LVS", "layout versus schematic", "layout vs schematic"),
      ("lvs",)),
+    # Step 37.3 already publishes gds_xor.json. This row preserves an
+    # INPUT requirement, including its count, rather than a measured result.
+    ("GDS_XOR", ("GDS XOR", "GDS_XOR", "GDS-XOR"), ("gds_xor",)),
     ("antenna", ("antenna",), ("antenna",)),
     ("STA", ("STA", "static timing analysis", "timing sign-off",
              "timing signoff"), ("sta", "timing")),
@@ -284,15 +287,19 @@ _THRESHOLD_RE = re.compile(
 
 _DOC_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".asciidoc")
 
-_DRC_ENGINES = (("magic", re.compile(r"\bmagic\b", re.I)),
-                ("klayout", re.compile(r"\bklayout\b", re.I)))
+_CHECK_ENGINES = {
+    "DRC": ("magic", "klayout"),
+    "LVS": ("magic", "netgen"),
+    "GDS_XOR": ("magic", "klayout"),
+}
+_DIFFERENCE_COUNT_RE = re.compile(
+    r"(?<![A-Za-z0-9.+-])(\d+|zero)\s+differences?\b", re.I)
 
 
 def _engines_of(check: str, clause: str) -> List[str]:
     """Return explicitly named engines for a check's own clause."""
-    if check != "DRC":
-        return []
-    return [name for name, pattern in _DRC_ENGINES if pattern.search(clause)]
+    return [name for name in _CHECK_ENGINES.get(check, ())
+            if _word_bounded(name).search(clause)]
 
 
 def _word_bounded(term: str) -> re.Pattern:
@@ -327,7 +334,11 @@ def _clause_for(line: str, match: re.Match) -> str:
     return line[match.start():end]
 
 
-def _requirement_of(clause: str) -> Optional[str]:
+def _requirement_of(clause: str, check: str = "") -> Optional[str]:
+    if check == "GDS_XOR":
+        count = _DIFFERENCE_COUNT_RE.search(clause)
+        if count and count.group(1).lower() in ("0", "zero"):
+            return "zero_difference"
     low = clause.lower()
     for name, pattern in _REQUIREMENT_PATTERNS:
         if re.search(pattern, low, re.IGNORECASE):
@@ -335,7 +346,13 @@ def _requirement_of(clause: str) -> Optional[str]:
     return None
 
 
-def _threshold_of(line: str) -> Optional[Dict[str, Any]]:
+def _threshold_of(line: str, check: str = "") -> Optional[Dict[str, Any]]:
+    if check == "GDS_XOR":
+        count = _DIFFERENCE_COUNT_RE.search(line)
+        if not count:
+            return None
+        return {"value": (0.0 if count.group(1).lower() == "zero"
+                          else float(count.group(1))), "unit": "difference"}
     m = _THRESHOLD_RE.search(line)
     if not m:
         return None
@@ -434,6 +451,21 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
                 if match is None and implicit is None:
                     continue
                 clause = implicit if implicit is not None else _clause_for(line, match)
+                if check == "GDS_XOR":
+                    # Bound both sides to this check's own sentence/record.
+                    # A later unrelated denial cannot withdraw it; the
+                    # existing next-check boundary still limits the clause.
+                    import _prose_polarity as polarity
+                    lo, hi = polarity.sentence_scope(
+                        line, match.start(), match.end(),
+                        before=len(line), after=len(line),
+                        extra_breaks=("。", ";", "；", ",", "，"))
+                    # Table cells on this row carry the check and its value;
+                    # a pipe before the check ends only the backward prefix.
+                    prefix = line[lo:match.start()].rsplit("|", 1)[-1]
+                    clause = clause[:hi - match.start()]
+                    if polarity.is_denied(prefix + clause):
+                        continue
                 hits.append({
                     "document": rel,
                     "line": lineno,
@@ -441,13 +473,13 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
                     # layer; the citation is a pointer, not a copy.
                     "text": line.strip()[:400],
                     "clause": clause.strip()[:200],
-                    "requirement": (_requirement_of(clause) or
+                    "requirement": (_requirement_of(clause, check) or
                                     ("pass" if implicit is not None and "通過" in clause else None)),
                     # Corners are read from the CLAUSE too, for the same
                     # reason: a corner named beside a different check on the
                     # same line is not this check's corner.
                     "corners": sorted(set(_CORNER_RE.findall(clause))),
-                "threshold": _threshold_of(clause),
+                    "threshold": _threshold_of(clause, check),
                     "engines": _engines_of(check, clause),
                 })
         if not hits:
@@ -472,7 +504,7 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
             "stated": True,
             "requirement": best["requirement"],
             "corners": sorted({c for h in hits for c in h["corners"]}),
-                "threshold": best["threshold"],
+            "threshold": best["threshold"],
             "engines": sorted({engine for h in hits
                                for engine in h.get("engines", [])}),
             "citation": {"document": best["document"], "line": best["line"],

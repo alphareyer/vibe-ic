@@ -11,6 +11,7 @@ import pytest
 import yaml
 import flow_compliance_check as flow
 from _hostpaths import require_repo
+from programs.tests.test_execution_receipt_chain import isolated_transport, real_entry
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 FLOW = PROGRAMS.parent / "flow/phase1_phase2_phase3.yaml"
@@ -259,13 +260,12 @@ def test_fixed_runner_stops_after_genuine_unmeasured_m3(tmp_path, monkeypatch):
     import mixed_signal_interface_si_check as si
     import mixed_signal_power_domain_run as m2
     import vibe_ic_one_shot_runner as runner
-    from _route_fixture import stage_owner_route
     project = tmp_path / "subject"
     shutil.copytree(PROGRAMS / "tests/fixtures/m2_placed", project)
     analog = project / "phase3/analog/analog_block_list.json"
     analog.parent.mkdir(parents=True)
     shutil.copyfile(project / "phase1/analog/analog_block_list.json", analog)
-    stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     rtl = project / "phase2/stage1/rtl/boundary.v"
     rtl.parent.mkdir(parents=True)
     rtl.write_text("module boundary(); endmodule\n")
@@ -300,13 +300,12 @@ def test_fixed_runner_stops_after_genuine_unmeasured_m3(tmp_path, monkeypatch):
 @pytest.mark.parametrize("fault", ["m2_failed", "missing", "malformed", "stale"])
 def test_fixed_runner_cannot_borrow_m3_readiness(tmp_path, monkeypatch, fault):
     import vibe_ic_one_shot_runner as runner
-    from _route_fixture import stage_owner_route
     project = tmp_path / "subject"
     shutil.copytree(PROGRAMS / "tests/fixtures/m2_placed", project)
     analog = project / "phase3/analog/analog_block_list.json"
     analog.parent.mkdir(parents=True)
     shutil.copyfile(project / "phase1/analog/analog_block_list.json", analog)
-    stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     # All "PASS" rows supplied here are hostile metadata; no positive product
     # claim is made. Real strict M3 gates still reject absent producer evidence.
     stale = project / DIR / "m3_producer_audit.json"

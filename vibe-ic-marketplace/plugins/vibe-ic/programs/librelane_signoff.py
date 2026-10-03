@@ -176,14 +176,29 @@ def rc_corner(pattern: str) -> str:
 
 
 def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
-                  receipt: Path) -> dict[str, Path]:
-    """Hand the tool's SPEFs to the paths the direct consumers read."""
+                  receipt: Path, *, physical_top: Optional[str] = None) -> dict[str, Path]:
+    """Hand the tool's SPEFs to the paths the direct consumers read.
+
+    ``top`` is the runner's logical/file-name alias.  A pad-ring producer may
+    have a different physical ``DESIGN_NAME`` in the RCX config; the caller
+    must supply that already-resolved physical subject explicitly.  The
+    canonical destinations keep the logical alias, while the producer subject
+    stays bound to the native config and receipt.
+    """
     folder = Path(result['rcx'])
     binding = bind_rcx_spefs(folder, folder / 'state_in.json')
     produced = _load(folder / 'state_out.json')['spef']
+    producer_top = _load(folder / 'config.json').get('DESIGN_NAME')
+    subject_top = physical_top if physical_top is not None else top
     if ({k: str(v) for k, v in result['spef'].items()} != produced or
-            top != _load(folder / 'config.json').get('DESIGN_NAME')):
-        raise Refusal('LL_RCX_OUTPUT_UNBOUND', 'publication population or top differs from producer')
+            not isinstance(top, str) or not top or
+            not isinstance(subject_top, str) or not subject_top or
+            subject_top != producer_top):
+        raise Refusal(
+            'LL_RCX_OUTPUT_UNBOUND',
+            f'publication population or physical subject differs from producer '
+            f'(logical_top={top!r}, physical_top={physical_top!r}, '
+            f'producer_DESIGN_NAME={producer_top!r})')
     targets: dict[str, Path] = {}
     for pattern in result['spef']:
         name = rc_corner(pattern)

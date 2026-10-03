@@ -180,6 +180,84 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
     return p, rtl, pdk, calls
 
 
+def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
+                                                               monkeypatch):
+    p, _, pdk, _ = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    observed = {}
+
+    class Execution:
+        @staticmethod
+        def request():
+            return {"mode": "ultra"}
+
+        @staticmethod
+        def bootstrap(project, *, parameters):
+            observed.update(project=project, parameters=parameters)
+            return "runtime"
+
+    result = D._bootstrap_execution_policy(
+        Execution, p, top="top", container="unused", ic_class=None,
+        skip_analog=True)
+    assert result == "runtime"
+    assert observed["project"] == p
+    assert observed["parameters"]["pdk"] is pdk
+    assert observed["parameters"]["pdk_name"] == pdk.name
+    assert observed["parameters"]["top"] == "top"
+    assert "pdk_refusal" not in observed["parameters"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "conflict"])
+def test_ultra_design_bootstrap_keeps_bad_pdk_fail_closed(tmp_path, monkeypatch,
+                                                          damage):
+    p, _, _, _ = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    if damage == "missing":
+        (p / "input/project.json").unlink()
+        (p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json").unlink()
+    else:
+        put(p / "phase3/librelane_switch.json", {"pdk": "otherPDK"})
+    observed = {}
+
+    class Execution:
+        @staticmethod
+        def request():
+            return {"mode": "ultra"}
+
+        @staticmethod
+        def bootstrap(project, *, parameters):
+            observed.update(parameters)
+            return "runtime"
+
+    assert D._bootstrap_execution_policy(
+        Execution, p, top="top", container="unused", ic_class=None,
+        skip_analog=False) == "runtime"
+    assert "pdk" not in observed
+    assert observed["pdk_refusal"].startswith(
+        "LL_PHASE2_PDK_UNDECLARED" if damage == "missing"
+        else "LL_PHASE2_PDK_CONFLICT")
+
+
+def test_default_design_bootstrap_does_not_resolve_or_probe_pdk(tmp_path,
+                                                                monkeypatch):
+    observed = {}
+    monkeypatch.setattr(D, "_phase2_pdk_config",
+                        lambda *_: pytest.fail("Default resolved a PDK"))
+
+    class Execution:
+        @staticmethod
+        def request():
+            return {"mode": "default"}
+
+        @staticmethod
+        def bootstrap(project, *, parameters):
+            observed.update(parameters)
+            return None
+
+    assert D._bootstrap_execution_policy(
+        Execution, tmp_path, top="top", container="unused", ic_class=None,
+        skip_analog=False) is None
+    assert "pdk" not in observed and "pdk_refusal" not in observed
+
+
 def _produce(tmp_path, monkeypatch, *, ordinary=False):
     p, rtl, pdk, calls = _synthesis(tmp_path, monkeypatch, ordinary=ordinary)
     stale = p / "phase2/stage2/synth/netlist.v"

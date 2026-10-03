@@ -74,6 +74,7 @@ chip-AGNOSTIC: nothing here reasons about any IC, vendor, SKU or process.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 from contextlib import contextmanager
@@ -95,6 +96,32 @@ __all__ = [
 #: a human or a sweeper can tell at a glance what it is and which process owned
 #: it — the alternative, an opaque `tmpXXXXXX`, is litter nobody can attribute.
 TMP_SUFFIX = ".tmp"
+
+# Optional process-local observation of bytes supplied by a real producer.
+# No paths/digests from the caller grant execution or adoption authority.
+_WRITE_OBSERVER = None
+
+
+@contextmanager
+def observe_writes():
+    """Capture producer-owned bytes before publication, without rereading files."""
+    global _WRITE_OBSERVER
+    if _WRITE_OBSERVER is not None:
+        raise RuntimeError('nested artefact write observation')
+    records = {}
+    _WRITE_OBSERVER = records
+    try:
+        yield records
+    finally:
+        _WRITE_OBSERVER = None
+
+
+def _observe(path, content):
+    if _WRITE_OBSERVER is not None:
+        name = str(Path(path).absolute())
+        if name in _WRITE_OBSERVER:
+            raise RuntimeError('producer published an artefact twice: ' + name)
+        _WRITE_OBSERVER[name] = {'sha256': hashlib.sha256(content).hexdigest()}
 
 
 def temp_name_for(path: Path, pid: Optional[int] = None) -> Path:
@@ -159,8 +186,23 @@ def writing(path: Union[str, Path], mode: str = "w",
         _discard(tmp)
         raise
     else:
-        fh.close()
-        os.replace(tmp, dest)
+        observed = _WRITE_OBSERVER is not None and str(dest.absolute()) in _WRITE_OBSERVER
+        held = os.dup(fh.fileno()) if observed else None
+        try:
+            fh.close()
+            os.replace(tmp, dest)
+            if observed:
+                version = lambda s: [s.st_dev, s.st_ino, s.st_mode, s.st_size,
+                                     s.st_mtime_ns, s.st_ctime_ns]
+                # Keep the producer's own inode open across publication.
+                # A same-byte replacement cannot supply its own inode proof.
+                issued = version(os.fstat(held))
+                if version(dest.lstat()) != issued:
+                    raise RuntimeError('producer publication replaced: ' + str(dest))
+                _WRITE_OBSERVER[str(dest.absolute())]['version'] = issued
+        finally:
+            if held is not None:
+                os.close(held)
 
 
 def _discard(tmp: Path) -> None:
@@ -182,6 +224,8 @@ def write_text(path: Union[str, Path], data: str,
     """
     dest = Path(path)
     with writing(dest, "w", encoding=encoding) as fh:
+        if _WRITE_OBSERVER is not None:
+            _observe(dest, data.encode(fh.encoding))
         fh.write(data)
     return dest
 
@@ -189,6 +233,7 @@ def write_text(path: Union[str, Path], data: str,
 def write_bytes(path: Union[str, Path], data: bytes) -> Path:
     """`Path.write_bytes`, atomically."""
     dest = Path(path)
+    _observe(dest, data)
     with writing(dest, "wb", encoding=None) as fh:
         fh.write(data)
     return dest

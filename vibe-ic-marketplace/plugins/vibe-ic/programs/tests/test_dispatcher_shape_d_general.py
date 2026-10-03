@@ -150,6 +150,7 @@ import benchmark_dispatch as bd
 import task_nature_route as tnr
 import _runtime_pair_fixture as runtime_pair
 import emit_attestation
+import test_ai_first_route_handoff as ai_route_fixtures
 
 _HIDDEN = 'SYNTHETIC_HIDDEN_HARNESS_SENTINEL'
 _METADATA = 'SYNTHETIC_SCORER_METADATA_SENTINEL'
@@ -162,7 +163,25 @@ _PROMPTS = {
     'debug': 'Fix the incorrect output inversion in the supplied module.',
 }
 
-def _shape_d_issue(tmp_path, monkeypatch, *, nature='spec_generation', count=1, bench='cvdp-open', supplied_rtl=_RTL):
+def _current_d1_boundary(calls, d1_calls):
+    """Reuse the v1.27.7 bound D1 producer in explicit subprocess mock scope.
+
+    The real dispatcher still writes invocation receipts and validates the
+    current report, source/material hashes, activation and launch snapshot.
+    Product calls remain separate so their count and argv are asserted exactly.
+    """
+    typed_d1 = ai_route_fixtures._typed_d1_runner(d1_calls)
+
+    def boundary(argv, *args, **kwargs):
+        if argv[argv.index('--exit-step') + 1] == 'D1':
+            return typed_d1(argv, *args, **kwargs)
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=1, stdout='', stderr='')
+
+    return boundary
+
+
+def _shape_d_issue(tmp_path, monkeypatch, *, nature='spec_generation', count=1, bench='cvdp-open', supplied_rtl=_RTL, d1_calls=None):
     runtime_pair.assume_matching_runtime_pair(monkeypatch)
     dataset = tmp_path / 'dataset';dataset.mkdir();run = tmp_path / 'run'
     rows = []
@@ -174,14 +193,9 @@ def _shape_d_issue(tmp_path, monkeypatch, *, nature='spec_generation', count=1, 
             'output':{'reference.sv':_METADATA}, 'categories':['optimization',_METADATA]})
     (dataset / 'synthetic.jsonl').write_text('\n'.join(json.dumps(row) for row in rows)+'\n')
     calls = []
-    def boundary(argv, **kwargs):
-        calls.append(list(argv))
-        project = Path(argv[2])
-        docs = project / 'phase1/generated_docs';docs.mkdir(parents=True,exist_ok=True)
-        if not (docs / 'L1.json').exists():
-            (docs / 'L1.json').write_text('{"synthetic_D1_emission":true}\n')
-        return SimpleNamespace(returncode=1, stdout='', stderr='')
-    monkeypatch.setattr(bd.subprocess, 'run', boundary)
+    if d1_calls is None:
+        d1_calls = []
+    monkeypatch.setattr(bd.subprocess, 'run', _current_d1_boundary(calls, d1_calls))
     assert bd.cmd_solve(bench,str(dataset),str(run),shape='D') == 2
     tasks = bd._read_jsonl(run / bd._ROUTE_WORKLIST)
     assert len(tasks) == count and calls == []
@@ -262,28 +276,38 @@ def test_shape_d_route_refusals(tmp_path,monkeypatch,mutation):
 @pytest.mark.parametrize('nature',list(_PROMPTS))
 def test_shape_d_confirm_entry(tmp_path,monkeypatch,nature):
     """SHAPED-CONFIRM-ENTRY: selector never substitutes for task nature."""
-    dataset,run,tasks,calls=_shape_d_issue(tmp_path,monkeypatch,nature=nature)
+    d1_calls = []
+    dataset,run,tasks,calls=_shape_d_issue(tmp_path,monkeypatch,nature=nature,d1_calls=d1_calls)
     task=tasks[0];project=Path(task['project'])
     assert task['program_proposal']['entry_nature']==nature
     assert task['allowed_natures']==sorted(tnr.NATURE_ENTRY)
     entry=tnr.NATURE_ENTRY[nature]['entry_step']
     if entry!='D1':
-        # Existing canonical provenance is reused, never regenerated. This is
-        # an explicit software fixture, not a native Phase-1 measurement.
+        # Historical provenance cannot authorize a fresh mid-flow launch.
+        # This remains a software fixture, not a native Phase-1 measurement.
         docs=project/'phase1/generated_docs';docs.mkdir(parents=True)
         (docs/'L1.json').write_text('{"earlier_canonical_D1_fixture":true}\n')
         before=emit_attestation.phase1_provenance(project)
     _shape_d_write(task,_shape_d_answer(task))
     bd.cmd_resume('cvdp-open',str(dataset),str(run))
     assert len(calls)==1
-    expected=bd._solver_argv(PROGRAMS/'vibe_ic_one_shot_runner.py',project,entry,tnr.EVIDENCE_EXIT[tnr.NATURE_ENTRY[nature]['default_evidence']]['exit_step'])
+    assert len(d1_calls)==1
+    assert d1_calls[0] == bd._solver_argv(
+        PROGRAMS/'vibe_ic_one_shot_runner.py',project,'D1','D1') + ['--no-dashboard']
+    product_entry = tnr.NATURE_ENTRY[nature]['then'][0] if entry=='D1' else entry
+    expected=bd._solver_argv(PROGRAMS/'vibe_ic_one_shot_runner.py',project,product_entry,tnr.EVIDENCE_EXIT[tnr.NATURE_ENTRY[nature]['default_evidence']]['exit_step'])
     assert calls[0]==expected
     result=json.loads((run/'solve_report.json').read_text())['results'][0]
     assert result['routing_verdict']['source']=='ai_confirmed' and result['accepted'] is False
     assert emit_attestation.phase1_provenance(project)['ran'] is True
+    current = emit_attestation.phase1_provenance(project)
+    assert result['phase1_frontdoor']['provenance']==current and result['phase1_frontdoor']['status']=='GENERATED'
+    gate = result['phase1_frontdoor']['d1_gate']
+    assert gate['current_call'] is True and gate['d1_provenance_sha256']==current['digest']
+    assert result['phase1_frontdoor']['runner_invocation']['invocation_id']==gate['invocation_id']
     if entry!='D1':
-        assert result['phase1_frontdoor']['provenance']==before and result['phase1_frontdoor']['status']=='REUSED'
-        assert emit_attestation.phase1_provenance(project)==before
+        assert result['phase1_frontdoor']['provenance']!=before and result['phase1_frontdoor']['status']=='GENERATED'
+        assert emit_attestation.phase1_provenance(project)==current and current!=before
     with pytest.raises(SystemExit):bd._require_program_first_ai_acceptance(run)
 
 @pytest.mark.parametrize('nature',['debug','optimization'])
@@ -346,9 +370,10 @@ def test_shape_d_score_refuses_nonagentic_fallthrough(tmp_path,monkeypatch):
 
 def test_issued_format_valid_agentic_completion(tmp_path, monkeypatch):
     partial = 'module unit(input wire a, output wire y);\n// TODO: implement output\nendmodule\n'
+    d1_calls = []
     dataset, run, tasks, calls = _shape_d_issue(
         tmp_path, monkeypatch, nature='completion', bench='verilogeval-human',
-        supplied_rtl=partial)
+        supplied_rtl=partial, d1_calls=d1_calls)
     task = tasks[0]
     assert task['io_format'] == 'agentic'
     assert task['program_proposal']['entry_nature'] == 'completion'
@@ -364,6 +389,7 @@ def test_issued_format_valid_agentic_completion(tmp_path, monkeypatch):
     _shape_d_write(task, _shape_d_answer(task))
     assert bd.cmd_resume('verilogeval-human', str(dataset), str(run)) == 2
     assert len(calls) == 1 and collected == [('agentic', None)]
+    assert len(d1_calls) == 1
     assert json.loads((run / 'solve_report.json').read_text())['format'] == 'agentic'
 
 
@@ -374,8 +400,8 @@ def test_issued_format_valid_nonagentic_continuation(tmp_path, monkeypatch):
     (dataset / 'neutral_prompt.txt').write_text('Design a combinational output buffer named TopModule.')
     run = tmp_path / 'run'
     calls = []
-    monkeypatch.setattr(bd.subprocess, 'run', lambda argv, **_kw:
-                        calls.append(list(argv)) or SimpleNamespace(returncode=1))
+    d1_calls = []
+    monkeypatch.setattr(bd.subprocess, 'run', _current_d1_boundary(calls, d1_calls))
     assert bd.cmd_solve('verilogeval-human', str(dataset), str(run)) == 2
     task = bd._read_jsonl(run / bd._ROUTE_WORKLIST)[0]
     assert task['io_format'] == 'verilogeval' and calls == []
@@ -390,6 +416,7 @@ def test_issued_format_valid_nonagentic_continuation(tmp_path, monkeypatch):
     _shape_d_write(task, _shape_d_answer(task))
     assert bd.cmd_resume('verilogeval-human', str(dataset), str(run)) == 2
     assert len(calls) == 1 and collected == [('verilogeval', 'TopModule')]
+    assert len(d1_calls) == 1
     assert json.loads((run / 'solve_report.json').read_text())['format'] == 'verilogeval'
 
 

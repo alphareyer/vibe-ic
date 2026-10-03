@@ -1,0 +1,46 @@
+[
+  {
+    "at": "2026-10-03T15:27:19.394841+00:00",
+    "step": "phase2.rtl_gen.catalog_glue",
+    "bucket": "B",
+    "rule_name": "sample_synchronous_reset_before_external_write_inhibit",
+    "owner_layer": "skills/catalog-glue-author/SKILL.md::AI authoring contract; separately authored glue output",
+    "before_state": "Independent original-input real1024B write42@256: compile0/run1; raw reset gating changed WEN without posedge.",
+    "after_state": "Same immutable independent TB compile0/run0; sampled reset inhibit, write address/data unretimed; affected real boot/store/GPIO/alignment/held-reset positive0 and normal L9/pad consumers0.",
+    "status": "BOUNDED_REPAIR_PROVEN; whole-IC INCOMPLETE",
+    "changed_reused_ip_files": 0,
+    "official_reused_files": 22,
+    "authored_glue_file": "subservient.v",
+    "glue_parent_sha256": "c21df6bb630b9883659737254c7847b3a3334c59f032256b1db8fb55bdb8e6f9",
+    "glue_candidate_sha256": "6ade8fdf1309f539f515baf55e445adff3a0e6a97e901f614fcd83c2880e43ab",
+    "diff_sha256": "1e561bd347250c69374004965da0e93dc3ba5ee670009ddd10d25ff3e645ac37",
+    "challenge_sha256": "8cd8f4e4ed3fdb9aff127a2ae073f430c3d22666f7a3b1c4c5b5aeff0127615d",
+    "actual_cid": "9f25b163c6b5f897e69dfbdca29239681ccb17d46e1ab97905b9b50aa9c34c3c",
+    "image_digest": "sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe",
+    "retention_scopes": {
+      "prior_initial_reset": "bytes24..1023 only",
+      "new_affected_positive": "initial reset24..1023; held sampled reset at idle entry snapshot0..1023"
+    },
+    "reset_boundary": "External synchronous SRAM consumes preceding valid transaction at sampling edge; reset inhibit becomes effective after sample. No asynchronous cancellation promise.",
+    "normal_expert": "exact answer consumed77/83, findings7 (6misscoped,1ownership-undecidable), check-report0; D1 NOT_MEASURED",
+    "remaining": "Core fetch-glitch LOCAL DERIVATIVE admission is separate; imported core unchanged in this WEN candidate. CurrentRTL-to-new-synthesis LEC not measured. LC helper component proof delivered, shipping review separate.",
+    "evidence_packet": "glue-sync-reset-evidence-r1.tar",
+    "evidence_sha256": {
+      "glue.delta.patch": "1e561bd347250c69374004965da0e93dc3ba5ee670009ddd10d25ff3e645ac37",
+      "preparation.json": "af7e9cba450b1025ebd698fb9901be8e74a354c3a526f2fcbf0e0d9c59c7f363",
+      "native-001/result.json": "10b284e5041c24bd0111aa61c46cb1d4c5b77fd4a7d9340d17a9d5d587af966d",
+      "native-001/launch_identity.json": "43897f4234514c0e39cfae318b296e5fb99d42900afb1ea9d91c2d6d59a33fb2",
+      "native-001/positive_run.log": "e674370e2beed0f648c4e3c6cec748707926c82cbbf1b15f3deea8c294155e6c",
+      "red-independent-packet/run.log": "9f768f292f1cd9f96f7fe56f431d537ff7022ba9562d3fffe03ba580091e0486",
+      "green-identical-challenge/run.log": "6ea2ee294e370accec64038575aa4b47e40079654c62ba14ce4ed03d5971c86c"
+    },
+    "why_not_bucket_a": "Selecting an external SRAM protocol and deciding whether reset cancels a pre-edge transaction or only changes output state after sampling require contextual interpretation of the original synchronous-reset, one-cycle reset and latency obligations; a raw-gating syntax rule cannot choose that protocol or safely insert a write pipeline.",
+    "skill_title": "Synchronous reset at an external memory interface",
+    "pattern": "Raw synchronous reset combinationally changes an external memory transaction between clock edges.",
+    "when": "Authoring integration glue for a declared synchronous reset and external synchronous memory protocol.",
+    "what": "Choose and declare the reset sampling boundary from the input and memory protocol; sample the reset inhibit, preserve write-enable/address/data alignment and avoid a write-only pipeline. Retain the independent failing control unchanged and verify the affected held-reset retention and normal boot.",
+    "example": "A short reset pulse occurs while a valid memory write is held between rising edges. A raw reset gate withdraws the strobe; a sampled inhibit leaves that transaction unchanged until the sampling edge. A pre-edge write may commit at that edge under the declared memory protocol.",
+    "generality": "The sampling boundary and aligned transaction tuple apply to integration around any reused processor or memory adapter; neither IP identity nor memory capacity selects behavior.",
+    "classification": "Bucket B contextual author/skill judgment; not a deterministic program fix"
+  }
+]
