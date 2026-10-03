@@ -950,11 +950,11 @@ def body_tap_contact_layer(layers) -> Optional[str]:
     """Return the PDK contact that joins local interconnect to metal1.
 
     Sky130 guard-ring labels are on ``psubdiffcont``/``nsubdiffcont``.
-    Those device-contact types are not the metal1 routing plane: the emitter
-    supplies the local-interconnect residue and then needs the technology's
-    own local-interconnect-to-metal1 contact before the normal via1 stack can
-    leave the ring.  Derive that contact from the loaded tech table; never
-    name ``mcon`` or another PDK alias here.
+    Those device-contact types are not the metal1 routing plane: the gencell
+    already supplies the local-interconnect residue, and the route needs the
+    technology's own local-interconnect-to-metal1 contact before the normal
+    via1 stack can leave the ring.  Derive that contact from the loaded tech
+    table; never name ``mcon`` or another PDK alias here.
     """
     if layers is None:
         return None
@@ -2313,8 +2313,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             tap_local = g.get("body_tap_local")
             if tap_contact:
                 tx, ty, _ = g["abs_labels"][0]
-                # The gencell's body label is on a device-contact layer. Paint
-                # its PDK-derived local residue and local-to-metal1 contact;
+                # The gencell's body label is on a device-contact layer whose
+                # local-interconnect residue is already present in the child.
+                # Paint only the PDK-derived local-to-metal1 contact here;
                 # `_via_stack` then carries that conductor through metal1/2/3.
                 hp = geo.via_pad[1]
                 if tap_local:
