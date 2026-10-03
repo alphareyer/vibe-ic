@@ -36,7 +36,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 from _atomic_artefact import write_bytes, write_json
-from _execution_manifest import ISSUED_MANIFEST_ENV, issued_manifest_path
+from _execution_manifest import (ISSUED_MANIFEST_ENV, issued_manifest_path,
+                                  is_exclusive_regular)
 
 
 # Authority belongs to the live Controller issuer. Editable files, content
@@ -651,7 +652,11 @@ class Controller:
         def frozen_binding():
             actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*')
                       if p.is_file() and p != manifest}
-            if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
+            if (not is_exclusive_regular(manifest) or
+                    any(p.is_file() and not is_exclusive_regular(p)
+                        for p in inputs.rglob('*')) or
+                    actual != plan['binding']['inputs'] or
+                    any(p.is_symlink() for p in inputs.rglob('*'))):
                 raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         try:
             if context.binding() != plan['binding']:
@@ -933,7 +938,13 @@ class Controller:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
         manifest = issued_manifest_path(frozen)
-        if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)):
+        # Preserve the existing census identity for a link/alias at the
+        # authority path. Missing metadata and changed bytes remain the
+        # manifest-specific refusal; the frozen census below reports links.
+        if (not manifest.is_symlink() and
+                (not manifest.is_file() or
+                 (is_exclusive_regular(manifest) and
+                  receipt.get('manifest_sha256') != digest(manifest)))):
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         try:
             manifest_doc = json.loads(manifest.read_text())
@@ -954,10 +965,12 @@ class Controller:
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         if receipt.get('manifest') != manifest_doc:
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
-        if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
+        if (not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or
+                any(p.is_file() and not is_exclusive_regular(p)
+                    for p in frozen.rglob('*')) or {
                 str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
                 if p.is_file() and p != manifest
-                } != binding['inputs']:
+                } != binding['inputs']):
             raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         evidence = receipt.get('evidence') or {}
         if evidence.get('binding') != binding:

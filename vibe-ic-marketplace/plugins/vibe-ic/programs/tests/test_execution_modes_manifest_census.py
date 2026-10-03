@@ -1,6 +1,7 @@
 """R4-01 controls through real registered Step 8 run/adopt public callers."""
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,44 @@ def test_input_subdirectory_manifest_is_ordinary_bound_input(tmp_path):
     assert all(r['rc'] == 0 for r in marker['records'])
     argv = receipt['processes'][0]['argv']
     assert argv[argv.index('--manifest') + 1] == str(frozen / 'issued_manifest.json')
+    assert adoption(context, arm, controller, root)['status'] == 'ADOPTED'
+
+
+@pytest.mark.parametrize('relative,reason', [
+    ('issued_manifest.json', 'FROZEN_INPUT_CHANGED'),
+    ('phase2/stage2/constraints/top.sdc', 'FROZEN_INPUT_CHANGED'),
+])
+def test_external_hardlink_to_frozen_evidence_refuses(tmp_path, relative, reason):
+    """A frozen file cannot be aliased outside the Controller input root."""
+    context, arm, controller, root = setup(tmp_path)
+    receipt = run(context, arm, controller, root)
+    assert receipt['status'] == 'ELIGIBLE', receipt
+    frozen = Path(receipt['input_root'])
+    subject = frozen / relative
+    alias = tmp_path / 'outside-frozen-root-alias'
+    os.link(subject, alias)
+    with pytest.raises(em.Refusal, match=reason):
+        adoption(context, arm, controller, root)
+    result = json.loads((root / 'adoption.json').read_text())
+    assert result['status'] == 'REFUSED', result
+    assert result['reason'] == reason, result
+    assert subject.stat().st_nlink == 2
+    assert subject.stat().st_ino == alias.stat().st_ino
+    assert not (root / 'selected').exists()
+
+
+def test_hardlinked_caller_source_is_copied_to_exclusive_frozen_input(tmp_path):
+    """Caller aliases are allowed; Controller-owned copies remain exclusive."""
+    context, arm, controller, root = setup(tmp_path)
+    original = context.inputs['phase2/stage2/constraints/top.sdc']
+    alias = tmp_path / 'caller-hardlink-top.sdc'
+    os.link(original, alias)
+    context = replace(context, inputs={
+        **context.inputs, 'phase2/stage2/constraints/top.sdc': alias})
+    receipt = run(context, arm, controller, root)
+    assert receipt['status'] == 'ELIGIBLE', receipt
+    frozen = Path(receipt['input_root'])
+    assert frozen.joinpath('phase2/stage2/constraints/top.sdc').stat().st_nlink == 1
     assert adoption(context, arm, controller, root)['status'] == 'ADOPTED'
 
 

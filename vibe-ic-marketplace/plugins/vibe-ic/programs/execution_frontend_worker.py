@@ -4,7 +4,8 @@ import hashlib
 import time
 from contextvars import ContextVar
 from pathlib import Path
-from _execution_manifest import ISSUED_MANIFEST_ENV, issued_manifest_path
+from _execution_manifest import (ISSUED_MANIFEST_ENV, issued_manifest_path,
+                                  is_exclusive_regular)
 
 _STEP8_PRODUCER_TIMEOUT_S = 30
 _STEP8_DISPATCH = ContextVar('step8_dispatch', default=False)
@@ -24,6 +25,9 @@ def _issued_manifest_path(project, authority_path=None):
     path = Path(raw) if raw else issued_manifest_path(project)
     if bound and path.absolute() != Path(bound).absolute():
         raise ValueError('issued manifest authority path mismatch')
+    if ((authority_path or _strict_issuance()) and
+            not is_exclusive_regular(path)):
+        raise ValueError('issued manifest authority path is required')
     if path.is_symlink() or not path.is_file():
         raise ValueError('issued manifest authority path is required')
     return path
@@ -97,6 +101,7 @@ def _verify_manifest(project, step, authority_path=None):
         path=Path(project)/rel
         if (Path(rel).is_absolute() or '..' in Path(rel).parts or
                 path.is_symlink() or not path.is_file() or
+                (_strict_issuance() and not is_exclusive_regular(path)) or
                 not path.resolve().is_relative_to(Path(project).resolve()) or
                 hashlib.sha256(path.read_bytes()).hexdigest() != expected):
             raise ValueError(f'{step}: issued input mutation: {rel}')
@@ -119,7 +124,9 @@ def _step8_inputs(project, manifest):
             raise ValueError(f"8: required input missing: {contract['path']}")
         for path in matches:
             rel = str(path.relative_to(project))
-            if (path.is_symlink() or not path.is_file() or not path.stat().st_size or
+            if (path.is_symlink() or not path.is_file() or
+                    (_strict_issuance() and not is_exclusive_regular(path)) or
+                    not path.stat().st_size or
                     manifest['files'].get(rel) != hashlib.sha256(path.read_bytes()).hexdigest()):
                 raise ValueError(f'8: required input empty or unbound: {rel}')
 
