@@ -248,13 +248,19 @@ def test_body_tap_contact_is_derived_from_tech_residues():
         }
         plane_of = {"locali": "locali", "metal1": "metal1",
                     "metal2": "metal2"}
+        canon = {"li": "locali", "m1": "metal1"}
+        contact_heads = [("mcon", ("li", "m1"))]
 
     class NoBridge:
         connects = {"via1": ("metal1", "metal2")}
         plane_of = Layers.plane_of
 
     assert A5E.body_tap_contact_layer(Layers()) == "viali"
+    assert A5E.body_tap_metal_contact_layer(Layers()) == "mcon"
+    assert A5E.body_tap_local_layer(Layers()) == "locali"
     assert A5E.body_tap_contact_layer(NoBridge()) is None
+    assert A5E.body_tap_metal_contact_layer(NoBridge()) is None
+    assert A5E.body_tap_local_layer(NoBridge()) is None
 
 
 class FakeStage:

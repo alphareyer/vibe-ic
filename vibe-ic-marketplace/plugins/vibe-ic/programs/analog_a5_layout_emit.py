@@ -378,6 +378,16 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
                       f"what shorts a capacitor whose plates are not spelled "
                       f"metalN.")
     facts.layers = _lim.layer_identity(ttext, tp)
+    # Preserve the technology's raw contact heads.  LayerIdentity deliberately
+    # canonicalises aliases for plane reasoning; the .mag writer still needs
+    # the declared wiring-contact token (for example Sky130's mcon) so a body
+    # tap reaches metal1 through the PDK interface.
+    contact_heads = []
+    for line in _lim._tech_sections(ttext).get("contact", []):
+        toks = line.split()
+        if len(toks) >= 3 and toks[0] != "stackable":
+            contact_heads.append((toks[0], tuple(toks[1:])))
+    facts.layers.contact_heads = contact_heads
     if not facts.layers.plane_of:
         return None, (f"ENV_UNAVAILABLE: {tp} declares no `types` section "
                       f"this program can read, so no drawn type has a plane. "
@@ -940,11 +950,11 @@ def body_tap_contact_layer(layers) -> Optional[str]:
     """Return the PDK contact that joins local interconnect to metal1.
 
     Sky130 guard-ring labels are on ``psubdiffcont``/``nsubdiffcont``.
-    Those device-contact types are not the metal1 routing plane: the gencell
-    already supplies the local-interconnect residue, and the route needs the
-    technology's own local-interconnect-to-metal1 contact before the normal
-    via1 stack can leave the ring.  Derive that contact from the loaded tech
-    table; never name ``mcon`` or another PDK alias here.
+    Those device-contact types are not the metal1 routing plane: the emitter
+    supplies the local-interconnect residue and then needs the technology's
+    own local-interconnect-to-metal1 contact before the normal via1 stack can
+    leave the ring.  Derive that contact from the loaded tech table; never
+    name ``mcon`` or another PDK alias here.
     """
     if layers is None:
         return None
@@ -952,6 +962,37 @@ def body_tap_contact_layer(layers) -> Optional[str]:
         planes = {layers.plane_of.get(r) for r in residues}
         if "locali" in planes and "metal1" in planes:
             return contact
+    return None
+
+
+def body_tap_metal_contact_layer(layers) -> Optional[str]:
+    """Return the raw Magic contact that joins the tap's local residue to M1.
+
+    ``LayerIdentity`` canonicalises Magic type aliases (Sky130 calls the
+    locali plane ``viali``), but a wiring ``contact`` is a separate tile
+    declared by the tech file.  Keep that declaration's head token so the
+    emitted .mag contains the actual M1 contact rather than merely another
+    locali tile.
+    """
+    if layers is None:
+        return None
+    for head, residues in getattr(layers, "contact_heads", ()):
+        planes = {layers.plane_of.get(layers.canon.get(r, r))
+                  for r in residues}
+        if "locali" in planes and "metal1" in planes:
+            return head
+    return None
+
+
+def body_tap_local_layer(layers) -> Optional[str]:
+    """Return the local-interconnect residue required under the tap."""
+    if layers is None:
+        return None
+    for contact, residues in layers.connects.items():
+        planes = {layers.plane_of.get(r) for r in residues}
+        if "locali" in planes and "metal1" in planes:
+            return next((r for r in residues
+                         if layers.plane_of.get(r) == "locali"), None)
     return None
 
 
@@ -2008,6 +2049,8 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                tap_clear: int, pin_spec: Optional[dict] = None) -> Plan:
     plan = Plan()
     body_tap_contact = body_tap_contact_layer(facts.layers)
+    body_tap_metal_contact = body_tap_metal_contact_layer(facts.layers)
+    body_tap_local = body_tap_local_layer(facts.layers)
     pitch = geo.pitch()
     pad_half = geo.via_pad[1]
     m1_space = geo.default_space
@@ -2139,6 +2182,8 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                            "labels": [{"x": tx, "y": ty, "level": 1,
                                        "name": "tap"}],
                            "body_tap_contact": body_tap_contact,
+                           "body_tap_metal_contact": body_tap_metal_contact,
+                           "body_tap_local": body_tap_local,
                            "level": 1})
 
         # two groups escaping at one height take opposite sides, so their
@@ -2264,15 +2309,22 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
         for g in d["groups"]:
             net, ey, lane = g["net"], g["abs_escape_y"], g["lane_x"]
             tap_contact = g.get("body_tap_contact")
+            tap_metal_contact = g.get("body_tap_metal_contact")
+            tap_local = g.get("body_tap_local")
             if tap_contact:
                 tx, ty, _ = g["abs_labels"][0]
-                # The gencell's body label is on a device-contact layer whose
-                # local-interconnect residue is already present in the child.
-                # Paint only the PDK-derived local-to-metal1 contact here;
+                # The gencell's body label is on a device-contact layer. Paint
+                # its PDK-derived local residue and local-to-metal1 contact;
                 # `_via_stack` then carries that conductor through metal1/2/3.
                 hp = geo.via_pad[1]
+                if tap_local:
+                    plan.paint(net, tap_local, tx - hp, ty - hp,
+                               tx + hp, ty + hp)
                 plan.paint(net, tap_contact, tx - hp, ty - hp,
                            tx + hp, ty + hp)
+                if tap_metal_contact:
+                    plan.paint(net, tap_metal_contact, tx - hp, ty - hp,
+                               tx + hp, ty + hp)
             if g["strapped"]:
                 # THE STUB STARTS WHERE THE STACK ENDED UP. An island that
                 # was moved a lambda off its label and then wired from the
