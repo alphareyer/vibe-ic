@@ -356,6 +356,7 @@ begin
     puts "XOR_ERROR no top cell"
     exit 3
   end
+  puts "XOR_TOOL klayout"
   puts "XOR_TOP shipped=#{top_s.name} reference=#{top_r.name}"
   # THE FAITHFULNESS CENSUS, printed before any difference is counted. A
   # reference that is missing libraries produces a CONFIDENT WRONG ANSWER, and
@@ -810,7 +811,8 @@ CONNECTIVITY_BASES = ("magic_vs_klayout_stream_xor",
 _CONNECTIVITY_UNMEASURED_CLASS = "FLOW_DOES_NOT_PERFORM"
 
 
-def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
+def gds_connectivity(project: Path, live_sha256: str,
+                     comparison: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Is the SHIPPED GDS (these bytes) shown to carry the routed connectivity?
 
     WHAT DOES NOT COUNT, measured on the spm IC-path tail (cx_spmic2_run,
@@ -833,6 +835,17 @@ def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
     """
     found: List[Dict[str, Any]] = []
     looked: List[str] = []
+    if comparison and (comparison.get("current") or {}).get("inputs", {}).get("connectivity"):
+        import _native373_current as _bounded
+        try:
+            measured = _bounded.connectivity(project, comparison)
+            measured["basis"] = CONNECTIVITY_BASES[0]
+            found.append(measured)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return {"subject_sha256": live_sha256, "measurements": [],
+                    "not_measured_by": [str(exc)], "verdict": "NOT_DETERMINED", "basis": None,
+                    "reason_class": _CONNECTIVITY_UNMEASURED_CLASS,
+                    "reason": "current native stream dependency refused: " + str(exc)}
     promo = _json(project / LIBRELANE_PROMOTION_REL)
     if not isinstance(promo, dict):
         looked.append(f"{LIBRELANE_PROMOTION_REL} absent (no Magic-vs-KLayout "
@@ -965,6 +978,33 @@ def librelane_finishing_receipt(project: Path, live_sha256: str
                   design__xor_difference__count=count,
                   layers_compared=state.get("vibeic__finishing_xor__design_pair__count"),
                   finishing_record_sha256=_sha256(project / rel))
+    # Reuse the existing strict native receipt reader, including image/PDK,
+    # execution, config, current State and material input bindings.
+    try:
+        import _physical_current as _pc
+        import librelane_signoff_evidence as _native
+        shipped, dfile, _att = shipped_and_source(project)
+        config_root = project / f"phase3/librelane/37.3-{arm}-config"
+        measured = _native.count_row(project, Path(folder), "Vibeic.FinishingXOR",
+                                     "vibeic__finishing_xor__defect__count", shipped, config_root)
+        if measured.get("value") != count or type(count) is not int:
+            raise ValueError(measured.get("reason") or "XOR_LIBRELANE_COUNT_NOT_CURRENT")
+        config = json.loads((config_root / "Vibeic.FinishingXOR.json").read_text())
+        pre = Path(config["VIBEIC_FINISHING_PRE_GDS"])
+        if not pre.is_file() or _sha256(pre) == live_sha256:
+            raise ValueError("XOR_IDENTICAL_OR_MISSING_INPUTS")
+        pdk_name, technology = _pc.pdk_of(project)
+        report["current_native"] = {
+            "step": "37.3", "stage": "stage4", "design": _pc.design_of(dfile),
+            "pdk": pdk_name, "tool": "librelane:Vibeic.FinishingXOR",
+            "shipped": _pc.entry(project, shipped), "reference": _pc.entry(project, pre),
+            "def": _pc.entry(project, dfile), "technology": _pc.entry(project, technology),
+            "receipt": _pc.entry(project, Path(folder) / "vibeic_receipt.json"),
+            "state": _pc.entry(project, Path(folder) / "state_out.json"),
+            "config": _pc.entry(project, config_root / "Vibeic.FinishingXOR.json")}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"verdict": "NOT_DETERMINED", "rc": 2, "report": report,
+                "reason": f"XOR_LIBRELANE_CURRENT_REFUSED: {exc}"}
     if count == 0:
         return {"verdict": "PASS", "rc": 0, "report": report,
                 "reason": f"step 37's LibreLane finishing XOR on the promoted "
@@ -1054,6 +1094,50 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"FAIL: the run's own receipt {rel} records {len(diffs)} DESIGN "
             f"layer(s) differing between the shipped GDS and this run's "
             f"pre-finishing reference ({count} differing polygon(s): {named})"), doc
+    if (doc.get("reference") or {}).get("kind") == "librelane_stream":
+        shipped, dfile, _att = shipped_and_source(project)
+        if shipped is None or dfile is None:
+            return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_CURRENT_SUBJECT_MISSING", doc
+        fresh = librelane_finishing_receipt(project, _sha256(shipped))
+        if fresh is None or fresh["verdict"] != "PASS":
+            return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_LIBRELANE_NOT_CURRENT", doc
+        for key in ("design_layer_differences", "design__xor_difference__count", "layers_compared", "current_native"):
+            if doc.get(key) != fresh["report"].get(key) or fresh["report"].get(key) is None:
+                return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_LIBRELANE_RECORD_CHANGED", doc
+        conn = gds_connectivity(project, _sha256(shipped))
+        if conn.get("verdict") != "PASS":
+            return (1 if conn.get("verdict") == "FAIL" else 2), "NOT_MEASURED: current connectivity absent or failed", doc
+        return 0, "PASS: current LibreLane finishing XOR and current connectivity", doc
+
+    # A zero is credit only for the current, separately produced subjects.
+    import _physical_current as _pc
+    current = doc.get("current")
+    refusal = _pc.validate(project, current, step="37.3", stage="stage4",
+                           tools=("klayout",),
+                           required_inputs=("shipped", "reference", "def", "technology", "recipe"),
+                           required_outputs=("log",), marker="XOR_DONE")
+    if not refusal:
+        shipped, dfile, _att = shipped_and_source(project)
+        for role, path in (("shipped", shipped), ("def", dfile)):
+            if path is None or _pc.entry(project, path) != current["inputs"][role]:
+                refusal = "XOR_CURRENT_SUBJECT_SWAPPED"
+        if current["inputs"]["shipped"]["sha256"] == current["inputs"]["reference"]["sha256"]:
+            refusal = "XOR_IDENTICAL_INPUTS"
+        text = (project / current["outputs"]["log"]["path"]).read_text()
+        counts, done = parse_layers(text)
+        tops = re.findall(r"(?m)^XOR_TOP shipped=(\S+) reference=(\S+)$", text)
+        if not done or not counts or tops != [(current["design"], current["design"])]:
+            refusal = "XOR_NATIVE_SUBJECT_OR_EXECUTION_MISMATCH"
+        if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
+            refusal = "XOR_NATIVE_TOOL_MISSING"
+        fill, seal, _ = declared_finishing_layers(project)
+        native_design, native_finishing, total = partition(counts, fill, seal)
+        if (native_design != diffs or total != count or len(counts) != layers
+                or native_finishing != doc.get("finishing_layer_differences")):
+            refusal = "XOR_NATIVE_VALUES_CHANGED"
+    if refusal:
+        return 2, f"NOT_MEASURED [EXECUTION_ERROR]: {refusal}", doc
+
     # U15 / R-0929-GDSXOR-SPLIT: `verdict` is the GEOMETRIC answer (0
     # design-layer differences). Step 37.3's composed status also needs the
     # shipped bytes' connectivity (`connectivity`), bound to the sha256 the
@@ -1082,6 +1166,13 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"connectivity is not bound to the shipped GDS it compared "
             f"(subject {str(conn.get('subject_sha256'))[:16]}..., shipped "
             f"{str(live)[:16]}..., basis {conn.get('basis')!r})"), doc
+    fresh_conn = gds_connectivity(project, live, doc)
+    changed = (fresh_conn.get("verdict") != conn.get("verdict")
+               or fresh_conn.get("basis") != conn.get("basis"))
+    if current["inputs"].get("connectivity"):
+        changed = fresh_conn != conn
+    if changed:
+        return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_CONNECTIVITY_EVIDENCE_CHANGED", doc
     if conn["verdict"] == "FAIL":
         return 1, (
             f"FAIL: {rel} records the shipped GDS's connectivity FAILED under "
@@ -1219,7 +1310,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         """R-0929-GDSXOR-SPLIT: `verdict` stays the GEOMETRIC answer; the
         shipped bytes' connectivity is its own field, which step 37.3's
         judge composes with it (`judge_receipt`)."""
-        conn = gds_connectivity(project, live)
+        conn = gds_connectivity(project, live, report)
         report["connectivity"] = conn
         return finish(verdict, rc, f"{reason}; connectivity of the shipped "
                                    f"GDS: {conn['verdict']}"
@@ -1240,6 +1331,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             return finish(ll["verdict"], ll["rc"], ll["reason"])
         return finish_geometric(ll["verdict"], ll["rc"], ll["reason"])
 
+    bounded = None
+    try:
+        import _native373_current as _bounded
+        bounded = _bounded.produce(project, dfile)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        report["native_dependency_refusal"] = str(exc)
+
     try:
         import _klayout_launch as _kl
     except ImportError as exc:                             # pragma: no cover
@@ -1248,7 +1346,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # own `reports/container_image.json` names the container it used, so this
     # invocation and the runner's resolve the same environment instead of falling
     # through to a conventional default that mounts a different tree.
-    runner = _kl.find_runner(args.container, project=project)
+    runner = (_bounded.ShippedXorRunner(project, bounded["image"]) if bounded is not None
+              else _kl.find_runner(args.container, project=project))
     if runner is None or not runner.covers(shipped):
         return finish("NOT_DETERMINED", 2,
                       "no KLayout runner reaches this project, so the comparison "
@@ -1257,6 +1356,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     timeout = args.timeout if args.timeout > 0 else 24 * 3600
     kept, kind, prov = resolve_reference(project, dfile.stem, dfile)
+    if bounded is not None:
+        # The reference is a real stream of this current DEF, independently
+        # compared against the other engine before the shipped comparison.
+        import _physical_current as _pc
+        streams = bounded["current"]["outputs"]
+        chosen = next((streams[role] for role in ("magic_gds", "klayout_gds")
+                       if streams[role]["sha256"] != live), None)
+        if chosen is not None:
+            kept = project / chosen["path"]
+            kind = "native two-engine"
+            prov = {"kind": "native_stream", "path": chosen["path"],
+                    "sha256": chosen["sha256"], "dependency": _bounded.REL}
     report["reference"] = prov
     with tempfile.TemporaryDirectory(prefix="gds_xor_ref_",
                                      dir=str(project)) as scratch:
@@ -1283,9 +1394,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             _t_env, cited = restream_env_from_transcript(project)
             if cited:
                 report["reference"]["stream_transcript"] = cited
+        import _physical_current as _pc
+        try:
+            pdk_name, technology = _pc.pdk_of(project)
+            if _pc.digest(shipped) == _pc.digest(reference):
+                return finish("NOT_DETERMINED", 2, "XOR_IDENTICAL_INPUTS")
+            if reference.parent == Path(scratch):
+                retained = project / "reports/phase3/gds_xor_reference.gds"
+                retained.write_bytes(reference.read_bytes())
+                reference = retained
+            inputs = {"shipped": _pc.entry(project, shipped),
+                      "reference": _pc.entry(project, reference),
+                      "def": _pc.entry(project, dfile),
+                      "technology": _pc.entry(project, technology)}
+            if bounded is not None:
+                inputs["connectivity"] = _pc.entry(project, project / _bounded.REL)
+            design_name = _pc.design_of(dfile)
+        except (OSError, ValueError) as exc:
+            return finish("NOT_DETERMINED", 2, f"XOR_CURRENT_INPUT_REFUSED: {exc}")
         report["reference"]["bytes"] = reference.stat().st_size
         rc, so, se = run_xor(runner, Path(scratch), shipped, reference,
                              timeout)
+        log_path = project / "reports/phase3/gds_xor_native.log"
+        script_path = project / "reports/phase3/gds_xor_native.rb"
+        log_path.write_text((so or "") + "\n" + (se or ""))
+        script_path.write_text(_XOR_RB)
+        inputs["recipe"] = _pc.entry(project, script_path)
+        report["current"] = _pc.build(
+            project, "37.3", "stage4", design_name, pdk_name, "klayout", inputs,
+            {"log": _pc.entry(project, log_path)},
+            getattr(runner, "execution", None) or
+            {"rc": rc, "argv": ["klayout", "-b", "-r", str(script_path)],
+             "runner": report["runner"]})
         counts, done = parse_layers(so)
         ok, why, stats = reference_is_faithful(so)
         report["census"] = stats
