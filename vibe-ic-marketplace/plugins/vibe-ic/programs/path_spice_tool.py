@@ -74,6 +74,7 @@ chip-AGNOSTIC: no design, PDK, cell or corner literal selects a branch.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -431,6 +432,12 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
     left to its schematic subckt and named in `kept_schematic`."""
     work = out_dir / 'extract'
     work.mkdir(parents=True, exist_ok=True)
+    # These exports belong to this producer. Absence before Magic makes a
+    # subsequently consumed export evidence of this invocation, not a retry's.
+    for cell in cells:
+        for suffix in ('.spice', '.ext'):
+            (work / (cell + suffix)).unlink(missing_ok=True)
+    (out_dir / 'cells_extracted.spice').unlink(missing_ok=True)
     tcl = work / 'extract.tcl'
     tcl.write_text(extraction_tcl(gds, cells, work))
     run = _docker(image, project, mounts,
@@ -438,9 +445,12 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
                   env={'PDK_ROOT': guest_root})
     (work / 'magic.log').write_text(run.stdout + '\n' + run.stderr)
     kept: Dict[str, str] = {}
+    missing_exports = []
     body: List[str] = []
     for cell in cells:
         path = work / f'{cell}.spice'
+        if not path.is_file() or not path.stat().st_size:
+            missing_exports.append(cell)
         text = path.read_text(errors='replace') if path.is_file() else ''
         ports, devices = subckt_devices(text).get(cell, ([], 0))
         start = re.search(r'^\.subckt\s+' + re.escape(cell) + r'\b.*$', text, re.M | re.I)
@@ -457,7 +467,11 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
     out.write_text('* vibe-ic step 30: cells extracted from the declared layout\n'
                    + '\n'.join(body) + '\n')
     return {'path': str(out), 'magic_rc': run.returncode, 'magicrc': magicrc,
-            'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept}
+            'magic_execution': {'tool': 'Magic', 'rc': run.returncode,
+                'argv': ['magic', '-dnull', '-noconsole', '-rcfile', magicrc, str(tcl)],
+                'script': str(tcl), 'log': str(work / 'magic.log')},
+            'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept,
+            'missing_exports': missing_exports}
 
 
 def cell_view(image: str, project: Path, mounts: List[Tuple[Path, str]], *, config: dict,
@@ -734,6 +748,11 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     if not (opc and libname):
         raise Refusal('LL_LIBERTY_OPCOND_UNDECLARED', inputs['liberties'][0])
     out_dir.mkdir(parents=True, exist_ok=True)
+    # These files belong only to this Step-30 invocation. A failed tool may
+    # not reuse a deck or STA report left by its predecessor.
+    for stale in out_dir.glob('path_*'):
+        if stale.is_file():
+            stale.unlink()
     cell_sources = [host(p) for p in (config.get('CELL_SPICE_MODELS') or [])]
     spice_sources = cell_sources + [host(p) for p in (config.get('PAD_SPICE_MODELS') or [])]
     mounts = [(pdk_root / pdk, guest)]
@@ -741,6 +760,8 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
                      guest_root=str(Path(guest).parent), pdk=pdk,
                      netlist=project / inputs['sta_netlist'], cell_sources=cell_sources,
                      out_dir=out_dir)
+    if view.get('missing_exports'):
+        raise Refusal('LL_SPICE_CURRENT_CELL_EXPORT_MISSING', str(view['missing_exports']))
     cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
                          ground, out_dir / 'cells_folded.spice')
     cells['cell_view'] = {k: v for k, v in view.items() if k != 'sources'}
@@ -773,11 +794,14 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
             'spef': str(spef_path), 'spef_sha256': digest(spef_path), 'cells': cells,
             'models': models, 'sta_rc': sta.returncode, 'prepared': prepared,
+            'sta_execution': {'tool': 'OpenSTA', 'rc': sta.returncode,
+                'argv': ['sta', '-no_init', '-no_splash', '-exit', str(tcl)],
+                'script': str(tcl), 'log': str(out_dir / 'sta.log')},
             'image': image, 'project': project, 'mounts': mounts, 'header': header,
             'liberty_text': '\n'.join(lib_texts)}
 
 
-def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
+def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
     """Every prepared deck through the simulator (concurrently), measured
     and compared with its STA path."""
     from concurrent.futures import ThreadPoolExecutor
@@ -786,7 +810,7 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
     def one(item: Dict[str, Any]) -> Dict[str, Any]:
         parsed, deck = item['parsed'], item['deck']
         row: Dict[str, Any] = {'path': item['path'], 'deck': str(deck) if deck else None}
-        if parsed is None or deck is None or deck.stat().st_size == 0:
+        if arm.get('sta_rc') != 0 or parsed is None or deck is None or deck.stat().st_size == 0:
             row.update(status='NOT_MEASURED', reason='no STA path or no deck',
                        wps_fail=item['wps_fail'])
             return row
@@ -795,7 +819,14 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
                         step_s=step)
         deck.with_suffix('.log').write_text(sim.stdout + '\n' + sim.stderr)
         got = measure(deck, simulator, parsed, header)
-        row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9)
+        row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9,
+                   simulator_execution={'tool': simulator, 'rc': sim.returncode,
+                       'argv': (['ngspice', '-b'] if simulator == 'ngspice' else ['Xyce'])
+                               + [str(deck.with_suffix('.run.sp'))],
+                       'script': str(deck.with_suffix('.run.sp')),
+                       'log': str(deck.with_suffix('.log'))})
+        if sim.returncode != 0:
+            got = {'status': 'NOT_MEASURED', 'reason': 'simulator exited non-zero'}
         sta_ns = parsed['path_delay_ns']
         stages = path_stages(parsed['rows'])
         tol = (_scc.derive_liberty_path_tolerance(arm['liberty_text'], stages, sta_ns)
@@ -842,11 +873,12 @@ def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, A
     unresponsive = [r for r in response if r['responds'] is False]
     worst = max(rows, key=lambda r: abs(r.get('error_pct') or 0.0))
     verdicts = {r.get('verdict') for r in rows}
-    verdict = ('SPEF_UNRESPONSIVE' if unresponsive else
+    verdict = ('CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
+               'MISMATCH' if 'MISMATCH' in verdicts else
+               'SPEF_UNRESPONSIVE' if unresponsive else
                'MUTATION_NOT_MEASURED' if unmeasured else
                'CORRELATED' if verdicts == {'CORRELATED'} else
-               'CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
-               'MISMATCH' if 'MISMATCH' in verdicts else 'TOLERANCE_UNDERIVABLE')
+               'TOLERANCE_UNDERIVABLE')
     return {'verdict': verdict, 'worst_path': worst['path'],
             'worst_error_pct': worst.get('error_pct'), 'mutation': response}
 
@@ -1001,3 +1033,274 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
                            for s, a in arms.items()}}
     write_json(project / 'reports/phase3/spice_path_tool.json', document)
     return document
+
+
+def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
+    """Current routed subject and the existing tool's extracted corner inputs."""
+    import _opensta_current as current
+    import librelane_contract as lc
+    import librelane_postroute as lp
+    project = Path(project).resolve(strict=True)
+    folder, _ = lp.stapostpnr_state(project)
+    if not folder.resolve().is_relative_to(project / 'phase3/librelane'):
+        raise Refusal('CURRENT_STEP30_STAGE_MISMATCH', str(folder))
+    lc.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
+    record = _load(project / lp.STEP23_RECORD)
+    corner = ((record.get('judgment') or {}).get('worst_setup') or {}).get('corner')
+    if not corner:
+        raise Refusal('CURRENT_STEP30_CORNER_MISSING', str(record))
+    inputs = post_pnr_timing_inputs(project, folder / 'state_out.json', corner)
+    config = _load(folder / 'config.json')
+    top = config.get('DESIGN_NAME')
+    host = lambda path: Path(str(path).replace(f'/pdk/{pdk}/', str(pdk_root / pdk) + '/', 1))
+    libs = [host(path) for path in inputs['liberties']]
+    subject, _tool = current.tool_subject(project, top, corner=corner)
+    if image != _tool['image'] or config.get('PDK') != pdk or not any(Path(host_root).resolve() == (pdk_root / pdk).resolve() and guest_root == f'/pdk/{pdk}' for host_root, guest_root in _tool['mounts']):
+        raise Refusal('CURRENT_STEP30_IMAGE_OR_PDK_MISMATCH', str(pdk_root))
+    roles = {row['role']: row for row in subject['inputs']}
+    for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc'), ('spef', 'spef')]:
+        if current.digest(project / inputs[key]) != roles[role]['sha256']:
+            raise Refusal('CURRENT_STEP30_TOOL_SUBJECT_MISMATCH', role)
+    subject['inputs'] += [current.file_record(path, role, project) for role, path in [
+        ('sta_state', folder / 'state_out.json'), ('sta_config', folder / 'config.json'),
+        ('sta_receipt', folder / 'vibeic_receipt.json'), ('step23_record', project / lp.STEP23_RECORD),
+        ('sta_corner_log', folder / corner / 'sta.log')]]
+    sources = {str(path.resolve()): current.digest(path)
+               for directory in ('ngspice', 'magic')
+               for path in (pdk_root / pdk / 'libs.tech' / directory).rglob('*')
+               if path.is_file()}
+    for relative in _PDK_FLOW_CONFIGS:
+        path = pdk_root / pdk / relative
+        if path.is_file():
+            sources[str(path.resolve())] = current.digest(path)
+    for name in ('CELL_SPICE_MODELS', 'PAD_SPICE_MODELS', 'CELL_GDS'):
+        for path in config.get(name) or []:
+            source = host(path).resolve(strict=True)
+            if not source.is_relative_to((pdk_root / pdk).resolve()):
+                raise Refusal('CURRENT_STEP30_PDK_PATH_MISMATCH', str(source))
+            sources[str(source)] = current.digest(source)
+    if not sources:
+        raise Refusal('CURRENT_STEP30_MODELS_MISSING', str(pdk_root))
+    return subject, {'image': image, 'pdk_root': str(pdk_root), 'pdk': pdk,
+                     'corner': corner, 'sources': sources}
+
+
+def _current_products(project: Path, tool: dict):
+    """Bind native path reports, extracted subckts, models and waveforms too.
+
+    These are the files the existing producer consumed to derive its result;
+    a deck alone does not bind its included circuit or measured samples.
+    """
+    root = project / 'phase3/tool_arms/30'
+    products = []
+    for simulator, arm in tool['detail'].items():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            execution = data.get('sta_execution')
+            if not execution:
+                continue
+            directory = root / simulator / variant
+            if Path(execution['script']) != directory / 'arm.tcl':
+                raise Refusal('CURRENT_STEP30_PATH_EXECUTION_MISMATCH', str(execution))
+            products += [('product:' + str(path.relative_to(root)), path)
+                         for path in sorted(directory.rglob('*')) if path.is_file()]
+        mutation = arm.get('mutation') or {}
+        if mutation.get('path'):
+            path = root / simulator / 'mutated.spef'
+            if Path(mutation['path']) != path:
+                raise Refusal('CURRENT_STEP30_MUTATION_PATH_MISMATCH', str(mutation))
+            products.append(('product:' + str(path.relative_to(root)), path))
+    return products
+
+
+def _current_executions(tool: dict):
+    executions = []
+    for arm in tool['detail'].values():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            extraction = ((data.get('cells') or {}).get('cell_view') or {}).get('magic_execution')
+            if extraction:
+                executions.append(extraction)
+            if data.get('sta_execution'):
+                executions.append(data['sta_execution'])
+            executions += [row['simulator_execution'] for row in data.get('paths') or []
+                           if row.get('simulator_execution')]
+    return executions
+
+
+def _current_companion_errors(project: Path, tool: dict, subject: dict, context: dict):
+    """Keep a bound base mismatch decisive when its companion is incomplete.
+
+    This exception cannot admit PASS, a failed base execution, an unmeasured
+    base, or a result from another state/corner/material subject. Every error's
+    script/log and all measured products remain mandatory current byte bindings.
+    """
+    errors, incomplete = [], False
+    for simulator, arm in tool['detail'].items():
+        base, changed = arm.get('base') or {}, arm.get('mutated') or {}
+        incomplete |= any(row.get('status') == 'MEASURED' and not any(
+            other.get('status') == 'MEASURED'
+            and other.get('startpoint') == row.get('startpoint')
+            and other.get('endpoint') == row.get('endpoint')
+            for other in changed.get('paths') or []) for row in base.get('paths') or [])
+        for variant in ('base', 'mutated'):
+            for execution in _current_executions({'detail': {simulator: {variant: arm.get(variant)}}}):
+                if type(execution.get('rc')) is not int:
+                    raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
+                if execution['rc'] != 0:
+                    errors.append({'simulator': simulator, 'variant': variant, **execution})
+    if not errors and not incomplete:
+        return []
+    if tool.get('verdict') != 'FAIL' or any(error['variant'] != 'mutated' for error in errors):
+        raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(errors))
+    state = next(row for row in subject['inputs'] if row['role'] == 'sta_state')
+    if (tool.get('sta_state') != state['path'] or tool.get('sta_state_sha256') != state['sha256']
+            or tool.get('corner') != context['corner']):
+        raise Refusal('CURRENT_STEP30_FAIL_SUBJECT_MISMATCH', str(state))
+    inputs = post_pnr_timing_inputs(project, Path(state['path']), context['corner'])
+    for simulator, arm in tool['detail'].items():
+        base = arm.get('base') or {}
+        if (base.get('inputs') != inputs or base.get('spef') != str(project / inputs['spef'])
+                or base.get('spef_sha256') != inputs['sha256']['spef']):
+            raise Refusal('CURRENT_STEP30_FAIL_SUBJECT_MISMATCH', str(base.get('inputs')))
+        if (base.get('sta_execution') or {}).get('rc') != 0:
+            continue
+        for row in base.get('paths') or []:
+            execution = row.get('simulator_execution') or {}
+            values = [row.get(key) for key in ('sta_ns', 'spice_ns', 'tolerance_pct')]
+            if (row.get('status') != 'MEASURED' or execution.get('rc') != 0
+                    or execution.get('tool') != simulator
+                    or not all(type(value) in (int, float) and math.isfinite(value) for value in values)
+                    or values[0] <= 0 or values[1] < 0 or values[2] < 0):
+                continue
+            measured = _scc.path_correlation_verdict((values[1] - values[0]) / values[0] * 100, values[2])
+            if measured == row.get('verdict') and measured in ('MISMATCH', 'CRITICAL_MISMATCH'):
+                return errors
+    raise Refusal('CURRENT_STEP30_MEASURED_FAILURE_MISSING', str(errors))
+
+
+def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
+    """Ordinary Step 30: existing write_path_spice route, one native simulator.
+
+    The existing tool owns its decks, local Liberty tolerance and SPEF-response
+    control. This boundary owns current material and downstream result identity.
+    """
+    import _opensta_current as current
+    project = Path(project).resolve(strict=True)
+    report = project / 'reports/phase3/spice_correlation.json'
+    receipt_path = report.with_suffix('.current.json')
+    canonical_deck = project / 'phase3/stage3/spice/correlation.spice'
+    canonical_log = canonical_deck.with_suffix('.log')
+    for path in (report, receipt_path, canonical_deck, canonical_log,
+                 canonical_deck.with_suffix('.json')):
+        path.unlink(missing_ok=True)
+    subject, context = current_context(project, image, pdk_root, pdk)
+    tool = run_step30(project, image, pdk_root, pdk, paths=1, simulators=('ngspice',))
+    if current_context(project, image, pdk_root, pdk) != (subject, context):
+        raise Refusal('CURRENT_STEP30_INPUT_CHANGED_DURING_RUN', str(project))
+    companion_errors = _current_companion_errors(project, tool, subject, context)
+    executions, outputs = _current_executions(tool), []
+    for arm in tool['detail'].values():
+        for variant in ('base', 'mutated'):
+            data = arm.get(variant) or {}
+            for row in data.get('paths') or []:
+                if row.get('deck'):
+                    outputs.append(('deck:' + variant, Path(row['deck'])))
+    # A known measured FAIL remains a failed measurement; absence is named.
+    if not executions:
+        raise Refusal('CURRENT_STEP30_EXECUTION_MISSING', str(tool.get('arms')))
+    execution_files = []
+    for index, execution in enumerate(executions):
+        if type(execution.get('rc')) is not int:
+            raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
+        for role in ('script', 'log'):
+            execution_files.append(current.file_record(execution[role], f'{role}:{index}', project))
+    first_deck = next((path for role, path in outputs if role == 'deck:base'), None)
+    first_sim = next((ex for ex in executions if ex['tool'] == 'ngspice'), None)
+    if first_deck is None or first_sim is None:
+        raise Refusal('CURRENT_STEP30_CORRELATION_PRODUCT_MISSING', str(project))
+    canonical_deck.parent.mkdir(parents=True, exist_ok=True)
+    canonical_deck.write_bytes(first_deck.read_bytes())
+    canonical_log.write_bytes(Path(first_sim['log']).read_bytes())
+    outputs += [('canonical_deck', canonical_deck), ('canonical_log', canonical_log)]
+    doc = {**tool, 'program': 'spice_correlation_check.current_write_path_spice',
+           'current_subject': subject, 'current_context': context}
+    if companion_errors:
+        doc['companion_errors'] = companion_errors
+    write_json(report, doc)
+    declared_result = canonical_deck.with_suffix('.json')
+    write_json(declared_result, doc)
+    outputs += [('declared_result', declared_result)]
+    outputs += [('tool_result', project / 'reports/phase3/spice_path_tool.json'), ('correlation', report)]
+    outputs += _current_products(project, tool)
+    receipt = {**subject, 'schema': 'step30-current-v1', 'step': '30', 'context': context,
+               'execution': executions, 'execution_files': execution_files,
+               'outputs': [current.file_record(path, role, project) for role, path in outputs]}
+    if companion_errors:
+        receipt['companion_errors'] = companion_errors
+    write_json(receipt_path, receipt)
+    validate_current_step30(project)
+    return doc
+
+
+def validate_current_step30(project: Path):
+    """Consumer verification, including the declared correlation result/decks."""
+    import _opensta_current as current
+    project = Path(project).resolve(strict=True)
+    report = project / 'reports/phase3/spice_correlation.json'
+    receipt = _load(report.with_suffix('.current.json'))
+    if (receipt.get('schema') != 'step30-current-v1' or receipt.get('step') != '30'
+            or receipt.get('project') != str(project) or receipt.get('stage') != 'post_route_extracted'):
+        raise Refusal('CURRENT_STEP30_PROJECT_STAGE_MISMATCH', str(report))
+    context = receipt['context']
+    subject, now = current_context(project, context['image'], Path(context['pdk_root']), context['pdk'])
+    if now != context or any(receipt.get(k) != subject[k] for k in subject):
+        raise Refusal('CURRENT_STEP30_INPUT_BYTES_CHANGED', str(report))
+    current.check_files(receipt['execution_files'], project)
+    executions = receipt['execution']
+    if not executions or not any(e.get('tool') == 'ngspice' for e in executions):
+        raise Refusal('CURRENT_STEP30_SIMULATOR_NOT_RUN', str(report))
+    if not any(e.get('tool') == 'OpenSTA' for e in executions):
+        raise Refusal('CURRENT_STEP30_WRITE_PATH_SPICE_NOT_RUN', str(report))
+    expected_files = {}
+    for i, ex in enumerate(executions):
+        if type(ex.get('rc')) is not int or not ex.get('argv'):
+            raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(ex))
+        expected_files.update({f'{role}:{i}': ex[role] for role in ('script', 'log')})
+    if {r['role']: r['path'] for r in receipt['execution_files']} != expected_files:
+        raise Refusal('CURRENT_STEP30_EXECUTION_CONSUMPTION_MISSING', str(report))
+    current.check_files(receipt['outputs'], project)
+    outputs = {r['role']: r['path'] for r in receipt['outputs']}
+    if outputs.get('correlation') != str(report) or outputs.get('tool_result') != str(project / 'reports/phase3/spice_path_tool.json'):
+        raise Refusal('CURRENT_STEP30_RESULT_CONSUMPTION_MISSING', str(report))
+    tool = _load(project / 'reports/phase3/spice_path_tool.json')
+    if executions != _current_executions(tool):
+        raise Refusal('CURRENT_STEP30_EXECUTION_ADOPTION_MISMATCH', str(report))
+    products = {role: str(path) for role, path in _current_products(project, tool)}
+    if {role: path for role, path in outputs.items() if role.startswith('product:')} != products:
+        raise Refusal('CURRENT_STEP30_NATIVE_PRODUCTS_MISMATCH', str(report))
+    doc = _load(report)
+    if any(doc.get(k) != v for k, v in tool.items()):
+        raise Refusal('CURRENT_STEP30_ADOPTION_MISMATCH', str(report))
+    companion_errors = _current_companion_errors(project, tool, subject, context)
+    if (doc.get('companion_errors', []) != companion_errors
+            or receipt.get('companion_errors', []) != companion_errors):
+        raise Refusal('CURRENT_STEP30_COMPANION_ERROR_ADOPTION_MISMATCH', str(report))
+    decks = {r['path'] for r in receipt['outputs'] if r['role'].startswith('deck:')}
+    named = {r['deck'] for arm in tool['detail'].values() for variant in ('base', 'mutated')
+             for r in (arm.get(variant) or {}).get('paths') or [] if r.get('deck')}
+    if not named or decks != named or not all(Path(p).is_relative_to(project / 'phase3/tool_arms/30') for p in decks):
+        raise Refusal('CURRENT_STEP30_DECK_CONSUMPTION_MISSING', str(report))
+    canonical = project / 'phase3/stage3/spice/correlation.spice'
+    canonical_log = canonical.with_suffix('.log')
+    declared_result = canonical.with_suffix('.json')
+    if outputs.get('declared_result') != str(declared_result) or _load(declared_result) != doc:
+        raise Refusal('CURRENT_STEP30_DECLARED_RESULT_CONSUMPTION_MISSING', str(report))
+    if outputs.get('canonical_deck') != str(canonical) or outputs.get('canonical_log') != str(canonical_log):
+        raise Refusal('CURRENT_STEP30_CANONICAL_CONSUMPTION_MISSING', str(report))
+    first = next((r['deck'] for arm in tool['detail'].values()
+                  for r in (arm.get('base') or {}).get('paths') or [] if r.get('deck')), None)
+    first_sim = next((ex for ex in executions if ex['tool'] == 'ngspice'), None)
+    if first is None or first_sim is None or digest(canonical) != digest(Path(first)) or digest(canonical_log) != digest(Path(first_sim['log'])):
+        raise Refusal('CURRENT_STEP30_CANONICAL_ADOPTION_MISMATCH', str(report))
+    return doc
