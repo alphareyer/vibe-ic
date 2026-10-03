@@ -83,10 +83,13 @@ tree can never be deletion targets.
 WHAT IT DOES NOT DO
 -------------------
 Reports whose grammar vibe-ic's own consumers were not measured against
-(LibreLane's STA summaries, DRC/LVS reports, antenna reports) go under
+(LibreLane's STA summaries and antenna reports) go under
 ``reports/phase3/librelane/<flow step>/``, never under a sign-off name: the
-kept vibe-ic decks own those (decision 11g). It judges nothing: a step this
-flow did not do is listed in ``not_performed`` for the verdict layer (W14).
+kept vibe-ic decks own those (decision 11g). KLayout DRC and Netgen LVS JSON
+are the narrow exception: their typed report readers are run at import time,
+so a bounded preview cannot enter the canonical tree under a report filename.
+The importer judges nothing: a step this flow did not do is listed in
+``not_performed`` for the verdict layer (W14).
 
 chip-AGNOSTIC: no design, PDK, corner or cell literal. The top comes from the
 run's own ``resolved.json``; corners come from the state, and the nominal SPEF
@@ -493,6 +496,42 @@ def _duration_ms(folder: Path) -> Optional[int]:
         return None
 
 
+def _validate_imported_report(path: Path) -> None:
+    """Refuse bounded previews at the two typed DRC/LVS report boundaries.
+
+    The importer copies tool bytes, but these two filenames are read by
+    downstream verdict consumers as complete machine reports.  A 4096-byte
+    presentation preview therefore cannot be allowed to masquerade as a
+    report merely because it has a ``.json`` suffix.  The check is deliberately
+    limited to the producer-owned report names; all other LibreLane payloads
+    remain opaque copies as before.
+    """
+    if path.name not in {"drc.klayout.json", "lvs.netgen.json"}:
+        return
+    try:
+        if path.name == "drc.klayout.json":
+            report = json.loads(path.read_text(encoding="utf-8"))
+            complete = (isinstance(report, dict) and
+                        isinstance(report.get("total"), int) and
+                        not isinstance(report.get("total"), bool) and
+                        report.get("total", -1) >= 0 and
+                        all(isinstance(value, int) and
+                            not isinstance(value, bool) and value >= 0
+                            for value in report.values()))
+        else:
+            # Use the same structural E1 reader as the LVS verdict consumer;
+            # an unreadable or non-E1 object is absent, never a pass.
+            import lvs_verdict_tokens as _lvs_verdict_tokens
+            complete = _lvs_verdict_tokens.load_json_report(path) is not None
+    except (OSError, UnicodeError, ValueError, TypeError):
+        complete = False
+    if not complete:
+        raise Refusal(
+            "LL_IMPORT_REPORT_INCOMPLETE",
+            f"{path}: bounded preview or incomplete typed report; "
+            "complete producer JSON is required")
+
+
 def _copy(src: Path, dst: Path) -> None:
     """Copy bytes; a symlink at the destination is replaced, never followed."""
     if src.is_symlink():
@@ -691,6 +730,7 @@ def _plan_step(project: Path, ran: Ran, rule: Rule, top: str,
             for path in found:
                 if path.is_symlink():
                     raise Refusal("LL_IMPORT_SOURCE_SYMLINK", str(path))
+                _validate_imported_report(path)
                 rel = path.relative_to(ran.folder).as_posix()
                 plan.files.append((path, src.dest(project, top, rel)))
     if plan.files:

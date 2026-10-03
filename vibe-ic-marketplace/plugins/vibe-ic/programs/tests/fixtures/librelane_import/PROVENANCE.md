@@ -11,6 +11,22 @@ read only, and neither source was written:
 Each run: `librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3 config.yaml`
 (LibreLane 3.1.0.dev1, Classic flow), rc 0, `Flow complete.`.
 
+The two typed sign-off payloads were recovered from those producer runs in
+full, rather than retained as bounded log previews.  Both producer runs have
+the same bytes for each report (the host-specific run identity remains in the
+run tree):
+
+| Report | Bytes | SHA256 | Intended result |
+|---|---:|---|---|
+| `65-klayout-drc/reports/drc.klayout.json` | 14342 | `c904540dc1752065161d65a76e446d9ad469884028410273e21ffce70446e193` | `total: 0` |
+| `70-netgen-lvs/reports/lvs.netgen.json` | 7746 | `590040e59a132a0c7d58d3472c23478a86e9bf8f550d4975582be8e2712ef022` | E1 `verdict: match` |
+
+The producer tool identity recorded with the runs is LibreLane v3.1.0.dev1,
+KLayout 0.30.12, Netgen 1.5.324, Magic 8.3.684, OpenROAD
+26Q3-3002-gda11f47e14, Yosys 0.69+ (git `4d572059c`), Python 3.12.3, and
+PDK `gf180mcuD`.  The four prior 4096-byte report blobs remain under
+`negative_controls/` with their original hashes and a `.json.preview` suffix.
+
 ## What the trim kept, and what it changed
 - `flow.log`: whole.
 - `resolved.json`: only `DESIGN_NAME`.
@@ -24,7 +40,8 @@ Each run: `librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3 config.yaml`
   - `runtime.txt`;
   - `state_out.json` without `metrics`;
   - the first 4096 bytes of the step's own tool logs (`_step_logs`) and of
-    every file a rule imports.
+    every file a rule imports, except the complete typed DRC/LVS JSON reports
+    listed above.
 - For every OpenROAD/Odb step from the first `OpenROAD.Floorplan` up to
   `OpenROAD.RCX` (the PnR span, STA sessions included): the first 4096 bytes
   of its tool logs.
@@ -32,9 +49,11 @@ Each run: `librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3 config.yaml`
   name a home directory). The recorded run roots therefore read
   `/host/cmp3/librelane_8HD-*/design/runs/cmp3`.
 
-Payload files are cut to 4096 bytes. The importer copies and binds bytes; it
-does not parse the payloads. The artefact-derived measurement of a cut DEF,
-SPEF or GDS is not the measurement of the real run.
+Payload files other than the two typed DRC/LVS JSON reports are cut to 4096
+bytes where stated above. The importer copies and binds bytes; it does not
+claim that a cut DEF, SPEF or GDS is the measurement of the real run. At the
+two typed report boundaries the importer decodes the producer JSON and refuses
+an incomplete object before writing its canonical copy.
 
 Two consequences of the cut, which the tests account for:
 - Several DEFs share their first 4096 bytes. For example, the routed and
