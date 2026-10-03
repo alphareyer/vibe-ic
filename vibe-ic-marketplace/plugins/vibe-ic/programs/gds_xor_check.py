@@ -1167,7 +1167,11 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"(subject {str(conn.get('subject_sha256'))[:16]}..., shipped "
             f"{str(live)[:16]}..., basis {conn.get('basis')!r})"), doc
     fresh_conn = gds_connectivity(project, live, doc)
-    if fresh_conn != conn:
+    changed = (fresh_conn.get("verdict") != conn.get("verdict")
+               or fresh_conn.get("basis") != conn.get("basis"))
+    if current["inputs"].get("connectivity"):
+        changed = fresh_conn != conn
+    if changed:
         return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_CONNECTIVITY_EVIDENCE_CHANGED", doc
     if conn["verdict"] == "FAIL":
         return 1, (

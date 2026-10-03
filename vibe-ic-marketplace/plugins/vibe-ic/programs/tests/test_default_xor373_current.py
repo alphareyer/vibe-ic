@@ -1,7 +1,6 @@
 """Current native Step37.3 artefacts and substantive refusal controls."""
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -16,7 +15,10 @@ import librelane_contract as lc
 
 @pytest.fixture
 def project():
-    path = Path(os.environ["VIBEIC_XOR373_NATIVE_PROJECT"])
+    declared = os.environ.get("VIBEIC_XOR373_NATIVE_PROJECT")
+    if not declared:
+        pytest.skip("native producer artefacts not supplied: NOT_VERIFIED")
+    path = Path(declared)
     assert path.is_dir()
     return path
 
