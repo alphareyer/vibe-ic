@@ -10,6 +10,9 @@ def test_complete_consumer_with_unavailable_parent_stays_not_measured(tmp_path, 
     project, match, ref, _ = _fixture(tmp_path, monkeypatch)
     assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
     Path(match.canonical_url).rename(tmp_path / 'unreachable')
+    unavailable_cache = tmp_path / 'unavailable-cache'
+    assert not unavailable_cache.exists()
+    monkeypatch.setattr(pull, 'CACHE_ROOT', unavailable_cache)
     result = runner.step_rtl_gen(project, 'processor_cpu')
     assert result.status == 'NOT_MEASURED', result.detail
     assert 'IP_REUSE_PIN_VERIFY_UNAVAILABLE' in result.detail
