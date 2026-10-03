@@ -693,14 +693,14 @@ def _metrics(folder: Path) -> Dict[str, Any]:
 
 def run_antenna_router(project: Path, image: str, pdk_root: Path, pdk: str, *,
                        routed_def: Path, netlist: Path, sdc: Path,
-                       lane: str = '26') -> Dict[str, Any]:
+                       lane: str = '26', overlay: Optional[dict] = None) -> Dict[str, Any]:
     """`OpenROAD.CheckAntennas` on the ODB of the route that ships.
 
     The bridge reads the canonical routed DEF once, with the step config's own
     LEFs; there is no `global_route` (the direct re-read needed one and threw
     the antenna jumpers away, ANT-0008)."""
     configs = resolve_step_configs(project, image, pdk, list(ANTENNA_ROUTER_STEPS),
-                                   pdk_root=pdk_root, folder='26-config')
+                                   pdk_root=pdk_root, folder='26-config', overlay=overlay)
     mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
     for source in (routed_def, netlist, sdc):
         if not Path(source).is_file():
@@ -719,12 +719,12 @@ def run_antenna_router(project: Path, image: str, pdk_root: Path, pdk: str, *,
 
 
 def run_antenna_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
-                    gds: Path, lane: str = '26-gds') -> Dict[str, Any]:
+                    gds: Path, lane: str = '26-gds', overlay: Optional[dict] = None) -> Dict[str, Any]:
     """The PDK's antenna deck on the shipped stream (`KLayout.Antenna`), then
     the tool's own checker.  A checker refusal (count > 0) is recorded, not
     raised: the count is the evidence."""
     configs = resolve_step_configs(project, image, pdk, list(ANTENNA_GDS_STEPS),
-                                   pdk_root=pdk_root, folder='26-config')
+                                   pdk_root=pdk_root, folder='26-config', overlay=overlay)
     runset = _config(configs['KLayout.Antenna']).get('KLAYOUT_ANTENNA_RUNSET')
     if not runset:
         raise Refusal('LL_ANTENNA_RUNSET_UNDECLARED', f'{pdk}: KLAYOUT_ANTENNA_RUNSET')

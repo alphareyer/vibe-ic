@@ -52,6 +52,7 @@ PRODUCED: dict[str, tuple[str, ...]] = {
     'KLayout.DRC': ('klayout__drc_error__count',),
     'KLayout.Density': ('klayout__density_error__count',),
     'Magic.SpiceExtraction': ('magic__illegal_overlap__count',),
+    'KLayout.LVS': ('klayout__lvs_error__count',),
     'Netgen.LVS': ('design__lvs_error__count', 'design__lvs_unmatched_device__count',
                    'design__lvs_unmatched_net__count', 'design__lvs_unmatched_pin__count'),
     'KLayout.XOR': ('design__xor_difference__count',),
@@ -238,6 +239,55 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
     required = tuple(step for step in chain if step in PRODUCED)
     return judge_pv(folders, required, project / RECORD_REL.format(half=half),
                     scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)})
+
+
+def run_mixed_top(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
+                  views: dict[str, Path], overlay: dict) -> dict:
+    """Step31 on the merged mixed top, with its explicit powered/CDL pair.
+
+    run_half derives powered logic from the digital DEF, which cannot describe
+    the analog geometry M1 adds. This adapter supplies the declared paired
+    views and extracts full devices from GDS. Independent engines continue
+    after a refusal so an absent engine cannot erase a measured violation.
+    All configs, States, receipts and verdicts use the existing contract.
+    """
+    chain = HALVES[half] + (('KLayout.LVS',) if half == 'lvs' else ())
+    options = dict(tech_lef_overlay(project) or {})
+    options.update(overlay)
+    options.update({key: (value, 'M4 verifies the exact merged GDS, full devices')
+                    for key, value in {'MAGIC_DRC_USE_GDS': True,
+                                       'MAGIC_EXT_USE_GDS': True,
+                                       'MAGIC_EXT_ABSTRACT': False}.items()})
+    configs = resolve_step_configs(project, image, pdk, list(chain),
+                                   pdk_root=pdk_root, folder=f'31-{half}-config',
+                                   overlay=options)
+    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    folders, errors = [], []
+    extracted = None
+    for step in chain:
+        try:
+            if step == 'Netgen.LVS':
+                if extracted is None:
+                    raise Refusal('LL_MIXED_TOP_EXTRACTION_MISSING', step)
+                state = extracted
+            else:
+                state = state_from_direct(project, image, configs[step], views,
+                                          project / 'phase3/librelane' /
+                                          f'31-{half}-config' / f'bridge-{step}',
+                                          mounts=mounts)
+            made = run_chain(project, image, [(step, configs[step], state)],
+                             mounts=mounts, lane=f'31-{half}', pdk_root=PDK_GUEST_ROOT)
+            folders.extend(made)
+            if step == 'Magic.SpiceExtraction':
+                extracted = made[0] / 'state_out.json'
+        except (Refusal, ValueError, OSError) as exc:
+            errors.append(f'{step}: {exc}')
+    scope = {'gds_sha256': digest(views['gds']), 'def_sha256': digest(views['def']),
+             'magic_ext_use_gds': True, 'extracted_gds_sha256': digest(views['gds'])}
+    record = judge_pv(folders, chain, project / RECORD_REL.format(half=half), scope=scope)
+    record['execution_refusals'] = errors
+    write_json(project / RECORD_REL.format(half=half), record)
+    return record
 
 
 def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,

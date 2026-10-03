@@ -75,9 +75,17 @@ def tool_selected(project: Path, step: str = '31') -> bool:
         return True
 
 
-def finished_layout(project: Path, layout: Path | None = None) -> Path:
+def finished_layout(project: Path, layout: Path | None = None, *, mixed_top: bool = False) -> Path:
     """Resolve one declared finished stream; prove any tool promotion's bytes."""
     project = project.resolve()
+    if mixed_top:
+        # M1's merged stream is a distinct subject from digital stream-out.
+        # The M4 caller separately verifies its producer/current M1 bindings.
+        canonical = project / 'phase3/mixed_signal/top_merged.gds'
+        _require(layout is not None and layout.resolve() == canonical
+                 and canonical.resolve() == canonical and canonical.is_file(),
+                 'LL_MIXED_TOP_SUBJECT_UNBOUND')
+        return canonical
     if tool_selected(project, '37'):
         promo = _read(project / PROMOTION)
         arm = promo.get('selection')
@@ -226,6 +234,11 @@ def count_row(project: Path, folder: Path, step: str, key: str,
                 # already binds the real declared/resolved PDK tree.
                 continue
             translated = path
+            if path == Path('/pdk'):
+                # run_chain mounts the declared PDK child under this resolver
+                # directory. _pdk_mounts already proves its root provenance.
+                host, guest = mounts[0]
+                translated = Path(host) if guest == '/pdk' else Path(host).parent
             for host, guest in mounts:
                 if path.is_relative_to(guest):
                     translated = Path(host) / path.relative_to(guest)
@@ -286,15 +299,15 @@ def _verdict(rows: dict) -> str:
             NM if not values or any(v == NM for v in values) else 'PASS')
 
 
-def obligation(project: Path, kind: str, layout: Path | None = None) -> dict | None:
+def obligation(project: Path, kind: str, layout: Path | None = None, *, mixed_top: bool = False) -> dict | None:
     """None means direct authority; NM never permits legacy fallback."""
     step = {'density': '34', 'antenna': '26'}.get(kind, '31')
-    final_stream = kind in ('drc', 'density') and tool_selected(project, '37')
+    final_stream = not mixed_top and kind in ('drc', 'density') and tool_selected(project, '37')
     if not final_stream and not tool_selected(project, step):
         return None
     rows = {}
     try:
-        chosen = finished_layout(project, layout)
+        chosen = finished_layout(project, layout, mixed_top=mixed_top)
         # Final Step37 density is its own producer. Other metrics remain on
         # Step31; a stale Step31 record is not replaced by a legacy report.
         if kind == 'antenna':
@@ -341,7 +354,7 @@ def obligation(project: Path, kind: str, layout: Path | None = None) -> dict | N
                     'value': int(value) if type(value) is bool and bound else NM,
                     'reason': f'{flag}={value!r}; route source must be current and affirmative',
                     'record': str(path)}
-        elif kind == 'drc' and tool_selected(project, '37'):
+        elif kind == 'drc' and not mixed_top and tool_selected(project, '37'):
             arm = _read(project / PROMOTION)['selection']
             lane = project / f'phase3/librelane/37-{arm}-final-drc'
             path = lane / 'drc_judgment.json'
@@ -390,7 +403,7 @@ def obligation(project: Path, kind: str, layout: Path | None = None) -> dict | N
                 for row in rows.values():
                     if type(row['value']) is int and row['value'] == 0:
                         row.update(value=NM, reason='LL_JUDGED_STATE_CHANGED')
-        elif kind == 'density' and tool_selected(project, '37'):
+        elif kind == 'density' and not mixed_top and tool_selected(project, '37'):
             arm = _read(project / PROMOTION)['selection']
             path = project / f'phase3/librelane/37-{arm}-density.json'
             record = _read(path)

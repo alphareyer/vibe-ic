@@ -11,6 +11,9 @@ Every fixture below is synthetic PDK text, so the tests need no container and
 no PDK.
 """
 import json
+import importlib
+
+import pytest
 import subprocess
 import sys
 from pathlib import Path
@@ -30,9 +33,30 @@ GENCELL = """
 """
 
 DRC = """
+planes
+ metal1,m1
+end
+types
+ metal1 metal1,m1
+ metal1 rmetal1,rm1
+ -metal1 obsm1
+ -metal1 diffprobe
+end
+aliases
+ allm1 *m1,rm1
+end
+cifoutput
+style drc
+ scalefactor 10 nanometers
+end
+drc
+ style drc
+ scalefactor 10
+ cifstyle drc
  width *m1,rm1 160 "Metal1 width < %d (M1.a)"
  spacing allm1,diffprobe allm1,*obsm1 180 touching_ok \\
 \t"Metal1 spacing < %d (M1.b)"
+end
 """
 
 
@@ -117,3 +141,104 @@ def test_a_deck_missing_the_space_rule_yields_no_clearance(tmp_path):
                    drc=' width *m1,rm1 160 "Metal1 width < %d (M1.a)"\n')
     assert out["m1_space_um"] is None
     assert "tap_clear_um" not in out
+
+
+# Small exact-form excerpt from the pinned Ciel sky130A.tech, file SHA256
+# a9149695613d6ad30f898cfd1cedeaaf0adf38035f2b5818b4f0c9f5cf6f1614.
+# Apache-2.0; Copyright (c) 2020 R. Timothy Edwards.
+CIEL_METAL1 = """planes
+ metal1,m1
+ metal2,m2
+end
+types
+ metal1 metal1,m1,met1
+ metal1 rmetal1,rm1,rmet1
+ -metal1 obsm1
+ -metal1 m1fill
+ metal2 metal2,m2,met2
+ metal2 rmetal2,rm2,rmet2
+end
+aliases
+ allm1 *m1,rm1
+end
+cifoutput
+style drc
+ scalefactor 10 nanometers
+end
+drc
+ style drc variants (fast),(full),(routing)
+ scalefactor 10
+ cifstyle drc
+ width mcon/m1 170 "mcon.width < %d (mcon.1)"
+ spacing mcon/m1 mcon/m1,obsmcon/m1 190 touching_ok "mcon.spacing < %d (mcon.2)"
+ width *m1,rm1 140 "Metal1 width < %d (met1.1)"
+ spacing allm1,m1fill allm1,*obsm1,m1fill 140 touching_ok "Metal1 spacing < %d (met1.2)"
+ widespacing allm1 3005 allm1,*obsm1,m1fill 280 touching_ok "Metal1 > 3um spacing (met1.3b)"
+end
+"""
+
+
+def test_ciel_layer_set_rule_through_existing_cli(tmp_path):
+    rc, out = _run(tmp_path, drc=CIEL_METAL1)
+    assert rc == 0
+    assert out["m1_space_um"] == pytest.approx(0.14)
+    assert out["tap_clear_terms"]["m1_space_um"] == pytest.approx(0.14)
+    assert out["drc_tech"] == str(tmp_path / "drc.tech")
+
+
+def test_metal1_scale_comes_from_declared_drc_and_cif_units(tmp_path):
+    text = CIEL_METAL1.replace("scalefactor 10 nanometers", "scalefactor 20 nanometers")
+    rc, out = _run(tmp_path, drc=text)
+    assert rc == 0 and out["m1_space_um"] == pytest.approx(0.28)
+
+
+@pytest.mark.parametrize("old,new", [
+    ("width *m1,rm1 140", "width *m1,rm1 0"),
+    ("spacing allm1,m1fill allm1,*obsm1,m1fill 140", "spacing allm1,m1fill allm1,*obsm1,m1fill nan"),
+    ("scalefactor 10 nanometers", "scalefactor nan nanometers"),
+    ("scalefactor 10 nanometers", "scalefactor 10 unknown_units"),
+    ("scalefactor 10\n", "scalefactor 0\n"),
+    ("cifstyle drc", "cifstyle absent"),
+    ("allm1 *m1,rm1", "allm1 *m2,rm2"),
+    ("allm1 *m1,rm1", "allm1 undefined_layer"),
+    ("allm1 *m1,rm1", "allm1 allm1"),
+    ("allm1 *m1,rm1", "allm1 *m1,rm1\n allm1 *m2,rm2"),
+    ("scalefactor 10\n", "scalefactor 10\n scalefactor 20\n"),
+    ("cifstyle drc", "cifstyle drc\n cifstyle other"),
+    ("types\n metal1 metal1,m1,met1", "types\n metal2 metal1,m1,met1"),
+    ("allm1,m1fill allm1,*obsm1,m1fill", "allm1,m2 allm1,*obsm1,m1fill"),
+])
+def test_metal1_missing_bad_or_foreign_declarations_refuse(tmp_path, old, new):
+    assert old in CIEL_METAL1
+    rc, out = _run(tmp_path, drc=CIEL_METAL1.replace(old, new))
+    assert rc == 0  # preserve the existing CLI's partial-facts contract
+    assert out["m1_space_um"] is None
+    assert "tap_clear_um" not in out
+
+
+def test_missing_units_are_not_guessed(tmp_path):
+    fragment = ('width m1 140 "Metal1 width < %d (met1.1)"\n'
+                'spacing m1 m1 140 touching_ok "Metal1 spacing < %d (met1.2)"\n')
+    rc, out = _run(tmp_path, drc=fragment)
+    assert out["m1_space_um"] is None and "tap_clear_um" not in out
+
+
+def test_conflicting_baseline_spacing_is_not_arbitrarily_selected(tmp_path):
+    extra = ' spacing allm1,m1fill allm1,*obsm1,m1fill 150 touching_ok "Metal1 spacing < %d (met1.2)"\n'
+    text = CIEL_METAL1.rsplit("end", 1)[0] + extra + "end\n"
+    rc, out = _run(tmp_path, drc=text)
+    assert out["m1_space_um"] is None and "tap_clear_um" not in out
+
+
+def test_existing_a5_pdk_consumer_accepts_ciel_rule_and_keeps_refusal():
+    fixtures = importlib.import_module("test_analog_a5_layout_emit")
+    emitter = importlib.import_module("analog_a5_layout_emit")
+    stage = fixtures.CielSky130Stage()
+    stage.CIEL_TECH = CIEL_METAL1
+    facts, why = emitter.read_pdk(stage, "/pdk", "sky130A", None, None)
+    assert facts is not None, why
+    assert facts.m1_space_um == pytest.approx(0.14)
+    assert facts.sources["drc_tech"] == "/pdk/sky130A/libs.tech/magic/sky130A.tech"
+    stage.CIEL_TECH = CIEL_METAL1.replace("allm1 *m1,rm1", "allm1 *m2,rm2")
+    facts, why = emitter.read_pdk(stage, "/pdk", "sky130A", None, None)
+    assert facts is None and "ENV_UNAVAILABLE" in why and "Metal1" in why

@@ -1,0 +1,8 @@
+{
+  "pdk": "sky130A",
+  "original_cell": "sky130_fd_sc_hd__inv_1",
+  "source_gds_sha256": "0ff6ef920115f2c959bdb055eb73829fe94ebd142fb51fde94dc39b57f1997a6",
+  "model_source": "open sky130A PDK cell SPICE/CDL",
+  "scope": "bounded native PV receiver with logical interface wrapper",
+  "fabricated_reports": false
+}

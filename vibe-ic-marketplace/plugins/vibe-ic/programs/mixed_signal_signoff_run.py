@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Derive M4 from current M1-M3 and native top-level PV evidence.
+"""Produce native merged-top PV, then derive M4 from current M1-M3 evidence.
 
 ENFORCEMENT: blocking in M4, advisory to the independent digital track.
 No ready assertion is an input. LibreLane's existing material-bound evidence
 reader verifies Magic/KLayout/Netgen/antenna reports against the merged GDS.
+Ordinary M4 first runs those existing producers for the declared logical pair.
 Missing coverage cannot fall back to legacy counts. --check-only compares an
 existing signoff to the fresh derivation; it never creates that signoff.
 rc 0 genuinely ready, 2 unmeasured/upstream blocked production, 1 audit refused.
@@ -18,6 +19,7 @@ from _atomic_artefact import write_json
 import mixed_signal_m3_run as m3
 import mixed_signal_power_domain_run as m2
 import librelane_signoff_evidence as pv
+import _mixed_signal_top_pv as top_pv
 
 PROGRAM = "mixed_signal_signoff_run"
 SCHEMA = "vibeic.mixed_signal.m4.v1"
@@ -28,7 +30,8 @@ UPSTREAM = ("phase3/mixed_signal/top_merged.gds", m3.DIR + "/merge.json",
             m3.COSIM, m3.SI, m3.RECEIPT,
             "reports/phase3/librelane_pv_drc.json",
             "reports/phase3/librelane_pv_lvs.json",
-            "reports/phase3/antenna_librelane.json")
+            "reports/phase3/antenna_librelane.json", "reports/phase3/fill_librelane.json",
+            top_pv.OUTPUT, top_pv.REQUEST)
 
 
 def bindings(project):
@@ -60,6 +63,11 @@ def derive(project, top):
             raise m3.Refusal("WRONG_DESIGN", "upstream production belongs to another top")
     checks = []
     merged = project / "phase3/mixed_signal/top_merged.gds"
+    try:
+        top_pv.verify(project, top)
+        production_reason = None
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        production_reason = str(exc)
     # An M1 PASS without exact native subject binding cannot certify a layout.
     # The merged-top LVS obligation below supplies that binding when available.
     try:
@@ -95,12 +103,14 @@ def derive(project, top):
                        "findings": check["findings"]})
     for kind in ("drc", "lvs", "antenna", "density"):
         try:
-            native = pv.obligation(project, kind, layout=merged)
+            native = pv.obligation(project, kind, layout=merged, mixed_top=True)
             if native is None:
                 native = {"verdict": "NOT_MEASURED", "reason":
                           "applicable LibreLane native producer not selected; no legacy fallback"}
         except (ValueError, OSError, KeyError, TypeError) as exc:
             native = {"verdict": "NOT_MEASURED", "reason": str(exc)}
+        if production_reason and native.get("verdict") != "FAIL":
+            native = dict(native, verdict="NOT_MEASURED", production_refusal=production_reason)
         checks.append({"step": "PV_" + kind, "verdict": native.get("verdict", "NOT_MEASURED"),
                        "native": native})
         if kind == "lvs" and native.get("verdict") == "PASS" and checks[0].get("reason") == "merged-top native LVS binding required":
@@ -165,6 +175,7 @@ def main(argv=None):
             if not (project / OUTPUT).resolve().is_relative_to(project):
                 raise m3.Refusal("FOREIGN_OUTPUT", OUTPUT)
             (project / OUTPUT).unlink(missing_ok=True)
+            top_pv.produce(project, args.top)
             report = derive(project, args.top)
             write_json(project / OUTPUT, report)
             rc = 0 if report["ready_for_tapeout"] else 1 if report["verdict"] == "FAIL" else 2

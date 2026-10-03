@@ -1,0 +1,3 @@
+.SUBCKT mixed_probe A VGND VNB VPB VPWR Y
+Xreceiver A VGND VNB VPB VPWR Y sense_receiver
+.ENDS

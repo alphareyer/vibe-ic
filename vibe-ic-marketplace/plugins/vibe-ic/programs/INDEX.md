@@ -820,7 +820,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `mixed_signal_merge_check` | any | v0.2.84 | M1 gate (v0.2.84: SUBSTANCE, not presence). |
 | `mixed_signal_power_domain_run` | any | — | M2: placed protection-cell evidence from UPF + routed Verilog/DEF. |
 | `mixed_signal_signoff_check` | any | — | gate M4 (hardened, anti-fabrication). |
-| `mixed_signal_signoff_run` | any | — | Derive M4 from current M1-M3 and native top-level PV evidence. |
+| `mixed_signal_signoff_run` | any | — | Produce native merged-top PV, then derive M4 from current M1-M3 evidence. |
 | `mixed_signal_top_lvs_run` | any | — | REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub). |
 | `modbus_protocol_synth` | any | v0.1.84 | Modbus-class protocol synth helper. |
 | `modify_complete_synth` | any | — | deterministic SOLVER for two CVDP "complete / enhance a FULLY-and-UNAMBIGUOUSLY-specified atomic function" records whose function is pinn... |
@@ -2268,7 +2268,7 @@ _(no programs in this group)_
 - `mixed_signal_merge_check` — M1 gate (v0.2.84: SUBSTANCE, not presence).  _[v0.2.84]_
 - `mixed_signal_power_domain_run` — M2: placed protection-cell evidence from UPF + routed Verilog/DEF.
 - `mixed_signal_signoff_check` — gate M4 (hardened, anti-fabrication).
-- `mixed_signal_signoff_run` — Derive M4 from current M1-M3 and native top-level PV evidence.
+- `mixed_signal_signoff_run` — Produce native merged-top PV, then derive M4 from current M1-M3 evidence.
 - `mixed_signal_top_lvs_run` — REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub).
 - `modbus_protocol_synth` — Modbus-class protocol synth helper.  _[v0.1.84]_
 - `modify_complete_synth` — deterministic SOLVER for two CVDP "complete / enhance a FULLY-and-UNAMBIGUOUSLY-specified atomic function" records whose function is pinn...

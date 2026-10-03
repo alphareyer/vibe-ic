@@ -1,0 +1,10 @@
+{
+  "pdk": "sky130A",
+  "image": "ghcr.io/vibeic/vibeic-eda@sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe",
+  "steps": {
+    "31": "librelane",
+    "37": "direct",
+    "26": "librelane",
+    "34": "librelane"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "fields": {
+    "pdk_target": "sky130A"
+  }
+}

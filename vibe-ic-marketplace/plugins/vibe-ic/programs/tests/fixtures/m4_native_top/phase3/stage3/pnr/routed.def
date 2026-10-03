@@ -1,0 +1,10 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN mixed_probe ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 1760 3200 ) ;
+COMPONENTS 1 ;
+- u_receiver sense_receiver + FIXED ( 0 0 ) N ;
+END COMPONENTS
+END DESIGN

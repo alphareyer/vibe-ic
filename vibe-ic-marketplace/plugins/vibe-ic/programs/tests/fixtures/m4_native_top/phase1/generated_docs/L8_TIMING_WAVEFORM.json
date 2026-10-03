@@ -1,0 +1,10 @@
+{
+  "clock_domains": [
+    {
+      "name": "interface",
+      "role": "primary",
+      "source_pin": "A",
+      "period_ns": 10
+    }
+  ]
+}
