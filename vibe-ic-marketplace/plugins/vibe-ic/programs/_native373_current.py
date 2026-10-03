@@ -188,6 +188,8 @@ def connectivity(project, comparison):
     project = Path(project).resolve()
     doc = read_current(project)
     current = comparison["current"]
+    _require(comparison.get("shipped_sha256_live") == current["inputs"]["shipped"]["sha256"],
+             "NATIVE373_SHIPPED_IDENTITY_CHANGED")
     _require(current["inputs"].get("connectivity") == pc.entry(project, project / REL),
              "NATIVE373_DEPENDENCY_SWAPPED")
     _require(current["inputs"]["def"] == doc["current"]["inputs"]["def"], "NATIVE373_DEF_SWAPPED")

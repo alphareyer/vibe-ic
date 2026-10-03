@@ -36,7 +36,7 @@ def test_native_ordinary_caller_and_declared_consumer(project):
 
 @pytest.mark.parametrize("mutation", ["shipped", "reference", "def", "netlist", "sdc", "technology",
                                      "stage", "design", "pdk", "tool", "execution", "argv", "log",
-                                     "count", "connectivity", "missing_dependency", "material_hash",
+                                     "count", "connectivity", "shipped_identity", "missing_dependency", "material_hash",
                                      "material_unbound", "material_path", "mount", "image", "native_log",
                                      "native_execution", "stream_swapped", "identical_streams"])
 def test_current_native_refusal(project, mutation):
@@ -72,6 +72,10 @@ def test_current_native_refusal(project, mutation):
             edit(dep_path, dep)
         elif mutation == "connectivity":
             report["connectivity"]["measurements"][0]["evidence_sha256"] = "0" * 64
+            edit(report_path, report)
+        elif mutation == "shipped_identity":
+            report["shipped_sha256_live"] = "0" * 64
+            report["connectivity"]["subject_sha256"] = "0" * 64
             edit(report_path, report)
         elif mutation == "missing_dependency":
             edit(dep_path, {})
