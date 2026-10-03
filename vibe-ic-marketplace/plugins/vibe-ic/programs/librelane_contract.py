@@ -2599,7 +2599,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
-        if step_id in ('Magic.StreamOut', 'KLayout.StreamOut', 'KLayout.XOR'):
+        if lane in ('37.3-magic', '37.3-compare'):
             fingerprint['config_files'] = _current_config_material(
                 _load(config), mounts or [])
         if step_id == 'OpenROAD.STAPostPNR':

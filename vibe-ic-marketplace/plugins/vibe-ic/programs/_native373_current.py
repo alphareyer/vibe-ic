@@ -139,7 +139,7 @@ def produce(project, routed_def):
         configs = lc.resolve_step_configs(project, image, pdk, list(STEPS),
                                            pdk_root=pdk_root, docker=launcher,
                                            folder="37.3-config", overlay=overlay)
-        mounts = [(pdk_root / pdk, f"/pdk/{pdk}")]
+        mounts = [(pdk_root, "/pdk")]
         state = lc.state_from_direct(project, image, configs[STEPS[0]],
                                      {"def": routed_def, "nl": sources["netlist"], "sdc": sources["sdc"]},
                                      project / CONFIG / "bridge", mounts=mounts, docker=launcher)

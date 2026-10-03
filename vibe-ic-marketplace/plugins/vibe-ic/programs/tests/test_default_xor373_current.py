@@ -112,7 +112,8 @@ def test_current_native_refusal(project, mutation):
             path.write_bytes(content)
 
 
-def test_material_bytes_and_mount_are_read(tmp_path):
+@pytest.mark.parametrize("scenario", ["current", "changed", "missing"])
+def test_material_bytes_and_mount_are_read(tmp_path, scenario):
     root = tmp_path / "real_mount"
     root.mkdir()
     deck = root / "declared.deck"
@@ -121,8 +122,10 @@ def test_material_bytes_and_mount_are_read(tmp_path):
     mounts = [(root, "/pdk")]
     first = lc._current_config_material(config, mounts)
     assert first == {str(deck): pc.digest(deck)}
-    deck.write_text("changed declared fixture material\n")
-    assert lc._current_config_material(config, mounts) != first
-    deck.unlink()
-    with pytest.raises(lc.Refusal, match="LL_CONFIG_MATERIAL_MISSING"):
-        lc._current_config_material(config, mounts)
+    if scenario == "changed":
+        deck.write_text("changed declared fixture material\n")
+        assert lc._current_config_material(config, mounts) != first
+    elif scenario == "missing":
+        deck.unlink()
+        with pytest.raises(lc.Refusal, match="LL_CONFIG_MATERIAL_MISSING"):
+            lc._current_config_material(config, mounts)
