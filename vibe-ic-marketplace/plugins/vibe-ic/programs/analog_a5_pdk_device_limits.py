@@ -246,21 +246,129 @@ def gencell_defaults(text: str, source: str = "") -> Dict[str, dict]:
 
 
 def m1_space_um(text: str) -> Optional[float]:
-    """Metal1 min space / notch, in um, from the DRC deck.
+    """Read the baseline Metal1 rule and its declared physical scale.
 
-    magic decks state the value in the deck's own integer units and name the
-    rule in the trailing message; the width rule on the same layer calibrates
-    the unit, so no scale factor is assumed.
+    Magic DRC distances are dimensionless: CIF microns per database unit
+    divided by DRC units per database unit supplies the conversion. A legacy
+    fragment may instead calibrate from an explicit physical width message.
+    No rule number, magnitude, layer substring or assumed nm supplies a limit.
     """
-    sp = re.search(r"^\s*spacing\s+\S*m1\S*[^\n]*?\s(\d+)\s+touching_ok\s*"
-                   r"\\?\s*\n?[^\n]*M1\.b", text, re.M)
-    wd = re.search(r"^\s*width\s+\S*m1\S*[^\n]*?\s(\d+)\s+\"[^\"]*M1\.a",
-                   text, re.M)
-    if not sp or not wd:
+    import math
+
+    flat = re.sub(r"\\\s*\n", " ", text)
+    sections = _tech_sections(flat)
+    identity = layer_identity(flat)
+    target = identity.canon.get("m1", "m1")
+    if identity.plane_of and identity.level("m1") != 1:
         return None
-    # the deck's units are calibrated by the width rule: magic PDKs state
-    # these in nm, which the width rule's own magnitude confirms.
-    return int(sp.group(1)) / 1000.0
+    aliases: Dict[str, set] = {}
+    for row in sections.get("aliases", []):
+        parts = row.split()
+        if len(parts) == 2:
+            aliases.setdefault(parts[0], set()).add(parts[1])
+    planes: Dict[str, set] = {}
+    for row in sections.get("types", []):
+        parts = row.split()
+        if len(parts) == 2:
+            plane = parts[0].lstrip("-")
+            plane = identity.plane_canon.get(plane, plane)
+            for name in parts[1].split(","):
+                planes.setdefault(name, set()).add(plane)
+
+    def members(expr: str, seen: tuple = ()) -> Optional[set]:
+        out = set()
+        for token in expr.split(","):
+            name = token[1:] if token.startswith("*") else token
+            if name in aliases:
+                if name in seen or len(aliases[name]) != 1:
+                    return None
+                expanded = members(next(iter(aliases[name])), (*seen, name))
+                if expanded is None:
+                    return None
+                out.update(expanded)
+            elif identity.knows(name):
+                if planes.get(name) != {identity.plane_of[target]}:
+                    return None
+                out.add(identity.canon[name])
+            elif not identity.plane_of and name == "m1":
+                out.add(name)  # legacy single-layer fragment, not a guessed set
+            else:
+                return None
+        return out
+
+    widths, spaces, scales = set(), set(), []
+    for row in flat.splitlines():
+        width = re.fullmatch(r'\s*width\s+(\S+)\s+(\S+)\s+"([^"]*)"\s*', row)
+        space = re.fullmatch(r'\s*spacing\s+(\S+)\s+(\S+)\s+(\S+)'
+                             r'\s+touching_ok\s+"([^"]*)"\s*', row)
+        if width and re.search(r"\bMetal1 width\s*<", width[3], re.I):
+            layers = members(width[1])
+            if layers is None or target not in layers or not width[2].isdigit():
+                return None
+            value = int(width[2])
+            if value <= 0:
+                return None
+            widths.add(value)
+            physical = re.search(r"<\s*([0-9.eE+-]+)\s*(um|nm)\b", width[3])
+            if physical:
+                try:
+                    scales.append(float(physical[1]) *
+                                  {"um": 1.0, "nm": 0.001}[physical[2]] / value)
+                except ValueError:
+                    return None
+        if space and re.search(r"\bMetal1 spacing\s*<", space[4], re.I):
+            left, right = members(space[1]), members(space[2])
+            if (left is None or right is None or target not in left
+                    or target not in right or not space[3].isdigit()):
+                return None
+            value = int(space[3])
+            if value <= 0:
+                return None
+            spaces.add(value)
+    if len(widths) != 1 or len(spaces) != 1:
+        return None
+
+    drc = re.findall(r"^drc\s*\n(.*?)^end\s*$", flat, re.M | re.S)
+    cif = re.findall(r"^cifoutput\s*\n(.*?)^end\s*$", flat, re.M | re.S)
+    if drc or cif:
+        if len(drc) != 1 or len(cif) != 1:
+            return None
+        selected = re.findall(r"^\s*cifstyle\s+(\S+)\s*$", drc[0], re.M)
+        factors = re.findall(r"^\s*scalefactor\s+([^\n]+)", drc[0], re.M)
+        if len(selected) != 1 or len(factors) != 1:
+            return None
+        style = re.findall(r"^\s*style\s+" + re.escape(selected[0]) +
+                           r"(?=\s|$)[^\n]*\n(.*?)(?=^\s*style\s|\Z)",
+                           cif[0], re.M | re.S)
+        if len(style) != 1:
+            return None
+        output = re.findall(r"^\s*scalefactor\s+([^\n]+)", style[0], re.M)
+        if len(output) != 1:
+            return None
+        try:
+            ds, cs = factors[0].split(), output[0].split()
+            if len(ds) not in (1, 2) or len(cs) not in (1, 2):
+                return None
+            drc_scale = float(ds[0]) / (float(ds[1]) if len(ds) == 2 else 1.0)
+            cif_scale = float(cs[0])
+            # Magic's documented default CIF unit is a centimicron.
+            unit = {"nanometers": 0.001, "angstroms": 0.0001,
+                    "centimicrons": 0.01}.get(cs[1] if len(cs) == 2 else "centimicrons")
+            if (unit is None or not math.isfinite(drc_scale) or drc_scale <= 0
+                    or not math.isfinite(cif_scale) or cif_scale <= 0
+                    or any(float(v) <= 0 for v in ds)):
+                return None
+            scales.append(cif_scale * unit / drc_scale)
+        except (ValueError, ZeroDivisionError):
+            return None
+    if (not scales or any(not math.isfinite(v) or v <= 0 for v in scales)
+            or any(not math.isclose(v, scales[0], rel_tol=1e-12) for v in scales)):
+        return None
+    try:
+        value = next(iter(spaces)) * scales[0]
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 # ── the rest of what the deck states, for a caller that DRAWS ─────────
