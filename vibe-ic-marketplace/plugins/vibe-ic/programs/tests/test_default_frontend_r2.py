@@ -183,6 +183,77 @@ def _produce(tmp_path, monkeypatch, *, ordinary=False):
     return p, rtl, calls
 
 
+def _staged_synthesis_library(tmp_path, monkeypatch, route):
+    """Reuse the production-caller fixture with the canonical staging shape."""
+    import shutil
+
+    p, _, pdk, calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    library = Path(pdk.liberty)
+    root = library.parents[4]
+    pdk.name = library.parents[3].name
+    put(p / "input/project.json", {"pdk": pdk.name})
+    doc = json.loads((p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json").read_text())
+    doc["fields"]["pdk_target"] = pdk.name
+    put(p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", doc)
+    monkeypatch.setattr(P3, "_detect_pdk", lambda project, name: pdk if name == pdk.name else None)
+    image_root = Path("/image-selected-pdks")
+    monkeypatch.setattr(P3, "PDKS_IN_CONTAINER", str(image_root))
+    relative = library.relative_to(root)
+    staging = {"path": str(root), "source": "resolved", "derivation": {
+        "pdk": pdk.name, "image_pdk_root": str(image_root),
+        "guest_path": str(image_root / pdk.name), "host_path": str(root / pdk.name)}}
+    if route in ("ciel", "declared_ciel"):
+        relative = Path("ciel/family/versions/version-id") / relative
+    if route == "declared_ciel":
+        target = root / relative
+        shutil.copytree(root / pdk.name, target.parents[3])
+        library = target
+        staging = {"path": str(root), "source": "declared"}
+    pdk.liberty = str(library if route == "host" else image_root / relative)
+    monkeypatch.setattr(LC, "pdk_root_resolution", lambda *a, **k: staging)
+    return p, pdk, calls, library, staging, relative
+
+
+@pytest.mark.parametrize("route", ["ciel", "named", "host", "declared_ciel"])
+def test_step9_staged_library_mapping_preserves_selected_bytes(tmp_path, monkeypatch, route):
+    p, pdk, calls, library, staging, _ = _staged_synthesis_library(tmp_path, monkeypatch, route)
+    expected_hash = LC.digest(library)
+    row = D.step_yosys_synth(p, "top", "unused")
+    assert row.status == "PASS", row.detail
+    assert Path(pdk.liberty) == library
+    assert LC.digest(Path(pdk.liberty)) == expected_hash
+    cfg = json.loads((p / "phase3/librelane/synth_config.json").read_text())
+    root = Path(staging["path"])
+    expected = "/pdk/" + str(library.relative_to(root))
+    assert cfg["LIB"] == {"*": [expected]}
+    assert cfg["PDK"] == pdk.name
+    assert "Yosys.Synthesis" in calls[0]
+    assert H.bound_handoff(p)["verdict"] == "PASS"
+    assert P3.pnr_input_netlist(p, "top")[0].read_bytes() == (p / "phase2/stage2/synth/netlist.v").read_bytes()
+
+
+@pytest.mark.parametrize("damage", ["missing", "foreign", "staging_conflict"])
+def test_step9_staged_library_missing_or_conflicting_assets_refuse_before_tool(
+        tmp_path, monkeypatch, damage):
+    p, pdk, calls, library, staging, relative = _staged_synthesis_library(tmp_path, monkeypatch, "ciel")
+    root = Path(staging["path"])
+    if damage == "missing":
+        library.unlink()
+    elif damage == "foreign":
+        relative = Path(*relative.parts[:4], "otherPDK", *relative.parts[5:])
+        decoy = root / relative
+        decoy.parent.mkdir(parents=True)
+        decoy.write_bytes(library.read_bytes())
+        pdk.liberty = str(Path(P3.PDKS_IN_CONTAINER) / relative)
+    else:
+        staging["derivation"]["pdk"] = "otherPDK"
+    row = D.step_yosys_synth(p, "top", "unused")
+    assert row.status == "FAIL", row
+    assert "LL_PDK_LIB_" in row.detail
+    assert calls == []
+    assert not (p / "phase2/stage2/synth/netlist.v").exists()
+
+
 def test_step9_phase2_default_publishes_exact_tool_bytes_and_step14_passes(tmp_path, monkeypatch):
     p, _, calls = _produce(tmp_path, monkeypatch, ordinary=True)
     assert calls == [["Yosys.JsonHeader", "Yosys.Synthesis", "Checker.YosysUnmappedCells",
