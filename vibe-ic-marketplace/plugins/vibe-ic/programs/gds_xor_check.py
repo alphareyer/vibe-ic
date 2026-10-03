@@ -811,7 +811,8 @@ CONNECTIVITY_BASES = ("magic_vs_klayout_stream_xor",
 _CONNECTIVITY_UNMEASURED_CLASS = "FLOW_DOES_NOT_PERFORM"
 
 
-def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
+def gds_connectivity(project: Path, live_sha256: str,
+                     comparison: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Is the SHIPPED GDS (these bytes) shown to carry the routed connectivity?
 
     WHAT DOES NOT COUNT, measured on the spm IC-path tail (cx_spmic2_run,
@@ -834,6 +835,19 @@ def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
     """
     found: List[Dict[str, Any]] = []
     looked: List[str] = []
+    if comparison and (comparison.get("current") or {}).get("inputs", {}).get("connectivity"):
+        import _native373_current as _bounded
+        try:
+            measured = _bounded.connectivity(project, comparison)
+            measured["basis"] = CONNECTIVITY_BASES[0]
+            return {"subject_sha256": live_sha256, "measurements": [measured],
+                    "not_measured_by": [], "verdict": measured["verdict"],
+                    "basis": measured["basis"]}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return {"subject_sha256": live_sha256, "measurements": [],
+                    "not_measured_by": [str(exc)], "verdict": "NOT_DETERMINED", "basis": None,
+                    "reason_class": _CONNECTIVITY_UNMEASURED_CLASS,
+                    "reason": "current native stream dependency refused: " + str(exc)}
     promo = _json(project / LIBRELANE_PROMOTION_REL)
     if not isinstance(promo, dict):
         looked.append(f"{LIBRELANE_PROMOTION_REL} absent (no Magic-vs-KLayout "
@@ -1154,8 +1168,8 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"connectivity is not bound to the shipped GDS it compared "
             f"(subject {str(conn.get('subject_sha256'))[:16]}..., shipped "
             f"{str(live)[:16]}..., basis {conn.get('basis')!r})"), doc
-    fresh_conn = gds_connectivity(project, live)
-    if fresh_conn.get("verdict") != conn.get("verdict") or fresh_conn.get("basis") != conn.get("basis"):
+    fresh_conn = gds_connectivity(project, live, doc)
+    if fresh_conn != conn:
         return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_CONNECTIVITY_EVIDENCE_CHANGED", doc
     if conn["verdict"] == "FAIL":
         return 1, (
@@ -1294,7 +1308,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         """R-0929-GDSXOR-SPLIT: `verdict` stays the GEOMETRIC answer; the
         shipped bytes' connectivity is its own field, which step 37.3's
         judge composes with it (`judge_receipt`)."""
-        conn = gds_connectivity(project, live)
+        conn = gds_connectivity(project, live, report)
         report["connectivity"] = conn
         return finish(verdict, rc, f"{reason}; connectivity of the shipped "
                                    f"GDS: {conn['verdict']}"
@@ -1315,6 +1329,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             return finish(ll["verdict"], ll["rc"], ll["reason"])
         return finish_geometric(ll["verdict"], ll["rc"], ll["reason"])
 
+    bounded = None
+    try:
+        import _native373_current as _bounded
+        bounded = _bounded.produce(project, dfile)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        report["native_dependency_refusal"] = str(exc)
+
     try:
         import _klayout_launch as _kl
     except ImportError as exc:                             # pragma: no cover
@@ -1323,7 +1344,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # own `reports/container_image.json` names the container it used, so this
     # invocation and the runner's resolve the same environment instead of falling
     # through to a conventional default that mounts a different tree.
-    runner = _kl.find_runner(args.container, project=project)
+    runner = (_bounded.ShippedXorRunner(project, bounded["image"]) if bounded is not None
+              else _kl.find_runner(args.container, project=project))
     if runner is None or not runner.covers(shipped):
         return finish("NOT_DETERMINED", 2,
                       "no KLayout runner reaches this project, so the comparison "
@@ -1332,6 +1354,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     timeout = args.timeout if args.timeout > 0 else 24 * 3600
     kept, kind, prov = resolve_reference(project, dfile.stem, dfile)
+    if bounded is not None:
+        # The reference is a real stream of this current DEF, independently
+        # compared against the other engine before the shipped comparison.
+        import _physical_current as _pc
+        streams = bounded["current"]["outputs"]
+        chosen = next((streams[role] for role in ("magic_gds", "klayout_gds")
+                       if streams[role]["sha256"] != live), None)
+        if chosen is not None:
+            kept = project / chosen["path"]
+            kind = "native two-engine"
+            prov = {"kind": "native_stream", "path": chosen["path"],
+                    "sha256": chosen["sha256"], "dependency": _bounded.REL}
     report["reference"] = prov
     with tempfile.TemporaryDirectory(prefix="gds_xor_ref_",
                                      dir=str(project)) as scratch:
@@ -1371,6 +1405,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "reference": _pc.entry(project, reference),
                       "def": _pc.entry(project, dfile),
                       "technology": _pc.entry(project, technology)}
+            if bounded is not None:
+                inputs["connectivity"] = _pc.entry(project, project / _bounded.REL)
             design_name = _pc.design_of(dfile)
         except (OSError, ValueError) as exc:
             return finish("NOT_DETERMINED", 2, f"XOR_CURRENT_INPUT_REFUSED: {exc}")
@@ -1385,6 +1421,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         report["current"] = _pc.build(
             project, "37.3", "stage4", design_name, pdk_name, "klayout", inputs,
             {"log": _pc.entry(project, log_path)},
+            getattr(runner, "execution", None) or
             {"rc": rc, "argv": ["klayout", "-b", "-r", str(script_path)],
              "runner": report["runner"]})
         counts, done = parse_layers(so)

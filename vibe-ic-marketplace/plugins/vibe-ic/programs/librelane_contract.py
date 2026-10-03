@@ -2511,6 +2511,23 @@ def validate_rcx_receipt(folder: Path) -> dict:
         raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
 
 
+def _current_config_material(config: dict, mounts: list) -> dict:
+    """Hash the real files read through the caller's declared mounts."""
+    result = {}
+    for path in _walk_paths(config):
+        material = path
+        for host, guest in mounts:
+            if path.is_relative_to(guest):
+                material = Path(host) / path.relative_to(guest)
+                break
+        if material.is_dir():
+            continue
+        if not material.is_file():
+            raise Refusal('LL_CONFIG_MATERIAL_MISSING', str(path))
+        result[str(material)] = digest(material)
+    return result
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2582,6 +2599,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
+        if step_id in ('Magic.StreamOut', 'KLayout.StreamOut', 'KLayout.XOR'):
+            fingerprint['config_files'] = _current_config_material(
+                _load(config), mounts or [])
         if step_id == 'OpenROAD.STAPostPNR':
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
