@@ -197,6 +197,11 @@ def _read_top_ports(project: Path) -> List[Dict[str, object]]:
         doc = json.loads(spec.read_text(errors="replace"))
     except (OSError, ValueError) as exc:
         raise Unavailable("INTEGRATION_SPEC_UNREADABLE", str(exc))
+    from _staged_top_module import refresh_selected_interface
+    try:
+        doc = refresh_selected_interface(project, spec, doc)
+    except ValueError as exc:
+        raise Refusal("SELECTED_INTERFACE_BINDING_REFUSED", str(exc))
     ports = doc.get("top_ports") or doc.get("ports") or []
     if not isinstance(ports, list) or not ports:
         raise Unavailable("NO_TOP_PORTS",

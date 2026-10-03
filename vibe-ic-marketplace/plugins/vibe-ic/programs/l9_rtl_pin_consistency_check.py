@@ -699,13 +699,15 @@ def _declared_interface_protocols(project: Path) -> set:
     return out
 
 
-def _l3_iface_illustrative(project: Path, iface: str) -> bool:
+def _l3_iface_illustrative(project: Path, iface: str, *, input_only=False) -> bool:
     """ORGANIC #711 r2 — True iff an L3 input/generated doc marks the `<iface>`
     interface sub-ports as TYPICAL/ILLUSTRATIVE (the `<name>` (or `<alt>`) /
     '(typical)' / 'illustrative' notation on a line naming an `<iface>` port).
     This is the design's OWN authoritative 'these names are illustrative'
     signal — without it the interface must match exactly (no auto-reconcile)."""
-    roots = [project / "input" / "docs", _pl.generated_docs_dir(project)]
+    roots = [project / "input" / "docs"]
+    if not input_only:
+        roots.append(_pl.generated_docs_dir(project))
     tok = re.compile(rf"(?:^|_){re.escape(iface)}(?:_|\b)", re.IGNORECASE)
     for root in roots:
         if not root.is_dir():
@@ -722,7 +724,7 @@ def _l3_iface_illustrative(project: Path, iface: str) -> bool:
 
 
 def _auto_derive_renamed_interfaces(project: Path, only_l9: list,
-                                    only_rtl: list) -> list:
+                                    only_rtl: list, *, input_only=False) -> list:
     """ORGANIC #711 r2 — derive `renamed_interfaces` groups WITHOUT a hand-
     authored manifest block. For each interface that is BOTH protocol-declared
     (declaration.json) AND L3-illustrative, pair the residual L9-only and
@@ -733,7 +735,7 @@ def _auto_derive_renamed_interfaces(project: Path, only_l9: list,
         return []
     out: list = []
     for iface in sorted(ifaces):
-        if not _l3_iface_illustrative(project, iface):
+        if not _l3_iface_illustrative(project, iface, input_only=input_only):
             continue
         tok = re.compile(rf"(?:^|_){re.escape(iface)}(?:_|\b)", re.IGNORECASE)
         l9_grp = sorted(p for p in only_l9 if tok.search(p))

@@ -52208,9 +52208,17 @@ def gen_l9_integration_spec(project: Path,
     _czl9_prose_port_fallback(content, extracted)
     _czl9_emit_interface_prose(content, extracted)
 
-    return _write_l_doc(
+    result = _write_l_doc(
         project, "L9_INTEGRATION_SPEC", content, evidence,
         source_documents=_source_documents_from_extracted(project, extracted))
+    # The selected synthesis handoff reads this exact L9 as current authority.
+    # Publish the genuine authored document before invoking that consumer;
+    # its existing receipt/hash and current-interface refusals stay strict.
+    emitted = json.loads(result.path.read_text())
+    bound = _stgtop.refresh_selected_interface(project, result.path, emitted)
+    return LDocResult(name=result.name, path=result.path,
+                      todo_count=json.dumps(bound).count("__TODO__"),
+                      evidence_count=result.evidence_count)
 
 
 # v1.6.289 — for #156 ORGANIC. Bring-up paragraph list harvester.

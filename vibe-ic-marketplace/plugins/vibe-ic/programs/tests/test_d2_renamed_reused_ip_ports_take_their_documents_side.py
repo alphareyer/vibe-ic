@@ -178,6 +178,116 @@ def test_the_wrapper_passes_the_runners_core_connection_backstop(tmp_path):
         "core", IO._record(proj).get("chip_top_module") or "chip_top")
 
 
+def _selected_project(tmp_path, *, protocol=True, missing_mandatory=False,
+                      wrong_width=False):
+    doc_ports = [p for p in SPEC["top_ports"]
+                 if p["name"] in DOC_ONLY or p["name"] in {"clk", "rst", "o_status"}]
+    doc_ports = [{k: v for k, v in p.items()
+                  if k not in {"declared_by_staged_top", "extraction_strategy"}}
+                 for p in doc_ports]
+    if missing_mandatory:
+        doc_ports.append({"name": "i_required", "direction": "input", "width": 1})
+    if wrong_width:
+        doc_ports[0]["width"] = 4
+    doc = DOC + """
+## Memory interface examples
+| Signal | Width | Direction | Description |
+|---|---|---|---|
+| `o_memory_data` (or `o_memory_wdata`) | 2 | output | data (typical) |
+| `o_memory_addr` | 1 | output | address (typical) |
+| `o_memory_we` | 1 | output | enable (typical) |
+"""
+    proj = _project(tmp_path, doc=doc,
+                    spec={"top_module": "core", "top_ports": doc_ports})
+    d = proj / "plugin_output"
+    d.mkdir()
+    choice = {"top_module": "core"}
+    if protocol:
+        choice["memory_interface_protocol"] = "split_read_write"
+    (d / "declaration.json").write_text(json.dumps(choice))
+    (d / "declaration.provenance.json").write_text(json.dumps(
+        {"fields": {"top_module": {"provenance_verified": False}}}))
+    return proj
+
+
+def test_selected_declared_interface_rebinds_l9_and_the_normal_wrapper(tmp_path):
+    import phase3_one_shot_runner as R
+    proj = _selected_project(tmp_path)
+    original_choice = (proj / "plugin_output/declaration.provenance.json").read_bytes()
+    res = IO._run(GEN, proj, IO._pdk(tmp_path / "pdk"))
+    assert res.returncode == 0, res.stdout + res.stderr
+    R._validate_padring_core_connections(
+        proj / "phase2/stage2/synth/core_synth.v", proj / CHIP_TOP_V,
+        "core", "chip_top")
+    l9 = json.loads((proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+    assert l9["top_ports"] == l9["ports"] == l9["top_module_pins"]
+    rows = {p["name"]: p for p in l9["top_ports"]}
+    assert rows["o_memory_wdata"]["width"] == 2
+    assert rows["o_memory_wdata"]["direction"] == "output"
+    assert all(rows[n]["declared_by_staged_top"] is False for n in DOC_ONLY)
+    assert (proj / "plugin_output/declaration.provenance.json").read_bytes() == original_choice
+
+
+def test_l9_regeneration_publishes_before_selected_handoff_read(tmp_path, monkeypatch):
+    """Exercise the real emitter ordering with L9 absent at entry.
+
+    This neutral fixture keeps the consumer's exact-name L9 read. The bounded
+    actual-project control separately verifies the full native receipt/hash
+    consumer, without replaying synthesis or inventing a generated L9.
+    """
+    import librelane_contract as LC
+    import phase1_doc_one_shot_runner as D
+    import phase3_one_shot_runner as R
+    proj = _selected_project(tmp_path)
+    source_doc = proj / "input/docs/L3_external_interface.md"
+    source_doc.write_text(source_doc.read_text() + "\nTop-level module: core\n")
+    docs = proj / "phase1/generated_docs"
+    l9 = docs / "L9_INTEGRATION_SPEC.json"
+    original = json.loads(l9.read_text())
+    (docs / "L1_DATASHEET.json").write_text(json.dumps(
+        {"ic_name": "core", "top_module": "core",
+         "pin_table": [dict(p, mode=p["direction"])
+                       for p in original["top_ports"]]}))
+    l9.unlink()
+    observed = []
+
+    def selected_handoff(project, top):
+        current = LC._ldoc(project / "phase1/generated_docs", l9.name)
+        assert current["top_module"] == top == "core"
+        assert not current.get("phase1_step_error")
+        observed.append(current)
+        return project / "phase2/stage2/synth/core_synth.v", "fixture", False
+
+    monkeypatch.setattr(R, "pnr_input_netlist", selected_handoff)
+    extracted = {p.name: p.read_text() for p in (proj / "input/docs").glob("*.md")}
+    assert not l9.exists()
+    result = D.gen_l9_integration_spec(proj, extracted, {})
+    final = json.loads(result.path.read_text())
+    assert observed and result.path == l9
+    assert final["top_ports"] == final["ports"] == final["top_module_pins"]
+    assert final["selected_interface_binding"]["selected_source"].endswith("core_synth.v")
+    assert {p["name"] for p in final["top_ports"]
+            if p.get("declared_by_staged_top") is True} == {
+                "clk", "rst", "o_status", "o_memory_wdata", "o_memory_waddr", "o_memory_wen"}
+
+
+@pytest.mark.parametrize("kw", [{"protocol": False},
+                                {"missing_mandatory": True},
+                                {"wrong_width": True}],
+                         ids=["undeclared-interface", "mandatory-port", "named-width"])
+def test_selected_binding_preserves_contract_refusals(tmp_path, kw):
+    import phase3_one_shot_runner as R
+    proj = _selected_project(tmp_path, **kw)
+    res = IO._run(GEN, proj, IO._pdk(tmp_path / "pdk"))
+    if res.returncode == 0:
+        with pytest.raises(ValueError, match="PADRING_CORE_PORT_CONNECTION_MISMATCH"):
+            R._validate_padring_core_connections(
+                proj / "phase2/stage2/synth/core_synth.v", proj / CHIP_TOP_V,
+                "core", "chip_top")
+    else:
+        assert "SELECTED_INTERFACE_BINDING_REFUSED" in res.stdout + res.stderr
+
+
 # --------------------------------------------------------------------------- #
 # the refusals that stay
 # --------------------------------------------------------------------------- #

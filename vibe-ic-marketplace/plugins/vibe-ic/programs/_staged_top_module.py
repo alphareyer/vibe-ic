@@ -63,6 +63,10 @@ say so; a consumer that needs to know the port is not a scalar now can.
 from __future__ import annotations
 
 import sys
+import copy
+import hashlib
+import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -196,3 +200,144 @@ def staged_top_ports(project, vendor_dir,
     if top is None:
         return []
     return declared_ports(modules, top, project=project)
+
+
+def bind_selected_interface(project: Path, content: dict) -> dict:
+    """Bind a delegated, declared reused-IP interface to its selected top.
+
+    Reuse the existing protocol + original L3 illustrative-name authority.
+    Keep document examples for pad-group evidence; only those names receive
+    the existing absent-from-top label. Fixed ports, directions and known
+    widths remain obligations. This does not verify the declaration's author.
+    """
+    from l9_rtl_pin_consistency_check import _auto_derive_renamed_interfaces
+    from renamed_interface_derive import _rtl_top_ports
+
+    project = Path(project)
+    already_bound = "selected_interface_binding" in content
+
+    def not_applicable(reason: str) -> dict:
+        # First-time optional enrichment may be inapplicable. Once bound,
+        # losing its current authority must not return the stale projection.
+        if already_bound:
+            raise ValueError(f"already-bound selected interface: {reason}")
+        return content
+
+    choice_path = project / "plugin_output/declaration.json"
+    manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    try:
+        choice = json.loads(choice_path.read_text())
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as exc:
+        return not_applicable(f"current declaration or reused-IP manifest unreadable: {exc}")
+    if not isinstance(choice, dict) or not isinstance(manifest, dict):
+        return not_applicable("current declaration and reused-IP manifest must be objects")
+    if manifest.get("reused_ip") is not True:
+        return not_applicable("current manifest no longer declares reused_ip=true")
+    top = str(content.get("top_module") or "")
+    if not choice.get("top_module"):
+        return not_applicable("current declaration.top_module is missing")
+    if choice["top_module"] != top:
+        raise ValueError(f"selected top {choice['top_module']!r} differs from L9 {top!r}")
+    selected = _rtl_top_ports(project, top)
+    # The ordinary pad consumer can have only the selected synthesis header;
+    # use the same selection and header parser as its existing core backstop.
+    try:
+        from phase3_one_shot_runner import pnr_input_netlist
+        from lec_run import netlist_top_ports
+        netlist, _note, _scan = pnr_input_netlist(project, top)
+        parsed = netlist_top_ports(netlist.read_text(), top)
+        if parsed:
+            actual = []
+            for direction, rng, name in parsed:
+                m = re.fullmatch(r"\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]", rng.strip())
+                width = (abs(int(m.group(1)) - int(m.group(2))) + 1 if m
+                         else (1 if not rng.strip() else None))
+                actual.append({"name": name, "direction": direction, "width": width})
+            selected = (str(netlist.relative_to(project)), actual)
+    except OSError:
+        pass
+    if not selected:
+        return not_applicable("current selected top interface is unavailable")
+    source, actual = selected
+    ports = content.get("top_ports") or content.get("ports") or []
+    documented = {p["name"]: p for p in ports if isinstance(p, dict) and p.get("name")}
+    implemented = {p["name"]: p for p in actual}
+    old = set(documented) - set(implemented)
+    new = set(implemented) - set(documented)
+    groups = _auto_derive_renamed_interfaces(project, sorted(old), sorted(new),
+                                            input_only=True)
+    # A previously bound document must still be checked against current bytes.
+    if not groups and not already_bound:
+        return content
+    retired = {n for g in groups for n in g["l9"]}
+    added = {n for g in groups for n in g["rtl"]}
+    if not groups:
+        # Recompute authorization using the original document-side examples,
+        # rather than trusting an old binding receipt to authorize new names.
+        original = [n for n in old if documented[n].get("declared_by_staged_top") is False]
+        rhs = [n for n, p in documented.items()
+               if p.get("extraction_strategy") == EXTRACTION_STRATEGY]
+        groups = _auto_derive_renamed_interfaces(project, original, rhs + sorted(new),
+                                                input_only=True)
+        retired = {n for g in groups for n in g["l9"]}
+        added = {n for g in groups for n in g["rtl"]}
+    missing = sorted(n for n in old if n not in retired
+                     and documented[n].get("optional") is not True)
+    fixed = sorted(n for n in retired if documented[n].get("required") is True
+                   or documented[n].get("mandatory") is True)
+    unexpected = sorted(new - added)
+    if missing or fixed or unexpected:
+        raise ValueError(f"mandatory_missing={missing + fixed}; undeclared_ports={unexpected}")
+    result = copy.deepcopy(content)
+    bound = copy.deepcopy(ports)
+    for port in bound:
+        name = port.get("name")
+        if name in retired:
+            port["declared_by_staged_top"] = False
+        elif name in implemented:
+            rtl = implemented[name]
+            direction = port.get("direction") or port.get("mode")
+            width = port.get("width")
+            if direction and direction != rtl["direction"]:
+                raise ValueError(f"named direction mismatch for {name}: {direction} != {rtl['direction']}")
+            if width is not None and rtl.get("width") is not None and width != rtl["width"]:
+                raise ValueError(f"named width mismatch for {name}: {width} != {rtl['width']}")
+            if width is None and isinstance(rtl.get("width"), int) and rtl["width"] > 0:
+                port.update(width=rtl["width"], msb=rtl["width"] - 1, lsb=0)
+            port["declared_by_staged_top"] = True
+    for rtl in actual:
+        if rtl["name"] not in new:
+            continue
+        width = rtl.get("width")
+        if not isinstance(width, int) or width < 1:
+            raise ValueError(f"selected width unresolved for {rtl['name']}")
+        bound.append(dict(rtl, mode=rtl["direction"], io=None, rtl_name=rtl["name"],
+                          aliases=[], msb=width - 1, lsb=0,
+                          declared_by_staged_top=True,
+                          evidence=f"{source}: module {top} port list",
+                          extraction_strategy=EXTRACTION_STRATEGY))
+    for key in ("ports", "top_ports", "top_module_pins"):
+        result[key] = bound
+    provenance_path = project / "plugin_output/declaration.provenance.json"
+    result["selected_interface_binding"] = {
+        "top_module": top, "declaration": "plugin_output/declaration.json",
+        "declaration_sha256": hashlib.sha256(choice_path.read_bytes()).hexdigest(),
+        "declaration_provenance": "plugin_output/declaration.provenance.json",
+        "declaration_provenance_sha256": (hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+                                          if provenance_path.is_file() else None),
+        "provenance_verification": "NOT_VERIFIED_BY_INTERFACE_BINDING",
+        "selected_source": source,
+        "selected_source_sha256": hashlib.sha256((project / source).read_bytes()).hexdigest(),
+        "illustrative_groups": groups, "document_examples_not_implemented": sorted(retired),
+    }
+    return result
+
+
+def refresh_selected_interface(project: Path, path: Path, content: dict) -> dict:
+    """Ordinary producer refresh for a continuation's existing L9 document."""
+    bound = bind_selected_interface(project, content)
+    if bound != content:
+        from l_doc_generator_stamp import dump
+        dump(path, bound, emitter="_staged_top_module.refresh_selected_interface")
+    return bound
