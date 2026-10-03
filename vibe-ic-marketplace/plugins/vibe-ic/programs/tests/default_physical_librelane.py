@@ -12,6 +12,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import librelane_contract as lc
 import librelane_step37 as streams
+import librelane_signoff_evidence as native
 import _tapeout_declaration as td
 import _physical_current as pc
 import gds_xor_check as xor
@@ -34,6 +35,7 @@ def main():
     os.environ["OMP_NUM_THREADS"] = "2"
     put(project, "phase3/librelane_switch.json", {"image": image, "pdk": pdk,
                                                 "pdk_root_host": str(pdk_root)})
+    lc.pdk_root_resolution(project, pdk, image=image)
     put(project, "phase1/generated_docs/L8_TIMING_WAVEFORM.json", {
         "clock_domains": [{"role": "primary", "period_ns": spec["clock"]["period_ns"],
                            "source_pin": spec["clock"]["port"]}]})
@@ -94,6 +96,10 @@ def main():
                                            project / "phase3/librelane/37-xor.json",
                                            limits={"design__xor_difference__count": {"eq": 0}})
         final = json.loads((compare[-1] / "state_out.json").read_text())
+        result["strict_dependency_reader"] = native.count_row(
+            project, compare[-1], "KLayout.XOR", "design__xor_difference__count",
+            Path(final["klayout_gds"]), project / "phase3/librelane/37-config",
+            subject_view="klayout_gds")
         shipped = project / f"phase3/stage4/gds/{top}.gds"
         shutil.copyfile(final["klayout_gds"], shipped)
         reference = pnr / (top + ".prefinish.gds")
