@@ -111,7 +111,7 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
     The enclosing fresh image supplies the environment and cgroup memory bound.
     Unknown launch options refuse rather than silently discarding their meaning.
     """
-    mounts, variables, entrypoint = [], {}, None
+    mounts, variables, entrypoint, container_workdir = [], {}, None, None
     network, memory, memory_swap, auto_remove = None, None, None, False
     at = argv.index('run') + 1
     while at < len(argv) and argv[at].startswith('-'):
@@ -120,8 +120,10 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
             auto_remove = True
             at += 1
             continue
-        if option not in ('-v', '-e', '--entrypoint', '--memory', '--memory-swap', '--network'):
+        if option not in ('-v', '-e', '--entrypoint', '--memory', '--memory-swap', '--network', '--workdir'):
             raise Refusal('LL_LOCAL_LAUNCH_UNSUPPORTED', option)
+        if option == '--workdir' and at + 1 >= len(argv):
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID', '--workdir requires a path')
         value = argv[at + 1]
         if option == '-v':
             host, guest, *mode = value.split(':')
@@ -135,11 +137,48 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
             entrypoint = value
         elif option == '--network':
             network = value
+        elif option == '--workdir':
+            container_workdir = value
         elif option == '--memory':
             memory = _local_memory_bytes(value)
         elif option == '--memory-swap':
             memory_swap = _local_memory_bytes(value)
         at += 2
+    child_cwd = None
+    if container_workdir is not None:
+        requested_cwd = Path(container_workdir)
+        if not requested_cwd.is_absolute():
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID',
+                          f'--workdir must be an absolute mounted path: {container_workdir!r}')
+        mapped_cwd = Path(_ce.localise_mounted_paths(container_workdir, mounts))
+        mapped_mounts = []
+        for guest, host in mounts:
+            guest_path = Path(guest)
+            try:
+                relative = requested_cwd.relative_to(guest_path)
+            except ValueError:
+                continue
+            mapped_mounts.append((len(guest_path.parts), guest_path, Path(host), relative))
+        if not mapped_mounts:
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID',
+                          f'--workdir is outside every declared mount: {container_workdir!r}')
+        _, guest_root, host_root, relative = max(mapped_mounts, key=lambda row: row[0])
+        try:
+            resolved_root = host_root.resolve(strict=True)
+            child_cwd = mapped_cwd.resolve(strict=True)
+            expected_cwd = (resolved_root / relative).resolve(strict=True)
+            supplied_cwd = Path(kw['cwd']).resolve(strict=True) if kw.get('cwd') is not None else None
+        except OSError as exc:
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID',
+                          f'--workdir does not resolve on the mounted host path: {exc}') from None
+        if (child_cwd != expected_cwd or not child_cwd.is_dir()
+                or not child_cwd.is_relative_to(resolved_root)):
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID',
+                          f'--workdir does not resolve to an existing directory in mount {guest_root}')
+        if supplied_cwd is not None and supplied_cwd != child_cwd:
+            raise Refusal('LL_LOCAL_WORKDIR_INVALID',
+                          'caller cwd conflicts with the mounted Docker --workdir')
+        kw['cwd'] = child_cwd
     image = argv[at]
     attestation = local_image_attestation(image)
     if network is not None and attestation['network_mode'] != network:
@@ -175,7 +214,8 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
                         for key, value in variables.items()})
     _ce.local_exec_mode('librelane_contract')
     with _ce.local_engine_cwd() as scratch:
-        kw.setdefault('cwd', scratch)
+        if child_cwd is None:
+            kw.setdefault('cwd', scratch)
         if probe_deadline_s is not None:
             # A probe timeout kills the native group, including descendants.
             # A tool's natural rc=124 remains an ordinary tool failure.

@@ -131,6 +131,98 @@ def test_step9_local_image_identity_refuses_foreign_reference(monkeypatch):
         installation._image_identity(reference, "docker")
 
 
+def _local_workdir_argv(project: Path, workdir: str) -> list[str]:
+    samepath = str(project.resolve())
+    return ["docker", "run", "--rm", "-v", f"{samepath}:{samepath}",
+            "--workdir", workdir, "--entrypoint", "python3", "unit-image",
+            "-c", "import os; print(os.getcwd())"]
+
+
+def test_local_workdir_runs_child_from_mapped_docker_directory(tmp_path, monkeypatch):
+    """Unit seam only: assert the actual child cwd, with image authority mocked."""
+    import _container_exec as container_exec
+    import librelane_contract as ll
+
+    project = tmp_path / "project"
+    project.mkdir()
+    observed = {}
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(container_exec, "local_exec_mode", lambda owner: None)
+    attestation = {"network_mode": None, "memory": 0, "memory_swap": -1,
+                   "auto_remove": True, "cid": "unit-cid"}
+    monkeypatch.setattr(ll, "local_image_attestation", lambda image: dict(attestation))
+
+    class Child:
+        pid = 1
+        returncode = 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def communicate(self, timeout=None):
+            return "unit output", ""
+
+    def popen(command, **kwargs):
+        observed["command"] = command
+        observed["cwd"] = kwargs.get("cwd")
+        return Child()
+
+    monkeypatch.setattr(ll.subprocess, "Popen", popen)
+    result = ll._run_local(_local_workdir_argv(project, str(project)),
+                           probe_deadline_s=1, supervised=False, log=None)
+    assert result.returncode == 0
+    assert observed["cwd"] == project.resolve()
+    assert observed["cwd"].is_dir()
+
+
+@pytest.mark.parametrize("workdir", ["relative-dir", "/unmapped/workdir"])
+def test_local_workdir_refuses_unmapped_or_relative_paths(tmp_path, monkeypatch, workdir):
+    import _container_exec as container_exec
+    import librelane_contract as ll
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(container_exec, "local_exec_mode", lambda owner: None)
+    monkeypatch.setattr(ll, "local_image_attestation",
+                        lambda image: pytest.fail("invalid --workdir reached image attestation"))
+    with pytest.raises(ll.Refusal, match="LL_LOCAL_WORKDIR_INVALID"):
+        ll._run_local(_local_workdir_argv(project, workdir),
+                      probe_deadline_s=1, supervised=False, log=None)
+
+
+def test_local_workdir_refuses_missing_directory_without_scratch_fallback(tmp_path, monkeypatch):
+    import _container_exec as container_exec
+    import librelane_contract as ll
+
+    project = tmp_path / "project"
+    project.mkdir()
+    missing = project / "missing"
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(container_exec, "local_exec_mode", lambda owner: None)
+    monkeypatch.setattr(ll, "local_image_attestation",
+                        lambda image: pytest.fail("missing --workdir reached image attestation"))
+    with pytest.raises(ll.Refusal, match="LL_LOCAL_WORKDIR_INVALID"):
+        ll._run_local(_local_workdir_argv(project, str(missing)),
+                      probe_deadline_s=1, supervised=False, log=None)
+
+
+def test_local_workdir_refuses_conflicting_caller_cwd(tmp_path, monkeypatch):
+    import _container_exec as container_exec
+    import librelane_contract as ll
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(container_exec, "no_container_route", lambda: True)
+    monkeypatch.setattr(container_exec, "local_exec_mode", lambda owner: None)
+    monkeypatch.setattr(ll, "local_image_attestation",
+                        lambda image: pytest.fail("conflicting cwd reached image attestation"))
+    with pytest.raises(ll.Refusal, match="LL_LOCAL_WORKDIR_INVALID"):
+        ll._run_local(_local_workdir_argv(project, str(project)),
+                      probe_deadline_s=1, supervised=False, log=None,
+                      cwd=tmp_path)
+
+
 def _worker_installation_spec():
     image_ref = "registry.invalid/tools@sha256:" + "2" * 64
     image_id = "sha256:" + "1" * 64
