@@ -642,6 +642,13 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
         findings.append(Finding("ERROR", "LL_FILL_ODB_NOT_RUN",
                                 "OpenROAD.FillInsertion left no record"))
     else:
+        if odb.get("shipped") == "librelane":
+            try:
+                _lf.validate_fill_consumption(project_dir)
+                stats["odb_fill_consumed"] = True
+            except Exception as exc:
+                stats["odb_fill_consumed"] = False
+                findings.append(Finding("ERROR", "LL_FILL_HANDOFF_UNBOUND", str(exc)))
         if odb.get("def_sha256") != _sha256(routed):
             findings.append(Finding("ERROR", "LL_FILL_RECORD_STALE",
                                     "the fill record is about another routed DEF"))
@@ -660,7 +667,25 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
                                     str(gds.get("tool_refusal") or gds.get("ship_refusal")
                                         or "no GDS fill shipped")))
         elif isinstance(arm, dict):
-            count = arm.get(_lf.DENSITY_METRIC)
+            measured = _lf.tool_density(project_dir)
+            if measured and measured.get("status") == "MEASURED":
+                count = measured.get("errors")
+                per_layer = measured.get("per_layer")
+                if per_layer is not None:
+                    stats["tool_per_layer_density"] = per_layer
+                    rows = per_layer.get("per_layer") or {}
+                    stats["density_artefact_read"] = bool(rows)
+                    stats["per_layer_density_verified"] = bool(rows) and all(
+                        row.get("status") in ("PASS", "FAIL") for row in rows.values())
+                    stats["layers_ok"] = sum(row.get("status") == "PASS" for row in rows.values())
+                    stats["layers_bad"] = sum(row.get("status") != "PASS" for row in rows.values())
+                    stats["filled_gds_density"] = {"state": per_layer.get("verdict")}
+                    if per_layer.get("verdict") != "PASS":
+                        findings.append(Finding("ERROR", "LL_METAL_LAYER_DENSITY_REFUSED",
+                                                str(per_layer)))
+            else:
+                findings.append(Finding("ERROR", "LL_DENSITY_NOT_MEASURED",
+                                        str(measured or "current density producer absent")))
     elif _llc.selected_mode(project_dir, "37") != "direct":
         s37 = _lf.step37_density(project_dir)
         if s37 is None:
@@ -734,10 +759,30 @@ def main(argv: list = None) -> int:
 
     findings, stats = audit(project_dir)
     tool_findings, tool_stats = tool_arm_findings(project_dir)
+    if tool_stats.get("per_layer_density_verified"):
+        # The direct row-utilization disclosure was made before the strict
+        # ordinary tool consumer ran. Replace only that now-stale INFO; every
+        # error, including a measured out-of-window layer, remains unchanged.
+        findings = [f for f in findings if not (
+            f.severity == "INFO" and f.category == "PER_LAYER_DENSITY_NOT_VERIFIED_HERE")]
+        judged = tool_stats["tool_per_layer_density"]
+        findings.append(Finding(
+            "INFO", "PER_LAYER_DENSITY_CONSUMED",
+            f"{judged['consumer']} judged {len(judged['per_layer'])} current metal layers: "
+            f"{judged['verdict']}; adopted GDS sha256={judged['subject_sha256']}",
+            details="per_layer_density_verified=true"))
     findings.extend(tool_findings)
     report = build_report(findings, stats, str(project_dir))
     report["summary"]["step34_mode"] = tool_stats.get("mode")
     report["summary"]["tool_density_errors"] = tool_stats.get("density_errors")
+    report["summary"]["odb_fill_consumed"] = tool_stats.get("odb_fill_consumed")
+    # The Default tool route uses the existing per-layer judge on the adopted
+    # stream. Do not retain the direct arm's unmeasured flags beside its PASS.
+    if "tool_per_layer_density" in tool_stats:
+        for key in ("density_artefact_read", "per_layer_density_verified", "layers_ok", "layers_bad"):
+            report["summary"][key] = tool_stats[key]
+        report["summary"]["filled_gds_density"] = tool_stats["filled_gds_density"]["state"]
+        report["tool_per_layer_density"] = tool_stats["tool_per_layer_density"]
 
     # vibe-ic#1080 — `report["summary"]` is already the machine-readable form
     # of what this gate measured, so the wiring is to HAND IT OVER rather than

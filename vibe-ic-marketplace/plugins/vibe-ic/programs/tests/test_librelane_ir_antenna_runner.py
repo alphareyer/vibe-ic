@@ -146,7 +146,7 @@ def test_step265ic_dual_refuses_different_sealed_streams(tmp_path):
 
 # --- step 24 librelane publishes what the gates read --------------------------------
 
-def test_the_published_ir_report_passes_the_step24_gate(tmp_path):
+def test_published_ir_values_need_current_adoption_to_pass_step24_gate(tmp_path):
     project = _project(tmp_path, {"24": "librelane"})
     tool = project / "phase3/librelane/24/01-openroad-irdropreport"
     tool.mkdir(parents=True)
@@ -171,7 +171,10 @@ def test_the_published_ir_report_passes_the_step24_gate(tmp_path):
     out = project / "reports/phase3/ir_drop_signoff.json"
     rc = subprocess.run([sys.executable, str(_PROGRAMS / "ir_drop_report_check.py"),
                          str(project), "--json", str(out)], capture_output=True, text=True)
-    assert rc.returncode == 0, rc.stdout[-2000:]
+    # Publishing numbers with placeholder state digests is not adoption.
+    # The supported positive is the separate committed-source native run.
+    assert rc.returncode == 2, rc.stdout[-2000:]
+    assert json.loads(out.read_text())["primary_ir"]["rule"] == "LL_IR_CURRENT_BINDING_INVALID"
 
 
 # --- step 26.5ic: _die_finishing hands the tool's output to die_finishing_gen --------

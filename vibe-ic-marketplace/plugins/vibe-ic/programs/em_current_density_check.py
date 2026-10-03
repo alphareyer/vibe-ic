@@ -4,14 +4,15 @@
 The tapeout-checklist skill's EM row requires a genuine per-segment current
 DENSITY vs the foundry's Jmax limit (per metal / via layer), not a proxy.
 
-Today the plugin only *measures* EM current:
+The plugin measures EM current and executes the native density arm:
 
   * `phase3_one_shot_runner._emit_ir_em_reports` runs OpenROAD PSM
     `analyze_power_grid -net <VPWR> -enable_em -em_outfile em_segments.csv`
     and writes `reports/phase3/em.json` with `verdict: "MEASURED"` plus a
     per-segment CSV whose columns are:
         Node0 Layer, Node0 X, Node0 Y, Node1 Layer, Node1 X, Node1 Y, Current
-    (Current in Amperes). It NEVER compares that current to any Jmax limit.
+    (Current in Amperes). The same Default session runs check_current_density
+    on declared routing limits; this gate binds it before its retained screen.
   * `signoff_ladder_run.check_tier_2_decap` calls its "EM" tier a
     DECAP-CELL-COUNT proxy (`decap_cells >= 100`) — a placement heuristic,
     not a current-density check.
@@ -84,6 +85,8 @@ chip-AGNOSTIC: pure numeric current/geometry compare; no chip literal.
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import csv
 import heapq
 import json
@@ -943,6 +946,249 @@ def _lifetime_ratio(util: float, n: float) -> Optional[float]:
         return None
 
 
+def native_limits(text: str, margin: float = _DEFAULT_MARGIN) -> str:
+    """Fork input: routing areal limits from this LEF, never wire-to-cut limits.
+
+    The native areal table cannot represent LEF mA/cut authority. Cut records
+    remain NO_LIMIT in this arm; the retained per-cut screen is independent.
+    """
+    return "".join(
+        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - margin):.12g}\n"
+        for row in parse_lef_jmax(text).values()
+        if row.get("kind") == "routing"
+        and math.isfinite(row.get("jmax_areal_A_per_um2") or 0)
+        and (row.get("jmax_areal_A_per_um2") or 0) > 0)
+
+
+def native_source_identity() -> Dict[str, str]:
+    """Bind the owned producer functions and both consumers, not unrelated steps."""
+    root = Path(__file__).resolve().parent
+    runner = (root / "phase3_one_shot_runner.py").read_text()
+    lines = runner.splitlines(keepends=True)
+    owned = {"_step24_basis_inputs", "_step24_transient_argv",
+             "_emit_ir_em_reports", "_emit_em_current_authority",
+             "_step25_native_density_due", "_librelane_step24_record",
+             "_librelane_step24_publish", "_librelane_step24_refusal_publish",
+             "_step24_primary_mode", "_step24_adopt_primary"}
+    result = {}
+    for node in ast.parse(runner).body:
+        if isinstance(node, ast.FunctionDef) and node.name in owned:
+            result[node.name] = hashlib.sha256(
+                "".join(lines[node.lineno - 1:node.end_lineno]).encode()).hexdigest()
+    for name in ("em_current_density_check.py", "em_peak_current_authority_check.py",
+                 "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py",
+                 "ir_drop_report_check.py"):
+        result[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
+    return result
+
+
+def _native_sha(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def native_project(em_path: Path) -> Optional[Path]:
+    """Production reports owe native evidence; standalone offline screens do not."""
+    for candidate in (em_path, *em_path.parents):
+        report = candidate / "reports/phase3/em.json"
+        try:
+            doc = json.loads(report.read_text())
+        except (OSError, ValueError):
+            continue
+        if doc.get("tool") == "openroad-psm":
+            return candidate
+        return None
+    # Deleting the companion does not retire a production report's obligation.
+    if em_path.parent.name == "phase3" and em_path.parent.parent.name == "reports":
+        try:
+            if "phase3_one_shot_runner" in (em_path.parent / "em.rpt").read_text():
+                return em_path.parent.parent.parent
+        except OSError:
+            pass
+    return None
+
+
+def validate_primary_ir(project: Path) -> Dict[str, Any]:
+    """Step-24's existing gate consumes the adopted current tool result.
+
+    This validates the IR producer's own state and publication, independently
+    of Step-25 density coverage. A partial EM result cannot retire a static IR
+    measurement, nor can report keywords substitute for primary adoption.
+    """
+    try:
+        doc = json.loads((project / "reports/phase3/ir_drop_librelane.json").read_text())
+        if not doc.get("adopted") or doc.get("source_identity") != native_source_identity():
+            raise ValueError("LibreLane IR primary was not adopted by current source")
+        if (not {"def", "netlist", "sdc", "spef"}.issubset(doc["inputs"])
+                or not {"reports/phase3/ir_drop.json", "reports/phase3/ir_drop.rpt"}.issubset(doc["published"])):
+            raise ValueError("LibreLane IR required input/publication binding removed")
+        for population in ("inputs", "artifacts", "published"):
+            rows = doc[population]
+            if not rows:
+                raise ValueError(f"LibreLane IR {population} population absent")
+            for key, row in rows.items():
+                name, digest = (row["path"], row["sha256"]) if population == "inputs" else (key, row)
+                path = Path(name)
+                if path.is_absolute() or ".." in path.parts or not digest or _native_sha(project / path) != digest:
+                    raise ValueError(f"LibreLane IR current bytes changed: {name}")
+        record = doc["record"]
+        if _native_sha(Path(record["tool_state"])) != record["tool_state_sha256"]:
+            raise ValueError("LibreLane IR tool state changed")
+        for row in [doc["native_basis"][key] for key in ("odb", "sdc", "spef", "tech_lef")] + doc["native_basis"]["liberties"]:
+            if not row["sha256"] or _native_sha(Path(row["path"])) != row["sha256"]:
+                raise ValueError("LibreLane IR native basis changed")
+        import librelane_ir_antenna as la
+        judged = la.judge_ir(record)
+        if judged != doc["judgment"] or judged["verdict"] not in ("PASS", "FAIL"):
+            raise ValueError("LibreLane IR measurement/coverage unavailable")
+        return {"valid": True, "verdict": judged["verdict"],
+                "producer": doc["producer"], "tool_state_sha256": record["tool_state_sha256"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {"valid": False, "verdict": "NOT_MEASURED",
+                "reason": str(exc), "rule": "LL_IR_CURRENT_BINDING_INVALID"}
+
+
+def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
+                            ) -> Dict[str, Any]:
+    """Existing Step-25 blocking consumer: verify execution, inputs and authority.
+
+    A digest-bound snapshot makes an image-internal authority readable by the
+    host gate. When the declared original is host-readable it is also checked.
+    This is provenance, not a substitute for native measurements or full power
+    basis coverage. Missing evidence is NOT_MEASURED; known native FAIL wins
+    over valid partial coverage.
+    """
+    rpt = project / "reports/phase3"
+    def local(name: str) -> Path:
+        rel = Path(name)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError("non-project path in native binding")
+        return project / rel
+
+    try:
+        doc = json.loads((rpt / "em_openroad_density.json").read_text())
+        if doc.get("schema") != "em_native_density/1":
+            raise ValueError("native execution binding absent")
+        if doc.get("source_identity") != native_source_identity():
+            raise ValueError("native producer/consumer source changed")
+        execution = doc["execution"]
+        if execution["native_rc"] != 0 or not execution["argv"]:
+            raise ValueError("native invocation did not succeed")
+        for name, digest in doc["outputs"].items():
+            if not digest or _native_sha(local(name)) != digest:
+                raise ValueError(f"native output changed: {name}")
+        log = (rpt / "ir_em.log").read_text()
+        if not doc["outputs"] or not doc["inputs"]:
+            raise ValueError("empty native binding")
+        required = {f"reports/phase3/{name}" for name in (
+            "em.rpt", "em.json", "ir_drop.rpt", "ir_drop.json", "ir_em.log",
+            "em_segments.csv", "em_pg_geometry.tsv", "em_pg_geometry_subject.json",
+            "em_native_authority.tlef", "em_openroad_limits.txt")}
+        required.update(f"reports/phase3/{prefix}_{net}.csv"
+                        for net in doc["nets"] for prefix in ("em_segments", "em_openroad_density"))
+        if not required.issubset(doc["outputs"]) or not {"layout", "tech_lef", "cell_lef", "liberty0"}.issubset(doc["inputs"]):
+            raise ValueError("required native input/output binding removed")
+        for role, row in doc["inputs"].items():
+            digest = row["sha256"]
+            if not digest or any(
+                    f"EM_BOUND_{stage} {role} {digest}" not in log
+                    for stage in ("BEFORE", "AFTER")):
+                raise ValueError(f"native input was not read unchanged: {role}")
+            current = local(row["project_path"]) if row.get("project_path") else Path(row["declared_path"])
+            if (row.get("project_path") or current.is_file()) and _native_sha(current) != digest:
+                raise ValueError(f"current input changed: {role}")
+        authority = local(doc["authority"]["snapshot"])
+        authority_sha = doc["inputs"]["tech_lef"]["sha256"]
+        if _native_sha(authority) != authority_sha:
+            raise ValueError("PDK authority snapshot changed")
+        if not doc["pdk"]["name"] or doc["pdk"]["tech_lef"] != doc["inputs"]["tech_lef"]["declared_path"]:
+            raise ValueError("declared PDK identity disagrees")
+        text = authority.read_text()
+        if doc["margin"] != margin:
+            raise ValueError("Jmax margin differs from native execution")
+        limits = rpt / "em_openroad_limits.txt"
+        if limits.read_text() != native_limits(text, margin):
+            raise ValueError("native Jmax is not the declared routing authority")
+        subject = json.loads((rpt / "em.json").read_text())
+        static = json.loads((rpt / "ir_drop.json").read_text())
+        basis = doc["power_basis"]
+        for role, field in (("layout", "layout"), ("sdc", "sdc"), ("spef", "spef")):
+            if basis.get(field) and basis[field + "_sha256"] != doc["inputs"][role]["sha256"]:
+                raise ValueError("power basis input digest disagrees")
+        if (basis != static["power_basis"]
+                or subject["power_basis"]["basis_id"] != basis["id"]
+                or subject["subject_def_sha256"] != doc["inputs"]["layout"]["sha256"]
+                or subject["subject_def"] != doc["inputs"]["layout"]["project_path"]):
+            raise ValueError("DEF or power basis disagrees with the measurement")
+        ll = doc.get("librelane_ir")
+        if ll and ll.get("adopted"):
+            ll_path = local(ll["record"])
+            if _native_sha(ll_path) != ll["record_sha256"]:
+                raise ValueError("LibreLane primary record changed")
+            ll_doc = json.loads(ll_path.read_text())
+            ll_basis = ll_doc["native_basis"]
+            for role in ("sdc", "spef", "tech_lef"):
+                if ll_basis[role]["sha256"] != doc["inputs"][role]["sha256"]:
+                    raise ValueError(f"LibreLane/EM power basis differs: {role}")
+            if ll_basis["odb"]["sha256"] != doc["inputs"]["librelane_odb"]["sha256"]:
+                raise ValueError("EM did not consume the LibreLane PSM ODB")
+            ll_libs = {row["sha256"] for row in ll_basis["liberties"]}
+            em_libs = {row["sha256"] for role, row in doc["inputs"].items() if role.startswith("liberty")}
+            if not ll_libs or ll_libs != em_libs:
+                raise ValueError("LibreLane/EM library populations differ")
+        table = parse_lef_jmax(text)
+        coverage = {}
+        for net in doc["nets"]:
+            if f"EM_DENSITY_DONE {net}" not in log:
+                raise ValueError(f"native density execution bypassed: {net}")
+            csv_path = rpt / f"em_openroad_density_{net}.csv"
+            csv_sha = _native_sha(csv_path)
+            if f"EM_BOUND_OUTPUT {csv_path.name} {csv_sha}" not in log:
+                raise ValueError(f"native density bytes unbound: {net}")
+            rows = list(csv.DictReader(csv_path.open(newline="")))
+            psm = list(csv.DictReader((rpt / f"em_segments_{net}.csv").open(newline="")))
+            if not rows or len(rows) != len(psm):
+                raise ValueError(f"native segment coverage disagrees: {net}")
+            counts = {"checked": 0, "no_limit": 0, "violated": 0,
+                      "psm_segments": len(psm), "worst_ratio": None}
+            for row in rows:
+                layer = table.get(row["Layer"].lower(), {})
+                status = row["Status"]
+                if status == "NO_LIMIT":
+                    counts["no_limit"] += 1
+                    continue
+                if status not in ("OK", "VIOLATED") or layer.get("kind") != "routing" or row["Basis"] != "AREAL":
+                    raise ValueError("wire-to-via substitution or invalid native status")
+                expected = layer["jmax_areal_A_per_um2"] * (1 - margin)
+                if not math.isclose(float(row["Jlimit(A/um^2)"]), expected, rel_tol=0.0006):
+                    raise ValueError("native CSV Jmax differs from PDK authority")
+                ratio = float(row["Ratio"])
+                if not math.isfinite(ratio) or ratio < 0:
+                    raise ValueError("invalid native density ratio")
+                counts["checked"] += 1
+                counts["violated"] += status == "VIOLATED"
+                counts["worst_ratio"] = max(counts["worst_ratio"] or 0, ratio)
+            if counts != doc["nets"][net]:
+                raise ValueError("native coverage summary changed")
+            coverage[net] = counts
+        if not coverage or set(coverage) != set(subject["nets_analysed"]):
+            raise ValueError("native density omitted a supply net")
+        violations = sum(x["violated"] for x in coverage.values())
+        missing = sum(x["no_limit"] for x in coverage.values())
+        verdict = ("FAIL" if violations else "NOT_MEASURED" if missing or not basis.get("complete") or (ll and not ll.get("adopted"))
+                   else "PASS")
+        return {"valid": True, "verdict": verdict, "authority": str(authority),
+                "authority_sha256": authority_sha, "pdk": doc["pdk"],
+                "nets": coverage, "violations": violations,
+                "unmeasured_segments": missing, "power_basis_complete": bool(basis.get("complete")),
+                "source_identity": doc["source_identity"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {"valid": False, "verdict": "NOT_MEASURED",
+                "reason": str(exc), "rule": "EM_NATIVE_BINDING_INVALID"}
+
+
 def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
              tech_lef: Optional[Path], margin: float, blacks_n: float,
              net_hint: Optional[str], top_offenders: int,
@@ -966,6 +1212,27 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                                 "(§4.05: absence is not PASS)"})
         return "SKIPPED", rep
     rep["em_report"] = str(em_path)
+
+    # Normal producer reports must reach this consumer through the native
+    # invocation on the current basis. Offline segment fixtures stay offline.
+    native = None
+    production = native_project(em_path)
+    if production is not None:
+        native = validate_native_density(production, margin)
+        rep["native_density"] = native
+        supplied = tech_lef or jmax_path
+        if native["valid"] and supplied is not None and _native_sha(supplied) != native["authority_sha256"]:
+            native = dict(native, valid=False, verdict="NOT_MEASURED",
+                          reason="selected Jmax differs from the native PDK authority")
+            rep["native_density"] = native
+        if not native["valid"]:
+            rep.update(verdict="NOT_MEASURED", **{"pass": False},
+                       skip_reason="native_execution_or_basis_unbound")
+            rep["findings"].append({"severity": "NOT_MEASURED",
+                                    "rule": "EM_NATIVE_BINDING_INVALID",
+                                    "message": native["reason"]})
+            return "NOT_MEASURED", rep
+        tech_lef, jmax_path = Path(native["authority"]), None
 
     # (2) Jmax reference present?
     table, jmax_src, jerr = load_jmax_table(jmax_path, tech_lef)
@@ -1083,7 +1350,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     rep["not_measured_segments"] = not_measured_segments
 
     # (3b) report present + Jmax present but nothing mapped → SKIPPED, never PASS
-    if n_screened == 0:
+    if n_screened == 0 and not (native and native["verdict"] == "FAIL"):
         geometry_missing = any(k.startswith("psm_") for k in unscreened_reasons)
         empty_verdict = "NOT_MEASURED" if geometry_missing else "SKIPPED"
         rep["verdict"] = empty_verdict
@@ -1126,7 +1393,14 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                                     "message": msg})
         return "FAIL", rep
 
-    if n_unscreened:
+    if native and native["verdict"] == "FAIL":
+        rep.update(verdict="FAIL", **{"pass": False})
+        rep["findings"].append({"severity": "ERROR",
+                                "rule": "EM_NATIVE_CURRENT_DENSITY_OVER_JMAX",
+                                "message": f"native checker measured {native['violations']} over-limit segments"})
+        return "FAIL", rep
+
+    if n_unscreened or (native and native["verdict"] != "PASS"):
         rep["verdict"] = "NOT_MEASURED"
         rep["pass"] = False
         rep["skip_reason"] = "one_or_more_segments_not_measured"
@@ -1134,6 +1408,10 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
             "severity": "NOT_MEASURED", "rule": "EM_SEGMENT_GEOMETRY_UNPROVEN",
             "message": f"{n_unscreened} of {n_total} segment(s) lack a proven "
                        "same-net conductor cross section or Jmax"})
+        if native and not native["power_basis_complete"]:
+            rep["findings"].append({"severity": "NOT_MEASURED",
+                                    "rule": "EM_POWER_BASIS_INCOMPLETE",
+                                    "message": "native static basis lacks matched SPEF or readable constraints"})
         return "NOT_MEASURED", rep
 
     rep["verdict"] = "PASS"

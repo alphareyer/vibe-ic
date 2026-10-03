@@ -208,6 +208,18 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """
     if (probe_deadline_s is None) == (not supervised):
         raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
+    # Use the image's normal environment, with its explicit skip front door.
+    # Overriding ENTRYPOINT bypassed that environment for resolved tool steps.
+    argv = list(argv)
+    if '--entrypoint' in argv:
+        index = argv.index('--entrypoint')
+        entrypoint = argv[index + 1]
+        image_index = next((i for i in range(index + 2, len(argv))
+                            if '@sha256:' in argv[i]), None)
+        if image_index is not None:
+            image = argv[image_index]
+            argv = [*argv[:index], *argv[index + 2:image_index], image,
+                    '--skip', entrypoint, *argv[image_index + 1:]]
     import _docker_watchdog as _dw  # the one naming rule for ephemeral containers
     at = argv.index('run') + 1
     binary = argv[0]
@@ -837,6 +849,62 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Checker.KLayoutDensity': (),
     # Steps 37.3 / 37.5ic (mig105): vibe-ic's own stream checks.
     'Vibeic.FinishingXOR': ('gds',), 'Vibeic.DatabaseUnit': ('gds',)}
+
+
+def validate_step_receipt(folder: Path, step: str) -> dict:
+    """Validate retained tool bytes before reuse or downstream publication.
+
+    This checks a product boundary, not source landing. Missing execution
+    output is refused; computing a new digest cannot replace the producer's
+    recorded digest.
+    """
+    try:
+        folder = folder.resolve()
+        receipt = _load(folder / 'vibeic_receipt.json')
+        fp, hashes = receipt['input'], receipt['sha256']
+        if fp.get('step') != step or not isinstance(hashes, dict):
+            raise ValueError('wrong producer or missing hashes')
+        for name in ('state_out.json', 'input_fingerprint.json', 'pdk_root.json',
+                     'invocation.log'):
+            if name not in hashes:
+                raise ValueError(f'missing producer file: {name}')
+        for name, sha in hashes.items():
+            path = (folder / name).resolve()
+            if not path.is_relative_to(folder) or not re.fullmatch('[0-9a-f]{64}', str(sha)) \
+                    or not path.is_file() or digest(path) != sha:
+                raise ValueError(f'changed producer file: {name}')
+        if _load(folder / 'input_fingerprint.json') != fp:
+            raise ValueError('input fingerprint differs')
+        if not (folder / 'invocation.log').read_text().strip():
+            raise ValueError('tool execution log is empty')
+        state = _load(folder / 'state_out.json')
+        for path in _walk_paths({k: v for k, v in state.items() if k != 'metrics'}):
+            if path.is_relative_to(folder) and \
+                    hashes.get(str(path.relative_to(folder))) != digest(path):
+                raise ValueError(f'unbound output view: {path}')
+        return receipt
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise Refusal('LL_STEP_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
+
+
+def config_file_hashes(config: dict, mounts: list) -> dict[str, str]:
+    """Hash config files on the host, including files behind PDK mounts."""
+    result = {}
+    for path in _walk_paths(config):
+        source = path
+        for host, guest in sorted(mounts, key=lambda m: len(str(m[1])), reverse=True):
+            if path.is_relative_to(guest):
+                source = Path(host) / path.relative_to(guest)
+                break
+        if source.is_file():
+            result[str(path)] = digest(source)
+            # Density decks load their rule/layer definitions from Ruby
+            # siblings. Bind those executable inputs before running/caching.
+            if str(path) == config.get('KLAYOUT_DENSITY_RUNSET'):
+                for dependency in sorted(source.parent.rglob('*.rb')):
+                    guest = path.parent / dependency.relative_to(source.parent)
+                    result[str(guest)] = digest(dependency)
+    return result
 
 
 def _check_state(state: dict, *, outputs: bool = False,
@@ -1759,7 +1827,10 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
 #: criteria (a) and (b), or b-analog for an analog observer step). A step not
 #: named here defaults to `direct`. A project opts out of a cut-over default by
 #: naming the step `direct` in `phase3/librelane_switch.json`.
-PRODUCTION_DEFAULTS: dict[str, str] = {'2': 'librelane', '3': 'librelane'}
+PRODUCTION_DEFAULTS: dict[str, str] = {
+    '2': 'librelane', '3': 'librelane', '24': 'librelane',
+    '33': 'librelane', '34': 'librelane',
+}
 
 #: The chip path: a die that carries its own pad ring
 #: (`_tapeout_declaration.requests_pad_ring`, the condition of step 15.5ic).
@@ -2278,11 +2349,11 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
     write_json(requested, step_ids)
-    script = '''import json,sys
+    script = '''import json,sys,hashlib
 from pathlib import Path
 from librelane.flows.chip import Chip
 from librelane.steps import Step
-design, requested, output, pdk, project = sys.argv[1:]
+design, requested, output, pdk, project, image = sys.argv[1:]
 flow = Chip(config=design, pdk=pdk, pdk_root="/pdk", design_dir=project)
 raw = flow.config.to_raw_dict()
 for step_id in json.loads(Path(requested).read_text()):
@@ -2300,6 +2371,21 @@ for step_id in json.loads(Path(requested).read_text()):
                          if key in names and key not in selected})
     selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
     Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")
+    if step_id == "KLayout.Density":
+        def walk(value):
+            if isinstance(value, dict):
+                for nested in value.values(): yield from walk(nested)
+            elif isinstance(value, (tuple, list)):
+                for nested in value: yield from walk(nested)
+            elif str(value).startswith("/"): yield Path(str(value))
+        # Image-owned common templates are real inputs too. Read them in the
+        # same pinned resolver container, never by guessing a host path.
+        owned = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                 for path in walk(selected) if path.is_file()
+                 and not path.is_relative_to("/pdk")
+                 and not path.is_relative_to(project)}
+        Path(output, step_id + ".image_files.json").write_text(
+            json.dumps({"image": image, "sha256": owned}, indent=2) + "\\n")
     # LibreLane's Meta refuses unknown keys, so the step's declared views live beside it.
     Path(output, step_id + ".views.json").write_text(json.dumps({
         "step": step_id,
@@ -2317,7 +2403,7 @@ Path(output, "flow_gates.json").write_text(json.dumps({
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
            '--entrypoint', 'python3', image, '-c', script, str(design),
-           str(requested), str(root), pdk, str(project.resolve())]
+           str(requested), str(root), pdk, str(project.resolve()), image]
     result = run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S, log=root / 'resolution.log')
     (root / 'resolution.log').write_text(result.stdout + '\n' + result.stderr)
     if result.returncode:
@@ -2579,9 +2665,18 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                            {k: v for k, v in state.items() if k != 'metrics'})},
                        # Files the step config names (SDC, EQY script, PDN Tcl…)
                        # are inputs too: an edited deck must re-run the step.
-                       'config_files': {str(path): digest(path) for path in _walk_paths(
-                           _load(config)) if path.is_file()},
+                       'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
+        if step_id == 'KLayout.Density':
+            image_files = config.with_name('KLayout.Density.image_files.json')
+            if image_files.is_file():
+                owned = _load(image_files)
+                if owned.get('image') != image or not isinstance(owned.get('sha256'), dict) \
+                        or any(not re.fullmatch('[0-9a-f]{64}', str(sha))
+                               for sha in owned['sha256'].values()):
+                    raise Refusal('LL_DENSITY_IMAGE_INPUT_UNBOUND', str(image_files))
+                fingerprint['image_files'] = owned
+                fingerprint['image_files_sha256'] = digest(image_files)
         if step_id == 'OpenROAD.STAPostPNR':
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
@@ -2604,7 +2699,11 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         # from before the root was recorded (the CLI then took the image's
         # PDK_ROOT) or under another root/mount is archived and re-run. The
         # fingerprint itself is unchanged, so no other step re-runs for it.
-        if (receipt.exists() and _load(receipt).get('input') == fingerprint
+        try:
+            retained = validate_step_receipt(folder, step_id) if receipt.exists() else None
+        except Refusal:
+            retained = None
+        if (retained is not None and retained.get('input') == fingerprint
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
@@ -2674,7 +2773,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             if not inputs_unchanged:
                 raise Refusal('LL_RCX_OUTPUT_UNBOUND',
                               f'{folder}: extraction input bytes changed during execution')
-        hashes = {'state_out.json': digest(folder / 'state_out.json')}
+        hashes = {'state_out.json': digest(folder / 'state_out.json'),
+                  'invocation.log': digest(folder / 'invocation.log')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):
                 hashes[str(path.relative_to(folder))] = digest(path)
