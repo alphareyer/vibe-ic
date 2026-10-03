@@ -35,7 +35,8 @@ def test_default_bootstrap_is_observationally_inert(tmp_path, monkeypatch):
 def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_path):
     project=tmp_path/'project';project.mkdir()
     issued=R.real_entry('IC','ultra',project)
-    runtime=policy.bootstrap(project,parameters={'top':'chip_top','design_name':'chip_top'})
+    runtime=policy.bootstrap(project,parameters={
+        'top':'chip_top','design_name':'chip_top','skip_analog':True})
     assert policy.bootstrap(project) is runtime
     assert type(runtime['controller']) is em.Controller
     assert type(runtime['registry']) is em.Registry
@@ -116,7 +117,7 @@ def test_ordinary_step8_uses_live_context_and_existing_selection(tmp_path):
     sdc.with_name('pvt_matrix.json').write_text('{"corners":[]}\n')
     l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json';l8.parent.mkdir(parents=True)
     l8.write_text('{"clocks":{"clk":{"period_ns":10}}}\n')
-    runtime=policy.bootstrap(project)
+    runtime=policy.bootstrap(project,parameters={'skip_analog':True})
     import design_one_shot_runner as design
     pending=design.step_sdc_validation(project)
     result=pending.extras['execution_result']

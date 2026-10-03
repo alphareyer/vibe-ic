@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import execution_modes as em
 import execution_production as production
 import execution_native_installation as installation
+import execution_native_worker as native_worker
 import execution_synthesis_engines as provider
 from programs.tests import test_execution_receipt_chain as R
 from programs.tests import test_execution_modes as H
@@ -128,6 +129,36 @@ def test_step9_local_image_identity_refuses_foreign_reference(monkeypatch):
 
     with pytest.raises(em.Refusal, match="STEP9_IMAGE_IDENTITY_MISMATCH"):
         installation._image_identity(reference, "docker")
+
+
+def _worker_installation_spec():
+    image_ref = "registry.invalid/tools@sha256:" + "2" * 64
+    image_id = "sha256:" + "1" * 64
+    payload = {"schema": 1, "status": "MEASURED", "step_id": "9",
+               "image_ref": image_ref, "image_id": image_id}
+    receipt = {**payload, "receipt_sha256": hashlib.sha256(json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode()).hexdigest()}
+    return {"schema": 1, "step_id": "9", "image_id": image_id,
+            "native_installation_request": {
+                "schema": 1, "step_id": "9", "image_ref": image_ref,
+                "image_id": image_id},
+            "native_installation_receipt": receipt,
+            "native_installation_receipt_sha256": receipt["receipt_sha256"]}, image_ref
+
+
+def test_native_worker_uses_parent_bound_reference_not_config_image_id():
+    spec, image_ref = _worker_installation_spec()
+    assert native_worker._pinned_image_reference(spec) == image_ref
+    assert image_ref != spec["image_id"]
+
+
+def test_native_worker_refuses_reference_changed_after_installation():
+    spec, _ = _worker_installation_spec()
+    spec["native_installation_request"]["image_ref"] = (
+        "registry.invalid/foreign@sha256:" + "3" * 64)
+    with pytest.raises(em.Refusal, match="PRODUCTION_IMAGE_REFERENCE_UNBOUND"):
+        native_worker._pinned_image_reference(spec)
 
 
 def test_missing_tool_is_not_measured_even_with_a_real_image_digest(tmp_path, monkeypatch):

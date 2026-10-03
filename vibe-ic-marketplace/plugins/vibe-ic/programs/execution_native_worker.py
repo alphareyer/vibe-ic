@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import MISSING, fields
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -13,6 +15,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from _atomic_artefact import write_json
 import execution_modes as em
+import execution_native_installation as installation
 import execution_synthesis_engines as engines
 
 
@@ -45,6 +48,27 @@ def _pdk_config(values: dict, pdk_root: Path, original: Path, project: Path):
                 and item.default_factory is MISSING):
             kwargs[item.name] = "" if item.type in (str, 'str') else None
     return PdkConfig(**kwargs)
+
+
+def _pinned_image_reference(spec: Mapping[str, object]) -> str:
+    """Return the parent-verified reference paired with the measured image ID."""
+    request = spec.get('native_installation_request')
+    receipt = spec.get('native_installation_receipt')
+    image_id = spec.get('image_id')
+    if not isinstance(request, Mapping) or not isinstance(receipt, Mapping):
+        raise em.Refusal('PRODUCTION_IMAGE_REFERENCE_UNBOUND', 'installation binding absent')
+    image_ref = request.get('image_ref')
+    if (not isinstance(image_ref, str)
+            or re.fullmatch(r'[^\s]+@sha256:[0-9a-f]{64}', image_ref) is None
+            or request.get('step_id') != '9'
+            or receipt.get('step_id') != '9'
+            or request.get('image_id') != image_id
+            or receipt.get('image_id') != image_id
+            or receipt.get('image_ref') != image_ref
+            or spec.get('native_installation_receipt_sha256') != receipt.get('receipt_sha256')
+            or not installation.verify_receipt_digest(receipt)):
+        raise em.Refusal('PRODUCTION_IMAGE_REFERENCE_UNBOUND', str(image_ref))
+    return image_ref
 
 
 def execute(inputs: Path, outputs: Path) -> dict:
@@ -92,10 +116,11 @@ def execute(inputs: Path, outputs: Path) -> dict:
         shutil.copyfile(source, frozen_pdk / source.name)
     pdk = _pdk_config(spec.get('pdk', {}), declared_root,
                       Path(spec['original_project']), project)
+    image_ref = _pinned_image_reference(spec)
     switch = project / 'phase3/librelane_switch.json'
     switch.parent.mkdir(parents=True, exist_ok=True)
     options = json.loads(switch.read_text()) if switch.is_file() else {}
-    options.update(image=spec['image_id'], pdk_root_host=str(declared_root.parent),
+    options.update(image=image_ref, pdk_root_host=str(declared_root.parent),
                    pdk=spec.get('pdk', {}).get('name'))
     write_json(switch, options, sort_keys=True)
     from phase3_one_shot_runner import _step_synth_librelane
@@ -104,7 +129,7 @@ def execute(inputs: Path, outputs: Path) -> dict:
         'native_entrypoint': engine.native_entrypoint,
         'image_id': spec['image_id'],
         'argv': ['phase3_one_shot_runner._step_synth_librelane', spec['top'],
-                 spec['image_id']],
+                 image_ref],
     }
     try:
         # The native helper may refuse during image/PDK preflight before it
@@ -116,7 +141,7 @@ def execute(inputs: Path, outputs: Path) -> dict:
             command['executed'] = True
             return _run_chain(*args, **kwargs)
         _lc.run_chain = _traced_run_chain
-        result = _step_synth_librelane(project, spec['top'], pdk, spec['image_id'])
+        result = _step_synth_librelane(project, spec['top'], pdk, image_ref)
     except Exception as exc:
         result = None
         detail = repr(exc)
