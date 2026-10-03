@@ -62,6 +62,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import magic_extract_spice_emit as _mx  # noqa: E402 — ordinary A7 extraction producer
+from _analog_a_check_common import (  # noqa: E402
+    DESIGN_CONTENT_FIELD, content_disclosed, load_block_list,
+)
 
 
 def _docker_exec_raw(container: str, cmd: str, timeout: int = 900
@@ -472,6 +475,8 @@ _POWER_TO_UW = {
     "nw": 0.001,
     "pw": 0.000001,
 }
+_POWER_TO_W = {unit: factor * 1e-6
+               for unit, factor in _POWER_TO_UW.items()}
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 _MAG_USE_RE = re.compile(r"(?im)^\s*use\s+(\S+)")
@@ -793,6 +798,130 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _declared_a3_subject_binding(project: Path, block: str, bdir: Path,
+                                 topology: Dict[str, object]
+                                 ) -> Tuple[Optional[Dict[str, object]], str]:
+    """Read, never infer, the existing A3 subject declaration.
+
+    A8 binds its native measurement only when the block is declared and A3's
+    producer sidecar names the same netlist, topology, and spec bytes.  The R3
+    open fixture lacks this sidecar and stays design-content undisclosed.
+    """
+    declared = load_block_list(project)
+    if not declared or block not in declared:
+        return None, ""
+    sidecar = bdir / "netlist_provenance.json"
+    if not sidecar.is_file():
+        return None, "declared block has no A3 netlist_provenance.json"
+    try:
+        doc = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"A3 netlist_provenance.json is unreadable: {exc}"
+    if not isinstance(doc, dict) or doc.get("block") != block:
+        return None, "A3 netlist provenance names a different block"
+    prov = doc.get("_provenance")
+    if not isinstance(prov, dict):
+        return None, "A3 netlist provenance has no _provenance object"
+    content = prov.get(DESIGN_CONTENT_FIELD)
+    if not content_disclosed(content):
+        return None, "A3 netlist provenance has no disclosed design_content"
+
+    topology_path = bdir / "topology.json"
+    spec_path = bdir / "spec.json"
+    netlist_path = bdir / f"{block}.sp"
+    rendered = prov.get("rendered_from")
+    if not isinstance(rendered, dict):
+        return None, "A3 netlist provenance has no rendered_from inputs"
+    topology_claim = rendered.get("topology_json")
+    spec_claim = rendered.get("spec_json")
+    if not isinstance(topology_claim, dict) or not isinstance(spec_claim, dict):
+        return None, "A3 netlist provenance has no topology/spec source claims"
+    for path, claim, expected in (
+        (topology_path, topology_claim, topology_path),
+        (spec_path, spec_claim, spec_path),
+    ):
+        if claim.get("path") != str(expected.relative_to(project)):
+            return None, f"A3 source claim does not name {expected.name}"
+        if not path.is_file() or _sha256(path) != str(
+                claim.get("sha256") or "").lower():
+            return None, f"A3 source claim is stale for {expected.name}"
+    if not netlist_path.is_file():
+        return None, "A3 declared netlist is absent"
+    artifact_hash = str(prov.get("artifact_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact_hash) \
+            or _sha256(netlist_path) != artifact_hash:
+        return None, "A3 declared netlist hash is stale or missing"
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"A3 spec is unreadable: {exc}"
+    if not isinstance(spec, dict) or spec.get("block") != block:
+        return None, "A3 spec does not name the declared block"
+    ports = topology.get("ports") if isinstance(topology, dict) else None
+    interface = spec.get("interface")
+    interface = interface if isinstance(interface, dict) else None
+    pins = interface.get("pins") if interface is not None else None
+    spec_ports = [p.get("name") for p in (pins or []) if isinstance(p, dict)]
+    if not isinstance(ports, list) or not isinstance(pins, list) \
+            or spec_ports != ports:
+        return None, "A3 spec interface pins do not equal topology ports"
+    block_list = next((project / root / "analog_block_list.json"
+                       for root in ("phase3/analog", "phase1/analog")
+                       if (project / root / "analog_block_list.json").is_file()), None)
+    if block_list is None:
+        return None, "declared analog block list disappeared"
+    binding: Dict[str, object] = {
+        "producer": "analog_a8_hardmacro_emit",
+        "source": "a3_netlist_provenance",
+        "block": block,
+        DESIGN_CONTENT_FIELD: content,
+        "netlist_provenance": str(sidecar.relative_to(project)),
+        "netlist_provenance_sha256": _sha256(sidecar),
+        "a3_netlist": str(netlist_path.relative_to(project)),
+        "a3_netlist_sha256": artifact_hash,
+        "topology": str(topology_path.relative_to(project)),
+        "topology_sha256": _sha256(topology_path),
+        "spec": str(spec_path.relative_to(project)),
+        "spec_sha256": _sha256(spec_path),
+        "declared_block_list": str(block_list.relative_to(project)),
+        "declared_block_list_sha256": _sha256(block_list),
+    }
+    return binding, ""
+
+
+def _attach_declared_subject_binding(project: Path, block: str,
+                                     topology: Dict[str, object],
+                                     measurement: Dict[str, object]
+                                     ) -> Tuple[Optional[Dict[str, object]], str]:
+    """Republish a validated A3 subject claim in the ordinary A8 record."""
+    bdir = project / "phase3" / "analog" / block
+    binding, why = _declared_a3_subject_binding(project, block, bdir, topology)
+    if binding is None:
+        # Missing/stale A3 input leaves the measured record unbound; the
+        # downstream content consumer then preserves its explicit refusal.
+        return measurement, why
+    path = bdir / _A8_MEASUREMENT
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot update {_A8_MEASUREMENT} subject binding: {exc}"
+    old_binding = doc.get("subject_binding")
+    if old_binding is not None and old_binding != binding:
+        return None, "existing A8 subject binding disagrees with current A3 subject"
+    if doc.get(DESIGN_CONTENT_FIELD) not in (None, binding[DESIGN_CONTENT_FIELD]):
+        return None, "existing A8 design_content disagrees with current A3 subject"
+    if old_binding != binding or doc.get(DESIGN_CONTENT_FIELD) != binding[DESIGN_CONTENT_FIELD]:
+        doc[DESIGN_CONTENT_FIELD] = binding[DESIGN_CONTENT_FIELD]
+        doc["subject_binding"] = binding
+        write_json(path, doc)
+        refreshed, refresh_why = load_native_measurement(
+            project, block, bdir / f"{block}.gds", topology)
+        if refreshed is None:
+            return None, f"subject-bound A8 record was not admissible: {refresh_why}"
+        return refreshed, ""
+    return measurement, ""
+
+
 def _project_file(project: Path, raw: object, *, field: str
                   ) -> Tuple[Optional[Path], str]:
     if not isinstance(raw, str) or not raw.strip():
@@ -893,6 +1022,21 @@ def load_native_measurement(project: Path, block: str, gds: Path,
     if source_netlist_path == (bdir / f"{block}.sp").resolve():
         return None, ("source_netlist names the A3 input netlist; a native "
                       "post-layout extracted netlist is required")
+    try:
+        extracted_text = source_netlist_path.read_text(errors="replace") \
+            if source_netlist_path is not None else ""
+    except OSError as exc:
+        return None, f"source_netlist is unreadable: {exc}"
+    header = next((hit for hit in _SUBCKT_HEADER_RE.finditer(extracted_text)
+                   if hit.group(1) == block), None)
+    if header is None:
+        return None, (f"source_netlist has no exact declared top-cell "
+                      f".subckt {block!r}; aliases are not admissible")
+    extracted_ports = (header.group(2) or "").split()
+    if extracted_ports != list(topology.get("ports") or []):
+        return None, (f"source_netlist .subckt {block!r} ports "
+                      f"{extracted_ports!r} do not match topology ports "
+                      f"{list(topology.get('ports') or [])!r}")
 
     # The digest proves which log was consumed; this small semantic check
     # proves it is an ngspice measurement log rather than an arbitrary
@@ -920,7 +1064,7 @@ def load_native_measurement(project: Path, block: str, gds: Path,
                 native_power_w, idd_power_w, rel_tol=1e-6, abs_tol=1e-18):
             return None, ("native pwr and I(VDD) receipts disagree")
         native_power_w = idd_power_w
-    record_power_w = value / _POWER_TO_UW[unit]
+    record_power_w = value * _POWER_TO_W[unit]
     if native_power_w is None or not math.isclose(
             record_power_w, native_power_w, rel_tol=1e-6, abs_tol=1e-18):
         return None, ("measured value does not match native pwr/ I(VDD) "
@@ -983,6 +1127,11 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
             return {"block": block, "emitted": False, "rc": 1,
                     "reason": ("ordinary native producer wrote a record "
                                f"that could not be admitted: {measurement_reason}")}
+    measurement, subject_reason = _attach_declared_subject_binding(
+        project, block, topology, measurement)
+    if measurement is None:
+        return {"block": block, "emitted": False, "rc": 1,
+                "reason": f"declared subject binding refused: {subject_reason}"}
     tech = layout_tech(bdir)
     rcfile = magicrc_for(pdk_root, container, tech)
     if rcfile is None:
@@ -1069,6 +1218,12 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
             "image_digest": measurement["image_digest"],
         },
     }
+    if DESIGN_CONTENT_FIELD in measurement:
+        manifest["native_measurement"][DESIGN_CONTENT_FIELD] = \
+            measurement[DESIGN_CONTENT_FIELD]
+    if "subject_binding" in measurement:
+        manifest["native_measurement"]["subject_binding"] = \
+            measurement["subject_binding"]
     write_json(hdir / "a8_views_provenance.json", manifest)
 
     return {"block": block, "emitted": True, "rc": 0,
