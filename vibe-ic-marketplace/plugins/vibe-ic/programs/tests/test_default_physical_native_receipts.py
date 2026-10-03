@@ -107,3 +107,34 @@ def test_native_xor_absent_connectivity_is_not_pass(native_project):
     assert rc == 2
     assert doc["design__xor_difference__count"] == 0
     assert doc["current"]["execution"]["rc"] == 0
+
+
+@pytest.mark.parametrize("mutation", ["reference", "shipped", "stage", "tool", "design", "pdk", "execution", "removed_producer"])
+def test_native_xor_current_reverse(native_project, mutation):
+    path = native_project / "reports/phase3/gds_xor.json"
+    doc = json.loads(path.read_text())
+    if mutation in ("reference", "shipped"):
+        p = native_project / doc["current"]["inputs"][mutation]["path"]
+        p.write_bytes(p.read_bytes() + b"changed")
+    elif mutation in ("stage", "tool", "design", "pdk"):
+        doc["current"][mutation] = "wrong"
+    elif mutation == "execution":
+        doc["current"]["execution"]["rc"] = 1
+    else:
+        doc.pop("current")
+    path.write_text(json.dumps(doc))
+    rc, reason, _ = xor.judge_receipt(native_project, str(path.relative_to(native_project)))
+    assert rc == 2
+    assert "CURRENT_" in reason or "XOR_CURRENT" in reason
+
+
+def test_native_xor_geometry_mutation_fails(native_project):
+    import klayout.db as db
+    doc = json.loads((native_project / "reports/phase3/gds_xor.json").read_text())
+    path = native_project / doc["current"]["inputs"]["shipped"]["path"]
+    layout = db.Layout()
+    layout.read(str(path))
+    layout.top_cell().shapes(layout.layer(68, 20)).insert(db.Box(30000, 30000, 31000, 31000))
+    layout.write(str(path))
+    assert xor.main([str(native_project), "--json", str(native_project / "reports/phase3/gds_xor.json")]) == 1
+    assert xor.main([str(native_project), "--check", "reports/phase3/gds_xor.json"]) == 1

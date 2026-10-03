@@ -64,7 +64,10 @@ def main():
         if argv[at + 1] != "--skip":
             raise RuntimeError("native wrapper requires --skip first after image")
         argv[at + 2:at + 2] = ["/usr/bin/time", "-v"]
-        argv[2:2] = ["--cpus", "2", "--network", "none"]
+        limits = ["--cpus", "2"]
+        if "--network" not in argv:
+            limits += ["--network", "none"]
+        argv[2:2] = limits
         before = time.monotonic()
         cp = original(argv, **kwargs)
         launches.append({"argv": argv, "rc": cp.returncode,
