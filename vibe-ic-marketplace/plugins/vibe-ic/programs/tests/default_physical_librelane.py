@@ -37,6 +37,7 @@ def main():
     put(project, "phase1/generated_docs/L8_TIMING_WAVEFORM.json", {
         "clock_domains": [{"role": "primary", "period_ns": spec["clock"]["period_ns"],
                            "source_pin": spec["clock"]["port"]}]})
+    put(project, "phase1/generated_docs/L9_INTEGRATION_SPEC.json", {"design_name": top, "ports": spec["ports"]})
     declaration = json.loads((project / td.DECLARATION_REL).read_text())
     for key, value in {"top_cell": top, "macro_area_um": [0, 0, *spec["die_um"]]}.items():
         declaration["answers"][key] = value
@@ -75,7 +76,9 @@ def main():
     result = {"scope": "Magic.StreamOut, KLayout.StreamOut, KLayout.XOR only"}
     try:
         ids = ["Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR"]
-        configs = lc.resolve_step_configs(project, image, pdk, ids, pdk_root=pdk_root)
+        configs = lc.resolve_step_configs(project, image, pdk, ids, pdk_root=pdk_root,
+                                          overlay={"VERILOG_FILES": (["dir::" + str(rtl.relative_to(project))],
+                                                   "input/source.json buffer fixture netlist")})
         pnr = project / "phase3/stage3/pnr"
         state = streams._routed_state(project, image, pdk_root, pdk, configs[ids[0]],
                                       pnr / "routed.def", pnr / (top + "_pnr.v"),
