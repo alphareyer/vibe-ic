@@ -263,7 +263,7 @@ def _current_tool_handoff(tmp_path, pdk="pdk_neutral"):
         put(p / 'phase3/librelane/synthesis_resolved.json', cfg)
         fingerprint = {'step': 'Yosys.Synthesis',
                        'config': LC.digest(p / 'phase3/librelane/synthesis_resolved.json'),
-                       'config_files': {str(rtl.resolve()): LC.digest(rtl)},
+                       'config_files': LC.config_file_hashes(cfg, [[str(root), '/pdk']]),
                        'state_files': {}}
         put(folder / 'input_fingerprint.json', fingerprint)
         receipt = {'input': fingerprint,
