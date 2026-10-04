@@ -126,6 +126,23 @@ def _receipt_pdk_mounts(folder: Path, receipt: dict) -> list[tuple[Path, str]]:
     return mounts
 
 
+def _rebase_project_path(recorded: str | Path, project: Path,
+                         allowed: tuple[str, ...]) -> Path:
+    """Rebind a recorded host path to the mounted project, fail closed."""
+    path = Path(recorded).resolve()
+    if path.is_relative_to(project.resolve()):
+        return path
+    parts = path.parts
+    for suffix in allowed:
+        tail = tuple(Path(suffix).parts)
+        for i in range(len(parts) - len(tail) + 1):
+            if parts[i:i + len(tail)] == tail:
+                candidate = (project / Path(*parts[i:])).resolve()
+                if candidate.is_file() and candidate.is_relative_to(project.resolve()):
+                    return candidate
+    raise ValueError('recorded project path is unknown or foreign')
+
+
 def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict, dict]:
     """Verify the existing run_chain receipt against its consumed/output bytes."""
     import librelane_contract as LC
@@ -141,6 +158,16 @@ def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict
     if inp['step'] != 'Yosys.Synthesis' or cfg['meta']['step'] != inp['step']:
         raise ValueError('not a Yosys.Synthesis producer')
     raw = Path(state['nl']).resolve()
+    # run_chain records host absolute paths in state_out.json.  A handoff
+    # consumer may read that receipt from a same-tree container mount, where
+    # the host prefix is absent.  Rebind only the canonical project
+    # ``phase3/librelane`` suffix and only when the resulting file is inside
+    # this producer folder; unknown paths remain a hard refusal.
+    if not raw.is_relative_to(folder):
+        rebound = _rebase_project_path(raw, project, ('phase3/librelane',))
+        if not rebound.is_relative_to(folder) or not rebound.is_file():
+            raise ValueError('native netlist path is unknown to producer folder')
+        raw = rebound
     if not raw.is_relative_to(folder):
         raise ValueError('native netlist is outside its producer folder')
     for rel in ('state_out.json', 'config.json', 'reports/stat.json', str(raw.relative_to(folder))):
@@ -153,20 +180,36 @@ def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict
         raise ValueError('producer PDK/top differs from declared input')
     rtl = silicon_rtl_selection(project / 'phase2/stage1/rtl')
     paths = [str(p.resolve()) for p in rtl]
-    if not paths or cfg.get('VERILOG_FILES') != paths:
+    recorded_paths = [str(_rebase_project_path(v, project, ('phase2/stage1/rtl',)))
+                      for v in cfg.get('VERILOG_FILES', [])]
+    if not paths or recorded_paths != paths:
         raise ValueError('producer RTL file set differs from current synthesis input')
     for path in rtl:
-        if inp['config_files'].get(str(path.resolve())) != _sha(path):
+        recorded = next((v for k, v in inp['config_files'].items()
+                         if Path(k).name == path.name and
+                         'phase2/stage1/rtl' in k), None)
+        if recorded != _sha(path):
             raise ValueError('producer consumed stale RTL bytes')
     mounts = _receipt_pdk_mounts(folder, receipt)
     # Rehash the producer's recorded population. A later reader namespace may
     # expose additional image files; those were not part of this receipt.
     expected_config_files = LC.config_file_hashes(
         {'files': list(inp['config_files'])}, mounts)
+    # Project-owned RTL/config keys are recorded with the producer's host
+    # prefix.  Rebind those keys to the mounted project before hashing while
+    # retaining the original key names in the receipt comparison.
+    for key in inp['config_files']:
+        if 'phase2/stage1/rtl' in key:
+            rebound = _rebase_project_path(key, project, ('phase2/stage1/rtl',))
+            expected_config_files[key] = _sha(rebound)
     if inp.get('config_files') != expected_config_files:
         raise ValueError('producer consumed stale or incomplete config material')
     for path, recorded in inp['state_files'].items():
-        if recorded != _sha(Path(path)):
+        candidate = Path(path)
+        if not candidate.is_file():
+            candidate = _rebase_project_path(path, project,
+                                             ('phase3/librelane', 'phase2/stage1/rtl'))
+        if recorded != _sha(candidate):
             raise ValueError(f'producer consumed stale state_files: {path}')
     stat = json.loads((folder / 'reports/stat.json').read_text())
     modules = stat.get('modules')
