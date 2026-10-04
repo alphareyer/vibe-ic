@@ -398,7 +398,15 @@ def _run_one(project: Path, row: Dict[str, str], timeout: int
         out.update({"rc": None, "executed": False,
                     "note": f"{row['program']}.py is not in programs/"})
         return out
-    argv = [sys.executable, str(prog)] + row["command"].split()[1:]
+    # Use the gate's existing project-relative argv semantics, including
+    # nullglob for optional source extensions. Literal *.sv/*.v arguments
+    # made the owed ROM producer refuse before it could publish its evidence.
+    from flow_compliance_check import _resolve_program_cmd
+    argv = _resolve_program_cmd(row["command"], cwd=project)
+    if not argv:
+        out.update({"rc": None, "executed": False,
+                    "note": "declared producer command could not be resolved"})
+        return out
     t0 = time.time()
     try:
         cp = subprocess.run(  # nosec B603 — argv from the flow yaml

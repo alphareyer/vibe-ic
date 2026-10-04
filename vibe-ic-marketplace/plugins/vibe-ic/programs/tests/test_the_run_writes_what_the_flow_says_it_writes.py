@@ -420,3 +420,70 @@ def test_the_two_kinds_of_skip_are_counted_apart(tmp_path):
                                  + rec["already_produced_by_the_run"])
     assert rec["population"] + rec["steps_the_run_did_not_perform"] == (
         rec["declared_clauses"])
+
+
+def _shipped_rom_clause():
+    from _hostpaths import repo_path
+    flow = repo_path("vibe-ic-marketplace", "plugins", "vibe-ic",
+                     "flow", "phase1_phase2_phase3.yaml")
+    rows = [r for r in P.declared_producer_clauses(flow)
+            if r["program"] == "rom_init_lint"]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _rom_producer_project(tmp_path, *, source_count=23, unsafe=False):
+    row = _shipped_rom_clause()
+    rtl = tmp_path / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    for i in range(source_count):
+        body = f"module leaf_{i}; endmodule\n"
+        if unsafe and i == 0:
+            body = ("module leaf_0; reg [7:0] rom [0:3]; integer i;\n"
+                    "initial begin for (i=0; i<4; i=i+1) rom[i]=i; end\n"
+                    "endmodule\n")
+        (rtl / f"leaf_{i}.v").write_text(body)
+    sibling = tmp_path / row["siblings"][0]
+    sibling.parent.mkdir(parents=True, exist_ok=True)
+    sibling.write_text('{}\n')
+    (tmp_path / row["target"]).parent.mkdir(parents=True, exist_ok=True)
+    owed, skipped = P.owed(tmp_path, [row])
+    assert len(owed) == 1 and not skipped, (owed, skipped)
+    return owed[0]
+
+
+@pytest.mark.parametrize("unsafe", [False, True], ids=["clean", "finding"])
+def test_shipped_rom_globs_publish_the_actual_producer_verdict(tmp_path, unsafe):
+    row = _rom_producer_project(tmp_path, unsafe=unsafe)
+    rtl = tmp_path / "phase2/stage1/rtl"
+    assert len(list(rtl.glob("*.v"))) == 23 and not list(rtl.glob("*.sv"))
+    result = P._run_one(tmp_path, row, timeout=30)
+    assert result["rc"] == (1 if unsafe else 0), result
+    assert result["executed"] and result["target_exists_after"], result
+    findings = json.loads((tmp_path / row["target"]).read_text())
+    assert [f["rule"] for f in findings] == (["quartus-unsafe-rom-init"] if unsafe else [])
+
+
+def test_rom_globs_without_any_source_still_refuse(tmp_path):
+    row = _rom_producer_project(tmp_path, source_count=0)
+    result = P._run_one(tmp_path, row, timeout=30)
+    assert (result["executed"], result["rc"], result["target_exists_after"]) == (True, 2, False), result
+
+
+def test_rom_missing_required_literal_source_still_refuses(tmp_path):
+    row = _rom_producer_project(tmp_path)
+    required = "phase2/stage1/rtl/required.v"
+    row["command"] = f"rom_init_lint {required} --json {row['target']}"
+    result = P._run_one(tmp_path, row, timeout=30)
+    assert (result["executed"], result["rc"], result["target_exists_after"]) == (True, 2, False), result
+    assert f"missing file: {required}" in result["tail"], result
+
+
+def test_missing_declared_producer_program_still_refuses(tmp_path):
+    row = _rom_producer_project(tmp_path)
+    row["program"] = "fixture_missing_producer"
+    row["command"] = f"fixture_missing_producer . --json {row['target']}"
+    result = P._run_one(tmp_path, row, timeout=30)
+    assert (result["executed"], result["rc"]) == (False, None), result
+    assert "is not in programs/" in result["note"], result
+    assert not (tmp_path / row["target"]).exists()
