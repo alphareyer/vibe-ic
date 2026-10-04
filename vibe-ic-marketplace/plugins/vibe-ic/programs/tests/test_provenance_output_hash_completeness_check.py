@@ -66,6 +66,120 @@ def test_outputs_missing_fails(tmp_path: Path) -> None:
     assert any(f.rule == "PROVENANCE_OUTPUTS_MISSING" for f in findings)
 
 
+def test_typed_catalog_glue_adoption_requires_current_successor(tmp_path: Path) -> None:
+    p = tmp_path / "proj"
+    rel = "phase2/stage1/rtl/subservient.v"
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    glue = b"module subservient; endmodule\n"
+    core = b"module serv_state; endmodule\n"
+    (rtl / "subservient.v").write_bytes(glue)
+    (rtl / "serv_state.v").write_bytes(core)
+    glue_sha, core_sha = _sha256_of(glue), _sha256_of(core)
+    record = {"path": "local/combined-r1/record.json", "sha256": "a" * 64}
+    legacy_derivative = {
+        "event": "ip_catalog_local_derivative",
+        "kind": "LOCAL_DERIVATIVE",
+        "record": record,
+        "current_inventory": {"subservient.v": glue_sha,
+                              "serv_state.v": core_sha},
+        "official_unmodified_files": 1,
+        "locally_adapted_reused_files": 1,
+        "separately_authored_files": ["subservient.v"],
+    }
+    _make_provenance(p, [{
+        "event": "catalog_glue_author_adoption",
+        "kind": "SEPARATELY_AUTHORED_GLUE",
+        "path": rel,
+        "sha256": glue_sha,
+    }, legacy_derivative, {**legacy_derivative, "exit_code": 0,
+                          "outputs": {"phase2/stage1/rtl/serv_state.v":
+                                      f"sha256:{core_sha}"}}])
+    verdict, findings = audit(p)
+    assert verdict == "PASS", [(f.rule, f.detail) for f in findings]
+    assert findings == []
+
+
+def test_typed_catalog_glue_adoption_changed_bytes_still_fail(tmp_path: Path) -> None:
+    p = tmp_path / "proj"
+    rel = "phase2/stage1/rtl/subservient.v"
+    (p / rel).parent.mkdir(parents=True)
+    (p / rel).write_bytes(b"changed bytes\n")
+    core_rel = "phase2/stage1/rtl/serv_state.v"
+    core = b"core bytes\n"
+    (p / core_rel).write_bytes(core)
+    current = {"subservient.v": _sha256_of(b"accepted bytes\n"),
+               "serv_state.v": _sha256_of(core)}
+    successor = {
+        "event": "ip_catalog_local_derivative",
+        "kind": "LOCAL_DERIVATIVE",
+        "record": {"path": "local/combined-r1/record.json", "sha256": "a" * 64},
+        "current_inventory": current,
+        "exit_code": 0,
+        "outputs": {core_rel: f"sha256:{_sha256_of(core)}"},
+    }
+    _make_provenance(p, [{
+        "event": "catalog_glue_author_adoption",
+        "kind": "SEPARATELY_AUTHORED_GLUE",
+        "path": rel,
+        "sha256": _sha256_of(b"accepted bytes\n"),
+    }, successor])
+    verdict, findings = audit(p)
+    assert verdict == "FAIL"
+    assert any(f.rule == "PROVENANCE_HASH_MISMATCH" for f in findings)
+
+
+def test_typed_catalog_glue_adoption_without_successor_fails(tmp_path: Path) -> None:
+    p = tmp_path / "proj"
+    rel = "phase2/stage1/rtl/subservient.v"
+    body = b"module subservient; endmodule\n"
+    (p / rel).parent.mkdir(parents=True)
+    (p / rel).write_bytes(body)
+    _make_provenance(p, [{
+        "event": "catalog_glue_author_adoption",
+        "kind": "SEPARATELY_AUTHORED_GLUE",
+        "path": rel,
+        "sha256": _sha256_of(body),
+    }])
+    verdict, findings = audit(p)
+    assert verdict == "FAIL"
+    assert any(f.rule == "PROVENANCE_OUTPUTS_MISSING" for f in findings)
+
+
+def test_legacy_derivative_requires_exact_output_successor(tmp_path: Path) -> None:
+    p = tmp_path / "proj"
+    rel = "phase2/stage1/rtl/serv_state.v"
+    body = b"current core\n"
+    (p / rel).parent.mkdir(parents=True)
+    (p / rel).write_bytes(body)
+    legacy = {
+        "event": "ip_catalog_local_derivative",
+        "kind": "LOCAL_DERIVATIVE",
+        "record": {"path": "local/combined-r1/record.json", "sha256": "a" * 64},
+        "current_inventory": {"serv_state.v": _sha256_of(body)},
+    }
+    successor = {**legacy, "record": {"path": "local/other/record.json",
+                                        "sha256": "b" * 64},
+                 "exit_code": 0,
+                 "outputs": {rel: f"sha256:{_sha256_of(body)}"}}
+    _make_provenance(p, [legacy, successor])
+    verdict, findings = audit(p)
+    assert verdict == "FAIL"
+    assert any(f.rule == "PROVENANCE_OUTPUTS_MISSING" for f in findings)
+
+
+def test_unrelated_metadata_without_outputs_still_fails(tmp_path: Path) -> None:
+    p = tmp_path / "proj"
+    _make_provenance(p, [{
+        "event": "unrelated_metadata",
+        "path": "phase2/stage1/rtl/subservient.v",
+        "sha256": "a" * 64,
+    }])
+    verdict, findings = audit(p)
+    assert verdict == "FAIL"
+    assert any(f.rule == "PROVENANCE_OUTPUTS_MISSING" for f in findings)
+
+
 def test_hash_shape_invalid_fails(tmp_path: Path) -> None:
     p = tmp_path / "proj"
     _make_provenance(p, [

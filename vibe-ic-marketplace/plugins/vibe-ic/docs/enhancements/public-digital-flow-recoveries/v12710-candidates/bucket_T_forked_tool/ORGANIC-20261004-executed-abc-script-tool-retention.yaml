@@ -1,0 +1,28 @@
+type: enhancement
+severity: P1
+component: flow:librelane
+plugin_version: "1.27.10"
+
+title: >-
+  Retain executed ABC mapping scripts in the source-owned synthesis wrapper
+
+root_cause_layer: forked_tool
+tool: "yosys"
+generating_step: "phase2.yosys_synth"
+golden_sample: "none - no independent expected-output sample was supplied; the retained-script positive is a candidate witness, not a golden sample"
+bad_sample: "spm-abc-retention-candidate-r9-collected/terminal-receipt.json (preserved original failure); spm-r9-independent-review-collected/applicability-current396/current396-synthesize.py (unpatched installed source)"
+problem: |
+  The Yosys ABC invocation deletes its executed mapping script before the repository keeper can archive and bind it to current native behavior.
+tool_enhancement: |
+  In the real `LibreLane` fork, `librelane/scripts/pyosys/synthesize.py::synthesize.run_strategy` now adds only `-nocleanup` to the existing ABC script invocation. The real fork and image recipe are source-landed. The existing image owner still must publish and bind installed module bytes to the resulting manifest. This is an invocation repair in `LibreLane`, not a Yosys-core patch or detector relaxation.
+
+pattern: |
+  A synthesis tool invoked without artifact retention deletes its executed mapping script before a current-run producer can bind its bytes, so replaying a configured script cannot prove which actions the tool applied.
+
+suggested_fix: |
+  Preserve the source-landed retention component and its existing installed baseline changes separately. Formal image publication and installed-byte verification remain with the existing single release owner. Repository script-retention and ordinary LOCAL `run_chain` with `--workdir` repairs are now source-absorbed after a real child positive and independent component acceptance; do not duplicate those repairs or promote a small probe to whole-flow proof.
+
+id: "ORGANIC-20261004-executed-abc-script-tool-retention"
+submitted_at: "2026-10-04T02:18:37+02:00"
+session_context: >-
+  Dated documentation-only follow-up from root landing and existing terminal/review receipts. The real fork and image recipe are MAIN LANDED source only; formal image publication has not been started by this capture. The local probe image still has no published manifest digest and is not deployed. Normal synthesis and current equivalence pass in an existing continuation, whose final structural audit fails and prevents Phase 3. No fresh EDA run, global repin, threshold change, full-flow PASS or duplicate implementation is part of this capture.

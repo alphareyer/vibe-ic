@@ -4454,9 +4454,17 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
                 continue
         except OSError:                                    # pragma: no cover
             continue
-        tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
+        # These receipts can be named by nested durable audit records. Keep
+        # their actual bytes in this project's existing runtime-state area,
+        # rather than publishing an argv that expires with a /tmp directory.
+        # Runtime state is excluded from the design-input fingerprint.
+        receipt_root = project / ".vibeic-state" / "audit_receipts"
+        if not receipt_root.resolve().is_relative_to(project.resolve()):
+            raise ValueError("AUDIT_RECEIPT_OUTSIDE_PROJECT")
+        receipt_root.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkdtemp(prefix="gate_receipt_", dir=receipt_root))
         tmps.append(tmp)
-        dest = str(Path(tmp.name) / abs_target.name)
+        dest = str(tmp / abs_target.name)
         moved[i + 1] = dest
         # SEED THE SCRATCH WITH THE DOCUMENT. For several gates this flag names
         # an INPUT as well as an output: `pad_ring_check`'s own help says the

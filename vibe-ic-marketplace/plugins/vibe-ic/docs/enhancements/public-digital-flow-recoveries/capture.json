@@ -8,11 +8,15 @@
   },
   "program_first": true,
   "counts": {
-    "absorbed": 4,
-    "open_findings": 4,
-    "new_program_candidates": 1,
+    "absorbed": 8,
+    "open_findings": 3,
+    "new_program_candidates": 0,
     "new_skill_sections": 0,
-    "new_backlogs": 0
+    "new_backlogs": 1,
+    "resolved_historical_findings": 1,
+    "accepted_unlanded_components": 0,
+    "additional_program_source_absorptions": 2,
+    "pending_formal_image_publications": 1
   },
   "absorbed": [
     {
@@ -182,6 +186,266 @@
         }
       ],
       "claim_boundary": "Successful GeneratePDN output and connected supplies prove this repaired stage only. They do not prove Phase 3 or whole-IC completion."
+    },
+    {
+      "id": "local-derivative-written-output-provenance",
+      "step": "phase2.rtl_gen.reused_ip_local_derivative",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "A declared replacement must be written by its producer before its output digest is published; an existing matching file cannot stand in for the producer writing the declared bytes.",
+      "before": "Existing-byte equality could allow a provenance event without the required replacement-output write.",
+      "after": "The producer writes the exact replacement bytes, hashes the written file, then publishes current provenance; missing or drifted events retain refusal.",
+      "implementation": {
+        "release": "1.27.10",
+        "commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+        "measured_production_source": "c1f5e4d39004ae9d7d1b94d13bc21f579e3a9a76",
+        "runtime_candidate": "b20aa578b8030ece255e1768b5d4a1eb4417f951",
+        "version_tip_runtime_rerun": false,
+        "accepted_source_tip": "3094a0593b2cc21f5c03c3893838035680e76d1c",
+        "accepted_source_tree": "58918efa4684d1e34911c5c7a244b9ac9166b506",
+        "programs": [
+          "programs/ip_catalog_pull.py::apply_local_derivative"
+        ]
+      },
+      "evidence": [
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "LANDED.json",
+          "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+        },
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "SHIPPING_IDENTITY.json",
+          "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+        },
+        {
+          "packet": "subservient-derivative-output-r3-collected",
+          "artifact": "67f-to-3094-provenance.patch",
+          "sha256": "081165474425ee38b9123b10e876dc7abacf5e723dc10fd23a246eb0676cdb2f"
+        },
+        {
+          "packet": "subservient-derivative-output-r3-collected",
+          "artifact": "VERDICT.md",
+          "sha256": "39a3b78a1a1e81c2e29d4ea3a01e5a33c16d1f549f7cf5900ad51ba3b684a92a"
+        }
+      ],
+      "claim_boundary": "replacement-output provenance only; benchmark adoption and whole IC remain NOT_MEASURED; no new code emission or replay for this documentation capture.",
+      "measurements": {
+        "c1_correct_cwd": {
+          "passed": 6,
+          "failed": 1,
+          "failed_reason": "Unavailable-parent fixture retained a verified CACHE_ROOT, yielding PASS_WITH_WAIVERS under approved offline route."
+        },
+        "wrong_cwd_attempt": "RETAINED_NOT_CREDITED; relative os.link destinations were attributed to programs/ write guard",
+        "b20_exact_prior_red_selector": {
+          "passed": 1,
+          "failed": 0,
+          "fixture_delta": "+3/-0",
+          "assertions_preserved": [
+            "NOT_MEASURED",
+            "IP_REUSE_PIN_VERIFY_UNAVAILABLE"
+          ]
+        },
+        "final_source_blobs_unchanged": true
+      }
+    },
+    {
+      "id": "known-offline-official-reference",
+      "step": "phase2.rtl_gen.reused_ip_local_derivative",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "An explicitly approved immutable offline reference may replace network replay only when origin, exact ref, commit and complete inventory are independently bound; a caller-local clone or self-supplied tag is not that authority.",
+      "before": "The approved exact official parent remained unavailable when its network replay could not finish.",
+      "after": "Only the root-approved read-only mirror is admitted; wrong origin, wrong pin, modified RTL, project cache and project symlink remain MISMATCH.",
+      "implementation": {
+        "release": "1.27.10",
+        "commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+        "measured_production_source": "c1f5e4d39004ae9d7d1b94d13bc21f579e3a9a76",
+        "runtime_candidate": "b20aa578b8030ece255e1768b5d4a1eb4417f951",
+        "version_tip_runtime_rerun": false,
+        "accepted_source_tip": "694c833485fb0a87611c049d5c83868be7638743",
+        "accepted_source_tree": "437b4aa0bf60b4643c29309cddb0a1cc14da0250",
+        "programs": [
+          "programs/ip_catalog_pull.py"
+        ]
+      },
+      "evidence": [
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "LANDED.json",
+          "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+        },
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "SHIPPING_IDENTITY.json",
+          "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+        },
+        {
+          "packet": "offline-official-reference-proposal-r1-collected",
+          "artifact": "net.patch",
+          "sha256": "827326d17043aaf4fc0be11eeeac7ab9bf6568d8bb22459bab29edcbb13d5615"
+        },
+        {
+          "packet": "offline-official-reference-independent-r1-collected",
+          "artifact": "VERDICT.md",
+          "sha256": "695eb1d1e29be3aba58a197755dc413462d48d1232e3a142735623962e183873"
+        }
+      ],
+      "claim_boundary": "approved exact mirror only; arbitrary forged tags not approved; runtime adoption not claimed; no new code emission or replay for this documentation capture.",
+      "measurements": {
+        "driver_rc": 0,
+        "total_observations": 7,
+        "base_observations": 1,
+        "base_actual_state": "UNAVAILABLE",
+        "candidate_observations": 6,
+        "candidate_actual_states": {
+          "approved_cache": "VERIFIED",
+          "wrong_origin": "MISMATCH",
+          "wrong_pin": "MISMATCH",
+          "modified_rtl": "MISMATCH",
+          "project_cache": "MISMATCH",
+          "project_symlink": "MISMATCH"
+        },
+        "interpretation": "Six candidate outcomes equal their expected states; not seven candidate PASS cases.",
+        "project_changed": false
+      },
+      "approved_reference": {
+        "origin": "https://github.com/olofk/serv.git",
+        "ref": "refs/tags/1.4.0",
+        "commit": "7d9cde4e6ca4f4c84d7512a752a4c187537dd373",
+        "inventory_sha256": "1cfb8901f38d0470959d55212995a9ea60e17200a5bc18039b8a4b1e8ab53591",
+        "mount": "read-only"
+      }
+    },
+    {
+      "id": "l13-input-polarity-and-declared-equipment",
+      "step": "phase1.fact_extract",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "Field-relevant negative wording must remain scoped to its clause and source; positive equipment declarations elsewhere must survive, and missing calibration or equipment facts must not be invented.",
+      "before": "Negative calibration wording and positive declared equipment could be mis-scoped or flattened together.",
+      "after": "The ordinary L13 producer preserves input polarity and declared equipment using the existing shared extraction path.",
+      "implementation": {
+        "release": "1.27.10",
+        "commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+        "measured_production_source": "c1f5e4d39004ae9d7d1b94d13bc21f579e3a9a76",
+        "runtime_candidate": "b20aa578b8030ece255e1768b5d4a1eb4417f951",
+        "version_tip_runtime_rerun": false,
+        "accepted_source_tip": "97ba0230b3df02d967b7062ab08fcbf93198df56",
+        "accepted_source_tree": "53557e25e1bd90d9e5151442abed0b4f21253338",
+        "programs": [
+          "programs/phase1_doc_one_shot_runner.py",
+          "programs/spi_protocol_synth.py"
+        ]
+      },
+      "evidence": [
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "LANDED.json",
+          "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+        },
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "SHIPPING_IDENTITY.json",
+          "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+        },
+        {
+          "packet": "subservient-l13-negation-r2-chain-collected",
+          "artifact": "19e-to-97ba-three-path-net.patch",
+          "sha256": "0073ecf3a05935d29018195c47acd5730b9f89e42d1e118ce1cfd2041048599d"
+        },
+        {
+          "packet": "subservient-l13-source-independent-r2-collected",
+          "artifact": "VERDICT.md",
+          "sha256": "ae985e5227c40117a61692539339d8084d1efff5d36c6b777edd9303e7643f4f"
+        }
+      ],
+      "claim_boundary": "current-subject D1 receipt retained separately; no whole Phase 1 or whole IC claim; no new code emission or replay for this documentation capture.",
+      "measurements": {
+        "c1_focused_passed": 15,
+        "source_blobs_unchanged_through_shipping": true,
+        "whole_phase1": "NOT_CLAIMED"
+      }
+    },
+    {
+      "id": "spm-current-sdc-pvt-classification-spef-chain",
+      "step": "phase3.sta",
+      "bucket": "A",
+      "program_first_disposition": "ALREADY_PROGRAM",
+      "status": "ABSORBED_LANDED",
+      "general_pattern": "A current sign-off measurement must bind raw and derived constraints, applied OCV, typed corner artifacts, classified electrical rows and actual extraction bytes; listed IO or external-port disclosures cannot be silently counted as measured core violations.",
+      "before": "The current SDC/PVT/DRV/SPEF producer and consumer chain lacked the complete current-source bindings needed for typed consumption.",
+      "after": "The accepted R4-R7 program chain binds current SDC and OCV, typed corner evidence, source-bound DRV classes and RCX-produced SPEF receipts; measured core violations and UNAVAILABLE remain FAIL, while unqueried data remain NOT_MEASURED.",
+      "implementation": {
+        "release": "1.27.10",
+        "commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+        "measured_production_source": "c1f5e4d39004ae9d7d1b94d13bc21f579e3a9a76",
+        "runtime_candidate": "b20aa578b8030ece255e1768b5d4a1eb4417f951",
+        "version_tip_runtime_rerun": false,
+        "accepted_source_tip": "c4f8bb260e00f016afe64633344d578948f35815",
+        "accepted_source_tree": "359f0ace4f58b7bde3685e7e8c8f6cb596af4520",
+        "programs": [
+          "programs/drv_capture_plan.py",
+          "programs/drv_signoff_capture.py",
+          "programs/sta_corner_record_completeness_check.py"
+        ]
+      },
+      "evidence": [
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "LANDED.json",
+          "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+        },
+        {
+          "packet": "post-v1279-accepted4-root-ready",
+          "artifact": "SHIPPING_IDENTITY.json",
+          "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+        },
+        {
+          "packet": "spm-spef-producer-r7-collected",
+          "artifact": "91b-to-c4-three-path-net.patch",
+          "sha256": "123a441409f08774fc3f351077dfb5d47dcdd4bc966aedc0e6a474eb575f8534"
+        },
+        {
+          "packet": "spm-spef-producer-r7-review-collected",
+          "artifact": "review.md",
+          "sha256": "354f8c625de62f6f9922d9f4650441cc360bfe45d6cd16a9f7fd3d2e655e1e87"
+        },
+        {
+          "packet": "post-v1279-spm-finite-c1f5-collected",
+          "artifact": "receipt.json",
+          "sha256": "34897c1a4420d0b6cee04410064805fb9e3d5ba6aea35d3a88f2efc870423389"
+        }
+      ],
+      "claim_boundary": "R4-R7 accepted chain only; measured FAIL precedence retained; no whole IC credit; no new code emission or replay for this documentation capture.",
+      "measurements": {
+        "named_controls": 8,
+        "r4_controls": 3,
+        "r6_controls": 4,
+        "r7_controls": 1,
+        "controls_rc": 0,
+        "current_consumer_scenes": 9,
+        "current_consumer_verdict": "PASS",
+        "raw_listed_row_counts": "six scenes with 36; three scenes with 37",
+        "drv_classes": "CLASSIFIED",
+        "connectivity": "SOURCE_BOUND",
+        "counted": {},
+        "raw_rows_preserved": true,
+        "ocv_example_values": {
+          "early": 0.95,
+          "late": 1.05
+        },
+        "ocv_value_contract": "finite values with 0 < early <= 1 <= late; example values are source-read, not hard-coded",
+        "original_step32_synth_abc": "FAIL_UNCHANGED",
+        "no_whole_ic_credit": true
+      }
     }
   ],
   "expert_reconciliation": {
@@ -236,7 +500,7 @@
       "step": "phase3.sta",
       "bucket": "A",
       "program_first_disposition": "ALREADY_PROGRAM_EVIDENCE_PENDING",
-      "status": "OPEN_NOT_CLASSIFIED",
+      "status": "RESOLVED_COMPONENT_SCOPED",
       "general_pattern": "A design-wide electrical-limit count cannot be assigned to core logic, IO cells, or external ports without a current, source-bound connectivity and Liberty witness. Missing classification evidence must count conservatively and remain unavailable rather than silently dropping rows.",
       "observed": {
         "reported_cap_rows": 37,
@@ -256,7 +520,23 @@
         "artifact": "NATIVE_PROGRESS.md",
         "sha256": "19221555d91ed51b0cb9be6d124a930f2397fd87b0d2cdeb702513b29b10a704"
       },
-      "claim_boundary": "The count is not evidence of 37 core violations, and no IO-margin waiver or row deletion is authorized."
+      "claim_boundary": "The count is not evidence of 37 core violations, and no IO-margin waiver or row deletion is authorized.",
+      "historical_status": "OPEN_NOT_CLASSIFIED",
+      "resolution": {
+        "release": "1.27.10",
+        "source_commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "evidence": {
+          "packet": "post-v1279-spm-finite-c1f5-collected",
+          "artifact": "receipt.json",
+          "sha256": "34897c1a4420d0b6cee04410064805fb9e3d5ba6aea35d3a88f2efc870423389"
+        },
+        "current_consumer": "PASS; nine current scenes",
+        "classes": "CLASSIFIED",
+        "connectivity": "SOURCE_BOUND",
+        "counted": {},
+        "raw_listed": "36/37 disclosures retained, not genuine core-violation counts",
+        "claim_boundary": "Historical 37-row unavailable observation above remains intact. No broad physical or whole-IC closure claim."
+      }
     },
     {
       "id": "native-hold-met-below-additional-reserve",
@@ -323,6 +603,500 @@
         }
       ],
       "claim_boundary": "The current report is in progress and pre-stream remains FAIL. This capture does not classify the cause, manufacture a core rectangle, or claim GDS or whole-IC PASS."
+    }
+  ],
+  "latest_source_release": {
+    "version": "1.27.11",
+    "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+    "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+    "landed_at": "2026-10-04T00:07:00.584058+00:00",
+    "receipt": {
+      "packet": "v12711-pr2869-sub-spm-root",
+      "artifact": "LANDED.json",
+      "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+    }
+  },
+  "snapshot_at_utc": "2026-10-03T23:55:45.468180+00:00",
+  "snapshot_policy": "Immutable supplied evidence plus dated manager ownership statements; no fresh runtime or remote-head promotion.",
+  "prior_capture_counts": {
+    "absorbed": 4,
+    "open_findings": 4,
+    "new_program_candidates": 1,
+    "new_skill_sections": 0,
+    "new_backlogs": 0
+  },
+  "accepted_candidates": [
+    {
+      "id": "legacy-local-derivative-producer-output-recovery",
+      "bucket": "A",
+      "step": "phase2.rtl_gen.reused_ip_local_derivative",
+      "program_first_disposition": "ALREADY_PROGRAM_LANDED",
+      "status": "ABSORBED_LANDED",
+      "source_tip": "daceff44d48cde2b449e33f7aa6f9128c8d507e4",
+      "source_tree": "ba1fca5bc041bc08f43210d2942f517f71c8c4dd",
+      "general_pattern": "Recover only an exactly captured historical event shape after re-deriving every current parent, patch, inventory, input and proof binding; retain old event bytes and append a digest of bytes actually written.",
+      "event_shape": "Both exit_code and outputs absent; exact current event equality after removing only those two fields. Partial absence or changed fields still refuse.",
+      "implementation": "programs/ip_catalog_pull.py; ordinary consumer unchanged",
+      "measurements": {
+        "existing_focused_passed": 6,
+        "existing_focused_deselected": 16,
+        "actual002_producer_rc": 1,
+        "actual003_producer": "VERIFIED; rc0",
+        "actual003_frontdoor_rc": 1,
+        "ordinary_current_consumer": "NOT_MEASURED; awaiting_signed_judgement (corrected cause). Legal delegated-parent lock re-entry was not a blocker.",
+        "manifest_rtl_and_inputs": "UNCHANGED",
+        "provenance_history": "Original bytes retained as exact prefix; one current event appended",
+        "actual001": "Host setup failure before child launch"
+      },
+      "evidence": [
+        {
+          "packet": "subservient-legacy-output-independent-r1-collected",
+          "artifact": "VERDICT.md",
+          "sha256": "c32484af19ed8e0a0f153f9b619c847994e0080d250402f136771ea533572a28"
+        },
+        {
+          "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+          "artifact": "HANDOFF.md",
+          "sha256": "c27e7b2ef7f5287aa2ee7f74c0c3711526329be52c4fe30a9242b06c2d6c2bc1"
+        },
+        {
+          "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+          "artifact": "SOURCE_IDENTITY.json",
+          "sha256": "e8069e36d243ae8e3cc71fec87b9c761cf2dfe1d3bbe4b9c4d8c83e967366837"
+        }
+      ],
+      "claim_boundary": "Producer recovery is source-absorbed at v1.27.11. Later normal Step1 review/API PASS does not override actual006 whole Phase2 FAIL; synthesis/current LEC PASS, final audit structural blockers, functional NOT_MEASURED and Phase3 SKIPPED remain distinct. Retained 247 proof is historical.",
+      "landed_release": {
+        "version": "1.27.11",
+        "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+        "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+        "landed_at": "2026-10-04T00:07:00.584058+00:00",
+        "receipt": {
+          "packet": "v12711-pr2869-sub-spm-root",
+          "artifact": "LANDED.json",
+          "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+        }
+      },
+      "actual003_reason_correction": {
+        "original_reported_reason": "RUNNER_LOCK_REENTRANT",
+        "correct_reason": "awaiting_signed_judgement",
+        "ordinary_bounded_entry_rc": 1,
+        "ordinary_bounded_exit_rc": 1,
+        "verdict": "NOT_MEASURED",
+        "lock_semantics": "Legal delegated parent-child re-entry diagnostic; not a bug or refusal cause.",
+        "evidence_source": "capture-v12710-current-facts-followup.md; later normal Step1 receipt and canonical log corroborate current admission",
+        "supersedes_reason_only": true,
+        "raw_prior_packet_refs_retained": true
+      },
+      "later_current_step1": {
+        "verdict": "PASS",
+        "normal_api_check": true,
+        "review_ready": {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "artifact": "REVIEW_READY.json",
+          "sha256": "ad8f37886032c520a88bbb28e9ad0e5f33f9e28eeff646cdd758e4263c27c731"
+        },
+        "normal_receipt_sha256": "46a9ea0094088a48acad1f364459ae79eca284d47eb7c01d90f361ae607059a4",
+        "details": "current_facts_followups[0].later_current_step1"
+      },
+      "later_full_default_continuation": {
+        "duration_s": 212.0,
+        "rc": 1,
+        "synthesis": "PASS",
+        "current_LEC": "PASS",
+        "final_audit": "FAIL: five dangling references and historical outputless entry",
+        "phase3": "SKIPPED because Phase2 FAIL",
+        "receipt": {
+          "packet": "subservient-full-default-actual006-collected",
+          "artifact": "MANAGER_RESULT.json",
+          "sha256": "932a3873b7f604fac1f4105316f3b30fc650ce64bbe7d1aa42817c65f065671c"
+        },
+        "details": "current_facts_followups[0].actual006"
+      }
+    },
+    {
+      "id": "executed-abc-script-tool-retention",
+      "bucket": "T",
+      "step": "phase2.yosys_synth",
+      "status": "TOOL_SOURCE_LANDED_IMAGE_PUBLICATION_NOT_STARTED",
+      "tool": "yosys",
+      "tool_family_note": "Generating native tool is Yosys/pyosys; the one-line invocation repair is owned by the real LibreLane fork, not Yosys core or the downstream detector.",
+      "repair_owner": {
+        "repo": "https://github.com/vibeic/librelane.git",
+        "file": "librelane/scripts/pyosys/synthesize.py",
+        "function": "synthesize.run_strategy",
+        "delta": "Add only -nocleanup to the existing abc -script invocation"
+      },
+      "candidate_image": {
+        "id": "sha256:f4a70cd773560c080cb8f29029b635cfa52c5465123538af2fbab9a917ca37a7",
+        "repo_digests": [],
+        "state": "UNPUBLISHED_PROBE_ONLY",
+        "base_digest": "sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe"
+      },
+      "existing_probe": {
+        "vendor_tip": "ba516779ffcf1a03ab0d75e7e2e62becb24394d2",
+        "vendor_tree": "7db45aa9c489fdaea6282a47b28579decb5c9e3c",
+        "repo_tip": "addd2b3647bea750bca017af947cf86964ba602f",
+        "repo_tree": "8fe7092ca28df126876c417a8796ed83ae424fa7",
+        "cli": "python3 -m librelane.steps run --id Yosys.Synthesis",
+        "scope": "Small standalone retention_probe; full repository run_chain not executed",
+        "native_rc": 0,
+        "consumer_rc": 0,
+        "positive": "Current executed script retained and bound to current behavior/run_id",
+        "negatives": [
+          "missing script REFUSED with current behavior",
+          "changed script REFUSED with current behavior"
+        ],
+        "script_sha256": "d4168af64ba816a08f493efd65211d3989104950fedf3a9b6ecfd388a2bcd288",
+        "installed_module_sha256": "4af431bfdc435bfd25ecb62ad9fecaf2200b5fc5a8a34ecc0ab3549340de335a",
+        "buffering": false,
+        "applied_fanout": null,
+        "original_spm": "FAIL / NOT_VERIFIED unchanged"
+      },
+      "current396_applicability": {
+        "manifest_digest": "sha256:cff05483633c3fdf48d12cfef506645d2d8f8afcc31014c71643d335f471fdac",
+        "installed_module_sha256": "b37a0d1042f9972fd704a4321d8f6331ec0f397f13d0942734f892eec3913327",
+        "has_nocleanup": false,
+        "static_patch_check_rc": 0,
+        "execution_envelope": "host_static_patch_check; no pinned/shipping credit",
+        "installed799_existing_overlay": "Two pre-existing differences; excluded from the one-line repair attribution",
+        "pin_only_installation": "INSUFFICIENT; owner existing installed-package patch loop must include repair"
+      },
+      "evidence": [
+        {
+          "packet": "spm-r9-independent-review-collected",
+          "artifact": "review.md",
+          "sha256": "eec45a33c828413b5dcf1f8945b1fe28bc20c04da76c39ca7248cbb3ad47bb1a"
+        },
+        {
+          "packet": "spm-r9-independent-review-collected",
+          "artifact": "verdict.json",
+          "sha256": "5654703400668d1a6407609351a6d98d6f49ff730bd59f6308db59a1fa2ec898"
+        },
+        {
+          "packet": "spm-r9-independent-review-collected/applicability-current396",
+          "artifact": "applicability.json",
+          "sha256": "46b8281f625d074e94500cb22a03bbfce1f98cca3f560189045034a5934675a1"
+        },
+        {
+          "packet": "spm-abc-retention-candidate-r9-collected",
+          "artifact": "RESULT.md",
+          "sha256": "65b19630aeb360a2b184802bef7dbc35281085b89af1dec6334fa6b5b552e5f1"
+        },
+        {
+          "packet": "spm-abc-retention-candidate-r9-collected",
+          "artifact": "terminal-receipt.json",
+          "sha256": "a804d68a9e458e5dd04e656d43f9709fa5d6f92bd4575ee0634dca916e050138"
+        },
+        {
+          "packet": "spm-abc-retention-candidate-r9-collected",
+          "artifact": "current-consumer-result.json",
+          "sha256": "15b23557c968f8122fccb488b225dc9ad480b66f71328d9948486d44796fc782"
+        }
+      ],
+      "claim_boundary": "Real fork and image recipe MAIN LANDED source only. Formal image publication NOT_STARTED_BY_US; local f4a70 has no RepoDigest and is not deployed. Original small probe is not new native or whole-IC proof.",
+      "landed_tool_owner_sources": [
+        {
+          "repo": "https://github.com/vibeic/librelane.git",
+          "base": "8f096f0846c91d021f0a84d916c1a6b352492041",
+          "commit": "dacb849bd88e37bc9f6cf655c59e51776a05f28b",
+          "tree": "bc27d9d5ce923325f72f74c041d666d4c6626fa0",
+          "status": "MAIN_LANDED_SOURCE_ONLY",
+          "receipt": {
+            "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+            "artifact": "LANDED.json",
+            "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+          }
+        },
+        {
+          "repo": "https://github.com/vibeic/vibeic-eda.git",
+          "base": "469827f8d6b1418d435bcfd689134cb4d5c1f8e6",
+          "commit": "590cb98eb1df5f96ae4e2914d7d1350e514323d7",
+          "tree": "4b28270f0ce407151ab55ddf88004528e3868980",
+          "status": "MAIN_LANDED_SOURCE_ONLY",
+          "receipt": {
+            "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+            "artifact": "LANDED.json",
+            "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+          }
+        }
+      ],
+      "local_workdir_source": {
+        "status": "ABSORBED_LANDED",
+        "source_tip": "d1d474fee60293f46da49fb65f2881cbc8e6f2bf",
+        "source_tree": "bda362474eab30d7b0420ad5f12f0a3ada48e3cc",
+        "receipt": {
+          "packet": "post-v12710-sub-spm-assembly-r1-collected",
+          "artifact": "ROOT_READY.json",
+          "sha256": "6a4ad69929e2943e7a4c8c7c245f8acf069f54f7309837a71f39d16214f4ec72"
+        },
+        "details": "current_facts_followups[0].local_workdir"
+      }
+    }
+  ],
+  "manager_owned_followup": {
+    "statement_source": "default-capture-exact-reading-scope.md",
+    "state": "DATED_PREPARED_UNPUBLISHED_SNAPSHOT",
+    "identities_are_abbreviated": true,
+    "fork": {
+      "tip": "dacb849",
+      "tree": "bc27",
+      "same_tree_as": "1e19",
+      "base": "8f096f0846c91d021f0a84d916c1a6b352492041"
+    },
+    "image_owner": {
+      "tip": "590cb98",
+      "tree": "4b28270",
+      "base": "469827f8d6b1418d435bcfd689134cb4d5c1f8e6",
+      "version_context": "0.3.97",
+      "formal_release": "NOT_DONE"
+    },
+    "lc_r8_r9": {
+      "main_state": "UNLANDED",
+      "ordinary_local_workdir_integration": "OPEN; fresh ordinary caller mismatch reported by manager",
+      "followup_candidate": "22f",
+      "unit_seam_passed": 5,
+      "actual_child_control": "PENDING_INDEPENDENT_REVIEW",
+      "owner": "Separate original author; no duplicate implementation in this capture"
+    },
+    "snapshot_at_utc": "2026-10-03T23:55:45.468180+00:00",
+    "superseded_by": "current_facts_followups[0]"
+  },
+  "emission_scope": {
+    "input": "tool-owner-recoveries.json",
+    "A": 0,
+    "B": 0,
+    "C": 0,
+    "D": 0,
+    "T": 1,
+    "existing_open_candidate_input": "open-recoveries.json retained byte-for-byte and not replayed",
+    "backlog_state": "DRAFT_CAPTURE_ONLY_NOT_SUBMITTED",
+    "routing": "Existing phase2.yosys_synth and Bucket T tool family yosys; actual fork/image owner named explicitly; no routing edit."
+  },
+  "reused_capture_records": [
+    "docs/capture/2026-10-03-local-reused-ip-derivative/recoveries.json",
+    "docs/capture/2026-10-03-declared-top-identity/recoveries.json",
+    "docs/enhancements/source-bound-spec-clarification/capture.json"
+  ],
+  "prior_v12710_candidate_statuses": {
+    "at_utc": "2026-10-03T23:55:45.468180+00:00",
+    "source_candidate": "4dddcecc6b517d0af01a2a1b8bac8640bda3b81a",
+    "states": [
+      {
+        "id": "legacy-local-derivative-producer-output-recovery",
+        "status": "ACCEPTED_CANDIDATE_UNLANDED"
+      },
+      {
+        "id": "executed-abc-script-tool-retention",
+        "status": "ACCEPTED_PROBE_ONLY_OWNER_PUBLICATION_PENDING"
+      }
+    ],
+    "counts": {
+      "absorbed": 8,
+      "open_findings": 3,
+      "new_program_candidates": 0,
+      "new_skill_sections": 0,
+      "new_backlogs": 1,
+      "resolved_historical_findings": 1,
+      "accepted_unlanded_components": 2
+    },
+    "scope": "Superseded source status snapshot; original evidence and program rules retained."
+  },
+  "current_facts_followups": [
+    {
+      "at_utc": "2026-10-04T00:14:42.141819+00:00",
+      "read_scope": "Exactly seven staged files in CURRENT_FOLLOWUP.json; no descendants, source survey, tests or native replay.",
+      "source_status_basis": "Root LANDED and existing terminal/review receipts; no live source fetch or new execution.",
+      "latest_landed_main": {
+        "version": "1.27.11",
+        "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+        "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+        "landed_at": "2026-10-04T00:07:00.584058+00:00",
+        "receipt": {
+          "packet": "v12711-pr2869-sub-spm-root",
+          "artifact": "LANDED.json",
+          "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+        }
+      },
+      "actual003_reason_correction": {
+        "original_reported_reason": "RUNNER_LOCK_REENTRANT",
+        "correct_reason": "awaiting_signed_judgement",
+        "ordinary_bounded_entry_rc": 1,
+        "ordinary_bounded_exit_rc": 1,
+        "verdict": "NOT_MEASURED",
+        "lock_semantics": "Legal delegated parent-child re-entry diagnostic; not a bug or refusal cause.",
+        "evidence_source": "capture-v12710-current-facts-followup.md; later normal Step1 receipt and canonical log corroborate current admission",
+        "supersedes_reason_only": true,
+        "raw_prior_packet_refs_retained": true
+      },
+      "later_current_step1": {
+        "scope": "POST_OUTPUT_CURRENT_STEP1_REVIEW",
+        "verdict": "PASS",
+        "normal_api_check": true,
+        "terminal_rc": 0,
+        "receipt": {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "artifact": "1.json",
+          "sha256": "46a9ea0094088a48acad1f364459ae79eca284d47eb7c01d90f361ae607059a4"
+        },
+        "evidence": {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "sha256": "576b5b7881c5517996c7f8ef7a25e0ce1d0d06756f7351af25b64cec9331f1c4",
+          "source_field": "REVIEW_READY.json::evidence_sha256",
+          "artifact_name": "NOT_SPECIFIED_BY_THIS_RECEIPT"
+        },
+        "review_ready": {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "artifact": "REVIEW_READY.json",
+          "sha256": "ad8f37886032c520a88bbb28e9ad0e5f33f9e28eeff646cdd758e4263c27c731"
+        },
+        "D1_sha256_unchanged": "99dd1a5ae49b33d733508bde578184a99c6c485be27e0fd06c2b91a8528c9819",
+        "whole_phase2": "NOT_REEVALUATED_BY_STEP1_REVIEW"
+      },
+      "actual006": {
+        "packet": "subservient-full-default-actual006-collected",
+        "source_tip": "daceff44d48cde2b449e33f7aa6f9128c8d507e4",
+        "duration_s": 212.0,
+        "rc": 1,
+        "overall": "FAIL",
+        "measured_pass": [
+          "normal Yosys synthesis",
+          "current RTL-to-synth LEC"
+        ],
+        "final_audit_blockers": [
+          "project_outputs_in_tree_check five dangling references",
+          "provenance_output_hash_completeness_check historical outputless entry"
+        ],
+        "phase3": "SKIPPED because phase2 FAIL",
+        "functional_evidence": "NOT_MEASURED: declared Zifencei stimulus and rv32i_40 coverage absent; not PASS",
+        "preserved": {
+          "original_input_files": 10,
+          "RTL_files": 23,
+          "D1": "UNCHANGED"
+        },
+        "references": [
+          {
+            "packet": "subservient-full-default-actual006-collected",
+            "artifact": "MANAGER_RESULT.json",
+            "sha256": "932a3873b7f604fac1f4105316f3b30fc650ce64bbe7d1aa42817c65f065671c"
+          },
+          {
+            "packet": "subservient-full-default-actual006-collected",
+            "artifact": "inside-terminal.json",
+            "sha256": "3af4a175de5f603f47280d1c6d204a1e031912e9c7a04b2b10e0dc32e4646fd4"
+          },
+          {
+            "packet": "subservient-full-default-actual006-collected",
+            "artifact": "canonical.log",
+            "sha256": "3f178ee3581207d876795721a3971260943290acdc49deef844ade3a3fe7d2fb"
+          }
+        ],
+        "claim_boundary": "Existing actual006 evidence only; no new runtime, tests, D1 or whole-flow PASS."
+      },
+      "legacy_source": "ABSORBED_LANDED at v1.27.11; original daceff accepted source retained",
+      "local_workdir": {
+        "status": "ABSORBED_LANDED",
+        "source_tip": "d1d474fee60293f46da49fb65f2881cbc8e6f2bf",
+        "source_tree": "bda362474eab30d7b0420ad5f12f0a3ada48e3cc",
+        "landed_release": {
+          "version": "1.27.11",
+          "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+          "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+          "landed_at": "2026-10-04T00:07:00.584058+00:00",
+          "receipt": {
+            "packet": "v12711-pr2869-sub-spm-root",
+            "artifact": "LANDED.json",
+            "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+          }
+        },
+        "accepted_components": [
+          "Sub strict historical outputs producer recovery daceff",
+          "LC R8/R9 script retention hook",
+          "LOCAL workdir integration22f and actualchild testd1"
+        ],
+        "controls": "Five retained controls plus one real Python child positive, baseline RED to GREEN; existing independent ACCEPT_COMPONENT. Counts are manager-reported here, not rerun.",
+        "independent_review": {
+          "packet": "post-v12710-local-workdir-review-r1",
+          "artifact": "HANDOFF.md",
+          "sha256": "69149b96359de43f3807ba757b2fce43f11f26a1808ce9555018d2561924b1d9"
+        },
+        "receipt": {
+          "packet": "post-v12710-sub-spm-assembly-r1-collected",
+          "artifact": "ROOT_READY.json",
+          "sha256": "6a4ad69929e2943e7a4c8c7c245f8acf069f54f7309837a71f39d16214f4ec72"
+        },
+        "scope": "Ordinary LOCAL workdir source integration repair; no full native or whole-IC credit."
+      },
+      "tool_owner_sources": [
+        {
+          "repo": "https://github.com/vibeic/librelane.git",
+          "base": "8f096f0846c91d021f0a84d916c1a6b352492041",
+          "commit": "dacb849bd88e37bc9f6cf655c59e51776a05f28b",
+          "tree": "bc27d9d5ce923325f72f74c041d666d4c6626fa0",
+          "status": "MAIN_LANDED_SOURCE_ONLY",
+          "receipt": {
+            "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+            "artifact": "LANDED.json",
+            "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+          }
+        },
+        {
+          "repo": "https://github.com/vibeic/vibeic-eda.git",
+          "base": "469827f8d6b1418d435bcfd689134cb4d5c1f8e6",
+          "commit": "590cb98eb1df5f96ae4e2914d7d1350e514323d7",
+          "tree": "4b28270f0ce407151ab55ddf88004528e3868980",
+          "status": "MAIN_LANDED_SOURCE_ONLY",
+          "receipt": {
+            "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+            "artifact": "LANDED.json",
+            "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+          }
+        }
+      ],
+      "image_publication": "NOT_STARTED_BY_US; not a deployed image",
+      "local_probe_image": "f4a70 remains local probe with RepoDigests=[]",
+      "release_owner": "Existing .112 run_0530.sh; no new .102 daily_release lane",
+      "references": [
+        {
+          "packet": "v12711-pr2869-sub-spm-root",
+          "artifact": "LANDED.json",
+          "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+        },
+        {
+          "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+          "artifact": "LANDED.json",
+          "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+        },
+        {
+          "packet": "subservient-full-default-actual006-collected",
+          "artifact": "MANAGER_RESULT.json",
+          "sha256": "932a3873b7f604fac1f4105316f3b30fc650ce64bbe7d1aa42817c65f065671c"
+        },
+        {
+          "packet": "subservient-full-default-actual006-collected",
+          "artifact": "inside-terminal.json",
+          "sha256": "3af4a175de5f603f47280d1c6d204a1e031912e9c7a04b2b10e0dc32e4646fd4"
+        },
+        {
+          "packet": "subservient-full-default-actual006-collected",
+          "artifact": "canonical.log",
+          "sha256": "3f178ee3581207d876795721a3971260943290acdc49deef844ade3a3fe7d2fb"
+        },
+        {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "artifact": "REVIEW_READY.json",
+          "sha256": "ad8f37886032c520a88bbb28e9ad0e5f33f9e28eeff646cdd758e4263c27c731"
+        },
+        {
+          "packet": "post-v12710-sub-spm-assembly-r1-collected",
+          "artifact": "ROOT_READY.json",
+          "sha256": "6a4ad69929e2943e7a4c8c7c245f8acf069f54f7309837a71f39d16214f4ec72"
+        }
+      ],
+      "manager_statement": {
+        "filename": "capture-v12710-current-facts-followup.md",
+        "sha256": "a9352cbb2e5708b0e9311a24d051efd186ce11af10094093b121aad18804e109"
+      }
     }
   ]
 }

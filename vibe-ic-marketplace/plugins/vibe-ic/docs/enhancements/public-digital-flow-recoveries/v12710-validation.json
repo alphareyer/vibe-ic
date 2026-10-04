@@ -1,0 +1,131 @@
+{
+  "schema": "vibeic.capture-execution-receipt/v1",
+  "at_utc": "2026-10-04T00:04:09.676490+00:00",
+  "source_base": {
+    "commit": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+    "tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+    "version": "1.27.10"
+  },
+  "execution": {
+    "image_ref": "ghcr.io/vibeic/vibeic-eda@sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe",
+    "emitter_cid": "7d54956572abdbd5a2ae50c1203c81919ad77abfb208b956d86fcc1288ff8e9d",
+    "validator_compliance_cid": "ca84df160e529a834a58b91c7c6e2c3c2576f7fbe495d45f0271d3f73c546d29",
+    "limits": {
+      "cpus": 2,
+      "memory_bytes": 2147483648,
+      "memory_swap_bytes": 2147483648,
+      "network": "none",
+      "max_concurrent_children": 1
+    },
+    "first_image_argument": "--skip",
+    "normal_emitter_rc": 0,
+    "normal_validator_rc": 0,
+    "validator": "PASS; one file; zero hard violations and warnings; NDA detector MEASURED using existing owner read-only configuration",
+    "skill_compliance": [
+      {
+        "report": "RESULT.md",
+        "rc": 0,
+        "verdict": "PASS",
+        "requirements": "2/2"
+      },
+      {
+        "report": "CAPTURE.md",
+        "rc": 0,
+        "verdict": "PASS",
+        "requirements": "2/2"
+      }
+    ]
+  },
+  "retained_attempts": [
+    {
+      "packet": "attempt1-emitter-refusal",
+      "emitter_rc": 1,
+      "reason": "Bare RepoDigest technical identifier in session_context; corrected wording only."
+    },
+    {
+      "packet": "attempt2-emitted-validator-unavailable",
+      "emitter_rc": 0,
+      "validator_rc": 2,
+      "verdict": "NOT_MEASURED",
+      "reason": "Existing private NDA-token configuration absent from child; later mounted read-only without changing rules."
+    }
+  ],
+  "validated_repo_artifacts": {
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/tool-owner-recoveries.json": {
+      "sha256": "f139e67569461962837de9a46d97f7cdfa1747fadc4cd15a248ea3d1b48f2712",
+      "size": 2426
+    },
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/capture.json": {
+      "sha256": "b9b8c7715dbfe364e0c14dd4dec433610d7cefd983c8a7df0456481d39c6791a",
+      "size": 39925
+    },
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-evidence-index.json": {
+      "sha256": "a6990fdbf27cd56f29058ea9f9c09a616bf8aa5c79a02a97b00203a8d7916588",
+      "size": 12134
+    },
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/RESULT.md": {
+      "sha256": "273a7799aec8069adaf25a9bab12569bbc08463100d0300f4d5f0f8ed8ba2634",
+      "size": 9160
+    },
+    "docs/capture/2026-10-03-local-reused-ip-derivative/recoveries.json": {
+      "sha256": "2aa3f17815009fe74b0092b1e9d6e2bac702246f0fda57dd6812198f11c20087",
+      "size": 10297
+    },
+    "docs/capture/2026-10-03-local-reused-ip-derivative/CAPTURE.md": {
+      "sha256": "b62cde10a2dccd250333926855ecd09bb148e6b76f73aae1932654e102ff0bb0",
+      "size": 7317
+    },
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-candidates/bucket_T_forked_tool/ORGANIC-20261004-executed-abc-script-tool-retention.yaml": {
+      "sha256": "6c24a3ede28326576d86a4598a512d22ddee05a0a1d4bed41bb4515ade9e14a2",
+      "size": 2353
+    }
+  },
+  "emitted_repo_files": [
+    "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-candidates/bucket_T_forked_tool/ORGANIC-20261004-executed-abc-script-tool-retention.yaml"
+  ],
+  "raw_normal_emission_summary": {
+    "packet": "default-enhancement-capture-v12710-r1",
+    "artifact": "emission-summary.json",
+    "sha256": "64b572fbb39efe4e78781ed888c91cddfe6c060155750e36f3c6ef74fb8f4c5c"
+  },
+  "original_validation_receipts": [
+    {
+      "packet": "default-enhancement-capture-v12710-r1",
+      "artifact": "validator.json",
+      "sha256": "20199ae8e6a4c1e6de9e92647b11ae0cd94b0536ae2391f79a644b478b7d059b"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1",
+      "artifact": "compliance.json",
+      "sha256": "999c16bb0fb164dc882fbbe15190aab76afbdc8c330a3fa3ccb2f7c9ef5bd090"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1",
+      "artifact": "derivative-compliance.json",
+      "sha256": "999c16bb0fb164dc882fbbe15190aab76afbdc8c330a3fa3ccb2f7c9ef5bd090"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1",
+      "artifact": "validation-receipt.json",
+      "sha256": "9eb80318d15cc1a39ffd1794dd263b2bca3d3c01dd3dd7d680bfe445f2b20126"
+    }
+  ],
+  "scope": {
+    "production_sources_changed": false,
+    "routing_changed": false,
+    "native_replay": false,
+    "host_pytest": false,
+    "docker_exec": false,
+    "full_test_campaign": false,
+    "D1_signature": false,
+    "main_version_push_repin": false,
+    "backlog_submitted": false
+  },
+  "retained_limits": [
+    "Four new landed program repairs are already absorbed at v1.27.10.",
+    "Legacy daceff is accepted candidate until main adoption is verified.",
+    "Local f4a70 image has no RepoDigest; real fork/image owner prepared candidates remain unpublished.",
+    "LC R8/R9 ordinary LOCAL workdir integration remains OPEN/candidate.",
+    "No Phase2/Phase3/whole-IC PASS."
+  ]
+}

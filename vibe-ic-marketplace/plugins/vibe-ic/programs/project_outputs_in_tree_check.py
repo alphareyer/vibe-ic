@@ -700,6 +700,86 @@ def _write_report(report: Optional[str], verdict: str, rc: int,
     })
 
 
+def _auditor_diagnostic_text(txt: str, auditor_records: List[str]
+                             ) -> Tuple[str, List[str]]:
+    """Project typed auditor diagnostics onto their current declaration role.
+
+    An old gate finding records an earlier measurement, not a fresh output
+    declaration. Apply only while the owning auditor invokes this gate; a
+    standalone read, malformed record, other fields and declared outputs keep
+    the existing scan. Original report bytes are never rewritten.
+    """
+    if "reports/audit/phase23_completion_audit.json" not in auditor_records:
+        return txt, []
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate diagnostic key")
+            value[key] = item
+        return value
+    try:
+        doc = json.loads(txt, object_pairs_hook=unique_object)
+    except ValueError:
+        return txt, []
+    if (not isinstance(doc, dict)
+            or not isinstance(doc.get("steps"), list)
+            or not isinstance(doc.get("scope"), dict)
+            or not isinstance(doc.get("gate_execution_ledger"), list)
+            or not isinstance(doc.get("invocation"), str)
+            or not doc["invocation"].strip()
+            or not (doc.get("program") == "flow_compliance_check"
+                    or (doc.get("schema_version") == 2
+                        and doc.get("recheck_of") ==
+                        "reports/audit/phase23_completion_audit.json"))):
+        return txt, []
+    projected: List[str] = []
+    for si, step in enumerate(doc["steps"]):
+        if not isinstance(step, dict):
+            continue
+        records = step.get("gate_records")
+        if not isinstance(records, list):
+            continue
+        for gi, gate in enumerate(records):
+            if (not isinstance(gate, dict)
+                    or gate.get("name") != "project_outputs_in_tree_check"
+                    or not isinstance(gate.get("evidence"), dict)
+                    or not isinstance(gate["evidence"].get("flagged"), list)):
+                continue
+            flags = gate["evidence"]["flagged"]
+            # Leave anything that does not have the existing finding shape
+            # available to the normal path scanner, including malformed data.
+            diagnostic = re.compile(r"^.+ → /.+ \((?:live|dangling|outside-root)\)$")
+            retained = [x for x in flags
+                        if not isinstance(x, str) or not diagnostic.fullmatch(x)]
+            if len(retained) != len(flags):
+                gate["evidence"]["flagged"] = retained
+                projected.append(f"steps/{si}/gate_records/{gi}/evidence/flagged")
+    # Legacy nested audits also recorded their OWN redirected --json argument.
+    # Recognize only the stage-compliance receipt matching the typed scope;
+    # other argv paths and every declared output remain visible.
+    argv = doc.get("command_argv")
+    scope = doc["scope"]
+    stage = scope.get("stage")
+    expected = (f"stage{stage}_compliance.json" if str(stage) in ("1", "2", "3")
+                else f"{scope['stage_id']}_compliance.json"
+                if isinstance(scope.get("stage_id"), str) else None)
+    if isinstance(argv, list) and argv and isinstance(argv[0], str):
+        owner = Path(argv[0]).name
+        owners = ("flow_compliance_check.py", "stage1_compliance.py",
+                  "stage2_compliance.py", "stage3_compliance.py")
+        if owner in owners and expected:
+            for i, flag in enumerate(argv[:-1]):
+                if flag != "--json" or not isinstance(argv[i + 1], str):
+                    continue
+                target = Path(argv[i + 1])
+                if (target.is_absolute() and target.name == expected
+                        and target.parent.name.startswith("gate_receipt_")):
+                    argv[i + 1] = expected
+                    projected.append(f"command_argv/{i + 1} (own stage receipt)")
+    return (json.dumps(doc, ensure_ascii=False), projected) if projected else (txt, [])
+
+
 def main() -> int:
     arg_project, report, auditor_records = _parse_argv(sys.argv[1:])
     if arg_project is None:
@@ -712,6 +792,7 @@ def main() -> int:
         return 2
     # The invoking auditor's own record(s): not judged here (see --auditor-record).
     auditor_excluded: List[str] = []
+    auditor_diagnostics: List[Tuple[str, List[str]]] = []
 
     # (file, path, exists_on_disk, from_log)
     findings: List[Tuple[str, str, bool, bool]] = []
@@ -764,6 +845,10 @@ def main() -> int:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
+            if f.suffix == ".json":
+                txt, fields = _auditor_diagnostic_text(txt, auditor_records)
+                if fields:
+                    auditor_diagnostics.append((f.relative_to(project).as_posix(), fields))
             from_log = f.name.endswith(".log")
             for m in _PATH_RE.finditer(txt):
                 p = m.group(1).rstrip(".,;:)")
@@ -1079,6 +1164,13 @@ def main() -> int:
             f"visible while the audit runs is superseded by the one it writes "
             f"after this gate; judged like any other file when this gate runs "
             f"standalone")
+
+    if auditor_diagnostics:
+        notes.append(
+            "[INFO] project_outputs_in_tree_check: historical auditor "
+            "diagnostic fields are not current output declarations; original "
+            "records retained, other fields judged: " + "; ".join(
+                f"{rel}: {', '.join(fields)}" for rel, fields in auditor_diagnostics))
 
     def _emit_notes() -> None:
         """The non-blocking disclosures, AFTER the verdict line that decides."""

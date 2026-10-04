@@ -1,0 +1,115 @@
+{
+  "schema": "vibeic.capture-current-facts-validation/v1",
+  "at_utc": "2026-10-04T00:20:27.056265+00:00",
+  "prior_capture_tip": "4dddcecc6b517d0af01a2a1b8bac8640bda3b81a",
+  "prior_validation": "v12710-validation.json retained byte-for-byte; first raw logs remain in the original packet",
+  "read_evidence_files": 7,
+  "input_index": {
+    "packet": "default-enhancement-capture-v12710-r1/current-followup",
+    "artifact": "CURRENT_FOLLOWUP.json",
+    "sha256": "4fabd1c30b5113aaa45a4c772b278e6b2fddd50013cf36b6072050352f19fd19"
+  },
+  "execution": {
+    "image": "ghcr.io/vibeic/vibeic-eda@sha256:79957120d37804ae0d23144307c5c166dcb609831326f19f2edb8729fe807cfe",
+    "cid": "309d312ca23a881db14395a12885dfc2df095a86d9458c1bc1187a356e29e9a5",
+    "first_image_argument": "--skip",
+    "limits": {
+      "cpus": 2,
+      "memory_bytes": 2147483648,
+      "memory_swap_bytes": 2147483648,
+      "network": "none",
+      "max_concurrent_children": 1
+    },
+    "clone_mount": "READ_ONLY",
+    "existing_private_configuration": "READ_ONLY; no token values copied",
+    "emitter_rc": 0,
+    "validator_rc": 0,
+    "validator": "PASS; one file, zero hard/soft findings, NDA detector MEASURED",
+    "compliance": [
+      {
+        "file": "RESULT.md",
+        "rc": 0,
+        "verdict": "PASS",
+        "requirements": "2/2"
+      },
+      {
+        "file": "CAPTURE.md",
+        "rc": 0,
+        "verdict": "PASS",
+        "requirements": "2/2"
+      }
+    ]
+  },
+  "validated_and_bound_repo_artifacts": [
+    {
+      "path": "docs/capture/2026-10-03-local-reused-ip-derivative/CAPTURE.md",
+      "sha256": "7ee4de72d1f64eceaa25c750e068c920979e523d451437f37316abd7ab0a2a80"
+    },
+    {
+      "path": "docs/capture/2026-10-03-local-reused-ip-derivative/recoveries.json",
+      "sha256": "f34e95dcb4ad337ac1b3fc59b68712266eafe6c464d104af9ad927d22901b5df"
+    },
+    {
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/RESULT.md",
+      "sha256": "30bd4962ec48c777fee3c68a427db3078955d20876c8698da0179d211d693e2a"
+    },
+    {
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/capture.json",
+      "sha256": "c68197fd3bbe30c811f998015814cef0d35c57488ff066ce0fe4ef63e7aa905f"
+    },
+    {
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/tool-owner-recoveries.json",
+      "sha256": "48c989ad5f32bd8dd7165bf7f817429430e0c7d215ec94d214d94ec058d2ca47"
+    },
+    {
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-evidence-index.json",
+      "sha256": "ccb089941a20be3b94f7d86919f925ec00e17695a476eda303b790383d030f28"
+    },
+    {
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-candidates/bucket_T_forked_tool/ORGANIC-20261004-executed-abc-script-tool-retention.yaml",
+      "sha256": "6f59671e998002dfabe6f2597dcee5a2918ace4b6c267421cf53535534647b73"
+    }
+  ],
+  "normal_emitted_draft": {
+    "path": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-candidates/bucket_T_forked_tool/ORGANIC-20261004-executed-abc-script-tool-retention.yaml",
+    "sha256": "6f59671e998002dfabe6f2597dcee5a2918ace4b6c267421cf53535534647b73",
+    "same_bytes_as_validated_output": true,
+    "backlog_submitted": false
+  },
+  "raw_receipts": [
+    {
+      "packet": "default-enhancement-capture-v12710-r1/current-followup",
+      "artifact": "validation-receipt.json",
+      "sha256": "5d103eed2673d5695200c33e3e13fdda485e5bde70dfd381ee39cadd6247aaee"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1/current-followup",
+      "artifact": "validator.json",
+      "sha256": "ecaaabd2573c050b848b24d861abf22b4171673a16f7aa99aed5b6b66c5620d7"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1/current-followup",
+      "artifact": "compliance.json",
+      "sha256": "999c16bb0fb164dc882fbbe15190aab76afbdc8c330a3fa3ccb2f7c9ef5bd090"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1/current-followup",
+      "artifact": "derivative-compliance.json",
+      "sha256": "999c16bb0fb164dc882fbbe15190aab76afbdc8c330a3fa3ccb2f7c9ef5bd090"
+    },
+    {
+      "packet": "default-enhancement-capture-v12710-r1/current-followup",
+      "artifact": "emitted/summary.json",
+      "sha256": "664d39ec0bd4f87b42e3fc3c58702bb7f85fb0f7c71ea37891ddee68bbf42a4d"
+    }
+  ],
+  "scope": {
+    "source_tests": false,
+    "native_replay": false,
+    "all_source_validation": false,
+    "runtime_source_edits": false,
+    "routing_edits": false,
+    "D1_signature": false,
+    "main_push_version_repin": false
+  }
+}

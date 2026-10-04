@@ -57,7 +57,136 @@
         "derivative": "NOT_ADOPTED",
         "whole_ic": "INCOMPLETE",
         "remaining": "Root final review and shipping, then current design qualification with composed owner sources; source acceptance does not satisfy those obligations"
+      },
+      {
+        "at": "2026-10-03T23:55:45.468180+00:00",
+        "revision": "V12710_LANDED_WRITTEN_OUTPUT_AND_APPROVED_OFFLINE_REFERENCE",
+        "verdict": "ABSORBED_LANDED_COMPONENT_SCOPED",
+        "source_tip": "eef4b319b3b4fadd890ced8abbf8d969a6804357",
+        "source_tree": "f0e9764984bd86bc1576e260d4d856ea88a39dd5",
+        "accepted_component_tips": [
+          "3094a0593b2cc21f5c03c3893838035680e76d1c",
+          "694c833485fb0a87611c049d5c83868be7638743"
+        ],
+        "result": "Producer writes replacement bytes before output hashing; exact root-approved offline reference is independently verified. Retained wrong-cwd attempt is not credited. Correct-cwd c1 has 6 passes and one stale cache fixture failure; b20 exact fixture repair has one pass. Offline has one base UNAVAILABLE and six candidate expected states, not seven candidate PASS cases.",
+        "official_verifier_unchanged": true,
+        "evidence": [
+          {
+            "packet": "post-v1279-accepted4-root-ready",
+            "artifact": "LANDED.json",
+            "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+          },
+          {
+            "packet": "post-v1279-accepted4-root-ready",
+            "artifact": "SHIPPING_IDENTITY.json",
+            "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+          },
+          {
+            "packet": "post-v1279-accepted4-assembly-r1-collected",
+            "artifact": "VERDICT.md",
+            "sha256": "b0833d0c5e9006efe33942f04ae5c1bab4326804e5cfe9ccf9b2925b81a7fac3"
+          }
+        ],
+        "LEC": "NOT_MEASURED_BY_THIS_CAPTURE",
+        "D1": "NOT_MEASURED_BY_THIS_CAPTURE",
+        "whole_ic": "NOT_CLAIMED"
       }
-    ]
+    ],
+    "accepted_candidate_followups": [
+      {
+        "id": "legacy-local-derivative-producer-output-recovery",
+        "bucket": "A",
+        "step": "phase2.rtl_gen.reused_ip_local_derivative",
+        "program_first_disposition": "ALREADY_PROGRAM_LANDED",
+        "status": "ABSORBED_LANDED",
+        "source_tip": "daceff44d48cde2b449e33f7aa6f9128c8d507e4",
+        "source_tree": "ba1fca5bc041bc08f43210d2942f517f71c8c4dd",
+        "general_pattern": "Recover only an exactly captured historical event shape after re-deriving every current parent, patch, inventory, input and proof binding; retain old event bytes and append a digest of bytes actually written.",
+        "event_shape": "Both exit_code and outputs absent; exact current event equality after removing only those two fields. Partial absence or changed fields still refuse.",
+        "implementation": "programs/ip_catalog_pull.py; ordinary consumer unchanged",
+        "measurements": {
+          "existing_focused_passed": 6,
+          "existing_focused_deselected": 16,
+          "actual002_producer_rc": 1,
+          "actual003_producer": "VERIFIED; rc0",
+          "actual003_frontdoor_rc": 1,
+          "ordinary_current_consumer": "NOT_MEASURED; awaiting_signed_judgement (corrected cause). Legal delegated-parent lock re-entry was not a blocker.",
+          "manifest_rtl_and_inputs": "UNCHANGED",
+          "provenance_history": "Original bytes retained as exact prefix; one current event appended",
+          "actual001": "Host setup failure before child launch"
+        },
+        "evidence": [
+          {
+            "packet": "subservient-legacy-output-independent-r1-collected",
+            "artifact": "VERDICT.md",
+            "sha256": "c32484af19ed8e0a0f153f9b619c847994e0080d250402f136771ea533572a28"
+          },
+          {
+            "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+            "artifact": "HANDOFF.md",
+            "sha256": "c27e7b2ef7f5287aa2ee7f74c0c3711526329be52c4fe30a9242b06c2d6c2bc1"
+          },
+          {
+            "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+            "artifact": "SOURCE_IDENTITY.json",
+            "sha256": "e8069e36d243ae8e3cc71fec87b9c761cf2dfe1d3bbe4b9c4d8c83e967366837"
+          }
+        ],
+        "claim_boundary": "Producer recovery is source-absorbed at v1.27.11. Later normal Step1 review/API PASS does not override actual006 whole Phase2 FAIL; synthesis/current LEC PASS, final audit structural blockers, functional NOT_MEASURED and Phase3 SKIPPED remain distinct. Retained 247 proof is historical.",
+        "prior_status": "ACCEPTED_CANDIDATE_UNLANDED",
+        "landed_release": {
+          "version": "1.27.11",
+          "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+          "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+          "landed_at": "2026-10-04T00:07:00.584058+00:00",
+          "receipt": {
+            "packet": "v12711-pr2869-sub-spm-root",
+            "artifact": "LANDED.json",
+            "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+          }
+        },
+        "actual003_reason_correction": {
+          "original_reported_reason": "RUNNER_LOCK_REENTRANT",
+          "correct_reason": "awaiting_signed_judgement",
+          "ordinary_bounded_entry_rc": 1,
+          "ordinary_bounded_exit_rc": 1,
+          "verdict": "NOT_MEASURED",
+          "lock_semantics": "Legal delegated parent-child re-entry diagnostic; not a bug or refusal cause.",
+          "evidence_source": "capture-v12710-current-facts-followup.md; later normal Step1 receipt and canonical log corroborate current admission",
+          "supersedes_reason_only": true,
+          "raw_prior_packet_refs_retained": true
+        }
+      }
+    ],
+    "current_facts_followup": {
+      "at_utc": "2026-10-04T00:14:42.141819+00:00",
+      "landed_release": {
+        "version": "1.27.11",
+        "commit": "dd001c6c62912a59be9a270fb15412b6ecf72544",
+        "tree": "97879719cc181e5d35f695f1fd4780ec885e7442",
+        "landed_at": "2026-10-04T00:07:00.584058+00:00",
+        "receipt": {
+          "packet": "v12711-pr2869-sub-spm-root",
+          "artifact": "LANDED.json",
+          "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+        }
+      },
+      "current_step1": "PASS; normal API true; see REVIEW_READY portable reference",
+      "actual006": "212s/rc1; synthesis/current LEC PASS; final audit FAIL; Phase3 SKIPPED",
+      "references": [
+        {
+          "packet": "subservient-current-step1-review-r1-collected",
+          "artifact": "REVIEW_READY.json",
+          "sha256": "ad8f37886032c520a88bbb28e9ad0e5f33f9e28eeff646cdd758e4263c27c731"
+        },
+        {
+          "packet": "subservient-full-default-actual006-collected",
+          "artifact": "MANAGER_RESULT.json",
+          "sha256": "932a3873b7f604fac1f4105316f3b30fc650ce64bbe7d1aa42817c65f065671c"
+        }
+      ],
+      "details": "vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/capture.json::current_facts_followups[0]",
+      "scope": "Dated correction only; original source/proof snapshots and raw packet references retained."
+    }
   }
 ]

@@ -1,0 +1,329 @@
+{
+  "schema": "vibeic.recovery-evidence-portable-index/v1",
+  "snapshot_at_utc": "2026-10-03T23:55:45.468180+00:00",
+  "evidence_archive": {
+    "filename": "evidence.tar.gz",
+    "sha256": "203a90143a16a27147248aea8fb4df9c6ca68ca3ad812efd045c968b255c789a"
+  },
+  "input_index": {
+    "filename": "INPUT_INDEX.json",
+    "sha256": "1b28d81445dc5547454143dfa161c6f9733e4cd262db4b8fd6ef573a7e12b079"
+  },
+  "directly_read": [
+    {
+      "packet": "post-v1279-accepted4-root-ready",
+      "artifact": "HANDOFF.md",
+      "sha256": "33685b318424d5b2783e72e5ab8844abbcefa94a177b752fc410946ece95a8a5"
+    },
+    {
+      "packet": "post-v1279-accepted4-root-ready",
+      "artifact": "LANDED.json",
+      "sha256": "6aef6c055c5b42c2b4d3d9bbb62d93707015066d38c34d7e626060e880d94a75"
+    },
+    {
+      "packet": "post-v1279-accepted4-root-ready",
+      "artifact": "RECEIPT_INDEX.json",
+      "sha256": "dce4a0832dbd260f67fb26e1dfab0b696e4cb111ca582239adea77478af1d020"
+    },
+    {
+      "packet": "post-v1279-next-package-map-r1",
+      "artifact": "MAP.json",
+      "sha256": "74ace5028852811eaeac468517126d73aa8e9a041fbca9c91e3953e8b7741d3f"
+    },
+    {
+      "packet": "subservient-legacy-output-independent-r1-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "c32484af19ed8e0a0f153f9b619c847994e0080d250402f136771ea533572a28"
+    },
+    {
+      "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+      "artifact": "HANDOFF.md",
+      "sha256": "c27e7b2ef7f5287aa2ee7f74c0c3711526329be52c4fe30a9242b06c2d6c2bc1"
+    },
+    {
+      "packet": "subservient-legacy-output-producer-recovery-r1-collected",
+      "artifact": "SOURCE_IDENTITY.json",
+      "sha256": "e8069e36d243ae8e3cc71fec87b9c761cf2dfe1d3bbe4b9c4d8c83e967366837"
+    },
+    {
+      "packet": "spm-r9-independent-review-collected",
+      "artifact": "review.md",
+      "sha256": "eec45a33c828413b5dcf1f8945b1fe28bc20c04da76c39ca7248cbb3ad47bb1a"
+    },
+    {
+      "packet": "spm-r9-independent-review-collected",
+      "artifact": "verdict.json",
+      "sha256": "5654703400668d1a6407609351a6d98d6f49ff730bd59f6308db59a1fa2ec898"
+    },
+    {
+      "packet": "spm-r9-independent-review-collected/applicability-current396",
+      "artifact": "applicability.json",
+      "sha256": "46b8281f625d074e94500cb22a03bbfce1f98cca3f560189045034a5934675a1"
+    },
+    {
+      "packet": "spm-abc-retention-candidate-r9-collected",
+      "artifact": "RESULT.md",
+      "sha256": "65b19630aeb360a2b184802bef7dbc35281085b89af1dec6334fa6b5b552e5f1"
+    },
+    {
+      "packet": "spm-abc-retention-candidate-r9-collected",
+      "artifact": "terminal-receipt.json",
+      "sha256": "a804d68a9e458e5dd04e656d43f9709fa5d6f92bd4575ee0634dca916e050138"
+    },
+    {
+      "packet": "spm-abc-retention-candidate-r9-collected",
+      "artifact": "current-consumer-result.json",
+      "sha256": "15b23557c968f8122fccb488b225dc9ad480b66f71328d9948486d44796fc782"
+    },
+    {
+      "packet": "post-v1279-accepted4-root-ready",
+      "artifact": "SHIPPING_IDENTITY.json",
+      "sha256": "c1354f028beab4e0e091915a626e7bc0ecf22d0c14b0f2b478db828d55c405ea"
+    },
+    {
+      "packet": "post-v1279-accepted4-assembly-r1-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "b0833d0c5e9006efe33942f04ae5c1bab4326804e5cfe9ccf9b2925b81a7fac3"
+    }
+  ],
+  "linked_receipt_references": [
+    {
+      "packet": "post-v1279-accepted4-assembly-r1-collected",
+      "artifact": "SOURCE_IDENTITY.json",
+      "sha256": "b6c371a6cbba09e2345e69a99b9c68228c51f776e301432a30f66d9542a5c100"
+    },
+    {
+      "packet": "post-v1279-accepted4-assembly-r1-collected",
+      "artifact": "finite.junit.xml",
+      "sha256": "59562290f8de20e934de3a10ad5cc7e2be10b0488c4c45c70ca971fd235369d4"
+    },
+    {
+      "packet": "post-v1279-accepted4-assembly-r1-collected",
+      "artifact": "offline-control-driver.log",
+      "sha256": "a1f4158684229d559dc4207ff0c657264e4ac243e6508e3f9a46aca24b496e25"
+    },
+    {
+      "packet": "post-v1279-accepted4-assembly-r1-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "b0833d0c5e9006efe33942f04ae5c1bab4326804e5cfe9ccf9b2925b81a7fac3"
+    },
+    {
+      "packet": "post-v1279-unavailable-parent-fixture-r2-collected",
+      "artifact": "SOURCE_IDENTITY.json",
+      "sha256": "f64f889a99b564042c1d47acd5dabbc4f5fbec23d2d4f619571ee91ed37a141f"
+    },
+    {
+      "packet": "post-v1279-unavailable-parent-fixture-r2-independent-review",
+      "artifact": "REVIEW.md",
+      "sha256": "3a9a69901d681a6b869de5e13fa725b502b85e17071f7d7420a8fdb5c01fc3c9"
+    },
+    {
+      "packet": "post-v1279-unavailable-parent-fixture-r2-independent-review",
+      "artifact": "REVIEW.json",
+      "sha256": "3eb6a3bee8cf441380722984a85d50c5cd28da3c5accf8f7b712514fc1756e5a"
+    },
+    {
+      "packet": "post-v1279-unavailable-parent-fixture-r2-collected",
+      "artifact": "focused.xml",
+      "sha256": "21004949e4cfc51787981a2f479767a694bc907c0d1dbb6794de0c5bcdb88a3a"
+    },
+    {
+      "packet": "post-v1279-unavailable-parent-fixture-r2-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "e321263e6a30ececd85a0c0b5edcba4fcd70dce78184e6af3ec314217ded506f"
+    },
+    {
+      "packet": "post-v1279-next-package-map-r1",
+      "artifact": "MAP.json",
+      "sha256": "74ace5028852811eaeac468517126d73aa8e9a041fbca9c91e3953e8b7741d3f"
+    },
+    {
+      "packet": "post-v1279-spm-finite-c1f5-collected",
+      "artifact": "receipt.json",
+      "sha256": "34897c1a4420d0b6cee04410064805fb9e3d5ba6aea35d3a88f2efc870423389"
+    },
+    {
+      "packet": "post-v1279-spm-finite-c1f5-collected",
+      "artifact": "summary.txt",
+      "sha256": "76bfed95c7d0721dee74d089176fe9a396e0b43b12c19916e35d2f64c0b2ff40"
+    },
+    {
+      "packet": "subservient-derivative-output-r3-collected",
+      "artifact": "67f-to-3094-provenance.patch",
+      "sha256": "081165474425ee38b9123b10e876dc7abacf5e723dc10fd23a246eb0676cdb2f"
+    },
+    {
+      "packet": "subservient-derivative-output-r3-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "39a3b78a1a1e81c2e29d4ea3a01e5a33c16d1f549f7cf5900ad51ba3b684a92a"
+    },
+    {
+      "packet": "offline-official-reference-proposal-r1-collected",
+      "artifact": "net.patch",
+      "sha256": "827326d17043aaf4fc0be11eeeac7ab9bf6568d8bb22459bab29edcbb13d5615"
+    },
+    {
+      "packet": "offline-official-reference-independent-r1-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "695eb1d1e29be3aba58a197755dc413462d48d1232e3a142735623962e183873"
+    },
+    {
+      "packet": "subservient-l13-negation-r2-chain-collected",
+      "artifact": "19e-to-97ba-three-path-net.patch",
+      "sha256": "0073ecf3a05935d29018195c47acd5730b9f89e42d1e118ce1cfd2041048599d"
+    },
+    {
+      "packet": "subservient-l13-source-independent-r2-collected",
+      "artifact": "VERDICT.md",
+      "sha256": "ae985e5227c40117a61692539339d8084d1efff5d36c6b777edd9303e7643f4f"
+    },
+    {
+      "packet": "spm-spef-producer-r7-collected",
+      "artifact": "91b-to-c4-three-path-net.patch",
+      "sha256": "123a441409f08774fc3f351077dfb5d47dcdd4bc966aedc0e6a474eb575f8534"
+    },
+    {
+      "packet": "spm-spef-producer-r7-review-collected",
+      "artifact": "review.md",
+      "sha256": "354f8c625de62f6f9922d9f4650441cc360bfe45d6cd16a9f7fd3d2e655e1e87"
+    }
+  ],
+  "final10_source_manifest": [
+    {
+      "git_blob": "12da0021283b30697210849c8e299331bfc47c90",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/drv_capture_plan.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "d3ebc6f273effc85409d770f67dd146903a66eaea686a35a501582d3374d58ae"
+    },
+    {
+      "git_blob": "df3ec5dbab1483735545736a37c218a8601a1458",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/drv_signoff_capture.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "c5e0147f6f9c0f5b7ebfea8fbb79bcaafe48409e98453aa3668da9b139769050"
+    },
+    {
+      "git_blob": "e9e444f8b24cdc9cb466e5f5f7e212ba8512ea14",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/ip_catalog_pull.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "b110ef6ff0b9c92fc4af72344fd07865f053b29869d0692540129a7f1daea246"
+    },
+    {
+      "git_blob": "960abbb20023d23a1a5098b216db53bd6dba77da",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/phase1_doc_one_shot_runner.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "60c94867c61cd0bd935979fa0cc2081ae784026998d467a050afd29206888104"
+    },
+    {
+      "git_blob": "4f113ae192a7c0f1a5085ff3c4233e13b98ea2f1",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/spi_protocol_synth.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "694ec85f91de180940f5cc99baaef21678f86285a113b44f7ad031b91e26027a"
+    },
+    {
+      "git_blob": "8d1cca0404c85fbef8ef9dda6b6c813b4de3217b",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/sta_corner_record_completeness_check.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "c4b58f5915932687f542c35a2ad65a679c8e89ca50856e46e3c9a085ca626a05"
+    },
+    {
+      "git_blob": "9b6f073b1b1fc4e6c6538bb4d133d09053318766",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_l13_input_polarity.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "d291d9b3b2f279254d0b7c702ebb1aff56c3d0d7a7f0ee135c581082e0a187bd"
+    },
+    {
+      "git_blob": "1afc4ff9d832a4b83400e46616aec138a94bdd14",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_local_derivative_provenance_precedence.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "a057f79f902e14d4a88779350c02b3d43a2b8c4f53be96c4a6cbafe836628341"
+    },
+    {
+      "git_blob": "20f008f6779e2fb8bd1434954443a4649673c39b",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_local_derivative_written_output_provenance.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "fbb1cf5ffb99d201a6e640d8d1ccea5cd4ab0c732fd1b5d405ed936c53d1eb8e"
+    },
+    {
+      "git_blob": "3959b441f6a1db6058835928041903735fcff6a4",
+      "path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_reused_ip_local_derivative.py",
+      "same_as_runtime_candidate": true,
+      "sha256": "6699cbc5503238e40ce9cdb59d2e520b11309ae4e4acff334076ce2b8d688269"
+    }
+  ],
+  "author_patch_and_bundle_references": {
+    "base_tip": "a67ded39ed7147a7624197e1245bbb9a2ed6b86f",
+    "base_tree": "db280792a172421a77659a9c4132c9f56af58729",
+    "tip": "daceff44d48cde2b449e33f7aa6f9128c8d507e4",
+    "tree": "ba1fca5bc041bc08f43210d2942f517f71c8c4dd",
+    "branch": "recovery/legacy-output-provenance-20261004",
+    "clean": true,
+    "commits": [
+      "daceff44d48cde2b449e33f7aa6f9128c8d507e4 Match the captured legacy event shape\n611a748be516369a627a8d53a12641ba5866382f Recover legacy local derivative producer outputs"
+    ],
+    "files": [
+      "vibe-ic-marketplace/plugins/vibe-ic/programs/ip_catalog_pull.py",
+      "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_reused_ip_local_derivative.py"
+    ],
+    "patch_sha256": "ebbfb3df99c0176bc258ca104648d222e9db046def6c77ddd9f55ed72aed9b32",
+    "bundle_sha256": "88b64eb3accfa0b5b85dc04040821bc1026012f0c480d387fbd5471978c0538a",
+    "test_red": "Preserved native-002 ordinary ip_catalog_pull, pinned 799, rc1 local derivative producer provenance missing/changed; copied subject RTL/manifest verified against current project.",
+    "focused_green": "test-control-002: 6 passed, 16 deselected, pinned 799, exact recovery, idempotence and refusals.",
+    "scope": "producer only; no ordinary consumer gate change, ledger rewrite, waiver, Phase1 or LEC replay."
+  },
+  "manager_statements": [
+    {
+      "filename": "default-enhancement-capture-v12710-r1.md",
+      "sha256": "3a4900b4fdbf5fd123b2061c20dc1bbf1a6cc607124658b51ab88a6d43c3ef04"
+    },
+    {
+      "filename": "default-capture-exact-reading-scope.md",
+      "sha256": "57157c898944eb4ad8749f0f55d392469ef2054c781e40c6a9ea955a450ece0c"
+    }
+  ],
+  "scope": "Only directly listed receipts and two exact linked receipts were extracted/read; archive descendants were not surveyed; no native replay.",
+  "current_followup": {
+    "at_utc": "2026-10-04T00:14:42.141819+00:00",
+    "index": {
+      "filename": "CURRENT_FOLLOWUP.json",
+      "sha256": "4fabd1c30b5113aaa45a4c772b278e6b2fddd50013cf36b6072050352f19fd19"
+    },
+    "directly_read": [
+      {
+        "packet": "v12711-pr2869-sub-spm-root",
+        "artifact": "LANDED.json",
+        "sha256": "894d744915ed54daabc43371da3ca97778f3ffb95ea0a3fe41b24a810723f118"
+      },
+      {
+        "packet": "spm-r9-real-fork-image-owner-prepare-r1-collected",
+        "artifact": "LANDED.json",
+        "sha256": "bd05d98032c344ccc44d821a03f32588c415b290c7e110706d3cea9d26d6ccc8"
+      },
+      {
+        "packet": "subservient-full-default-actual006-collected",
+        "artifact": "MANAGER_RESULT.json",
+        "sha256": "932a3873b7f604fac1f4105316f3b30fc650ce64bbe7d1aa42817c65f065671c"
+      },
+      {
+        "packet": "subservient-full-default-actual006-collected",
+        "artifact": "inside-terminal.json",
+        "sha256": "3af4a175de5f603f47280d1c6d204a1e031912e9c7a04b2b10e0dc32e4646fd4"
+      },
+      {
+        "packet": "subservient-full-default-actual006-collected",
+        "artifact": "canonical.log",
+        "sha256": "3f178ee3581207d876795721a3971260943290acdc49deef844ade3a3fe7d2fb"
+      },
+      {
+        "packet": "subservient-current-step1-review-r1-collected",
+        "artifact": "REVIEW_READY.json",
+        "sha256": "ad8f37886032c520a88bbb28e9ad0e5f33f9e28eeff646cdd758e4263c27c731"
+      },
+      {
+        "packet": "post-v12710-sub-spm-assembly-r1-collected",
+        "artifact": "ROOT_READY.json",
+        "sha256": "6a4ad69929e2943e7a4c8c7c245f8acf069f54f7309837a71f39d16214f4ec72"
+      }
+    ],
+    "scope": "Seven receipts only; prior archive and first validation evidence remain unchanged."
+  }
+}

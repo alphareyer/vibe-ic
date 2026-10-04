@@ -472,6 +472,74 @@ def _removal_list(entry: dict) -> Optional[list]:
     return refs
 
 
+def _historical_successor_reconciliation(
+        project: Path, entries: List[dict], index: int, entry: dict
+        ) -> Tuple[bool, Optional[ProvenanceFinding]]:
+    """Read only the two existing append-only successor contracts in this ledger.
+
+    `ip_catalog_pull.apply_local_derivative` can append a current event after
+    the exact historical event that predates its `exit_code`/`outputs` fields.
+    Its producer compares all other fields byte-for-value before appending.
+    Separately, the typed glue-adoption event's `path`/bare `sha256` must be
+    carried unchanged in a later verified local-derivative full inventory.
+    Neither path manufactures an output map: successor output maps are checked
+    in their own rows, and the legacy glue digest is checked directly against
+    disk.
+    """
+    if entry.get("event") == "ip_catalog_local_derivative" and \
+            entry.get("kind") == "LOCAL_DERIVATIVE" and \
+            "exit_code" not in entry and "outputs" not in entry:
+        for successor in entries[index + 1:]:
+            if not isinstance(successor, dict) or \
+                    successor.get("event") != "ip_catalog_local_derivative" or \
+                    successor.get("kind") != "LOCAL_DERIVATIVE" or \
+                    successor.get("exit_code") != 0 or \
+                    not isinstance(successor.get("outputs"), dict) or \
+                    not successor.get("outputs"):
+                continue
+            legacy = {key: value for key, value in successor.items()
+                      if key not in ("exit_code", "outputs")}
+            if legacy == entry:
+                return True, None
+
+    if entry.get("event") == "catalog_glue_author_adoption" and \
+            entry.get("kind") == "SEPARATELY_AUTHORED_GLUE" and \
+            "outputs" not in entry:
+        rel = entry.get("path")
+        digest = entry.get("sha256")
+        prefix = "phase2/stage1/rtl/"
+        if isinstance(rel, str) and rel.startswith(prefix) and \
+                isinstance(digest, str) and _RE_BARE_SHA256.fullmatch(digest):
+            rtl_rel = rel[len(prefix):]
+            artifact = project / rel
+            if _is_inside_project(project, artifact):
+                for successor in entries[index + 1:]:
+                    if not isinstance(successor, dict) or \
+                            successor.get("event") != "ip_catalog_local_derivative" or \
+                            successor.get("kind") != "LOCAL_DERIVATIVE" or \
+                            successor.get("exit_code") != 0 or \
+                            not isinstance(successor.get("outputs"), dict) or \
+                            not successor.get("outputs"):
+                        continue
+                    inventory = successor.get("current_inventory")
+                    if isinstance(inventory, dict) and \
+                            inventory.get(rtl_rel) == digest:
+                        if not artifact.is_file():
+                            return True, ProvenanceFinding(
+                                entry_index=index, tool="catalog_glue_author_adoption",
+                                rule="PROVENANCE_OUTPUT_FILE_MISSING",
+                                detail=f"declared output '{rel}' is not present on disk")
+                        actual = _file_sha256(artifact)
+                        if actual.lower() != digest.lower():
+                            return True, ProvenanceFinding(
+                                entry_index=index, tool="catalog_glue_author_adoption",
+                                rule="PROVENANCE_HASH_MISMATCH",
+                                detail=f"output '{rel}': declared sha256:{digest} vs "
+                                       f"on-disk sha256:{actual}")
+                        return True, None
+    return False, None
+
+
 def _is_failed_invocation(entry: dict) -> bool:
     """True when this row records an invocation that EXITED NON-ZERO.
 
@@ -925,6 +993,19 @@ def audit_counted(project: Path, strict_timing: bool = False,
             # attests the pulled file set; per-path on-disk verification is not
             # possible without paths (that is what the v1.0.74 `outputs` dict
             # adds, verified above when present).
+            continue
+        # Append-only legacy metadata is accepted only when its existing
+        # producer successor contract is present. Glue adoption rows are
+        # directly hash-checked through their typed path/digest and matched to
+        # a later local-derivative full inventory; pre-output local-derivative
+        # rows are reconciled only by the exact successor shape emitted by
+        # ip_catalog_pull's legacy-output recovery. The successor's own output
+        # map falls through this gate and receives ordinary verification.
+        reconciled, legacy_finding = _historical_successor_reconciliation(
+            project, to_check, i, e)
+        if reconciled:
+            if legacy_finding is not None:
+                findings.append(legacy_finding)
             continue
         # #365 — a per-invocation COMMAND-AUDIT record (record == "invocation",
         # written by phase3_one_shot_runner._log_invocation) whose call site

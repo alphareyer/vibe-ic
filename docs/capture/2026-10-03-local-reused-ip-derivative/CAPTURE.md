@@ -78,9 +78,73 @@ The historical R1 snapshot and its immutable evidence hashes above are retained.
 No runtime controls or native work were replayed for this capture correction.
 LEC and D1 remain NOT_MEASURED, the derivative NOT_ADOPTED, and whole IC INCOMPLETE.
 
-## Next
+## v1.27.10 landed provenance and offline-reference follow-up
+
+The dated supplied landing receipt binds `eef4b319b3b4fadd890ced8abbf8d969a6804357`
+and tree `f0e9764984bd86bc1576e260d4d856ea88a39dd5`. Accepted components
+`3094a0593b2cc21f5c03c3893838035680e76d1c` and
+`694c833485fb0a87611c049d5c83868be7638743` are now absorbed in that release.
+The producer writes the declared replacement before publishing written-output
+digests; the strict official verifier remains unchanged. Offline admission is
+limited to the explicitly approved read-only origin/ref/commit/inventory.
+
+Existing evidence is retained accurately: the wrong-cwd attempt is not credited;
+correct-cwd c1 reports six passes and one unavailable-parent fixture failure
+because its cache was actually available. b20 changes only that fixture, and
+its exact prior-red selector passes with the refusal assertions preserved.
+Offline driver rc0 comprises one base UNAVAILABLE and six candidate expected
+states (one VERIFIED and five MISMATCH), not seven candidate PASS cases.
+
+The separate legacy recovery `daceff44d48cde2b449e33f7aa6f9128c8d507e4`, tree
+`ba1fca5bc041bc08f43210d2942f517f71c8c4dd`, has independent ACCEPT_COMPONENT
+and six retained focused passes but is an unlanded candidate. It re-derives all
+bindings before recognizing exactly the legacy event lacking both exit_code and
+outputs, writes the same verified bytes, retains the old event prefix and appends
+a current event. Actual003 producer VERIFIED/rc0 does not promote the ordinary
+bounded entry/exit rc1/NOT_MEASURED awaiting signed judgement. The previous
+RUNNER_LOCK_REENTRANT cause attribution was incorrect; delegated re-entry is legal.
+Actual002 refusal, actual001
+setup failure, and the historical prose-versus-launch identity discrepancy remain.
+No LEC, 247, D1, producer or consumer is replayed for this docs update.
+
+Portable packet/file/SHA references and final ten shipping source blobs are in
+`vibe-ic-marketplace/plugins/vibe-ic/docs/enhancements/public-digital-flow-recoveries/v12710-evidence-index.json`.
+The original source snapshots above remain unchanged; `recoveries.json` appends
+the landed follow-up and accepted legacy candidate without a duplicate rule.
+
+## Next action
 
 Root should proceed to final review and shipping of this capture correction.
 Current design qualification, including normal current synthesis/LEC consumption,
 remains pending admission of the composed owner sources. Root owns version and
 push; this follow-up changes capture documentation and routing only.
+
+## Dated current-facts correction (v1.27.11)
+
+The paragraph immediately above retains the earlier v1.27.10 snapshot. Root's
+LANDED receipt now binds main `dd001c6c62912a59be9a270fb15412b6ecf72544`, tree
+`97879719cc181e5d35f695f1fd4780ec885e7442`, absorbing `daceff` and the final LC
+ordinary LOCAL workdir repair. Five existing controls plus one actual Python
+child positive and independent component ACCEPT are retained, not rerun.
+
+Actual003 awaited signed Step1 judgement, not a lock repair. The later independent
+current Step1 PASS has normal API check true, receipt SHA
+`46a9ea0094088a48acad1f364459ae79eca284d47eb7c01d90f361ae607059a4`, evidence
+`576b5b7881c5517996c7f8ef7a25e0ce1d0d06756f7351af25b64cec9331f1c4`; D1 is
+unchanged. Legal delegated parent-child re-entry is not a refusal cause.
+
+Existing actual006 then measured normal synthesis and current RTL-to-synthesis
+LEC PASS, but overall Phase 2 FAIL/rc1 in 212 seconds. Final audit reports five
+dangling references and historical outputless-event completeness; Phase 3 is
+SKIPPED. Zifencei stimulus and rv32i_40 coverage remain NOT_MEASURED. Original ten
+inputs, 23 RTL files and D1 are preserved. This is not whole-flow acceptance.
+
+Seven portable packet/file/SHA references and the current landed identities are
+appended to the existing public-digital `capture.json` and evidence index. No
+source tests, native flow, D1 or prior proof were replayed for this correction.
+
+## Next action
+
+Root should proceed to review the dated correction. Existing source owners retain
+the actual006 audit work and formal tool-image publication. This capture adds no
+implementation, new gate, version change, repin or whole-IC PASS.
