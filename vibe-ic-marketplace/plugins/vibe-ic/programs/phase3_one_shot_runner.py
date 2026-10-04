@@ -76892,11 +76892,22 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
                     or f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}")
     log = (project.parent / ".phase3_window_runs" / project.name / run_id
            / "enclosing_phase3.stderr.log")
+    import execution_policy as _execution
+    capability_fds = _execution.child_pass_fds()
+
+    def _popen_with_execution_capability(command, **kwargs):
+        # The enclosing runner consumes the same live request as this process.
+        # The watchdog's default Popen closes inherited FDs, so keep the
+        # canonical issuer capability on this existing supervised child edge.
+        return subprocess.Popen(command, start_new_session=True,
+                                pass_fds=capability_fds, **kwargs)
+
     res = _wd.run_host_supervised(
         cmd,
         progress_paths=lambda: list(isolated.rglob("*.log")),
         stall_grace_s=_WATCHDOG_STALL_GRACE_S,
         hard_ceiling_s=_WATCHDOG_HARD_CEILING_S,
+        popen_factory=_popen_with_execution_capability,
         ceiling_notice=lambda s: print(
             f"WATCHDOG_BUDGET: enclosing phase3 passed its recorded "
             f"{s:g}s budget and runs on (#2051)", file=sys.stderr))

@@ -143,6 +143,47 @@ def test_omitted_mode_keeps_each_canonical_phase_subprocess_boundary_exact(monke
         assert pass_fds == ()
 
 
+def test_phase3_enclosing_supervised_child_inherits_live_request_capability(
+        tmp_path, monkeypatch):
+    """The watchdog-launched enclosing Phase-3 child must use the existing
+    canonical request FD, just like children started through _run_phase."""
+    import argparse
+    import phase3_one_shot_runner as phase3
+
+    project = tmp_path / 'subservient'
+    project.mkdir()
+    route = real_entry('IC', 'default', project)['route']
+    args = argparse.Namespace(execution_mode='default', execution_cpus=None,
+                              execution_ram_mb=None, execution_workers=None,
+                              execution_licenses=None, execution_choice=None,
+                              execution_choice_wait_s=None)
+    parent_request = policy.configure(args)
+    assert parent_request['authority'] == policy.PROGRAM_DEFAULT
+    assert route['request_digest'] == parent_request['request_digest']
+
+    programs = str(Path(policy.__file__).parent)
+    child = (
+        'import argparse,json,sys\n'
+        f'sys.path.insert(0, {programs!r})\n'
+        'import execution_policy as p\n'
+        'a=argparse.Namespace(execution_mode="default", execution_cpus=None, '
+        'execution_ram_mb=None, execution_workers=None, execution_licenses=None, '
+        'execution_choice=None, execution_choice_wait_s=None)\n'
+        'r=p.configure(a)\n'
+        'print(json.dumps({"request_digest":r["request_digest"], '
+        '"authority":r["authority"], "mode":r["mode"]}, sort_keys=True))\n'
+    )
+    monkeypatch.setenv('VIBEIC_PHASE3_WINDOW_RUN_ID', 'request-capability-child-control')
+    result, _log = phase3._phase3_enclosing_supervised(
+        project, tmp_path / 'isolated', [sys.executable, '-c', child])
+    assert result.rc == 0, result.err
+    assert json.loads(result.out) == {
+        'request_digest': parent_request['request_digest'],
+        'authority': policy.PROGRAM_DEFAULT,
+        'mode': 'default',
+    }
+
+
 def test_postfix_chain_passes_and_records_all_links(tmp_path):
     ctx = H.context(tmp_path)
     controller = H.controller(H.adapter('a'), H.adapter('b'))
