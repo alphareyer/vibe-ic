@@ -382,7 +382,11 @@ def execute(
         pdk_root = _ll.pdk_root_resolution(project, str(pdk.name), image=image)["path"]
     except _ll.Refusal as exc:
         return _refuse("LL_PDK_ROOT_NOT_DECLARED", str(exc), out)
-    mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
+    # LibreLane's CLI receives the PDK_ROOT, not only the selected process
+    # directory. Keep the same root at the same /pdk namespace used by the
+    # placement chain; a child-only mount cannot resolve --pdk-root /pdk on
+    # the LOCAL route and the CLI fails before CTS starts.
+    mounts = [(Path(pdk_root), _ll.PDK_GUEST_ROOT)]
     sizing_tcl = work / "clock_path_drive_sizing.body.tcl"
     R._aa.write_text(sizing_tcl, R._clock_path_drive_sizing_tcl())
     ids = ["OpenROAD.CTS", "Vibeic.ClockPathDriveSizing",

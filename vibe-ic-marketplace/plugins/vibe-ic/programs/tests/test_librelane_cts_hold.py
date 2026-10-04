@@ -523,6 +523,136 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
         == (1000.0, 1010.0, 2)
 
 
+def test_cts_local_route_binds_the_resolved_pdk_root_at_the_cli_root(tmp_path, monkeypatch):
+    """The real CTS caller and LOCAL run_chain agree on the /pdk root."""
+    switch = {'steps': {'19': 'librelane', '20': 'librelane'}}
+    project, out_dir, pnr_tcl = _split_project(tmp_path, switch)
+    pdk_root = tmp_path / 'pdkroot'
+    pdk_root.mkdir(exist_ok=True)
+    pdk_name = 'pdkX'
+    (pdk_root / pdk_name).mkdir(exist_ok=True)
+    image = 'img@sha256:' + '7c' * 32
+    attestation = {'image': image, 'image_id': 'sha256:' + '7c' * 32,
+                   'repo_digests': [image], 'cid': 'ab' * 32,
+                   'network_mode': 'none', 'memory': 64 * 1024**3,
+                   'memory_swap': 64 * 1024**3, 'auto_remove': True}
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(contract, 'local_image_attestation', lambda _image: attestation)
+    monkeypatch.setattr(contract, 'image_capability', lambda *_a, **_k: None)
+    monkeypatch.setattr(runner, '_resolved_cell_policy', lambda configs, *_a, **_k:
+                        (configs, set()))
+
+    corners = ['nom_tt_025C_5v00']
+
+    def resolve(_project, _image, _pdk, step_ids, *, folder, **_kwargs):
+        root = project / 'phase3/librelane' / folder
+        result = {}
+        for step in step_ids:
+            config = put(root / f'{step}.json', {
+                'meta': {'step': step}, 'STA_CORNERS': corners, 'PNR_CORNERS': corners})
+            put(contract.views_path(config), {
+                'step': step, 'inputs': ['odb', 'def', 'nl', 'sdc'], 'outputs': []})
+            result[step] = config
+        return result
+
+    monkeypatch.setattr(contract, 'resolve_step_configs', resolve)
+    monkeypatch.setattr(contract, 'pdk_root_resolution',
+                        lambda *_a, **_k: {'path': str(pdk_root)})
+
+    def bridge(_project, _image, _config, views, output, **_kwargs):
+        state = {key: str(Path(value).resolve()) for key, value in views.items()}
+        return put(output / 'state_in.json', state)
+
+    monkeypatch.setattr(contract, 'state_from_direct', bridge)
+    direct_calls = []
+
+    def direct(_container, cmd, *args, **kwargs):
+        direct_calls.append(cmd)
+        if 'pnr_cts_head.tcl' in cmd:
+            for ext in ('odb', 'def', 'nl.v', 'insts'):
+                write(out_dir / f'cts_hold_split/pre_cts.{ext}', f'pre {ext}\n')
+        return 0, 'head ok', ''
+
+    monkeypatch.setattr(runner, '_docker_exec', direct)
+    monkeypatch.setattr(runner, '_after_restore_tcl', lambda *_a, **_k: '# restore\n')
+    monkeypatch.setattr(runner, '_container_mounts', lambda _container: [])
+
+    import _watchdog as watchdog
+    native_argv = []
+
+    class StopAfterLocalCommand(RuntimeError):
+        pass
+
+    def supervised(command, **_kwargs):
+        native_argv.append(command)
+        out = Path(command[command.index('-o') + 1])
+        views = {key: str(path.resolve()) for key, path in {
+            'odb': out_dir / 'cts_hold_split/pre_cts.odb',
+            'def': out_dir / 'cts_hold_split/pre_cts.def',
+            'nl': out_dir / 'cts_hold_split/pre_cts.nl.v',
+            'sdc': out_dir / 'constraint.sdc'}.items()}
+        put(out / 'state_out.json', views)
+        return SimpleNamespace(outcome='completed', rc=0, out='', err='', supervision={})
+
+    monkeypatch.setattr(watchdog, 'run_host_supervised', supervised)
+    original_chain = contract.run_chain
+
+    def stop_after_chain(*args, **kwargs):
+        folders = original_chain(*args, **kwargs)
+        raise StopAfterLocalCommand(folders)
+
+    monkeypatch.setattr(contract, 'run_chain', stop_after_chain)
+    with pytest.raises(StopAfterLocalCommand) as stopped:
+        cts.execute(
+            runner, project=project, pdk=SimpleNamespace(name=pdk_name), container='c',
+            out_dir=out_dir, out_dir_c=str(out_dir), pnr_tcl=pnr_tcl,
+            modes={'19': 'librelane', '20': 'librelane'},
+            cmd=f'openroad {pnr_tcl} | tee {out_dir}/openroad.log', spare_plan=None,
+            overlay={}, exec_kwargs={})
+
+    assert stopped.value.args[0]
+    assert native_argv
+    assert all(command[command.index('--pdk-root') + 1] == str(pdk_root.resolve())
+               for command in native_argv)
+    pdk_record = json.loads((stopped.value.args[0][0] / 'pdk_root.json').read_text())
+    assert pdk_record['cli_pdk_root'] == str(pdk_root.resolve())
+    assert pdk_record['requested_pdk_root'] == '/pdk'
+    assert pdk_record['execution_route'] == 'LOCAL'
+    assert pdk_record['requested_mounts'] == [[str(pdk_root.resolve()), '/pdk']]
+    assert pdk_record['mounts_under_it'] == [[str(pdk_root.resolve()),
+                                               str(pdk_root.resolve())]]
+
+
+def test_cts_local_route_still_refuses_a_missing_selected_pdk(tmp_path, monkeypatch):
+    switch = {'steps': {'19': 'librelane', '20': 'librelane'}}
+    project, out_dir, pnr_tcl = _split_project(tmp_path, switch)
+    shutil.rmtree(tmp_path / 'pdkroot' / 'pdkX')
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(contract, 'local_image_attestation',
+                        lambda image: {'image': image})
+    monkeypatch.setattr(contract, 'image_capability', lambda *_a, **_k: None)
+    calls = []
+
+    def direct(_container, cmd, *args, **kwargs):
+        calls.append(cmd)
+        for ext in ('odb', 'def', 'nl.v', 'insts'):
+            write(out_dir / f'cts_hold_split/pre_cts.{ext}', f'pre {ext}\n')
+        return 0, 'head ok', ''
+
+    monkeypatch.setattr(runner, '_docker_exec', direct)
+    monkeypatch.setattr(runner, '_after_restore_tcl', lambda *_a, **_k: '# restore\n')
+    monkeypatch.setattr(runner, '_container_mounts', lambda _container: [])
+    result = cts.execute(
+        runner, project=project, pdk=SimpleNamespace(name='pdkX'), container='c',
+        out_dir=out_dir, out_dir_c=str(out_dir), pnr_tcl=pnr_tcl,
+        modes={'19': 'librelane', '20': 'librelane'},
+        cmd=f'openroad {pnr_tcl} | tee {out_dir}/openroad.log', spare_plan=None,
+        overlay={}, exec_kwargs={})
+    assert result[0] != 0 and 'LL_PDK_MISSING' in result[1]
+    assert len(calls) == 1 and 'pnr_cts_head.tcl' in calls[0]
+    assert not (project / 'phase3/librelane/19-cts-hold/01-openroad-cts/invocation.log').exists()
+
+
 def test_a_missing_pdk_root_refuses_and_never_resumes_the_route(tmp_path, monkeypatch):
     switch = {'steps': {'19': 'librelane', '20': 'librelane'}}
     project, out_dir, pnr_tcl = _split_project(tmp_path, switch)
