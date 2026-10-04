@@ -496,6 +496,7 @@ def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, mon
         seen['bridge'] = json.loads(Path(triples[0][2]).read_text())
         seen['steps'] = [t[0] for t in triples]
         seen['lane'] = k['lane']
+        seen['mounts'] = k['mounts']
         folders = []
         for step, _cfg, _st in triples:
             f = project / 'phase3/librelane/15-floorplan' / step
@@ -511,12 +512,14 @@ def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, mon
                         SimpleNamespace(returncode=0, stdout='PASS', stderr=''))
     pdk = _pdk(tmp_path)
     pdk.macro_lefs, pdk.macro_gds = [], []
+    expected_image = contract.resolve_image(project)
     result, consumer = runner._prepare_librelane_floorplan_for_route(
         project, pdk, 'c', out_dir, _deck(), {'15': 'librelane', '15.5ic': 'librelane'},
         io_view_discover=lambda *a: (['/pdk/io.lef'], ['/pdk/io.gds']))
     assert result.status == 'PASS', result.detail
-    assert seen['image'] == stated_image() and seen['folder'] == '15-config'
+    assert seen['image'] == expected_image and seen['folder'] == '15-config'
     assert seen['lane'] == '15-floorplan'
+    assert seen['mounts'] == [(tmp_path / 'pdkroot', '/pdk')]
     # the declared PDN deck reaches the tool config with its provenance
     value, source = seen['overlay']['PDN_CFG']
     assert value.endswith('15-config/pdn_cfg.tcl') and 'pdn_ring.connects' in source

@@ -37633,7 +37633,10 @@ def _prepare_librelane_floorplan_for_route(
     last = ("OpenROAD.DetailedPlacement" if placement is not None
             else "Odb.RemovePDNObstructions" if modes["15"] == "librelane"
             else "OpenROAD.PadRing")
-    mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
+    # LibreLane is invoked with the run's PDK_ROOT (/pdk), not only the
+    # selected PDK's child directory.  Bind the resolved root at that same
+    # namespace so JsonHeader and downstream steps can resolve /pdk itself.
+    mounts = [(Path(pdk_root), _ll.PDK_GUEST_ROOT)]
     try:
         # `Yosys.JsonHeader` is the tool's producer of the `json_h` power view
         # that `Odb.SetPowerConnections` declares; it reads the declared RTL.
