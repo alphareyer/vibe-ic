@@ -17097,6 +17097,73 @@ def _write_synth_log(project: Path, log: Path, content: str) -> None:
             tool="phase3_one_shot_runner")
 
 
+def _librelane_synth_fanout_updates(resolved: dict, producer_config: dict,
+                                    producer_sources: dict) -> dict:
+    """Return the normal Yosys.Synthesis config update for a declared cap.
+
+    LibreLane's documented ``SYNTH_ABC_BUFFER_ONLY`` option emits ABC's
+    ``buffer -N MAX_FANOUT_CONSTRAINT`` without the unrelated upsize/dnsize
+    passes.  The direct synth arm already carries that cap in its ABC recipe;
+    the production LibreLane arm must carry the same declaration into its
+    ordinary step config. Tool defaults (both ABC modes false) are not an
+    explicit design opt-out. ``SYNTH_ABC_BUFFERING=False`` does not disable
+    the separate buffer-only mode. An explicit ``SYNTH_ABC_BUFFER_ONLY=False``
+    alongside a declared cap is a real conflict and is refused.
+    """
+    cap = resolved.get("MAX_FANOUT_CONSTRAINT")
+    if cap is None:
+        return {}
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        raise ValueError(f"LL_SYNTH_FANOUT_CAP_INVALID: {cap!r}")
+
+    buffering = resolved.get("SYNTH_ABC_BUFFERING") is True
+    buffer_only = resolved.get("SYNTH_ABC_BUFFER_ONLY") is True
+    if buffering and buffer_only:
+        raise ValueError("LL_SYNTH_FANOUT_MODE_CONFLICT: LibreLane ABC buffering modes are exclusive")
+    if buffering or buffer_only:
+        return {}
+
+    if (producer_config.get("SYNTH_ABC_BUFFER_ONLY") is False
+            and "SYNTH_ABC_BUFFER_ONLY" in producer_sources):
+        raise ValueError("LL_SYNTH_FANOUT_MODE_CONFLICT: declared cap "
+                         f"{cap} conflicts with explicit disabled mode "
+                         "SYNTH_ABC_BUFFER_ONLY")
+
+    source = producer_sources.get("MAX_FANOUT_CONSTRAINT") or (
+        "resolved Yosys.Synthesis.MAX_FANOUT_CONSTRAINT")
+    return {
+        "SYNTH_ABC_BUFFER_ONLY": (
+            True,
+            f"{source} -> LibreLane Yosys.Synthesis ABC buffer -N {cap} "
+            "(buffer-only; no ABC upsize/dnsize)",
+        )
+    }
+
+
+def _publish_librelane_synth_fanout_config(config_path: Path,
+                                           updates: dict) -> Path:
+    """Publish the derived synthesis config at the canonical consumer path.
+
+    The strict synthesis handoff binds ``synthesis_resolved.json``. Preserve
+    the resolver's original bytes and any adjacent provenance/view records
+    under a distinct name, then derive back to that canonical path so the
+    runner, native receipt, and existing consumer all name the same config.
+    """
+    import librelane_contract as _ll
+
+    if not updates:
+        return config_path
+    original = config_path.with_name("synthesis_pre_fanout_resolved.json")
+    shutil.copy2(config_path, original)
+    for sidecar in (config_path.with_suffix(".provenance.json"),
+                    config_path.with_suffix(".parity.json"),
+                    _ll.views_path(config_path)):
+        if sidecar.is_file():
+            suffix = sidecar.name[len(config_path.stem):]
+            shutil.copy2(sidecar, original.with_name(original.stem + suffix))
+    return _ll.derive_step_config(original, config_path, updates)
+
+
 def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                          container: str) -> StepResult:
     """Run the mapped synthesis tool and retain its native evidence for step 9."""
@@ -17219,6 +17286,12 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             project, image, config_dir / "synthesis_config.json",
             config_dir / "synthesis_resolved.json", mounts=mounts,
             pdk_root=pdk_root_guest)
+        resolved_synthesis = json.loads(synthesis_config.read_text())
+        fanout_updates = _librelane_synth_fanout_updates(
+            resolved_synthesis, config, provenance)
+        if fanout_updates:
+            synthesis_config = _publish_librelane_synth_fanout_config(
+                synthesis_config, fanout_updates)
         # Step 14 (synthesis handoff): LibreLane's own netlist checkers run
         # right behind the synthesis step, as in its Chip flow.
         checker_steps = []
