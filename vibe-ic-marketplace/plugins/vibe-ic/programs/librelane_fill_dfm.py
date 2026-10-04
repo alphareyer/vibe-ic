@@ -68,7 +68,7 @@ CONFIG_FOLDER = '34-config'
 
 
 def _mounts(pdk_root: Path, pdk: str) -> list:
-    return [(pdk_root / pdk, f'/pdk/{pdk}')]
+    return [(pdk_root.resolve(), PDK_GUEST_ROOT)]
 
 
 def _metrics(folder: Path) -> Dict[str, Any]:

@@ -54,6 +54,11 @@ def write(path, text):
 def _isolated(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     state_the_image(monkeypatch)
+    # These route tests exercise the selected image/source fields without a
+    # live host launch. The actual host-CID authority contract is tested at
+    # its own boundary; route fixtures must state their image identity.
+    monkeypatch.setattr(contract, 'local_image_attestation',
+                        lambda image=None: {'image': image or 'img@sha256:x'})
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
 
@@ -278,6 +283,7 @@ def _fake_tools(project, *, route_ll=None, seed_ll=None, fail_step=None):
     def chain(proj, image, triples, **kwargs):
         lane = kwargs.get('lane', 'x')
         seen['chains'].append((lane, [s for s, _, _ in triples], [c for _, c, _ in triples]))
+        seen.setdefault('mounts', []).append((lane, kwargs.get('mounts')))
         base = proj / 'phase3/librelane' / lane
         folders, metrics = [], {}
         arm = route_ll
@@ -455,6 +461,17 @@ def test_librelane_route_reaches_the_paths_the_post_route_tail_reads(tmp_path, m
     assert 'PNR_STAGE: global_route' in log and 'PNR_STAGE: detailed_route' in log
     assert 'GRT-0273' in log and 'DRT-0199' in log
     assert 'PNR_ROUTE_HANDOFF: selected=librelane' in log
+
+
+def test_route_mounts_the_resolved_whole_pdk_root_for_its_pdk_root_cli(tmp_path, monkeypatch):
+    run = _run(tmp_path, monkeypatch)
+    assert run.rc == 0, run.out
+    lane, mounts = run.seen['mounts'][0]
+    assert lane == '21-route'
+    assert len(mounts) == 1
+    host_root, cli_root = mounts[0]
+    assert host_root.resolve() == (tmp_path / 'pdkroot').resolve()
+    assert cli_root == contract.PDK_GUEST_ROOT
 
 
 def test_librelane_handoff_mints_receipt_from_selected_drt(tmp_path, monkeypatch):

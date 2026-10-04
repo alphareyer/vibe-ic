@@ -293,7 +293,7 @@ def _state_chain(project, params, ids, predecessor, overlay=None):
     configs = ll.resolve_step_configs(project, image, pdk, ids,
                     pdk_root=root, folder=lane + '-config', overlay=overlay)
     configs, _ = R._resolved_cell_policy(configs, root, pdk)
-    mounts = [(root / pdk, '/pdk/' + pdk)]
+    mounts = [(root.resolve(), ll.PDK_GUEST_ROOT)]
     if params.get('state_in'):
         state = _require(Path(params['state_in']))
     else:
@@ -557,7 +557,7 @@ def _cts_split(project, params, R, ll, pdk, overlay):
         selected = native.with_name('OpenROAD.STAMidPNR@' + corner + '.json')
         ll.derive_step_config(native, selected, {'PNR_CORNERS': ([corner], 'resolved STA_CORNERS, one measurement per corner')})
         chain.append(('OpenROAD.STAMidPNR', selected))
-    mounts = [(root / pdk.name, '/pdk/' + pdk.name)]
+    mounts = [(root.resolve(), ll.PDK_GUEST_ROOT)]
     views = _views(project, params['top'], 'placed.def' if sid == '19' else 'post_cts.def')
     state = (_require(Path(params['state_in'])) if params.get('state_in') else
              ll.state_from_direct(project, image, configs[ids[0]], views,
@@ -690,7 +690,7 @@ def produce_pnr(project, params):
         configs = ll.resolve_step_configs(project, params['image_id'], pdk.name, ids,
                      pdk_root=Path(params['pdk_root']), folder='execution-backend-15-config', overlay=overlay)
         configs, _ = R._resolved_cell_policy(configs, Path(params['pdk_root']), pdk.name)
-        mounts = [(Path(params['pdk_root']) / pdk.name, '/pdk/' + pdk.name)]
+        mounts = [(Path(params['pdk_root']).resolve(), ll.PDK_GUEST_ROOT)]
         state = ll.state_from_direct(project, params['image_id'], configs[ids[0]],
                      {'nl': _require(nl)}, project / 'phase3/librelane/execution-backend-15-config/bridge',
                      chain=[configs[s] for s in ids[1:]], mounts=mounts)

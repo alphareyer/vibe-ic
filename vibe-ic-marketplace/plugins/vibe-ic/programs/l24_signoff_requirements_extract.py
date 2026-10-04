@@ -72,6 +72,9 @@ SIGNOFF_CHECKS: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
     ("DRC", ("DRC", "design rule check"), ("drc",)),
     ("LVS", ("LVS", "layout versus schematic", "layout vs schematic"),
      ("lvs",)),
+    # A PDN/floorplan PASS does not measure disconnected ports. Only a
+    # report naming that specific connectivity check may answer this row.
+    ("power_network", ("power network",), ("no_disconnected_ports",)),
     # Step 37.3 already publishes gds_xor.json. This row preserves an
     # INPUT requirement, including its count, rather than a measured result.
     ("GDS_XOR", ("GDS XOR", "GDS_XOR", "GDS-XOR"), ("gds_xor",)),
@@ -276,6 +279,11 @@ _REQUIREMENT_PATTERNS: Tuple[Tuple[str, str], ...] = (
     ("pass", r"(?<![a-z0-9])pass(?:ed)?(?![a-z0-9])"),
 )
 
+# Here the denial names the required absence of disconnected ports. It does
+# not withdraw the power-network check; a separate denial still can.
+_NO_DISCONNECTED_PORTS_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:no|without|無|无)\s+disconnected\s+ports?\b", re.I)
+
 #: A corner named on the line. Uppercase process-corner tokens only; these are
 #: PDK-independent names, not a node or vendor.
 _CORNER_RE = re.compile(r"(?<![A-Za-z0-9])(SS|TT|FF|SF|FS)(?![A-Za-z0-9])")
@@ -335,6 +343,8 @@ def _clause_for(line: str, match: re.Match) -> str:
 
 
 def _requirement_of(clause: str, check: str = "") -> Optional[str]:
+    if check == "power_network" and _NO_DISCONNECTED_PORTS_RE.search(clause):
+        return "no_disconnected_ports"
     if check == "GDS_XOR":
         count = _DIFFERENCE_COUNT_RE.search(clause)
         if count and count.group(1).lower() in ("0", "zero"):
@@ -451,7 +461,7 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
                 if match is None and implicit is None:
                     continue
                 clause = implicit if implicit is not None else _clause_for(line, match)
-                if check == "GDS_XOR":
+                if check in ("GDS_XOR", "power_network"):
                     # Bound both sides to this check's own sentence/record.
                     # A later unrelated denial cannot withdraw it; the
                     # existing next-check boundary still limits the clause.
@@ -464,7 +474,10 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
                     # a pipe before the check ends only the backward prefix.
                     prefix = line[lo:match.start()].rsplit("|", 1)[-1]
                     clause = clause[:hi - match.start()]
-                    if polarity.is_denied(prefix + clause):
+                    denial_span = prefix + clause
+                    if check == "power_network":
+                        denial_span = _NO_DISCONNECTED_PORTS_RE.sub(" ", denial_span)
+                    if polarity.is_denied(denial_span):
                         continue
                 hits.append({
                     "document": rel,

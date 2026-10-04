@@ -136,7 +136,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
         # A PDK that declares no OpenRCX rules is the LEF-RC/analytical
         # fallback's case (the direct path); the tool would warn and skip.
         raise Refusal('LL_RCX_RULESETS_UNDECLARED', f'{pdk}: RCX_RULESETS is empty')
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     for source in (routed_def, netlist, sdc):
         if not Path(source).is_file():
             raise Refusal('LL_ROUTE_VIEW_MISSING', str(source))

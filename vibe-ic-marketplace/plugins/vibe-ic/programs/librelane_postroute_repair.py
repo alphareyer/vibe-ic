@@ -1064,7 +1064,7 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
         configs[REPAIR_STEP] = _ll.derive_step_config(configs[REPAIR_STEP],
                                                       configs[REPAIR_STEP], extra)
     corners = list(_load(configs["OpenROAD.STAPostPNR"]).get("STA_CORNERS") or [])
-    return configs, corners, [(pdk_root / pdk, f"/pdk/{pdk}")]
+    return configs, corners, [(pdk_root.resolve(), _ll.PDK_GUEST_ROOT)]
 
 
 def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,

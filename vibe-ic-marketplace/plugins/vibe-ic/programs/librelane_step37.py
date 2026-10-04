@@ -25,7 +25,7 @@ STEPS = ("Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR",
 
 def _run(project: Path, image: str, pdk_root: Path, pdk: str,
          steps: list[str], state: Path, lane: str, configs: dict[str, Path]) -> list[Path]:
-    mount = [(pdk_root / pdk, f"/pdk/{pdk}")]
+    mount = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     return run_chain(project, image, [(step, configs[step], state) for step in steps],
                      mounts=mount, lane=lane, pdk_root=PDK_GUEST_ROOT)
 
@@ -45,7 +45,7 @@ def _routed_state(project: Path, image: str, pdk_root: Path, pdk: str,
         project, image, config,
         {"def": routed_def, "nl": netlist, "sdc": sdc},
         project / "phase3/librelane/37-config/bridge",
-        mounts=[(pdk_root / pdk, f"/pdk/{pdk}")])
+        mounts=[(pdk_root.resolve(), PDK_GUEST_ROOT)])
 
 
 def _gds_state(state_path: Path, gds: Path, out: Path) -> Path:

@@ -536,7 +536,7 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
         record['VIBEIC_DECAP_CAP'] = {'value': decap_f, 'unit': 'F', 'source': decap_source}
         write_json(overrides, record)
     cfg = _config(ir_cfg)
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     for source in (routed_def, netlist, sdc, spef):
         if not Path(source).is_file():
             raise Refusal('LL_ROUTE_VIEW_MISSING', str(source))
@@ -701,7 +701,7 @@ def run_antenna_router(project: Path, image: str, pdk_root: Path, pdk: str, *,
     the antenna jumpers away, ANT-0008)."""
     configs = resolve_step_configs(project, image, pdk, list(ANTENNA_ROUTER_STEPS),
                                    pdk_root=pdk_root, folder='26-config', overlay=overlay)
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     for source in (routed_def, netlist, sdc):
         if not Path(source).is_file():
             raise Refusal('LL_ROUTE_VIEW_MISSING', str(source))
@@ -730,7 +730,7 @@ def run_antenna_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
         raise Refusal('LL_ANTENNA_RUNSET_UNDECLARED', f'{pdk}: KLAYOUT_ANTENNA_RUNSET')
     if not Path(gds).is_file():
         raise Refusal('LL_GDS_MISSING', f'no stream file at {Path(gds)}')
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     state = state_from_direct(project, image, configs['KLayout.Antenna'], {'gds': gds},
                               project / 'phase3/librelane/26-config/bridge-gds',
                               chain=[configs['Checker.KLayoutAntenna']], mounts=mounts)
@@ -843,7 +843,7 @@ def run_sealring(project: Path, image: str, pdk_root: Path, pdk: str, *,
     write_json(config_path, cfg)
     write_json(config_path.with_name(config_path.stem + '.overrides.json'),
                {'DIE_AREA': cfg['DIE_AREA'], 'replaced': replaced, 'source': die_source})
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     state = state_from_direct(project, image, config_path, {'gds': gds_in},
                               project / 'phase3/librelane/26.5ic-config/bridge', mounts=mounts)
     folder = run_chain(project, image, [('KLayout.SealRing', config_path, state)],
@@ -866,7 +866,7 @@ def xor_sealed(project: Path, image: str, pdk_root: Path, pdk: str, *,
     be 0; anything else is a refusal."""
     configs = resolve_step_configs(project, image, pdk, ['KLayout.XOR'],
                                    pdk_root=pdk_root, folder='26.5ic-config')
-    mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
+    mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
     state = state_from_direct(project, image, configs['KLayout.XOR'],
                               {'mag_gds': direct_gds, 'klayout_gds': tool_gds},
                               project / 'phase3/librelane/26.5ic-config/bridge-xor', mounts=mounts)

@@ -370,6 +370,39 @@ def test_run_chain_passes_and_records_the_stated_root(tmp_path, monkeypatch):
     assert record["mounts_under_it"] == [[str(host.resolve()), "/pdk/procA"]]
 
 
+def test_local_run_chain_resolves_the_cli_root_from_the_whole_root_mount(tmp_path, monkeypatch):
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"meta": {"step": "OpenROAD.Floorplan"}}))
+    state = tmp_path / "s.json"
+    state.write_text(json.dumps({}))
+    host_root = tmp_path / "pdkroot"
+    (host_root / "pdkX").mkdir(parents=True)
+    argv = []
+
+    def local_tool(cmd, **_kw):
+        argv.append(cmd)
+        folder = Path(cmd[cmd.index("-o") + 1])
+        (folder / "state_out.json").write_text(json.dumps({}))
+        return ll.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ll, "image_capability", lambda *a, **k: {})
+    monkeypatch.setattr(ll, "openroad_home", lambda *a, **k: None)
+    monkeypatch.setattr(ll, "_check_state", lambda *a, **k: None)
+    monkeypatch.setattr(ll, "run_container", local_tool)
+    monkeypatch.setattr(ll._ce, "no_container_route", lambda: True)
+    monkeypatch.setattr(ll, "local_image_attestation", lambda *a, **k: {"image": "img"})
+
+    folders = ll.run_chain(tmp_path, "img", [("OpenROAD.Floorplan", config, state)],
+                           mounts=[(host_root, "/pdk")], pdk_root="/pdk")
+    cmd = argv[0]
+    assert cmd[cmd.index("--pdk-root") + 1] == str(host_root.resolve())
+    record = json.loads((folders[0] / "pdk_root.json").read_text())
+    assert record["execution_route"] == "LOCAL"
+    assert record["cli_pdk_root"] == str(host_root.resolve())
+    assert record["requested_pdk_root"] == "/pdk"
+    assert record["requested_mounts"] == [[str(host_root.resolve()), "/pdk"]]
+
+
 def test_the_resolver_follows_module_bindings_through_attributes_and_scopes():
     """The a6 form: the module bound to an attribute and read back through
     it, on the same object and on another. And the phase-3 form: a name that

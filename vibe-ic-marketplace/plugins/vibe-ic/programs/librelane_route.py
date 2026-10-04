@@ -481,7 +481,11 @@ def execute(
             return _refuse("LL_PDK_ROOT_NOT_DECLARED",
                            "phase3/librelane_switch.json pdk_root_host or "
                            "VIBEIC_LIBRELANE_PDK_ROOT", out)
-        mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
+        # This caller's steps name the PDK root itself (`--pdk-root /pdk`),
+        # so the LOCAL route must be able to resolve that whole root on the
+        # host too. A selected-PDK-only child mount leaves `/pdk` absent when
+        # run_chain rewrites the CLI path for LOCAL execution.
+        mounts = [(Path(pdk_root), _ll.PDK_GUEST_ROOT)]
         sdc = deck_sdc(R, deck, container=container, project=project, out_dir=out_dir)
         cfg_dir = project / "phase3/librelane/21-config"
         reserved = [i.get("name") for i in (spare_plan or {}).get("instances", [])
