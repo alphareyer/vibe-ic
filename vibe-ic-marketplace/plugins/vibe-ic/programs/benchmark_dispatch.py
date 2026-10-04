@@ -3151,7 +3151,38 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
             f"port of the instantiated candidate")
 
 
-def _challenge_execution_declaration(run_p: Path) -> dict:
+def _native_challenge_identity_path(run_p: Path) -> Path:
+    return Path(run_p) / "ai_verification_challenges" / "native_execution.json"
+
+
+_NATIVE_CHALLENGE_IDENTITY_FIELDS = (
+    "container", "container_id", "image_id", "image_digest")
+
+
+def _frozen_native_challenge_identity(run_p: Path) -> dict | None:
+    path = _native_challenge_identity_path(run_p)
+    if not path.exists() and not path.is_symlink():
+        return None
+    declaration = _read_json_regular(path)
+    if (not isinstance(declaration, dict) or declaration.get("backend") != "native"
+            or declaration.get("error") or any(
+                not isinstance(declaration.get(k), str) or not declaration[k]
+                for k in _NATIVE_CHALLENGE_IDENTITY_FIELDS)):
+        raise ValueError("frozen native challenge identity is incomplete")
+    return declaration
+
+
+def _known_unbound_native_mismatch(declaration) -> bool:
+    """Only this pre-proof refusal is retryable; bound identities never refresh."""
+    return (isinstance(declaration, dict)
+            and declaration.get("backend") == "native"
+            and declaration.get("error") == "runtime pair is incomplete or mismatched"
+            and not any(declaration.get(k) for k in _NATIVE_CHALLENGE_IDENTITY_FIELDS)
+            and isinstance(declaration.get("runtime_pair"), dict)
+            and declaration["runtime_pair"].get("verdict") == _runtime_pair.RUNTIME_PAIR_MISMATCH)
+
+
+def _challenge_execution_declaration(run_p: Path, *, native: bool = False) -> dict:
     """Bind the challenge to the run's selected runtime, before execution.
 
     Old standalone callers without a runtime declaration retain their named
@@ -3159,7 +3190,14 @@ def _challenge_execution_declaration(run_p: Path) -> dict:
     An operator can explicitly select host challenges with
     VIBEIC_CHALLENGE_BACKEND=host; this does not change the runner's backend.
     """
-    selected = os.environ.get("VIBEIC_CHALLENGE_BACKEND")
+    # A process default cannot override the run's first native proof identity.
+    try:
+        frozen = _frozen_native_challenge_identity(run_p)
+    except (OSError, ValueError) as exc:
+        return {"backend": "native", "error": str(exc)}
+    if frozen is not None:
+        return frozen
+    selected = "native" if native else os.environ.get("VIBEIC_CHALLENGE_BACKEND")
     if selected == "host":
         return {"backend": "host", "selection": "VIBEIC_CHALLENGE_BACKEND=host"}
     if selected not in (None, "native"):
@@ -3191,8 +3229,33 @@ def _challenge_execution_declaration(run_p: Path) -> dict:
 def _challenge_execution_for_task(task: dict) -> dict:
     project = Path(str(task.get("project") or ""))
     run_p = project.parent.parent
+    declaration = task.get("verification_execution")
+    try:
+        frozen = _frozen_native_challenge_identity(run_p)
+    except (OSError, ValueError) as exc:
+        return {"backend": "native", "error": str(exc)}
     if "verification_execution" in task:
         declaration = task["verification_execution"]
+        if frozen is not None:
+            issued_host = frozen.get("issued_host_task_sha256", [])
+            if (isinstance(declaration, dict) and declaration.get("backend") == "host"
+                    and not str(declaration.get("selection", "")).startswith("legacy")
+                    and isinstance(issued_host, list)
+                    and _review_task_digest(task) in issued_host):
+                return declaration
+            if _known_unbound_native_mismatch(declaration):
+                return frozen
+            if (not isinstance(declaration, dict)
+                    or declaration.get("backend") != "native"
+                    or declaration.get("error")
+                    or any(declaration.get(k) != frozen[k]
+                           for k in _NATIVE_CHALLENGE_IDENTITY_FIELDS)):
+                return {**frozen, "error": "task declaration differs from frozen native identity"}
+            return frozen
+        if _known_unbound_native_mismatch(declaration):
+            # The original refusal stays in the task/worklist. Only a persisted
+            # MATCH may bind its first proof; arbitrary native errors stay owed.
+            return _challenge_execution_declaration(run_p, native=True)
         if (isinstance(declaration, dict) and declaration.get("backend") == "host"
                 and str(declaration.get("selection", "")).startswith("legacy")
                 and ((run_p / _RUNTIME_PAIR_RECORD).exists()
@@ -3258,6 +3321,34 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
         receipt["identity_before"] = actual
         if why:
             return finish({"status": "UNAVAILABLE", "reasons": [why]})
+        execution_run = challenge.get("execution_run")
+        if execution_run is not None:
+            # Freeze after readback, before the first tool. Repeated proofs use
+            # the same identity, even after a fresh process or pair overwrite.
+            run_p = Path(execution_run)
+            path = _native_challenge_identity_path(run_p)
+            frozen = {"backend": "native", "selection": str(path.resolve()),
+                      **{k: declaration[k] for k in _NATIVE_CHALLENGE_IDENTITY_FIELDS}}
+            try:
+                existing = _frozen_native_challenge_identity(run_p)
+                if existing is None:
+                    frozen["issued_host_task_sha256"] = sorted({
+                        _review_task_digest(task)
+                        for task in _read_jsonl(run_p / _REVIEW_WORKLIST)
+                        if isinstance(task.get("verification_execution"), dict)
+                        and task["verification_execution"].get("backend") == "host"
+                        and not str(task["verification_execution"].get(
+                            "selection", "")).startswith("legacy")})
+                elif "issued_host_task_sha256" in existing:
+                    # Never backfill an old freeze from the mutable worklist.
+                    frozen["issued_host_task_sha256"] = existing["issued_host_task_sha256"]
+                _write_immutable_json(path, frozen)
+                if _frozen_native_challenge_identity(run_p) != frozen:
+                    raise ValueError("frozen native identity readback differs")
+            except (OSError, ValueError) as exc:
+                return finish({"status": "UNAVAILABLE", "reasons": [str(exc)]})
+            declaration = frozen
+            receipt["declaration"] = frozen
         try:
             inspect_argv = ["docker", "inspect", "--format", "{{json .Mounts}}", declaration["container_id"]]
             cp = subprocess.run(inspect_argv, capture_output=True, text=True, timeout=30)
@@ -3695,7 +3786,8 @@ def _validate_ai_review(task: dict) -> dict:
         reasons.extend(challenge_reasons)
         if challenge is not None:
             challenge_result = _run_verification_challenge(
-                candidate, {**challenge, "execution_backend": execution_backend})
+                candidate, {**challenge, "execution_backend": execution_backend,
+                            "execution_run": str(Path(task["project"]).parent.parent)})
             if challenge_result.get("status") == _CHALLENGE_UNAVAILABLE:
                 unmeasurable.append(
                     "the prompt-derived verification test could not be RUN on "
@@ -3724,7 +3816,8 @@ def _validate_ai_review(task: dict) -> dict:
         reasons.extend(challenge_reasons)
         if challenge is not None:
             challenge_result = _run_verification_challenge(
-                candidate, {**challenge, "execution_backend": execution_backend})
+                candidate, {**challenge, "execution_backend": execution_backend,
+                            "execution_run": str(Path(task["project"]).parent.parent)})
             if challenge_result.get("status") == _CHALLENGE_UNAVAILABLE:
                 unmeasurable.append(
                     "the prompt-derived PASS confirmation could not be RUN on "
@@ -3765,7 +3858,8 @@ def _validate_ai_review(task: dict) -> dict:
                 "status": "INVALID", "reasons": inherited_reasons})
             continue
         result = _run_verification_challenge(
-            candidate, {**inherited, "execution_backend": execution_backend})
+            candidate, {**inherited, "execution_backend": execution_backend,
+                        "execution_run": str(Path(task["project"]).parent.parent)})
         supersession = supersession_by_hash.get(
             str(inherited.get("sha256") or ""))
         if supersession is not None:
@@ -6811,9 +6905,20 @@ _RUNTIME_PAIR_RECORD = "runtime_pair_preflight.json"
 
 def _write_runtime_pair_record(run_p: Path, record: dict) -> None:
     """Record the reconciliation where the run that used it can be read with it."""
-    with contextlib.suppress(OSError):
-        run_p.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(run_p / _RUNTIME_PAIR_RECORD, record)
+    run_p.mkdir(parents=True, exist_ok=True)
+    path = run_p / _RUNTIME_PAIR_RECORD
+    if record.get("verdict") == _runtime_pair.RUNTIME_PAIR_MATCH and path.is_file():
+        prior_text = path.read_text()
+        try:
+            prior = _strict_json_loads(prior_text)
+        except ValueError:
+            prior = None
+        if isinstance(prior, dict) and prior.get("verdict") == _runtime_pair.RUNTIME_PAIR_MISMATCH:
+            _write_immutable_text(run_p / "runtime_pair_refusals" /
+                                  f"{_sha256_text(prior_text)}.json", prior_text)
+    _atomic_write_json(path, record)
+    if _read_json_regular(path) != record:
+        raise ValueError("runtime pair persistence readback differs")
 
 
 def _runtime_pair_before_fan_out(rows, run_p: Path, operation: str) -> int | None:
@@ -6865,6 +6970,14 @@ def _runtime_pair_gate(run_p: Path, operation: str,
     record = _runtime_pair.preflight()
     record["operation"] = operation
     if record["verdict"] == _runtime_pair.RUNTIME_PAIR_MATCH:
+        if not pristine:
+            try:
+                _write_runtime_pair_record(run_p, record)
+            except (OSError, ValueError) as exc:
+                record.update(failure_class=_runtime_pair.RUNTIME_INFRASTRUCTURE_NOT_READY,
+                              workers_launched=0, persistence_error=str(exc))
+                print(f"RUNTIME_PAIR_PERSISTENCE_REFUSED: {exc}", file=sys.stderr)
+                return 2, record
         print(_runtime_pair.pair_line(record))
         return None, record
     record["failure_class"] = _runtime_pair.RUNTIME_INFRASTRUCTURE_NOT_READY
@@ -6874,7 +6987,8 @@ def _runtime_pair_gate(run_p: Path, operation: str,
             _atomic_write_json(
                 run_p.parent / f"{run_p.name}.{_RUNTIME_PAIR_RECORD}", record)
     else:
-        _write_runtime_pair_record(run_p, record)
+        with contextlib.suppress(OSError, ValueError):
+            _write_runtime_pair_record(run_p, record)
     print(f"{_runtime_pair.RUNTIME_INFRASTRUCTURE_NOT_READY}: "
           f"{_runtime_pair.pair_line(record)}", file=sys.stderr)
     # VERBATIM. `_eda_pin` composed these; re-wording one would hand the reader
@@ -7493,6 +7607,31 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         print("ERROR: duplicate problem id in solve report or review worklist",
               file=sys.stderr)
         return 2
+    # Review-only resume can execute proofs without a worker fan-out. Refresh
+    # before repair planning, which itself adjudicates inherited challenges.
+    # Questions and absent reviews remain no-execution bookkeeping.
+    for task in review_tasks:
+        try:
+            review = _read_json_regular(Path(str(task.get("review_path") or "")))
+        except (OSError, ValueError):
+            continue
+        semantic = review.get("semantic_review") if isinstance(review, dict) else None
+        if (not isinstance(semantic, dict)
+                or semantic.get("verdict") == "NEEDS_CLARIFICATION"
+                or not (review.get("verification_test") or task.get("verification_challenges"))):
+            continue
+        declaration = _challenge_execution_for_task(task)
+        if not isinstance(declaration, dict) or declaration.get("backend") != "native":
+            continue
+        try:
+            frozen = _frozen_native_challenge_identity(run_p)
+        except (OSError, ValueError):
+            continue  # The consumer records UNAVAILABLE; never recover corruption.
+        if frozen is None:
+            gate_rc, _ = _runtime_pair_gate(run_p, "resume:review")
+            if gate_rc is not None:
+                return gate_rc
+        break
     try:
         route_worklist = _read_jsonl(run_p / _ROUTE_WORKLIST)
     except ValueError:

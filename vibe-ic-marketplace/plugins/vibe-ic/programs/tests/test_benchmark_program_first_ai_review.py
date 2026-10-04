@@ -2501,11 +2501,84 @@ def test_operator_explicit_host_mode_is_preserved_in_a_native_run(tmp_path, monk
     project = Path(old_task["project"])
     got = bio.collect("rtllm", old_task["id"], project)
     task = bd._make_ai_review_task(old_task["id"], project, got, ROUTING, 0, run, "PROGRAM")
+    # This task was explicitly bound before another proof froze the run's
+    # native identity. The frozen run cannot reinterpret that host declaration.
+    host = task["verification_execution"]
+    freeze = bd._native_challenge_identity_path(run)
+    bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    first_proof = _native_freeze_source_control(run, task, monkeypatch)
+    assert first_proof["status"] == bd._CHALLENGE_UNAVAILABLE
+    frozen = bd._frozen_native_challenge_identity(run)
+    pair_bytes = (run / "runtime_pair_preflight.json").read_bytes()
+    freeze_bytes = freeze.read_bytes()
+    native_probes = []
+    def native_probe(declaration):
+        native_probes.append(declaration)
+        return {}, str(declaration.get("error") or "native probe forbidden for host task")
+    def no_refresh(*args, **kwargs):
+        raise AssertionError("explicit host task must not refresh the native pair")
+    monkeypatch.setattr(bd, "_challenge_native_identity", native_probe)
+    monkeypatch.setattr(bd, "_runtime_pair_gate", no_refresh)
+    monkeypatch.setattr(bd._runtime_pair, "preflight", no_refresh)
     _write_review(task, _valid_review(task))
     verdict = bd._validate_ai_review(task)
+    undeclared = {k: v for k, v in task.items() if k != "verification_execution"}
+    # The same process default is not an already-bound task declaration.
+    reverse = bd._challenge_execution_for_task(undeclared)
+    evidence = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence:
+        (Path(evidence) / "explicit_bound_host.json").write_text(json.dumps({
+            "host": host, "frozen": frozen, "verdict": verdict,
+            "native_identity_probes": native_probes,
+            "undeclared_task_selection": reverse}, indent=2))
     assert verdict["status"] == "ACCEPTED", verdict
     assert verdict["challenge_result"]["execution"]["declaration"] == {
         "backend": "host", "selection": "VIBEIC_CHALLENGE_BACKEND=host"}
+    assert bd._challenge_execution_for_task(task) is host
+    assert native_probes == []
+    assert reverse == frozen
+    assert (run / "runtime_pair_preflight.json").read_bytes() == pair_bytes
+    assert freeze.read_bytes() == freeze_bytes
+
+
+@_NEEDS_SIMULATOR
+@pytest.mark.parametrize("change", ["missing_roster", "late_host", "changed_issued_task"])
+def test_frozen_native_never_backfills_mutable_host_issuance(tmp_path, monkeypatch, change):
+    run, task, _ = _declared_host_task(tmp_path)
+    freeze = bd._native_challenge_identity_path(run)
+    if change == "missing_roster":
+        # Represent an older freeze with no host issuance evidence.
+        bd._write_immutable_json(freeze, {
+            "backend": "native", "selection": str(freeze.resolve()),
+            "container": "neutral-frozen-runtime", "container_id": "ca" * 32,
+            "image_id": "sha256:" + "ab" * 32, "image_digest": _rt_pair.PAIR_DIGEST})
+    elif change == "changed_issued_task":
+        bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    first = _native_freeze_source_control(run, task, monkeypatch)
+    assert first["status"] == bd._CHALLENGE_UNAVAILABLE
+    freeze_bytes = freeze.read_bytes()
+    if change == "changed_issued_task":
+        task["verification_execution"]["selection"] = "explicit host changed after freeze"
+    bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    # A repeat proof must not snapshot the now-mutable host worklist.
+    repeated = _native_freeze_source_control(run, task, monkeypatch)
+    assert repeated["status"] == bd._CHALLENGE_UNAVAILABLE
+    _write_review(task, _valid_review(task))
+    def refused_native(declaration):
+        return {}, str(declaration.get("error") or "native source seam has no tool")
+    monkeypatch.setattr(bd, "_challenge_native_identity", refused_native)
+    verdict = bd._validate_ai_review(task)
+    selected = bd._challenge_execution_for_task(task)
+    evidence = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence:
+        (Path(evidence) / ("host_issuance_" + change + ".json")).write_text(json.dumps({
+            "task": task, "first": first, "repeated": repeated, "verdict": verdict,
+            "selected": selected, "freeze_before": freeze_bytes.decode(),
+            "freeze_after": freeze.read_text()}, indent=2))
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert selected["backend"] == "native", selected
+    assert "frozen" in selected["error"]
+    assert freeze.read_bytes() == freeze_bytes
 
 
 @_NEEDS_SIMULATOR
@@ -2653,3 +2726,244 @@ def test_live_native_identity_drift_invalidates_completed_raw_proof(tmp_path, mo
     if evidence_dir:
         (Path(evidence_dir) / ("native_drift_" + stage + ".json")).write_text(
             json.dumps({"task": task, "verdict": verdict, "injection": "CID readback after actual " + stage}, indent=2))
+
+
+def _stale_native_pair(run):
+    pair = {"verdict": "RUNTIME_PAIR_MISMATCH", "container": "stale-runtime",
+            "required_digest": _rt_pair.PAIR_DIGEST, "found_digest": None}
+    (run / "runtime_pair_preflight.json").write_text(json.dumps(pair))
+    return pair
+
+
+def _neutral_native_identity(monkeypatch):
+    # Source controls name fictional identities; they never claim native proof.
+    monkeypatch.setenv("VIBEIC_EDA_CONTAINER", "neutral-runtime")
+    monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "native")
+    monkeypatch.setattr(_ce, "container_id", lambda name: "ca" * 32)
+    monkeypatch.setattr(_pin, "container_image_id", lambda name: ("sha256:" + "ab" * 32, ""))
+
+
+def _native_freeze_source_control(run, task, monkeypatch):
+    # Real identity/freeze consumer with unit subprocess seams, no native tool.
+    with monkeypatch.context() as native:
+        _neutral_native_identity(native)
+        native.setattr(bd.subprocess, "run", lambda argv, **kwargs:
+            bd.subprocess.CompletedProcess(argv, 0,
+                "[]" if ".Mounts" in " ".join(argv) else "", ""))
+        return bd._run_verification_challenge(task["candidate_snapshot"], {
+            **_write_direct_assignment_challenge(task), "execution_run": str(run),
+            "execution_backend": {
+                "backend": "native", "container": "neutral-frozen-runtime",
+                "container_id": "ca" * 32, "image_id": "sha256:" + "ab" * 32,
+                "image_digest": _rt_pair.PAIR_DIGEST}})
+
+
+def _issue2867_resume_report(run, task):
+    _solve_report(run, task)
+    # Current-main resume binds its I/O shape to the coordinator's issue.
+    # Use the real producer, keeping route admission and all assertions intact.
+    project = Path(task["project"])
+    route = bd._make_ai_route_task(task["id"], project,
+        {"public_original_input": task["public_original_input"]}, ROUTING,
+        run, "rtllm", benchmark="rtllm", dataset_path=Path("/unused"))
+    bd._write_jsonl(run / bd._ROUTE_WORKLIST, [route])
+    (run / ".bench_config.json").write_text(json.dumps({"bench": "rtllm", "format": "rtllm"}))
+
+
+def test_runtime_pair_match_persists_and_reads_back_over_stale_mismatch(tmp_path, monkeypatch):
+    run, _, _ = _task(tmp_path)
+    _neutral_native_identity(monkeypatch)
+    _stale_native_pair(run)
+    rc, fresh = bd._runtime_pair_gate(run, "resume:review")
+    assert rc is None
+    actual = json.loads((run / "runtime_pair_preflight.json").read_text())
+    assert actual == fresh, (actual, fresh)
+    assert bd._challenge_execution_declaration(run)["container_id"] == "ca" * 32
+
+
+def test_runtime_pair_refresh_keeps_the_original_refusal(tmp_path):
+    run, _, _ = _task(tmp_path)
+    prior = _stale_native_pair(run)
+    raw = (run / "runtime_pair_preflight.json").read_bytes()
+    assert bd._runtime_pair_gate(run, "resume:review")[0] is None
+    archive = run / "runtime_pair_refusals" / (bd._sha256_text(raw.decode()) + ".json")
+    assert archive.read_bytes() == raw
+    assert json.loads(archive.read_text()) == prior
+
+
+@pytest.mark.parametrize("failure", ["write", "readback"])
+def test_runtime_pair_match_refuses_failed_persistence(tmp_path, monkeypatch, failure):
+    run, _, _ = _task(tmp_path)
+    _stale_native_pair(run)
+    real_write = bd._atomic_write_json
+    def broken(path, record):
+        if Path(path).name == "runtime_pair_preflight.json":
+            if failure == "write":
+                raise OSError("neutral write refusal")
+            return  # Old MISMATCH remains; readback must discriminate it.
+        real_write(path, record)
+    monkeypatch.setattr(bd, "_atomic_write_json", broken)
+    rc, _ = bd._runtime_pair_gate(run, "resume:review")
+    assert rc == 2, "MATCH is unusable when the consumer still reads MISMATCH"
+
+
+@pytest.mark.parametrize("review_kind", ["absent", "question"])
+def test_resume_runtime_bookkeeping_does_not_preflight(tmp_path, monkeypatch, review_kind):
+    run, task, _ = _task(tmp_path)
+    _issue2867_resume_report(run, task)
+    _stale_native_pair(run)
+    if review_kind == "question":
+        review = _valid_review(task)
+        review["semantic_review"]["verdict"] = "NEEDS_CLARIFICATION"
+        _write_review(task, review)
+    def forbidden(*args, **kwargs):
+        pytest.fail("bookkeeping queried a runtime or executed a proof")
+    monkeypatch.setattr(bd._runtime_pair, "preflight", forbidden)
+    monkeypatch.setattr(bd, "_run_verification_challenge", forbidden)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_review_only_resume_refreshes_known_unbound_native_mismatch(tmp_path, monkeypatch, inherited):
+    run, task, _ = _task(tmp_path)
+    _neutral_native_identity(monkeypatch)
+    old_pair = _stale_native_pair(run)
+    original = bd._challenge_execution_declaration(run)
+    task["verification_execution"] = original
+    if inherited:
+        task["verification_challenges"] = [{**_write_direct_assignment_challenge(task),
+            "id": task["id"], "prompt_sha256": task["prompt_sha256"]}]
+    _issue2867_resume_report(run, task)
+    _write_review(task, _valid_review(task))
+    seen = []
+    def unavailable(candidate, challenge, **kwargs):
+        declaration = challenge["execution_backend"]
+        seen.append(declaration)
+        return {"status": bd._CHALLENGE_UNAVAILABLE, "reasons": ["source fixture: no native execution"]}
+    monkeypatch.setattr(bd, "_run_verification_challenge", unavailable)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    assert seen and all(d.get("container_id") == "ca" * 32 for d in seen), seen
+    assert json.loads((run / "runtime_pair_preflight.json").read_text())["verdict"] == "RUNTIME_PAIR_MATCH"
+    # The historical refusal is retained, rather than rewritten as a bound proof.
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]["verification_execution"] == original
+    assert original["runtime_pair"] == old_pair
+
+
+@pytest.mark.parametrize("bad", [False, True])
+@_NEEDS_SIMULATOR
+def test_current_main_one_bit_good_and_bad_consumer(tmp_path, bad):
+    # Real compile + vvp in the fresh pinned docker-run child, explicitly host
+    # selected inside that image. This does not exercise Docker native transport.
+    run, task, _ = _declared_host_task(tmp_path)
+    if bad:
+        project = Path(task["project"])
+        Path(task["working_rtl_paths"][0]).write_text(
+            "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
+        got = bio.collect("rtllm", task["id"], project)
+        task = bd._make_ai_review_task(task["id"], project, got, ROUTING, 0, run, "PROGRAM")
+        task["verification_execution"] = {"backend": "host", "selection": "explicit test host in pinned image"}
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == ("REJECTED" if bad else "ACCEPTED"), verdict
+    proof = verdict["challenge_result"]
+    assert proof["status"] == ("FAIL" if bad else "PASS"), proof
+    stages = {c["stage"]: c for c in proof["execution"]["commands"]}
+    assert stages["compile"]["returncode"] == 0
+    assert stages["runtime"]["returncode"] == (1 if bad else 0)
+    evidence = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence:
+        Path(evidence).mkdir(parents=True, exist_ok=True)
+        (Path(evidence) / ("image_onebit_bad.json" if bad else "image_onebit_good.json")).write_text(json.dumps(verdict, indent=2))
+
+
+@pytest.mark.parametrize("mutation", ["cid", "host_default", "pair_overwrite", "bound_declaration", "host_declaration", "malformed_freeze"])
+def test_native_first_proof_freezes_identity_and_repeated_review_refuses_drift(tmp_path, monkeypatch, mutation):
+    run, task, _ = _task(tmp_path)
+    _neutral_native_identity(monkeypatch)
+    _, pair = bd._runtime_pair_gate(run, "resume:review")
+    # Freeze controls begin with a valid persisted pair on both arms, independent
+    # of the producer persistence regression covered above.
+    bd._atomic_write_json(run / "runtime_pair_preflight.json", pair)
+    task["verification_execution"] = bd._challenge_execution_declaration(run)
+    _issue2867_resume_report(run, task)
+    _write_review(task, _valid_review(task))
+    def no_tool(argv, **kwargs):
+        # Exercise the real identity + freeze consumer before a missing tool.
+        # No native tool or Docker transport is claimed by this source control.
+        return bd.subprocess.CompletedProcess(argv, 0, "[]" if ".Mounts" in " ".join(argv) else "", "")
+    monkeypatch.setattr(bd.subprocess, "run", no_tool)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    first = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["review_outcomes"][0]
+    assert first["status"] == bd._NOT_MEASURED
+    freeze = run / "ai_verification_challenges" / "native_execution.json"
+    freeze_bytes = freeze.read_bytes()
+    # Subsequent declaration selection is the behavioral value under test.
+    if mutation == "cid":
+        monkeypatch.setattr(_ce, "container_id", lambda name: "cb" * 32)
+    elif mutation == "host_default":
+        monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "host")
+        task.pop("verification_execution")
+    elif mutation == "pair_overwrite":
+        _stale_native_pair(run)
+        task.pop("verification_execution")
+    elif mutation == "bound_declaration":
+        task["verification_execution"]["image_id"] = "sha256:" + "cd" * 32
+    elif mutation == "host_declaration":
+        task["verification_execution"] = {
+            "backend": "host", "selection": "VIBEIC_CHALLENGE_BACKEND=host"}
+    else:
+        freeze.parent.mkdir(parents=True, exist_ok=True)
+        freeze.write_text('{"backend":"native"}')
+        task.pop("verification_execution")
+    bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    selected = bd._challenge_execution_for_task(task)
+    evidence = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence:
+        (Path(evidence) / ("native_freeze_" + mutation + ".json")).write_text(json.dumps({
+            "task": task, "first": first, "selected": selected,
+            "second": json.loads((run / bd._ACCEPTANCE_REPORT).read_text()),
+            "freeze_before": freeze_bytes.decode(), "freeze_after": freeze.read_text()}, indent=2))
+    assert selected["backend"] == "native", selected
+    if mutation in {"host_default", "pair_overwrite"}:
+        assert selected.get("container_id") == "ca" * 32, selected
+    else:
+        verdict = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["review_outcomes"][0]
+        assert verdict["status"] == bd._NOT_MEASURED, verdict
+        why = " ".join(verdict["challenge_result"]["reasons"])
+        assert any(s in why for s in ("drift", "frozen")), why
+    assert freeze.is_file(), "first native proof must leave immutable identity evidence"
+    if mutation != "malformed_freeze":
+        assert freeze.read_bytes() == freeze_bytes
+
+
+@pytest.mark.parametrize("field", ["container_id", "image_id", "error"])
+def test_native_partial_or_unknown_error_is_never_refreshed(tmp_path, monkeypatch, field):
+    run, task, _ = _task(tmp_path)
+    _neutral_native_identity(monkeypatch)
+    _stale_native_pair(run)
+    original = bd._challenge_execution_declaration(run)
+    if field == "error":
+        original["error"] = "unrecognized native refusal"
+    else:
+        original[field] = "previously-bound-identity"
+    task["verification_execution"] = copy.deepcopy(original)
+    bd._runtime_pair_gate(run, "resume:review")
+    assert bd._challenge_execution_for_task(task) == original
+
+
+def test_pristine_match_leaves_solve_clean_room_empty(tmp_path):
+    run = tmp_path / "new-solve"
+    assert bd._runtime_pair_gate(run, "solve", pristine=True)[0] is None
+    assert not run.exists()
+
+
+@_NEEDS_SIMULATOR
+def test_normal_successful_resume_with_current_issued_io_binding(tmp_path):
+    run, task, got = _declared_host_task(tmp_path)
+    _issue2867_resume_report(run, task)
+    _write_review(task, _valid_review(task))
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+    report = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
+    assert report["status"] == "COMPLETE" and report["accepted_ids"] == ["p1"]
+    assert json.loads(Path(task["response_path"]).read_text())["completion"] == got["completion"]
