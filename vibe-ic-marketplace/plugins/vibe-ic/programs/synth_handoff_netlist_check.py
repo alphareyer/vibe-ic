@@ -259,11 +259,47 @@ def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict
     return raw, cfg, report
 
 
+def verify_handoff(project: Path, folder: Path, mapped: Path, top: str,
+                   *, check_canonical: bool = True) -> dict:
+    """Verify a producer handoff without writing to the producer tree.
+
+    Consumer probes frequently mount the producer project read-only.  The old
+    probe called :func:`publish_handoff`, which verifies correctly but then
+    rewrites ``synth_inputs.json`` and ``netlist.v``.  That made a read-only
+    consumer impossible and encouraged callers to make mutable copies of the
+    producer evidence.  Keep this operation strictly read-only and return the
+    evidence needed by a probe; only the in-flow publisher below may mutate the
+    writable design project.
+    """
+    project = project.resolve()
+    folder = folder.resolve()
+    mapped = mapped.resolve()
+    if not mapped.is_relative_to(project):
+        raise ValueError('mapped handoff is outside project')
+    raw, _, report = _native_synthesis(project, folder, top)
+    if not mapped.is_file():
+        raise ValueError('mapped handoff is missing')
+    if _sha(mapped) != _sha(raw):
+        raise ValueError('mapped copy differs from native output')
+    canonical = mapped.parent / 'netlist.v'
+    if check_canonical and canonical.is_file() and _sha(canonical) != _sha(raw):
+        raise ValueError('canonical handoff differs from native output')
+    return {
+        **report,
+        'producer_folder': str(folder.relative_to(project)),
+        'native': str(raw.relative_to(project)),
+        'mapped': str(mapped.relative_to(project)),
+        'netlist_sha256': _sha(raw),
+        'canonical_checked': check_canonical and canonical.is_file(),
+        'read_only': True,
+    }
+
+
 def publish_handoff(project: Path, folder: Path, mapped: Path, top: str) -> dict:
     """Publish exactly the checked native bytes into the existing handoff contract."""
-    raw, _, _ = _native_synthesis(project, folder, top)
-    if mapped.read_bytes() != raw.read_bytes():
-        raise ValueError('mapped copy differs from native output')
+    checked = verify_handoff(project, folder, mapped, top,
+                             check_canonical=False)
+    raw = project / checked['native']
     canonical = mapped.parent / 'netlist.v'
     canonical.write_bytes(raw.read_bytes())
     sidecar = mapped.parent / 'synth_inputs.json'

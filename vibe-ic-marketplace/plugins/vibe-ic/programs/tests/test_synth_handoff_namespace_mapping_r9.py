@@ -97,3 +97,20 @@ def test_real_native_consumer_rejects_duplicate_rtl(tmp_path, monkeypatch):
     (folder / "vibeic_receipt.json").write_text(json.dumps(receipt))
     with pytest.raises(ValueError, match="duplicated"):
         H._native_synthesis(project, folder, "spm")
+
+
+def test_read_only_consumer_verifies_without_writing(tmp_path, monkeypatch):
+    project, folder, _ = _fixture(tmp_path)
+    mapped = project / "phase2/stage2/synth/spm_synth.v"
+    mapped.parent.mkdir(parents=True)
+    mapped.write_bytes((folder / "spm.nl.v").read_bytes())
+    _patch_external(monkeypatch, project)
+
+    def fail_write(*args, **kwargs):
+        raise AssertionError("read-only consumer must not write producer evidence")
+
+    monkeypatch.setattr(H, "write_json", fail_write)
+    result = H.verify_handoff(project, folder, mapped, "spm")
+    assert result["verdict"] == "PASS"
+    assert result["read_only"] is True
+    assert result["canonical_checked"] is False
