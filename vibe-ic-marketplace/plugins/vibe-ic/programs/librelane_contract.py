@@ -2815,13 +2815,37 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
     write_json(requested, step_ids)
-    script = '''import json,sys,hashlib
+    script = '''import json,sys,hashlib,os
 from pathlib import Path
 from librelane.flows.chip import Chip
 from librelane.steps import Step
 design, requested, output, pdk, project, image = sys.argv[1:]
 flow = Chip(config=design, pdk=pdk, pdk_root="/pdk", design_dir=project)
 raw = flow.config.to_raw_dict()
+# LibreLane fills PDK-owned paths from the image's declared PDK_ROOT.  The
+# caller deliberately mounts that tree at /pdk, so retain only the resolver's
+# declared image-root prefix while rebasing those paths to the actual guest
+# mount.  Other absolute paths (project inputs, decks, and generated views)
+# remain untouched and unknown paths are never guessed.
+image_pdk_root = os.environ.get("PDK_ROOT")
+if not image_pdk_root or not image_pdk_root.startswith("/"):
+    raise ValueError("image PDK_ROOT is not an absolute path")
+def rebase_pdk(value):
+    if isinstance(value, str) and (value == image_pdk_root or
+                                   value.startswith(image_pdk_root + "/")):
+        return "/pdk" + value[len(image_pdk_root):]
+    if isinstance(value, list):
+        return [rebase_pdk(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(rebase_pdk(item) for item in value)
+    if isinstance(value, dict):
+        return {key: rebase_pdk(item) for key, item in value.items()}
+    return value
+PDK_PATH_FIELDS = {"PDK_ROOT", "RCX_RULESETS", "TECH_LEFS", "CELL_LEFS",
+                   "EXTRA_LEFS"}
+raw = {key: (rebase_pdk(value) if key in PDK_PATH_FIELDS else value)
+       for key, value in raw.items()}
+raw["PDK_ROOT"] = "/pdk"
 for step_id in json.loads(Path(requested).read_text()):
     target = Step.factory.get(step_id)
     if target is None:
@@ -3053,9 +3077,30 @@ def _sta_liberty_input_hashes(config: dict, project: Path,
 def _rcx_pdk_input_hashes(config: dict, project: Path,
                           mounts: list[tuple[Path, str]]) -> dict[str, str | None]:
     """RCX's declared rules and physical LEFs, at their mounted host bytes."""
+    # LibreLane may preserve the image's declared PDK_ROOT (for example
+    # /foss/pdks) in a resolved config even though this run explicitly mounts
+    # that same PDK tree at /pdk.  Rebase only paths under the config's own
+    # declared PDK_ROOT to the declared PDK mount; project paths remain
+    # untouched and an unbound path still returns None below.
+    declared_root = config.get('PDK_ROOT')
+    pdk_guest = next((str(guest) for _host, guest in mounts
+                      if str(guest) == PDK_GUEST_ROOT), None)
+    def rebase(value: Any) -> Any:
+        if (isinstance(value, str) and isinstance(declared_root, str)
+                and declared_root.startswith('/')
+                and pdk_guest is not None
+                and (value == declared_root or value.startswith(declared_root + '/'))):
+            return pdk_guest + value[len(declared_root):]
+        if isinstance(value, list):
+            return [rebase(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(rebase(item) for item in value)
+        if isinstance(value, dict):
+            return {key: rebase(item) for key, item in value.items()}
+        return value
     paths = []
     for field in ('RCX_RULESETS', 'TECH_LEFS', 'CELL_LEFS', 'EXTRA_LEFS'):
-        value = config.get(field) or []
+        value = rebase(config.get(field) or [])
         groups = value.values() if isinstance(value, dict) else [value]
         for group in groups:
             paths.extend([group] if isinstance(group, str) else group)
