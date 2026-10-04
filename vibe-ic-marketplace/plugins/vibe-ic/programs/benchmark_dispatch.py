@@ -2390,7 +2390,15 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
         reasons.append("AI repair record rationale must explain the repair")
     contract = record.get("repair_contract")
     public = task.get("public_original_input") or {}
-    if public.get("status") != "PRESENT" or not public.get("source_sha256"):
+    # A prompt-only staging (NOT_PROVIDED) still has an immutable source
+    # identity: source_sha256 hashes the staged prompt the whole lineage is
+    # bound to. Refusing those made the coordinator DEMAND an AI repair the
+    # validator could never accept — a catch-22 measured on VerilogEval, where
+    # every task stages a prompt and no separate public files, so a proven
+    # semantic FAIL could never be repaired. NOT_MEASURED (no recorded
+    # manifest at all) and a missing source hash stay refused.
+    if (public.get("status") not in ("PRESENT", "NOT_PROVIDED")
+            or not public.get("source_sha256")):
         reasons.append("source-bounded repair requires immutable public original input")
     if not isinstance(contract, dict):
         reasons.append("AI repair record lacks repair_contract")
