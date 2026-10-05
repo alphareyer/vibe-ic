@@ -822,10 +822,11 @@ def verify_existing_official_pins_outcome(project: Path,
             return PIN_MISMATCH, "official reference cache is inside the project"
     with tempfile.TemporaryDirectory(prefix="ip-pin-verify-") as scratch:
         reference = Path(scratch)
-        # Outputs remain isolated; the existing official pull rechecks the
-        # cached pin, canonical origin, clean RTL, complete files and errata.
+        # Independently re-fetch the current upstream pin and errata. Reusing
+        # the initial pull's cache would accept unreachable or rewritten tags
+        # solely because their old checkout still matches the local receipts.
         audit = pull_all_catalog_matches(reference, matches, official_only=True,
-                                         cache_root=CACHE_ROOT)
+                                         cache_root=reference / "canonical")
 
         def _scrub(text: Any) -> str:
             # The reference pull runs in a throw-away directory; its path in a
