@@ -722,9 +722,15 @@ def accepted_renames(project: Path, implemented: Any
     manifest = load_source_manifest(Path(project)) or {}
     ordinary: List[Tuple[set, set]] = []
     for key, entries in (manifest.items() if isinstance(manifest, dict) else []):
-        if key == DERIVED_PAD_PAIRS_KEY or key not in _MANIFEST_RENAME_KEYS:
+        if key != DERIVED_PAD_PAIRS_KEY and key not in _MANIFEST_RENAME_KEYS:
             continue
-        for l9, rtl in _manifest_renamed_groups({key: entries}):
+        if key == DERIVED_PAD_PAIRS_KEY:
+            entries = [e for e in (entries or [])
+                       if isinstance(e, dict)
+                       and e.get("rule") != "R3_explicit_document_alias"]
+        parse_key = ("renamed_interfaces"
+                     if key == DERIVED_PAD_PAIRS_KEY else key)
+        for l9, rtl in _manifest_renamed_groups({parse_key: entries}):
             ordinary.append((set(l9), set(rtl)))
     accepted, rejected = accept_renames(ordinary, read_l9_top_ports(project),
                                         implemented)

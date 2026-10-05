@@ -627,6 +627,17 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
     # The parser reads only the rename keys; `derived_pad_pairs` entries are
     # parsed under `renamed_interfaces`, exactly as `declared_renames` does.
     parse_key = key if key in _MANIFEST_RENAME_KEYS else "renamed_interfaces"
+    fresh_pairs: Optional[List[Dict[str, Any]]] = None
+    fresh_error: Optional[str] = None
+    if key == DERIVED_KEY:
+        # A persisted derived pair is an input to the pad-side consumer, so
+        # its complete record must be regenerated from the current documents,
+        # RTL, and placement. Checking only the parsed l9/rtl names lets an
+        # adversarial swap retain a plausible side and pass.
+        try:
+            fresh_pairs = derive(project)["pairs"]
+        except (NotApplicable, NotMeasured) as exc:
+            fresh_error = str(exc)
     out: List[Dict[str, Any]] = []
     for entry in pairs:
         groups = _manifest_renamed_groups({parse_key: [entry]})
@@ -639,6 +650,15 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
                        f"re-emit the manifest (it moves it to `{DERIVED_KEY}`)")
         if not l9s or not rtls:
             why.append("a pair needs a non-empty l9 list and rtl list")
+        if key == DERIVED_KEY:
+            if fresh_error:
+                why.append("fresh derivation of persisted derived_pad_pairs "
+                           f"is unavailable: {fresh_error}")
+            elif entry not in (fresh_pairs or []):
+                why.append("persisted derived_pad_pairs entry does not exactly "
+                           "match a pair freshly derived from the current "
+                           "input documents, implemented RTL, L9 identity, "
+                           "and placement")
         not_impl = sorted(n for n in rtls if n not in implemented)
         if not_impl:
             why.append(f"rtl name(s) {not_impl} are not ports of the "
@@ -700,13 +720,25 @@ def check(project: Path, pairs: Any,
       * how many bits a port has, when neither its RTL header nor L9 states a
         number (`_countable_ports`). Its bits are not counted. A port with no
         side at all is still FAIL: that holds whatever its width."""
-    d = d if d is not None else derive(project)
+    # Always obtain the current derivation. A caller-supplied `d` is useful for
+    # the report shape, but it cannot authorize a stale or hand-mutated list.
+    fresh_d = derive(project)
+    d = fresh_d
     if derived is None:
         derived = d["pairs"]
     by_key = pairs if isinstance(pairs, dict) else {"renamed_interfaces": pairs}
     authored_v = [v for key, entries in by_key.items()
                   for v in verify(project, entries, key=key)]
     derived_v = verify(project, derived, authored=False, key=DERIVED_KEY)
+    if derived != d["pairs"]:
+        derived_v.append({
+            "key": DERIVED_KEY,
+            "pair": {"l9": [], "rtl": []},
+            "verdict": "REFUSED",
+            "side": None,
+            "reason": ("persisted derived_pad_pairs does not exactly equal "
+                       "the fresh derivation from current project inputs"),
+        })
     project = Path(project)
     top, l9_ports = _l9(project)
     placement, params = _placement(project)

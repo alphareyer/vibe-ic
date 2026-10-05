@@ -7732,21 +7732,56 @@ def _split_supplied_roles(project: Path, staged: Sequence[Path]
     """(reused IP, context RTL), decided PER FILE (review_wave4a MINOR).
 
     A file is reused IP when it arrives under `input/vendor_rtl/` (the
-    reused-IP input root, #542/#732) or when a manifest declares the supplied
-    RTL reused IP (`_declared_reused_ip`). Everything else -- `input/rtl/`,
+    reused-IP input root, #542/#732). An explicit input SOURCE_MANIFEST with
+    `reused_ip: true` is also an all-supplied-IP declaration. A catalog
+    declaration is narrower: only the catalog entry's listed files and their
+    forward module closure are reused IP. Everything else -- `input/rtl/`,
     `design_src/**/rtl` -- is CONTEXT RTL a task completes or modifies. One
-    vendor file never turns the context RTL beside it into "do not author"."""
-    if _declared_reused_ip(project):
-        return list(staged), []
+    catalog file never turns the context RTL beside it into "do not author"."""
     vendor = (project / "input" / "vendor_rtl").resolve()
+    staged = [Path(f) for f in staged]
+    try:
+        mf_in = json.loads((project / "input" / "SOURCE_MANIFEST.json")
+                           .read_text(errors="replace"))
+    except (OSError, ValueError):
+        mf_in = {}
+    if isinstance(mf_in, dict) and mf_in.get("reused_ip") is True:
+        return list(staged), []
+
+    # A producer-owned phase2 manifest is an explicit all-supplied-IP
+    # declaration.  Preserve that contract, while keeping the catalog prose
+    # predicate below per-file.
+    if _is_reused_ip_project(project):
+        try:
+            import l9_rtl_pin_consistency_check as _l9
+            mf_stage = _l9.load_source_manifest(project) or {}
+        except Exception:  # noqa: BLE001
+            mf_stage = {}
+        if mf_stage.get("rtl_strategy") != "design_provided_rtl_plus_ai_glue":
+            return list(staged), []
+
     ip: List[Path] = []
-    ctx: List[Path] = []
+    seen = set()
     for f in staged:
         try:
             f.resolve().relative_to(vendor)
             ip.append(f)
+            seen.add(f.resolve())
         except ValueError:
-            ctx.append(f)
+            pass
+
+    # `declared_catalog_reuse` is a design-level route predicate.  It must not
+    # promote every supplied file in a mixed catalog-plus-authored project.
+    try:
+        import ip_catalog_query as _catalog
+        for f in _catalog.catalog_reuse_files(project, supplied=staged):
+            if f.resolve() not in seen:
+                ip.append(f)
+                seen.add(f.resolve())
+    except Exception:  # noqa: BLE001 - malformed catalog evidence is context
+        pass
+
+    ctx = [f for f in staged if f.resolve() not in seen]
     return ip, ctx
 
 

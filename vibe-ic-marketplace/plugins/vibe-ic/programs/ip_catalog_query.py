@@ -16,6 +16,7 @@ Reject GPL/AGPL/SSPL/CC-BY-SA-NC.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -1583,6 +1584,112 @@ def declared_catalog_reuse(project: Path, matches: Optional[List[Any]] = None,
         if str(name or "").strip().lower() in named:
             out.append(name)
     return out
+
+
+def _catalog_manifest_files(match: Any) -> Optional[List[str]]:
+    """Return a catalog entry's declared RTL file list, or ``None``.
+
+    A missing or malformed list is not evidence that every supplied source is
+    catalog IP.  Callers use ``None`` as a fail-closed signal and keep those
+    files in the authored/context role.
+    """
+    raw = (match.get("rtl_files") if isinstance(match, dict)
+           else getattr(match, "rtl_files", None))
+    if not isinstance(raw, list) or not raw:
+        return None
+    files = [str(x).strip() for x in raw
+             if isinstance(x, str) and str(x).strip()]
+    return files if len(files) == len(raw) else None
+
+
+def catalog_reuse_files(project: Path, matches: Optional[List[Any]] = None,
+                        supplied: Optional[List[Path]] = None) -> List[Path]:
+    """Classify the supplied files belonging to declared catalog IP.
+
+    ``declared_catalog_reuse`` answers a design-level applicability question.
+    It must not be used as a project-wide switch for a mixed source tree: an
+    authored wrapper beside one catalog core is still authored context.  This
+    helper binds the declaration to the catalog entry's own ``rtl_files`` and
+    then walks only the forward module/include closure of those files.  The
+    parent wrapper is therefore never pulled into the IP role by reverse
+    reachability.
+
+    File matching is basename-based because the consume step deliberately
+    flattens catalog paths into ``phase2/stage1/rtl``.  An ambiguous basename,
+    a missing/malformed manifest list, or an unreadable source contributes no
+    file.  These choices are fail-closed: uncertainty leaves a source as
+    authored/context instead of granting it reused-IP exemptions.
+    """
+    project = Path(project)
+    if matches is None:
+        try:
+            matches = query_catalog(project)
+        except Exception:  # noqa: BLE001 - catalog evidence is optional
+            matches = []
+    if not matches:
+        return []
+    try:
+        declared = set(declared_catalog_reuse(project, matches))
+    except Exception:  # noqa: BLE001 - malformed declaration is no evidence
+        return []
+    if not declared:
+        return []
+
+    if supplied is None:
+        try:
+            import reused_ip_rtl_consume as _consume
+            supplied = list(_consume.discover_supplied_design_sources(project))
+        except Exception:  # noqa: BLE001
+            supplied = []
+    files = [Path(f) for f in supplied if isinstance(f, (str, Path))]
+    files = [f for f in files if f.is_file() and f.suffix in (".v", ".sv")]
+    if not files:
+        return []
+
+    seeds: List[Path] = []
+    for match in matches:
+        name = (match.get("ip_name") if isinstance(match, dict)
+                else getattr(match, "ip_name", ""))
+        if str(name or "").strip().lower() not in {
+                str(x).strip().lower() for x in declared}:
+            continue
+        entries = _catalog_manifest_files(match)
+        if entries is None:
+            continue
+        for entry in entries:
+            basename = Path(entry.replace("\\", "/")).name
+            candidates = [f for f in files if f.name == basename]
+            # A flattened source with two equal basenames has no trustworthy
+            # catalog identity.  Do not guess which one the manifest meant.
+            if len(candidates) == 1:
+                seeds.append(candidates[0])
+
+    if not seeds:
+        return []
+    selected = {f.resolve() for f in seeds}
+
+    # Pull only the forward closure from catalog-owned seed files.  Importing
+    # the shared resolver keeps this grammar identical to the catalog-glue
+    # preflight; a resolver failure still leaves the direct seeds intact.
+    try:
+        import catalog_glue_closure_resolver as _closure
+        texts = {}
+        for f in files:
+            try:
+                texts[f.resolve()] = _closure._strip_comments(
+                    f.read_text(errors="replace"))
+            except OSError:
+                continue
+        index = _closure.build_index(texts)
+        for seed in list(selected):
+            for module in _closure._MODULE_DEF_RE.findall(texts.get(seed, "")):
+                reachable, _trace = _closure.resolve_closure(
+                    module, texts, index)
+                selected.update(reachable)
+    except Exception:  # noqa: BLE001 - direct manifest evidence remains valid
+        pass
+    return sorted((f for f in files if f.resolve() in selected),
+                  key=lambda f: str(f))
 
 
 def _origin_match_reason(mt: CatalogMatch, manifest: Dict[str, Any],
