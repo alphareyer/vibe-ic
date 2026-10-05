@@ -576,6 +576,19 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
                 raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
                               f'{_salvage(result.out, result.err, log)}')
             result = _wd.completed_process(command, result)
+    if provider is not None:
+        changed = []
+        if (provider.librelane_root and
+                _local_tree_sha256(Path(provider.librelane_root)) != provider.source_sha256):
+            changed.append(f'LL_LOCAL_SOURCE_CHANGED: {provider.librelane_root}')
+        if _local_tree_sha256(Path(provider.pdk_root)) != provider.pdk_root_sha256:
+            changed.append(f'LL_LOCAL_PDK_CHANGED: {provider.pdk_root}')
+        if changed:
+            detail = '; '.join(changed)
+            if result.returncode:
+                result.stderr = (result.stderr or '') + f'\n{detail}\n'
+            else:
+                raise Refusal('LL_LOCAL_SOURCE_CHANGED', detail)
     if attestation is not None and local_image_attestation(image) != attestation:
         raise Refusal('LL_LOCAL_ATTESTATION_CHANGED', attestation['attestation_path'])
     return result

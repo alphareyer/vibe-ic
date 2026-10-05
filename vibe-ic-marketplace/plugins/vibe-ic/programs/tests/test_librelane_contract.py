@@ -159,6 +159,27 @@ def test_local_provider_source_mutation_refuses_before_subprocess(tmp_path, monk
             probe_deadline_s=1)
 
 
+def test_local_provider_source_mutation_during_subprocess_refuses_afterward(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    script = f'from pathlib import Path;Path({str(tmp_path / "librelane/VERSION")!r}).write_text("changed-during-run")'
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_SOURCE_CHANGED'):
+        contract.run_container([
+            'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+            '--entrypoint', sys.executable, image, '-c', script],
+            probe_deadline_s=1)
+
+
+def test_local_provider_tool_fail_precedes_postrun_identity_drift(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    script = (f'from pathlib import Path;Path({str(tmp_path / "librelane/VERSION")!r}).write_text("changed-during-run");'
+              'raise SystemExit(7)')
+    result = contract.run_container([
+        'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+        '--entrypoint', sys.executable, image, '-c', script], probe_deadline_s=1)
+    assert result.returncode == 7
+    assert 'LL_LOCAL_SOURCE_CHANGED' in result.stderr
+
+
 def test_local_provider_executable_mismatch_refuses_before_subprocess(tmp_path, monkeypatch):
     _project, image = _host_provider(tmp_path, monkeypatch)
     with pytest.raises(contract.Refusal, match='LL_LOCAL_EXECUTABLE_MISMATCH'):
