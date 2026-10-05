@@ -1,6 +1,7 @@
 """Real contract consumer with EDA file writes substituted at the process edge."""
 import importlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -78,6 +79,7 @@ def test_declared_host_provider_bypasses_image_resolution_and_binds_pdk(tmp_path
     librelane_root = tmp_path / 'librelane'
     (librelane_root / 'librelane').mkdir(parents=True)
     (librelane_root / 'VERSION').write_text('host-provider')
+    (librelane_root / 'librelane/__init__.py').write_text('MARKER = "bound-source"\n')
     put(project / 'phase3/librelane_switch.json', {
         'execution_route': 'LOCAL', 'pdk': 'gf180mcuD',
         'pdk_root_host': str(pdk_root),
@@ -100,14 +102,121 @@ def test_declared_host_provider_bypasses_image_resolution_and_binds_pdk(tmp_path
     assert capability['tcl_probe'].startswith('NOT_MEASURED:')
 
 
+def _host_provider(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    (project / 'phase3').mkdir(parents=True)
+    pdk_root = tmp_path / 'pdk-root'
+    pdk_root.mkdir()
+    source_root = tmp_path / 'librelane'
+    (source_root / 'librelane').mkdir(parents=True)
+    (source_root / 'VERSION').write_text('host-provider')
+    (source_root / 'librelane/__init__.py').write_text('MARKER = "bound-source"\n')
+    put(project / 'phase3/librelane_switch.json', {
+        'execution_route': 'LOCAL', 'pdk': 'gf180mcuD',
+        'pdk_root_host': str(pdk_root),
+        'librelane_root_host': str(source_root),
+        'librelane_executable': sys.executable})
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
+    return project, contract.resolve_image(project)
+
+
+def test_local_provider_subprocess_edge_executes_native_child_with_bounds(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    docker_calls = []
+    original_run = subprocess.run
+
+    def forbid_docker(argv, **kwargs):
+        if argv and argv[0] == 'docker':
+            docker_calls.append(argv)
+            raise AssertionError('typed LOCAL provider reached Docker')
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', forbid_docker)
+    script = ('import os,resource,librelane; '
+              'print(resource.getrlimit(resource.RLIMIT_AS)[0]); '
+              'print(os.readlink("/proc/self/ns/net")); '
+              'print(os.environ["VIBEIC_LOCAL_NETWORK_MODE"]); '
+              'print(librelane.__file__)')
+    result = contract.run_container([
+        'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+        '--entrypoint', sys.executable, image, '-c', script], probe_deadline_s=5)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert int(lines[0]) <= 256 * 1024 * 1024
+    assert lines[2] == 'none'
+    assert lines[1] != os.readlink('/proc/self/ns/net')
+    assert lines[3].startswith(str(tmp_path / 'librelane'))
+    assert docker_calls == []
+
+
+def test_local_provider_source_mutation_refuses_before_subprocess(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    (tmp_path / 'librelane/VERSION').write_text('changed-after-admission')
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_SOURCE_CHANGED'):
+        contract.run_container([
+            'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+            '--entrypoint', sys.executable, image, '-c', 'raise SystemExit(0)'],
+            probe_deadline_s=1)
+
+
+def test_local_provider_executable_mismatch_refuses_before_subprocess(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_EXECUTABLE_MISMATCH'):
+        contract.run_container([
+            'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+            '--entrypoint', '/bin/sh', image, '-c', 'true'], probe_deadline_s=1)
+
+
+def test_local_provider_scan_ignores_provider_text_outside_image(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    docker_calls = []
+
+    def record_docker(argv, **kwargs):
+        docker_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 125, '', 'reverse Docker edge')
+
+    monkeypatch.setattr(subprocess, 'run', record_docker)
+    remote_image = 'registry.invalid/remote-image'
+    script = f'print({str(image)!r})'
+    result = contract.run_container([
+        'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+        '--entrypoint', sys.executable, remote_image, '-c', script],
+        probe_deadline_s=1)
+    assert result.returncode == 125
+    assert docker_calls and docker_calls[0][0:2] == ['docker', 'run']
+
+
+def test_local_provider_reverse_without_registered_identity_uses_docker_edge(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    monkeypatch.delitem(contract._LOCAL_PROVIDER_IDENTITIES, str(image), raising=False)
+    monkeypatch.setenv(contract.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    docker_calls = []
+
+    def record_docker(argv, **kwargs):
+        docker_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 125, '', 'reverse Docker edge')
+
+    monkeypatch.setattr(subprocess, 'run', record_docker)
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_REMOTE_MISMATCH'):
+        contract.run_container([
+            'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+            '--entrypoint', sys.executable, str(image), '-c', 'raise SystemExit(0)'],
+            probe_deadline_s=1)
+    assert docker_calls == []
+
+
 def test_local_provider_refuses_remote_and_untyped_image_mismatch(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     (project / 'phase3').mkdir(parents=True)
     pdk_root = tmp_path / 'pdk-root'
     pdk_root.mkdir()
+    source_root = tmp_path / 'librelane'
+    (source_root / 'librelane').mkdir(parents=True)
+    (source_root / 'VERSION').write_text('host-provider')
+    (source_root / 'librelane/__init__.py').write_text('MARKER = "bound-source"\n')
     put(project / 'phase3/librelane_switch.json', {
         'execution_route': 'LOCAL', 'pdk': 'gf180mcuD',
-        'pdk_root_host': str(pdk_root)})
+        'pdk_root_host': str(pdk_root), 'librelane_root_host': str(source_root)})
     monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
     image = contract.resolve_image(project)
     switch = json.loads((project / 'phase3/librelane_switch.json').read_text())

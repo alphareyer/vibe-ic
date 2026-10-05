@@ -41,7 +41,10 @@ class LocalProviderIdentity(str):
 
     def __new__(cls, reference: str, *, librelane_root: str | None,
                 pdk_root: str, pdk: str | None, source_sha256: str,
-                pdk_root_sha256: str | None):
+                pdk_root_sha256: str | None, executable: str,
+                executable_sha256: str, source_kind: str,
+                network_mode: str, network_namespace: str,
+                network_helper: str | None, network_helper_sha256: str | None):
         value = str.__new__(cls, reference)
         value.route = 'LOCAL'
         value.provider = 'host-owned-librelane'
@@ -50,6 +53,13 @@ class LocalProviderIdentity(str):
         value.pdk = pdk
         value.source_sha256 = source_sha256
         value.pdk_root_sha256 = pdk_root_sha256
+        value.executable = executable
+        value.executable_sha256 = executable_sha256
+        value.source_kind = source_kind
+        value.network_mode = network_mode
+        value.network_namespace = network_namespace
+        value.network_helper = network_helper
+        value.network_helper_sha256 = network_helper_sha256
         return value
 
     def as_record(self) -> dict[str, Any]:
@@ -57,7 +67,14 @@ class LocalProviderIdentity(str):
                 'reference': str(self), 'librelane_root': self.librelane_root,
                 'pdk_root': self.pdk_root, 'pdk': self.pdk,
                 'source_sha256': self.source_sha256,
-                'pdk_root_sha256': self.pdk_root_sha256}
+                'pdk_root_sha256': self.pdk_root_sha256,
+                'executable': self.executable,
+                'executable_sha256': self.executable_sha256,
+                'source_kind': self.source_kind,
+                'network_mode': self.network_mode,
+                'network_namespace': self.network_namespace,
+                'network_helper': self.network_helper,
+                'network_helper_sha256': self.network_helper_sha256}
 
 
 _LOCAL_PROVIDER_IDENTITIES: dict[str, LocalProviderIdentity] = {}
@@ -116,8 +133,12 @@ def _local_tree_sha256(root: Path | None) -> str | None:
             return hashlib.sha256(root.read_bytes()).hexdigest()
         result = hashlib.sha256()
         for path in sorted(root.rglob('*')):
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink():
+                return None
+            if path.is_dir() or '__pycache__' in path.parts or path.suffix in {'.pyc', '.pyo'}:
                 continue
+            if not path.is_file():
+                return None
             relative = path.relative_to(root).as_posix().encode()
             result.update(len(relative).to_bytes(8, 'big'))
             result.update(relative)
@@ -125,6 +146,44 @@ def _local_tree_sha256(root: Path | None) -> str | None:
         return result.hexdigest()
     except OSError:
         return None
+
+
+def _local_executable_identity(value: str | None = None) -> tuple[str, str]:
+    candidate = value or os.environ.get('VIBEIC_LIBRELANE_EXECUTABLE') or sys.executable
+    path = Path(candidate).expanduser()
+    if not path.is_absolute():
+        resolved = shutil.which(str(path))
+        path = Path(resolved) if resolved else path
+    try:
+        path = path.resolve(strict=True)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise OSError('not an executable file')
+        return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise Refusal('LL_LOCAL_EXECUTABLE_INVALID', f'{path}: {exc}') from None
+
+
+def _local_network_namespace() -> str:
+    try:
+        return os.readlink('/proc/self/ns/net')
+    except OSError as exc:
+        raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                      f'cannot identify host network namespace: {exc}') from None
+
+
+def _local_network_helper_identity() -> tuple[str, str]:
+    helper = shutil.which('bwrap')
+    if not helper:
+        raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                      'bwrap is required to provide a LOCAL network namespace')
+    try:
+        path = Path(helper).resolve(strict=True)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise OSError('not an executable file')
+        return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                      f'cannot bind bwrap identity: {exc}') from None
 
 
 def local_provider_identity(project: Path | None = None,
@@ -138,27 +197,63 @@ def local_provider_identity(project: Path | None = None,
             raise Refusal('LL_LOCAL_PROVIDER_UNDECLARED',
                           'LOCAL requires pdk_root_host or VIBEIC_LIBRELANE_PDK_ROOT')
         return None
+    if not source_value:
+        raise Refusal('LL_LOCAL_SOURCE_UNDECLARED',
+                      'LOCAL requires librelane_root_host or VIBEIC_LIBRELANE_ROOT')
     if selected and not _PDK_NAME.fullmatch(selected):
         raise Refusal('LL_PDK_NAME_INVALID', repr(selected))
     root = Path(root_value).expanduser()
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise Refusal('LL_LOCAL_PDK_ROOT_INVALID', str(root))
     source = Path(source_value).expanduser() if source_value else None
-    if source is not None and (not source.is_absolute() or source.is_symlink() or not source.exists()):
+    if source is not None and (not source.is_absolute() or source.is_symlink() or
+                               not source.is_dir()):
         raise Refusal('LL_LOCAL_LIBRELANE_ROOT_INVALID', str(source))
-    source_sha = _local_tree_sha256(source) or hashlib.sha256(
-        str(source or '<host-installed-librelane>').encode()).hexdigest()
+    if source is not None:
+        package_init = source / 'librelane' / '__init__.py'
+        if package_init.is_symlink() or not package_init.is_file():
+            raise Refusal('LL_LOCAL_SOURCE_UNATTESTED',
+                          f'LibreLane package is not bound under {source}')
+    executable, executable_sha = _local_executable_identity(
+        _provider_switch(project).get('librelane_executable'))
+    source_sha = _local_tree_sha256(source) if source is not None else executable_sha
+    if not source_sha:
+        raise Refusal('LL_LOCAL_SOURCE_UNATTESTED',
+                      f'cannot hash declared LibreLane source {source}')
+    source_kind = 'source_tree' if source is not None else 'executable'
+    switch = _provider_switch(project)
+    network_mode = (switch.get('local_network_mode') or
+                    os.environ.get('VIBEIC_LIBRELANE_LOCAL_NETWORK') or 'none')
+    network_mode = str(network_mode).strip().lower()
+    if network_mode not in {'none', 'host'}:
+        raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                      f'unsupported local network mode {network_mode!r}')
+    network_namespace = _local_network_namespace()
+    network_helper, network_helper_sha = (
+        _local_network_helper_identity() if network_mode == 'none' else (None, None))
     root_sha = _local_tree_sha256(root)
+    if not root_sha:
+        raise Refusal('LL_LOCAL_PROVIDER_IDENTITY_UNBOUND',
+                      f'cannot hash PDK root {root}')
     material = json.dumps({'route': 'LOCAL', 'provider': 'host-owned-librelane',
                            'librelane_root': str(source.resolve()) if source else None,
                            'pdk_root': str(root.resolve()), 'pdk': selected,
-                           'source_sha256': source_sha, 'pdk_root_sha256': root_sha},
+                           'source_sha256': source_sha, 'source_kind': source_kind,
+                           'pdk_root_sha256': root_sha, 'executable': executable,
+                           'executable_sha256': executable_sha,
+                           'network_mode': network_mode,
+                           'network_namespace': network_namespace,
+                           'network_helper': network_helper,
+                           'network_helper_sha256': network_helper_sha},
                           sort_keys=True, separators=(',', ':')).encode()
     reference = LOCAL_PROVIDER_IDENTITY_PREFIX + hashlib.sha256(material).hexdigest()
     identity = LocalProviderIdentity(
         reference, librelane_root=str(source.resolve()) if source else None,
         pdk_root=str(root.resolve()), pdk=selected, source_sha256=source_sha,
-        pdk_root_sha256=root_sha)
+        pdk_root_sha256=root_sha, executable=executable,
+        executable_sha256=executable_sha, source_kind=source_kind,
+        network_mode=network_mode, network_namespace=network_namespace,
+        network_helper=network_helper, network_helper_sha256=network_helper_sha)
     _LOCAL_PROVIDER_IDENTITIES[reference] = identity
     return identity
 
@@ -183,6 +278,29 @@ def _provider_route_mismatch(image: Any, project: Path | None = None) -> Refusal
     elif image is not None and _explicit_local_route(project):
         return Refusal('LL_LOCAL_REMOTE_MISMATCH',
                         f'Docker-backed image {image} cannot run on an explicit LOCAL route')
+    return None
+
+
+def _container_image_arg(argv: list[Any]) -> Any | None:
+    """Return the image token after the Docker-run options, if unambiguous."""
+    try:
+        at = argv.index('run') + 1
+    except ValueError:
+        return None
+    value_options = {'-v', '-e', '--entrypoint', '--memory', '--memory-swap',
+                     '--network', '--workdir'}
+    while at < len(argv):
+        token = argv[at]
+        if not isinstance(token, str):
+            return token
+        if not token.startswith('-'):
+            return token
+        if token == '--rm':
+            at += 1
+        elif token in value_options:
+            at += 2
+        else:
+            return None
     return None
 
 
@@ -342,6 +460,35 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
         image = str(image)
         argv[at] = image
     attestation = None if provider is not None else local_image_attestation(image)
+    if provider is not None:
+        if _local_network_namespace() != provider.network_namespace:
+            raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                          'the host network namespace changed since provider admission')
+        if (provider.librelane_root and
+                _local_tree_sha256(Path(provider.librelane_root)) != provider.source_sha256):
+            raise Refusal('LL_LOCAL_SOURCE_CHANGED', provider.librelane_root)
+        if _local_tree_sha256(Path(provider.pdk_root)) != provider.pdk_root_sha256:
+            raise Refusal('LL_LOCAL_PDK_CHANGED', provider.pdk_root)
+        if network is None:
+            network = provider.network_mode
+        if network != provider.network_mode:
+            raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                          f'requested {network!r}; provider binds {provider.network_mode!r}')
+        if provider.network_mode == 'none':
+            if (not provider.network_helper or
+                    _local_executable_identity(provider.network_helper)[1] !=
+                    provider.network_helper_sha256):
+                raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
+                              'the bound LOCAL network helper changed or disappeared')
+        if memory is None or memory <= 0:
+            raise Refusal('LL_LOCAL_MEMORY_UNATTESTED',
+                          'LOCAL execution requires a finite --memory bound')
+        if memory_swap is None or memory_swap != memory:
+            raise Refusal('LL_LOCAL_SWAP_UNATTESTED',
+                          'LOCAL execution requires --memory-swap equal to --memory')
+        if not auto_remove:
+            raise Refusal('LL_LOCAL_AUTOREMOVE_UNATTESTED',
+                          'LOCAL execution requires Docker-equivalent --rm process lifetime')
     if attestation is not None and network is not None and attestation['network_mode'] != network:
         raise Refusal('LL_LOCAL_NETWORK_UNATTESTED',
                       f"requested --network {network}; current CID {attestation['cid']} "
@@ -372,12 +519,36 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
     else:
         raise Refusal('LL_LOCAL_LAUNCH_UNSUPPORTED', 'missing explicit --skip command')
     command = [_ce.localise_mounted_paths(part, mounts) for part in command]
+    if provider is not None:
+        executable = shutil.which(command[0]) if command else None
+        if not executable:
+            raise Refusal('LL_LOCAL_EXECUTABLE_INVALID', command[0] if command else '<empty>')
+        executable = str(Path(executable).resolve())
+        if (executable != provider.executable or
+                hashlib.sha256(Path(executable).read_bytes()).hexdigest() !=
+                provider.executable_sha256):
+            raise Refusal('LL_LOCAL_EXECUTABLE_MISMATCH',
+                          f'{executable} is not the bound {provider.executable}')
+        if provider.network_mode == 'none':
+            command = [provider.network_helper, '--bind', '/', '/', '--unshare-net', '--', *command]
     environment = dict(kw.pop('env', None) or os.environ)
     environment.update({key: _ce.localise_mounted_paths(value, mounts)
                         for key, value in variables.items()})
     if provider is not None and provider.librelane_root:
         environment['PYTHONPATH'] = os.pathsep.join(
             [provider.librelane_root, environment.get('PYTHONPATH', '')]).rstrip(os.pathsep)
+    if provider is not None:
+        # Apply the native address-space ceiling in a separate launcher.  A
+        # preexec_fn in a supervised/threaded parent can deadlock after fork;
+        # this launcher sets the limit and immediately execs the bound command.
+        launcher = (
+            'import os,resource,sys; '
+            'limit=int(sys.argv[1]); '
+            'resource.setrlimit(resource.RLIMIT_AS,(limit,limit)); '
+            'os.execvpe(sys.argv[2],sys.argv[2:],os.environ)')
+        command = [provider.executable, '-c', launcher, str(memory), *command]
+        environment['VIBEIC_LOCAL_MEMORY_LIMIT_BYTES'] = str(memory)
+        environment['VIBEIC_LOCAL_NETWORK_MODE'] = provider.network_mode
     _ce.local_exec_mode('librelane_contract')
     with _ce.local_engine_cwd() as scratch:
         if child_cwd is None:
@@ -616,8 +787,9 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """
     if (probe_deadline_s is None) == (not supervised):
         raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
-    provider = next((_provider_for_image(part) for part in argv), None)
-    mismatch = _provider_route_mismatch(provider)
+    image_arg = _container_image_arg(argv)
+    provider = _provider_for_image(image_arg)
+    mismatch = _provider_route_mismatch(image_arg)
     if mismatch is not None:
         raise mismatch
     if provider is not None:
