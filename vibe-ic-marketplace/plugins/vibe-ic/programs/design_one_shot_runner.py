@@ -10009,10 +10009,39 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
                         "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
         log_path = out_dir / "cocotb_run.log"
-        cmd = f"cd '{out_dir}' && make SIM=icarus"
+        # The generator publishes `out_dir` in the runner's filesystem.  A
+        # docker-exec consumer must use the corresponding bind-mount spelling;
+        # passing the host path verbatim makes the container fail before make
+        # starts (the native SPM run returned `cd: .../sim_professional/spm:
+        # No such file or directory`).  Keep the host path for the log because
+        # the bind mount writes that file back into the run tree the runner
+        # owns, but use the consumer's spelling for both the shell and the
+        # watchdog's process marker.
+        import shlex as _shlex
+        consumer_out_dir = str(out_dir)
+        if _exec_site == "container":
+            if not _path_in_container(str(out_dir), container):
+                gap = ("the generated professional bundle is not visible in "
+                       f"the configured container: {out_dir}")
+                rec["run_refusal"] = _professional_tb_refuse(
+                    out_dir, gap, dut_kind=str(dut_kind),
+                    exec_site="container")
+                _write({**rec, "status": "INCOMPLETE", "reason": gap,
+                        "fallback_skill": "testbench-gen"})
+                return StepResult(
+                    "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                    detail=(f"{dut_kind} TB generated; bundle "
+                            f"{out_dir.name!r} REFUSED BY NAME — {gap}; "
+                            "fallback_skill=testbench-gen"),
+                    extras={"fallback_skill": "testbench-gen",
+                            "program_first": "professional_tb_gen"},
+                    reason_class=_V.ReasonClass.PARTIAL_POPULATION)
+            consumer_out_dir = _to_container_path(str(out_dir), container)
+        cmd = (f"cd {_shlex.quote(consumer_out_dir)} && "
+               "make SIM=icarus")
         if _exec_site == "container":
             rc, so, se = _docker_exec(container, cmd, timeout=1200,
-                                      marker=str(out_dir),
+                                      marker=consumer_out_dir,
                                       log_path=str(log_path))
         else:
             # Host / in-container-native mode: the pinned toolchain IS
