@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -874,7 +875,9 @@ def generate(project: Path, out_dir: Optional[Path] = None) -> dict:
     cov = build_coverage_model(shape)
     sva, l29 = build_assertions(project, shape)
     rtl = _rtl_files(project, top)
-    mk = emit_makefile(shape, rtl)
+    # Make runs inside the emitted bundle, potentially under a different
+    # project mount. Keep source references relative to that consumer cwd.
+    mk = emit_makefile(shape, [os.path.relpath(path, out) for path in rtl])
     vplan = {
         "top": top, "ic_class": ic_class, "dut_kind": run_kind,
         "reference_model_tier": ref_tier,
