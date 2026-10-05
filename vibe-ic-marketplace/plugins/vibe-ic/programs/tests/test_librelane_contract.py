@@ -71,6 +71,25 @@ def test_local_resolver_requires_host_cid_and_records_provenance(local_image):
         contract.resolve_image(project)
 
 
+def test_generic_no_container_route_keeps_legacy_attested_image(tmp_path, monkeypatch):
+    pdk_root = tmp_path / 'pdk-root'
+    pdk_root.mkdir()
+    monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(pdk_root))
+    monkeypatch.delenv(contract.LOCAL_PROVIDER_ROUTE_ENV, raising=False)
+    monkeypatch.delenv('VIBEIC_LIBRELANE_ROOT', raising=False)
+    monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: True)
+    calls = []
+
+    def legacy_attestation(image):
+        calls.append(image)
+        return {'image': 'legacy-attested-image'}
+
+    monkeypatch.setattr(contract, 'local_image_attestation', legacy_attestation)
+    assert contract.resolve_image(None) == 'legacy-attested-image'
+    assert calls == [None]
+
+
 def test_declared_host_provider_bypasses_image_resolution_and_binds_pdk(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     (project / 'phase3').mkdir(parents=True)
@@ -220,9 +239,27 @@ def test_local_provider_reverse_without_registered_identity_uses_docker_edge(tmp
     monkeypatch.setattr(subprocess, 'run', record_docker)
     with pytest.raises(contract.Refusal, match='LL_LOCAL_REMOTE_MISMATCH'):
         contract.run_container([
-            'docker', 'run', '--memory', '256m', '--memory-swap', '256m', '--rm',
+            'docker', 'run', '--cpus', '1', '--memory', '256m', '--memory-swap', '256m', '--rm',
             '--entrypoint', sys.executable, str(image), '-c', 'raise SystemExit(0)'],
             probe_deadline_s=1)
+    assert docker_calls == []
+
+
+def test_local_provider_unresolved_option_refuses_without_docker_fallback(tmp_path, monkeypatch):
+    _project, image = _host_provider(tmp_path, monkeypatch)
+    monkeypatch.setenv(contract.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    docker_calls = []
+
+    def record_docker(argv, **kwargs):
+        docker_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 125, '', 'unexpected Docker fallback')
+
+    monkeypatch.setattr(subprocess, 'run', record_docker)
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_IMAGE_UNRESOLVABLE'):
+        contract.run_container([
+            'docker', 'run', '--unknown-value', '1', '--memory', '256m',
+            '--memory-swap', '256m', '--rm', '--entrypoint', sys.executable,
+            str(image), '-c', 'raise SystemExit(0)'], probe_deadline_s=1)
     assert docker_calls == []
 
 

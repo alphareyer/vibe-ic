@@ -189,7 +189,10 @@ def _local_network_helper_identity() -> tuple[str, str]:
 def local_provider_identity(project: Path | None = None,
                             pdk: str | None = None) -> LocalProviderIdentity | None:
     """Resolve an explicitly selected host-owned LibreLane/PDK provider."""
-    if not _provider_route(project):
+    # A generic no-container/native fallback is still the legacy attested-image
+    # route.  Only an explicit LOCAL/HOST/NATIVE selection may promote the
+    # caller into the typed host-provider identity contract.
+    if not _explicit_local_route(project):
         return None
     root_value, source_value, selected = _provider_roots(project, pdk)
     if not root_value:
@@ -288,7 +291,7 @@ def _container_image_arg(argv: list[Any]) -> Any | None:
     except ValueError:
         return None
     value_options = {'-v', '-e', '--entrypoint', '--memory', '--memory-swap',
-                     '--network', '--workdir'}
+                     '--network', '--workdir', '--cpus', '--shm-size'}
     while at < len(argv):
         token = argv[at]
         if not isinstance(token, str):
@@ -302,6 +305,13 @@ def _container_image_arg(argv: list[Any]) -> Any | None:
         else:
             return None
     return None
+
+
+def _local_reference_token(argv: list[Any]) -> str | None:
+    """Find an exact typed LOCAL reference without scanning command text."""
+    pattern = re.escape(LOCAL_PROVIDER_IDENTITY_PREFIX) + r'[0-9a-f]{64}'
+    return next((part for part in argv
+                 if isinstance(part, str) and re.fullmatch(pattern, part)), None)
 
 
 def local_image_attestation(image: str | None = None) -> dict[str, Any]:
@@ -801,6 +811,10 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     if (probe_deadline_s is None) == (not supervised):
         raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
     image_arg = _container_image_arg(argv)
+    if image_arg is None and (_explicit_local_route(None) or
+                              _local_reference_token(argv) is not None):
+        raise Refusal('LL_LOCAL_IMAGE_UNRESOLVABLE',
+                      'LOCAL route cannot identify an unambiguous image token')
     provider = _provider_for_image(image_arg)
     mismatch = _provider_route_mismatch(image_arg)
     if mismatch is not None:
