@@ -395,6 +395,10 @@ def _native_output(tmp_path: Path, *, area: bool):
         ensure_ascii=False).encode()).hexdigest()
     install_receipt = {**install_payload, "receipt_sha256": install_digest}
     producer = {
+        "schema": provider.RECEIPT_SCHEMA,
+        "step_id": provider.STEP_ID,
+        "top": "top",
+        "canonical_netlist": provider.CANONICAL_NETLIST,
         "binding": binding, "status": "PASS",
         "source_sha": binding["source_sha"],
         "native_entrypoint": provider.LIBRELANE.native_entrypoint,
@@ -404,8 +408,27 @@ def _native_output(tmp_path: Path, *, area: bool):
         "native_installation_receipt_sha256": install_digest,
         "native_tool_netlist": str(synth / "top_synth.v"),
     }
+    input_hashes = producer["input_hashes"]
+    producer["source_tree_sha256"] = provider.tree_digest(source_files)
+    producer["input_tree_sha256"] = provider.tree_digest(input_hashes)
+    producer["tool"] = {
+        "image_id": "sha256:" + "1" * 64,
+        "native_entrypoint": provider.LIBRELANE.native_entrypoint,
+        "native_trace": [],
+    }
+    producer["tool_sha256"] = provider.stable_digest(producer["tool"])
+    producer["output_hashes"] = production._output_hashes(output)
+    native_rel = "project/phase2/stage2/synth/top_synth.v"
+    producer["consumer_binding"] = provider.consumer_binding(
+        top="top", native_netlist=native_rel,
+        canonical_sha256=producer["output_hashes"][provider.NETLIST],
+        native_sha256=producer["output_hashes"][native_rel],
+        source_tree_sha256=producer["source_tree_sha256"],
+        input_tree_sha256=producer["input_tree_sha256"],
+        tool_sha256=producer["tool_sha256"])
     (output / "producer.json").write_text(json.dumps(producer) + "\n")
     spec = {
+        "top": "top",
         "source_sha": binding["source_sha"],
         "synthesis_engine": provider.LIBRELANE.contract(),
         "image_id": "sha256:" + "1" * 64,
