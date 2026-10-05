@@ -377,6 +377,9 @@ def _native_output(tmp_path: Path, *, area: bool):
             "netlist": provider.CANONICAL_NETLIST,
             "netlist_digest": em.digest(synth / "netlist.v"),
         }) + "\n")
+    trace = output / "project/phase3/librelane/run/vibeic_receipt.json"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({"step": "Yosys.Synthesis", "measured": True}) + "\n")
     (output / "native_commands.jsonl").write_text(json.dumps({
         "executed": True, "native_entrypoint": provider.LIBRELANE.native_entrypoint,
         "image_id": "sha256:" + "1" * 64,
@@ -395,6 +398,10 @@ def _native_output(tmp_path: Path, *, area: bool):
         ensure_ascii=False).encode()).hexdigest()
     install_receipt = {**install_payload, "receipt_sha256": install_digest}
     producer = {
+        "schema": provider.RECEIPT_SCHEMA,
+        "step_id": provider.STEP_ID,
+        "top": "top",
+        "canonical_netlist": provider.CANONICAL_NETLIST,
         "binding": binding, "status": "PASS",
         "source_sha": binding["source_sha"],
         "native_entrypoint": provider.LIBRELANE.native_entrypoint,
@@ -403,9 +410,32 @@ def _native_output(tmp_path: Path, *, area: bool):
         "input_hashes": {k: v for k, v in binding["inputs"].items() if k != "request.json"},
         "native_installation_receipt_sha256": install_digest,
         "native_tool_netlist": str(synth / "top_synth.v"),
+        "native_trace": [{
+            "path": str(trace.relative_to(output / "project")),
+            "sha256": em.digest(trace),
+        }],
     }
+    input_hashes = producer["input_hashes"]
+    producer["source_tree_sha256"] = provider.tree_digest(source_files)
+    producer["input_tree_sha256"] = provider.tree_digest(input_hashes)
+    producer["tool"] = {
+        "image_id": "sha256:" + "1" * 64,
+        "native_entrypoint": provider.LIBRELANE.native_entrypoint,
+        "native_trace": producer["native_trace"],
+    }
+    producer["tool_sha256"] = provider.stable_digest(producer["tool"])
+    producer["output_hashes"] = production._output_hashes(output)
+    native_rel = "project/phase2/stage2/synth/top_synth.v"
+    producer["consumer_binding"] = provider.consumer_binding(
+        top="top", native_netlist=native_rel,
+        canonical_sha256=producer["output_hashes"][provider.NETLIST],
+        native_sha256=producer["output_hashes"][native_rel],
+        source_tree_sha256=producer["source_tree_sha256"],
+        input_tree_sha256=producer["input_tree_sha256"],
+        tool_sha256=producer["tool_sha256"])
     (output / "producer.json").write_text(json.dumps(producer) + "\n")
     spec = {
+        "top": "top",
         "source_sha": binding["source_sha"],
         "synthesis_engine": provider.LIBRELANE.contract(),
         "image_id": "sha256:" + "1" * 64,

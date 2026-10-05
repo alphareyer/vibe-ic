@@ -4,11 +4,23 @@
 Preserves docker inspect/remove calls; native runs use the image's standard
 wrapper and retain actual command, exit status, wall time and tool RSS.
 """
+
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import json
 import os
 import subprocess
 import sys
 import time
+
+import _docker_memory as _dmem
 
 
 def main():
@@ -31,8 +43,8 @@ def main():
         command = command[1:]
     else:
         raise ValueError("NATIVE373_WRAPPER_COMMAND_MISSING")
-    argv = ["docker", "run", *flags, "--cpus", "2", "--memory", "6g",
-            "--memory-swap", "6g", "--network", "none", image, "--skip",
+    argv = ["docker", "run", *flags, *_dmem.docker_memory_flags(), "--cpus", "2",
+            "--network", "none", image, "--skip",
             "/usr/bin/time", "-v", *command]
     started = time.monotonic()
     cp = subprocess.run(argv)

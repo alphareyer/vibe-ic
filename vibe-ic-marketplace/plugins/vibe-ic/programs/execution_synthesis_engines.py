@@ -6,7 +6,16 @@ the measured LibreLane image and the canonical declaration/RTL input set.
 """
 from __future__ import annotations
 
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +25,8 @@ import execution_modes as em
 
 STEP_ID = "9"
 RECEIPT_CONTRACT = "librelane-mapped-synthesis-v1"
+RECEIPT_SCHEMA = "vibe-ic/step9-native-producer/1"
+CONSUMER_BINDING_SCHEMA = "vibe-ic/step9-native-consumer/1"
 REQUIRED_GATES = (
     "synth_netlist_check", "provenance_check",
     "area_total_vs_budget_check", "pdk_consistency_check",
@@ -29,6 +40,38 @@ AREA = "project/" + CANONICAL_AREA
 STATS = "project/" + CANONICAL_STATS
 PRODUCER_RECEIPT = "producer.json"
 NATIVE_COMMANDS = "native_commands.jsonl"
+
+
+def stable_digest(value: object) -> str:
+    """Hash a receipt value without making path ordering or whitespace mutable."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def tree_digest(files: dict[str, str]) -> str:
+    """Digest a source/input tree represented by its relative-name map."""
+    return stable_digest({str(name): str(value) for name, value in sorted(files.items())})
+
+
+def consumer_binding(*, top: str, native_netlist: str,
+                     canonical_sha256: str, native_sha256: str,
+                     source_tree_sha256: str, input_tree_sha256: str,
+                     tool_sha256: str) -> dict:
+    """Describe the exact Step 9 consumer handoff, independent of host paths."""
+    return {
+        "schema": CONSUMER_BINDING_SCHEMA,
+        "step_id": STEP_ID,
+        "consumer": "execution_production.validate_synthesis",
+        "top": top,
+        "canonical_netlist": NETLIST,
+        "native_tool_netlist": native_netlist,
+        "canonical_netlist_sha256": canonical_sha256,
+        "native_tool_netlist_sha256": native_sha256,
+        "source_tree_sha256": source_tree_sha256,
+        "input_tree_sha256": input_tree_sha256,
+        "tool_sha256": tool_sha256,
+    }
 
 
 @dataclass(frozen=True)

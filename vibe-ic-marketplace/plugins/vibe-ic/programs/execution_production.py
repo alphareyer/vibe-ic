@@ -7,6 +7,14 @@ receipt, or caller supplied tool version is a producer.
 """
 from __future__ import annotations
 
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from dataclasses import asdict, fields, is_dataclass
 import json
 import math
@@ -547,6 +555,33 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
         raise em.Refusal("STEP9_PRODUCER_INSTALLATION_UNBOUND", str(producer_path))
     if producer.get("input_hashes") != expected_inputs:
         raise em.Refusal("PRODUCTION_WORKER_INPUT_MANIFEST_UNBOUND", str(producer_path))
+    project = outputs / "project"
+    if (producer.get("schema") != engines.RECEIPT_SCHEMA or
+            producer.get("step_id") != engines.STEP_ID or
+            producer.get("canonical_netlist") != CANONICAL_NETLIST):
+        raise em.Refusal("PRODUCTION_SYNTH_RECEIPT_SCHEMA_INVALID", str(producer_path))
+    producer_top = producer.get("top")
+    expected_top = spec.get("top")
+    if (not isinstance(producer_top, str) or
+            not isinstance(expected_top, str) or producer_top != expected_top):
+        raise em.Refusal("PRODUCTION_SYNTH_TOP_UNBOUND", str(producer_path))
+    source_tree_sha256 = engines.tree_digest(spec.get("source_files", {}))
+    input_tree_sha256 = engines.tree_digest(expected_inputs)
+    if (producer.get("source_tree_sha256") != source_tree_sha256 or
+            producer.get("input_tree_sha256") != input_tree_sha256):
+        raise em.Refusal("PRODUCTION_SYNTH_TREE_HASH_MISMATCH", str(producer_path))
+    tool = producer.get("tool")
+    expected_tool = {
+        "image_id": spec.get("image_id"),
+        "native_entrypoint": engine.native_entrypoint,
+        "native_trace": producer.get("native_trace"),
+    }
+    if (tool != expected_tool or
+            producer.get("tool_sha256") != engines.stable_digest(expected_tool)):
+        raise em.Refusal("PRODUCTION_SYNTH_TOOL_HASH_MISMATCH", str(producer_path))
+    trace_rows = producer.get("native_trace")
+    if not isinstance(trace_rows, list):
+        raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
     command_rows = []
     try:
         for line in commands_path.read_text().splitlines():
@@ -560,7 +595,6 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
                and row.get("image_id") == spec.get("image_id")
                and row.get("executed") is True for row in command_rows):
         raise em.Refusal("PRODUCTION_NATIVE_INVOCATION_UNPROVEN", str(commands_path))
-    project = outputs / "project"
     if project.is_symlink() or not project.is_dir():
         raise em.Refusal("PRODUCTION_PROJECT_OUTPUT_MISSING", str(project))
     # The worker's writable project is a derived view. Rebind every canonical
@@ -575,6 +609,31 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
             continue
         if not _regular(actual) or _sha(actual) != expected:
             raise em.Refusal("PRODUCTION_DERIVED_INPUT_CHANGED", name)
+    receipt_outputs = producer.get("output_hashes")
+    if not isinstance(receipt_outputs, dict):
+        raise em.Refusal("PRODUCTION_SYNTH_OUTPUT_HASHES_MISSING", str(producer_path))
+    current_outputs = _output_hashes(outputs)
+    for rel, expected in receipt_outputs.items():
+        if not isinstance(rel, str) or current_outputs.get(rel) != expected:
+            raise em.Refusal("PRODUCTION_SYNTH_OUTPUT_HASH_MISMATCH", rel)
+    project_root = project.resolve()
+    for row in trace_rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
+        raw_path = row["path"]
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", raw_path)
+        trace_path = (project / relative).resolve()
+        output_rel = "project/" + relative.as_posix()
+        if (not trace_path.is_relative_to(project_root) or
+                output_rel not in receipt_outputs or
+                output_rel not in current_outputs or
+                not _regular(trace_path) or
+                row.get("sha256") != receipt_outputs[output_rel] or
+                row.get("sha256") != current_outputs[output_rel] or
+                row.get("sha256") != _sha(trace_path)):
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", raw_path)
     declaration = project / "input/submission_template/tapeout_declaration.json"
     rtl_root = project / "phase2/stage1/rtl"
     netlist = project / CANONICAL_NETLIST
@@ -589,6 +648,20 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
     if (not _regular(native_path) or native_path.resolve() == netlist.resolve()
             or not native_path.resolve().is_relative_to(project)):
         raise em.Refusal("PRODUCTION_NATIVE_NETLIST_UNBOUND", str(native_path))
+    native_output_rel = "project/" + native_path.resolve().relative_to(project.resolve()).as_posix()
+    required_output_hashes = (NETLIST, native_output_rel, NATIVE_COMMANDS)
+    if any(rel not in receipt_outputs or rel not in current_outputs
+           for rel in required_output_hashes):
+        raise em.Refusal("PRODUCTION_SYNTH_OUTPUT_HASHES_MISSING", str(producer_path))
+    expected_binding = engines.consumer_binding(
+        top=str(spec.get("top", "")), native_netlist=native_output_rel,
+        canonical_sha256=current_outputs[NETLIST],
+        native_sha256=current_outputs[native_output_rel],
+        source_tree_sha256=source_tree_sha256,
+        input_tree_sha256=input_tree_sha256,
+        tool_sha256=producer["tool_sha256"])
+    if producer.get("consumer_binding") != expected_binding:
+        raise em.Refusal("PRODUCTION_SYNTH_CONSUMER_UNBOUND", str(producer_path))
     if _sha(netlist) != _sha(native_path):
         return em.Evidence(binding, "FAIL", gates, hashes,
                            detail="canonical netlist differs from native tool netlist")

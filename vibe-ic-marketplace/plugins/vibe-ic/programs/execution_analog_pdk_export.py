@@ -6,6 +6,14 @@ container follows literal file references reachable from those seeds.
 """
 from __future__ import annotations
 
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import hashlib
 import json
 import os
@@ -20,6 +28,7 @@ import ctypes
 from typing import Mapping
 
 import execution_modes as em
+import _docker_memory as _dmem
 import librelane_contract as lc
 
 
@@ -458,8 +467,7 @@ def export_bounded_pdk(project: Path, *, target: str, image_ref: str,
                    limits={'max_files': max_files, 'max_bytes': max_bytes})
     scratch = Path(tempfile.mkdtemp(prefix='.analog-pdk-export-', dir=base))
     try:
-        argv = [docker, 'run', '--rm', '--network', 'none', '--cpus', '1',
-                '--memory', '512m', '--memory-swap', '512m',
+        argv = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none', '--cpus', '1',
                 '-v', f'{scratch}:/vibeic-pdk-export:rw', image_ref,
                 '--skip', 'python3', '-c', _CONTAINER_COPY, pdk_root,
                 '/vibeic-pdk-export', json.dumps({'pdk_root': pdk_root, 'seeds': seeds,

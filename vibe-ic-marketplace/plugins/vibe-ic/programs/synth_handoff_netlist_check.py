@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _atomic_artefact import write_json  # noqa: E402
+from _atomic_artefact import write_bytes, write_json  # noqa: E402
 import instrument_calibration  # noqa: E402
 
 #: A Verilog sized literal as Yosys `write_verilog` prints a constant.
@@ -188,7 +188,7 @@ def publish_handoff(project: Path, folder: Path, mapped: Path, top: str) -> dict
     if mapped.read_bytes() != raw.read_bytes():
         raise ValueError('mapped copy differs from native output')
     canonical = mapped.parent / 'netlist.v'
-    canonical.write_bytes(raw.read_bytes())
+    write_bytes(canonical, raw.read_bytes())
     sidecar = mapped.parent / 'synth_inputs.json'
     doc = json.loads(sidecar.read_text())
     doc['librelane_synthesis'] = {

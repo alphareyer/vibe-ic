@@ -15,11 +15,22 @@ infers a pulse contract from a signal name or from generic timing vocabulary.
 """
 from __future__ import annotations
 
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
+
+import _prose_polarity as _pp
 
 
 _IDENT = r"[A-Za-z_]\w*"
@@ -248,6 +259,18 @@ def _marked_contract(source_text: str) -> Optional[ContractParse]:
     for key, pattern in patterns.items():
         m = re.search(pattern, source_text, re.IGNORECASE)
         if m:
+            # Marked fields are one-record-per-line declarations.  A denial
+            # before the field name is prose that retires the declaration; it
+            # must not be inverted into a live contract.  Keep the value side
+            # alone: ``reset_active_low: no`` is a valid typed boolean, while
+            # ``not reset_active_low: true`` is a denied declaration.
+            if key != "source_quote":
+                lo, _ = _pp.sentence_scope(
+                    source_text, m.start(), m.end(), extra_breaks=("\n",))
+                if _pp.is_denied(source_text[lo:m.start()]) is not None:
+                    return ContractParse(
+                        None, True,
+                        "explicit pulse contract contains a denied marked field")
             data[key] = m.group(1).strip()
     # The marked form may state the two booleans separately.
     for key in ("rearm_requires_inactive", "requires_inactive",

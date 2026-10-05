@@ -71,6 +71,25 @@ def _pinned_image_reference(spec: Mapping[str, object]) -> str:
     return image_ref
 
 
+def _output_hashes(outputs: Path) -> dict[str, str]:
+    """Hash the producer-owned files before the receipt is written.
+
+    The receipt deliberately excludes itself.  Every file named here is
+    rehashed by the Step 9 consumer, so a filename left by an older run cannot
+    satisfy the handoff merely by existing.
+    """
+    result = {}
+    for path in outputs.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(outputs).as_posix()
+        if (rel == engines.NATIVE_COMMANDS or
+                rel.startswith("project/phase2/stage2/synth/") or
+                rel.startswith("project/phase3/")):
+            result[rel] = em.digest(path)
+    return result
+
+
 def execute(inputs: Path, outputs: Path) -> dict:
     spec = json.loads((inputs / 'request.json').read_text())
     engine = engines.require_spec(spec)
@@ -166,11 +185,22 @@ def execute(inputs: Path, outputs: Path) -> dict:
     # it into NOT_MEASURED based on a wrapper trace would erase the producer's
     # authoritative disposition.
     if status == 'PASS':
+        # _step_synth_librelane publishes this handoff only after the native
+        # Yosys product and its producer receipt have been checked.  Do not
+        # recreate the canonical netlist from ``<top>_synth.v`` here: a legacy
+        # filename is not evidence of a current native producer.
+        import synth_handoff_netlist_check as _handoff
         mapped = project / 'phase2/stage2/synth' / f"{spec['top']}_synth.v"
         canonical = project / 'phase2/stage2/synth/netlist.v'
-        if mapped.is_file():
-            canonical.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(mapped, canonical)
+        handoff = _handoff.bound_handoff(project)
+        if (not isinstance(handoff, dict) or handoff.get('verdict') != 'PASS' or
+                handoff.get('mapped') != str(mapped) or
+                handoff.get('canonical') != str(canonical) or
+                not mapped.is_file() or not canonical.is_file() or
+                em.digest(mapped) != em.digest(canonical)):
+            detail = ((handoff or {}).get('findings') if isinstance(handoff, dict)
+                      else None) or 'native synthesis handoff is absent'
+            raise em.Refusal('PRODUCTION_NATIVE_HANDOFF_UNBOUND', str(detail))
         stat_candidates = [Path(p) for p in getattr(result, 'output_files', [])
                            if Path(p).name in ('stats.json', 'stat.json', 'stat.rpt')]
         # Prefer the source-owned stats emitter's schema over LibreLane's raw
@@ -198,16 +228,60 @@ def execute(inputs: Path, outputs: Path) -> dict:
         if p.is_file() and p.suffix in ('.v', '.sv'):
             native_netlist = str(p)
             break
+    if status == 'PASS' and native_netlist is None:
+        raise em.Refusal('PRODUCTION_NATIVE_NETLIST_UNBOUND', 'native output list')
+    input_hashes = spec.get('input_hashes', {})
+    source_files = spec.get('source_files', {})
+    native_relative = None
+    native_output_rel = None
+    if native_netlist is not None:
+        native_path = Path(native_netlist).resolve()
+        if not native_path.is_relative_to(project.resolve()):
+            raise em.Refusal('PRODUCTION_NATIVE_NETLIST_UNBOUND', native_netlist)
+        native_relative = str(native_path.relative_to(project.resolve()))
+        native_output_rel = 'project/' + native_relative
+    source_tree_sha256 = engines.tree_digest(source_files)
+    input_tree_sha256 = engines.tree_digest(input_hashes)
+    tool = {
+        'image_id': spec.get('image_id'),
+        'native_entrypoint': engine.native_entrypoint,
+        'native_trace': native_trace,
+    }
+    tool_sha256 = engines.stable_digest(tool)
+    output_hashes = _output_hashes(outputs)
+    canonical_rel = 'project/' + engines.CANONICAL_NETLIST
+    if status == 'PASS' and (canonical_rel not in output_hashes or
+                             native_output_rel is None or
+                             native_output_rel not in output_hashes):
+        raise em.Refusal('PRODUCTION_NATIVE_OUTPUT_UNBOUND', canonical_rel)
+    binding_record = None
+    if status == 'PASS':
+        binding_record = engines.consumer_binding(
+            top=spec['top'], native_netlist=native_output_rel,
+            canonical_sha256=output_hashes[canonical_rel],
+            native_sha256=output_hashes[native_output_rel],
+            source_tree_sha256=source_tree_sha256,
+            input_tree_sha256=input_tree_sha256, tool_sha256=tool_sha256)
     receipt = {
+        'schema': engines.RECEIPT_SCHEMA,
+        'step_id': engines.STEP_ID,
+        'top': spec.get('top'),
+        'canonical_netlist': engines.CANONICAL_NETLIST,
+        'source_tree_sha256': source_tree_sha256,
+        'input_tree_sha256': input_tree_sha256,
+        'tool': tool,
+        'tool_sha256': tool_sha256,
+        'output_hashes': output_hashes,
+        'consumer_binding': binding_record,
         'binding': binding,
         'status': status,
         'detail': detail,
         'source_sha': spec['source_sha'],
-        'source_files': spec.get('source_files', {}),
+        'source_files': source_files,
         'native_installation_receipt_sha256': spec.get('native_installation_receipt_sha256'),
         'native_entrypoint': engine.native_entrypoint,
         'synthesis_engine': engine.contract(),
-        'input_hashes': spec.get('input_hashes', {}),
+        'input_hashes': input_hashes,
         'native_tool_netlist': native_netlist,
         'native_trace': native_trace,
         'native_result': (getattr(result, '__dict__', None) or {}),

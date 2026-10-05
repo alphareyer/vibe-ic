@@ -4,6 +4,14 @@ The exact image, declared model/deck bytes and actual native tool commands are
 measured through the existing ephemeral container supervisor. No recursive PDK
 census, caller qualification bit, Controller, capability or waiver.
 """
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
@@ -16,6 +24,7 @@ from typing import Mapping
 
 import execution_modes as em
 import librelane_contract as lc
+import _docker_memory as _dmem
 
 
 @dataclass(frozen=True)
@@ -312,8 +321,7 @@ def _bound(request: InstallationRequest) -> dict:
 
 def measure_installation(request: InstallationRequest, *, docker='docker') -> InstallationReceipt:
     probe = _bound(request)
-    argv = [docker, 'run', '--rm', '--network', 'none', '--cpus', '1',
-            '--memory', '512m', '--memory-swap', '512m',
+    argv = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none', '--cpus', '1',
             '--user', f'{os.getuid()}:{os.getgid()}']
     # Only the enumerated regular files are exposed to this bounded probe.
     for name in sorted(probe['models']):
@@ -443,8 +451,8 @@ def prepare_entry_request(project: Path, args) -> dict:
             remaining = min(20, listing_deadline - time.monotonic())
             if remaining <= 0 or not request['image_ref']:
                 raise em.Refusal('ANALOG_RESOLVER_NOT_MEASURED', path)
-            argv = ['docker', 'run', '--rm', '--network', 'none', '--cpus', '1',
-                '--memory', '512m', '--memory-swap', '512m', request['image_ref'], '--skip',
+            argv = ['docker', 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none', '--cpus', '1',
+                request['image_ref'], '--skip',
                 'python3', '-c', 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); '
                 'print(json.dumps(sorted(x.name for x in p.iterdir()) if p.is_dir() else []))', path]
             env = {k: v for k, v in os.environ.items() if not k.startswith('VIBEIC_EXECUTION')}

@@ -11,6 +11,14 @@ Unsupported contracts still fail closed. Audit rc=1 is never a vacuous rc=2.
 """
 from __future__ import annotations
 
+
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import argparse
 import hashlib
 import json
