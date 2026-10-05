@@ -716,8 +716,69 @@ def accepted_renames(project: Path, implemented: Any
                      ) -> Tuple[List[Tuple[set, set]], List[Dict[str, Any]]]:
     """`declared_renames` filtered by `accept_renames` against L9 and the
     implemented interface: the ONE call step 2 and step 15.5ic both make."""
-    return accept_renames(declared_renames(project),
-                          read_l9_top_ports(project), implemented)
+    from l9_rtl_pin_consistency_check import (load_source_manifest,
+                                              _MANIFEST_RENAME_KEYS,
+                                              _manifest_renamed_groups)
+    manifest = load_source_manifest(Path(project)) or {}
+    ordinary: List[Tuple[set, set]] = []
+    for key, entries in (manifest.items() if isinstance(manifest, dict) else []):
+        if key != DERIVED_PAD_PAIRS_KEY and key not in _MANIFEST_RENAME_KEYS:
+            continue
+        if key == DERIVED_PAD_PAIRS_KEY:
+            entries = [e for e in (entries or [])
+                       if isinstance(e, dict)
+                       and e.get("rule") != "R3_explicit_document_alias"]
+        parse_key = ("renamed_interfaces"
+                     if key == DERIVED_PAD_PAIRS_KEY else key)
+        for l9, rtl in _manifest_renamed_groups({parse_key: entries}):
+            ordinary.append((set(l9), set(rtl)))
+    accepted, rejected = accept_renames(ordinary, read_l9_top_ports(project),
+                                        implemented)
+    # R3 aliases are pad-side evidence whose two spellings can both be
+    # implemented/documented, so the ordinary declared-rename rule correctly
+    # rejects them. Revalidate the producer's source-bound R3 verdict instead.
+    entries = [e for e in (manifest.get(DERIVED_PAD_PAIRS_KEY) or [])
+               if isinstance(e, dict)
+               and e.get("rule") == "R3_explicit_document_alias"]
+    if entries:
+        verdicts: List[Dict[str, Any]] = []
+        try:
+            import renamed_interface_derive as _rid
+            fresh = _rid.derive(Path(project)).get("pairs") or []
+            fresh_r3 = [e for e in fresh
+                        if isinstance(e, dict)
+                        and e.get("rule") == "R3_explicit_document_alias"]
+            if entries != fresh_r3:
+                reason = ("persisted R3 derived_pad_pairs list does not exactly "
+                          "match the current fresh R3 derivation (order, "
+                          "length, uniqueness, or record fields differ); "
+                          "all R3 pairs refused")
+                for entry in entries:
+                    rejected.append({
+                        "l9": sorted(entry.get("l9") or []),
+                        "rtl": sorted(entry.get("rtl") or []),
+                        "reasons": [reason],
+                    })
+                entries = []
+            else:
+                verdicts = _rid.verify(Path(project), entries,
+                                       authored=False,
+                                       key=DERIVED_PAD_PAIRS_KEY)
+        except Exception as exc:  # noqa: BLE001 - preserve fail-closed output
+            verdicts = [{"verdict": "REFUSED", "pair": {},
+                         "reason": f"explicit alias verification raised {exc}"
+                         } for _ in entries]
+        for verdict in verdicts:
+            pair = verdict.get("pair") or {}
+            if verdict.get("verdict") == "VERIFIED":
+                accepted.append((set(pair.get("l9") or []),
+                                 set(pair.get("rtl") or [])))
+            else:
+                rejected.append({"l9": sorted(pair.get("l9") or []),
+                                 "rtl": sorted(pair.get("rtl") or []),
+                                 "reasons": [verdict.get("reason") or
+                                             "explicit alias refused"]})
+    return accepted, rejected
 
 
 def accepted_exposed_output_splits(
