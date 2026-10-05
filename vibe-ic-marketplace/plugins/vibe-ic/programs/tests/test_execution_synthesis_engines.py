@@ -407,6 +407,7 @@ def _native_output(tmp_path: Path, *, area: bool):
         "input_hashes": {k: v for k, v in binding["inputs"].items() if k != "request.json"},
         "native_installation_receipt_sha256": install_digest,
         "native_tool_netlist": str(synth / "top_synth.v"),
+        "native_trace": [],
     }
     input_hashes = producer["input_hashes"]
     producer["source_tree_sha256"] = provider.tree_digest(source_files)
