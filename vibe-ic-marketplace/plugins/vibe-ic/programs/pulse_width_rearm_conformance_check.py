@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _atomic_artefact as _aa  # noqa: E402
 from pulse_width_rearm_contract import (  # noqa: E402
     ContractParse,
     PulseWidthRearmContract,
@@ -1010,7 +1011,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        _aa.write_json(out, report, sort_keys=True)
     print(f"pulse_width_rearm_conformance_check: {report['verdict']} - {report.get('reason', '')}")
     if report.get("counts"):
         print("  counts: " + json.dumps(report["counts"], sort_keys=True))
