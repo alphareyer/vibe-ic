@@ -377,6 +377,9 @@ def _native_output(tmp_path: Path, *, area: bool):
             "netlist": provider.CANONICAL_NETLIST,
             "netlist_digest": em.digest(synth / "netlist.v"),
         }) + "\n")
+    trace = output / "project/phase3/librelane/run/vibeic_receipt.json"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({"step": "Yosys.Synthesis", "measured": True}) + "\n")
     (output / "native_commands.jsonl").write_text(json.dumps({
         "executed": True, "native_entrypoint": provider.LIBRELANE.native_entrypoint,
         "image_id": "sha256:" + "1" * 64,
@@ -407,7 +410,10 @@ def _native_output(tmp_path: Path, *, area: bool):
         "input_hashes": {k: v for k, v in binding["inputs"].items() if k != "request.json"},
         "native_installation_receipt_sha256": install_digest,
         "native_tool_netlist": str(synth / "top_synth.v"),
-        "native_trace": [],
+        "native_trace": [{
+            "path": str(trace.relative_to(output / "project")),
+            "sha256": em.digest(trace),
+        }],
     }
     input_hashes = producer["input_hashes"]
     producer["source_tree_sha256"] = provider.tree_digest(source_files)
@@ -415,7 +421,7 @@ def _native_output(tmp_path: Path, *, area: bool):
     producer["tool"] = {
         "image_id": "sha256:" + "1" * 64,
         "native_entrypoint": provider.LIBRELANE.native_entrypoint,
-        "native_trace": [],
+        "native_trace": producer["native_trace"],
     }
     producer["tool_sha256"] = provider.stable_digest(producer["tool"])
     producer["output_hashes"] = production._output_hashes(output)

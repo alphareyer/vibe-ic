@@ -574,13 +574,9 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
     if (tool != expected_tool or
             producer.get("tool_sha256") != engines.stable_digest(expected_tool)):
         raise em.Refusal("PRODUCTION_SYNTH_TOOL_HASH_MISMATCH", str(producer_path))
-    for row in producer.get("native_trace") or []:
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
-        trace_path = project / row["path"]
-        if (not _regular(trace_path) or
-                row.get("sha256") != _sha(trace_path)):
-            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
+    trace_rows = producer.get("native_trace")
+    if not isinstance(trace_rows, list):
+        raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
     command_rows = []
     try:
         for line in commands_path.read_text().splitlines():
@@ -594,7 +590,6 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
                and row.get("image_id") == spec.get("image_id")
                and row.get("executed") is True for row in command_rows):
         raise em.Refusal("PRODUCTION_NATIVE_INVOCATION_UNPROVEN", str(commands_path))
-    project = outputs / "project"
     if project.is_symlink() or not project.is_dir():
         raise em.Refusal("PRODUCTION_PROJECT_OUTPUT_MISSING", str(project))
     # The worker's writable project is a derived view. Rebind every canonical
@@ -616,6 +611,24 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
     for rel, expected in receipt_outputs.items():
         if not isinstance(rel, str) or current_outputs.get(rel) != expected:
             raise em.Refusal("PRODUCTION_SYNTH_OUTPUT_HASH_MISMATCH", rel)
+    project_root = project.resolve()
+    for row in trace_rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", str(producer_path))
+        raw_path = row["path"]
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", raw_path)
+        trace_path = (project / relative).resolve()
+        output_rel = "project/" + relative.as_posix()
+        if (not trace_path.is_relative_to(project_root) or
+                output_rel not in receipt_outputs or
+                output_rel not in current_outputs or
+                not _regular(trace_path) or
+                row.get("sha256") != receipt_outputs[output_rel] or
+                row.get("sha256") != current_outputs[output_rel] or
+                row.get("sha256") != _sha(trace_path)):
+            raise em.Refusal("PRODUCTION_NATIVE_TRACE_INVALID", raw_path)
     declaration = project / "input/submission_template/tapeout_declaration.json"
     rtl_root = project / "phase2/stage1/rtl"
     netlist = project / CANONICAL_NETLIST
