@@ -1,36 +1,172 @@
-"""Focused regression for the subservient catalog/pad contract."""
+"""Self-contained regressions for the subservient catalog/pad contract."""
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sys
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
-PROJECT = Path(os.environ.get("JSUB_PROJECT", "/project"))
+_L3 = """# External Interface
+
+## Port Table
+
+| Port | Width | Direction | Description |
+|---|---:|---|---|
+| `i_clk` | 1-bit | input | clock |
+| `i_rst` | 1-bit | input | reset |
+| `o_sram_data` (or `o_sram_wdata`) | 8-bit | output | write data |
+| `i_sram_data` (or `i_sram_rdata`) | 8-bit | input | read data |
+| `o_sram_addr` | 10-bit | output | address |
+| `o_sram_we` | 1-bit | output | write enable |
+| `o_sram_cyc` | 1-bit | output | cycle valid |
+| `o_gpio` | 1-bit | output | gpio output |
+| `i_gpio` | 1-bit | input | gpio input |
+
+## Physical Pad Placement
+
+| Side | Signals |
+|---|---|
+| **North (N)** | SRAM data bus |
+| **South (S)** | SRAM address control we cyc |
+| **East (E)** | `i_clk` / `i_rst` |
+| **West (W)** | `o_gpio` / `i_gpio` |
+"""
+
+_RTL = """module chip_top (
+  input wire i_clk,
+  input wire i_rst,
+  output wire [7:0] o_sram_data,
+  input wire [7:0] i_sram_data,
+  output wire [9:0] o_sram_addr,
+  output wire o_sram_we,
+  output wire o_sram_cyc,
+  output wire o_gpio,
+  input wire i_gpio,
+  output wire [7:0] o_sram_wdata,
+  input wire [7:0] i_sram_rdata
+);
+endmodule
+"""
 
 
-def _copy_project(tmp_path: Path) -> Path:
-    dst = tmp_path / "run"
-    shutil.copytree(PROJECT, dst)
-    return dst
+def _top_ports():
+    return [
+        {"name": "i_clk", "direction": "input", "width": 1},
+        {"name": "i_rst", "direction": "input", "width": 1},
+        {"name": "o_sram_data", "direction": "output", "width": 8,
+         "msb": 7, "lsb": 0},
+        {"name": "i_sram_data", "direction": "input", "width": 8,
+         "msb": 7, "lsb": 0},
+        {"name": "o_sram_addr", "direction": "output", "width": 10,
+         "msb": 9, "lsb": 0},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+        {"name": "o_sram_cyc", "direction": "output", "width": 1},
+        {"name": "o_gpio", "direction": "output", "width": 1},
+        {"name": "i_gpio", "direction": "input", "width": 1},
+        {"name": "o_sram_wdata", "direction": "output", "width": 8,
+         "msb": 7, "lsb": 0},
+        {"name": "i_sram_rdata", "direction": "input", "width": 8,
+         "msb": 7, "lsb": 0},
+    ]
+
+
+def _make_project(tmp_path: Path) -> Path:
+    project = tmp_path / "run"
+    (project / "input/docs").mkdir(parents=True)
+    (project / "phase1/generated_docs").mkdir(parents=True)
+    (project / "phase2/stage1/rtl").mkdir(parents=True)
+    answers = {
+        key: "NOT_DETERMINED"
+        for key in (
+            "deliverable", "top_cell", "die_area_um", "core_area_um",
+            "fp_sizing", "die_origin_um", "macro_area_um",
+            "macro_origin_um", "database_unit_um", "pad_order_by_side",
+            "pad_site_name", "pad_corner_site_name", "pad_edge_spacing_um",
+            "pad_rotations", "pad_corner_master", "pad_fillers",
+            "pad_signal_map", "seal_ring_required", "seal_ring_script",
+            "seal_ring_marker_layer",
+        )
+    }
+    answers["deliverable"] = "DIE"
+    route = {
+        "schema": "vibe-ic/tapeout_declaration/1",
+        "answers": answers,
+        "forbidden_layers": "NOT_DETERMINED",
+        "synthesis_area_budget": "NOT_DETERMINED",
+        "answer_provenance": {
+            "deliverable": {
+                "answered_by": "owner",
+                "citation": "self-contained fixture",
+            },
+        },
+    }
+    (project / "input/step_0_5ic_answers.json").write_text(
+        json.dumps({
+            **route,
+            "operator_template": {
+                "path": None,
+                "slot": None,
+                "absent_reason": "self-contained fixture",
+            },
+        }, indent=2) + "\n", encoding="utf-8")
+    slots = project / "input/submission_template/slots"
+    slots.mkdir(parents=True)
+    pads = [f"bidir[{i}].pad" for i in range(32)]
+    (slots / "self_contained.json").write_text(
+        json.dumps({"PAD_NORTH": pads[:16], "PAD_SOUTH": pads[16:]}),
+        encoding="utf-8")
+    (project / "input/submission_template/tapeout_declaration.json").write_text(
+        json.dumps(route, indent=2) + "\n", encoding="utf-8")
+    (project / "input/docs/L3_external_interface.md").write_text(
+        _L3, encoding="utf-8")
+    (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
+        json.dumps({"schema_version": 1, "top_module": "chip_top",
+                    "top_ports": _top_ports()}, indent=2) + "\n",
+        encoding="utf-8")
+    (project / "phase2/stage1/rtl/chip_top.v").write_text(
+        _RTL, encoding="utf-8")
+    (project / "phase2/stage1/rtl/SOURCE_MANIFEST.json").write_text(
+        json.dumps({"reused_ip": True,
+                    "rtl_strategy": "catalog_lookup_plus_ai_glue",
+                    "renamed_interfaces": [],
+                    "derived_pad_pairs": []}, indent=2) + "\n",
+        encoding="utf-8")
+    return project
+
+
+def _catalog_project(tmp_path: Path) -> Path:
+    project = tmp_path / "catalog"
+    (project / "phase1/generated_docs").mkdir(parents=True)
+    (project / "phase2/stage1/rtl").mkdir(parents=True)
+    (project / "phase1/generated_docs/L2_FRS.json").write_text(
+        json.dumps({"cpu_isa": "rv32i", "cpu_arch": "bit-serial",
+                    "description":
+                    "The design reuses the serv core from the IP catalog."}),
+        encoding="utf-8")
+    (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
+        json.dumps({"top_module": "chip_top", "top_ports": []}),
+        encoding="utf-8")
+    (project / "phase2/stage1/rtl/chip_top.v").write_text(
+        "module chip_top(input wire clk, output wire q); assign q = clk; endmodule\n",
+        encoding="utf-8")
+    return project
 
 
 def test_base_catalog_gate_is_red_and_missing_declaration_is_fail_closed(tmp_path):
     import catalog_synth_safe_params_check as catalog
     import design_one_shot_runner as runner
 
-    rc, report = catalog.run(PROJECT, None)
+    project = _catalog_project(tmp_path)
+    rc, report = catalog.run(project, None)
     assert rc == 1
     assert "CATALOG_REUSE_DECLARED_NOT_INSTANTIATED" in report["failure_codes"]
     assert report["reached_ips"] == []
 
     empty = tmp_path / "empty"
-    (empty / "input" / "docs").mkdir(parents=True)
-    (empty / "input" / "docs" / "README.md").write_text(
+    (empty / "input/docs").mkdir(parents=True)
+    (empty / "input/docs/README.md").write_text(
         "chip with no catalog declaration\n", encoding="utf-8")
     assert runner._declared_reused_ip(empty) is False
 
@@ -39,7 +175,7 @@ def test_explicit_alias_pair_resolves_the_sixteen_unmatched_bits(tmp_path):
     import renamed_interface_derive as derive
     import slot_pad_budget_check as pad
 
-    project = _copy_project(tmp_path)
+    project = _make_project(tmp_path)
     manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest = derive.apply_to_manifest(project, manifest)
@@ -63,18 +199,18 @@ def test_alias_mutations_remain_fail_closed(tmp_path):
     import renamed_interface_derive as derive
 
     for mutation in ("missing", "width", "direction"):
-        project = _copy_project(tmp_path / mutation)
+        project = _make_project(tmp_path / mutation)
         doc = project / "input/docs/L3_external_interface.md"
         text = doc.read_text(encoding="utf-8")
         if mutation == "missing":
             text = text.replace(" (or `o_sram_wdata`)", "")
             text = text.replace(" (or `i_sram_rdata`)", "")
         elif mutation == "width":
-            text = text.replace("| 8-bit | output | 寫入資料", "| 16-bit | output | 寫入資料")
-            text = text.replace("| 8-bit | input | 讀取資料", "| 16-bit | input | 讀取資料")
+            text = text.replace("| 8-bit | output | write data", "| 16-bit | output | write data")
+            text = text.replace("| 8-bit | input | read data", "| 16-bit | input | read data")
         else:
-            text = text.replace("| 8-bit | input | 讀取資料", "| 8-bit | output | 讀取資料")
-            text = text.replace("| 8-bit | output | 寫入資料", "| 8-bit | input | 寫入資料")
+            text = text.replace("| 8-bit | input | read data", "| 8-bit | output | read data")
+            text = text.replace("| 8-bit | output | write data", "| 8-bit | input | write data")
         doc.write_text(text, encoding="utf-8")
         result = derive.derive(project)
         assert result["pairs"] == [], mutation
@@ -88,7 +224,7 @@ def test_persisted_derived_pairs_rederive_against_every_current_record(tmp_path)
     mutations = ("swap", "side", "evidence", "placement", "width",
                  "direction")
     for mutation in mutations:
-        project = _copy_project(tmp_path / mutation)
+        project = _make_project(tmp_path / mutation)
         manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest = derive.apply_to_manifest(project, manifest)
@@ -104,14 +240,13 @@ def test_persisted_derived_pairs_rederive_against_every_current_record(tmp_path)
             doc = project / "input/docs/L3_external_interface.md"
             text = doc.read_text(encoding="utf-8")
             if mutation == "placement":
-                text = text.replace("SRAM data bus(寬度大,放主要一邊以利 routing)",
-                                    "GPIO")
+                text = text.replace("SRAM data bus", "GPIO")
             elif mutation == "width":
-                text = text.replace("| 8-bit | output | 寫入資料", "| 16-bit | output | 寫入資料")
-                text = text.replace("| 8-bit | input | 讀取資料", "| 16-bit | input | 讀取資料")
+                text = text.replace("| 8-bit | output | write data", "| 16-bit | output | write data")
+                text = text.replace("| 8-bit | input | read data", "| 16-bit | input | read data")
             else:
-                text = text.replace("| 8-bit | input | 讀取資料", "| 8-bit | output | 讀取資料")
-                text = text.replace("| 8-bit | output | 寫入資料", "| 8-bit | input | 讀取資料")
+                text = text.replace("| 8-bit | input | read data", "| 8-bit | output | read data")
+                text = text.replace("| 8-bit | output | write data", "| 8-bit | input | write data")
             doc.write_text(text, encoding="utf-8")
         manifest["derived_pad_pairs"] = pairs
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n",
@@ -128,7 +263,7 @@ def test_duplicate_r3_is_rejected_by_pad_consumer_and_slot_budget(tmp_path):
     import renamed_interface_derive as derive
     import slot_pad_budget_check as pad
 
-    project = _copy_project(tmp_path)
+    project = _make_project(tmp_path)
     manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest = derive.apply_to_manifest(project, manifest)
@@ -183,14 +318,12 @@ def test_catalog_reuse_is_per_file_with_forward_closure_and_fail_closed_context(
     assert {p.name for p in ip} == {"catalog_ip.v", "catalog_dep.v"}
     assert [p.name for p in context] == ["authored_top.v"]
 
-    # A declaration without a trustworthy per-entry file list grants no file.
     malformed = [{"ip_name": "catalog_ip", "rtl_files": "rtl/catalog_ip.v"}]
     monkeypatch.setattr(catalog, "query_catalog", lambda project: malformed)
     ip, context = runner._split_supplied_roles(project, staged)
     assert ip == []
     assert {p.name for p in context} == set(files)
 
-    # A catalog-shaped match with no declaration is still authored context.
     monkeypatch.setattr(catalog, "query_catalog", lambda project: matches)
     monkeypatch.setattr(catalog, "declared_catalog_reuse", lambda *args: [])
     ip, context = runner._split_supplied_roles(project, staged)
