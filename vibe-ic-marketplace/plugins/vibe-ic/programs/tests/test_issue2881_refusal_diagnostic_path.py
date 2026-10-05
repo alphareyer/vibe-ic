@@ -54,6 +54,19 @@ def test_retained_artifact_path_in_refusal_is_still_rejected(tmp_path):
     assert not out.exists()
 
 
+def test_diagnostic_path_list_cannot_bypass_relocated_copy_guard(tmp_path):
+    project = tmp_path / "spmcanonical1006"
+    project.mkdir()
+    relocated = (
+        "/tmp/vibeic-rtl-step-8xymyxxa/spmcanonical1006/"
+        "phase2/stage1/rtl/spm.v")
+    out = project / "reports" / "orchestrator" / "phase2_one_shot.json"
+
+    with pytest.raises(runner._RecordNamesRelocatedCopy):
+        runner._write_phase2_report(out, _summary([relocated]), project)
+    assert not out.exists()
+
+
 def test_untyped_external_refusal_path_remains_fail_closed(tmp_path):
     project = tmp_path / "spmcanonical1006"
     project.mkdir()

@@ -293,14 +293,8 @@ def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
     import project_outputs_in_tree_check as _poit
     found: List[str] = []
 
-    def _walk(node: Any, where: str, *, diagnostic_path: bool = False) -> None:
+    def _walk(node: Any, where: str) -> None:
         if isinstance(node, str):
-            # A refusal's path is a diagnostic reference to the rejected
-            # candidate, not a retained artefact that a later reader must
-            # follow.  The producer marks that distinction explicitly; every
-            # other pathname keeps the fail-closed relocated-copy guard.
-            if diagnostic_path:
-                return
             for m in _poit._ANY_ABS_PATH_RE.finditer(node):
                 cand = m.group(1)
                 if _poit.names_a_relocated_copy(cand, project):
@@ -308,18 +302,24 @@ def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
         elif isinstance(node, dict):
             is_output_refusal = where.rsplit(".", 1)[-1] == "output_refusal"
             for k, v in node.items():
-                _walk(
-                    v,
-                    f"{where}.{k}",
-                    diagnostic_path=(
-                        is_output_refusal
-                        and k == "path"
-                        and node.get("finding") == _PHASE1_RTL_OUTPUT_REFUSED
-                        and node.get("path_kind") == "diagnostic"),
-                )
+                is_diagnostic_path = (
+                    is_output_refusal
+                    and k == "path"
+                    and node.get("finding") == _PHASE1_RTL_OUTPUT_REFUSED
+                    and node.get("path_kind") == "diagnostic")
+                # Only a scalar string in this exact producer-owned field is
+                # a diagnostic reference to the rejected candidate.  Lists
+                # and dicts must be walked normally; malformed scalar values
+                # are rejected fail-closed below.
+                if is_diagnostic_path and isinstance(v, str):
+                    continue
+                if is_diagnostic_path and not isinstance(v, (str, list, tuple, dict)):
+                    found.append(f"{where}.{k} -> non-scalar diagnostic path")
+                    continue
+                _walk(v, f"{where}.{k}")
         elif isinstance(node, (list, tuple)):
             for i, v in enumerate(node):
-                _walk(v, f"{where}[{i}]", diagnostic_path=diagnostic_path)
+                _walk(v, f"{where}[{i}]")
 
     _walk(summary, "$")
     if found:
