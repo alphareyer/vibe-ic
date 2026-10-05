@@ -15,6 +15,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
 container_exec = importlib.import_module('_container_exec')
+eda_pin = importlib.import_module('_eda_pin')
 
 
 def put(path, obj):
@@ -67,6 +68,59 @@ def test_local_resolver_requires_host_cid_and_records_provenance(local_image):
     local_image.receipt.unlink()
     with pytest.raises(contract.Refusal, match='LL_LOCAL_IMAGE_UNATTESTED'):
         contract.resolve_image(project)
+
+
+def test_declared_host_provider_bypasses_image_resolution_and_binds_pdk(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    (project / 'phase3').mkdir(parents=True)
+    pdk_root = tmp_path / 'pdk-root'
+    pdk_root.mkdir()
+    librelane_root = tmp_path / 'librelane'
+    (librelane_root / 'librelane').mkdir(parents=True)
+    (librelane_root / 'VERSION').write_text('host-provider')
+    put(project / 'phase3/librelane_switch.json', {
+        'execution_route': 'LOCAL', 'pdk': 'gf180mcuD',
+        'pdk_root_host': str(pdk_root),
+        'librelane_root_host': str(librelane_root)})
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
+    monkeypatch.setattr(eda_pin, 'image_reference',
+                        lambda: (_ for _ in ()).throw(AssertionError('image resolver ran')))
+
+    image = contract.resolve_image(project)
+    assert isinstance(image, contract.LocalProviderIdentity)
+    assert image.route == 'LOCAL'
+    assert image.provider == 'host-owned-librelane'
+    answer = contract.pdk_root_resolution(project, 'gf180mcuD', image=image)
+    assert answer['source'] == 'local_provider'
+    assert answer['path'] == str(pdk_root.resolve())
+    assert answer['provider']['reference'] == str(image)
+    assert json.loads((project / 'phase3/librelane_pdk_root.provenance.json').read_text()) == answer
+    capability = contract.image_capability(image)
+    assert capability['execution_route'] == 'LOCAL'
+    assert capability['tcl_probe'].startswith('NOT_MEASURED:')
+
+
+def test_local_provider_refuses_remote_and_untyped_image_mismatch(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    (project / 'phase3').mkdir(parents=True)
+    pdk_root = tmp_path / 'pdk-root'
+    pdk_root.mkdir()
+    put(project / 'phase3/librelane_switch.json', {
+        'execution_route': 'LOCAL', 'pdk': 'gf180mcuD',
+        'pdk_root_host': str(pdk_root)})
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
+    image = contract.resolve_image(project)
+    switch = json.loads((project / 'phase3/librelane_switch.json').read_text())
+    switch['execution_route'] = 'REMOTE'
+    put(project / 'phase3/librelane_switch.json', switch)
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_REMOTE_MISMATCH'):
+        contract.pdk_root_resolution(project, 'gf180mcuD', image=image)
+
+    switch['execution_route'] = 'LOCAL'
+    put(project / 'phase3/librelane_switch.json', switch)
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_REMOTE_MISMATCH'):
+        contract.pdk_root_resolution(project, 'gf180mcuD',
+                                     image='registry.invalid/librelane@sha256:' + 'ab' * 32)
 
 
 @pytest.mark.parametrize('change', ['cid', 'image', 'hostname', 'stopped', 'duplicate'])
