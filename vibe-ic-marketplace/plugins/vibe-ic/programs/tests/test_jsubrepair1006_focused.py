@@ -123,6 +123,39 @@ def test_persisted_derived_pairs_rederive_against_every_current_record(tmp_path)
         assert checked["verdict"] == "FAIL", mutation
 
 
+def test_duplicate_r3_is_rejected_by_pad_consumer_and_slot_budget(tmp_path):
+    import _l_doc_pad_placement as placement
+    import renamed_interface_derive as derive
+    import slot_pad_budget_check as pad
+
+    project = _copy_project(tmp_path)
+    manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = derive.apply_to_manifest(project, manifest)
+    r3 = [p for p in manifest["derived_pad_pairs"]
+           if p.get("rule") == "R3_explicit_document_alias"]
+    assert r3
+    manifest["derived_pad_pairs"].append(json.loads(json.dumps(r3[0])))
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n",
+                             encoding="utf-8")
+
+    top, l9_ports = derive._l9(project)
+    implemented, _source = derive._implemented_ports(project, top, l9_ports)
+    accepted, rejected = placement.accepted_renames(project, implemented)
+    assert accepted == []
+    assert any("does not exactly match" in reason
+               for item in rejected for reason in item.get("reasons", []))
+
+    ring = placement.derive_own_ring(project, implemented)
+    assert ring["renamed_interfaces"] == []
+    assert ring["renamed_interfaces_rejected"]
+    out = project / "reports/slot-duplicate-r3.json"
+    rc = pad.main([str(project), "--json", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert rc != 0, report
+    assert report["verdict"] != "FITS", report
+
+
 def test_catalog_reuse_is_per_file_with_forward_closure_and_fail_closed_context(
         tmp_path, monkeypatch):
     import design_one_shot_runner as runner

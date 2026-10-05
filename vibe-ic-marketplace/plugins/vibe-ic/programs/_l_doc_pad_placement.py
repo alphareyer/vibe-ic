@@ -741,14 +741,33 @@ def accepted_renames(project: Path, implemented: Any
                if isinstance(e, dict)
                and e.get("rule") == "R3_explicit_document_alias"]
     if entries:
+        verdicts: List[Dict[str, Any]] = []
         try:
             import renamed_interface_derive as _rid
-            verdicts = _rid.verify(Path(project), entries, authored=False,
-                                   key=DERIVED_PAD_PAIRS_KEY)
+            fresh = _rid.derive(Path(project)).get("pairs") or []
+            fresh_r3 = [e for e in fresh
+                        if isinstance(e, dict)
+                        and e.get("rule") == "R3_explicit_document_alias"]
+            if entries != fresh_r3:
+                reason = ("persisted R3 derived_pad_pairs list does not exactly "
+                          "match the current fresh R3 derivation (order, "
+                          "length, uniqueness, or record fields differ); "
+                          "all R3 pairs refused")
+                for entry in entries:
+                    rejected.append({
+                        "l9": sorted(entry.get("l9") or []),
+                        "rtl": sorted(entry.get("rtl") or []),
+                        "reasons": [reason],
+                    })
+                entries = []
+            else:
+                verdicts = _rid.verify(Path(project), entries,
+                                       authored=False,
+                                       key=DERIVED_PAD_PAIRS_KEY)
         except Exception as exc:  # noqa: BLE001 - preserve fail-closed output
             verdicts = [{"verdict": "REFUSED", "pair": {},
-                         "reason": f"explicit alias verification raised {exc}"}
-                        for _ in entries]
+                         "reason": f"explicit alias verification raised {exc}"
+                         } for _ in entries]
         for verdict in verdicts:
             pair = verdict.get("pair") or {}
             if verdict.get("verdict") == "VERIFIED":
