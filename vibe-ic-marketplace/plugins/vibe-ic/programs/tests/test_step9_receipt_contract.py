@@ -36,6 +36,24 @@ def test_consumer_accepts_real_producer_trace(tmp_path, monkeypatch):
     assert "project/" + trace["path"] in producer["output_hashes"]
 
 
+@pytest.mark.parametrize("mutation", ["missing", "co-mutated"],
+                         ids=["missing-top", "co-mutated-top"])
+def test_consumer_rejects_missing_or_co_mutated_producer_top(
+        tmp_path, monkeypatch, mutation):
+    output, binding = fixture._native_output(tmp_path, area=False)
+    producer_path = output / "producer.json"
+    producer = json.loads(producer_path.read_text())
+    if mutation == "missing":
+        producer.pop("top")
+    else:
+        producer["top"] = "other_top"
+        producer["consumer_binding"]["top"] = "other_top"
+    producer_path.write_text(json.dumps(producer) + "\n")
+    monkeypatch.setattr(production, "_run_gate", lambda *args: ("PASS", Path("gate")))
+    with pytest.raises(em.Refusal, match="PRODUCTION_SYNTH_TOP_UNBOUND"):
+        production.validate_synthesis(output, binding)
+
+
 @pytest.mark.parametrize("mutation", ["remove", "rename", "stale"],
                          ids=["remove-canonical", "rename-native", "stale-output-hash"])
 def test_consumer_rejects_receipt_output_mutations(tmp_path, monkeypatch, mutation):

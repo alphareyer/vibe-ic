@@ -560,6 +560,11 @@ def validate_synthesis(outputs: Path, binding: Mapping[str, object]) -> em.Evide
             producer.get("step_id") != engines.STEP_ID or
             producer.get("canonical_netlist") != CANONICAL_NETLIST):
         raise em.Refusal("PRODUCTION_SYNTH_RECEIPT_SCHEMA_INVALID", str(producer_path))
+    producer_top = producer.get("top")
+    expected_top = spec.get("top")
+    if (not isinstance(producer_top, str) or
+            not isinstance(expected_top, str) or producer_top != expected_top):
+        raise em.Refusal("PRODUCTION_SYNTH_TOP_UNBOUND", str(producer_path))
     source_tree_sha256 = engines.tree_digest(spec.get("source_files", {}))
     input_tree_sha256 = engines.tree_digest(expected_inputs)
     if (producer.get("source_tree_sha256") != source_tree_sha256 or
