@@ -5,23 +5,23 @@
   "populations": {
     "programs_top_level": {
       "definition": "Every *.py directly in plugins/vibe-ic/programs/ (top level, NOT recursive). Helpers (_*.py), DEPRECATED_* and *_shim.py ARE included. This is the population the shell glob `programs/*.py` expands to. NOTE: the git pathspec `programs/*.py` is NOT the same thing \u2014 git's `*` crosses `/`, so `git ls-files 'programs/*.py'` returns the RECURSIVE population instead.",
-      "count": 1562,
-      "sha256_of_sorted_paths": "d3dfe3f3446d6c1be573d11a3535866a3967733ae012d08562b291e6d091ce7e"
+      "count": 1597,
+      "sha256_of_sorted_paths": "40f95172972993d3eb069efabe65ba22e34184c5fe9793426d410208c8f1ca89"
     },
     "programs_catalogued": {
       "definition": "programs_top_level minus helpers and deprecation shims (_*.py, DEPRECATED_*, *_shim.py, and any file whose first 2000 chars contain 'DEPRECATION SHIM'). This is the population catalogued in programs/INDEX.md by tools/gen_programs_index.py.",
-      "count": 1405,
-      "sha256_of_sorted_paths": "23f61605208d082544320918565e8537961171fe541adb3d2268df89280fbf09"
+      "count": 1439,
+      "sha256_of_sorted_paths": "d07ecaa52148ec66750595abd928a13f182fad48125fe9af2427d7aa0aeb0524"
     },
     "programs_tree_all_py": {
       "definition": "Every *.py at ANY depth under plugins/vibe-ic/programs/, including programs/tests/ and the sub-packages. Roughly programs_top_level + test_files + sub-package modules.",
-      "count": 5971,
-      "sha256_of_sorted_paths": "d1f47bea7d6d05a80654c8ff14ec73741bdfe2721279149e7cd0150dc90156bd"
+      "count": 6068,
+      "sha256_of_sorted_paths": "62ab484198aa51258654028e2ff1e1e4030209861c9c1014b832f4dc2f01efea"
     },
     "test_files": {
       "definition": "Every test_*.py at any depth under plugins/vibe-ic/programs/tests/.",
-      "count": 4290,
-      "sha256_of_sorted_paths": "e6680b31921dc36ceab4c77e26f4aaefbdd3cbcf42f57ecde28bfa7ab363ae06"
+      "count": 4338,
+      "sha256_of_sorted_paths": "1120113f5ff6586c344c1ca3d7a183cb75cc199e986c4b1d5433cde700b6284d"
     },
     "mcp_eda_test_files": {
       "definition": "Every test_*.py directly under plugins/vibe-ic/mcp-eda/test/.",
@@ -30,8 +30,8 @@
     },
     "programs_helpers_and_shims": {
       "definition": "programs_top_level minus programs_catalogued: the helper modules and deprecation shims that INDEX.md deliberately omits. Stated in the plugin README so the gap between the two program counts is accounted for rather than left as an unexplained discrepancy.",
-      "count": 157,
-      "sha256_of_sorted_paths": "011232edd1491c569d0fdbbe86042d9ba82b23d330b84f8c8ceec86374d02937"
+      "count": 158,
+      "sha256_of_sorted_paths": "0f0c0afdeb0bf8c3d85223bd4da33d1a27f0309a097c0410e20fed41c0564524"
     },
     "skill_compliance_test_files": {
       "definition": "Every test_*.py under plugins/vibe-ic/skills/*/tests/ \u2014 the per-skill compliance regressions. A DIFFERENT corpus from test_files, which is programs/tests/ only.",

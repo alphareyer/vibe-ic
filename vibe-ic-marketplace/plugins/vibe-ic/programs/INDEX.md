@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1405
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1405)
+- **Total programs (excluding helpers / shims):** 1439
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1439)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1396 |
+| `any` | 1430 |
 
 ## Alphabetical listing
 
@@ -412,7 +412,40 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `every_required_metric_key_has_a_producer` | any | — | an axis proves from a metric somebody actually emits. |
 | `evidence_citation_resolves_check` | any | — | a cited evidence artifact must EXIST. |
 | `excluded_master_census_check` | any | — | ADVISORY per-step census of masters excluded by the run's cell policy. |
-| `execution_modes` | any | — | Bounded execution-policy controller; BLOCKING at this API boundary. |
+| `execution_adapters_analog` | any | — | Source-bound A6/A7/A8 adapters for the ordinary outer Controller route. |
+| `execution_adapters_analog_front` | any | — | Source-bound adapters for the existing analog A1-A5/A9 producer sites. |
+| `execution_adapters_backend` | any | — | Minimal ULTRACORE seam for the reviewed 23-row backend family. |
+| `execution_adapters_mixed` | any | — | Registry adapters for the existing fixed mixed-signal producer sequence. |
+| `execution_adapters_release` | any | — | Minimal ULTRACORE seam for the reviewed 14-row release family. |
+| `execution_analog_caller` | any | — | A6/A7/A8 caller wiring into the existing fixed-step dispatcher. |
+| `execution_analog_contract` | any | — | Existing analog canonical gate population and evidence consumers. |
+| `execution_analog_front_worker` | any | — | Passive worker for the existing ordinary analog A1-A5/A9 producers. |
+| `execution_analog_installation` | any | — | Bounded parent-side analog installation facts, never execution authority. |
+| `execution_analog_local_transport` | any | — | Passive analog producer transport through the existing ephemeral supervisor. |
+| `execution_analog_mixed_worker` | any | — | A8's retained source-bound optional characterization helper. |
+| `execution_analog_pdk_export` | any | — | Export a bounded, resolver-declared container PDK population to a project. |
+| `execution_analog_worker` | any | — | Isolated analog producer child and substantive fresh artifact consumers. |
+| `execution_authority` | any | — | Canonical, isolated CLI issuer. Imported modules only consume its live receipt. |
+| `execution_backend_consumer` | any | — | Canonical backend consumer seam used after ULTRACORE adoption. |
+| `execution_backend_gates` | any | — | Execute the unchanged canonical clauses; retain advisory/conditional facts. |
+| `execution_backend_producers` | any | — | Explicit bounded backend producer sites. Never call main or step_pnr. |
+| `execution_backend_snapshot` | any | — | Backend INPUT population and transactional publication; no native dispatch. |
+| `execution_backend_worker` | any | — | Real source-owned backend component for the common execution controller. |
+| `execution_frontend_providers` | any | — | Source-only provider family for the canonical frontend rows. |
+| `execution_frontend_worker` | any | — | Explicit fail-closed frontend producer entry points. |
+| `execution_mixed_subject` | any | — | Resolve a mixed producer's canonical subject from issued Controller facts. |
+| `execution_mixed_worker` | any | — | Controller child that runs the existing mixed producer and consumers. |
+| `execution_modes` | any | — | Bounded execution-policy controller and common receipt chain. |
+| `execution_native_installation` | any | — | Parent-measured, source/input-bound installation admission for Step 9. |
+| `execution_native_worker` | any | — | Native Step9 child: execute the source-owned LibreLane synthesis once. |
+| `execution_policy` | any | — | Typed transport for the common production execution policy. |
+| `execution_production` | any | — | Canonical Step 9 production front door. |
+| `execution_provider_catalog` | any | — | Source-owned provider census for the backend and release adapter families. |
+| `execution_release_rows` | any | — | Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p... |
+| `execution_release_worker` | any | — | Real source-owned release component for the common execution controller. |
+| `execution_source_snapshot` | any | — | One-operation source snapshot for adapter registration. |
+| `execution_step_protocol` | any | — | Small source-bound Step9 request protocol. |
+| `execution_synthesis_engines` | any | — | Source-owned Step 9 synthesis identities and evidence boundary. |
 | `expert_decision_table` | any | — | a decision table is DATED, and a stale one is refused. |
 | `explicit_argument_outranks_the_environment_pointer` | any | — | whatever a gate scanned, it says so. |
 | `explicit_argument_outranks_the_environment_pointer_census` | any | — | An environment pointer that overrules a location the caller NAMED. |
@@ -1116,6 +1149,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `rig_topology_image_extracted_check` | any | v0.119.32 | gate (LL-35). |
 | `rom_init_lint` | any | — | Detect Quartus-unsafe ROM initialization patterns. |
 | `route_congestion_trade_disclosure` | any | — | when global routing buys routability by REMOVING a non-default rule from a net, say so. Especially when the run passes. |
+| `route_decision` | any | — | Typed, identity-separated routing for the general front door. |
 | `rs485_protocol_synth` | any | v0.1.84 | RS-485-class protocol synth helper. |
 | `rsp_example_otp_consistency_check` | any | — | L3 response examples must match L11 OTP content. |
 | `rtl_bug_report_schema_check` | any | v0.54 | v0.54 plugin gate |
@@ -1477,7 +1511,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1396 programs)
+### `any` (1430 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1861,7 +1895,40 @@ _(no programs in this group)_
 - `every_required_metric_key_has_a_producer` — an axis proves from a metric somebody actually emits.
 - `evidence_citation_resolves_check` — a cited evidence artifact must EXIST.
 - `excluded_master_census_check` — ADVISORY per-step census of masters excluded by the run's cell policy.
-- `execution_modes` — Bounded execution-policy controller; BLOCKING at this API boundary.
+- `execution_adapters_analog` — Source-bound A6/A7/A8 adapters for the ordinary outer Controller route.
+- `execution_adapters_analog_front` — Source-bound adapters for the existing analog A1-A5/A9 producer sites.
+- `execution_adapters_backend` — Minimal ULTRACORE seam for the reviewed 23-row backend family.
+- `execution_adapters_mixed` — Registry adapters for the existing fixed mixed-signal producer sequence.
+- `execution_adapters_release` — Minimal ULTRACORE seam for the reviewed 14-row release family.
+- `execution_analog_caller` — A6/A7/A8 caller wiring into the existing fixed-step dispatcher.
+- `execution_analog_contract` — Existing analog canonical gate population and evidence consumers.
+- `execution_analog_front_worker` — Passive worker for the existing ordinary analog A1-A5/A9 producers.
+- `execution_analog_installation` — Bounded parent-side analog installation facts, never execution authority.
+- `execution_analog_local_transport` — Passive analog producer transport through the existing ephemeral supervisor.
+- `execution_analog_mixed_worker` — A8's retained source-bound optional characterization helper.
+- `execution_analog_pdk_export` — Export a bounded, resolver-declared container PDK population to a project.
+- `execution_analog_worker` — Isolated analog producer child and substantive fresh artifact consumers.
+- `execution_authority` — Canonical, isolated CLI issuer. Imported modules only consume its live receipt.
+- `execution_backend_consumer` — Canonical backend consumer seam used after ULTRACORE adoption.
+- `execution_backend_gates` — Execute the unchanged canonical clauses; retain advisory/conditional facts.
+- `execution_backend_producers` — Explicit bounded backend producer sites. Never call main or step_pnr.
+- `execution_backend_snapshot` — Backend INPUT population and transactional publication; no native dispatch.
+- `execution_backend_worker` — Real source-owned backend component for the common execution controller.
+- `execution_frontend_providers` — Source-only provider family for the canonical frontend rows.
+- `execution_frontend_worker` — Explicit fail-closed frontend producer entry points.
+- `execution_mixed_subject` — Resolve a mixed producer's canonical subject from issued Controller facts.
+- `execution_mixed_worker` — Controller child that runs the existing mixed producer and consumers.
+- `execution_modes` — Bounded execution-policy controller and common receipt chain.
+- `execution_native_installation` — Parent-measured, source/input-bound installation admission for Step 9.
+- `execution_native_worker` — Native Step9 child: execute the source-owned LibreLane synthesis once.
+- `execution_policy` — Typed transport for the common production execution policy.
+- `execution_production` — Canonical Step 9 production front door.
+- `execution_provider_catalog` — Source-owned provider census for the backend and release adapter families.
+- `execution_release_rows` — Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p...
+- `execution_release_worker` — Real source-owned release component for the common execution controller.
+- `execution_source_snapshot` — One-operation source snapshot for adapter registration.
+- `execution_step_protocol` — Small source-bound Step9 request protocol.
+- `execution_synthesis_engines` — Source-owned Step 9 synthesis identities and evidence boundary.
 - `expert_decision_table` — a decision table is DATED, and a stale one is refused.
 - `explicit_argument_outranks_the_environment_pointer` — whatever a gate scanned, it says so.
 - `explicit_argument_outranks_the_environment_pointer_census` — An environment pointer that overrules a location the caller NAMED.
@@ -2563,6 +2630,7 @@ _(no programs in this group)_
 - `rig_topology_image_extracted_check` — gate (LL-35).  _[v0.119.32]_
 - `rom_init_lint` — Detect Quartus-unsafe ROM initialization patterns.
 - `route_congestion_trade_disclosure` — when global routing buys routability by REMOVING a non-default rule from a net, say so. Especially when the run passes.
+- `route_decision` — Typed, identity-separated routing for the general front door.
 - `rs485_protocol_synth` — RS-485-class protocol synth helper.  _[v0.1.84]_
 - `rsp_example_otp_consistency_check` — L3 response examples must match L11 OTP content.
 - `rtl_bug_report_schema_check` — v0.54 plugin gate  _[v0.54]_
