@@ -440,7 +440,11 @@ def test_librelane_contract_argv_carries_the_ceiling(tmp_path, monkeypatch):
     ringed = next(e["name"] for e in entries
                   if (e.get("pdn_ring") or {}).get("connect_to_pad_layers")
                   and (e.get("pdn_ring") or {}).get("connects"))
-    assert _drive("emit_pdn_cfg", ok("add_pdn_connect -grid g\n"),
+    # The producer contract is a single JSON envelope; plain Tcl is rejected
+    # so startup diagnostics cannot be copied into the generated config.
+    pdn_payload = json.dumps({"vibeic_pdn_payload_v1":
+                              "add_pdn_connect -grid g\n"}) + "\n"
+    assert _drive("emit_pdn_cfg", ok(pdn_payload),
                   lambda: ll.emit_pdn_cfg(image, ringed, tmp_path / "pdn.tcl"))
 
     assert _drive("flow_segment", ok('["A.One", "B.Two"]\n'),
