@@ -293,18 +293,33 @@ def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
     import project_outputs_in_tree_check as _poit
     found: List[str] = []
 
-    def _walk(node: Any, where: str) -> None:
+    def _walk(node: Any, where: str, *, diagnostic_path: bool = False) -> None:
         if isinstance(node, str):
+            # A refusal's path is a diagnostic reference to the rejected
+            # candidate, not a retained artefact that a later reader must
+            # follow.  The producer marks that distinction explicitly; every
+            # other pathname keeps the fail-closed relocated-copy guard.
+            if diagnostic_path:
+                return
             for m in _poit._ANY_ABS_PATH_RE.finditer(node):
                 cand = m.group(1)
                 if _poit.names_a_relocated_copy(cand, project):
                     found.append(f"{where} -> {cand}")
         elif isinstance(node, dict):
+            is_output_refusal = where.rsplit(".", 1)[-1] == "output_refusal"
             for k, v in node.items():
-                _walk(v, f"{where}.{k}")
+                _walk(
+                    v,
+                    f"{where}.{k}",
+                    diagnostic_path=(
+                        is_output_refusal
+                        and k == "path"
+                        and node.get("finding") == _PHASE1_RTL_OUTPUT_REFUSED
+                        and node.get("path_kind") == "diagnostic"),
+                )
         elif isinstance(node, (list, tuple)):
             for i, v in enumerate(node):
-                _walk(v, f"{where}[{i}]")
+                _walk(v, f"{where}[{i}]", diagnostic_path=diagnostic_path)
 
     _walk(summary, "$")
     if found:
@@ -3283,7 +3298,10 @@ def _phase1_rtl_output_refusal(
     except (TypeError, ValueError):
         path_label = str(path)
     return {"finding": _PHASE1_RTL_OUTPUT_REFUSED, "reason": reason,
-            "path": path_label, "detail": detail}
+            # This path identifies the rejected candidate for diagnosis.  It
+            # is deliberately distinct from a retained-artifact reference,
+            # which remains subject to _refuse_relocated_copy_in_record.
+            "path": path_label, "path_kind": "diagnostic", "detail": detail}
 
 
 def _phase1_rtl_output_refusal_result(
