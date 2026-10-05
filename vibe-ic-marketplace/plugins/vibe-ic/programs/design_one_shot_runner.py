@@ -18129,6 +18129,75 @@ def _bootstrap_execution_policy(execution, project: Path, *, top: str,
     return execution.bootstrap(project, parameters=parameters)
 
 
+def _receipt_declared_top(project: Path, defined_modules: Sequence[str]) -> Optional[str]:
+    """Return one source-bound supplied top, or fail closed.
+
+    ``supplied_rtl`` is the producer receipt.  Its ``top.defined_in`` entry
+    must identify exactly one currently staged file whose recorded hash matches
+    the bytes in the staged tree.  L9 is used only as a second declaration: a
+    disagreement is ambiguous, while agreement does not replace the receipt's
+    source binding.
+    """
+    declaration_top: Optional[str] = None
+    declaration_bound = False
+    try:
+        declaration = json.loads(
+            (Path(project) / "plugin_output/declaration.json").read_text(
+                errors="replace"))
+        supplied = declaration.get("supplied_rtl")
+        top_record = supplied.get("top") if isinstance(supplied, dict) else None
+        files = supplied.get("files") if isinstance(supplied, dict) else None
+        value = top_record.get("value") if isinstance(top_record, dict) else None
+        defined_in = top_record.get("defined_in") if isinstance(top_record, dict) else None
+        if isinstance(value, str) and value.strip():
+            declaration_top = value.strip()
+        if (declaration_top and isinstance(defined_in, str)
+                and defined_in and not Path(defined_in).is_absolute()
+                and isinstance(files, list)):
+            matches = [entry for entry in files
+                       if isinstance(entry, dict)
+                       and entry.get("staged") == defined_in]
+            staged_path = Path(project) / defined_in
+            expected = matches[0].get("staged_sha256") if len(matches) == 1 else None
+            actual = _sha256_file(staged_path)
+            actual_hex = actual.split(":", 1)[1] if actual and ":" in actual else actual
+            declaration_bound = (len(matches) == 1
+                                 and matches[0].get("status") == "staged"
+                                 and isinstance(expected, str)
+                                 and expected == actual_hex)
+    except (OSError, ValueError, TypeError):
+        declaration_top = None
+
+    l9_top: Optional[str] = None
+    try:
+        l9 = json.loads(
+            (Path(project) / "phase1/generated_docs/L9_INTEGRATION_SPEC.json")
+            .read_text(errors="replace"))
+        value = l9.get("top_module") if isinstance(l9, dict) else None
+        if isinstance(value, str) and value.strip():
+            l9_top = value.strip()
+    except (OSError, ValueError, TypeError):
+        pass
+
+    candidates = {value for value in (declaration_top, l9_top) if value}
+    if len(candidates) > 1 or not declaration_bound:
+        return None
+    candidate = next(iter(candidates), None)
+    return candidate if candidate in set(defined_modules) else None
+
+
+def _phase2_synth_top(project: Path, requested_top: str) -> str:
+    """Bind the default request to a verified producer-declared top.
+
+    A real ``chip_top`` remains authoritative.  Only an absent default can be
+    replaced, and only by a name present in the exact staged source set.
+    """
+    defined = _v661_rtl_module_names(Path(project))
+    if requested_top != "chip_top" or requested_top in set(defined):
+        return requested_top
+    return _receipt_declared_top(project, defined) or requested_top
+
+
 def step_yosys_synth(project: Path, top_name: str = "chip_top",
                      container: str = _pin.default_container_name(),
                      ic_class: Optional[str] = None) -> StepResult:
@@ -18193,6 +18262,12 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
         if _m["v"] is not None:
             rtl_files.append(_emit_hardmacro_blackbox_stub(
                 _m["v"], _m["name"], synth_dir / "_hardmacro_bb"))
+    # Bind the default request to the supplied-RTL producer receipt before
+    # applying the existing ASIC/waiver precedence.  A missing receipt or a
+    # receipt naming a module absent from the staged source set leaves the
+    # request unchanged, so Yosys still returns the honest invalid-top error.
+    top_name = _phase2_synth_top(project, top_name)
+
     # v1.6.191 (#78 P0) — prefer ASIC-core top when both an FPGA
     # wrapper (`chip_top`) and an ASIC core (`chip_top_asic`) are
     # present in rtl/. The FPGA wrapper has tristate I/O whose
