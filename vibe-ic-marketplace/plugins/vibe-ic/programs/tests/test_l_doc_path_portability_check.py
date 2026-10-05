@@ -347,3 +347,19 @@ def test_the_gate_speaks_the_cli_the_runner_loop_uses(tmp_path):
     assert cp.returncode == 1, (
         f"the runner treats rc==1 as blocking; got {cp.returncode}")
     assert out.is_file(), "the runner writes the report path it passes in"
+
+
+def test_l_document_gates_use_exact_generated_docs_handoff(tmp_path):
+    """The runner must not feed nested source fixtures to L-document gates."""
+    import phase1_doc_one_shot_runner as runner
+
+    project = tmp_path / "legacy"
+    legacy = project / "generated_docs"
+    legacy.mkdir(parents=True)
+    (legacy / "L1_DATASHEET.json").write_text("{}")
+    assert runner._semantic_gate_root(
+        "l_doc_path_portability_check", project) == legacy
+    assert runner._semantic_gate_root(
+        "l_doc_generator_stamp", project) == legacy
+    assert runner._semantic_gate_root(
+        "l3_opcode_dispatch_key_actionable_check", project) == project

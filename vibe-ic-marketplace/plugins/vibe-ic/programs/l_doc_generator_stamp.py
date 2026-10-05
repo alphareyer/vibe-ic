@@ -109,7 +109,8 @@ Before concluding anything from a published L document — filing an issue,
 quoting a count, calling a gate a blocker — ask this module what release
 wrote it::
 
-    python3 l_doc_generator_stamp.py <design-or-corpus-dir>
+    python3 l_doc_generator_stamp.py <design-dir>
+    python3 l_doc_generator_stamp.py <corpus-dir> --corpus
 
     UNSTAMPED  produced before this stamp existed. Vintage unknown. Do not
                read it as the current state of the flow; re-derive first.
@@ -139,9 +140,10 @@ reads a version file and a taxonomy contract and knows nothing about what
 the documents describe.
 
 Usage:
-    python3 l_doc_generator_stamp.py <root> [--json OUT]
+    python3 l_doc_generator_stamp.py <design-dir> [--json OUT]
                                      [--max-minor-drift N]
                                      [--allow-unstamped]
+    python3 l_doc_generator_stamp.py <corpus-dir> --corpus [--json OUT]
 """
 from __future__ import annotations
 
@@ -491,9 +493,113 @@ def exceeds(v: Verdict, max_minor_drift: Optional[int]) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 # Scanning a tree
 # ─────────────────────────────────────────────────────────────────────
+def _canonical_scan_root(root: Path) -> Optional[Path]:
+    """Return a project's canonical handoff, or ``None`` for a corpus.
+
+    The presence of ``phase1/`` is the project marker even when its generated
+    handoff is missing.  That distinction is what keeps an empty project from
+    borrowing a nested fixture during a corpus-style recursive scan.  The
+    legacy root-level ``generated_docs/`` layout is still a project handoff,
+    for compatibility with older sibling contracts.
+    """
+    root = Path(root)
+    if root.name == "generated_docs":
+        return root
+    if root.name == "phase1":
+        return root / "generated_docs"
+    phase1 = root / "phase1"
+    phase1_handoff = phase1 / "generated_docs"
+    legacy = root / "generated_docs"
+    # A symlinked canonical branch is an integrity failure.  Do not fall back
+    # to a second layout and accidentally accept a different producer's docs.
+    if phase1.is_symlink() or phase1_handoff.is_symlink():
+        return phase1_handoff
+    # Prefer a handoff that actually contains direct L documents.  An empty
+    # phase1/generated_docs/ marker must not hide a valid legacy root-level
+    # handoff; if neither handoff has a document, keep the phase1 marker so the
+    # caller returns VACUOUS instead of widening into a nested fixture corpus.
+    if _has_direct_l_docs(phase1_handoff, root):
+        return phase1_handoff
+    if _has_direct_l_docs(legacy, root):
+        return legacy
+    if phase1.is_dir() or phase1.is_symlink():
+        return phase1_handoff
+    # Keep a legacy symlink in the canonical branch so the direct scanner can
+    # fail closed; it must never fall through to recursive corpus discovery.
+    if legacy.is_symlink():
+        return legacy
+    return None
+
+
+def _scan_root(root: Path) -> Path:
+    """Choose the L-doc tree for a project or a published corpus.
+
+    A canonical project owns ``phase1/generated_docs``.  Keep the scan inside
+    that Phase-1 bucket when the caller gives us the project root; a project
+    may also contain a nested source checkout whose fixtures are unrelated to
+    the current run.  A root without a Phase-1 bucket is treated as a corpus
+    root and retains the recursive ``generated_docs`` census.  If a project
+    has a Phase-1 directory but no generated handoff, returning that empty
+    bucket makes the result VACUOUS instead of silently borrowing a nested
+    fixture and claiming a verdict for the wrong artefact.
+    """
+    root = Path(root)
+    return _canonical_scan_root(root) or root
+
+
+def _has_symlink_between(path: Path, anchor: Path) -> bool:
+    """Fail closed when a canonical handoff crosses a symlink."""
+    current = Path(path)
+    anchor = Path(anchor)
+    while True:
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+        if current == anchor:
+            return False
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
+
+
+def _has_direct_l_docs(path: Path, anchor: Path) -> bool:
+    """Whether *path* is a readable direct L-document handoff."""
+    if (not path.is_dir() or path.is_symlink() or
+            _has_symlink_between(path, anchor)):
+        return False
+    try:
+        from l_doc_path_portability_check import _L_DOC_NAME_RE
+        return any(not child.is_symlink() and child.is_file() and
+                   _L_DOC_NAME_RE.match(child.name)
+                   for child in path.iterdir())
+    except (OSError, ImportError):
+        return False
+
+
+def _iter_direct_l_docs(scan_root: Path, anchor: Path) -> List[Path]:
+    """Read only direct, non-symlink L docs from a canonical handoff."""
+    if (_has_symlink_between(scan_root, anchor) or
+            not scan_root.is_dir()):
+        return []
+    try:
+        from l_doc_path_portability_check import _L_DOC_NAME_RE
+        return [p for p in sorted(scan_root.iterdir())
+                if not p.is_symlink() and p.is_file()
+                and _L_DOC_NAME_RE.match(p.name)]
+    except (OSError, ImportError):
+        # A canonical scope with an unreadable directory has no honest
+        # denominator.  Returning no paths preserves the VACUOUS/rc=2 gate
+        # rather than silently widening the scan to a corpus fallback.
+        return []
+
+
 def scan_tree(root: Path,
               max_minor_drift: Optional[int] = None,
-              allow_unstamped: bool = False) -> Dict[str, Any]:
+              allow_unstamped: bool = False,
+              *, scope: str = "project") -> Dict[str, Any]:
     """Classify every L document under ``root``.
 
     Always reports ``documents_read``. A clean verdict over an empty scan
@@ -513,7 +619,19 @@ def scan_tree(root: Path,
     counts: Dict[str, int] = {}
     offending: List[Dict[str, Any]] = []
     read_n = 0
-    for p in iter_l_docs(Path(root)):
+    root = Path(root)
+    if scope not in ("project", "corpus"):
+        raise ValueError(f"unknown L-document scan scope: {scope!r}")
+    canonical = _canonical_scan_root(root) if scope == "project" else None
+    if scope == "corpus":
+        paths = iter_l_docs(root, recursive_root=True)
+    elif canonical is None:
+        # A project invocation never widens into a recursive corpus census.
+        # Callers that own a published corpus must opt into that scope.
+        paths = []
+    else:
+        paths = _iter_direct_l_docs(canonical, root)
+    for p in paths:
         read_n += 1
         try:
             doc = json.loads(p.read_text(encoding="utf-8"))
@@ -534,6 +652,7 @@ def scan_tree(root: Path,
     return {
         "tool": TOOL,
         "root": str(root),
+        "scope": scope,
         "current_plugin_version": cur_v,
         "current_l_doc_taxonomy_digest": cur_t,
         "documents_read": read_n,
@@ -568,6 +687,9 @@ def _format(result: Dict[str, Any]) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("root")
+    ap.add_argument("--corpus", action="store_true",
+                    help="scan a published corpus recursively; project scope "
+                         "is the safe default")
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--max-minor-drift", type=int, default=None,
                     help="tolerate a STALE document up to N minor families "
@@ -584,7 +706,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"{TOOL}: ERROR not a directory: {root}", file=sys.stderr)
         return 2
     result = scan_tree(root, max_minor_drift=args.max_minor_drift,
-                       allow_unstamped=args.allow_unstamped)
+                       allow_unstamped=args.allow_unstamped,
+                       scope="corpus" if args.corpus else "project")
     if args.json_out:
         try:
             out = Path(args.json_out)

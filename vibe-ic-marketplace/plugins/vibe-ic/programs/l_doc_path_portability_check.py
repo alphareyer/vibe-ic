@@ -180,7 +180,7 @@ _SKIP_DIR_NAMES = frozenset({
 })
 
 
-def iter_l_docs(root: Path) -> Iterable[Path]:
+def iter_l_docs(root: Path, *, recursive_root: bool = False) -> Iterable[Path]:
     """Every L document under ``root``, in stable order.
 
     Finds the ``generated_docs`` directories FIRST and globs inside them,
@@ -190,7 +190,15 @@ def iter_l_docs(root: Path) -> Iterable[Path]:
     document, so none of them should be walked.
     """
     seen: set = set()
-    for d in sorted(root.rglob(_L_DOC_DIR)):
+    if recursive_root:
+        # rglob() does not include its starting directory.  A published
+        # corpus may itself be named generated_docs and still carry a direct
+        # handoff alongside nested designs, so include the root explicitly.
+        directories = [root] + sorted(root.rglob(_L_DOC_DIR))
+    else:
+        directories = ([root] if root.name == _L_DOC_DIR
+                       else sorted(root.rglob(_L_DOC_DIR)))
+    for d in directories:
         if not d.is_dir():
             continue
         if any(part in _SKIP_DIR_NAMES for part in d.parts):
