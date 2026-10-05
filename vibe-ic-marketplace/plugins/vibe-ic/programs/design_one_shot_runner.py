@@ -300,7 +300,22 @@ def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
                 if _poit.names_a_relocated_copy(cand, project):
                     found.append(f"{where} -> {cand}")
         elif isinstance(node, dict):
+            is_output_refusal = where.rsplit(".", 1)[-1] == "output_refusal"
             for k, v in node.items():
+                is_diagnostic_path = (
+                    is_output_refusal
+                    and k == "path"
+                    and node.get("finding") == _PHASE1_RTL_OUTPUT_REFUSED
+                    and node.get("path_kind") == "diagnostic")
+                # Only a scalar string in this exact producer-owned field is
+                # a diagnostic reference to the rejected candidate.  Lists
+                # and dicts must be walked normally; malformed scalar values
+                # are rejected fail-closed below.
+                if is_diagnostic_path and isinstance(v, str):
+                    continue
+                if is_diagnostic_path and not isinstance(v, (str, list, tuple, dict)):
+                    found.append(f"{where}.{k} -> non-scalar diagnostic path")
+                    continue
                 _walk(v, f"{where}.{k}")
         elif isinstance(node, (list, tuple)):
             for i, v in enumerate(node):
@@ -3283,7 +3298,10 @@ def _phase1_rtl_output_refusal(
     except (TypeError, ValueError):
         path_label = str(path)
     return {"finding": _PHASE1_RTL_OUTPUT_REFUSED, "reason": reason,
-            "path": path_label, "detail": detail}
+            # This path identifies the rejected candidate for diagnosis.  It
+            # is deliberately distinct from a retained-artifact reference,
+            # which remains subject to _refuse_relocated_copy_in_record.
+            "path": path_label, "path_kind": "diagnostic", "detail": detail}
 
 
 def _phase1_rtl_output_refusal_result(

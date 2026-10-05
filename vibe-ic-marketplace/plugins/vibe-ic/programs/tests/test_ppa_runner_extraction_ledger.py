@@ -760,6 +760,9 @@ _LEDGER = frozenset({
     # it measures no area and reads no metric. It asks whether a derivation may
     # supersede an OWNER-DECLARED answer, which is the subject of
     # `_tapeout_declaration`, not of `_ppa/area.py`.
+    "_area_receipt_flags",          # (area_receipt, area_run_manifest) -> argv pair;
+                                    # orchestration-only binding for the producer
+                                    # evidence passed to the synthesis step.
     "_declared_answer_is_the_core_this_die_wraps",
                                     # (project, key, declared, derived) -> bool.
                                     # True only for `top_cell`, only on a DIE,
