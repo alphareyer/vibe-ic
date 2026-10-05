@@ -95,6 +95,7 @@ L9_REL = "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
 RW_PREFIXES = ("r", "w")
 DERIVED_KEY = LPP.DERIVED_PAD_PAIRS_KEY
 _BASE_NAME = re.compile(r"\s*([A-Za-z_][A-Za-z_0-9$]*)")
+_DOC_ALIAS_RE = re.compile(r"`([A-Za-z_][A-Za-z_0-9$]*)`")
 
 
 class NotApplicable(Exception):
@@ -240,6 +241,46 @@ def _group_sides(placement, name: str) -> List[str]:
 
 def _direction(port: Dict[str, Any]) -> str:
     return str(port.get("direction") or port.get("mode") or "").lower()
+
+
+def _explicit_document_aliases(project: Path) -> List[Tuple[str, str, str, str, Optional[int]]]:
+    """Return only same-row, explicitly written ``(or ...)`` alternatives."""
+    out: List[Tuple[str, str, str, str, Optional[int]]] = []
+    seen: Set[Path] = set()
+    for root in (project / "input" / "docs", project / "input"):
+        if not root.is_dir():
+            continue
+        for f in sorted(root.rglob("*")):
+            if (not f.is_file()
+                    or f.suffix.lower() not in {".md", ".markdown", ".txt"}):
+                continue
+            rf = f.resolve()
+            if rf in seen:
+                continue
+            seen.add(rf)
+            try:
+                lines = f.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for lineno, line in enumerate(lines, 1):
+                if not re.search(r"\(\s*or\b", line, re.IGNORECASE):
+                    continue
+                names = _DOC_ALIAS_RE.findall(line)
+                direction = ""
+                dm = re.search(r"\|\s*(input|output)\s*\|", line,
+                               re.IGNORECASE)
+                if dm:
+                    direction = dm.group(1).lower()
+                wm = re.search(r"\b(\d+)\s*-?\s*bit\b", line,
+                               re.IGNORECASE)
+                width = int(wm.group(1)) if wm else None
+                for i, left in enumerate(names[:-1]):
+                    for right in names[i + 1:]:
+                        if left != right:
+                            out.append((left, right,
+                                        f"{f.relative_to(project)}:{lineno}",
+                                        direction, width))
+    return out
 
 
 def _net_sides(placement, params: Dict[str, int],
@@ -395,7 +436,40 @@ def derive(project: Path) -> Dict[str, Any]:
     doc_atoms = {d: _atoms(d) for d in doc_side}
 
     decided: Dict[str, Dict[str, Any]] = {}
+    # R3 is a document-owned alias, not an inferred rename. Both names may be
+    # present in L9/RTL; only the explicit source row, equal direction/width,
+    # and one canonical group side can establish the pad-side relationship.
+    for left, right, evidence, row_direction, row_width in \
+            _explicit_document_aliases(project):
+        for u, l9 in ((left, right), (right, left)):
+            if (u not in implemented or l9 not in by_name
+                    or u not in unplaced or l9 not in implemented):
+                continue
+            impl = next((p for p in impl_ports if str(p.get("name")) == u), {})
+            canon = next((p for p in impl_ports if str(p.get("name")) == l9), {})
+            if _direction(impl) != _direction(canon):
+                continue
+            if row_direction and row_direction != _direction(impl):
+                continue
+            iw = LPP._port_width(impl)
+            cw = LPP._port_width(canon) or LPP._port_width(by_name[l9])
+            if iw is None or cw is None or iw != cw:
+                continue
+            if row_width is not None and row_width != iw:
+                continue
+            sides = _group_sides(placement, l9)
+            if len(sides) != 1:
+                continue
+            decided[u] = {
+                "rule": "R3_explicit_document_alias", "side": sides[0],
+                "l9": [l9], "alias": l9, "evidence_source": evidence,
+                "because": (f"input document explicitly states {u!r} as an "
+                            f"alternative spelling of {l9!r}; direction and "
+                            f"width agree; group side {sides[0]}"),
+            }
     for u in unplaced:
+        if u in decided:
+            continue
         ua = _atoms(u)
         hits: List[str] = []
         via: Optional[str] = None
@@ -480,6 +554,9 @@ def derive(project: Path) -> Dict[str, Any]:
     accepted: List[str] = []
     rejected_by_port: Dict[str, List[str]] = {}
     for u in sorted(decided):
+        if decided[u]["rule"] == "R3_explicit_document_alias":
+            accepted.append(u)
+            continue
         _acc, rej = _acceptance([(set(decided[u]["l9"]), {u})],
                                 l9_ports, impl_ports)
         if rej:
@@ -586,7 +663,7 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
                            f"the document's own placement; this pair would "
                            f"also put them on {sides[0]} (PORT_ON_TWO_SIDES "
                            f"at 15.5ic)")
-        if l9s and rtls:
+        if l9s and rtls and entry.get("rule") != "R3_explicit_document_alias":
             _a, _r = _acceptance([(l9s, rtls)], l9_ports, impl_ports)
             for r in _r:
                 why.extend(x for x in r["reasons"] if x not in " ".join(why))

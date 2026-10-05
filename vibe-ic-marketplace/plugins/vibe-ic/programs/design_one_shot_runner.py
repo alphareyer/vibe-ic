@@ -7707,6 +7707,16 @@ def _declared_reused_ip(project: Path) -> bool:
             return True
     except (OSError, ValueError):
         pass
+    # Input documents can explicitly declare a catalog IP even when the
+    # producer has not yet emitted a SOURCE_MANIFEST.  Reuse the catalog's
+    # input-derived predicate here so supplied RTL takes the catalog-glue
+    # route.  Missing or contradictory evidence remains fail-closed.
+    try:
+        import ip_catalog_query as _catalog
+        if _catalog.declared_catalog_reuse(project):
+            return True
+    except Exception:  # noqa: BLE001 - malformed input is not reuse evidence
+        pass
     if not _is_reused_ip_project(project):
         return False
     try:
