@@ -100,6 +100,8 @@ def test_backend_argv_binds_complete_typed_parameter_envelope():
 def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
     """Long native rows must not inherit the 30-second Component default."""
     from execution_provider_catalog import BACKEND_ROWS
+    registry = register_backend_adapters(source_sha=BASE, available=False,
+                                         parameters={"timeout_s": 7})
     timeout_by_step = {
         step: _producer_timeout_s(BACKEND_ROWS[step], {"timeout_s": 7})
         for step in BACKEND_IDS
@@ -107,6 +109,9 @@ def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
     # Step 37's stream-out producer is a physical native run and its policy
     # explicitly grants the measured 30-minute window.
     assert timeout_by_step["37"] >= 1800
+    # The registered adapter must carry the same row-owned policy through the
+    # catalog, rather than merely passing the helper-level unit assertion.
+    assert registry.adapters("37")[0].components[0].timeout_s == 1800
     # Rows without a long-runtime policy continue to honour the supplied
     # fixture timeout, keeping unit tests and bounded fixtures fast.
     assert timeout_by_step["15"] == 7
