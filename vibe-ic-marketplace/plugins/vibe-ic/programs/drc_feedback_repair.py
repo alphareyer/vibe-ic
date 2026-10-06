@@ -23,6 +23,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 from _atomic_artefact import write_bytes, write_text
 from _docker_memory import docker_memory_flags
+import _container_exec as _ce
 import instrument_calibration as _instrument_calibration
 
 #: This step's own copy of the layout it published over the canonical DEFs.
@@ -42,6 +43,16 @@ _SCOPED_IDENTICAL = re.compile(
 _SCOPED_DRC = re.compile(
     r'^\[INFO DRT-0711\] Scoped detailed routing: whole-design violations '
     r'0 on entry, 0 on exit \(delta \+0\)\.$', re.M)
+
+
+_IMAGE_DIGEST_RE = re.compile(r'(?:sha256:)?[0-9a-f]{64}$')
+
+
+def _image_digest_bound(image: str) -> bool:
+    """Accept the digest forms used by the canonical image contract."""
+    import _eda_pin
+    return bool(_eda_pin.reference_digest(image) or
+                _IMAGE_DIGEST_RE.fullmatch(str(image or '')))
 
 
 class _Absent(ValueError):
@@ -76,6 +87,22 @@ def has_reviewed_rule(deck: str | None) -> bool:
 
 def image_for_container(container: str) -> str:
     """A fresh private docker run must use the live container's exact image."""
+    # The canonical runner may itself be executing inside the pinned EDA
+    # image. There is then no docker client to inspect the named outer
+    # container, and falling back to that name would make the later launch
+    # ambiguous. Reuse the runner's digest-bound image reference instead;
+    # a tag or bare image id is not enough to identify the current bytes.
+    if _ce.no_container_route():
+        import _eda_pin
+        for key in ('VIBEIC_EDA_IMAGE', 'IIC_EDA_IMAGE'):
+            reference = (os.environ.get(key) or '').strip()
+            if _eda_pin.reference_digest(reference):
+                return reference
+        # Keep the caller on its normal refusal path. ``run`` records a
+        # digest-contract refusal before any EDA tool or layout writer runs.
+        # Do not return the caller token: a token can itself look like a bare
+        # digest and would incorrectly bind an unverified local image.
+        return "FEEDBACK_IMAGE_UNBOUND"
     cp = subprocess.run(['docker', 'inspect', '--type', 'container',
                          '--format', '{{.Image}}', container],
                         capture_output=True, text=True, check=False)
@@ -185,6 +212,23 @@ def _docker(image: str, project: Path, args: list[str], *, env: dict[str, str] |
     for key, value in (env or {}).items():
         cmd += ['-e', f'{key}={value}']
     cmd += [image, '--skip', *args]
+    if _ce.no_container_route():
+        # The outer canonical launch already supplies the pinned image,
+        # project mount, PDK mount and resource ceiling. Re-entering Docker
+        # from inside it is impossible; execute the exact post-image command
+        # on this filesystem and translate only the private source mount.
+        mounts = [('/feedback_programs', str(_HERE.resolve()))]
+        local_args = [
+            _ce.localise_mounted_paths(str(value), mounts) for value in args
+        ]
+        local_env = dict(os.environ)
+        local_env.update({
+            key: _ce.localise_mounted_paths(str(value), mounts)
+            for key, value in (env or {}).items()
+        })
+        local_env.setdefault('IIC_OSIC_TOOLS_QUIET', '1')
+        return subprocess.run(local_args, cwd=str(project.resolve()), env=local_env,
+                              capture_output=True, text=True, check=False)
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
@@ -392,7 +436,7 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
             raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         record['initial_source_sha256'] = digest
         record['source_sha256'] = digest
-        if not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', image):
+        if not _image_digest_bound(image):
             raise ValueError('FEEDBACK_IMAGE_DIGEST_REQUIRED')
         design_cell = _def_design(source_def)
         record['design_cell'] = design_cell
@@ -528,6 +572,8 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
     source = project / 'phase3/stage3/pnr' / f'{top}.def'
     try:
         record = json.loads(receipt.read_text())
+        if not _image_digest_bound(image):
+            raise ValueError('FEEDBACK_IMAGE_DIGEST_REQUIRED')
         if record.get('status') != 'PASS' or record.get('source_sha256') != _sha(source):
             raise ValueError('FEEDBACK_ROUTE_DIGEST_MISMATCH')
         routed = project / 'phase3/stage3/pnr/routed.def'
@@ -614,10 +660,14 @@ def declare_publication(project: Path, record: dict, image: str,
     if not outputs:
         return None
     import datetime
+    local_route = _ce.no_container_route()
     row = {
         'record': 'invocation', 'tool': 'openroad', 'version': image,
-        'version_capture': 'image digest of the private docker run',
-        'command': command[:400], 'exec_route': 'container', 'exit_code': 0,
+        'version_capture': (
+            'local execution with a digest-bound outer image reference'
+            if local_route else 'image digest of the private docker run'),
+        'command': command[:400],
+        'exec_route': 'local' if local_route else 'container', 'exit_code': 0,
         'measured': True,
         'timestamp': datetime.datetime.now(datetime.timezone.utc)
                      .strftime('%Y-%m-%dT%H:%M:%SZ'),
