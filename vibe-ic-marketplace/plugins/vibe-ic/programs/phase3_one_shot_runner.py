@@ -77,7 +77,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path, PurePosixPath
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
                     NamedTuple, Optional, Sequence, Set, Tuple)
@@ -36653,6 +36653,52 @@ def _discover_padring_io_views(pdk: PdkConfig,
     return lefs, gds
 
 
+def _feedback_pdk_with_padring_io_views(pdk: PdkConfig,
+                                        container: str) -> PdkConfig:
+    """Copy the PDK contract with the canonical pad masters for feedback.
+
+    Route feedback opens the routed DEF independently of the main PnR Tcl.
+    It therefore must load the same IO masters that the canonical pad-ring
+    resolver selected.  Keep the run-wide PDK object immutable: this copy is
+    only passed to the feedback producer.  Discovery remains fail-closed so a
+    missing physical IO view cannot be mistaken for an antenna measurement.
+    """
+    io_lefs, _io_gds = _discover_padring_io_views(pdk, container)
+    existing = list(pdk.macro_lefs or [])
+    merged = existing + [lef for lef in io_lefs if lef not in existing]
+    return replace(pdk, macro_lefs=merged)
+
+
+def _feedback_pdk_for_route(project: Path, pdk: PdkConfig,
+                            container: str) -> PdkConfig:
+    """Add pad masters only on the chip path that actually owns a ring."""
+    if not _chip_path_requests_pad_ring(project):
+        return pdk
+    return _feedback_pdk_with_padring_io_views(pdk, container)
+
+
+def _write_feedback_padring_discovery_refusal(project: Path, top: str,
+                                               pdk: PdkConfig, image: str,
+                                               error: Exception) -> Path:
+    """Publish the pre-stream feedback refusal before returning its StepResult."""
+    import drc_feedback_repair as _drc_feedback
+    try:
+        rules = [str(row.get("id")) for row in
+                 _drc_feedback._rules(getattr(pdk, "drc_deck", None) or "")]
+    except Exception:
+        rules = []
+    receipt = project / "reports/phase3/drc_feedback.json"
+    _aa.write_json(receipt, {
+        "status": "REFUSED",
+        "reason": "PADRING_IO_VIEW_DISCOVERY_FAILED",
+        "detail": str(error),
+        "source_def": str(project / "phase3/stage3/pnr" / f"{top}.def"),
+        "image": image,
+        "rules": rules,
+    })
+    return receipt
+
+
 def _stage_padring_io_lefs_for_lvs(project: Path, pdk: PdkConfig,
                                    container: str) -> List[Path]:
     """Make the IO LEFs that PnR consumed available to host-side LVS emission.
@@ -57883,8 +57929,28 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                 "prestream_gate", "FAIL", time.time() - t0,
                 "SIGNOFF_DECK_FEEDBACK_REFUSED: " + str(exc),
                 [str(project / "reports/phase3/drc_feedback.json")])
+        try:
+            if isinstance(pdk, PdkConfig):
+                _feedback_pdk = _feedback_pdk_for_route(
+                    project, pdk, container)
+            else:
+                # Lightweight test doubles and legacy callers do not carry a
+                # PDK view contract. Preserve their existing feedback path;
+                # canonical PdkConfig runs above remain fail-closed.
+                _feedback_pdk = pdk
+        except Exception as exc:
+            # The antenna baseline must load the same physical IO masters as
+            # pad-ring PnR.  Missing views are an input failure, never a
+            # reason to continue with an incomplete OpenROAD library.
+            refusal_receipt = _write_feedback_padring_discovery_refusal(
+                project, top, pdk, _feedback_image, exc)
+            return StepResult(
+                "prestream_gate", "FAIL", time.time() - t0,
+                "SIGNOFF_DECK_FEEDBACK_REFUSED: "
+                f"PADRING_IO_VIEW_DISCOVERY_FAILED: {exc}",
+                [str(refusal_receipt)])
         _feedback = _drc_feedback.run(
-            project, top, pdk, _feedback_image,
+            project, top, _feedback_pdk, _feedback_image,
             stream_script_text=_GDS_STREAMOUT_PY)
         _fb_pub = _feedback.get("publication") or {}
         if _feedback.get("status") == "PASS" and _fb_pub.get("output"):
