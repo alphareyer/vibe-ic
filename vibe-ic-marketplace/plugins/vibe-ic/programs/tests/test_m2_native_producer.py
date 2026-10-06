@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from programs.tests.test_execution_receipt_chain import real_entry, isolated_transport  # noqa: F401
 import yaml
 
 import power_domain_crossing_check as crossing
@@ -43,6 +44,7 @@ def test_fixed_runner_reaches_producer_and_existing_gate(tmp_path, monkeypatch):
     project = fixture(tmp_path)
     from _route_fixture import stage_owner_route
     stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     rtl = project / "phase2/stage1/rtl/boundary.v"
     rtl.parent.mkdir(parents=True)
     rtl.write_text("module boundary(); endmodule\n")
@@ -56,6 +58,8 @@ def test_fixed_runner_reaches_producer_and_existing_gate(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(runner, "_run_phase", bounded)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(runner, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv", ["runner", str(project), "--top", "boundary",
                                       "--route", "ic", "--skip-phase1", "--no-dashboard"])
     runner.main()
@@ -155,8 +159,11 @@ def test_digital_only_does_not_invoke_m2(tmp_path, monkeypatch):
     (project / "phase3/analog/analog_block_list.json").unlink()
     from _route_fixture import stage_owner_route
     stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     calls = []
     monkeypatch.setattr(runner, "_run_phase", lambda label, p, args, env=None: calls.append(Path(p).stem) or 0)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(runner, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv", ["runner", str(project), "--route", "ic", "--skip-phase1", "--no-dashboard"])
     runner.main()
     assert "mixed_signal_power_domain_run" not in calls
@@ -167,6 +174,7 @@ def test_fixed_runner_never_admits_absent_measurement(tmp_path, monkeypatch, fau
     project = fixture(tmp_path)
     from _route_fixture import stage_owner_route
     stage_owner_route(project, "ic")
+    real_entry('IC', 'default', project)
     calls = []
     if fault == "stale_report":
         p = project / REPORTS / "power_domain_producer_audit.json"
@@ -183,6 +191,8 @@ def test_fixed_runner_never_admits_absent_measurement(tmp_path, monkeypatch, fau
             p.write_text("{broken")
         return 0
     monkeypatch.setattr(runner, "_run_phase", bounded)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(runner, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv", ["runner", str(project), "--top", "boundary",
                                      "--route", "ic", "--skip-phase1", "--no-dashboard"])
     runner.main()

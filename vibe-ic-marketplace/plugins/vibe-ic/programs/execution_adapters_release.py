@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import time
-import ast
 from pathlib import Path
 import sys
 from typing import Mapping
@@ -16,6 +15,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import execution_modes as em
+from execution_source_snapshot import python_defined_symbols
 from execution_provider_catalog import (RELEASE_IDS, RELEASE_SITES, coverage_rows,
                                         current_source_identity, current_source_tree_identity,
                                         source_closure, implementation_closure)
@@ -58,11 +58,9 @@ def _site_path(site: str) -> Path:
     if not module or not symbol or not path.is_file():
         raise em.Refusal("RELEASE_PRODUCER_SITE_MISSING", site)
     try:
-        tree = ast.parse(path.read_text())
+        symbols = python_defined_symbols(path.read_text())
     except (OSError, SyntaxError) as exc:
         raise em.Refusal("RELEASE_PRODUCER_SITE_UNREADABLE", site) from exc
-    symbols = {node.name for node in ast.walk(tree)
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
     if symbol not in symbols:
         raise em.Refusal("RELEASE_PRODUCER_SYMBOL_MISSING", site)
     return path
@@ -88,6 +86,45 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
     paths.update(implementation_closure(HERE / 'execution_release_worker.py'))
     paths.add(Path(sys.executable).resolve())
     return {str(p): em.digest(p) for p in sorted(paths)}
+
+
+def _composite_gate_execution(outputs, binding, report, report_sha):
+    """Describe current in-process calls; observed worker issuance is authority."""
+    step = str(binding.get("step_id"))
+    required = list(binding.get("required_gates", ()))
+    if (step not in ROWS or report.get("schema") != "vibeic/release-evidence/2" or
+            report.get("source_sha") != binding.get("source_sha") or
+            report.get("producer_verdict") != "PASS" or report.get("missing_inputs") or
+            len(required) != len(set(required)) or
+            set(required) != set(ROWS[step]["policy"]["mandatory_gate_programs"])):
+        return {}
+    from execution_release_worker import _canonical_gate_invocations, _command_argv
+    expected = []
+    for invocation in _canonical_gate_invocations(step, Path(outputs) / "project"):
+        module, args = _command_argv(invocation["command"], Path(outputs) / "project")
+        expected.append((module, [module, *args], bool(invocation["blocking"])))
+    rows = report.get("gate_records")
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        return {}
+    groups, sources = {}, {}
+    for row, (gate, argv, blocking) in zip(rows, expected):
+        if (not isinstance(row, dict) or row.get("gate") != gate or
+                row.get("argv") != argv or row.get("blocking") is not blocking):
+            return {}
+        if gate not in required or not blocking:
+            continue
+        source = HERE / (gate + ".py")
+        if (type(row.get("rc")) is not int or row["rc"] != 0 or
+                row.get("verdict") != "PASS" or not source.is_file() or source.is_symlink()):
+            return {}
+        groups.setdefault(gate, []).append(row)
+        sources[str(source)] = em.digest(source)
+    if set(groups) != set(required):
+        return {}
+    return {"schema": "vibeic/composite-gate-execution/1", "worker_component": "release-producer",
+            "worker_source": str(HERE / "execution_release_worker.py"),
+            "receipt_name": "release-evidence.json", "receipt_sha256": report_sha,
+            "required_gates": required, "gate_records": groups, "gate_sources": sources}
 
 
 def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
@@ -157,8 +194,11 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
         "PASS" if report.get("qualification") == "PASS" and not report.get("missing_outputs") and
         (not native_required or native_verdicts and all(v == "PASS" for v in native_verdicts))
         else "NOT_MEASURED")
+    composite = _composite_gate_execution(outputs, binding, report, outputs_hashes["release-evidence.json"])
     return em.Evidence(binding, verdict, gates, outputs_hashes,
-                       detail=str(report.get("reason", "")))
+                       metrics={"canonical_evidence": int(verdict == "PASS" and bool(composite))},
+                       detail=str(report.get("reason", "")),
+                       provenance={"composite_gate_execution": composite} if composite else {})
 
 
 def _native_finite(value, field):
@@ -373,7 +413,9 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
                                                  "; native qualification NOT_MEASURED" if not external else
                                                  "external handoff classification only; no software producer"),
         available=available and not unavailable and not external, availability_reason=reason,
-        cpus=1, ram_mb=256,
+        # Native OpenROAD reserves about 3.43 GiB of virtual address space
+        # before reading the clock plan (EDA 0.4.1); Controller enforces RLIMIT_AS.
+        cpus=1, ram_mb=4096 if step_id == "16" else 256,
         role=role,
         own_no_tool_reason="One complete release producer owns the row; physical/external evidence remains outside software.",
     )

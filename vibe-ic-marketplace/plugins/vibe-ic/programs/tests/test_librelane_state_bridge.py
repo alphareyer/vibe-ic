@@ -37,6 +37,8 @@ def write(path, text):
 @pytest.fixture(autouse=True)
 def _fresh_capability_cache(monkeypatch):
     # raising=False: the pre-T89 contract has no cache, and must still run each test
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
@@ -729,7 +731,11 @@ def test_overlay_joins_the_design_config_with_its_source(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
 
     def resolver(cmd, **_):
-        design, requested, root = Path(cmd[-5]), Path(cmd[-4]), Path(cmd[-3])
+        # Match the resolver's six explicit arguments, including image identity.
+        values = cmd[cmd.index('-c') + 2:]
+        assert len(values) == 6, values
+        assert values[-1] == cmd[cmd.index('-c') - 1]
+        design, requested, root = map(Path, values[:3])
         for step in json.loads(requested.read_text()):
             put(root / f'{step}.json', {**json.loads(design.read_text()), 'meta': {'step': step}})
             put(root / f'{step}.views.json', {'step': step, 'inputs': ['odb'], 'outputs': []})

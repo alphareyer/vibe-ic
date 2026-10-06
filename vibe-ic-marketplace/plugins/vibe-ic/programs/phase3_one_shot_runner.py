@@ -17347,16 +17347,32 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             raise _ll.Refusal("LL_SYNTH_AREA_UNMEASURED", str(stat))
         _ll.verify_synthesis_stat(stat, state, Path(stats), top,
                                   folder / "stat_binding_gate.json")
+        area_report = folder / "area_budget_gate.json"
+        area_report.unlink(missing_ok=True)
         gate = subprocess.run([sys.executable,
                                str(PROGRAMS_DIR / "area_total_vs_budget_check.py"),
-                               str(project),
+                               str(project), "--json", str(area_report),
                                *_area_receipt_flags(area_receipt, area_run_manifest)],
                               capture_output=True, text=True)
-        if gate.returncode != 0:
+        if gate.returncode not in (0, 2):
             return StepResult("synth", "FAIL", time.time() - t0,
                               f"area_total_vs_budget_check rc={gate.returncode}: "
                               + gate.stdout[-500:],
                               [str(netlist), str(stat), str(stats)])
+        # rc 2 means no comparison, not a measured synthesis failure. Still
+        # judge the native product: a real netlist/PDK/provenance failure must
+        # not be hidden behind the unresolved area authority. The completed
+        # step remains NOT_MEASURED, so Step9 adoption and final signoff cannot
+        # credit the missing comparison. Require the gate's typed report; an
+        # argument error or missing checker also exits 2 but proves nothing.
+        area_incomplete = gate.returncode == 2
+        if area_incomplete:
+            try:
+                area_result = json.loads(area_report.read_text())
+            except (OSError, ValueError) as exc:
+                raise _ll.Refusal("LL_SYNTH_AREA_REPORT_INVALID", str(exc)) from exc
+            if not isinstance(area_result, dict) or area_result.get("verdict") != "INCOMPLETE":
+                raise _ll.Refusal("LL_SYNTH_AREA_REPORT_INVALID", str(area_result))
         netlist_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "synth_netlist_check.py"),
              "--netlist", str(netlist), "--tool-netlist", str(source),
@@ -17396,13 +17412,19 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         _log_surviving_artefact([str(netlist.parent / "netlist.v")],
                                 produced_by="LibreLane.Yosys.Synthesis",
                                 tool="yosys", exit_code=0)
-        return StepResult("synth", "PASS", time.time() - t0,
+        return StepResult("synth", "NOT_MEASURED" if area_incomplete else "PASS",
+                          time.time() - t0,
                           f"LibreLane Yosys.Synthesis: {netlist.name}; "
                           f"area gate rc={gate.returncode}; "
                           f"pdk gate rc={pdk_gate.returncode}; "
                           "netlist/provenance/handoff gates rc=0; "
-                          "LibreLane netlist checkers ran",
-                          [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
+                          "LibreLane netlist checkers ran"
+                          + ("; area comparison INCOMPLETE: " + gate.stdout[-500:]
+                             if area_incomplete else ""),
+                          [str(netlist), str(stat), str(stats), str(folder / "state_out.json"),
+                           str(area_report)],
+                          extras={"area_budget_rc": gate.returncode},
+                          reason_class="inconclusive" if area_incomplete else "")
     except (_ll.Refusal, OSError, ValueError) as exc:
         stopped = (_ll.tool_stop_reason(exc.code)
                    if isinstance(exc, _ll.Refusal) else None)
@@ -17420,9 +17442,8 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     every yosys command below is byte-identical to what it was, so a run that
     never overflows its die cannot tell this parameter exists.
     """
-    # The current fixed-row dispatcher owns Ultra execution and AI adoption.
-    # Default has no ordinary runtime and falls through to the unchanged
-    # native-mode/area-retry implementation below.
+    # Issued Default/Ultra execution prepares Step9 from current producer
+    # outputs here. Unissued helpers retain the native implementation below.
     from execution_production import dispatch_site
     _step9 = dispatch_site(("9",), project, {
         "top": top, "pdk": pdk, "container": container,
@@ -57411,7 +57432,13 @@ def _layout_basis(project: Path, top: str, pdk: PdkConfig,
     """Content identity of the routed basis, with the shipped GDS when frozen."""
     import _step_identity as _si
     pnr = _pl.pnr_dir(project)
-    netlist = pnr_input_netlist(project, top)[0]
+    try:
+        netlist = pnr_input_netlist(project, top)[0]
+    except ValueError as exc:
+        # A missing/invalid synthesis handoff cannot identify a cached layout.
+        # Keep the refusal as data so the runner records its failed synthesis
+        # and downstream steps instead of aborting before report publication.
+        return "", str(exc)
     paths = {"def": pnr / "routed.def", "netlist": netlist,
              "sdc": pnr / "constraint.sdc"}
     missing = [f"{name}: {path}" for name, path in paths.items()
@@ -77535,6 +77562,24 @@ def _postcheck_step(project: Path, top: str, pdk: Any,
                       reason_class=reason)
 
 
+def _backend_parameter_values(project: Path, pdk: Optional[PdkConfig]) -> Dict[str, str]:
+    """Resolve the image and PDK root for the canonical backend registry.
+
+    Backend producers are source-owned, but they still need the same runtime
+    identities as the concrete Phase-3 tools.  Keeping this resolution at the
+    front door binds the producer parameters to the current run instead of
+    letting a later adapter invocation fail with an unbound envelope.
+    """
+    if pdk is None:
+        return {}
+    import librelane_contract as _ll
+    image = _ll.resolve_image(project)
+    pdk_root = _ll.pdk_root_resolution(
+        project, str(pdk.name), image=image)["path"]
+    return {"pdk_name": str(pdk.name), "image_id": image,
+            "pdk_root": str(pdk_root)}
+
+
 @_restores_the_container_env
 def main() -> int:
     p = argparse.ArgumentParser()
@@ -77746,9 +77791,22 @@ def main() -> int:
     args.util = norm_util
 
     pdk = _detect_pdk(project, args.pdk)
+    backend_parameters = {}
+    if pdk is not None:
+        import librelane_contract as _ll
+        try:
+            backend_parameters = _backend_parameter_values(project, pdk)
+        except _ll.Refusal as exc:
+            print(f"REFUSED: backend runtime binding: {exc}", file=sys.stderr)
+            return 2
     _execution.bootstrap(project, parameters={'top': args.top_name, 'pdk': pdk,
         'design_name': args.top_name, 'pdk_name': args.pdk, 'container': args.container,
-        'die_um': args.die_um, 'util': args.util})
+        'die_um': args.die_um, 'util': args.util, **backend_parameters,
+        # This process dispatches the backend, including resumed windows.
+        # Analog A-track producers belong to their separate runner; registering
+        # them here incorrectly requires a new Phase-1 analog declaration.
+        # Backend macro/interface checks still consume their required views.
+        'skip_analog': True})
     if pdk is None:
         print("[SKIP] phase3_one_shot_runner: no usable PDK detected. "
               "Provide input/pdk/{liberty,lef}/ or use --pdk sky130A.")

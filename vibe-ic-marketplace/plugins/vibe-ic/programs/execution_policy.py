@@ -439,10 +439,15 @@ def _register_analog_adapters(registry, project: Path, source_sha: str,
         registry, project=project, source_sha=source_sha)
 
 
-def bootstrap(project: Path, *, parameters: dict | None = None):
+def bootstrap(project: Path, *, parameters: dict | None = None,
+              phase1_only: bool = False):
     global _ordinary_runtime
     value = request()
-    if value['mode'] == 'default':
+    # Keep imported/default helpers observationally inert, but let the live
+    # canonical launcher bootstrap the same Controller for its program-default
+    # request.  The capability FD is the authority boundary; a caller-authored
+    # default environment must never construct a production registry.
+    if value['mode'] == 'default' and _CAPABILITY_FD_ENV not in os.environ:
         return None
     from execution_authority import consume
     import execution_modes as em
@@ -455,7 +460,8 @@ def bootstrap(project: Path, *, parameters: dict | None = None):
     route = issued['route']
     if route['project'] != str(project):
         raise Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
-    identity = (str(project), value['request_digest'], route['source_sha'])
+    identity = (str(project), value['request_digest'], route['source_sha'],
+                bool(phase1_only))
     if _ordinary_runtime is not None:
         if _ordinary_runtime['identity'] != identity:
             raise Refusal('ORDINARY_RUNTIME_REENTRY', str(project))
@@ -472,30 +478,35 @@ def bootstrap(project: Path, *, parameters: dict | None = None):
     snapshot = SourceSnapshot(em._REPO_ROOT, route['source_sha'])
     with using(snapshot):
         registry = em.Registry(snapshot=snapshot)
-        register_factories(registry, project=project, parameters=params)
-        common = dict(source_sha=route['source_sha'], path=route['ic_ip_path'],
-                      available=True, route_receipt=route, declaration=declaration)
-        register_backend_adapters(registry, **common, execution_mode=value['mode'], parameters={
-            k: v for k, v in params.items() if k in BACKEND_PARAMETER_DEFAULTS})
-        register_release_adapters(registry, **common, parameters={
-            k: v for k, v in params.items() if k in RELEASE_PARAMETER_DEFAULTS})
-        # ``--skip-analog`` is the canonical front door's explicit routing
-        # decision for a digital-only invocation.  Do not make that route
-        # manufacture an empty Phase-1 declaration merely so the Ultra
-        # Registry can be constructed.
-        _register_analog_adapters(registry, project, route['source_sha'], params)
-        from execution_adapters_mixed import register_mixed_adapters
-        register_mixed_adapters(registry, source_sha=route['source_sha'],
-            path=route['ic_ip_path'], project=project, parameters=params)
+        # Phase 1 owns only the route/declaration producer. Its later products
+        # cannot be prerequisites for entering that producer. Subsequent phase
+        # processes build their complete registry after those products exist.
+        register_factories(registry, project=project, parameters=params,
+                           step_ids=('0.5ic',) if phase1_only else None)
+        if not phase1_only:
+            common = dict(source_sha=route['source_sha'], path=route['ic_ip_path'],
+                          available=True, route_receipt=route, declaration=declaration)
+            register_backend_adapters(registry, **common, execution_mode=value['mode'], parameters={
+                k: v for k, v in params.items() if k in BACKEND_PARAMETER_DEFAULTS})
+            register_release_adapters(registry, **common, parameters={
+                k: v for k, v in params.items() if k in RELEASE_PARAMETER_DEFAULTS})
+            # ``--skip-analog`` is the canonical front door's explicit routing
+            # decision for a digital-only invocation.  Do not make that route
+            # manufacture an empty Phase-1 declaration merely so the Ultra
+            # Registry can be constructed.
+            _register_analog_adapters(registry, project, route['source_sha'], params)
+            from execution_adapters_mixed import register_mixed_adapters
+            register_mixed_adapters(registry, source_sha=route['source_sha'],
+                path=route['ic_ip_path'], project=project, parameters=params)
         controller = em.Controller(registry, Budget(value['cpus'], value['ram_mb'],
                              workers=value['workers'], licenses=value['licenses']))
     _ordinary_runtime = dict(identity=identity, project=project, policy=value,
         route=route, parameters=params, registry=registry, controller=controller,
-        contexts={}, bindings={}, runs={})
+        contexts={}, bindings={}, runs={}, phase1_only=bool(phase1_only))
     return _ordinary_runtime
 
 
-def _fixed_inputs(runtime, step_id: str) -> dict:
+def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     if str(step_id) == "9":
         from execution_production import current_step9_input_files
         issued = current_step9_input_files(runtime['project'])
@@ -508,8 +519,24 @@ def _fixed_inputs(runtime, step_id: str) -> dict:
         raise Refusal('UNKNOWN_CANONICAL_STEP', step_id)
     declarations = [r.get('path') for r in row.get('required_inputs', ()) if r.get('path')]
     declarations.extend(('input/step_0_5ic_answers.json', 'input/submission_template'))
+    if step_id == '0.5ic':
+        # Derived answers cite these original documents; their consumer must
+        # receive the same frozen bytes as the declaration producers.
+        declarations.append('input/docs')
+    if step_id == '0.5ic' and (parameters or {}).get('template'):
+        # Freeze only this invocation's declared template source. A missing
+        # searched directory remains valid for explicit absence routes.
+        declarations.append(parameters['template'])
     for arm in runtime['registry'].adapters(step_id):
         declarations.extend(arm.input_contract)
+    # Backend adapters publish one current synthesis receipt namespace per
+    # project.  Keep this dynamic set narrow; a static ``phase3/librelane``
+    # directory declaration would snapshot stale outputs from unrelated rows
+    # and could make the worker appear to consume its own prior result.
+    from execution_provider_catalog import BACKEND_IDS
+    if str(step_id) in BACKEND_IDS:
+        from execution_adapters_backend import backend_project_input_contract
+        declarations.extend(backend_project_input_contract(root, str(step_id)))
     inputs = {}
     for spec in declarations:
         for pattern in str(spec).split(' OR '):
@@ -670,6 +697,37 @@ def _wait_for_choice(context, run: Path, result: dict, response: Path,
         time.sleep(min(0.25, remaining))
 
 
+def _prepare_step9(runtime: dict, parameters: dict) -> None:
+    """Bind current producer outputs before the fixed Controller creates a plan."""
+    import execution_modes as em
+    import execution_production as production
+    project = runtime['project']
+    if (type(runtime['controller']) is not em.Controller or
+            runtime['controller'].registry is not runtime['registry']):
+        raise em.Refusal('PRODUCTION_CHILD_SCOPE_UNBOUND', 'ordinary live Controller required')
+    params = dict(runtime['parameters'], **parameters)
+    # A bootstrap resolver refusal cannot be erased by a later caller value.
+    if runtime['parameters'].get('pdk_refusal'):
+        params['pdk_refusal'] = runtime['parameters']['pdk_refusal']
+    identity = {key: params.get(key) for key in ('top', 'container', 'period_relax',
+                                                'declaration', 'pdk_refusal')}
+    identity['pdk'] = production._pdk_dict(params.get('pdk'))
+    if 'step9_dispatch_parameters' in runtime:
+        # Selection polls omit producer parameters; preserve the first dispatch
+        # values while refusing any explicitly changed value.
+        for key in identity:
+            if key not in parameters:
+                identity[key] = runtime['step9_dispatch_parameters'][key]
+        if identity != runtime['step9_dispatch_parameters']:
+            raise em.Refusal('STEP9_DISPATCH_PARAMETERS_CHANGED', '9')
+        production.current_step9_input_files(project)
+        return
+    if '9' in runtime['contexts'] or '9' in runtime['runs']:
+        raise em.Refusal('STEP9_BINDING_CLOSED', '9')
+    runtime['registry'].bind_step9(project=project, parameters=params)
+    runtime['step9_dispatch_parameters'] = identity
+
+
 def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
                         parameters=None, choice=None) -> dict | None:
     """Dispatch one caller-selected canonical row; gates/adoption remain Core's.
@@ -684,6 +742,8 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     runtime = _ordinary_runtime
     if Path(project).resolve() != runtime['project']:
         raise Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
+    if step_id == '9':
+        _prepare_step9(runtime, dict(parameters or {}))
     controller = runtime['controller']
     adapters = runtime['registry'].adapters(step_id)
     if not adapters:
@@ -703,13 +763,19 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         # Snapshot before Controller.run: the manager publishes only after
         # seeing this step's current request.
         baselines[step_id] = _choice_file_state(response_path, snapshot=True)
-    files = dict(inputs) if inputs is not None else _fixed_inputs(runtime, step_id)
+    parameters = dict(parameters or {})
+    if inputs is not None:
+        files = dict(inputs)
+    elif step_id == '0.5ic':
+        files = _fixed_inputs(runtime, step_id, parameters=parameters)
+    else:
+        files = _fixed_inputs(runtime, step_id)
     if not files:
         return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT', step_id=step_id, selected=None)
     frontend = all(a.tool_id == 'frontend-worker' for a in applicable)
     objective = (dict(parameters or {}) if step_id == '0.5ic' else
                  dict(runtime['parameters'], **dict(parameters or {}))) if frontend else dict(applicable[0].objective)
-    if frontend and step_id != '0.5ic':
+    if frontend:
         objective.setdefault('metric', 'source_boundary')
     context = em.Context(step_id, runtime['route']['source_sha'], files, objective,
         tuple(row['mandatory_gate_programs']), project_digest=runtime['route']['project_digest'],
@@ -726,7 +792,11 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         run, result = runtime['runs'][step_id]
     else:
         run = runtime['project'] / 'reports/execution' / runtime['policy']['request_receipt']['invocation_id'] / step_id
-        result = controller.run(context, run, 'ultra-mode')
+        mode_label = runtime['policy'].get('mode_label')
+        if mode_label is None:
+            mode_label = ('ultra-mode' if runtime['policy'].get('mode') == 'ultra'
+                          else 'default-mode')
+        result = controller.run(context, run, mode_label)
         runtime['contexts'][step_id] = context
         runtime['bindings'][step_id] = context.binding()
         runtime['runs'][step_id] = (run, result)
@@ -787,7 +857,39 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
     import step_preflight
     plan = step_preflight.RUNNER_PLANS.get(runner)
     span = dict(plan.sites).get(site, ()) if plan else ()
+    runtime = _ordinary_runtime
+    if (runtime.get('phase1_only') is True and runtime['policy']['mode'] == 'default'
+            and runner == 'phase1_one_shot_runner' and site == 'doc_extract'
+            and span == ('D1',)):
+        # This exact Default site keeps its established producer and expert
+        # handoff. It does not assert a qualified D1 Controller adapter.
+        from execution_authority import consume
+        issued = consume()
+        if Path(project).resolve() != runtime['project']:
+            raise Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
+        if (issued['request']['mode'] != 'default'
+                or issued['request'] != runtime['policy']['request_receipt']
+                or issued['route'] != runtime['route']
+                or runtime['identity'] != (str(runtime['project']),
+                    issued['request']['request_digest'], issued['route']['source_sha'], True)):
+            raise Refusal('REQUEST_CAPABILITY_INVALID', 'canonical Phase1 route changed')
+        runtime['canonical_phase1_producer'] = dict(
+            runner=runner, site=site, step_id='D1', mode='default',
+            source_sha=issued['route']['source_sha'],
+            request_digest=issued['request']['request_digest'],
+            route_digest=issued['route']['route_digest'],
+            controller_qualification='NOT_MEASURED')
+        return None
     return dispatch_ordinary_rows(project, span, site, refusal_factory)
+
+
+def phase1_producer_disclosure(project: Path) -> dict | None:
+    """Report an actual canonical-site selection, never Controller evidence."""
+    runtime = _ordinary_runtime
+    if runtime is None or Path(project).resolve() != runtime['project']:
+        return None
+    selected = runtime.get('canonical_phase1_producer')
+    return dict(selected) if selected is not None else None
 
 
 def dispatch_ordinary_rows(project, step_ids, site, result_factory):
@@ -805,5 +907,14 @@ def dispatch_ordinary_rows(project, step_ids, site, result_factory):
               else 'PASS' if all(r['status'] in ('ADOPTED', 'NOT_APPLICABLE') for r in results)
               else 'NOT_MEASURED')
     row = result_factory('Ultra fixed-row provider dispatch', {'execution_results': results})
+    # Some ordinary sites return a single runner row, while the Phase-2 DFT
+    # chain deliberately returns a one-element list so its caller can use
+    # ``plan.extend``.  Keep that site contract: mutating ``.status`` on the
+    # container itself turns a real DFT run into ``AttributeError: list has no
+    # attribute status`` after its producers have already run.
+    if isinstance(row, (list, tuple)):
+        for item in row:
+            item.status = status
+        return row
     row.status = status
     return row

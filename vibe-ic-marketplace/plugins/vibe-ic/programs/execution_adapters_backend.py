@@ -9,9 +9,9 @@ producer receipt and every downstream gate are observed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import ast
 import json
 import re
+import shlex
 from pathlib import Path
 import sys
 from typing import Mapping
@@ -20,6 +20,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import execution_modes as em
+from execution_source_snapshot import python_defined_symbols
 from execution_provider_catalog import (BACKEND_IDS, BACKEND_ROWS, coverage_rows,
                                         current_source_identity, current_source_tree_identity,
                                         source_closure, implementation_closure)
@@ -65,11 +66,9 @@ def _site_path(site: str) -> Path:
     if not module or not symbol or not path.is_file():
         raise em.Refusal("BACKEND_PRODUCER_SITE_MISSING", site)
     try:
-        tree = ast.parse(path.read_text())
+        symbols = python_defined_symbols(path.read_text())
     except (OSError, SyntaxError) as exc:
         raise em.Refusal("BACKEND_PRODUCER_SITE_UNREADABLE", site) from exc
-    symbols = {node.name for node in ast.walk(tree)
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
     if symbol not in symbols:
         raise em.Refusal("BACKEND_PRODUCER_SYMBOL_MISSING", site)
     return path
@@ -169,6 +168,73 @@ def _issue_direct_inputs(project, params, sid, extra):
     return complete
 
 
+def _composite_gate_execution(binding, result, report_sha):
+    """Project the canonical consumer ledger without inventing child processes."""
+    step = str(binding.get("step_id"))
+    required = list(binding.get("required_gates", ()))
+    summaries = {"backend_canonical", "backend_native_substance"}
+    if (step not in ROWS or result.get("schema") != "vibeic/backend-result/2" or
+            result.get("step_id") != step or result.get("source_sha") != binding.get("source_sha") or
+            result.get("producer_verdict") != "PASS" or result.get("verdict") != "PASS" or
+            result.get("missing_inputs") or result.get("missing_outputs") or
+            set(result.get("gates", {})) != set(required) | summaries or
+            any(result["gates"].get(name) != "PASS" for name in summaries) or
+            len(required) != len(set(required)) or
+            set(required) != set(ROWS[step]["portfolio_policy"]["mandatory_gate_programs"])):
+        return {}
+    producers = result.get("canonical_receipts")
+    if (not isinstance(producers, list) or not producers or any(
+            not isinstance(row, dict) or row.get("schema") != "vibeic/backend-producer-receipt/1" or
+            row.get("producer") != "execution_backend_producers.produce" or
+            row.get("step_id") != step or row.get("verdict") != "PASS" for row in producers)):
+        return {}
+    commands = []
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("program_exit_zero", "advisory_program_exit_zero", "optional_program_exit_zero"):
+                    command = value.get("command") if isinstance(value, dict) else value
+                    if isinstance(command, str):
+                        commands.append(command)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(ROWS[step]["canonical_row"].get("gate", {}))
+    if step == "20":
+        commands.append("hold_area_budget_check")
+    ledger = result.get("gate_ledger")
+    if not isinstance(ledger, list):
+        return {}
+    groups, sources = {}, {}
+    for gate in required:
+        if result.get("gates", {}).get(gate) != "PASS":
+            return {}
+        if gate == "backend_canonical":
+            groups[gate] = [{"consumer": "execution_backend_gates.evaluate", "ledger": ledger}]
+            source = HERE / "execution_backend_gates.py"
+        elif gate == "backend_native_substance":
+            groups[gate] = [{"producer_receipts": producers}]
+            source = HERE / "execution_backend_producers.py"
+        else:
+            expected = [cmd for cmd in commands if Path(shlex.split(cmd)[0]).stem == gate]
+            rows = [row for row in ledger if isinstance(row, dict) and row.get("gate") == gate]
+            if (not expected or sorted(row.get("cmd", "") for row in rows) != sorted(expected) or
+                    any(type(row.get("rc")) is not int or row["rc"] != 0 or
+                        row.get("verdict") != "PASS" or row.get("exit_code", 0) != 0 for row in rows)):
+                return {}
+            groups[gate] = rows
+            source = HERE / (gate + ".py")
+        if not source.is_file() or source.is_symlink():
+            return {}
+        sources[str(source)] = em.digest(source)
+    return {"schema": "vibeic/composite-gate-execution/1", "worker_component": "producer",
+            "worker_source": str(HERE / "execution_backend_worker.py"),
+            "receipt_name": "backend_result.json", "receipt_sha256": report_sha,
+            "required_gates": required, "gate_records": groups, "gate_sources": sources}
+
+
 def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gates: tuple[str, ...]) -> em.Evidence:
     """Read a provider receipt without treating rc0 or metadata as evidence."""
     path = outputs / "backend_result.json"
@@ -184,7 +250,10 @@ def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gate
     if result.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
                            detail="BACKEND_RESULT_UNBOUND")
-    observed = dict(result.get("gates") or {})
+    # The canonical worker also reports two composition summaries. Their FAIL
+    # was reduced above; they are supporting facts in the hash-bound report,
+    # not additional required gate invocations.
+    observed = {name: (result.get("gates") or {}).get(name, "NOT_MEASURED") for name in gates}
     status = "FAIL" if measured_fail else "NOT_MEASURED"
     if not measured_fail and result.get("producer_verdict") == "PASS" and all(
             observed.get(g) == "PASS" for g in gates) and (
@@ -201,8 +270,11 @@ def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gate
         else:
             return em.Evidence(binding, "NOT_MEASURED", observed, outputs_hashes,
                                detail="BACKEND_OUTPUT_UNMEASURED: " + str(name))
+    composite = _composite_gate_execution(binding, result, outputs_hashes["backend_result.json"])
     return em.Evidence(binding, status, observed, outputs_hashes,
-                       detail=str(result.get("detail", "")))
+                       metrics={"canonical_evidence": int(status == "PASS" and bool(composite))},
+                       detail=str(result.get("detail", "")),
+                       provenance={"composite_gate_execution": composite} if composite else {})
 
 
 def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
@@ -456,6 +528,13 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
         available = False
     params['execution_mode'] = execution_mode
     validator = _step37_validator("librelane") if spec["step_id"] == "37" else validate
+    # Backend producers are run in a clean arm directory.  The canonical
+    # runner consumes the already-issued Phase-1/2 and physical checkpoint;
+    # declaring only the row's terminal YAML inputs silently dropped that
+    # checkpoint and made the producer consult an ambient project path.  Keep
+    # the closure explicit and relative so the controller snapshots the exact
+    # bytes without granting the worker access to its parent project.
+    input_contract = _backend_input_contract(str(spec["step_id"]), spec)
     return em.Adapter(
         arm_id=str(spec["arm_id"]), tool_id="backend-worker", step_id=str(spec["step_id"]),
         source_sha=source_sha, source_files=source_files,
@@ -475,7 +554,94 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
                               else "" if available else "NATIVE_EXECUTION_NOT_MEASURED"),
         cpus=1, ram_mb=256, output_contract=output_contract,
         own_no_tool_reason="One complete producer owns all row outputs and gates; checker components are complementary.",
+        input_contract=input_contract,
     )
+
+
+def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the frozen project closure needed by a backend producer.
+
+    ``required_inputs`` are the row's gate contract, not the producer's full
+    source population.  The native PnR/streamout producer verifies the
+    current L-doc, RTL, synthesis receipt, and prior physical state; all of
+    those must be copied into the isolated worker.  These are project-relative
+    directory declarations, so ``execution_policy`` rejects traversal and
+    symlinks before issuing the manifest.  We deliberately exclude
+    ``reports/execution`` and the worker's own output tree.
+    """
+    row = spec.get("canonical_row", {})
+    declared = [str(item.get("path")) for item in row.get("required_inputs", ())
+                if isinstance(item, Mapping) and item.get("path")]
+    common = [
+        "input/docs", "input/project.json", "input/step_0_5ic_answers.json", "input/submission_template",
+        "phase1/generated_docs", "phase1/pdk_staging_read.json",
+        "phase1/merged_docs", "phase2/stage1/rtl", "phase2/stage2", "reports/phase2/dft",
+        "phase2/stage2/synth/synth_inputs.json", "phase3/librelane_switch.json",
+        "reports/pdk_via_patch_legalization.json",
+    ]
+    # PnR and streamout rows consume the current physical checkpoint.  Keep
+    # it separate from the generic synthesis closure so earlier rows do not
+    # accidentally claim a later output as an input.
+    if step_id in {"15.5ic", "17", "18", "19", "20", "21", "22",
+                   "23", "24", "26", "26.5ic", "27", "28", "29", "30",
+                   "31", "32", "33", "34", "37", "37.3"}:
+        common.append("phase3/stage3/pnr")
+    if step_id in {"22", "23", "24", "30", "31", "32", "33", "34", "37", "37.3"}:
+        common.extend(("phase3/stage3/extracted", "phase3/stage3/signoff"))
+    return tuple(dict.fromkeys((*declared, *common)))
+
+
+def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ...]:
+    """Add only the current synthesis receipt namespace to a worker manifest.
+
+    The static adapter contract cannot know the design's published synthesis
+    folder at registry construction time.  Resolve that binding from the
+    current project immediately before issuance instead of copying the whole
+    ``phase3/librelane`` output tree (which could include this step's stale
+    outputs).  Invalid declarations are left for the consumer's fail-closed
+    handoff check; this helper never invents a path or receipt.
+    """
+    root = Path(project).resolve(strict=True)
+    result: list[str] = []
+    sidecar = root / "phase2/stage2/synth/synth_inputs.json"
+    try:
+        doc = json.loads(sidecar.read_text())
+    except (OSError, ValueError, TypeError):
+        doc = {}
+    binding = doc.get("librelane_synthesis") if isinstance(doc, dict) else None
+    if isinstance(binding, dict):
+        folder_path = None
+        for key in ("folder", "mapped"):
+            value = binding.get(key)
+            if not isinstance(value, str):
+                continue
+            rel = Path(value)
+            if (not rel.is_absolute() and ".." not in rel.parts
+                    and rel.parts and (root / rel).resolve().is_relative_to(root)):
+                result.append(rel.as_posix())
+                if key == "folder":
+                    folder_path = root / rel
+        # The synthesis receipt's state_files can point to an earlier
+        # producer in the same LibreLane chain (for example the Yosys JSON
+        # header consumed by Yosys.Synthesis).  Include those exact relative
+        # files, rather than reopening the entire producer directory.
+        if folder_path is not None:
+            try:
+                receipt = json.loads((folder_path / "vibeic_receipt.json").read_text())
+                state_files = receipt.get("input", {}).get("state_files", {})
+            except (OSError, ValueError, TypeError):
+                state_files = {}
+            if isinstance(state_files, dict):
+                for raw in state_files:
+                    path = Path(str(raw))
+                    if (path.is_absolute() and path.is_relative_to(root)
+                            and ".." not in path.parts):
+                        result.append(path.relative_to(root).as_posix())
+    # The resolver validates the original producer state path from this
+    # receipt; the resolved config is its explicit input fingerprint.
+    if (root / "phase3/librelane/synthesis_resolved.json").is_file():
+        result.append("phase3/librelane/synthesis_resolved.json")
+    return tuple(dict.fromkeys(result))
 
 
 def register_backend_adapters(registry: em.Registry | None = None, *, source_sha: str,

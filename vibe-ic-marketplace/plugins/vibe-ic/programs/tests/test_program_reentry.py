@@ -198,7 +198,50 @@ def _declare_exit(run, step="2"):
     solve_path.write_text(json.dumps(solve))
 
 
-def _stuck(tmp_path, monkeypatch):
+def _historical_pending_repair(run, parent, challenge, output):
+    """Construct a legacy pending task; today's repair admission is not run.
+
+    The pre-contract Program could freeze transformed bytes despite a stale
+    author signature. An old version string on today's coordinator does not
+    recreate that behavior: today's ordinary resume correctly rejects it.
+    Only archive/task producers build this historical input to explicit
+    reentry. No validator is patched and nothing is accepted or published.
+    """
+    project = Path(parent["project"])
+    signed = bd._sha256_text(bd._candidate_text(bd._rtl_files(project)))
+    provenance, reasons = bd._validate_repair_record(
+        bd._repair_record_path(run, parent), parent, signed, challenge)
+    assert reasons == []
+    preserved = bd._archive_pre_gate_input(
+        run, parent["id"], bd._rtl_files(project), signed)
+    repair_input = bd._archive_repair_input(parent["id"], project, run, provenance)
+    working = bd._rtl_files(project)
+    assert len(working) == 1
+    working[0].write_text(output)
+    # This is explicitly historical fixture material, not a claim that the
+    # current source-bound repair collector admitted the transformed output.
+    got = {"id": parent["id"], "ok": True, "completion": output,
+           "rtl_gen": "NOT_APPLICABLE"}
+    task = bd._make_ai_review_task(
+        parent["id"], project, got, fx.ROUTING, 0, run, "AI_REPAIR",
+        verification_challenges=[challenge],
+        expected_public_input=parent["public_original_input"],
+        program_candidate=parent["program_candidate_snapshot"],
+        repair_parent_candidate=parent["candidate_snapshot"],
+        repair_provenance=provenance, repair_input_candidate=repair_input)
+    task["pre_gate_input"] = bd._bind_pre_gate_output(preserved, task["rtl_sha256"])
+    task["verification_execution"] = parent["verification_execution"]
+    bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    solve_path = run / "solve_report.json"
+    solve = json.loads(solve_path.read_text())
+    solve["results"][0].update(
+        candidate_origin="AI_REPAIR", awaiting_ai_review=True,
+        ai_repair_required=False, review_task=task["review_path"])
+    solve_path.write_text(json.dumps(solve))
+    return task
+
+
+def _stuck(tmp_path, monkeypatch, *, preserved_quote=None):
     """The exact stuck state: signed input, unwanted gate output, stale sig.
 
     The whole stuck state is produced while the OLD Program is running, so the
@@ -215,7 +258,7 @@ def _stuck(tmp_path, monkeypatch):
     got = bio.collect("rtllm", "p1", project)
     task = bd._make_ai_review_task("p1", project, got, fx.ROUTING, 0,
                                    run, "PROGRAM")
-    fx._solve_report(run, task)
+    fx._solve_report(run, task, active_route=True, exit_step="2")
     _declare_exit(run)
     fx._write_review(task, fx._proven_fail_review(task))
     assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
@@ -225,18 +268,22 @@ def _stuck(tmp_path, monkeypatch):
     # The author authors and SIGNS exactly these bytes.
     working.write_text(_SIGNED_RTL)
     signed = bd._sha256_text(bd._candidate_text(bd._rtl_files(project)))
-    fx._write_ai_repair_record(
+    author_record = fx._write_ai_repair_record(
         run, task, bd._validate_ai_review(task)["verified_challenge"])
     record_path = bd._repair_record_path(run, task)
+    if preserved_quote is not None:
+        author_record["repair_contract"]["preservation"]["sources"][0][
+            "preserved_executable_fragments"].append({"quote": preserved_quote})
+        record_path.write_text(json.dumps(author_record))
     signed_record = record_path.read_bytes()
 
-    # The gates normalize those bytes into something the author never signed.
-    _gate(monkeypatch, _UNWANTED)
-    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
-    stuck = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    stuck = _historical_pending_repair(
+        run, task, bd._validate_ai_review(task)["verified_challenge"], _UNWANTED)
     _declare_exit(run)
     # The Program is upgraded. Everything after this point runs on the fix.
     monkeypatch.undo()
+    _rt_pair.assume_matching_runtime_pair(monkeypatch)
+    monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "host")
     monkeypatch.setattr(bd, "_program_version", lambda: _NEW_PROGRAM,
                         raising=False)
     return run, stuck, signed, signed_record, record_path
@@ -259,7 +306,8 @@ def _request(run, task, signed, *, before=_OLD_PROGRAM, after=None, **over):
     return path, request
 
 
-def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
+def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2",
+          public_parameter=False):
     """The Program-transform entry state (the v1.17.71 fixture, re-pointed).
 
     Built under the OLD Program version so the merged operation's version-pair
@@ -270,6 +318,14 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
     run = tmp_path / "run"
     project = fx._project(tmp_path)
     rtl = project / "phase2/stage1/rtl/dut.v"
+    if public_parameter:
+        rtl.write_text(rtl.read_text().replace(
+            "module dut(", "module dut #(parameter MODE = 0)("))
+    # The legacy retry fixture also needs the exact public source precondition
+    # of its author contract; never infer that source from the later repair.
+    bio._stage_public_original(
+        "p1", (project / "input/phase1_prompt.md").read_text(),
+        {"dut.v": rtl.read_text()}, project)
     rtl.write_text(rtl.read_text().replace("y = a", "y = ~a"))
     parent = bd._make_ai_review_task("p1", project,
         fx.bio.collect("rtllm", "p1", project), fx.ROUTING, 0, run, "PROGRAM")
@@ -279,9 +335,15 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
     challenge = verdict["verified_challenge"]
     rtl.write_text(rtl.read_text().replace("y = ~a", "y = a"))
     signed = fx._write_ai_repair_record(run, parent, challenge)
+    if public_parameter:
+        matrix = signed["repair_contract"]["elaboration_matrix"]
+        matrix["supported_parameters"] = ["MODE"]
+        matrix["source_quotes"] = [{"quote": "parameter MODE = 0"}]
+        matrix["configurations"].append({"name": "mode_one", "parameters": {"MODE": 1}})
+        bd._repair_record_path(run, parent).write_text(json.dumps(signed))
     bd._archive_candidate("p1", project,
         {"id": "p1", "ok": True, "completion": rtl.read_text()}, run, "AI_REPAIR_INPUT")
-    fx._solve_report(run, parent)
+    fx._solve_report(run, parent, active_route=True, exit_step=exit_step)
     _declare_exit(run, exit_step)
     state = {"mode": "old", "calls": [], "on_run": None, "rc": 0}
     real_run = bd.subprocess.run
@@ -298,6 +360,8 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
             return SimpleNamespace(returncode=1)
         if state["mode"] in {"old", "still_transforms"}:
             current.write_text(current.read_text().replace("y = a", "y = 1'b0"))
+        if state["mode"] == "drop_parameter":
+            current.write_text(current.read_text().replace(" #(parameter MODE = 0)", ""))
         report = candidate / "reports/orchestrator/phase2_one_shot.json"
         report.parent.mkdir(parents=True, exist_ok=True)
         # R-0915-85 — the producer's word for a site upstream of --entry-step.
@@ -312,8 +376,8 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
         return SimpleNamespace(returncode=state["rc"])
 
     monkeypatch.setattr(bd.subprocess, "run", boundary)
-    assert bd.cmd_resume("rtllm", "/unused", str(run), worker_threads=1) == 2
-    task = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    task = _historical_pending_repair(
+        run, parent, challenge, rtl.read_text().replace("y = a", "y = 1'b0"))
     assert task["candidate_origin"] == "AI_REPAIR"
     assert task["rtl_sha256"] != signed["repaired_rtl_sha256"]
     assert bd.cmd_resume("rtllm", "/unused", str(run), worker_threads=1) == 2
@@ -324,6 +388,8 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
         fx._write_review(task, fx._proven_fail_review(task))
     # The Program is upgraded; everything after this point runs on the fix.
     monkeypatch.undo()
+    _rt_pair.assume_matching_runtime_pair(monkeypatch)
+    monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "host")
     monkeypatch.setattr(bd, "_program_version", lambda: _NEW_PROGRAM,
                         raising=False)
     monkeypatch.setattr(bd.subprocess, "run", boundary)
@@ -362,6 +428,34 @@ def _refusal(capsys):
 
 
 # ── the stuck state itself, and the refusal that must NOT be weakened ──
+
+@pytest.mark.parametrize("output", [_UNWANTED, _BENIGN])
+def test_current_ordinary_resume_refuses_mutation_of_the_signed_repair(
+        tmp_path, monkeypatch, output):
+    run, parent, _ = fx._task(tmp_path)
+    project = Path(parent["project"])
+    working = project / "phase2/stage1/rtl/dut.v"
+    working.write_text(_SIGNED_RTL.replace("y = a", "y = ~a"))
+    parent = bd._make_ai_review_task(
+        "p1", project, bio.collect("rtllm", "p1", project), fx.ROUTING, 0,
+        run, "PROGRAM")
+    fx._solve_report(run, parent, active_route=True, exit_step="2")
+    fx._write_review(parent, fx._proven_fail_review(parent))
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    challenge = bd._validate_ai_review(parent)["verified_challenge"]
+    working.write_text(_SIGNED_RTL)
+    fx._write_ai_repair_record(run, parent, challenge)
+    record = bd._repair_record_path(run, parent)
+    before = record.read_bytes()
+    _gate(monkeypatch, output)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST) == [parent]
+    refusal = bd._read_jsonl(run / bd._REPAIR_WORKLIST)[0]
+    assert refusal["status"] == "PROGRAM_GATES_REJECTED_AI_REPAIR"
+    assert "CANDIDATE_HASH_MISMATCH" in json.dumps(refusal["reasons"])
+    assert record.read_bytes() == before
+    assert not Path(parent["response_path"]).exists()
+
 
 def test_the_gate_boundary_records_the_signed_input_and_its_output(
         tmp_path, monkeypatch):
@@ -433,6 +527,16 @@ def test_a_fixed_program_regates_from_the_preserved_signed_input(
     assert regate.get("author_signature_unchanged") is True
     assert regate.get("repair_authorized") is False
     assert bd._validate_embedded_repair_provenance(new) == []
+    declaration = json.loads(Path(regate["output_contract_path"]).read_text())
+    assert declaration["actor"] == "PROGRAM"
+    assert declaration["signed_input_sha256"] == signed
+    assert declaration["output_rtl_sha256"] == new["rtl_sha256"]
+    assert declaration["runner_invocation"] == new["program_verification"]["runner_invocation"]
+    assert declaration["repair_contract"]["author"]["kind"] == "PROGRAM"
+    original_matrix = new["repair_provenance"]["repair_contract"]["elaboration_matrix"]
+    derived_matrix = declaration["repair_contract"]["elaboration_matrix"]
+    assert {k: v for k, v in derived_matrix.items() if k != "candidate_sha256"} == {
+        k: v for k, v in original_matrix.items() if k != "candidate_sha256"}
 
     # No acceptance, no publication, and a FRESH independent review is owed.
     outcome = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
@@ -446,6 +550,87 @@ def test_a_fixed_program_regates_from_the_preserved_signed_input(
     assert {c["sha256"] for c in stuck["verification_challenges"]} <= \
         {c["sha256"] for c in new["verification_challenges"]}
     assert "PROGRAM_REGATE_APPLIED" in capsys.readouterr().out
+    if third_hash:
+        # Adoption of actual normalized bytes also consumes the independently
+        # bound PROGRAM declaration, but only AFTER a new semantic review.
+        fx._write_review(new, fx._valid_review(new))
+        assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+        assert json.loads(Path(new["response_path"]).read_text())["completion"] == fixed_output
+        assert record_path.read_bytes() == signed_record
+
+
+@pytest.mark.parametrize("damage", ["missing", "invocation", "output", "identity"])
+def test_transformation_evidence_cannot_be_missing_forged_or_stale(
+        tmp_path, monkeypatch, damage):
+    run, old, signed, signature, record_path = _stuck(tmp_path, monkeypatch)
+    request, _ = _request(run, old, signed)
+    _gate(monkeypatch, _BENIGN)
+    assert _resume(run, request) == 2
+    new = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    assert bd._signed_candidate_hash(new) == signed != new["rtl_sha256"]
+    declaration_path = Path(new["program_regate"]["output_contract_path"])
+    if damage == "missing":
+        declaration_path.unlink()
+    elif damage == "output":
+        Path(new["working_rtl_paths"][0]).write_text(_UNWANTED)
+    else:
+        declaration = json.loads(declaration_path.read_text())
+        if damage == "invocation":
+            declaration["runner_invocation"]["invocation_id"] = "forged"
+        else:
+            declaration["program_identity"] = {"source_sha256": "0" * 64}
+        declaration_path.write_text(json.dumps(declaration))
+    assert bd._verified_program_regate(new) is None
+    assert bd._signed_candidate_hash(new) == new["rtl_sha256"]
+    assert bd._validate_embedded_repair_provenance(new)
+    assert record_path.read_bytes() == signature
+    assert not Path(new["response_path"]).exists()
+
+
+def test_a_byte_mutated_preimage_cannot_hide_behind_text_hashes(
+        tmp_path, monkeypatch, capsys):
+    run, old, signed, signature, record_path = _stuck(tmp_path, monkeypatch)
+    candidate = old["repair_input_candidate_snapshot"]
+    preserved = json.loads(Path(old["pre_gate_input"]["input_manifest_path"]).read_text())
+    # Both archives still have the same normalized text/aggregate hash, but
+    # their bytes no longer equal the immutable per-file author declaration.
+    for path in [*candidate["rtl_paths"], *preserved["rtl_paths"]]:
+        source = Path(path)
+        source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+    assert bd._sha256_text(bd._candidate_text(list(map(Path, candidate["rtl_paths"])))) == signed
+    request, _ = _request(run, old, signed)
+    calls = _gate(monkeypatch, _SIGNED_RTL)
+    assert _resume(run, request) == 2
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST) == [old]
+    assert calls == []
+    assert "signed preimage byte binding mismatch" in _refusal(capsys)
+    assert record_path.read_bytes() == signature
+
+
+def test_program_output_must_preserve_the_author_declared_source_fragment(
+        tmp_path, monkeypatch, capsys):
+    run, old, signed, signature, record_path = _stuck(
+        tmp_path, monkeypatch, preserved_quote="assign y = a;")
+    request, _ = _request(run, old, signed)
+    before = _protected(run, old)
+    _gate(monkeypatch, _SIGNED_RTL.replace("y = a", "y = 1'b0"))
+    assert _resume(run, request) == 2
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST) == [old]
+    assert _protected(run, old) == before
+    assert "FRAGMENT" in _refusal(capsys)
+    assert record_path.read_bytes() == signature
+
+
+def test_program_output_cannot_drop_a_public_parameter_configuration(
+        tmp_path, monkeypatch, capsys):
+    run, old, request, _, state = _case(tmp_path, monkeypatch, public_parameter=True)
+    before = _protected(run, old)
+    state["mode"] = "drop_parameter"
+    assert _resume(run, request) == 2
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST) == [old]
+    assert _protected(run, old) == before
+    assert "SUPPORTED_PARAMETER_REMOVED" in _refusal(capsys)
+    assert not Path(old["response_path"]).exists()
 
 
 def test_the_transition_is_reconstructable_from_records_alone(
@@ -671,7 +856,7 @@ def test_a_concurrent_coordinator_refuses_the_regate(
 def test_a_non_repair_candidate_cannot_be_regated(
         tmp_path, monkeypatch, capsys):
     run, task, _ = fx._task(tmp_path)
-    fx._solve_report(run, task)
+    fx._solve_report(run, task, active_route=True, exit_step="2")
     _declare_exit(run)
     fx._write_review(task, fx._valid_review(task))
     request = {
@@ -790,7 +975,8 @@ _DRIFT_GUARD = {
     # check, which is the guard that owns those bytes.
     "input": "candidate snapshot RTL bytes do not match completion",
     "parent": "candidate snapshot RTL bytes do not match completion",
-    "prompt": "prompt drift",
+    # Current D1 admission owns prompt freshness before the local regate guard.
+    "prompt": "ROUTE_REENTRY_D1_INVALID: D1_CURRENT_PROMPT_PROVENANCE_MISMATCH",
     "challenge": "inherited challenge drift",
     "accepted": "task must be unaccepted",
     "accepted_ledger": "candidate already accepted",
@@ -1479,9 +1665,16 @@ def test_a_missing_or_unsupported_declared_exit_is_refused(
 def test_a_benchmark_with_no_bound_io_adapter_is_refused(
         tmp_path, monkeypatch, capsys):
     run, stuck, signed, path, request = _stuck_request(tmp_path, monkeypatch)
+    before = _protected(run, stuck)
+    calls = _gate(monkeypatch, _BENIGN)
     assert bd.cmd_resume("not-a-benchmark", "/unused", str(run),
                          worker_threads=1, program_regate=str(path)) == 2
-    assert "no bound IO adapter" in _refusal(capsys)
+    # Public continuation rejects an unknown benchmark at immutable I/O
+    # admission, before the explicit operation can inspect any repair bytes.
+    assert "IO_FORMAT_BINDING_REFUSED: continuation differs from issued I/O format" in capsys.readouterr().err
+    assert _protected(run, stuck) == before
+    assert calls == []
+    assert not (run / "program_regates").exists()
 
 
 # --- the preserved input, in both its records --------------------------
@@ -1657,12 +1850,14 @@ def test_a_task_that_also_has_a_pending_ai_backup_is_refused(
 # staged copy that did not come out as the signed input.  That is what the
 # refusal is for; reaching it any other way would not be reaching it.
 
-def _candidate_root(run, request_path, staged):
+def _candidate_root(run, request_path, collected):
     """The fresh snapshot path the operation is about to claim."""
     key = "program-regate-" + bd._sha256_text(Path(request_path).read_text())
-    got = fx.bio.collect("rtllm", "p1", Path(staged), supplied_rtl=True)
+    # Use the actual contract-validated Program output. A second collection
+    # without its derived repair contract can refuse and hash empty output.
+    assert collected["ok"], collected
     return (Path(run) / "candidate_snapshots" / "p1"
-            / f"{key}-{bd._sha256_text(str(got.get('completion') or ''))}")
+            / f"{key}-{bd._sha256_text(collected['completion'])}")
 
 
 def test_a_staged_copy_that_is_not_the_signed_input_is_refused(
@@ -1671,14 +1866,14 @@ def test_a_staged_copy_that_is_not_the_signed_input_is_refused(
     signed". If the staged tree does not hash to those bytes, whatever is
     about to be re-run is not the signed input."""
     run, old, path, request, state = _case(tmp_path, monkeypatch)
-    real = bd._atomic_write_text
+    real = bd._atomic_write_bytes
 
-    def corrupt(target, text):
+    def corrupt(target, raw):
         if "staged_project" in str(target):
-            text = text + "\n// a concurrent writer\n"
-        return real(target, text)
+            raw = raw + b"\n// a concurrent writer\n"
+        return real(target, raw)
 
-    monkeypatch.setattr(bd, "_atomic_write_text", corrupt)
+    monkeypatch.setattr(bd, "_atomic_write_bytes", corrupt)
     before = _protected(run, old)
     assert _resume(run, path) == 2
     assert "staged work tree does not hash to the signed input" in _refusal(capsys)
@@ -1706,10 +1901,14 @@ def test_an_occupied_fresh_candidate_snapshot_is_refused(
         tmp_path, monkeypatch, capsys):
     run, old, path, request, state = _case(tmp_path, monkeypatch)
 
-    def occupy(staged):
-        _candidate_root(run, path, staged).mkdir(parents=True, exist_ok=True)
+    real = bd._collect_runner_result
 
-    state["on_run"] = occupy
+    def collect_then_occupy(*args, **kwargs):
+        collected = real(*args, **kwargs)
+        _candidate_root(run, path, collected).mkdir(parents=True, exist_ok=True)
+        return collected
+
+    monkeypatch.setattr(bd, "_collect_runner_result", collect_then_occupy)
     before = _protected(run, old)
     assert _resume(run, path) == 2
     assert "occupied fresh candidate snapshot" in _refusal(capsys)
@@ -1773,7 +1972,9 @@ def test_a_candidate_snapshot_claimed_during_preparation_is_refused(
         result = real(*args, **kwargs)
         source, target = args[0], args[1]
         if Path(target).name == "promotion_project":
-            _candidate_root(run, path, source).mkdir(parents=True, exist_ok=True)
+            collected = json.loads(
+                (Path(source).parent / "runner_result.json").read_text())["collected"]
+            _candidate_root(run, path, collected).mkdir(parents=True, exist_ok=True)
         return result
 
     monkeypatch.setattr(bd.shutil, "copytree", copy_then_claim)

@@ -133,15 +133,12 @@ def _source_closure(seeds):
         if path in seen or not path.is_file() or path.is_symlink():
             continue
         seen[path]=None
-        try: tree=ast.parse(snapshot.read_text(path) if snapshot is not None else path.read_text())
+        from execution_source_snapshot import python_import_syntax
+        try: imports=python_import_syntax(snapshot.read_text(path) if snapshot is not None else path.read_text())
         except (OSError, SyntaxError):
             continue
-        for node in ast.walk(tree):
-            names=[]
-            if isinstance(node, ast.Import):
-                names=[alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names=[node.module]
+        for kind, _level, module, aliases, _optional in imports:
+            names = aliases if kind == 'import' else (module,) if kind == 'from' and module else ()
             for name in names:
                 candidate=root / (name.replace('.', '/') + '.py')
                 if candidate.is_file():
@@ -203,6 +200,8 @@ def _gate_verdict(program, path):
         doc=json.loads(path.read_text())
         if program == 'submission_template_check':
             verdict=doc['check']['verdict']
+            if verdict == 'NOT_APPLICABLE':
+                return verdict
         else:
             verdict=doc['verdict']
         if verdict not in ('PASS','FAIL'):
@@ -225,8 +224,9 @@ def _run_gate(program, root, source_dir):
         except OSError:
             return 'NOT_MEASURED'
         verdict=_gate_verdict(program, report) if report.is_file() else 'NOT_MEASURED'
-        if cp.returncode == 0 and verdict == 'PASS':
-            return 'PASS'
+        if cp.returncode == 0 and (verdict == 'PASS' or (
+                program == 'submission_template_check' and verdict == 'NOT_APPLICABLE')):
+            return verdict
         if cp.returncode != 0 and verdict == 'FAIL':
             return 'FAIL'
         return 'NOT_MEASURED'
@@ -287,6 +287,39 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             required=tuple(contract.get('required_outputs') or ())
             concrete=_concrete_outputs(root, required)
             artifacts={rel:digest(root/rel) for rel in concrete}
+            if _row == 'D1':
+                # This worker reaches the real Phase-1 expert handoff, but its
+                # canonical outputs/gates are not connected to adoption yet.
+                # Never apply Step 8's SDC reports to these 32 D1 obligations.
+                canonical = root / 'canonical.json'
+                record = None
+                if canonical.is_file() and not canonical.is_symlink():
+                    artifacts = {'canonical.json': digest(canonical)}
+                    try:
+                        record = json.loads(canonical.read_text())
+                    except (OSError, ValueError, TypeError):
+                        pass
+                else:
+                    artifacts = {}
+                producer = record.get('producer_result') if isinstance(record, dict) else None
+                typed = (isinstance(record, dict) and
+                         record.get('schema') == 'frontend_worker_output/1' and
+                         record.get('step_id') == 'D1' and
+                         record.get('producer') == 'phase1_one_shot_runner._run_docs_mode+run_phase1_second_track' and
+                         record.get('result') == 'NOT_MEASURED' and
+                         isinstance(producer, dict) and
+                         producer.get('name') == 'phase1' and
+                         producer.get('status') in ('PASS', 'FAIL', 'NOT_MEASURED',
+                                                    'NOT_APPLICABLE', 'INCOMPLETE') and
+                         type(producer.get('duration_s')) in (int, float) and
+                         isinstance(producer.get('detail'), str) and
+                         isinstance(producer.get('extras'), dict) and
+                         isinstance(producer.get('reason_class'), str))
+                verdict = 'FAIL' if typed and producer['status'] == 'FAIL' else 'NOT_MEASURED'
+                return Evidence(facts, verdict,
+                                {name: 'NOT_MEASURED' for name in _gate_names}, artifacts,
+                                detail=('D1_CANONICAL_HANDOFF_NOT_CONNECTED' if typed else
+                                        'D1_CANONICAL_RECORD_MISSING_OR_INVALID'))
             if _row == '0.5ic':
                 try:
                     before_chain = em.consume_frontend_chain(root, facts)
@@ -316,7 +349,8 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                     verdict='FAIL'
                 elif (step_status == 'PASS' and gates and
                       chain is not None and
-                      all(value == 'PASS' for value in gates.values()) and
+                      all(em.required_gate_satisfied(_row, name, value)
+                          for name, value in gates.items()) and
                       all(any(fnmatch.fnmatch(rel, alt.strip())
                               for rel in artifacts
                               for alt in str(spec).split(' OR '))
@@ -378,8 +412,12 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                           capture_output=True).returncode != 0:
             raise ValueError('frontend provider source is dirty; refusing registration')
         objective={'parameters_from':'issued_manifest'}
+        # 0.5ic runs two sequential producers plus their source-bound snapshots
+        # and receipts. Give that composite a bounded execution budget; each
+        # independent quality gate keeps the normal component deadline.
+        worker_budget = {'timeout_s': 120} if row == '0.5ic' else {}
         components = [Component('frontend_worker', ('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}',
-                       *(('--manifest','{inputs}/issued_manifest.json') if row == '8' else ())))]
+                       *(('--manifest','{inputs}/issued_manifest.json') if row == '8' else ())), **worker_budget)]
         if row in ('0.5ic', '8'):
             def commands(node):
                 if isinstance(node, dict):
@@ -392,14 +430,25 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                     for value in node: yield from commands(value)
             declared = {shlex.split(command)[0]: shlex.split(command) for command in commands(contract.get('gate', {}))}
             for gate in portfolio_gates:
-                parts = declared[gate]
+                parts = list(declared[gate])
+                if row == '0.5ic':
+                    # The producer chain binds its reports through adoption.
+                    # These gates read them; their own receipts have a separate
+                    # destination so validation cannot overwrite signed bytes.
+                    parts[parts.index('--json') + 1] = (
+                        'reports/execution_gates/' + gate + '.json')
                 argv = ('python3',str(source_path.with_name(gate+'.py')),
                         *('{outputs}' if value == '.' else value for value in parts[1:]))
                 components.append(Component(gate, argv))
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,tuple(components),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row] + (('phase2/stage1/rtl', 'reports/phase2/cdc/crossing.json') if row == '8' else ())))
+        # Issued D1 workers inherit the Controller VM (~569 MiB measured)
+        # before Phase-1 parsing (~202 MiB in a clean process). Reserve bounded
+        # headroom for both; other adapters retain their existing defaults.
+        resources = {'ram_mb': 1024} if row == 'D1' else {}
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,tuple(components),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row] + (('phase2/stage1/rtl', 'reports/phase2/cdc/crossing.json') if row == '8' else ()), **resources))
     if step_ids is None:
         from execution_production import register_synthesis_adapter
-        register_synthesis_adapter(registry, project=project, parameters=parameters)
+        register_synthesis_adapter(registry, project=project, parameters=parameters,
+                                   deferred=True)
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():

@@ -48,6 +48,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from programs.tests.test_execution_receipt_chain import real_entry, isolated_transport  # noqa: F401
 
 yaml = pytest.importorskip("yaml")
 
@@ -207,6 +208,7 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
     # owner route rule 2026-09-28 (ICROUTE)
     from _route_fixture import stage_owner_route
     stage_owner_route(proj, "ic")
+    real_entry('IC', 'default', proj)
 
     dispatched: list[str] = []
 
@@ -215,6 +217,8 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
         return 0
 
     monkeypatch.setattr(ORCH, "_run_phase", _record)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(ORCH, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
                          "--route", "ic", "--skip-phase1", "--no-dashboard"])
@@ -244,6 +248,7 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     # owner route rule 2026-09-28 (ICROUTE)
     from _route_fixture import stage_owner_route
     stage_owner_route(proj, "ic")
+    real_entry('IC', 'default', proj)
 
     producers = _declared_producers_of_top_lvs(tmp_path, monkeypatch)
 
@@ -251,6 +256,8 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
         return 1 if Path(runner).stem in producers else 0
 
     monkeypatch.setattr(ORCH, "_run_phase", _record)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(ORCH, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
                          "--route", "ic", "--skip-phase1", "--no-dashboard"])
@@ -333,6 +340,7 @@ def test_digital_only_run_dispatches_no_mixed_signal_merge(tmp_path,
     # owner route rule 2026-09-28 (ICROUTE)
     from _route_fixture import stage_owner_route
     stage_owner_route(proj, "ic")
+    real_entry('IC', 'default', proj)
 
     dispatched: list[str] = []
 
@@ -341,6 +349,8 @@ def test_digital_only_run_dispatches_no_mixed_signal_merge(tmp_path,
         return 0
 
     monkeypatch.setattr(ORCH, "_run_phase", _record)
+    # This bounded fixed-caller test owns the existing _run_phase transport seam.
+    monkeypatch.setattr(ORCH, "_controller_mixed_step", lambda *_args: None)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
                          "--route", "ic", "--skip-phase1", "--no-dashboard"])

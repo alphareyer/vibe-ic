@@ -55,41 +55,51 @@ def current_source_tree_identity() -> str:
 @lru_cache(maxsize=2048)
 def _import_names(text: str) -> tuple[str, ...]:
     """Cache syntax only; filesystem resolution must remain current."""
+    from execution_source_snapshot import python_import_syntax
     try:
-        tree = ast.parse(text)
+        imports = python_import_syntax(text)
     except (OSError, SyntaxError):
         return ()
     found: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            names = ([node.module] if node.module else
-                     [alias.name for alias in node.names])
-        elif (isinstance(node, ast.Call) and node.args and
-              (getattr(node.func, "attr", None) == "import_module" or
-               getattr(node.func, "id", None) == "__import__") and
-              isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
-            names = [node.args[0].value]
+    for kind, _level, module, names, _optional in imports:
+        if kind == 'import':
+            found.update(names)
+        elif kind == 'from':
+            found.update([module] if module else names)
         else:
-            continue
-        found.update(names)
+            found.add(module)
     return tuple(sorted(found))
 
 
 def _local_imports(path: str, text: str) -> tuple[Path, ...]:
-    """Resolve sibling helpers and literal imports against today's files."""
-    source = Path(path)
+    """Resolve live, or reuse a transaction whose path probes finalize afresh."""
+    from execution_source_snapshot import active
+    snapshot = active()
+    source = Path(path).absolute()
+    cache_key = ('provider-local-imports', str(source), text)
+    if snapshot is not None:
+        cached = snapshot.value_get(cache_key)
+        if cached is not None:
+            snapshot.stats['provider_import_hits'] += 1
+            return cached
+        snapshot.stats['provider_import_misses'] += 1
     found: set[Path] = set()
     for name in _import_names(text):
         base = name.split(".")[0]
         for directory in (source.parent, HERE):
             candidates = (directory / (base + ".py"), directory / base / "__init__.py")
-            local = [p for p in candidates if p.is_file() and not p.is_symlink()]
+            if snapshot is not None:
+                probes = [snapshot.import_candidate(p) for p in candidates]
+                local = [state[3] for state in probes if state[2] and not state[1]]
+            else:
+                local = [p.resolve() for p in candidates if p.is_file() and not p.is_symlink()]
             if local:
-                found.update(p.resolve() for p in local)
+                found.update(local)
                 break
-    return tuple(sorted(found))
+    result = tuple(sorted(found))
+    if snapshot is not None:
+        snapshot.value_put(cache_key, result)
+    return result
 
 
 def source_closure(paths: Iterable[Path]) -> set[Path]:
@@ -118,8 +128,9 @@ def source_closure(paths: Iterable[Path]) -> set[Path]:
         if path in seen or not path.is_file() or path.is_symlink():
             continue
         seen.add(path)
-        text = snapshot.read_text(path) if snapshot is not None else path.read_text()
-        pending.extend(_local_imports(str(path), text) if path.suffix == ".py" else ())
+        if path.suffix == ".py":
+            text = snapshot.read_text(path) if snapshot is not None else path.read_text()
+            pending.extend(_local_imports(str(path), text))
     if snapshot is not None:
         for path in seen:
             snapshot.read_bytes(path)
@@ -221,17 +232,14 @@ def python_entrypoint(argv: tuple[str, ...], cwd: Path | None) -> Path:
     Options that alter import resolution, inline code and module launch are
     deliberately unsupported. Refusal precedes launch and identity deduplication.
     """
-    index = 1
-    while index < len(argv) and argv[index].startswith('-'):
-        option = argv[index]
-        index += 1
-        if option == '--':
-            break
-        if option not in {'-B', '-u', '-q', '-O', '-OO'}:
-            raise ValueError(f'unsupported Python invocation: {option}')
-    if index >= len(argv):
-        raise ValueError('missing Python entrypoint')
-    path = Path(argv[index])
+    # Share registration's option/value parsing. Import-path-changing options
+    # remain outside this provider's modeled search policy.
+    from execution_modes import _python_entry, Refusal
+    try:
+        argument, _, _ = _python_entry(argv[1:], allowed_options="BuqOWX")
+    except Refusal as exc:
+        raise ValueError(f"unsupported Python invocation: {exc}") from exc
+    path = Path(argument)
     if not path.is_absolute():
         if cwd is None:
             raise ValueError('Python entrypoint needs execution cwd')
@@ -326,29 +334,15 @@ def _python_module(name: str, search: list[Path], package: str = '',
 @lru_cache(maxsize=2048)
 def _python_import_specs(text: str) -> tuple:
     """Cache syntax, never filesystem resolution or dependency bytes."""
-    tree = ast.parse(text)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    from execution_source_snapshot import python_import_syntax
     found = []
-    for node in ast.walk(tree):
-        optional_relative = False
-        if isinstance(node, ast.Import):
-            found.extend((a.name, 0, (), False) for a in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            parent = parents.get(node)
-            while parent is not None:
-                if isinstance(parent, ast.Try) and any(
-                        h.type is None or any(isinstance(n, ast.Name) and n.id in
-                            {'ImportError', 'ModuleNotFoundError', 'Exception', 'BaseException'}
-                            for n in ast.walk(h.type)) for h in parent.handlers):
-                    optional_relative = True
-                parent = parents.get(parent)
-            found.append((node.module or '', node.level,
-                          tuple(a.name for a in node.names), optional_relative))
-        elif (isinstance(node, ast.Call) and node.args and
-              (getattr(node.func, 'attr', None) == 'import_module' or
-               getattr(node.func, 'id', None) == '__import__') and
-              isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
-            found.append((node.args[0].value, 0, (), False))
+    for kind, level, module, names, optional_relative in python_import_syntax(text):
+        if kind == 'import':
+            found.extend((name, 0, (), False) for name in names)
+        elif kind == 'from':
+            found.append((module, level, names, optional_relative))
+        else:
+            found.append((module, 0, (), False))
     return tuple(found)
 
 
@@ -520,9 +514,12 @@ def proven_dispatcher_closure(entry: Path, dispatcher: Path, *,
         # matches the canonical worker, rather than merely matching entry bytes.
         actual_search = [entry.parent, *search]
         canonical_search = [dispatcher.parent, *search]
-        actual = implementation_closure(entry, cwd=cwd, search=actual_search) - {entry}
-        canonical = implementation_closure(dispatcher, cwd=cwd, search=canonical_search) - {dispatcher}
-        if actual != canonical:
+        actual = implementation_closure(entry, cwd=cwd, search=actual_search)
+        canonical = implementation_closure(dispatcher, cwd=cwd, search=canonical_search)
+        # Exact entry bytes were checked above. A transitive import may reach
+        # the canonical dispatcher again; normalize only that proven root pair.
+        # Every other dependency must still resolve to the identical file.
+        if (actual - {entry}) | {dispatcher} != canonical:
             raise ValueError(f'copied worker import resolution differs: {entry}')
         return {entry, dispatcher, *actual}
     visit(entry, entrypoint=True)

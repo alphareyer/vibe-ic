@@ -6,11 +6,53 @@ HEAD commit/tree and its initial bytes. It is never an execution-time authority.
 """
 from __future__ import annotations
 
+import ast
+from collections import deque
+from functools import lru_cache
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
 from pathlib import Path
 import subprocess
+
+
+@lru_cache(maxsize=2048)
+def python_import_syntax(content: str) -> tuple:
+    """Share immutable import syntax by exact source bytes, never path state.
+
+    Registration readers retain their own import grammars and resolve current
+    files independently. Keep only import records, rather than entire ASTs or
+    parent maps, so a bootstrap does not retain every parsed expression.
+    """
+    pending = deque([(ast.parse(content), False)])
+    found = []
+    while pending:
+        node, optional_relative = pending.popleft()
+        if isinstance(node, ast.Import):
+            found.append(('import', 0, '', tuple(a.name for a in node.names), False))
+        elif isinstance(node, ast.ImportFrom):
+            found.append(('from', node.level, node.module or '',
+                          tuple(a.name for a in node.names), optional_relative))
+        elif (isinstance(node, ast.Call) and node.args and
+              (getattr(node.func, 'attr', None) == 'import_module' or
+               getattr(node.func, 'id', None) == '__import__') and
+              isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            found.append(('dynamic', 0, node.args[0].value, (), False))
+        if isinstance(node, ast.Try):
+            optional_relative = optional_relative or any(
+                handler.type is None or any(
+                    isinstance(part, ast.Name) and part.id in
+                    {'ImportError', 'ModuleNotFoundError', 'Exception', 'BaseException'}
+                    for part in ast.walk(handler.type)) for handler in node.handlers)
+        pending.extend((child, optional_relative) for child in ast.iter_child_nodes(node))
+    return tuple(found)
+
+
+@lru_cache(maxsize=2048)
+def python_defined_symbols(content: str) -> frozenset[str]:
+    """Cache syntax only; callers must supply each current file's contents."""
+    return frozenset(node.name for node in ast.walk(ast.parse(content))
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
 
 
 _ACTIVE: ContextVar["SourceSnapshot | None"] = ContextVar(
@@ -35,14 +77,24 @@ class SourceSnapshot:
         self.repo = Path(repo).resolve()
         self.source_sha = source_sha
         self.stats = {"file_reads": 0, "final_reads": 0, "git_commands": 0,
-                      "git_tree_reads": 0, "closure_misses": 0, "closure_hits": 0}
+                      "git_tree_reads": 0, "closure_misses": 0, "closure_hits": 0,
+                      "path_resolutions": 0, "path_cache_hits": 0,
+                      "digest_computations": 0, "digest_cache_hits": 0,
+                      "blob_computations": 0, "blob_cache_hits": 0,
+                      "local_import_misses": 0, "local_import_hits": 0,
+                      "provider_import_misses": 0, "provider_import_hits": 0,
+                      "import_probes": 0, "import_probe_hits": 0}
         self.commit = self._git_text("rev-parse", "--verify", f"{source_sha}^{{commit}}")
         self.tree = self._git_text("rev-parse", "--verify", f"{self.commit}^{{tree}}")
         head = self._git_text("rev-parse", "HEAD")
         if head != self.commit:
             raise RuntimeError("SOURCE_AUTHORITY_STALE")
         self._bytes: dict[Path, bytes] = {}
-        self._spellings: set[Path] = set()
+        self._resolved: dict[Path, Path] = {}
+        self._relative: dict[Path, str | None] = {}
+        self._digests: dict[Path, str] = {}
+        self._blob_digests: dict[Path, str] = {}
+        self._import_candidates: dict[Path, tuple] = {}
         self._git_blobs: dict[str, str] | None = None
         self._closures: dict[object, frozenset[Path]] = {}
         self._values: dict[object, object] = {}
@@ -53,12 +105,43 @@ class SourceSnapshot:
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
                               capture_output=True, text=True, timeout=10).stdout.strip()
 
-    def read_bytes(self, path: Path) -> bytes:
+    def _resolve(self, path: Path) -> Path:
+        # These are transaction inputs, not execution-time authority. Finalize
+        # re-resolves every spelling and reads every captured file afresh.
         spelling = Path(path).absolute()
+        if spelling in self._resolved:
+            self.stats["path_cache_hits"] += 1
+            return self._resolved[spelling]
         if spelling.is_symlink() or not spelling.is_file():
             raise RuntimeError(f"SOURCE_AUTHORITY_UNAVAILABLE: {spelling}")
-        self._spellings.add(spelling)
-        path = spelling.resolve()
+        resolved = spelling.resolve()
+        self._resolved[spelling] = resolved
+        self.stats["path_resolutions"] += 1
+        return resolved
+
+    def _relative_name(self, path: Path) -> str | None:
+        if path not in self._relative:
+            self._relative[path] = (path.relative_to(self.repo).as_posix()
+                                    if path.is_relative_to(self.repo) else None)
+        return self._relative[path]
+
+    @staticmethod
+    def _import_path_state(path: Path) -> tuple:
+        # Include negative lookups and parent-link targets. Equal bytes at a
+        # new target cannot preserve the original module-resolution proof.
+        return (path.exists(), path.is_symlink(), path.is_file(), path.resolve())
+
+    def import_candidate(self, path: Path) -> tuple:
+        spelling = Path(path).absolute()
+        if spelling not in self._import_candidates:
+            self._import_candidates[spelling] = self._import_path_state(spelling)
+            self.stats["import_probes"] += 1
+        else:
+            self.stats["import_probe_hits"] += 1
+        return self._import_candidates[spelling]
+
+    def read_bytes(self, path: Path) -> bytes:
+        path = self._resolve(path)
         if path not in self._bytes:
             self._bytes[path] = path.read_bytes()
             self.stats["file_reads"] += 1
@@ -68,7 +151,13 @@ class SourceSnapshot:
         return self.read_bytes(path).decode()
 
     def digest(self, path: Path) -> str:
-        return hashlib.sha256(self.read_bytes(path)).hexdigest()
+        path = self._resolve(path)
+        if path not in self._digests:
+            self._digests[path] = hashlib.sha256(self.read_bytes(path)).hexdigest()
+            self.stats["digest_computations"] += 1
+        else:
+            self.stats["digest_cache_hits"] += 1
+        return self._digests[path]
 
     def closure_get(self, key):
         value = self._closures.get(key)
@@ -79,7 +168,7 @@ class SourceSnapshot:
         return set(value)
 
     def closure_put(self, key, paths):
-        self._closures[key] = frozenset(Path(p).resolve() for p in paths)
+        self._closures[key] = frozenset(self._resolve(p) for p in paths)
 
     def value_get(self, key):
         return self._values.get(key)
@@ -93,22 +182,27 @@ class SourceSnapshot:
         blobs = self._tree_blobs()
         result = {}
         for path in paths:
-            path = Path(path).resolve()
-            if not path.is_relative_to(self.repo):
+            path = self._resolve(path)
+            relative = self._relative_name(path)
+            if relative is None:
                 continue
-            relative = path.relative_to(self.repo).as_posix()
             if relative not in blobs:
                 raise RuntimeError(f"SOURCE_AUTHORITY_UNAVAILABLE: {relative}")
             result[str(path)] = blobs[relative]
         return result
 
     def verify_tracked(self, path: Path) -> None:
-        path = Path(path).resolve()
+        path = self._resolve(path)
         data = self.read_bytes(path)
-        if not path.is_relative_to(self.repo):
+        relative = self._relative_name(path)
+        if relative is None:
             return
-        relative = path.relative_to(self.repo).as_posix()
-        if self._tree_blobs().get(relative) != self._git_blob(data):
+        if path not in self._blob_digests:
+            self._blob_digests[path] = self._git_blob(data)
+            self.stats["blob_computations"] += 1
+        else:
+            self.stats["blob_cache_hits"] += 1
+        if self._tree_blobs().get(relative) != self._blob_digests[path]:
             raise RuntimeError(f"SOURCE_AUTHORITY_DIRTY: {path}")
 
     def _tree_blobs(self) -> dict[str, str]:
@@ -140,9 +234,14 @@ class SourceSnapshot:
                 self._git_text("rev-parse", "HEAD^{tree}") != self.tree):
             raise RuntimeError("SOURCE_AUTHORITY_STALE")
         blobs = self._tree_blobs()
-        for spelling in self._spellings:
+        for spelling, initial_state in self._import_candidates.items():
+            if self._import_path_state(spelling) != initial_state:
+                raise RuntimeError(f"SOURCE_AUTHORITY_DIRTY: import candidate {spelling}")
+        for spelling, initial_target in self._resolved.items():
             if spelling.is_symlink() or not spelling.is_file():
                 raise RuntimeError(f"SOURCE_AUTHORITY_UNAVAILABLE: {spelling}")
+            if spelling.resolve() != initial_target:
+                raise RuntimeError(f"SOURCE_AUTHORITY_DIRTY: {spelling}")
         for path, original in self._bytes.items():
             if path.is_symlink() or not path.is_file():
                 raise RuntimeError(f"SOURCE_AUTHORITY_UNAVAILABLE: {path}")

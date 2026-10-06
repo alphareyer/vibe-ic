@@ -101,9 +101,33 @@ def _fake_docker(spef_sta_text):
 
 
 def _canonicalize(p: Path, monkeypatch, spef_text: str) -> None:
+    # This control supplies the direct OpenSTA report at its tool boundary.
+    switch = p / "phase3/librelane_switch.json"
+    switch.write_text(json.dumps({"steps": {
+        step: "direct" for step in ("22", "23", "32", "34", "37")}}))
     monkeypatch.setattr(R, "_docker_exec", _fake_docker(spef_text))
     monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
     R.step_canonicalize_artefacts(p, "chip_top", _pdk(), "x")
+
+
+def test_missing_native_power_state_retires_previous_measurement(tmp_path):
+    from _ppa import power
+
+    report = tmp_path / "reports/phase3/power.rpt"
+    report.parent.mkdir(parents=True)
+    report.write_text("previous tool measurement\n")
+    report.with_suffix(".current.json").write_text("{}")
+    report.with_suffix(".json").write_text(json.dumps({
+        "verdict": "PASS", "power_measurement": "MEASURED",
+        "total_power_w": 0.01}))
+    notes = []
+    assert power.adopt_current_power_report(tmp_path, "chip_top", report, notes) is False
+    assert not report.exists()
+    assert not report.with_suffix(".current.json").exists()
+    retired = json.loads(report.with_suffix(".json").read_text())
+    assert retired["power_measurement"] == "NOT_MEASURED"
+    assert retired.get("total_power_w") is None
+    assert any("LL_STAPOSTPNR_STATE_ABSENT" in note for note in notes)
 
 
 def _bound_basis(p: Path, record: dict) -> Path:

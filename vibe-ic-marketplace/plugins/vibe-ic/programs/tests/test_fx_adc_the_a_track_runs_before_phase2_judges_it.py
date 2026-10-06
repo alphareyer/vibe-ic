@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from programs.tests.test_execution_receipt_chain import real_entry, isolated_transport  # noqa: F401
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
@@ -43,6 +44,11 @@ def _drive(tmp_path: Path, monkeypatch, *, need_analog: bool,
     answers = project / ST.DESIGN_ANSWERS_REL
     answers.parent.mkdir(parents=True)
     answers.write_text(json.dumps(OD.attest({"answers": {"deliverable": "DIE"}})))
+    if need_analog:
+        declaration = project / 'phase1/analog/analog_block_list.json'
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(json.dumps({'blocks': [{'name': 'neutral_analog'}]}))
+    real_entry('IC', 'default', project)
     cap = {"order": []}
 
     def fake_run_phase(label, runner, args, env=None):

@@ -42,6 +42,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from programs.tests.test_execution_receipt_chain import isolated_transport, real_entry
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
@@ -62,6 +63,7 @@ from pathlib import Path as _rt_path
 _rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
 import _runtime_pair_fixture as _rt_pair  # noqa: E402
 import _ai_route_fixture as _ai_route  # noqa: E402
+from test_benchmark_program_first_ai_review import _emit_d1_fixture_report
 
 
 def _solve_after_ai_route(bench, dataset, run, *, jobs=1):
@@ -264,9 +266,9 @@ def _drive_orchestrator(monkeypatch, project: Path, argv_extra):
     actual phase2 argv can be inspected without spawning EDA tools (same
     harness as test_v0_2_95_issue459_auto_skip_analog)."""
     captured: dict = {}
-    # owner route rule 2026-09-28 (ICROUTE)
-    from _route_fixture import stage_owner_route
-    stage_owner_route(project, "ic")
+    # A direct main() call consumes a real issuer capability. The shared
+    # isolated_transport fixture closes it and restores the caller's state.
+    real_entry("IC", "default", project)
 
     def fake_run_phase(label, runner, args, env=None):
         captured[runner.name] = list(args)
@@ -319,6 +321,7 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
                            "route": "plugin_loop", "plugin_entry": {}})
     monkeypatch.setattr(tnr, "NATURE_ENTRY", {
         "fixture": {"entry_step": "D1", "default_evidence": "FIXTURE_EV",
+                    "then": ["2"],
                     "route": "plugin_loop", "plugin_entry": {}}})
     monkeypatch.setattr(tnr, "EVIDENCE_EXIT", {
         "FIXTURE_EV": {"exit_step": exit_step}})
@@ -352,6 +355,9 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
 
     def fake_run(argv, *args, **kwargs):
         argv_seen["argv"] = list(argv)
+        if argv[argv.index("--exit-step") + 1] == "D1":
+            _emit_d1_fixture_report(
+                Path(argv[2]), json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bd.subprocess, "run", fake_run)
@@ -370,18 +376,22 @@ def test_solve_passes_exit_step_alongside_skip_phase3(tmp_path, monkeypatch):
     assert argv[argv.index("--exit-step") + 1] == "8", argv
 
 
-def test_solve_never_passes_an_exit_outside_the_flow(tmp_path, monkeypatch):
-    """§4.05 boundary-outside: an evidence class whose exit_step is not a
-    declared flow step forwards nothing — the runner would refuse it, and
-    refusing every solve over a table typo is not this call site's job."""
+def test_solve_never_passes_an_exit_outside_the_flow(tmp_path, monkeypatch, capsys):
+    """An invalid route exit must refuse before launching any runner span."""
     argv_seen: dict = {}
     _install_solve_fakes(monkeypatch, argv_seen, exit_step="99")
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    _solve_after_ai_route("rtllm", dataset, tmp_path / "run", jobs=1)
-    argv = argv_seen["argv"]
-    assert "--exit-step" not in argv, argv
-    assert "--skip-phase3" not in argv, argv
+    run = tmp_path / "run"
+    assert _solve_after_ai_route("rtllm", dataset, run, jobs=1) == 2
+    assert argv_seen == {}, "invalid exit launched the runner"
+    result = json.loads((run / "solve_report.json").read_text())["results"][0]
+    assert result["candidate_ready"] is False
+    assert result["accepted"] is False
+    assert result.get("d1_activation") is None
+    assert result["worker_status"] == "ROUTE_PENDING"
+    assert "AI_ROUTE_INVALID: unknown lower-bound step(s): ['99']" in capsys.readouterr().out
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST) == []
 
 
 def test_solve_midflow_entry_runs_phase1_frontdoor_before_owning_loop(
@@ -398,10 +408,8 @@ def test_solve_midflow_entry_runs_phase1_frontdoor_before_owning_loop(
     def fake_budget_run(argv, *_args, **_kwargs):
         argv_seen.append(list(argv))
         if argv[argv.index("--exit-step") + 1] == "D1":
-            project = Path(argv[2])
-            docs = project / "phase1" / "generated_docs"
-            docs.mkdir(parents=True)
-            (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
+            _emit_d1_fixture_report(
+                Path(argv[2]), json.loads(_kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bd.subprocess, "run", fake_budget_run)
@@ -436,7 +444,7 @@ def test_solve_midflow_frontdoor_failure_blocks_owning_loop(
     dataset.mkdir()
     run = tmp_path / "run"
 
-    assert _solve_after_ai_route("rtllm", dataset, run, jobs=1) == 1
+    assert _solve_after_ai_route("rtllm", dataset, run, jobs=1) == 2
     assert len(argv_seen) == 1
     assert argv_seen[0][argv_seen[0].index("--exit-step") + 1] == "D1"
     assert "--entry-step" not in argv_seen[0]

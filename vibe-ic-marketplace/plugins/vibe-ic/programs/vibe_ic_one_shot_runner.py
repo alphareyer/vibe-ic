@@ -1772,9 +1772,6 @@ def _main() -> int:
         return 2
     from execution_authority import consume
     execution_route = consume()['route']
-    _execution.bootstrap(project, parameters={"top": args.top_name,
-        "container": args.container, "pdk_name": args.pdk,
-        "skip_analog": bool(args.skip_analog)})
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and
@@ -2121,6 +2118,8 @@ def _main() -> int:
     elif run_phase1:
         runner = _phase_runner("phase1")
         p1_args = [str(project), "--ic-name", args.ic_name]
+        if args.skip_analog:
+            p1_args.append("--skip-analog")
         # #2204 — the second pass of the expert hand-off. The extraction is
         # ALREADY DONE and its L documents are what the delivered answer was
         # authored against, so this pass runs the second track and nothing
@@ -2313,6 +2312,18 @@ def _main() -> int:
                 )
             else:
                 halted_at = "phase1"
+        elif (rc != 0 and verdict == "NOT_MEASURED"
+              and rep.get("reason_class") == "awaiting_signed_judgement"
+              and (rep.get("canonical_producer") or {}).get("step_id") == "D1"
+              and (rep.get("canonical_producer") or {}).get("mode") == "default"
+              and _published_here(project, "phase1_one_shot.json",
+                                  _phase_started["phase1"])):
+            # The canonical producer has handed off to its required expert.
+            # Keep that unmeasured result; downstream registration/dispatch
+            # must wait for the current signed judgement too.
+            halted_at = "phase1"
+            advisories.append("phase1 awaits its required signed AI judgement; "
+                              "downstream registration and dispatch were not started")
     else:
         plan.append(("phase1", "SKIPPED", 0))
 
@@ -2348,6 +2359,15 @@ def _main() -> int:
     if flow_top_note:
         print(f"[flow] {flow_top_note}", flush=True)
         advisories.append(f"flow {flow_top_note}")
+
+    # Register consumers only after Phase 1 has produced their inputs and the
+    # existing applicability decision has resolved the analog route. A Phase-1
+    # failure must retain its own verdict instead of failing registration of
+    # downstream rows whose inputs were never produced.
+    if halted_at != "phase1":
+        _execution.bootstrap(project, parameters={"top": flow_top,
+            "container": args.container, "pdk_name": args.pdk,
+            "skip_analog": not run_analog})
 
     # ---------------- Analog A1..A8 ----------------
     # FX_ADC_PHASE_ORDER — DISPATCHED BEFORE PHASE 2, reported after it.
@@ -3048,6 +3068,9 @@ if __name__ == "__main__":
         entry.add_argument('--execution-mode', choices=('default', 'ultra'), default='default')
         entry.add_argument('--receipt-channel-fd', type=int)
         selected, _ = entry.parse_known_args()
+        if not selected.project.is_dir():
+            print(f'ERROR: not a directory: {selected.project.resolve()}', file=sys.stderr)
+            sys.exit(2)
         route_refusal = _delivery_route.admit(selected.project.resolve(), selected.route)
         if route_refusal:
             print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)

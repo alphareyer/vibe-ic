@@ -11,7 +11,18 @@ isolated_transport=R.isolated_transport
 
 @pytest.fixture(autouse=True)
 def clean_runtime(monkeypatch):
+    import os
+    names = (policy.ENV, policy._CAPABILITY_FD_ENV, 'VIBEIC_EXECUTION_AUTH_SOCKET')
+    before = {name: os.environ.get(name) for name in names}
     monkeypatch.setattr(policy, '_ordinary_runtime', None)
+    yield
+    # real_entry publishes transport locators directly; keep later unissued
+    # caller controls independent of the live-entry fixture's closed FDs.
+    for name, value in before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def test_default_bootstrap_is_observationally_inert(tmp_path, monkeypatch):
@@ -30,6 +41,39 @@ def test_default_bootstrap_is_observationally_inert(tmp_path, monkeypatch):
         assert phase3._ordinary_phase3_row(tmp_path,name) is None
     assert policy._ordinary_runtime is None
     assert dict(__import__('os').environ)==before
+
+
+def test_canonical_default_bootstrap_reaches_producer_receipt_and_consumer(
+        tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    issued = R.real_entry('IC', 'default', project)
+    constraints = project / 'phase2/stage2/constraints'
+    constraints.mkdir(parents=True)
+    (constraints / 'top.sdc').write_text(
+        'create_clock -period 10 [get_ports clk]\n'
+        'set_input_delay 1 -clock clk [all_inputs]\n'
+        'set_output_delay 1 -clock clk [all_outputs]\n')
+    (constraints / 'pvt_matrix.json').write_text('{"corners":[]}\n')
+    l8 = project / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json'
+    l8.parent.mkdir(parents=True)
+    l8.write_text('{"clocks":{"clk":{"period_ns":10}}}\n')
+
+    runtime = policy.bootstrap(project, parameters={'skip_analog': True})
+    assert runtime is not None
+    assert runtime['policy']['mode_label'] == 'default-mode'
+    import design_one_shot_runner as design
+    consumed = design.step_sdc_validation(project)
+    assert consumed.status == 'PASS', consumed
+    result = consumed.extras['execution_result']
+    assert result['status'] == 'ADOPTED', result
+    run = Path(result['run_root'])
+    receipt = json.loads((run / 'frontend_8/receipt.json').read_text())
+    assert receipt['status'] == 'ELIGIBLE'
+    assert any(item['component'] == 'frontend_worker'
+               for item in receipt['processes'])
+    assert json.loads((run / 'adoption.json').read_text())['status'] == 'ADOPTED'
+    assert (project / 'reports/phase2/sdc_check.json').is_file()
 
 
 def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_path):
@@ -140,6 +184,41 @@ def test_ordinary_step8_uses_live_context_and_existing_selection(tmp_path):
         design.step_sdc_validation(project)
 
 
+
+def test_source_import_readers_share_exact_content_syntax(monkeypatch):
+    import ast
+    import execution_provider_catalog as catalog
+
+    content = ("import syntax_count_peer\n"
+               "try:\n    from . import optional_peer\n"
+               "except ImportError:\n    import fallback_peer\n"
+               "importlib.import_module('literal_peer')\n")
+    changed = content.replace("literal_peer", "changed_peer")
+    original = ast.parse
+    parsed = []
+
+    def count_parse(source, *args, **kwargs):
+        if source in (content, changed):
+            parsed.append(source)
+        return original(source, *args, **kwargs)
+
+    monkeypatch.setattr(ast, 'parse', count_parse)
+    for reader in (em._python_import_requests, catalog._import_names,
+                   catalog._python_import_specs):
+        reader.cache_clear()
+    assert (1, 'optional_peer') in em._python_import_requests(content)
+    assert 'literal_peer' in catalog._import_names(content)
+    assert ('', 1, ('optional_peer',), True) in catalog._python_import_specs(content)
+    assert parsed == [content], 'one source must be parsed once across readers'
+
+    assert 'changed_peer' in catalog._import_names(changed)
+    assert ('changed_peer', 0, (), False) in catalog._python_import_specs(changed)
+    em._python_import_requests(changed)
+    assert parsed == [content, changed], 'changed bytes need a fresh syntax result'
+    assert 'literal_peer' in catalog._import_names(content)
+    assert 'changed_peer' not in catalog._import_names(content)
+
+
 def test_import_syntax_cache_re_resolves_new_local_module(tmp_path):
     entry=tmp_path/'entry.py';entry.write_text('import bounded_source_helper\n')
     helper=tmp_path/'bounded_source_helper.py'
@@ -187,3 +266,119 @@ def test_relative_runtime_data_argument_is_independent_of_registration_cwd(tmp_p
     bound = em._invocation_sources(em.Component('sdc-validator', (
         *component.argv[:4], absolute, *component.argv[5:])))
     assert absolute in bound['argument_sources']
+
+
+def test_producer_site_symbols_share_exact_content_and_reject_changes(tmp_path, monkeypatch):
+    import ast
+    import execution_adapters_backend as backend
+    import execution_adapters_release as release
+    source = tmp_path / 'producer.py'
+    content = 'def produce():\n    pass\n'
+    source.write_text(content)
+    calls = []
+    parse = ast.parse
+    def counted(text, *args, **kwargs):
+        if text == content:
+            calls.append(text)
+        return parse(text, *args, **kwargs)
+    monkeypatch.setattr(ast, 'parse', counted)
+    for module in (backend, release):
+        monkeypatch.setattr(module, 'HERE', tmp_path)
+        assert module._site_path('producer.py:produce') == source
+        assert module._site_path('producer.py:produce') == source
+    assert len(calls) == 1
+    source.write_text('def replacement():\n    pass\n')
+    for module in (backend, release):
+        with pytest.raises(em.Refusal, match='PRODUCER_SYMBOL_MISSING'):
+            module._site_path('producer.py:produce')
+        assert module._site_path('producer.py:replacement') == source
+    source.write_text('invalid syntax !')
+    for module in (backend, release):
+        with pytest.raises(em.Refusal, match='PRODUCER_SITE_UNREADABLE'):
+            module._site_path('producer.py:replacement')
+
+
+@pytest.mark.parametrize('skip_analog', [False, True])
+def test_canonical_phase1_entry_defers_post_phase1_registration(tmp_path, monkeypatch,
+                                                               skip_analog):
+    import sys
+    import phase1_one_shot_runner as phase1
+    project = tmp_path / 'project'
+    project.mkdir()
+    R.real_entry('IC', 'default', project)
+    declaration = project / 'phase1/analog/analog_block_list.json'
+    assert not declaration.exists()
+    reached = []
+    class ReachedPhase1Producer(Exception):
+        pass
+    def stop_at_producer(current, **kwargs):
+        runtime = policy._ordinary_runtime
+        assert current == project
+        assert runtime['parameters']['skip_analog'] is skip_analog
+        assert runtime['registry'].adapters('0.5ic')
+        assert not runtime['registry'].adapters('A1')
+        assert not runtime['registry'].adapters('9')
+        assert not declaration.exists()
+        reached.append(True)
+        raise ReachedPhase1Producer
+    monkeypatch.setattr(phase1, '_run_step_0_5ic', stop_at_producer)
+    argv = ['phase1_one_shot_runner.py', str(project), '--route', 'ic']
+    if skip_analog:
+        argv.append('--skip-analog')
+    monkeypatch.setattr(sys, 'argv', argv)
+    with pytest.raises(ReachedPhase1Producer):
+        phase1.main()
+    assert reached == [True]
+    assert not declaration.exists()
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "conflict"])
+def test_issued_default_pdk_reaches_real_step9_registration(tmp_path, monkeypatch, damage):
+    import execution_production as production
+    import design_one_shot_runner as design
+    from test_default_frontend_r2 import _synthesis
+    project, _, pdk, native_calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    if damage == 'missing':
+        (project / 'input/project.json').unlink()
+        (project / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json').unlink()
+    elif damage == 'conflict':
+        (project / 'phase3').mkdir(parents=True, exist_ok=True)
+        (project / 'phase3/librelane_switch.json').write_text('{"pdk":"otherPDK"}')
+    R.real_entry('IC', 'default', project)
+    measured = []
+    def stop_native_probe(image, current):
+        measured.append((image, current))
+        return 'UNMEASURED:source-only-control', {}, ['SOURCE_ONLY_NATIVE_PROBE_STOP']
+    monkeypatch.setattr(production, '_tool_and_image', stop_native_probe)
+    class Registry:
+        def __init__(self):
+            self.arms = []
+        def register(self, adapter):
+            self.arms.append(adapter)
+    registry = Registry()
+    observed = {}
+    class Execution:
+        request = staticmethod(policy.request)
+        @staticmethod
+        def bootstrap(current, *, parameters):
+            observed.update(parameters)
+            production.register_synthesis_adapter(registry, project=current,
+                                                   parameters=parameters)
+            return registry
+    assert design._bootstrap_execution_policy(
+        Execution, project, top='top', container='unused', ic_class=None,
+        skip_analog=True) is registry
+    assert len(registry.arms) == 1
+    assert not registry.arms[0].available
+    if damage:
+        assert 'pdk' not in observed
+        code = 'LL_PHASE2_PDK_UNDECLARED' if damage == 'missing' else 'LL_PHASE2_PDK_CONFLICT'
+        assert observed['pdk_refusal'].startswith(code)
+        assert code in registry.arms[0].availability_reason
+        assert measured == []
+    else:
+        assert observed['pdk'] == production._pdk_dict(pdk)
+        assert observed['pdk_name'] == pdk.name
+        assert measured == [('img', project)]
+        assert 'SOURCE_ONLY_NATIVE_PROBE_STOP' in registry.arms[0].availability_reason
+    assert native_calls == []

@@ -117,8 +117,53 @@ def _cli(step, project, output, modules, args=()):
     return _write(step,output,','.join(modules),reason='all producers executed',records=records)
 
 def produce_d1(project,output,**k):
-    import design_one_shot_runner as d
-    return _record('D1',project,output,'design_one_shot_runner.step_phase1',d.step_phase1,**k)
+    from dataclasses import asdict
+    from execution_modes import require_issued_frontend
+    manifest = _verify_manifest(project, 'D1')
+    parameters = manifest['parameters']
+    # The existing live Controller binds this child, argv, source and census.
+    # A standalone helper or serialized manifest cannot authorize production.
+    require_issued_frontend(project, output, 'D1', parameters)
+    project, output = Path(project), Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / 'canonical.json').unlink(missing_ok=True)
+    # Phase 1 writes L-docs and expert handoffs. As with Step 8, reconstruct
+    # only the issued census in its private project, never in frozen inputs.
+    staged = output / 'project'
+    if staged.exists(): shutil.rmtree(staged)
+    staged.mkdir()
+    for rel in manifest['files']:
+        target = staged / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / rel, target)
+    require_issued_frontend(project, output, 'D1', parameters)
+    # Invoke the existing producer primitives inside this issued worker.
+    # Re-entering the Phase-1 launcher would bootstrap a different project.
+    # Selection objectives stay in issuance, never become producer kwargs.
+    import phase1_one_shot_runner as phase1
+    import _phase1_producer_identity as identity
+    producer = 'phase1_one_shot_runner._run_docs_mode+run_phase1_second_track'
+    started = time.monotonic()
+    input_before = identity.input_tree_snapshot(staged)
+    recorder = identity.ProducerRecorder()
+    with recorder:
+        rc_extract = phase1._as_the_producer(phase1._run_docs_mode)(staged, 'UNNAMED_CHIP')
+        rc_track = (2 if rc_extract == 2 else phase1.run_phase1_second_track(staged, 0))
+    if identity.docs_snapshot(staged):
+        identity.stamp(staged, recorder, input_before=input_before,
+                       knobs={'ic_name': 'UNNAMED_CHIP', 'mode': 'docs'})
+    rows = [phase1._delegated_step_result(phase1.D1_STEP_NAME, rc_extract,
+                time.monotonic() - started, f'docs producer rc={rc_extract}'),
+            phase1._delegated_step_result('phase1_expert_parse_track', rc_track,
+                0.0, phase1._expert_track_summary(staged), upstream=rc_extract == 2)]
+    verdict = phase1._aggregate_verdict(rows)
+    value = phase1.StepResult('phase1', verdict, time.monotonic() - started,
+                f'docs rc={rc_extract}; expert track rc={rc_track}',
+                reason_class='no_population' if verdict == 'NOT_MEASURED' else '')
+    require_issued_frontend(project, output, 'D1', parameters)
+    return _write('D1', output, producer, producer_result=asdict(value),
+                  producer_steps=[asdict(row) for row in rows],
+                  reason='producer executed; D1 handoff qualification is not connected')
 
 
 def _output_paths(root, required):
@@ -253,7 +298,10 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
         staged_template=Path(args1[args1.index('--template') + 1])
         if not staged_template.is_absolute():
             staged_template=staged / staged_template
-        if not staged_template.is_dir():
+        # A missing searched path is an ingest result, not a process error.
+        # The real producer records ABSENT without a routing marker; the
+        # unchanged gate requires the owner's reason before it can qualify.
+        if staged_template.exists() and not staged_template.is_dir():
             raise ValueError('0.5ic: template directory is unavailable')
     else:
         try:
@@ -321,6 +369,14 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
             with dst.open('xb') as stream:
                 stream.write(content)
         _write_step_binding(output, '0.5ic', paths)
+        # The declaration gate resolves derived-answer provenance from the
+        # output project. These are issued input copies, not produced views.
+        for rel, content in contents.items():
+            if rel.startswith('input/docs/'):
+                target = output / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('xb') as stream:
+                    stream.write(content)
         for index, lease in enumerate(snapshots):
             if lease.current() != stages[index]['final_tree']:
                 raise RuntimeError('0.5ic: snapshot changed before completion')

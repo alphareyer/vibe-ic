@@ -19,6 +19,8 @@ def put(path, value):
 
 
 def setup_case(tmp_path, monkeypatch, *, cap=30, corruption=None):
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     odb=tmp_path/'route.odb'; odb.write_text('native routed database')
     sdc=tmp_path/'route.sdc'; sdc.write_text('create_clock -period 20 [get_ports clk]\n')
     deff=tmp_path/'route.def'; deff.write_text('native routed DEF')
@@ -90,3 +92,38 @@ def test_invalid_native_rcx_cannot_be_replaced_by_a_second_extraction(tmp_path,m
     with pytest.raises(ll.Refusal,match='RCX'):
         native.measure(ctx,state,tmp_path/'measure')
     assert seen==[]
+
+
+@pytest.mark.parametrize('corruption', [None, 'missing_receipt', 'changed_spef',
+                                        'changed_route', 'stale_receipt'])
+def test_direct_rcx_handoff_requires_the_original_producer_receipt(
+        tmp_path, monkeypatch, corruption):
+    # setup_case executes the real run_chain receipt writer. Its substituted
+    # native file writes are a unit seam, not a new extraction/signoff claim.
+    ctx, _, _ = setup_case(tmp_path, monkeypatch)
+    state = Path(ctx['rcx_state'])
+    payload = json.loads(state.read_text())
+    source = Path(payload['spef']['nom_*'])
+    if corruption == 'missing_receipt':
+        (state.parent / 'vibeic_receipt.json').unlink()
+    elif corruption == 'changed_spef':
+        source.write_text(source.read_text() + '# changed after production\n')
+    elif corruption == 'changed_route':
+        Path(payload['odb']).write_text('another route after extraction')
+    elif corruption == 'stale_receipt':
+        config = state.parent / 'config.json'
+        config.write_text(config.read_text() + ' ')
+    dest, receipt = tmp_path / 'published.spef', tmp_path / 'handoff.json'
+    if corruption is not None:
+        with pytest.raises(ll.Refusal, match='LL_RCX_OUTPUT_UNBOUND'):
+            ll.handoff_to_direct(state, {'spef:nom_*': dest}, receipt)
+        assert not dest.exists()
+        assert not receipt.exists()
+        return
+    result = ll.handoff_to_direct(state, {'spef:nom_*': dest}, receipt)
+    producer = json.loads((state.parent / 'vibeic_receipt.json').read_text())
+    row = result['views']['spef:nom_*']
+    expected = producer['sha256'][str(source.relative_to(state.parent))]
+    assert expected and row['source_sha256'] == row['dest_sha256'] == expected
+    assert dest.read_bytes() == source.read_bytes()
+    assert json.loads(receipt.read_text()) == result

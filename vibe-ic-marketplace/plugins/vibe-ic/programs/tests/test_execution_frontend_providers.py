@@ -3,6 +3,8 @@ from pathlib import Path
 import json
 import execution_frontend_providers as p
 import execution_modes as em
+from programs.tests._execution_source_fixture import register_source_fixture, issued_context
+from programs.tests.test_execution_receipt_chain import isolated_transport
 
 EXPECTED=('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 
@@ -34,14 +36,116 @@ def test_step6_explicitly_not_measured_without_fpga():
     assert result.state=='NOT_IMPLEMENTED'
 
 def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp_path):
-    project=tmp_path/'project'; src=project/'input'/'docs'; src.mkdir(parents=True); f=src/'L1.md'; f.write_text('# design\n')
-    registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio(); row=next(s for s in portfolio['steps'] if s['id']=='D1')
+    # Incomplete input is a real expert handoff, not an eligible D1 positive.
+    from dataclasses import replace
     import subprocess
+    import pytest
+    project=tmp_path/'project'; src=project/'input'/'docs'; src.mkdir(parents=True)
+    f=src/'L1.md'; f.write_text('# design\n')
+    registry=em.Registry(); p.register_factories(registry, step_ids=('D1',))
+    portfolio=em.load_portfolio(); row=next(s for s in portfolio['steps'] if s['id']=='D1')
     sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
-    context=em.Context('D1',sha,{'input/docs/L1.md':f},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
-    run=tmp_path/'run'; result=em.Controller(registry,em.Budget(1,512,1),portfolio).run(context,run)
-    assert result['status']=='AWAITING_AI_SELECTION'
-    assert result['candidate_statuses']['frontend_D1'] in ('INELIGIBLE','NOT_MEASURED','ELIGIBLE')
+    context=issued_context(em.Context('D1',sha,{'input/docs/L1.md':f},
+                           {'metric':'source_boundary'},tuple(row['mandatory_gate_programs'])),
+                           project, mode='ultra')
+    route=project/'input/step_0_5ic_answers.json'
+    context=replace(context, inputs={**context.inputs,
+                    'input/step_0_5ic_answers.json':route})
+    bound_inputs={name: em.digest(path) for name, path in context.inputs.items()}
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,1024,1),portfolio)
+    result=controller.run(context,run)
+    receipt_path=run/'frontend_D1/receipt.json'; receipt_bytes=receipt_path.read_bytes()
+    receipt=json.loads(receipt_bytes); output=Path(receipt['output_root'])
+    process,=receipt['processes']
+    assert process['component']=='frontend_worker' and process['rc']==0
+    assert process['pid']>0 and process['ended_ns']>process['started_ns']
+    assert 'MemoryError' not in ''.join(Path(process[key]).read_text()
+                                      for key in ('stdout', 'stderr'))
+    assert receipt['binding']['objective']=={'metric':'source_boundary'}
+    assert receipt['binding']['inputs']==bound_inputs
+    frozen=Path(receipt['input_root'])
+    from _execution_manifest import issued_manifest_path
+    assert {str(path.relative_to(frozen)):em.digest(path)
+            for path in frozen.rglob('*') if path.is_file() and
+            path != issued_manifest_path(frozen)}==bound_inputs
+    assert not (frozen/'phase1').exists() and not (frozen/'reports').exists()
+    staged=output/'project'
+    docs=list((staged/'phase1/generated_docs').glob('L*.json'))
+    assert len(docs)==28
+    expert=json.loads((staged/'reports/audit/phase1/expert_parse_track.json').read_text())
+    assert expert['ai_subtrack']['status']=='HANDOFF_EMITTED'
+    assert expert['ai_subtrack']['expectations']==[]
+    assert result['status']=='NOT_MEASURED'
+    assert result['candidate_statuses']=={'frontend_D1':'NOT_MEASURED'}
+    assert receipt['reason']=='GATE_EXECUTION_UNBOUND'
+    assert receipt['evidence']['verdict']=='NOT_MEASURED'
+    assert receipt['evidence']['gates']=={
+        name:'NOT_MEASURED' for name in row['mandatory_gate_programs']}
+    assert json.loads((run/'comparison.json').read_text())['eligible_arms']==[]
+    assert not (run/'selected').exists() and not (run/'adoption.json').exists()
+    canonical=output/'canonical.json'; original=canonical.read_bytes()
+    record=json.loads(original)
+    assert record['producer_result']['name']=='phase1'
+    # These existing producer primitives return rc0 for an emitted handoff.
+    # Their program result cannot qualify D1 without the canonical consumers.
+    assert record['producer_result']['status']=='PASS'
+    assert 'HANDOFF_EMITTED' in record['producer_steps'][1]['detail']
+    assert receipt['evidence']['outputs']=={'canonical.json':em.digest(canonical)}
+    arm,=registry.adapters('D1')
+    # The real producer recorder stamped its own writes, not a copied claim.
+    import _phase1_producer_identity as identity
+    stamp=json.loads((identity.sidecar_dir(staged)/'step_identity.json').read_text())['phase1']
+    assert len(stamp['outputs'])==28 and stamp['carried']=={}
+    # A direct helper has no live Controller-child issuance, even with these
+    # genuine frozen bytes and their manifest. It must write nothing.
+    import execution_frontend_worker as worker
+    with pytest.raises(em.Refusal, match='ISSUED_FRONTEND_UNAVAILABLE'):
+        worker.produce_d1(frozen, output)
+    assert canonical.read_bytes()==original
+    manifest=issued_manifest_path(frozen); original_manifest=manifest.read_bytes()
+    wrong_step=json.loads(original_manifest); wrong_step['step_id']='8'
+    # Serialized negative input is not Controller authority. Keep the genuine
+    # read-only frozen manifest intact while exercising the public route check.
+    wrong_input=tmp_path/'wrong-step-input'; wrong_input.mkdir()
+    issued_manifest_path(wrong_input).write_text(json.dumps(wrong_step))
+    with pytest.raises(ValueError, match='D1: issued route mismatch'):
+        worker.produce_d1(wrong_input, output)
+    assert canonical.read_bytes()==original
+    assert manifest.read_bytes()==original_manifest
+    # Forged SDC successes cannot qualify any D1 gate.
+    sdc=output/'reports/phase2/sdc_check.json'; sdc.parent.mkdir(parents=True)
+    sdc.write_text(json.dumps({'program':'sdc_syntax_check','passed':True}))
+    (output/'reports/sdc_validator.json').write_text(json.dumps(
+        {'verdict':'PASS','exit_code':0,'issues':[]}))
+    record['producer_result']['status']='FAIL'
+    canonical.write_text(json.dumps(record))
+    assert arm.validate(output,context.binding()).verdict=='FAIL'
+    record['producer_result']['status']='PASS'
+    record['producer_result']['detail']='forged qualification without AI evidence'
+    canonical.write_text(json.dumps(record))
+    assert em.digest(canonical)!=receipt['evidence']['outputs']['canonical.json']
+    changed=arm.validate(output,context.binding())
+    assert changed.verdict=='NOT_MEASURED'
+    assert changed.gates==receipt['evidence']['gates']
+    choice={'arm_id':'frontend_D1','receipt_sha256':em.digest(receipt_path),
+            'rationale':'mutation refusal control','reviewer':'test','binding':context.binding()}
+    with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
+        controller.adopt(context,run,choice)
+    assert not (run/'selected').exists()
+    assert json.loads((run/'adoption.json').read_text())['status']!='ADOPTED'
+    # Missing, unknown and malformed canonical records also cannot qualify.
+    for invalid in (None, [], {'schema':'unknown'},
+                    {**record, 'producer_result':'StepResult(status=PASS)'}):
+        if invalid is None:
+            canonical.unlink()
+        else:
+            canonical.write_text(json.dumps(invalid))
+        rejected=arm.validate(output,context.binding())
+        assert rejected.verdict=='NOT_MEASURED'
+        assert rejected.gates==receipt['evidence']['gates']
+    canonical.write_bytes(original)
+    assert arm.validate(output,context.binding()).verdict=='NOT_MEASURED'
+    assert receipt_path.read_bytes()==receipt_bytes
 
 def test_step8_public_controller_eligible_and_adopted(tmp_path):
     import hashlib, subprocess
@@ -49,10 +153,11 @@ def test_step8_public_controller_eligible_and_adopted(tmp_path):
     sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\nset_output_delay 1 -clock clk [all_outputs]\n')
     l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
     l8.write_text(json.dumps({'clocks': {'clk': {'period_ns': 10}}}))
+    matrix=sdc.with_name('pvt_matrix.json'); matrix.write_text('{"corners":[]}\n')
     registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
     row=next(s for s in portfolio['steps'] if str(s['id'])=='8')
     sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
-    ctx=em.Context('8',sha,{'phase2/stage2/constraints/top.sdc':sdc,'phase1/generated_docs/L8_TIMING_WAVEFORM.json':l8},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
+    ctx=issued_context(em.Context('8',sha,{'phase2/stage2/constraints/top.sdc':sdc,'phase1/generated_docs/L8_TIMING_WAVEFORM.json':l8, 'phase2/stage2/constraints/pvt_matrix.json':matrix},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs'])), project)
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio); controller.run(ctx,run)
     receipt=json.loads((run/'frontend_8/receipt.json').read_text())
     assert receipt['status']=='ELIGIBLE'; assert set(receipt['evidence']['gates'])==set(row['mandatory_gate_programs'])
@@ -81,11 +186,11 @@ def test_05ic_public_controller_eligible_and_adopted(tmp_path):
     registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
     row=next(s for s in portfolio['steps'] if str(s['id'])=='0.5ic')
     sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
-    ctx=em.Context('0.5ic',sha,
+    ctx=issued_context(em.Context('0.5ic',sha,
                    {'input/step_0_5ic_answers.json':answers_path,
                     'input/submission_template_source/s1.yaml':slot},
                    {'template':'input/submission_template_source','slot':'s1'},
-                   tuple(row['mandatory_gate_programs']))
+                   tuple(row['mandatory_gate_programs'])), project)
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
     result=controller.run(ctx,run)
     assert result['candidate_statuses']['frontend_0_5ic']=='ELIGIBLE'
@@ -128,10 +233,10 @@ def test_05ic_declared_absence_routes_public_production_and_refuses_na_gate(
     row=next(s for s in portfolio['steps'] if str(s['id'])=='0.5ic')
     sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
     reason=answers['operator_template']['absent_reason']
-    ctx=em.Context('0.5ic',sha,{'input/step_0_5ic_answers.json':answers_path},
+    ctx=issued_context(em.Context('0.5ic',sha,{'input/step_0_5ic_answers.json':answers_path},
                    {'template':'input/submission_template_source',
                     'no_template_reason':reason},
-                   tuple(row['mandatory_gate_programs']))
+                   tuple(row['mandatory_gate_programs'])), project)
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
     result=controller.run(ctx,run)
     assert result['candidate_statuses']['frontend_0_5ic']=='NOT_MEASURED'
@@ -192,14 +297,22 @@ def test_rows_2_to_5_spy_order_and_argv(tmp_path, monkeypatch):
     calls.clear(); w.produce_5(tmp_path,tmp_path/'o5',top='chip_top',container='img')
     assert [x[0] for x in calls] == ['formal_harness_gen.generate','formal_property_run.run','step_full_stack_functional_tb','write']
 
-def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
+def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path, monkeypatch):
     import hashlib
     project=tmp_path/'p'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
     sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\n')
-    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True); l8.write_text(json.dumps({'clocks':[{'name':'clk','period_ns':11}]}))
-    files={str(x.relative_to(project)):hashlib.sha256(x.read_bytes()).hexdigest() for x in (sdc,l8)}
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True); l8.write_text(json.dumps({'clocks':{'clk':{'period_ns':11}}}))
+    matrix=sdc.with_name('pvt_matrix.json'); matrix.write_text('{"corners":[]}\n')
+    files={str(x.relative_to(project)):hashlib.sha256(x.read_bytes()).hexdigest() for x in (sdc,l8,matrix)}
     (project/'input').mkdir(); (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'8','parameters':{},'files':files}))
     import execution_frontend_worker as w
+    # Producer-only unit invocation envelope: real input/manifest bytes and
+    # hashes, not a claim of canonical Controller authority or adoption.
+    manifest=project/'input/issued_manifest.json'
+    manifest_hash=hashlib.sha256(manifest.read_bytes()).hexdigest()
+    monkeypatch.setenv(w.ISSUED_MANIFEST_ENV,str(manifest))
+    monkeypatch.setenv('VIBEIC_MANIFEST_SHA256',manifest_hash)
+    monkeypatch.setenv('VIBEIC_ISSUED_MANIFEST_SHA256',manifest_hash)
     with __import__('pytest').raises(RuntimeError): w.run_row('8',project,tmp_path/'out')
     (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'9','parameters':{},'files':files}))
     with __import__('pytest').raises(ValueError): w.run_row('8',project,tmp_path/'out2')
@@ -301,7 +414,7 @@ def test_05ic_each_real_producer_nonzero_stops_order(tmp_path, monkeypatch, fail
     assert len(calls)==fail_at+1
 
 
-def _authority_project(tmp_path):
+def _authority_project(tmp_path, *, top_cell=None):
     """Read a repository owner input, then supply neutral shuttle geometry."""
     import subprocess
     from programs.tests._hostpaths import repo_path
@@ -314,6 +427,8 @@ def _authority_project(tmp_path):
     answers = json.loads(fixture.read_text())
     answers['answer_provenance']['synthesis_area_budget'] = {
         'answered_by': 'owner', 'citation': 'neutral authority control area limit'}
+    if top_cell is not None:
+        answers['answers']['top_cell'] = top_cell
     answers_path.write_text(json.dumps(answers, sort_keys=True) + '\n')
     slot = project / 'input/template/s1.yaml'
     slot.parent.mkdir()
@@ -322,17 +437,17 @@ def _authority_project(tmp_path):
                     'SEAL_RING_WIDTH: 26\nFP_SIZING: absolute\n'
                     'pads: [pad_n0, pad_n1, pad_s0]\n')
     inputs = {str(path.relative_to(project)): path for path in (answers_path, slot)}
-    parameters = {'template': 'input/template', 'slot': 's1'}
+    parameters = {'template': 'input/template', 'slot': 's1', 'metric': 'source_boundary'}
     sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
                                   cwd=Path(p.__file__).parent, text=True).strip()
     row = next(row for row in em.load_portfolio()['steps'] if row['id'] == '0.5ic')
-    return project, em.Context('0.5ic', sha, inputs, parameters,
-                                tuple(row['mandatory_gate_programs']))
+    return project, issued_context(em.Context('0.5ic', sha, inputs, parameters,
+                                tuple(row['mandatory_gate_programs'])), project)
 
 
 def _authority_controller():
     registry = em.Registry()
-    p.register_factories(registry)
+    p.register_factories(registry, step_ids=('0.5ic',))
     return em.Controller(registry, em.Budget(1, 512, 1))
 
 
@@ -551,24 +666,23 @@ def _snapshot_adoption(controller, ctx, run):
 ])
 def test_05ic_staged_writer_refuses_before_adoption(tmp_path, mutation):
     """An external same-user writer; real producers and Controller, no patches."""
-    import os, threading, time
-    project, ctx = _authority_project(tmp_path)
-    answers = project / 'input/step_0_5ic_answers.json'
-    document = json.loads(answers.read_text())
-    document['answers']['top_cell'] = 'issued_owner_top'
-    answers.write_text(json.dumps(document, sort_keys=True) + '\n')
+    import os, threading
+    # Owner input must be complete before the genuine route capability binds it.
+    project, ctx = _authority_project(tmp_path, top_cell='issued_owner_top')
     binding = ctx.binding()
     controller = _authority_controller()
     run = tmp_path / 'run'
     staged = run / 'frontend_0_5ic/outputs/project'
     signal = staged / 'reports/phase1/submission_template.json'
     events = []; errors = []
+    completed = threading.Event()
 
     def writer():
         try:
-            deadline = time.monotonic() + 20
-            while not signal.is_file() and time.monotonic() < deadline:
-                time.sleep(.0005)
+            # Wait for the real producer report, including source admission.
+            # A terminal Controller result also wakes the observer on refusal.
+            while not signal.is_file() and not completed.wait(.0005):
+                pass
             if not signal.is_file():
                 raise RuntimeError('producer 1 never published its real report')
             target = staged / 'input/step_0_5ic_answers.json'
@@ -616,8 +730,11 @@ def test_05ic_staged_writer_refuses_before_adoption(tmp_path, mutation):
 
     thread = threading.Thread(target=writer)
     thread.start()
-    controller.run(ctx, run)
-    thread.join(25)
+    try:
+        controller.run(ctx, run)
+    finally:
+        completed.set()
+        thread.join(25)
     assert not thread.is_alive() and not errors, errors
     assert events and ctx.binding() == binding
     assert em.digest(run / 'frontend_0_5ic/inputs/input/step_0_5ic_answers.json') == binding['inputs']['input/step_0_5ic_answers.json']
@@ -701,6 +818,8 @@ def test_05ic_measured_gate_fail_precedes_changed_chain(tmp_path):
     project, ctx = _authority_project(tmp_path)
     controller = _authority_controller(); run = tmp_path / 'run'
     assert controller.run(ctx, run)['candidate_statuses']['frontend_0_5ic'] == 'ELIGIBLE'
+    completion_path = run / 'frontend_0_5ic/issued-completion.json'
+    completion_bytes = completion_path.read_bytes()
     output = run / 'frontend_0_5ic/outputs'
     report = output / 'reports/phase1/submission_template.json'
     document = json.loads(report.read_text())
@@ -715,4 +834,12 @@ def test_05ic_measured_gate_fail_precedes_changed_chain(tmp_path):
     receipt['evidence'] = asdict(evidence)
     receipt_path.write_text(json.dumps(receipt))
     assert _snapshot_adoption(controller, ctx, run) == 'REFUSED'
-    assert json.loads((run / 'adoption.json').read_text())['reason'] == 'GATE_FAIL'
+    # The fresh validator still reports measured FAIL above. It does not
+    # authorize a caller to rewrite evidence in an already sealed completion.
+    # That integrity boundary refuses before considering the edited receipt.
+    adoption = json.loads((run / 'adoption.json').read_text())
+    assert adoption['reason'] == 'EVIDENCE_CHANGED'
+    assert adoption['status'] == 'REFUSED'
+    assert adoption.get('selected') is None
+    assert not adoption.get('selected_generation')
+    assert completion_path.read_bytes() == completion_bytes

@@ -58,6 +58,18 @@ from _atomic_artefact import write_bytes, write_json
 from execution_source_snapshot import SourceSnapshot, active as _active_source_snapshot
 
 
+def required_gate_satisfied(step_id, gate, verdict):
+    """Honor the template checker's documented exit-zero applicability case.
+
+    NOT_APPLICABLE remains visible in evidence. No physical gate or other
+    step can use it to satisfy an obligation. Execution and input authority
+    are still verified separately before eligibility and adoption.
+    """
+    return verdict == 'PASS' or (
+        step_id == '0.5ic' and gate == 'submission_template_check' and
+        verdict == 'NOT_APPLICABLE')
+
+
 # The issuer is owned by this live controller process, never a caller-supplied
 # digest or a secret serialized beside editable run receipts. A new interpreter
 # cannot adopt a previous issuer's run: durable external supervision is not wired.
@@ -355,22 +367,30 @@ def _canonical_flow_authority(flow_path: Path) -> str:
 def _python_import_requests(content: str) -> tuple:
     # Cache syntax by exact bytes; all path resolution and source authority
     # checks remain live, including an import becoming local after first use.
-    tree = ast.parse(content)
+    from execution_source_snapshot import python_import_syntax
     requests = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            requests.extend((0, alias.name) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            requests.append((node.level, node.module or ''))
-            requests.extend((node.level, '.'.join(filter(None, (node.module, alias.name))))
-                            for alias in node.names if alias.name != '*')
+    for kind, level, module, names, _optional in python_import_syntax(content):
+        if kind == 'import':
+            requests.extend((0, name) for name in names)
+        elif kind == 'from':
+            requests.append((level, module))
+            requests.extend((level, '.'.join(filter(None, (module, name))))
+                            for name in names if name != '*')
     return tuple(requests)
 
 
 def _local_python_imports(path: Path) -> set[Path]:
-    """Resolve current local imports using only content-keyed syntax caching."""
+    """Resolve imports live, or provisionally within a verified snapshot."""
+    snapshot = _active_source_snapshot()
+    path = Path(path).absolute()
+    cache_key = ('execution-modes-local-imports', str(path))
+    if snapshot is not None:
+        cached = snapshot.value_get(cache_key)
+        if cached is not None:
+            snapshot.stats['local_import_hits'] += 1
+            return set(cached)
+        snapshot.stats['local_import_misses'] += 1
     try:
-        snapshot = _active_source_snapshot()
         requests = _python_import_requests(snapshot.read_text(path) if snapshot else path.read_text())
     except (OSError, SyntaxError):
         return set()
@@ -387,16 +407,28 @@ def _local_python_imports(path: Path) -> set[Path]:
             candidate = root.joinpath(*parts)
             module = candidate.with_suffix('.py') if parts else candidate / '__init__.py'
             package = candidate / '__init__.py'
-            if any(p.is_symlink() for p in (module, package)):
-                raise Refusal('ENTRY_SOURCE_UNBOUND', str(candidate))
-            found = {p.resolve() for p in (module, package) if p.is_file()}
+            if snapshot is not None:
+                probes = [snapshot.import_candidate(p) for p in (module, package)]
+                if any(state[1] for state in probes):
+                    raise Refusal('ENTRY_SOURCE_UNBOUND', str(candidate))
+                found = {state[3] for state in probes if state[2]}
+            else:
+                if any(p.is_symlink() for p in (module, package)):
+                    raise Refusal('ENTRY_SOURCE_UNBOUND', str(candidate))
+                found = {p.resolve() for p in (module, package) if p.is_file()}
             if found:
                 result.update(found)
                 for i in range(1, len(parts)):
                     init = root.joinpath(*parts[:i], '__init__.py')
-                    if init.is_file():
+                    if snapshot is not None:
+                        state = snapshot.import_candidate(init)
+                        if state[2]:
+                            result.add(state[3])
+                    elif init.is_file():
                         result.add(init.resolve())
                 break
+    if snapshot is not None:
+        snapshot.value_put(cache_key, frozenset(result))
     return result
 
 
@@ -445,7 +477,8 @@ def _source_method(context_type: type, source: Path, method: str) -> Callable:
     return actual
 
 
-def _python_entry(arguments: tuple[str, ...]) -> tuple[str, list[str], int]:
+def _python_entry(arguments: tuple[str, ...], *,
+                  allowed_options: str = "bBdEiIOPqsSuvxWX") -> tuple[str, list[str], int]:
     """Resolve the script using Python option semantics, never file existence.
 
     Only a bounded script invocation is supported. Unknown options, module,
@@ -471,6 +504,8 @@ def _python_entry(arguments: tuple[str, ...]) -> tuple[str, list[str], int]:
             if not options or argument.startswith('--'):
                 raise Refusal('ENTRY_SOURCE_UNBOUND', argument)
             for offset, option in enumerate(options):
+                if option not in allowed_options:
+                    raise Refusal('ENTRY_SOURCE_UNBOUND', argument)
                 if option in 'WX':
                     value = options[offset + 1:]
                     if not value:
@@ -1087,6 +1122,13 @@ def consume_frontend_chain(output: Path, facts: Mapping[str, object]) -> dict:
             raise Refusal('STAGED_SNAPSHOT_UNBOUND', str(root))
     if stages[1]['outputs'] != payload['outputs']:
         raise Refusal('STAGED_CHAIN_OUTPUT_MISMATCH', str(path))
+    for name, expected in facts['inputs'].items():
+        if name.startswith('input/docs/'):
+            target = output / _relative(name)
+            if (target.is_symlink() or not target.is_file() or
+                    not target.resolve().is_relative_to(output) or
+                    digest(target) != expected):
+                raise Refusal('STAGED_INPUT_COPY_CHANGED', name)
     for name, expected in payload['outputs'].items():
         target = output / _relative(name)
         if (target.is_symlink() or not target.resolve().is_relative_to(output) or
@@ -1134,7 +1176,7 @@ def _issued_frontend_child(plan_path, arm, component, argv, cwd, out_fd,
 class _IssuedFrontendProcess:
     """A bounded Linux child retaining the existing process-local issuer.
 
-    Only the exact registered 0.5ic worker uses this path. Other components
+    Only the exact registered 0.5ic and D1 workers use this path. Other components
     retain the exec launcher. No preexec_fn or external authorization service.
     """
     def __init__(self, plan_path, arm, component, argv, cwd, stdout, stderr,
@@ -1408,6 +1450,8 @@ class Registry:
         self._version_lock = threading.Lock()
         self.snapshot = snapshot
         self._finalized = False
+        self._step9_reserved: Adapter | None = None
+        self._step9_binding_closed = False
 
     def finalize(self) -> None:
         if self._finalized:
@@ -1534,6 +1578,55 @@ class Registry:
                                               for k, v in adapter.output_contract.items()}),
         )
         self._adapters[adapter.arm_id] = snapshot
+
+    def reserve_step9(self, adapter: Adapter) -> None:
+        """Reserve only the native Step9 slot before upstream RTL exists."""
+        from execution_synthesis_engines import LIBRELANE
+        if (adapter.step_id != '9' or adapter.arm_id != LIBRELANE.arm_id or
+                adapter.tool_id != 'step9-worker' or adapter.available or
+                adapter.qualified or self.adapters('9') or
+                adapter.availability_reason != 'STEP9_DISPATCH_PREPARATION_PENDING'):
+            raise Refusal('STEP9_RESERVATION_UNBOUND', adapter.arm_id)
+        self.register(adapter)
+        self._step9_reserved = self._adapters[adapter.arm_id]
+
+    def bind_step9(self, *, project: Path, parameters: dict) -> None:
+        """Complete that exact reservation once, before any Step9 plan.
+
+        Only the canonical installation producer can construct the replacement.
+        It must pass ordinary registration and a fresh source snapshot. General
+        registration remains closed; no other arm changes.
+        """
+        with self._version_lock:
+            if self._step9_binding_closed:
+                raise Refusal('STEP9_BINDING_CLOSED', '9')
+            reserved = self._step9_reserved
+            if (reserved is None or not self._finalized or
+                    self.adapters('9') != [reserved] or
+                    self._adapters.get(reserved.arm_id) is not reserved):
+                raise Refusal('STEP9_RESERVATION_UNBOUND', '9')
+            from execution_source_snapshot import using
+            from execution_production import register_synthesis_adapter
+            snapshot = SourceSnapshot(_REPO_ROOT, reserved.source_sha)
+            with using(snapshot):
+                prepared = Registry(snapshot=snapshot)
+                register_synthesis_adapter(prepared, project=project,
+                                           parameters=parameters)
+                prepared.finalize()
+            if len(prepared._adapters) != 1:
+                raise Refusal('STEP9_PREPARATION_UNBOUND', '9')
+            candidate = prepared._adapters.get(reserved.arm_id)
+            fixed = ('arm_id', 'step_id', 'tool_id', 'source_sha', 'source_files',
+                     'components', 'validate', 'required_outputs', 'input_contract',
+                     'engine_families', 'cpus', 'ram_mb', 'license_id',
+                     'output_contract', 'role', 'applicability', 'applicability_reason')
+            if candidate is None or any(getattr(candidate, key) != getattr(reserved, key)
+                                        for key in fixed):
+                raise Refusal('STEP9_RESERVATION_CHANGED', '9')
+            Controller._source_current(candidate)
+            self._adapters[reserved.arm_id] = candidate
+            self._step9_binding_closed = True
+            self._step9_reserved = None
 
     def adapters(self, step_id: str) -> list[Adapter]:
         return [a for a in self._adapters.values() if a.step_id == step_id]
@@ -1802,6 +1895,11 @@ class Controller:
 
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None, *, execution_root: Path | None = None) -> dict:
+        # Only the canonical Context may expose Step9 fields before binding.
+        # Its first plan closes preparation even when later authority fails.
+        if type(context) is _require_context_type() and context.step_id == '9':
+            with self.registry._version_lock:
+                self.registry._step9_binding_closed = True
         self._validate_live_portfolio()
         binding = self._context_binding(context)
         route_mode = context.route_receipt.get('mode_intent')
@@ -2331,8 +2429,8 @@ class Controller:
                     child_env[ISSUED_MANIFEST_ENV] = str(manifest)
                     child_env['VIBEIC_MANIFEST_SHA256'] = receipt['manifest_sha256']
                     worker = str(Path(__file__).with_name('execution_frontend_worker.py').resolve())
-                    if (arm.step_id == '0.5ic' and len(argv) == 8 and
-                            argv[1:] == [worker, '--step', '0.5ic', '--inputs',
+                    if (arm.step_id in ('0.5ic', 'D1') and len(argv) == 8 and
+                            argv[1:] == [worker, '--step', arm.step_id, '--inputs',
                                          str(inputs), '--outputs', str(outputs)]):
                         process = _IssuedFrontendProcess(
                             root / 'issued-plan.json', arm, component, argv,
@@ -2389,6 +2487,29 @@ class Controller:
                     output_digest=output_digest)
                 for process in receipt['processes']
             }
+            composite = evidence.provenance.get('composite_gate_execution')
+            if composite:
+                worker = next((p for p in receipt['processes']
+                               if p['component'] == composite.get('worker_component')), None)
+                groups = composite.get('gate_records', {})
+                if worker is None or set(groups) != set(plan['binding']['required_gates']):
+                    raise Refusal('GATE_EXECUTION_UNBOUND', arm.arm_id)
+                for gate, records in groups.items():
+                    if gate in receipt['gate_receipts']:
+                        raise Refusal('GATE_EXECUTION_UNBOUND', gate)
+                    receipt['gate_receipts'][gate] = dict(
+                        gate=gate, observation='canonical-composite',
+                        argv=list(worker['argv']), argv_sha256=_hash(worker['argv']),
+                        executable_path=worker['executable_path'],
+                        executable_sha256=worker['executable_sha256'],
+                        source_sha=arm.source_sha, tool_id=arm.tool_id,
+                        tool_version=arm.tool_version,
+                        source_manifest_sha256=_hash(dict(arm.source_files)),
+                        inputs=dict(plan['binding']['inputs']), rc=worker['rc'],
+                        output_digest=output_digest, nested_worker_component=worker['component'],
+                        typed_receipt_name=composite['receipt_name'],
+                        typed_receipt_sha256=composite['receipt_sha256'],
+                        nested_record_sha256=_hash(records))
             nested_records = evidence.provenance.get('nested_gate_records', ())
             if nested_records:
                 # Composite fixed-step adapters may expose gates run by their
@@ -2666,12 +2787,74 @@ class Controller:
         if verdict == 'FAIL' or any(gates.get(k) == 'FAIL' for k in context.required_gates):
             raise Refusal('GATE_FAIL', arm.arm_id)
         gate_receipts = receipt.get('gate_receipts') or {}
+        composite = evidence.get('provenance', {}).get('composite_gate_execution')
+        composite_worker = None
+        if composite:
+            # A projected receipt is not authority. Reconsume the canonical
+            # validator, then bind it to the actual source-owned worker Popen.
+            here = Path(__file__).resolve().parent
+            from execution_provider_catalog import RELEASE_IDS, BACKEND_IDS, python_entrypoint, proven_dispatcher_closure
+            if arm.step_id in RELEASE_IDS:
+                import execution_adapters_release as canonical
+                worker_name, worker_file = 'release-producer', 'execution_release_worker.py'
+            elif arm.step_id in BACKEND_IDS:
+                import execution_adapters_backend as canonical
+                worker_name, worker_file = 'producer', 'execution_backend_worker.py'
+            else:
+                raise Refusal('GATE_EXECUTION_UNBOUND', arm.arm_id)
+            fresh = asdict(canonical.validate(Path(receipt['output_root']), binding))
+            if fresh.get('verdict') == 'FAIL' or any(
+                    fresh.get('gates', {}).get(g) == 'FAIL' for g in context.required_gates):
+                raise Refusal('GATE_FAIL', arm.arm_id)
+            composite_worker = next((p for p in processes if p.get('component') == worker_name), None)
+            worker_source = str(here / worker_file)
+            component = arm.components[0] if len(arm.components) == 1 else None
+            expected_argv = ([arg.replace('{inputs}', receipt['input_root']).replace(
+                '{outputs}', receipt['output_root']) for arg in component.argv] if component else [])
+            try:
+                if not component:
+                    raise ValueError('canonical composite needs one registered component')
+                expected_argv[0] = str(Path(shutil.which(expected_argv[0]) or expected_argv[0]).resolve())
+                entry = python_entrypoint(tuple(expected_argv), Path(receipt['output_root']))
+                _, _, entry_index = _python_entry(tuple(expected_argv[1:]), allowed_options='BuqOWX')
+                worker_args = expected_argv[entry_index + 2:]
+                proof = proven_dispatcher_closure(entry, Path(worker_source), cwd=Path(receipt['output_root']))
+                if any(arm.source_files.get(str(path)) != digest(path) for path in proof):
+                    raise ValueError('canonical dispatcher source is not bound')
+            except (OSError, ValueError, Refusal) as exc:
+                raise Refusal('GATE_EXECUTION_UNBOUND', str(exc)) from exc
+            if (fresh != evidence or composite.get('schema') != 'vibeic/composite-gate-execution/1' or
+                    component is None or component.name != worker_name or
+                    len(worker_args) != 6 or
+                    worker_args[:4] != [receipt['input_root'], receipt['output_root'], '--step-id', arm.step_id] or
+                    worker_args[4] != '--params-json' or
+                    composite_worker is None or composite_worker.get('argv') != expected_argv or
+                    composite.get('worker_component') != worker_name or
+                    composite.get('worker_source') != worker_source or
+                    composite.get('required_gates') != list(context.required_gates) or
+                    set(composite.get('gate_records', {})) != set(context.required_gates) or
+                    set(gates) != set(context.required_gates) or
+                    evidence.get('outputs', {}).get(composite.get('receipt_name')) != composite.get('receipt_sha256')):
+                raise Refusal('GATE_EXECUTION_UNBOUND', arm.arm_id)
+            for source, expected in {worker_source: digest(Path(worker_source)),
+                                     **composite.get('gate_sources', {})}.items():
+                if arm.source_files.get(source) != expected or digest(Path(source)) != expected:
+                    raise Refusal('GATE_EXECUTION_UNBOUND', source)
         for gate in context.required_gates:
             gate_receipt = gate_receipts.get(gate)
             if not isinstance(gate_receipt, dict):
                 raise Refusal('GATE_EXECUTION_UNBOUND', gate)
             matching = next((process for process in processes
                              if process.get('component') == gate), None)
+            if matching is None and composite_worker is not None:
+                if (gate_receipt.get('observation') != 'canonical-composite' or
+                        gate_receipt.get('nested_worker_component') != composite_worker['component'] or
+                        gate_receipt.get('typed_receipt_name') != composite['receipt_name'] or
+                        gate_receipt.get('typed_receipt_sha256') != composite['receipt_sha256'] or
+                        gate_receipt.get('nested_record_sha256') != _hash(composite['gate_records'][gate]) or
+                        gate_receipt.get('rc') != 0):
+                    raise Refusal('GATE_EXECUTION_UNBOUND', gate)
+                matching = composite_worker
             if matching is None:
                 # Narrow nested-gate path for the registered M1-M4 aggregate
                 # worker only. Direct gate-process receipts retain the normal
@@ -2715,7 +2898,8 @@ class Controller:
                     gate_receipt.get('inputs') != binding['inputs'] or
                     gate_receipt.get('output_digest') != _hash(evidence.get('outputs', {}))):
                 raise Refusal('GATE_EXECUTION_UNBOUND', gate)
-        if verdict != 'PASS' or any(gates.get(k) != 'PASS' for k in context.required_gates):
+        if verdict != 'PASS' or any(not required_gate_satisfied(
+                context.step_id, k, gates.get(k)) for k in context.required_gates):
             raise Refusal('GATE_NOT_MEASURED', arm.arm_id)
         if arm.step_id == '0.5ic' and arm.tool_id == 'frontend-worker':
             chain = consume_frontend_chain(Path(receipt['output_root']), binding)
@@ -2862,7 +3046,8 @@ class Controller:
                 Path(receipt['output_root']), self._context_binding(context)))
             if (final_evidence != receipt['evidence'] or
                     final_evidence.get('verdict') != 'PASS' or
-                    any(final_evidence.get('gates', {}).get(gate) != 'PASS'
+                    any(not required_gate_satisfied(context.step_id, gate,
+                        final_evidence.get('gates', {}).get(gate))
                         for gate in context.required_gates)):
                 raise Refusal('FINAL_EVIDENCE_CHANGED', str(arm_id))
             self._eligible(receipt, context, arm)
@@ -3005,7 +3190,8 @@ class Controller:
         final_evidence = asdict(arm.validate(Path(receipt['output_root']), self._context_binding(context)))
         if (final_evidence != receipt.get('evidence') or
                 final_evidence.get('verdict') != 'PASS' or
-                any(final_evidence.get('gates', {}).get(gate) != 'PASS'
+                any(not required_gate_satisfied(context.step_id, gate,
+                    final_evidence.get('gates', {}).get(gate))
                     for gate in context.required_gates)):
             raise Refusal('FINAL_EVIDENCE_CHANGED', str(arm_id))
         return adoption

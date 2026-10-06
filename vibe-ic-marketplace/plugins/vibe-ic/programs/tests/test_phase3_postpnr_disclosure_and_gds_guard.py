@@ -104,6 +104,13 @@ def _span_inputs(project, top: str = "top") -> None:
     """
     from pathlib import Path as _P
     project = _P(project)
+    # The cached fixture netlist is from the substituted direct producer.
+    # Do not imply a LibreLane handoff that this fixture never produced.
+    switch = project / "phase3/librelane_switch.json"
+    settings = json.loads(switch.read_text()) if switch.is_file() else {}
+    settings.setdefault("steps", {}).setdefault("9", "direct")
+    switch.parent.mkdir(parents=True, exist_ok=True)
+    switch.write_text(json.dumps(settings))
     for rel, text in (
         ("phase2/stage1/rtl/%s.v" % top, "module %s(); endmodule\n" % top),
         ("phase2/stage2/constraints/%s.sdc" % top,
@@ -462,7 +469,9 @@ def _repair_producer(monkeypatch, project, producer, status, detail):
     if switch is not None:
         sw = project / "phase3" / "librelane_switch.json"
         sw.parent.mkdir(parents=True, exist_ok=True)
-        sw.write_text(json.dumps({"steps": switch}))
+        settings = json.loads(sw.read_text()) if sw.is_file() else {}
+        settings.setdefault("steps", {}).update(switch)
+        sw.write_text(json.dumps(settings))
     monkeypatch.setattr(R, fn, lambda *a, **k: R.StepResult(row, status, 0.0, detail))
     if producer == "librelane":
         monkeypatch.setattr(R, "_librelane_postroute_repair_mode", lambda p: "librelane")

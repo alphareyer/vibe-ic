@@ -1144,8 +1144,16 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
         if error:
             return 1
         operator = (bound_answers or {}).get('operator_template') or {}
-        parameters = {'template': operator.get('path'), 'slot': operator.get('slot'),
-                      'no_template_reason': operator.get('absent_reason')}
+        # Use the same actual search location as the canonical producer below.
+        # This names a lookup; it neither creates a template nor buys absence.
+        template = operator.get('path')
+        if template is None:
+            template = _ST.STAGED_TEMPLATE_REL
+        parameters = {'template': template, 'slot': operator.get('slot')}
+        # The real producer omits an absent reason from its issued arguments.
+        # Preserve every provided owner value, including invalid empty values.
+        if operator.get('absent_reason') is not None:
+            parameters['no_template_reason'] = operator['absent_reason']
         result = execution_policy.dispatch_fixed_step(project, '0.5ic', parameters=parameters)
         return 0 if result['status'] == 'ADOPTED' else 1
     answers_path, answers, err = _step_0_5ic_answers(project)
@@ -1750,12 +1758,15 @@ def main() -> int:
                         "`vibe_ic_one_shot_runner` when a delivered answer is "
                         "on disk and the track's own record says nobody has "
                         "read it.")
+    p.add_argument("--skip-analog", action="store_true",
+                   help="Preserve the parent invocation's explicit analog routing choice.")
     import execution_policy as _execution
     _execution.add_arguments(p)
     args, extras = p.parse_known_args()
     _execution.configure(args)
     project = args.project.resolve()
-    _execution.bootstrap(project, parameters={"ic_name": args.ic_name})
+    _execution.bootstrap(project, parameters={"ic_name": args.ic_name,
+        "skip_analog": bool(args.skip_analog)}, phase1_only=True)
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
@@ -1875,6 +1886,9 @@ def main() -> int:
                       "source": "extraction and route before expert track"},
             "second_track": second_track,
         }
+        producer = _execution.phase1_producer_disclosure(project)
+        if producer is not None:
+            summary['canonical_producer'] = producer
         import ai_signed_judgement as _ai_judgement
         summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
         if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
@@ -1999,6 +2013,9 @@ def main() -> int:
         "sufficiency": _suff,
         "extraction_gap": _gap,
     }
+    producer = _execution.phase1_producer_disclosure(project)
+    if producer is not None:
+        summary['canonical_producer'] = producer
     import ai_signed_judgement as _ai_judgement
     summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
     _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
