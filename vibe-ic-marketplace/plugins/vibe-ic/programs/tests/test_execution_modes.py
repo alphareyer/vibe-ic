@@ -111,7 +111,11 @@ def choice(ctx, root, arm='a'):
     refusal = root / 'refusal.json'
     if refusal.is_file() and not (root / arm / 'receipt.json').exists():
         return None
+    plan = json.loads((root / 'plan.json').read_text())
     return {'arm_id': arm, 'binding': ctx.binding(),
+            'run_id': plan['run_id'],
+            'frozen_work_digest': plan['frozen_work_digest'],
+            'comparison_digest': em.digest(root / 'comparison.json'),
             'receipt_sha256': em.digest(root / arm / 'receipt.json'),
             'reviewer': 'test AI decision consumer',
             'rationale': 'Complete current-input output and measured transform gate; lowest declared cost.'}

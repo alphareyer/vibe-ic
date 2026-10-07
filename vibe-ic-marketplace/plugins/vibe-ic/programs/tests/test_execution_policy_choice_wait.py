@@ -200,6 +200,32 @@ def test_new_wrong_receipt_digest_is_refused_by_core(tmp_path, monkeypatch):
     assert outcome['error'].code == 'AI_RECEIPT_DIGEST_MISMATCH'
 
 
+@pytest.mark.parametrize('field', ['run_id', 'comparison_digest', 'frozen_work_digest'])
+@pytest.mark.parametrize('damage', ['changed', 'missing'])
+def test_external_choice_must_acknowledge_current_comparison(
+        tmp_path, monkeypatch, field, damage):
+    response = tmp_path / 'choice.json'
+    project, _, _, runtime = _runtime(tmp_path, monkeypatch, response=response)
+    outcome = {}
+    thread = threading.Thread(target=_dispatch_in_thread, args=(project, response, outcome))
+    thread.start()
+    _wait_request(runtime)
+    ctx = runtime['contexts']['1']
+    run = runtime['runs']['1'][0]
+    choice = H.choice(ctx, run, 'b')
+    if damage == 'missing':
+        choice.pop(field)
+    else:
+        choice[field] = '0' * 64
+    response.write_text(json.dumps(choice))
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert isinstance(outcome.get('error'), em.Refusal), outcome
+    assert outcome['error'].code == 'AI_COMPARISON_UNBOUND'
+    assert not (run / 'selected').exists()
+    assert not (project / 'value.txt').exists()
+
+
 @pytest.mark.parametrize('fault,expected', [
     ('fail_gate', 'FAIL'), ('process_error', 'NOT_MEASURED'),
 ])
