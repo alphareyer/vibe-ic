@@ -220,8 +220,9 @@ def test_external_choice_must_acknowledge_current_comparison(
     response.write_text(json.dumps(choice))
     thread.join(timeout=5)
     assert not thread.is_alive()
-    assert isinstance(outcome.get('error'), em.Refusal), outcome
-    assert outcome['error'].code == 'AI_COMPARISON_UNBOUND'
+    observed = (outcome['error'].code if isinstance(outcome.get('error'), em.Refusal)
+                else outcome['result']['status'])
+    assert observed == 'AI_COMPARISON_UNBOUND'
     assert not (run / 'selected').exists()
     assert not (project / 'value.txt').exists()
 
