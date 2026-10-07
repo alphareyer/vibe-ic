@@ -77855,6 +77855,20 @@ def main() -> int:
             _delivery_report.write_text(json.dumps(_delivery_record, indent=2) + "\n")
         return 2
 
+    # Resolve the backend runtime binding before canonical admission. Admission
+    # is a compute reservation for a run that can actually execute; a missing
+    # local image attestation must fail before it consumes the project's
+    # source/config identity (SPM r29 exposed this ordering defect).
+    pdk = _detect_pdk(project, args.pdk)
+    backend_parameters = {}
+    if pdk is not None:
+        import librelane_contract as _ll
+        try:
+            backend_parameters = _backend_parameter_values(project, pdk)
+        except _ll.Refusal as exc:
+            print(f"REFUSED: backend runtime binding: {exc}", file=sys.stderr)
+            return 2
+
     _admission_args = {"top_name": args.top_name, "ic_name": args.ic_name,
          "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
          "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
@@ -77887,16 +77901,6 @@ def main() -> int:
     if util_warn:
         print(f"[WARN] {util_warn}", file=sys.stderr)
     args.util = norm_util
-
-    pdk = _detect_pdk(project, args.pdk)
-    backend_parameters = {}
-    if pdk is not None:
-        import librelane_contract as _ll
-        try:
-            backend_parameters = _backend_parameter_values(project, pdk)
-        except _ll.Refusal as exc:
-            print(f"REFUSED: backend runtime binding: {exc}", file=sys.stderr)
-            return 2
     _execution.bootstrap(project, parameters={'top': args.top_name, 'pdk': pdk,
         'design_name': args.top_name, 'pdk_name': args.pdk, 'container': args.container,
         'die_um': args.die_um, 'util': args.util, **backend_parameters,
