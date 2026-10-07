@@ -37369,8 +37369,9 @@ def _librelane_admission_facts(project: Path) -> Dict[str, Any]:
     the same run with the switch added.  A design class whose steps run on
     the contract's class default (T96: the chip path, 15..20) selects those
     producers with no switch at all, so its defaults count the same way.
-    Absent switch and no class default: nothing is added, so every such
-    identity is unchanged.
+    Absent switch and no class default: nothing is added unless the runner
+    declares a PDK-root environment override, which is independently bound
+    below because it changes the active physical inputs.
     """
     import librelane_contract as _ll
     switch = project / "phase3/librelane_switch.json"
@@ -37396,6 +37397,16 @@ def _librelane_admission_facts(project: Path) -> Dict[str, Any]:
         layer = {"UNREADABLE": str(exc)}
     if layer is not None:
         facts["librelane_impl_layer"] = layer
+    # The runner's environment can select a different PDK tree (for example,
+    # the outer-container /pdk mount). Bind that declared input into admission
+    # so the same source/project/image with a different active root is a new
+    # measurement. Keep the absent-override identity unchanged.
+    pdk_root_override = os.environ.get("VIBEIC_LIBRELANE_PDK_ROOT")
+    if pdk_root_override:
+        facts["librelane_pdk_root_override"] = {
+            "path": str(Path(pdk_root_override).expanduser().resolve()),
+            "source": "environment:VIBEIC_LIBRELANE_PDK_ROOT",
+        }
     if facts:
         facts["librelane_contract_sha256"] = _ll.digest(
             PROGRAMS_DIR / "librelane_contract.py")
