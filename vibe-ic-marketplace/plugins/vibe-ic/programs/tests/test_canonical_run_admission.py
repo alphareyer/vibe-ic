@@ -201,6 +201,9 @@ def test_direct_phase_runners_refuse_before_expensive_dispatch(tmp_path, monkeyp
     _declare(project)
     phase3 = _load_runner("phase3_one_shot_runner.py", "_test_direct_phase3")
     monkeypatch.setattr(phase3._runner_lock, "acquire_or_reenter", lambda *_: object())
+    # This fixture exercises admission itself; keep backend runtime binding
+    # out of scope by making PDK discovery explicitly return no PDK.
+    monkeypatch.setattr(phase3, "_detect_pdk", lambda *a: None)
     monkeypatch.setattr(phase3._canonical_admission, "admit_span", lambda *a, **k: refused)
     monkeypatch.setattr(sys, "argv", ["phase3_one_shot_runner.py", str(project)])
     assert phase3.main() == 2
