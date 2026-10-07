@@ -705,7 +705,8 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
                        exit_step: Optional[str],
                        area_receipt: Optional[str] = None,
                        area_run_manifest: Optional[str] = None,
-                       phase3_rederive_ic_name: Optional[str] = None
+                       phase3_rederive_ic_name: Optional[str] = None,
+                       pdk: str = "auto"
                        ) -> List[str]:
     """Build the canonical Phase-2 argv with explicit opt-ins only.
 
@@ -715,6 +716,8 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
     """
     result = [str(project), "--top-name", top_name, "--container", container,
               "--max-rtl-repair-retries", str(max_rtl_repair_retries)]
+    if pdk != "auto":
+        result += ["--pdk", pdk]
     if lec_max_completed_rungs is not None:
         result += ["--lec-max-completed-rungs", str(lec_max_completed_rungs)]
     if skip_hardware:
@@ -2461,6 +2464,7 @@ def _main() -> int:
         # unmappable value) happens there, not here.
         p2_args = _phase2_runner_argv(
             project, top_name=flow_top, container=args.container,
+            pdk=args.pdk,
             max_rtl_repair_retries=args.max_rtl_repair_retries,
             lec_max_completed_rungs=args.lec_max_completed_rungs,
             skip_hardware=args.skip_hardware, skip_phase3=args.skip_phase3,

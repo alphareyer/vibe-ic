@@ -1509,12 +1509,14 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     return result
 
 
-def phase2_pdk(project: Path) -> tuple[str, str]:
+def phase2_pdk(project: Path, *, selected: str | None = None) -> tuple[str, str]:
     """Read the existing Phase-2 PDK declaration, refusing ambiguous evidence.
 
     The shared declaration accessor selects the source. This stricter tool
     input boundary checks its providers for malformed or conflicting values;
     a prose target is not an executable PDK distribution name.
+    An explicit selection may name a declared alternate or family revision;
+    omission retains the existing primary-target result.
     """
     import declared_pdk_is_the_pdk_used_check as declared
 
@@ -1553,6 +1555,22 @@ def phase2_pdk(project: Path) -> tuple[str, str]:
         raise Refusal('LL_PHASE2_PDK_UNDECLARED', 'declare PDK in Phase-2 L19 or input/project.json')
     if values != {pdk}:
         raise Refusal('LL_PHASE2_PDK_CONFLICT', 'Phase-2 PDK declarations disagree')
+    if selected is not None and selected != 'auto':
+        if not isinstance(selected, str) or not _PDK_NAME.fullmatch(selected):
+            raise Refusal('LL_PHASE2_PDK_INVALID', 'selected PDK must name an exact distribution')
+        # The scalar primary is not the complete declaration of a multi-PDK
+        # design. Reuse the backend's existing, one-directional family/revision
+        # rule; a caller may select only a process the design already names.
+        import phase3_one_shot_runner as p3
+        tokens = {pdk.lower()}
+        for alternate in p3._read_declared_pdk_alternates(project):
+            if not _PDK_NAME.fullmatch(alternate):
+                raise Refusal('LL_PHASE2_PDK_INVALID', 'alternate PDK must name an exact distribution')
+            tokens.add(alternate.lower())
+        if not p3._declares_resolved_pdk(selected, tokens):
+            raise Refusal('LL_PHASE2_PDK_CONFLICT',
+                          'selected PDK is not a declared target or revision')
+        pdk, source = selected, f'run selection {selected}; declared by {source}'
     switch = project / 'phase3/librelane_switch.json'
     if switch.is_file():
         selected = _load(switch).get('pdk')

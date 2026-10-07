@@ -180,9 +180,14 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
     return p, rtl, pdk, calls
 
 
+@pytest.mark.parametrize("selected", [None, "pdkA"])
 def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
-                                                               monkeypatch):
+                                                               monkeypatch, selected):
     p, _, pdk, _ = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    if selected:
+        (p / "input/project.json").unlink()
+        put(p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+            "fields": {"pdk_target": "primaryKit", "pdk_target_alternates": ["pdkA"]}})
     observed = {}
 
     class Execution:
@@ -197,7 +202,7 @@ def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
 
     result = D._bootstrap_execution_policy(
         Execution, p, top="top", container="unused", ic_class=None,
-        skip_analog=True)
+        skip_analog=True, **({"pdk_name": selected} if selected else {}))
     assert result == "runtime"
     assert observed["project"] == p
     import execution_modes as EM
@@ -218,6 +223,65 @@ def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
         step8, {"required_output_contract": ["reports/phase2/sdc_check.json"]})
     assert acceptance["objective"]["pdk"]["name"] == pdk.name
     assert EM._hash(acceptance)
+
+
+def test_selected_secondary_pdk_reaches_the_phase2_producer(tmp_path, monkeypatch):
+    p, _, pdk, calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    (p / "input/project.json").unlink()
+    put(p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+        "fields": {"pdk_target": "primaryKit", "pdk_target_alternates": ["pdkA"],
+                   "die_area_budget_um": "1000x1000"}})
+    result = D.step_yosys_synth(p, "top", "unused", pdk_name=pdk.name)
+    assert result.status == "PASS", result.detail
+    assert calls[0] == ["Yosys.JsonHeader", "Yosys.Synthesis",
+                        "Checker.YosysUnmappedCells", "Checker.YosysSynthChecks",
+                        "Checker.NetlistAssignStatements"]
+    cfg = json.loads((p / "phase3/librelane/synthesis_resolved.json").read_text())
+    assert cfg["PDK"] == pdk.name
+    assert H.bound_handoff(p)["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("alternates,expected", [(["pdkA"], "PASS"), ([], "FAIL"),
+                                                (["otherKit"], "FAIL")])
+def test_native_handoff_accepts_only_a_declared_secondary_target(tmp_path, monkeypatch,
+                                                               alternates, expected):
+    p, _, _, _ = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    result = D.step_yosys_synth(p, "top", "unused")
+    assert result.status == "PASS", result.detail
+    (p / "input/project.json").unlink()
+    put(p / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+        "fields": {"pdk_target": "primaryKit", "pdk_target_alternates": alternates}})
+    report = H.bound_handoff(p)
+    assert report["verdict"] == expected, report
+
+
+def test_frontdoor_passes_the_selected_pdk_to_phase2():
+    import vibe_ic_one_shot_runner as frontdoor
+    common = dict(top_name="top", container="eda", max_rtl_repair_retries=3,
+                  lec_max_completed_rungs=None, skip_hardware=True,
+                  skip_phase3=False, skip_analog=True, entry_step="9", exit_step="14")
+    argv = frontdoor._phase2_runner_argv(Path("/project"), pdk="secondaryKitD", **common)
+    assert argv[argv.index("--pdk") + 1] == "secondaryKitD"
+    assert "--pdk" not in frontdoor._phase2_runner_argv(Path("/project"), **common)
+
+
+@pytest.mark.parametrize("primary,alternates,selected,expected", [
+    ("primaryKit", ["secondaryKit"], "secondaryKitD", "secondaryKitD"),
+    ("primaryKitA", [], "primaryKitB", "LL_PHASE2_PDK_CONFLICT"),
+    ("custom_kit_q7", [], "custom_kit_q7", "custom_kit_q7"),
+    ("primaryKit", [], "unrelatedKit", "LL_PHASE2_PDK_CONFLICT"),
+    ("primaryKit", ["untyped alternate"], "primaryKit", "LL_PHASE2_PDK_INVALID"),
+])
+def test_selected_pdk_preserves_declaration_refusals(tmp_path, primary, alternates,
+                                                   selected, expected):
+    put(tmp_path / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+        "fields": {"pdk_target": primary, "pdk_target_alternates": alternates}})
+    if expected.startswith("LL_"):
+        with pytest.raises(LC.Refusal) as exc:
+            LC.phase2_pdk(tmp_path, selected=selected)
+        assert exc.value.code == expected
+    else:
+        assert LC.phase2_pdk(tmp_path, selected=selected)[0] == expected
 
 
 @pytest.mark.parametrize("damage", ["missing", "conflict"])

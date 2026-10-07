@@ -13531,7 +13531,7 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
                       extras={"exit_code": rc})
 
 
-def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
+def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
     Default selects LibreLane with the PDK declared by Phase 2; the image is
@@ -13555,7 +13555,7 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     out_dir = project / "reports/phase2/lint"
     gate_json = out_dir / "verilator_lint_gate.json"
     try:
-        pdk, pdk_source = _ll.phase2_pdk(project)
+        pdk, pdk_source = _ll.phase2_pdk(project, selected=pdk_name)
         image = _ll.resolve_image(project)
         l9 = _rcvar_l9_top_ports(project)
         top = l9[0] if l9 else None
@@ -18174,7 +18174,7 @@ def _phase2_synth_timeout_s() -> int:
         return 300
 
 
-def _phase2_pdk_config(project: Path):
+def _phase2_pdk_config(project: Path, pdk_name: Optional[str] = None):
     """Resolve the one Phase-2 PDK contract used by synthesis and Ultra.
 
     This is deliberately the existing normal-flow declaration and Phase-3
@@ -18183,7 +18183,7 @@ def _phase2_pdk_config(project: Path):
     import librelane_contract as _ll
     import phase3_one_shot_runner as _p3
 
-    declared_pdk, _ = _ll.phase2_pdk(project)
+    declared_pdk, _ = _ll.phase2_pdk(project, selected=pdk_name)
     pdk = _p3._detect_pdk(project, declared_pdk)
     if pdk is None or pdk.name != declared_pdk:
         raise _ll.Refusal(
@@ -18194,7 +18194,7 @@ def _phase2_pdk_config(project: Path):
 
 def _bootstrap_execution_policy(execution, project: Path, *, top: str,
                                 container: str, ic_class: Optional[str],
-                                skip_analog: bool):
+                                skip_analog: bool, pdk_name: Optional[str] = None):
     """Give issued Default and Ultra the normal runner's JSON-bound PDK."""
     parameters = {
         "top": top,
@@ -18207,7 +18207,7 @@ def _bootstrap_execution_policy(execution, project: Path, *, top: str,
             _CAPABILITY_FD_ENV in os.environ):
         import librelane_contract as _ll
         try:
-            pdk = _phase2_pdk_config(project)
+            pdk = _phase2_pdk_config(project, pdk_name)
         except (_ll.Refusal, OSError, ValueError) as exc:
             # Other fixed rows remain runnable.  Step 9 registers an
             # unavailable external adapter carrying this exact refusal.
@@ -18295,7 +18295,8 @@ def _phase2_synth_top(project: Path, requested_top: str) -> str:
 
 def step_yosys_synth(project: Path, top_name: str = "chip_top",
                      container: str = _pin.default_container_name(),
-                     ic_class: Optional[str] = None) -> StepResult:
+                     ic_class: Optional[str] = None,
+                     *, pdk_name: Optional[str] = None) -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
@@ -18665,7 +18666,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     try:
         if _ll.selected_mode(project, "9") == "librelane":
             import phase3_one_shot_runner as _p3
-            pdk = _phase2_pdk_config(project)
+            pdk = _phase2_pdk_config(project, pdk_name)
             row = _p3.step_synth(
                 project, synth_top, pdk, container,
                 _fallback_handoff=_step9_handoff)
@@ -19760,7 +19761,7 @@ def _emit_step7_pvt_matrix(project: Path, pdk: object,
 def step_asic_sdc(project: Path, top_name: str = "chip_top",
                   container: str = _pin.default_container_name(),
                   ic_class: Optional[str] = None,
-                  *, pdk_config: Any = None,
+                  *, pdk_config: Any = None, pdk_name: Optional[str] = None,
                   _use_controller: bool = True) -> StepResult:
     """Canonical Phase-2 Step-7 producer (SDC + PVT matrix).
 
@@ -19795,7 +19796,7 @@ def step_asic_sdc(project: Path, top_name: str = "chip_top",
                               str(dispatched.get("reason", "")),
                               extras={"execution_result": dispatched})
     try:
-        pdk = pdk_config if pdk_config is not None else _phase2_pdk_config(project)
+        pdk = pdk_config if pdk_config is not None else _phase2_pdk_config(project, pdk_name)
         import phase3_one_shot_runner as _p3
         from _ppa import timing as _timing
         rec = _timing.emit_step7_asic_sdc(
@@ -25350,6 +25351,8 @@ def main() -> int:
     _line_buffer_own_stream()
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
+    p.add_argument("--pdk", default="auto",
+                   help="Select a PDK declared by the design, including its secondary targets.")
     p.add_argument("--skip-hardware", action="store_true")
     p.add_argument("--skip-analog", action="store_true",
                    help="Forward --skip-analog to final_audit so analog A1-A8 "
@@ -25435,7 +25438,7 @@ def main() -> int:
     _bootstrap_execution_policy(
         _execution, project, top=args.top_name, container=args.container,
         ic_class=getattr(args, 'ic_class', None),
-        skip_analog=bool(args.skip_analog))
+        skip_analog=bool(args.skip_analog), pdk_name=args.pdk)
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
@@ -25717,7 +25720,7 @@ def main() -> int:
 
     _canonical = _canonical_admission.admit_span(
         project, "phase2", PROGRAMS_DIR, args.container,
-        {"top_name": args.top_name,
+        {"top_name": args.top_name, "pdk": args.pdk,
          "max_rtl_repair_retries": args.max_rtl_repair_retries,
          "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
          "skip_analog": args.skip_analog, "entry_step": args.entry_step,
@@ -25944,7 +25947,7 @@ def main() -> int:
     plan.append(step_crosslayer_rewrite_fidelity(project))
 
     # Fixed Step 2 call: selected_mode owns the production default and opt-out.
-    _tool_lint = step_rtl_lint_tool(project)
+    _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk)
     if _tool_lint is not None:
         plan.append(_tool_lint)
 
@@ -26333,7 +26336,7 @@ def main() -> int:
             project, "design_one_shot_runner", "asic_sdc",
             _preflight_refusal("asic_sdc"),
             step_asic_sdc, project, args.top_name, args.container, ic_class,
-            _use_controller=False))
+            pdk_name=args.pdk, _use_controller=False))
     if _execution._ordinary_runtime is not None:
         # Step 8 is the consumer validation of the Step-7 artefacts.  The
         # default controller may return NOT_MEASURED for this source-bound
@@ -26360,6 +26363,7 @@ def main() -> int:
             project, "design_one_shot_runner", "yosys_synth",
             _preflight_refusal("yosys_synth"),
             step_yosys_synth, project, args.top_name, args.container, ic_class,
+            pdk_name=args.pdk,
             _preflight_not_applicable=(_analog_reason if _analog_absent
                                        else None)))
 

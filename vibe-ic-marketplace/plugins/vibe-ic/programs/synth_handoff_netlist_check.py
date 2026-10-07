@@ -203,7 +203,7 @@ def _native_synthesis(project: Path, folder: Path, top: str, *, path_resolver=No
             raise ValueError(f'native receipt mismatch: {rel}')
     if inp['config'] != _sha(project / 'phase3/librelane/synthesis_resolved.json'):
         raise ValueError('producer consumed a different resolved config')
-    pdk, _ = LC.phase2_pdk(project)
+    pdk, _ = LC.phase2_pdk(project, selected=cfg.get('PDK'))
     if cfg.get('PDK') != pdk or cfg.get('DESIGN_NAME') != top:
         raise ValueError('producer PDK/top differs from declared input')
     rtl = silicon_rtl_selection(project / 'phase2/stage1/rtl')
