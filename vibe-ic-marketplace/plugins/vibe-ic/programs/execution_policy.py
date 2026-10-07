@@ -523,11 +523,13 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
         if issued is not None:
             return issued
     import _flow_yaml
+    from step_required_inputs_check import expand
     root = runtime['project']
-    row = next((r for r in _flow_yaml.load()['steps'] if str(r['id']) == step_id), None)
+    by_id = {str(r['id']): r for r in _flow_yaml.load()['steps']}
+    row = by_id.get(step_id)
     if row is None:
         raise Refusal('UNKNOWN_CANONICAL_STEP', step_id)
-    declarations = [r.get('path') for r in row.get('required_inputs', ()) if r.get('path')]
+    declarations = list(row.get('required_inputs') or ())
     declarations.extend(('input/step_0_5ic_answers.json', 'input/submission_template'))
     if step_id == '0.5ic':
         # Derived answers cite these original documents; their consumer must
@@ -547,8 +549,26 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     if str(step_id) in BACKEND_IDS:
         from execution_adapters_backend import backend_project_input_contract
         declarations.extend(backend_project_input_contract(root, str(step_id)))
+    # Frontend adapters retain YAML mappings; native adapters declare paths.
+    # Use the canonical expansion for upstream `outputs: all` and keep an
+    # unchecked external declaration out of the filesystem search.
+    patterns = []
+    for entry in declarations:
+        if isinstance(entry, dict):
+            if entry.get('from') == 'external' and entry.get('check') == 'none':
+                continue
+            try:
+                patterns.extend(spec for _, spec in expand(entry, by_id))
+            except (KeyError, TypeError) as exc:
+                raise Refusal('ORDINARY_INPUT_CONTRACT_INVALID', str(entry)) from exc
+        elif isinstance(entry, str):
+            patterns.append(entry)
+        else:
+            raise Refusal('ORDINARY_INPUT_CONTRACT_INVALID', repr(entry))
     inputs = {}
-    for spec in declarations:
+    for spec in patterns:
+        if not isinstance(spec, str):
+            raise Refusal('ORDINARY_INPUT_CONTRACT_INVALID', repr(spec))
         for pattern in str(spec).split(' OR '):
             pattern = pattern.strip()
             if not pattern or Path(pattern).is_absolute() or '..' in Path(pattern).parts:

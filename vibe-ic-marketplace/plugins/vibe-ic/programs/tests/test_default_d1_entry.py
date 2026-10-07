@@ -164,3 +164,49 @@ def test_ultra_d1_keeps_controller_refusal(tmp_path):
     assert result.status == "NOT_MEASURED"
     assert result.extras["execution_results"][0]["reason"] == "NO_REGISTERED_PROVIDER"
     assert "canonical_phase1_producer" not in runtime
+
+
+@pytest.mark.parametrize("step_id", ["0.5ic", "1", "2"])
+def test_default_input_census_expands_canonical_declarations(tmp_path, step_id):
+    import execution_frontend_providers as providers
+
+    project = tmp_path / "subject"
+    _raw_docs_project(project)
+    extra = project / "extra/config.json"
+    extra.parent.mkdir()
+    extra.write_text('{"source": "declared native input"}\n')
+    expected = ["extra/config.json", "input/step_0_5ic_answers.json"]
+    if step_id == "0.5ic":
+        expected += ["input/docs/design.md", "input/submission_template_source/s1.yaml"]
+    else:
+        # Step 1 declares all D1 outputs; Step 2 names Step 1's RTL path.
+        paths = (["phase1/generated_docs/L1_DATASHEET.json",
+                  "phase1/generated_docs/L8_RTL_CONSTANTS.json"] if step_id == "1"
+                 else ["phase2/stage1/rtl/unit.sv"])
+        for name in paths:
+            path = project / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("neutral input bytes\n")
+        expected += paths
+    # These are the shipped adapter's input declarations, not producer or
+    # authority fakes. The consumer also supports native string paths.
+    adapter = SimpleNamespace(input_contract=providers.INPUT_CONTRACTS[step_id]
+                              + ("extra/config.json",))
+    runtime = {"project": project,
+               "registry": SimpleNamespace(adapters=lambda _: (adapter,))}
+    parameters = {"template": "input/submission_template_source"} if step_id == "0.5ic" else {}
+    try:
+        observed = sorted(policy._fixed_inputs(runtime, step_id, parameters=parameters))
+    except OSError as exc:
+        observed = [f"INPUT_COLLECTION_ERROR:{type(exc).__name__}:{exc.errno}"]
+    assert observed == sorted(expected)
+
+
+@pytest.mark.parametrize("declaration", [{}, {"from": "unknown", "outputs": "all"},
+                                         {"from": "D1"}, None])
+def test_default_input_census_refuses_malformed_declarations(tmp_path, declaration):
+    runtime = {"project": tmp_path,
+               "registry": SimpleNamespace(adapters=lambda _: (
+                   SimpleNamespace(input_contract=(declaration,)),))}
+    with pytest.raises(em.Refusal, match="ORDINARY_INPUT_CONTRACT_INVALID"):
+        policy._fixed_inputs(runtime, "0.5ic")
