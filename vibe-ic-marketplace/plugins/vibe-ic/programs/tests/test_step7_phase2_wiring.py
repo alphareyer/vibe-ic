@@ -137,6 +137,31 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
                                      "asic_sdc", lambda *a: None) is measured_fail
 
 
+def test_default_ordinary_step9_placeholder_releases_preflight_gate(
+        tmp_path, monkeypatch):
+    """The Default Step-9 source arm must release to the Yosys producer."""
+    placeholder = SimpleNamespace(status="NOT_MEASURED")
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: placeholder)
+    monkeypatch.setattr(EP, "_ordinary_runtime",
+                        {"policy": {"mode": "default"}})
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is None
+
+    monkeypatch.setattr(EP, "_ordinary_runtime",
+                        {"policy": {"mode": "ultra"}})
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is placeholder
+
+    measured_fail = SimpleNamespace(status="FAIL")
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: measured_fail)
+    monkeypatch.setattr(EP, "_ordinary_runtime",
+                        {"policy": {"mode": "default"}})
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is measured_fail
+
+
 def test_live_preflight_gate_calls_step7_fn_after_default_placeholder(
         tmp_path, monkeypatch):
     """Exercise the actual gate seam, not only its dispatch helper."""

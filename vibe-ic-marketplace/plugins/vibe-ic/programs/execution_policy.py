@@ -881,13 +881,14 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
             controller_qualification='NOT_MEASURED')
         return None
     result = dispatch_ordinary_rows(project, span, site, refusal_factory)
-    # Step 7 has a real program-first producer in the Phase-2 runner.  The
-    # ordinary Default frontend row is only a source-bound qualification arm;
-    # its explicit NOT_MEASURED result must release control back to
-    # step_preflight.gate so the caller can run the canonical emitter.  Keep
+    # These sites have real program-first producers in the Phase-2 runner.
+    # Their ordinary Default frontend rows are source-bound qualification arms;
+    # an explicit NOT_MEASURED placeholder must release control back to
+    # step_preflight.gate so the caller can run the canonical producer.  Keep
     # Ultra and measured failures on the Controller path: only Default's
-    # unmeasured placeholder is eligible for this fallback.
-    if (site == 'asic_sdc' and runtime.get('policy', {}).get('mode') == 'default'
+    # unmeasured placeholders are eligible for this fallback.
+    if (site in ('asic_sdc', 'yosys_synth')
+            and runtime.get('policy', {}).get('mode') == 'default'
             and getattr(result, 'status', None) == 'NOT_MEASURED'):
         return None
     return result
