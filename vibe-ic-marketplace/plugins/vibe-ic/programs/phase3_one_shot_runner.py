@@ -17445,7 +17445,24 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # Issued Default/Ultra execution prepares Step9 from current producer
     # outputs here. Unissued helpers retain the native implementation below.
     from execution_production import dispatch_site
-    _step9 = dispatch_site(("9",), project, {
+    # The Phase-2 Default frontend deliberately releases an unmeasured
+    # source-bound placeholder to this canonical producer.  That first
+    # placeholder dispatch has already opened Step 9's Controller binding with
+    # incomplete parameters; dispatching it again here would be a different
+    # request and correctly fail with STEP9_DISPATCH_PARAMETERS_CHANGED.
+    # Consume the explicit, same-process marker set by dispatch_ordinary_site.
+    # Ultra and measured failures do not set the marker and retain Controller
+    # selection/adoption exactly as before.
+    _execution = None
+    try:
+        import execution_policy as _execution
+        _runtime = getattr(_execution, "_ordinary_runtime", None)
+        _program_first_fallback = bool(
+            _runtime and "yosys_synth" in
+            _runtime.get("program_first_fallback_sites", set()))
+    except Exception:  # pragma: no cover - helper must never block native synth
+        _program_first_fallback = False
+    _step9 = None if _program_first_fallback else dispatch_site(("9",), project, {
         "top": top, "pdk": pdk, "container": container,
         "period_relax": period_relax,
     })
