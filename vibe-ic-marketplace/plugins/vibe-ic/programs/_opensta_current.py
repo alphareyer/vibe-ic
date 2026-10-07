@@ -63,11 +63,14 @@ def corner_identity(liberties):
     return out
 
 
-def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_top=None):
+def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_top=None,
+          spef=None):
     """Bind logical artifact paths and the module those bytes actually describe.
 
     A distinct physical top is supplied by the validated tool configuration;
     receipt validation re-derives it from that authority, never from filenames.
+    A tool-selected SPEF is similarly re-derived from the validated corner State;
+    the logical artifact alias need not represent that extraction corner.
     """
     project = Path(project).resolve(strict=True)
     physical_top = top if physical_top is None else physical_top
@@ -75,7 +78,7 @@ def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_
            for name in (top, physical_top)):
         raise Refusal("CURRENT_DESIGN_NAME_INVALID")
     paths = {"netlist": pl.pnr_dir(project) / f"{top}_pnr.v",
-             "spef": pl.extracted_dir(project) / f"{top}.spef",
+             "spef": Path(spef) if spef is not None else pl.extracted_dir(project) / f"{top}.spef",
              "sdc": pl.pnr_dir(project) / "constraint.sdc"}
     inputs = [file_record(p, role, project) for role, p in paths.items()]
     if not re.search(r'\bmodule\s+' + re.escape(physical_top) + r'\b', paths['netlist'].read_text()):
@@ -163,10 +166,10 @@ def validate(project, receipt_path, step, outputs):
     physical_top = (tool_current or {}).get('physical_top', doc['top'])
     if doc.get('physical_top', doc['top']) != physical_top:
         raise Refusal('CURRENT_TOOL_DESIGN_MISMATCH')
-    current = basis(project, doc['top'], libs, coupling=str(step) == '27',
-                    physical_top=physical_top)
-    # These roles have exactly one ordinary location. A perfectly hashed file
-    # from a sibling stage or design still cannot stand in for that location.
+    current = tool_current or basis(project, doc['top'], libs, coupling=str(step) == '27',
+                                    physical_top=physical_top)
+    # Ordinary locations or the exact validated tool scene own these roles.
+    # A hashed sibling SPEF cannot stand in for the corner the producer selected.
     expected = {r['role']: r for r in current['inputs']}
     observed = {r['role']: r for r in doc['inputs']}
     if len(observed) != len(doc['inputs']) or any(observed.get(k) != v for k, v in expected.items()):
@@ -243,13 +246,23 @@ def si_binding(project):
     rpt = pl.reports_phase3_dir(project) / 'si_crosstalk.rpt'
     doc = json.loads(rpt.with_suffix('.json').read_text())
     timing = Path(doc['timing_aware_advisory']['timing_json'])
-    validate(project, timing.with_suffix('.current.json'), '27', [('timing_windows', timing)])
+    timing_receipt = validate(project, timing.with_suffix('.current.json'), '27',
+                              [('timing_windows', timing)])
     timing_has_windows(timing)
     receipt = validate(project, rpt.with_suffix('.current.json'), '27',
                        [('si_report', rpt), ('si_result', rpt.with_suffix('.json'))])
     named = {r['role']: r['path'] for r in receipt['inputs']}
     if named.get('timing_windows') != str(timing) or named.get('timing_receipt') != str(timing.with_suffix('.current.json')):
         raise Refusal("CURRENT_SI_TIMING_CONSUMPTION_MISSING")
+    if (doc.get('spef') != named.get('spef')
+            or doc['timing_aware_advisory'].get('spef') != named.get('spef')):
+        raise Refusal('CURRENT_SI_SPEF_CONSUMPTION_MISMATCH')
+    report_inputs = {r['role']: r for r in receipt['inputs']
+                     if r['role'] not in ('timing_windows', 'timing_receipt')}
+    if (report_inputs != {r['role']: r for r in timing_receipt['inputs']}
+            or any(receipt.get(key) != timing_receipt.get(key) for key in
+                   ('top', 'physical_top', 'corner', 'tool_corner', 'tool_image'))):
+        raise Refusal('CURRENT_SI_TIMING_SUBJECT_MISMATCH')
     return receipt
 
 
@@ -257,7 +270,8 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     """Reuse Step 23's native current state; no producer or mode selection.
 
     The retained run_chain fingerprint, not recomputed State hashes, binds the
-    original material files. The ordinary route's copies must match those bytes.
+    original material files. Netlist/SDC copies must match those bytes; the
+    selected corner's SPEF is consumed directly, without rewriting a nominal alias.
     """
     import librelane_contract as lc
     import librelane_postroute as lp
@@ -291,7 +305,10 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     if not isinstance(physical_top, str) or not re.fullmatch(r'[A-Za-z_][\w$]*', physical_top):
         raise Refusal('CURRENT_DESIGN_NAME_INVALID')
     record = json.loads((project / lp.STEP23_RECORD).read_text())
-    corner = corner or ((record.get('judgment') or {}).get('worst_setup') or {}).get('corner')
+    selected_corner = ((record.get('judgment') or {}).get('worst_setup') or {}).get('corner')
+    if coupling and corner is not None and corner != selected_corner:
+        raise Refusal('CURRENT_SI_CORNER_MISMATCH')
+    corner = corner or selected_corner
     if not corner:
         raise Refusal('CURRENT_STAPOSTPNR_CORNER_MISSING')
     inputs = lc.post_pnr_timing_inputs(project, folder / 'state_out.json', corner)
@@ -305,9 +322,15 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     if any(str(p) not in fp['liberty_files'] and str(host(p)) not in fp['liberty_files']
            for p in inputs['liberties']):
         raise Refusal('CURRENT_STAPOSTPNR_CORNER_LIBRARY_UNBOUND')
-    subject = basis(project, top, libs, coupling=coupling, physical_top=physical_top)
+    selected_spef = project / inputs['spef']
+    # STAPostPNR carries extraction inputs; a State pathname alone cannot
+    # authorize new bytes. Keep the original executed input fingerprint binding.
+    if fp['state_files'].get(str(selected_spef)) != digest(selected_spef):
+        raise Refusal('CURRENT_STAPOSTPNR_SPEF_HANDOFF_MISMATCH')
+    subject = basis(project, top, libs, coupling=coupling, physical_top=physical_top,
+                    spef=selected_spef)
     roles = {r['role']: r for r in subject['inputs']}
-    for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc'), ('spef', 'spef')]:
+    for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc')]:
         if digest(project / inputs[key]) != roles[role]['sha256']:
             raise Refusal(f'CURRENT_STAPOSTPNR_{role.upper()}_HANDOFF_MISMATCH')
     subject['inputs'] += [file_record(path, role, project) for role, path in [

@@ -73008,6 +73008,15 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             raise current.Refusal('CURRENT_SI_BASIS_MISSING')
         if si_rpt.absolute() != (_pl.reports_phase3_dir(project) / 'si_crosstalk.rpt').absolute():
             raise current.Refusal('CURRENT_SI_OUTPUT_PATH_MISMATCH')
+        subject, _ = current.tool_subject(project, top, coupling=True)
+        selected_spef = next(Path(row['path']) for row in subject['inputs']
+                             if row['role'] == 'spef')
+        logical_spef = _pl.extracted_dir(project) / f'{top}.spef'
+        if spef.absolute() not in (logical_spef.absolute(), selected_spef):
+            raise current.Refusal('CURRENT_SI_INPUT_PATH_MISMATCH')
+        # The coupling screen and timing windows must consume the same scene.
+        # Preserve the logical output stem and leave the nominal alias intact.
+        spef = selected_spef
         cg, cc = _parse_spef_caps(spef.read_text())
         if not cc:
             raise current.Refusal('CURRENT_SPEF_COUPLING_MISSING')

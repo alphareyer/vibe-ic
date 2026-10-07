@@ -210,3 +210,130 @@ def test_declared_si_row_consumes_split_identity_and_blocks_drift(tmp_path, monk
     (folder / "invocation.log").unlink()
     result = FC._check_program_exit_zero(p, command)
     assert result[0] is False, result
+
+
+def corner_project(tmp_path, physical="package_shell"):
+    """Two receipt-bound SPEFs whose differences are legitimate corner data."""
+    import librelane_contract as LC
+    import librelane_postroute as LP
+    from test_default_current_power import seal
+    p, folder, lib = physical_project(tmp_path, physical)
+    canonical = p / "phase3/stage3/extracted/neutral.spef"
+    selected = write(canonical.parent / "spef_corners/neutral.max.spef",
+                     canonical.read_text().replace("0.01", "0.02"))
+    state_path = folder / "state_out.json"
+    state = json.loads(state_path.read_text())
+    state["spef"] = {"nom_*": str(canonical), "max_*": str(selected)}
+    put(state_path, state)
+    write(folder / "max_typ/sta.log",
+          (folder / "nom_typ/sta.log").read_text().replace("nom_typ", "max_typ"))
+    fp = json.loads((folder / "input_fingerprint.json").read_text())
+    fp["state_files"][str(selected)] = LC.digest(selected)
+    seal(folder, fp)
+    record = json.loads((p / LP.STEP23_RECORD).read_text())
+    record["sta_state_sha256"] = LC.digest(state_path)
+    record["judgment"]["worst_setup"]["corner"] = "max_typ"
+    put(p / LP.STEP23_RECORD, record)
+    return p, folder, lib, selected
+
+
+@pytest.mark.parametrize("physical", ["neutral", "package_shell"])
+@pytest.mark.parametrize("caller_view", ["logical_alias", "selected_corner"])
+def test_si_corner_spef_drives_screen_timing_and_consumer(tmp_path, monkeypatch, physical, caller_view):
+    import _opensta_current as C
+    p, folder, lib, selected = corner_project(tmp_path, physical)
+    canonical = p / "phase3/stage3/extracted/neutral.spef"
+    original = canonical.read_bytes()
+    fake_windows(monkeypatch, p)
+    report = p / "reports/phase3/si_crosstalk.rpt"
+    notes = []
+    supplied = canonical if caller_view == "logical_alias" else selected
+    produced = R._emit_si_crosstalk_report(p, "neutral", supplied,
+        report.parent / "ir_drop.rpt", report, notes, pdk(lib), "offline")
+    assert produced is True, notes
+    assert SG.main([str(p)]) == 0
+    receipt = C.si_binding(p)
+    bound = {r["role"]: r for r in receipt["inputs"]}
+    assert receipt["tool_corner"] == "max_typ"
+    assert bound["spef"]["path"] == str(selected)
+    assert bound["spef"]["sha256"] == C.digest(selected)
+    body = json.loads(report.with_suffix(".json").read_text())
+    assert body["spef"] == str(selected)
+    expected = R._si_coupling_metrics(*R._parse_spef_caps(selected.read_text()))
+    assert body["max_crosstalk_noise"] == expected["max_crosstalk_noise_mv"]
+    script = Path(receipt["execution"]["script"]).read_text()
+    assert str(selected) in script and str(canonical) not in script
+    assert canonical.read_bytes() == original
+    assert R._step27_current_si_due(p) is False
+
+
+@pytest.mark.parametrize("mutation", ["selected_bytes", "unbound_selected", "ambiguous_corner", "wrong_design"])
+def test_si_corner_handoff_refuses_invalid_tool_view(tmp_path, monkeypatch, mutation):
+    import librelane_contract as LC
+    import librelane_postroute as LP
+    from test_default_current_power import seal
+    p, folder, lib, selected = corner_project(tmp_path)
+    fp = json.loads((folder / "input_fingerprint.json").read_text())
+    if mutation == "selected_bytes":
+        selected.write_text(selected.read_text() + "\n ")
+    elif mutation == "unbound_selected":
+        del fp["state_files"][str(selected)]
+        seal(folder, fp)
+    elif mutation == "wrong_design":
+        selected.write_text(selected.read_text().replace('"package_shell"', '"foreign_die"'))
+        fp["state_files"][str(selected)] = LC.digest(selected)
+        seal(folder, fp)
+    else:
+        path = folder / "state_out.json"
+        state = json.loads(path.read_text())
+        state["spef"]["*"] = state["spef"]["nom_*"]
+        put(path, state)
+        seal(folder, fp)
+        record = json.loads((p / LP.STEP23_RECORD).read_text())
+        record["sta_state_sha256"] = LC.digest(path)
+        put(p / LP.STEP23_RECORD, record)
+    fake_windows(monkeypatch, p)
+    produced, notes = emit_physical_si(p, lib)
+    assert produced is False, notes
+    assert SG.main([str(p)]) == 1
+
+
+@pytest.mark.parametrize("mutation", ["selected_bytes", "report_spef", "timing_spef", "receipt_corner", "step23_corner"])
+def test_si_corner_consumer_rejects_stale_or_mixed_scene(tmp_path, monkeypatch, mutation):
+    import _opensta_current as C
+    import librelane_postroute as LP
+    p, folder, lib, selected = corner_project(tmp_path)
+    fake_windows(monkeypatch, p)
+    produced, notes = emit_physical_si(p, lib)
+    assert produced is True, notes
+    assert SG.main([str(p)]) == 0
+    report = p / "reports/phase3/si_crosstalk.json"
+    current = report.with_suffix(".current.json")
+    if mutation == "selected_bytes":
+        selected.write_text(selected.read_text() + "\n ")
+    elif mutation == "step23_corner":
+        path = p / LP.STEP23_RECORD
+        record = json.loads(path.read_text())
+        record["judgment"]["worst_setup"]["corner"] = "nom_typ"
+        put(path, record)
+    elif mutation == "report_spef":
+        doc = json.loads(report.read_text())
+        doc["spef"] = str(p / "phase3/stage3/extracted/neutral.spef")
+        put(report, doc)
+        receipt = json.loads(current.read_text())
+        for row in receipt["outputs"]:
+            if row["role"] == "si_result":
+                row["sha256"] = C.digest(report)
+        put(current, receipt)
+    else:
+        path = (p / "phase3/stage3/extracted/neutral_si_timing.current.json"
+                if mutation == "timing_spef" else current)
+        receipt = json.loads(path.read_text())
+        if mutation == "timing_spef":
+            receipt["inputs"] = [C.file_record(p / "phase3/stage3/extracted/neutral.spef", "spef", p)
+                                  if r["role"] == "spef" else r for r in receipt["inputs"]]
+        else:
+            receipt["tool_corner"] = "nom_typ"
+        put(path, receipt)
+    assert SG.main([str(p)]) == 1
+    assert R._step27_current_si_due(p) is True
