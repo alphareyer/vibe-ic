@@ -48,7 +48,8 @@ def test_step7_direct_path_uses_single_canonical_emitter(tmp_path, monkeypatch):
     pdk = SimpleNamespace(name="test", liberty="/pdk/nom.lib")
     monkeypatch.setattr(EP, "dispatch_fixed_step",
                         lambda *args, **kwargs: None)
-    monkeypatch.setattr(D, "_phase2_pdk_config", lambda project: pdk)
+    monkeypatch.setattr(
+        D, "_phase2_pdk_config", lambda project, _pdk_name=None: pdk)
     monkeypatch.setattr(D._pl, "constraints_dir",
                         lambda project: Path(project) / "constraints")
     fake = {
@@ -88,7 +89,8 @@ def test_default_not_measured_frontend_result_falls_through_to_emitter(
                         {"policy": {"mode": "default",
                                      "request_receipt": {"request_digest": "d" * 64}},
                          "project": tmp_path.resolve()})
-    monkeypatch.setattr(D, "_phase2_pdk_config", lambda project: pdk)
+    monkeypatch.setattr(
+        D, "_phase2_pdk_config", lambda project, _pdk_name=None: pdk)
     monkeypatch.setattr(D._pl, "constraints_dir",
                         lambda project: Path(project) / "constraints")
     called = []
