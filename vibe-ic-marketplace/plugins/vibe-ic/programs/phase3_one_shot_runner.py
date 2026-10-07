@@ -47009,7 +47009,9 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
         _drv_promotion_disclose(pnr_out, "librelane_closure_kept_input", _why)
         return StepResult("postroute_repair_librelane", step_status, time.time() - t0,
                           f"no candidate adopted (input route kept): {summary}; "
-                          + _why + drv_note)
+                          + _why + drv_note,
+                          reason_class=(_V.ReasonClass.NOT_EXECUTED.value
+                                        if step_status == "NOT_MEASURED" else ""))
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:

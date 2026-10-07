@@ -127,6 +127,22 @@ def test_step32_drv_verdict_does_not_gate_the_actuator_verdict(tmp_path, monkeyp
     assert report["drv_signoff_verdict"] == "NOT_MEASURED"
 
 
+def test_unadopted_not_measured_drv_result_has_reason_class(tmp_path):
+    import phase3_one_shot_runner as R
+    pnr = tmp_path / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True)
+    row = R._postroute_repair_librelane_result(
+        tmp_path, pnr,
+        {"verdict": "PASS", "adopted": None,
+         "drv_signoff_verdict": "NOT_MEASURED", "drv_signoff": {},
+         "baseline": {"setup_ws_min": 0.0, "hold_ws_min": 0.0, "drv_count": 0},
+         "final": {"setup_ws_min": 0.0, "hold_ws_min": 0.0, "drv_count": 0,
+                   "antenna_nets": 0, "antenna_pins": 0}},
+        0.0, handed=False)
+    assert row.status == "NOT_MEASURED"
+    assert row.reason_class == "not_executed"
+
+
 def test_an_adopted_candidate_is_handed_off_and_step32_carries_the_drv_fail(tmp_path, monkeypatch):
     import librelane_postroute_repair as llprr
     import phase3_one_shot_runner as R
