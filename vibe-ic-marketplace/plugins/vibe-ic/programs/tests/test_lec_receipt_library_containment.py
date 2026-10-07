@@ -48,7 +48,7 @@ def fixture(tmp_path, monkeypatch):
     binding.write_text(json.dumps({'librelane_synthesis': {
         'folder': str(folder.relative_to(project))}}))
     monkeypatch.setattr(H, 'bound_handoff', lambda _: {'verdict': 'PASS'})
-    monkeypatch.setattr(LC, 'phase2_pdk', lambda _: ('process', 'neutral fixture'))
+    monkeypatch.setattr(LC, 'phase2_pdk', lambda _, *, selected=None: ('process', 'neutral fixture'))
     refresh()
     return project, folder, roots, selected, library, config, root_record, receipt, refresh
 

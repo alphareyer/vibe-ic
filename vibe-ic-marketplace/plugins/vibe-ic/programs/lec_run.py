@@ -4978,7 +4978,7 @@ def _bound_synthesis_liberty(project: Path) -> Optional[str]:
         if len(libraries) != 1:
             raise ValueError('current synthesis cell library is ambiguous')
         library = Path(next(iter(libraries)))
-        pdk, _ = LC.phase2_pdk(project)
+        pdk, _ = LC.phase2_pdk(project, selected=cfg.get('PDK'))
         pdk_guest = guest_root / pdk
         if not library.is_absolute() or '..' in library.parts:
             raise ValueError('cell library path is not absolute or contains traversal')
