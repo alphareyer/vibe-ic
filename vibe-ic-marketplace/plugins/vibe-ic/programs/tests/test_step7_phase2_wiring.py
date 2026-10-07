@@ -83,9 +83,11 @@ def test_default_not_measured_frontend_result_falls_through_to_emitter(
     monkeypatch.setattr(EP, "dispatch_fixed_step",
                         lambda *args, **kwargs: {
                             "status": "NOT_MEASURED",
-                            "reason": "generic frontend gate is unmeasured"})
+                            "reason": "NO_RUNNABLE_ADAPTER"})
     monkeypatch.setattr(EP, "_ordinary_runtime",
-                        {"policy": {"mode": "default"}})
+                        {"policy": {"mode": "default",
+                                     "request_receipt": {"request_digest": "d" * 64}},
+                         "project": tmp_path.resolve()})
     monkeypatch.setattr(D, "_phase2_pdk_config", lambda project: pdk)
     monkeypatch.setattr(D._pl, "constraints_dir",
                         lambda project: Path(project) / "constraints")
@@ -115,11 +117,18 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
     that row would strand the direct producer forever.  Ultra and measured
     failures remain owned by the Controller.
     """
-    placeholder = SimpleNamespace(status="NOT_MEASURED")
+    placeholder = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime",
                         {"policy": {"mode": "default"}})
+    runtime = {"policy": {"mode": "default",
+                           "request_receipt": {"request_digest": "d" * 64}},
+               "project": tmp_path.resolve()}
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "asic_sdc", lambda *a: None) is None
 
@@ -128,11 +137,13 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "asic_sdc", lambda *a: None) is placeholder
 
-    measured_fail = SimpleNamespace(status="FAIL")
+    measured_fail = SimpleNamespace(status="FAIL", extras={})
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: measured_fail)
     monkeypatch.setattr(EP, "_ordinary_runtime",
-                        {"policy": {"mode": "default"}})
+                        {"policy": {"mode": "default",
+                                     "request_receipt": {"request_digest": "d" * 64}},
+                         "project": tmp_path.resolve()})
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "asic_sdc", lambda *a: None) is measured_fail
 
@@ -140,11 +151,16 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
 def test_default_ordinary_step9_placeholder_releases_preflight_gate(
         tmp_path, monkeypatch):
     """The Default Step-9 source arm must release to the Yosys producer."""
-    placeholder = SimpleNamespace(status="NOT_MEASURED")
+    placeholder = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime",
-                        {"policy": {"mode": "default"}})
+                        {"policy": {"mode": "default",
+                                     "request_receipt": {"request_digest": "d" * 64}},
+                         "project": tmp_path.resolve()})
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "yosys_synth", lambda *a: None) is None
 
@@ -153,7 +169,7 @@ def test_default_ordinary_step9_placeholder_releases_preflight_gate(
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "yosys_synth", lambda *a: None) is placeholder
 
-    measured_fail = SimpleNamespace(status="FAIL")
+    measured_fail = SimpleNamespace(status="FAIL", extras={})
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: measured_fail)
     monkeypatch.setattr(EP, "_ordinary_runtime",
@@ -165,14 +181,86 @@ def test_default_ordinary_step9_placeholder_releases_preflight_gate(
 def test_default_step9_placeholder_marks_canonical_producer_fallback(
         tmp_path, monkeypatch):
     """The released Step-9 placeholder must suppress Controller re-entry."""
-    placeholder = SimpleNamespace(status="NOT_MEASURED")
-    runtime = {"policy": {"mode": "default"}}
+    placeholder = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
+    runtime = {"policy": {"mode": "default",
+                           "request_receipt": {"request_digest": "d" * 64}},
+               "project": tmp_path.resolve()}
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "yosys_synth", lambda *a: None) is None
-    assert runtime["program_first_fallback_sites"] == {"yosys_synth"}
+    assert runtime["program_first_fallback_sites"] == {
+        ("yosys_synth", str(tmp_path.resolve()), "d" * 64)}
+    handoff = EP.consume_program_first_fallback(tmp_path, "yosys_synth")
+    assert handoff is not None
+    assert EP.is_program_first_fallback_handoff(handoff, tmp_path,
+                                                "yosys_synth") is True
+    assert EP.consume_program_first_fallback(tmp_path, "yosys_synth") is None
+    assert EP.is_program_first_fallback_handoff(handoff, tmp_path / "other",
+                                                "yosys_synth") is False
+    EP.release_program_first_fallback(handoff)
+
+
+def test_default_step9_fallback_marker_is_not_consumed_by_ultra(
+        tmp_path, monkeypatch):
+    runtime = {"policy": {"mode": "ultra"}, "project": tmp_path.resolve(),
+               "program_first_fallback_sites": {
+                   ("yosys_synth", str(tmp_path.resolve()))}}
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    assert EP.consume_program_first_fallback(tmp_path, "yosys_synth") is None
+    assert runtime["program_first_fallback_sites"]
+
+
+def test_default_step9_worker_error_does_not_release_to_native_producer(
+        tmp_path, monkeypatch):
+    worker_error = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "ADAPTER_ERROR"}]})
+    runtime = {"policy": {"mode": "default",
+                           "request_receipt": {"request_digest": "d" * 64}},
+               "project": tmp_path.resolve()}
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: worker_error)
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is worker_error
+    assert "program_first_fallback_sites" not in runtime
+
+
+def test_default_step9_fallback_requires_placeholder_reason(tmp_path, monkeypatch):
+    for reason in ("ADAPTER_ERROR", "PROCESS_ERROR", "GATE_FAIL", "worker error"):
+        worker_error = SimpleNamespace(
+            status="NOT_MEASURED",
+            extras={"execution_results": [{
+                "status": "NOT_MEASURED", "reason": reason}]})
+        runtime = {"policy": {"mode": "default",
+                               "request_receipt": {"request_digest": "d" * 64}},
+                   "project": tmp_path.resolve()}
+        monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                            lambda *args, _row=worker_error, **kwargs: _row)
+        monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+        assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                         "yosys_synth", lambda *a: None) is worker_error
+        assert "program_first_fallback_sites" not in runtime
+
+
+def test_default_step9_fallback_requires_request_digest(tmp_path, monkeypatch):
+    placeholder = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
+    runtime = {"policy": {"mode": "default"}, "project": tmp_path.resolve()}
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: placeholder)
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is placeholder
+    assert "program_first_fallback_sites" not in runtime
 
 
 def test_phase3_step9_consumes_default_fallback_marker():
@@ -184,9 +272,33 @@ def test_phase3_step9_consumes_default_fallback_marker():
               if isinstance(node, ast.FunctionDef) and node.name == "step_synth")
     segment = ast.get_source_segment(source, fn)
     assert segment is not None
-    assert "program_first_fallback_sites" in segment
-    assert "dispatch_site" in segment
+    assert "_fallback_handoff" in segment
     assert P3.step_synth.__name__ == "step_synth"
+    retry = [node for node in ast.walk(fn)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name)
+             and node.func.id == "step_synth"]
+    assert any(any(kw.arg == "_fallback_handoff" for kw in call.keywords)
+               for call in retry)
+
+
+def test_phase3_step9_rejects_forged_fallback_handoff(tmp_path, monkeypatch):
+    """An arbitrary private-looking value must keep Controller dispatch on."""
+    import execution_production as production
+    import phase3_one_shot_runner as P3
+    runtime = {"policy": {"mode": "default",
+                           "request_receipt": {"request_digest": "d" * 64}},
+               "project": tmp_path.resolve()}
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    calls = []
+    monkeypatch.setattr(production, "dispatch_site",
+                        lambda *args, **kwargs: (
+                            calls.append((args, kwargs)) or
+                            {"status": "ADOPTED", "reason": "controller"}))
+    result = P3.step_synth(tmp_path, "top", None, "container",
+                           _fallback_handoff=True)
+    assert result.status == "PASS"
+    assert calls, "forged handoff must not bypass Controller"
 
 
 def test_live_preflight_gate_calls_step7_fn_after_default_placeholder(
@@ -197,10 +309,15 @@ def test_live_preflight_gate_calls_step7_fn_after_default_placeholder(
     monkeypatch.setattr(S, "decide", lambda *args, **kwargs: decision)
     monkeypatch.setattr(S, "record", lambda *args, **kwargs: None)
     monkeypatch.setattr(EP, "_ordinary_runtime",
-                        {"policy": {"mode": "default"}})
+                        {"policy": {"mode": "default",
+                                     "request_receipt": {"request_digest": "d" * 64}},
+                         "project": tmp_path.resolve()})
     monkeypatch.setattr(EP, "dispatch_ordinary_rows",
                         lambda *args, **kwargs: SimpleNamespace(
-                            status="NOT_MEASURED"))
+                            status="NOT_MEASURED",
+                            extras={"execution_results": [{
+                                "status": "NOT_MEASURED",
+                                "reason": "NO_RUNNABLE_ADAPTER"}]}))
     called = []
     sentinel = SimpleNamespace(status="NOT_MEASURED")
 

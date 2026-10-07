@@ -17435,7 +17435,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
 def step_synth(project: Path, top: str, pdk: PdkConfig,
                container: str,
                period_relax: float = 1.0, *, area_receipt: Optional[str] = None,
-               area_run_manifest: Optional[str] = None) -> StepResult:
+               area_run_manifest: Optional[str] = None,
+               _fallback_handoff: object = None) -> StepResult:
     """Synthesise, and compare the result against the die the design declares.
 
     `period_relax` is the ONE knob the area loop turns. At its default of 1.0
@@ -17443,29 +17444,21 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     never overflows its die cannot tell this parameter exists.
     """
     # Issued Default/Ultra execution prepares Step9 from current producer
-    # outputs here. Unissued helpers retain the native implementation below.
-    from execution_production import dispatch_site
-    # The Phase-2 Default frontend deliberately releases an unmeasured
-    # source-bound placeholder to this canonical producer.  That first
-    # placeholder dispatch has already opened Step 9's Controller binding with
-    # incomplete parameters; dispatching it again here would be a different
-    # request and correctly fail with STEP9_DISPATCH_PARAMETERS_CHANGED.
-    # Consume the explicit, same-process marker set by dispatch_ordinary_site.
-    # Ultra and measured failures do not set the marker and retain Controller
-    # selection/adoption exactly as before.
-    _execution = None
-    try:
-        import execution_policy as _execution
-        _runtime = getattr(_execution, "_ordinary_runtime", None)
-        _program_first_fallback = bool(
-            _runtime and "yosys_synth" in
-            _runtime.get("program_first_fallback_sites", set()))
-    except Exception:  # pragma: no cover - helper must never block native synth
-        _program_first_fallback = False
-    _step9 = None if _program_first_fallback else dispatch_site(("9",), project, {
-        "top": top, "pdk": pdk, "container": container,
-        "period_relax": period_relax,
-    })
+    # outputs here. Phase-2's Default placeholder can pass an opaque,
+    # request-bound handoff for this producer scope; the recursive area retry
+    # below carries the same handoff. Forged booleans or arbitrary objects do
+    # not bypass the Controller.
+    import execution_policy as _execution
+    _program_first_fallback = _execution.is_program_first_fallback_handoff(
+        _fallback_handoff, project, "yosys_synth")
+    if not _program_first_fallback:
+        from execution_production import dispatch_site
+        _step9 = dispatch_site(("9",), project, {
+            "top": top, "pdk": pdk, "container": container,
+            "period_relax": period_relax,
+        })
+    else:
+        _step9 = None
     if _step9 is not None:
         _status = ("FAIL" if _step9.get("status") == "FAIL" or
                    "FAIL" in _step9.get("candidate_statuses", {}).values() else
@@ -18460,7 +18453,8 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                         project, top, pdk, container,
                         period_relax=AREA_RETRY_PERIOD_RELAX,
                         area_receipt=area_receipt,
-                        area_run_manifest=area_run_manifest)
+                        area_run_manifest=area_run_manifest,
+                        _fallback_handoff=_fallback_handoff)
                     _after = _synth_chip_area(project)
                     if area_retry_is_worth_adopting(_before, _after, _budget):
                         # ADOPTED. The retry's artefacts are already on disk in
