@@ -18658,15 +18658,23 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     # The fixed Phase-2 synthesis call owns the same Step9 producer as Phase3.
     # No generic pre-tool netlist may masquerade as the mapped handoff.
     import librelane_contract as _ll
+    import execution_policy as _execution
+    _step9_handoff = _execution.consume_program_first_fallback(
+        project, "yosys_synth")
     try:
         if _ll.selected_mode(project, "9") == "librelane":
             import phase3_one_shot_runner as _p3
             pdk = _phase2_pdk_config(project)
-            row = _p3.step_synth(project, synth_top, pdk, container)
+            row = _p3.step_synth(
+                project, synth_top, pdk, container,
+                _fallback_handoff=_step9_handoff)
             row.name = "yosys_synth"
             return row
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("yosys_synth", "FAIL", time.time() - t0, str(exc))
+    finally:
+        if _step9_handoff is not None:
+            _execution.release_program_first_fallback(_step9_handoff)
     # Stage stub OTP hex inside synth_dir so $readmemh resolves at synth.
     for stem in ("apple.hex", "otp_image.hex"):
         stub = synth_dir / stem
@@ -19652,7 +19660,10 @@ def step_asic_sdc(project: Path, top_name: str = "chip_top",
         # failures remain owned by the Controller and do not bypass selection.
         mode = getattr(_execution, "_ordinary_runtime", None)
         mode = ((mode or {}).get("policy") or {}).get("mode")
-        if dispatch_status != "NOT_MEASURED" or mode != "default":
+        placeholder_reason = dispatched.get("reason")
+        if (dispatch_status != "NOT_MEASURED" or mode != "default"
+                or placeholder_reason not in {
+                    "NO_RUNNABLE_ADAPTER", "NO_REGISTERED_PROVIDER"}):
             return StepResult("asic_sdc", status, time.time() - t0,
                               str(dispatched.get("reason", "")),
                               extras={"execution_result": dispatched})
@@ -25836,7 +25847,14 @@ def main() -> int:
     # explanation ("an analog design has NO digital RTL track"), so an entry
     # error was reported as a design classification. The gate refuses with the
     # actual absent paths instead.
-    if _after_exit("sim"):
+    if _before_entry("sim", _entry_site):
+        plan.append(StepResult(
+            "sim", "NOT_APPLICABLE", 0.0,
+            f"run declared --entry-step {args.entry_step}; this site's whole "
+            "span is upstream of it and was not dispatched. Its artefacts "
+            "are outside this run's declared proof burden, not missing.",
+            declared_by=f"--entry-step {args.entry_step}"))
+    elif _after_exit("sim"):
         # The whole step-4 TB-producer span (full-stack + L10 unit + the
         # professional cocotb path below) sits past the declared exit.
         plan.append(_exit_sentinel("sim"))

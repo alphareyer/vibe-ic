@@ -16,6 +16,7 @@ import sys as _sys
 if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -40,6 +41,15 @@ USER_EXPLICIT_ULTRA = 'USER_EXPLICIT_ULTRA'
 DEFAULT_MODE = 'default-mode'
 ULTRA_MODE = 'ultra-mode'
 _CANONICAL_FRONTDOOR = (Path(__file__).with_name('vibe_ic_one_shot_runner.py').resolve())
+
+
+@dataclass(frozen=True)
+class _ProgramFirstFallbackHandoff:
+    """Opaque, request-bound authority for one canonical producer scope."""
+
+    site: str
+    project: str
+    request_digest: str
 
 
 def _host_cpus() -> int:
@@ -887,9 +897,21 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
     # step_preflight.gate so the caller can run the canonical producer.  Keep
     # Ultra and measured failures on the Controller path: only Default's
     # unmeasured placeholders are eligible for this fallback.
+    _placeholder = False
+    _rows = (getattr(result, 'extras', {}) or {}).get('execution_results', ())
+    if isinstance(_rows, (list, tuple)) and len(_rows) == 1:
+        _row = _rows[0]
+        _allowed_reasons = {'NO_RUNNABLE_ADAPTER', 'NO_REGISTERED_PROVIDER'}
+        if site == 'yosys_synth':
+            _allowed_reasons.add('STEP9_REPLAY_PENDING')
+        _placeholder = (
+            isinstance(_row, dict)
+            and _row.get('status') == 'NOT_MEASURED'
+            and _row.get('reason') in _allowed_reasons)
     if (site in ('asic_sdc', 'yosys_synth')
             and runtime.get('policy', {}).get('mode') == 'default'
-            and getattr(result, 'status', None) == 'NOT_MEASURED'):
+            and getattr(result, 'status', None) == 'NOT_MEASURED'
+            and _placeholder):
         # Keep the fallback decision attached to this invocation.  Step 9's
         # canonical producer is reached after this ordinary placeholder is
         # released; it must not call the fixed Controller a second time with
@@ -897,9 +919,86 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
         # Step 7 already has an explicit producer bypass.  Step 9 reaches its
         # producer through phase3.step_synth, so that function consumes this
         # one-shot marker.  Ultra and measured failures never set it.
-        runtime.setdefault('program_first_fallback_sites', set()).add(site)
+        request_digest = _request_digest(runtime)
+        if request_digest is None:
+            return result
+        runtime.setdefault('program_first_fallback_sites', set()).add(
+            (site, str(Path(project).resolve()), request_digest))
         return None
     return result
+
+
+def _request_digest(runtime: dict) -> str | None:
+    policy = runtime.get('policy') or {}
+    receipt = policy.get('request_receipt')
+    value = receipt.get('request_digest') if isinstance(receipt, dict) else None
+    if not isinstance(value, str) or not value:
+        value = policy.get('request_digest')
+    return value if isinstance(value, str) and value else None
+
+
+def consume_program_first_fallback(
+        project: Path, site: str) -> _ProgramFirstFallbackHandoff | None:
+    """Consume one scoped Default producer fallback token.
+
+    The ordinary placeholder is allowed to release only its own bound project
+    and request, and only once. The producer passes the opaque handoff down its
+    whole synthesis scope, including an area retry, so a later call cannot
+    inherit a stale bypass or skip Controller input/freshness checks.
+    """
+    runtime = _ordinary_runtime
+    if runtime is None or runtime.get('policy', {}).get('mode') != 'default':
+        return None
+    bound = runtime.get('project')
+    request_digest = _request_digest(runtime)
+    if request_digest is None:
+        return None
+    try:
+        current = Path(project).resolve()
+        if bound is None or current != Path(bound).resolve():
+            return None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    markers = runtime.get('program_first_fallback_sites')
+    token = (site, str(current), request_digest)
+    if not isinstance(markers, set) or token not in markers:
+        return None
+    markers.remove(token)
+    handoff = _ProgramFirstFallbackHandoff(site, str(current), request_digest)
+    runtime.setdefault('_active_program_first_fallback_handoffs', set()).add(handoff)
+    return handoff
+
+
+def is_program_first_fallback_handoff(
+        handoff: object, project: Path, site: str) -> bool:
+    """Validate an active opaque handoff without accepting forged booleans."""
+    runtime = _ordinary_runtime
+    if runtime is None or runtime.get('policy', {}).get('mode') != 'default':
+        return False
+    active = runtime.get('_active_program_first_fallback_handoffs')
+    if not isinstance(active, set) or handoff not in active:
+        return False
+    if not isinstance(handoff, _ProgramFirstFallbackHandoff):
+        return False
+    request_digest = _request_digest(runtime)
+    if request_digest is None:
+        return False
+    try:
+        return (handoff.site == site
+                and handoff.project == str(Path(project).resolve())
+                and handoff.project == str(Path(runtime['project']).resolve())
+                and handoff.request_digest == request_digest)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def release_program_first_fallback(handoff: object) -> None:
+    runtime = _ordinary_runtime
+    if runtime is None:
+        return
+    active = runtime.get('_active_program_first_fallback_handoffs')
+    if isinstance(active, set):
+        active.discard(handoff)
 
 
 def phase1_producer_disclosure(project: Path) -> dict | None:

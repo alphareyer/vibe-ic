@@ -456,9 +456,12 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                         *('{outputs}' if value == '.' else value for value in parts[1:]))
                 components.append(Component(gate, argv))
         # Issued D1 workers inherit the Controller VM (~569 MiB measured)
-        # before Phase-1 parsing (~202 MiB in a clean process). Reserve bounded
-        # headroom for both; other adapters retain their existing defaults.
-        resources = {'ram_mb': 1024} if row == 'D1' else {}
+        # before Phase-1 parsing (~202 MiB in a clean process). Step 7 uses
+        # the same canonical Phase-3 timing emitter; importing that module
+        # exceeds the old 128 MiB worker limit before it can write SDC/PVT.
+        # Reserve bounded headroom for these source-bound producers; other
+        # adapters retain their existing defaults.
+        resources = {'ram_mb': 1024} if row in ('D1', '7') else {}
         registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,tuple(components),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row] + (('phase2/stage1/rtl', 'reports/phase2/cdc/crossing.json') if row == '8' else ()), **resources))
     if step_ids is None:
         from execution_production import register_synthesis_adapter
