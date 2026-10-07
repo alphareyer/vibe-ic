@@ -58945,6 +58945,17 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         pdk = _detect_pdk(project, declared_pdk)
         if pdk is None:
             raise ValueError("CLOCK_PLAN_PDK_NOT_RESOLVED")
+        if _chip_path_requests_pad_ring(project):
+            # This independent DEF reader needs the same physical IO masters
+            # as pad_ring_gen/PnR. Missing masters drop COMPONENTS before their
+            # NETS references fail; the DEF itself need not be malformed.
+            from _pad_ring import discover_io_lefs
+            root, tree = _padring_pdk_root_and_tree(pdk, None)
+            io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
+            if not io_lefs:
+                raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
+            pdk = replace(pdk, macro_lefs=list(dict.fromkeys(
+                [*(pdk.macro_lefs or []), *io_lefs])))
         floorplan = _pl.pnr_dir(project) / "floorplan.def"
         return _pc.clock_plan(project, clock_plan, floorplan, sdc_paths, pdk)
     except (OSError, ValueError, RuntimeError) as exc:
