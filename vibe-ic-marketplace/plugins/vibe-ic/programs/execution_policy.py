@@ -890,6 +890,14 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
     if (site in ('asic_sdc', 'yosys_synth')
             and runtime.get('policy', {}).get('mode') == 'default'
             and getattr(result, 'status', None) == 'NOT_MEASURED'):
+        # Keep the fallback decision attached to this invocation.  Step 9's
+        # canonical producer is reached after this ordinary placeholder is
+        # released; it must not call the fixed Controller a second time with
+        # producer parameters that were absent from the placeholder dispatch.
+        # Step 7 already has an explicit producer bypass.  Step 9 reaches its
+        # producer through phase3.step_synth, so that function consumes this
+        # one-shot marker.  Ultra and measured failures never set it.
+        runtime.setdefault('program_first_fallback_sites', set()).add(site)
         return None
     return result
 

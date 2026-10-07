@@ -162,6 +162,33 @@ def test_default_ordinary_step9_placeholder_releases_preflight_gate(
                                      "yosys_synth", lambda *a: None) is measured_fail
 
 
+def test_default_step9_placeholder_marks_canonical_producer_fallback(
+        tmp_path, monkeypatch):
+    """The released Step-9 placeholder must suppress Controller re-entry."""
+    placeholder = SimpleNamespace(status="NOT_MEASURED")
+    runtime = {"policy": {"mode": "default"}}
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: placeholder)
+    monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
+                                     "yosys_synth", lambda *a: None) is None
+    assert runtime["program_first_fallback_sites"] == {"yosys_synth"}
+
+
+def test_phase3_step9_consumes_default_fallback_marker():
+    """Phase-3 synth must have an explicit one-shot producer bypass."""
+    import phase3_one_shot_runner as P3
+    source = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    tree = ast.parse(source)
+    fn = next(node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef) and node.name == "step_synth")
+    segment = ast.get_source_segment(source, fn)
+    assert segment is not None
+    assert "program_first_fallback_sites" in segment
+    assert "dispatch_site" in segment
+    assert P3.step_synth.__name__ == "step_synth"
+
+
 def test_live_preflight_gate_calls_step7_fn_after_default_placeholder(
         tmp_path, monkeypatch):
     """Exercise the actual gate seam, not only its dispatch helper."""
