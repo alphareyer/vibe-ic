@@ -1122,7 +1122,10 @@ def current_metal_density(project: Path, arm: dict, promotion: dict) -> dict:
         raise Refusal('LL_METAL_DENSITY_SUBJECT_UNBOUND', str(report))
     state = Path(arm['state'])
     image = resolve_image(project)
-    switch = _load(project / 'phase3/librelane_switch.json')
+    # Default finishing needs no step switch; the PDK declaration and root
+    # receipt still bind its materials in _pdk_mounts, as at _current_stage.
+    switch_path = project / 'phase3/librelane_switch.json'
+    switch = _load(switch_path) if switch_path.is_file() else {}
     mounts = native._pdk_mounts(project, switch, state.parent, image)
     pdk = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.Density.json')['PDK']
     root = next((Path(host) if guest == '/pdk' else Path(host).parent

@@ -246,8 +246,24 @@ def test_default_ordinary_caller_uses_one_primary_without_a_mode_switch(tmp_path
     assert calls == ['primary']
 
 
-def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(tmp_path, monkeypatch):
+def without_switch(project, monkeypatch):
+    """Declare the same process/image through the ordinary non-switch inputs."""
+    from tapeout_precheck import RUN_PDK_RECORD_REL
+    switch = project / 'phase3/librelane_switch.json'
+    declared = json.loads(switch.read_text())
+    monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', declared['image'])
+    monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
+    BF.put(project / RUN_PDK_RECORD_REL,
+           {'pdk': declared['pdk'], 'pdk_source': '--pdk'})
+    switch.unlink()
+
+
+@pytest.mark.parametrize('switch_present', [True, False])
+def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(
+        tmp_path, monkeypatch, switch_present):
     p, record, _ = subject(tmp_path)
+    if not switch_present:
+        without_switch(p, monkeypatch)
     monkeypatch.setattr(R, '_layout_basis', lambda *a: ('current', None))
     monkeypatch.setattr(R._ga, 'stream_refusal', lambda *a: None)
     monkeypatch.setattr(R, '_vacuous_on_unrouted', lambda *a: None)
@@ -260,7 +276,7 @@ def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(tmp_path, 
         return result
     monkeypatch.setattr(MLD, 'check', observed)
     result = R.step_gds(p, 'top', R.PdkConfig('neutral', '', '', '', None, '', None), '')
-    assert result.status == 'PASS'
+    assert result.status == 'PASS', result.detail
     assert MFD.main([str(p), '--json', str(p / 'step34.json')]) == 0
     report = json.loads((p / 'step34.json').read_text())
     assert report['summary']['per_layer_density_verified'] is True
@@ -279,6 +295,30 @@ def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(tmp_path, 
     assert ref['step34_pass'] is True
     assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
     assert calls == [(str(p / LF.METAL_DENSITY_REL), 'PASS')] * 3
+    assert (p / 'phase3/librelane_switch.json').exists() is switch_present
+
+
+@pytest.mark.parametrize('mutation,reason', [
+    ('malformed_switch', 'Expecting property name'),
+    ('conflicting_process', 'LL_PDK_DECLARATION_MISMATCH'),
+    ('changed_root', 'LL_PDK_ROOT_CHANGED'),
+])
+def test_optional_switch_does_not_hide_invalid_declared_material(
+        tmp_path, monkeypatch, mutation, reason):
+    p, record, arm = subject(tmp_path)
+    without_switch(p, monkeypatch)
+    assert LF.current_metal_density(p, arm, record)['verdict'] == 'PASS'
+    switch = p / 'phase3/librelane_switch.json'
+    if mutation == 'malformed_switch':
+        switch.write_text('{invalid')
+    elif mutation == 'conflicting_process':
+        BF.put(switch, {'pdk': 'another-process'})
+    else:
+        root = p / 'changed-pdk-root'
+        root.mkdir()
+        monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(root))
+    with pytest.raises((ValueError, LC.Refusal), match=reason):
+        LF.current_metal_density(p, arm, record)
 
 
 def test_unverified_tool_path_retains_disclosure_and_refusal(tmp_path):
@@ -294,10 +334,12 @@ def test_unverified_tool_path_retains_disclosure_and_refusal(tmp_path):
     assert 'PER_LAYER_DENSITY_CONSUMED' not in categories
 
 
+@pytest.mark.parametrize('switch_present', [True, False])
 @pytest.mark.parametrize('mutation', ['missing_report', 'empty_layers', 'missing_layer',
     'prefill_subject', 'wrong_ratio_source', 'unexecuted_rules', 'below_floor',
     'wrong_denominator', 'invented_window', 'unknown_windows', 'changed_output_gate'])
-def test_zero_errors_cannot_replace_the_current_per_layer_consumer(tmp_path, mutation):
+def test_zero_errors_cannot_replace_the_current_per_layer_consumer(
+        tmp_path, monkeypatch, mutation, switch_present):
     p, record, arm = subject(tmp_path)
     path = p / LF.METAL_DENSITY_REL
     doc = json.loads(path.read_text())
@@ -336,6 +378,8 @@ def test_zero_errors_cannot_replace_the_current_per_layer_consumer(tmp_path, mut
                                   'shipped_sha256': arm['subject_sha256']})
     if mutation != 'missing_report':
         BF.put(path, doc)
+    if not switch_present:
+        without_switch(p, monkeypatch)
     findings, stats = MFD.tool_arm_findings(p)
     ref = DFM.audit(p)['density_ref']
     assert ref['step34_pass'] is False
