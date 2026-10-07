@@ -690,6 +690,10 @@ def _selection_request(context, run: Path, result: dict, response: Path) -> dict
     request = dict(schema='vibe-ic/ai-selection-request/1', step_id=context.step_id,
                    run_id=result.get('run_id'), binding=binding,
                    comparison_digest=comparison_sha,
+                   frozen_work_digest=comparison.get('frozen_work_digest'),
+                   required_choice_fields=['run_id', 'comparison_digest', 'frozen_work_digest',
+                                           'arm_id', 'receipt_sha256', 'binding',
+                                           'reviewer', 'rationale'],
                    request_path=str(request_path.resolve()), response_path=str(response.resolve()),
                    eligible_arms=[dict(arm_id=row['arm_id'],
                                        receipt_sha256=row['receipt_sha256'],
@@ -715,11 +719,19 @@ def _selection_request(context, run: Path, result: dict, response: Path) -> dict
 
 def _wait_for_choice(context, run: Path, result: dict, response: Path,
                      baseline, timeout_s: int):
-    _selection_request(context, run, result, response)
+    request = _selection_request(context, run, result, response)
     deadline = time.monotonic() + timeout_s
     while True:
         choice = _read_new_choice(response, baseline)
         if choice is not None:
+            # BLOCKING: the external reviewer must acknowledge the complete
+            # current comparison, including candidates it did not select.
+            # Selected-arm binding alone cannot attest what the AI reviewed.
+            if not isinstance(choice, dict) or any(
+                    not isinstance(choice.get(field), str) or
+                    not request.get(field) or choice[field] != request[field]
+                    for field in ('run_id', 'comparison_digest', 'frozen_work_digest')):
+                raise Refusal('AI_COMPARISON_UNBOUND', context.step_id)
             return choice
         remaining = deadline - time.monotonic()
         if remaining <= 0:
