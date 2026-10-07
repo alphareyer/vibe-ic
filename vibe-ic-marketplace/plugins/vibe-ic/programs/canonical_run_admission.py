@@ -171,6 +171,14 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
         programs_dir / "librelane_contract.py",
+        # The canonical runners delegate Default/Ultra dispatch and frontend
+        # worker execution through these modules.  A change there must reopen
+        # an expensive span; otherwise the admission ledger can reject a real
+        # producer fix as duplicate work.
+        programs_dir / "execution_policy.py",
+        programs_dir / "execution_modes.py",
+        programs_dir / "execution_frontend_providers.py",
+        programs_dir / "execution_frontend_worker.py",
         programs_dir.parent / "flow" / "phase1_phase2_phase3.yaml",
     )
 
