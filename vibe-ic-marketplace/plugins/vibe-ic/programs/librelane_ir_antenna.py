@@ -494,13 +494,19 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
            netlist: Path, sdc: Path, spef: Path, budget_pct: Optional[float],
            budget_source: str, lane: str = '24', decap_f: Optional[float] = None,
            decap_source: Optional[str] = None,
-           supply_nets: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
+           supply_nets: Optional[Dict[str, List[str]]] = None,
+           tech_lef: Optional[Path] = None) -> Dict[str, Any]:
     """Bridge the shipped route, run IRDropReport + Vibeic.IRDropChecker, then
     the cross-check.  Returns the record `judge_ir` reads.
 
     `decap_f` (farads, with its declared `decap_source`) is the on-die decap
     `Vibeic.TransientIR` models; the step converts it to the session's unit,
-    reads it back and measures its effect.  None: quasi-static."""
+    reads it back and measures its effect.  None: quasi-static.
+
+    `tech_lef` is the active routed authority shared with the EM producer.
+    Bind it into the selected IR corner before building the ODB; an absent
+    file or ambiguous corner refuses rather than substituting the kit default.
+    None retains the resolved PDK authority for standalone callers."""
     overlay = ({key: (value, 'current routed DEF SPECIALNETS USE POWER/GROUND')
                 for key, value in supply_nets.items()} if supply_nets is not None else None)
     configs = resolve_step_configs(project, image, pdk, list(IR_STEPS), pdk_root=pdk_root,
@@ -517,12 +523,32 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
     ir_cfg = configs['OpenROAD.IRDropReport']
     cfg = _config(ir_cfg)
     cleared = {key: cfg.get(key) for key in ('LAYERS_RC', 'VIAS_R')}
+    active_tech = None
+    if tech_lef is not None:
+        active_tech = _host_path(str(tech_lef), [(pdk_root.resolve(), PDK_GUEST_ROOT)])
+        if not active_tech.is_file():
+            raise Refusal('LL_IR_TECH_LEF_MISSING', str(active_tech))
+        active_tech = active_tech.resolve()
     for step in OPENROAD_IR_STEPS:
         step_cfg = _config(configs[step])
         step_cfg.update({'LAYERS_RC': None, 'VIAS_R': None})
+        overrides = {'cleared': cleared, 'source': RC_SOURCE}
+        if active_tech is not None:
+            techs = dict(step_cfg.get('TECH_LEFS') or {})
+            pattern = _pattern_for(step_cfg.get('DEFAULT_CORNER') or '', techs)
+            if pattern is None:
+                raise Refusal('LL_IR_TECH_LEF_CORNER_UNRESOLVED', step)
+            overrides['TECH_LEFS'] = {
+                'pattern': pattern, 'previous': techs,
+                'path': str(active_tech), 'sha256': digest(active_tech),
+                'source': 'active routed PDK tech LEF supplied by the IR/EM producer'}
+            # IR solves one selected corner. A single authority also makes
+            # the DEF-to-ODB bridge (which otherwise prefers the nominal
+            # entry) read exactly the LEF the solver and EM will consume.
+            step_cfg['TECH_LEFS'] = {pattern: str(active_tech)}
         write_json(configs[step], step_cfg)
         write_json(configs[step].with_name(configs[step].stem + '.overrides.json'),
-                   {'cleared': cleared, 'source': RC_SOURCE})
+                   overrides)
     if decap_f is not None:
         if not decap_source:
             raise Refusal('LL_DECAP_SOURCE_UNDECLARED',
@@ -537,6 +563,8 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
         write_json(overrides, record)
     cfg = _config(ir_cfg)
     mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
+    if active_tech is not None and not active_tech.is_relative_to(project.resolve()):
+        mounts.append((active_tech.parent, str(active_tech.parent)))
     for source in (routed_def, netlist, sdc, spef):
         if not Path(source).is_file():
             raise Refusal('LL_ROUTE_VIEW_MISSING', str(source))

@@ -67760,6 +67760,7 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
         record = _la.run_ir(project, image, root, pdk.name, routed_def=routed,
                             netlist=pnr / f"{top}_pnr.v", sdc=pnr / "constraint.sdc",
                             spef=spef, budget_pct=budget, budget_source=source,
+                            tech_lef=Path(pdk.tech_lef),
                             supply_nets=dict(zip(("VDD_NETS", "GND_NETS"),
                                                   _discover_power_nets(routed))))
         doc["record"] = record

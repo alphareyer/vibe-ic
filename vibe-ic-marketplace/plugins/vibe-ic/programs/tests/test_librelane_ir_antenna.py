@@ -327,6 +327,7 @@ if "librelane.steps" in argv:
     state = json.load(open(argv[argv.index("-i") + 1]))
     state["metrics"] = {"x": 1}
     json.dump(state, open(os.path.join(out, "state_out.json"), "w"))
+    print("offline step transport completed")
 '''
 
 
@@ -461,3 +462,61 @@ def test_standalone_ir_openroad_and_capability_probe_use_shared_supervisor(
     assert la.sealring_spans_capable("img")
     assert calls[0][1] == {"supervised": True, "log": log}
     assert calls[1][1] == {"probe_deadline_s": ll.PROBE_DEADLINE_S}
+
+
+@pytest.mark.parametrize("case", ["active", "non_nominal", "external", "default", "missing", "ambiguous"])
+def test_ir_bridge_uses_one_explicit_active_tech_lef(tmp_path, monkeypatch, case):
+    project = tmp_path / "project"
+    project.mkdir()
+    views = [project / name for name in ("route.def", "net.v", "clock.sdc", "route.spef")]
+    for view in views:
+        view.write_text("offline view\n")
+    nominal, active = project / "nominal.tlef", project / "active.tlef"
+    if case == "external":
+        active = tmp_path / "active.tlef"
+    nominal.write_text(TECH_LEF)
+    active.write_text(TECH_LEF + "# legal routed via geometry\n")
+    if case == "missing":
+        active.unlink()
+    paths, observed = {}, []
+
+    def configs(_project, _image, _pdk, steps, **kwargs):
+        for step in steps:
+            techs = {"nom*": str(nominal), "max*": "untouched-corner.tlef"}
+            if case == "ambiguous":
+                techs["*"] = str(nominal)
+            path = project / (step + ".json")
+            path.write_text(json.dumps({"DEFAULT_CORNER": "max_slow" if case == "non_nominal" else "nom_typ", "TECH_LEFS": techs}))
+            paths[step] = path
+        return paths
+
+    def bridge(_project, _image, config, *_args, **_kwargs):
+        observed.append(json.loads(config.read_text()))
+        if case == "external":
+            assert (active.parent, str(active.parent)) in _kwargs["mounts"]
+        raise ll.Refusal("OFFLINE_BRIDGE_OBSERVED", "no native solve in this fixture")
+
+    monkeypatch.setattr(la, "resolve_step_configs", configs)
+    monkeypatch.setattr(la, "state_from_direct", bridge)
+    expected = {"missing": "LL_IR_TECH_LEF_MISSING",
+                "ambiguous": "LL_IR_TECH_LEF_CORNER_UNRESOLVED"}.get(case, "OFFLINE_BRIDGE_OBSERVED")
+    kwargs = {} if case == "default" else {"tech_lef": active}
+    with pytest.raises(ll.Refusal, match=expected):
+        la.run_ir(project, "offline", tmp_path, "neutral-kit", routed_def=views[0],
+                  netlist=views[1], sdc=views[2], spef=views[3], budget_pct=10.0,
+                  budget_source="fixture", **kwargs)
+    if case in ("missing", "ambiguous"):
+        assert not observed
+    else:
+        selected = nominal if case == "default" else active
+        pattern = "max*" if case == "non_nominal" else "nom*"
+        assert observed[0]["TECH_LEFS"][pattern] == str(selected)
+        for step in la.OPENROAD_IR_STEPS:
+            config = json.loads(paths[step].read_text())
+            if case == "default":
+                assert config["TECH_LEFS"] == {"nom*": str(nominal), "max*": "untouched-corner.tlef"}
+            else:
+                assert config["TECH_LEFS"] == {pattern: str(active)}
+                provenance = json.loads(paths[step].with_suffix(".overrides.json").read_text())
+                assert provenance["TECH_LEFS"]["sha256"] == la.digest(active)
+                assert provenance["TECH_LEFS"]["previous"] == {"nom*": str(nominal), "max*": "untouched-corner.tlef"}

@@ -36,7 +36,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
+def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False, primary=False):
     project = tmp_path / "run"
     pnr = R._pl.pnr_dir(project)
     rpt = R._pl.reports_phase3_dir(project)
@@ -45,6 +45,7 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
     for name in ("unit.def", "routed.def"):
         (pnr / name).write_text(layout)
     (pnr / "constraint.sdc").write_text("set_load 0.02 [get_ports output]\n")
+    (pnr / "unit_pnr.v").write_text("module unit(); endmodule\n")
     extracted = R._pl.extracted_dir(project)
     extracted.mkdir(parents=True)
     (extracted / "unit.spef").write_text('*SPEF "IEEE 1481-1998"\n*DESIGN "unit"\n')
@@ -63,7 +64,42 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
         (rpt / R._LL_IR_RECORD).write_text(json.dumps({
             "producer": "librelane:OpenROAD.IRDropReport", "mode": mode,
             "judgment": {"verdict": "NOT_MEASURED", "reasons": ["offline fixture has no native LibreLane state"]}}))
-    monkeypatch.setattr(R, "_librelane_step24_record", ir_refusal)
+    if primary:
+        import librelane_ir_antenna as L
+        nominal = tmp_path / "nominal.tlef"
+        nominal.write_text(TECH + "# distribution authority, before route legalization\n")
+        monkeypatch.setattr(R, "_librelane_step_ctx", lambda *args: ("offline", tmp_path))
+
+        def offline_ir(project, image, root, kit, *, tech_lef=None, **kwargs):
+            # Stand in only for the native solve. Keep the real runner's
+            # publication, adoption and the existing EM consumer in the path.
+            calls.append("librelane_ir")
+            selected = Path(tech_lef) if tech_lef is not None else nominal
+            folder = project / "phase3/librelane/24/01-openroad-irdropreport"
+            folder.mkdir(parents=True)
+            odb = folder / "bridge.odb"; odb.write_text("offline ODB\n")
+            state = {"odb": str(odb), "sdc": str(kwargs["sdc"]),
+                     "spef": {"nom*": str(kwargs["spef"])}}
+            (folder / "state_in.json").write_text(json.dumps(state))
+            metrics = {"design_powergrid__drop__worst__net:PWR": 0.00001}
+            state_out = folder / "state_out.json"
+            state_out.write_text(json.dumps({**state, "metrics": metrics}))
+            (folder / "openroad-irdropreport.log").write_text(
+                f"Reading timing library for the 'nom' corner at '{lib}'\n"
+                "=== PSM_NET PWR ===\n[INFO PSM-0040] All shapes on net PWR are connected.\n"
+                "Worstcase IR drop: 0.00001 V\n")
+            cfg = project / "phase3/librelane/24-config/OpenROAD.IRDropReport.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(json.dumps({"DEFAULT_CORNER": "nom", "TECH_LEFS": {"nom*": str(selected)}}))
+            return {"tool_state": str(state_out), "tool_state_sha256": digest(state_out),
+                    "def_sha256": digest(kwargs["routed_def"]),
+                    "spef_sha256": digest(kwargs["spef"]), "vdd_nets": ["PWR"], "gnd_nets": [],
+                    "lib_voltage_v": 5.0, "budget_pct": kwargs["budget_pct"],
+                    "rc_model": {"verdict": "AGREE"},
+                    "cross_check": {"verdict": "MEASURED", "per_net_worst_drop_v": {"PWR": 0.00001}}}
+        monkeypatch.setattr(L, "run_ir", offline_ir)
+    else:
+        monkeypatch.setattr(R, "_librelane_step24_record", ir_refusal)
     monkeypatch.setattr(R, "_to_container_path", lambda path, container: path)
     monkeypatch.setattr(R, "_sta_extra_liberties", lambda *args: [])
     monkeypatch.setattr(R._ppa_presweep, "finalize", lambda *args: None)
@@ -111,6 +147,37 @@ def test_default_invokes_native_checker_and_existing_librelane_route(tmp_path, m
     assert doc["mode"] == "direct"
     assert doc["nets"]["PWR"]["checked"] == 1
     assert authority(project, pdk)[0] == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("via,stress,expected", [(False, False, "PASS"),
+                                               (False, True, "FAIL"),
+                                               (True, False, "INCOMPLETE")])
+def test_primary_and_em_consume_the_active_route_authority(tmp_path, monkeypatch, via, stress, expected):
+    project, pdk, _ = build(tmp_path, monkeypatch, primary=True, via=via, stress=stress)
+    verdict, report = authority(project, pdk)
+    assert verdict == expected, report
+    native = report["jmax_screen"]["native_density"]
+    assert native["valid"], native
+    assert native["authority_sha256"] == digest(Path(pdk.tech_lef))
+    assert E.validate_primary_ir(project)["valid"]
+
+
+def test_primary_authority_mismatch_still_refuses_at_existing_consumer(tmp_path, monkeypatch):
+    project, pdk, _ = build(tmp_path, monkeypatch, primary=True)
+    assert authority(project, pdk)[0] == "PASS"
+    rpt = project / "reports/phase3"
+    primary_path = rpt / R._LL_IR_RECORD
+    primary = json.loads(primary_path.read_text())
+    primary["native_basis"]["tech_lef"]["sha256"] = digest(tmp_path / "nominal.tlef")
+    primary_path.write_text(json.dumps(primary))
+    doc_path = rpt / "em_openroad_density.json"
+    doc = json.loads(doc_path.read_text())
+    doc["librelane_ir"]["record_sha256"] = digest(primary_path)
+    doc["outputs"][str(primary_path.relative_to(project))] = digest(primary_path)
+    doc_path.write_text(json.dumps(doc))
+    verdict, report = authority(project, pdk)
+    assert verdict == "INCOMPLETE", report
+    assert report["jmax_screen"]["native_density"]["reason"] == "LibreLane/EM power basis differs: tech_lef"
 
 
 @pytest.mark.parametrize("subject", ["DEF", "SDC", "PDK", "CSV", "REPORT", "EXECUTION", "CONSUMER", "AUTHORITY", "LIMIT", "VIA_SUBSTITUTION", "OUTPUT_BINDING", "BASIS"])
