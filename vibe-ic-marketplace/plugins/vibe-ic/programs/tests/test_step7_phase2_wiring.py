@@ -117,21 +117,24 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
     that row would strand the direct producer forever.  Ultra and measured
     failures remain owned by the Controller.
     """
-    placeholder = SimpleNamespace(
-        status="NOT_MEASURED",
-        extras={"execution_results": [{
-            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
-    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
-                        lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime",
                         {"policy": {"mode": "default"}})
     runtime = {"policy": {"mode": "default",
                            "request_receipt": {"request_digest": "d" * 64}},
                "project": tmp_path.resolve()}
     monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("Default Step 7 must use canonical producer")))
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "asic_sdc", lambda *a: None) is None
 
+    placeholder = SimpleNamespace(
+        status="NOT_MEASURED",
+        extras={"execution_results": [{
+            "status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}]})
+    monkeypatch.setattr(EP, "dispatch_ordinary_rows",
+                        lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime",
                         {"policy": {"mode": "ultra"}})
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
@@ -145,7 +148,7 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
                                      "request_receipt": {"request_digest": "d" * 64}},
                          "project": tmp_path.resolve()})
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
-                                     "asic_sdc", lambda *a: None) is measured_fail
+                                     "asic_sdc", lambda *a: None) is None
 
 
 def test_default_ordinary_step9_placeholder_releases_preflight_gate(

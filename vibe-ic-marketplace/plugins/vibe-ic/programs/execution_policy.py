@@ -868,6 +868,14 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
     plan = step_preflight.RUNNER_PLANS.get(runner)
     span = dict(plan.sites).get(site, ()) if plan else ()
     runtime = _ordinary_runtime
+    # Step 7's Default producer is the canonical program in
+    # design_one_shot_runner.step_asic_sdc.  The frontend-worker row is a
+    # source-bound qualification arm for Ultra; dispatching it first in
+    # Default makes a measured-but-unadoptable qualification receipt look like
+    # the producer result and strands the canonical emitter behind it.
+    if (runner == 'design_one_shot_runner' and site == 'asic_sdc'
+            and runtime.get('policy', {}).get('mode') == 'default'):
+        return None
     if (runtime.get('phase1_only') is True and runtime['policy']['mode'] == 'default'
             and runner == 'phase1_one_shot_runner' and site == 'doc_extract'
             and span == ('D1',)):
