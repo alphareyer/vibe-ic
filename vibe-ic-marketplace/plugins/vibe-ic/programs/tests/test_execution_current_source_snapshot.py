@@ -107,3 +107,61 @@ else:
                            cwd=plugin, env=environment, capture_output=True, text=True, timeout=30)
     assert probe.returncode == 0, probe.stdout + probe.stderr
     assert probe.stdout.startswith(f'{phase} {mutation} '), probe.stdout
+
+
+def test_current_source_body_snapshot_read_failure_is_typed(tmp_path):
+    clone = tmp_path / 'source'
+    cloned = subprocess.run(['git', 'clone', '--quiet', '--local', '--no-hardlinks',
+                             str(em._REPO_ROOT), str(clone)], capture_output=True, text=True)
+    assert cloned.returncode == 0, cloned.stderr
+    script = r'''
+from pathlib import Path
+import subprocess
+import sys
+import execution_modes as em
+from execution_source_snapshot import SourceSnapshot
+
+root = em._REPO_ROOT / 'current-source-disappearing'
+root.mkdir()
+module = root / 'module.py'; module.write_text('value = 1\n')
+entry = root / 'entry.py'; entry.write_text('import module\n')
+subprocess.run(['git', '-C', str(em._REPO_ROOT), 'add', str(root)], check=True)
+subprocess.run(['git', '-C', str(em._REPO_ROOT), '-c', 'user.name=Snapshot fixture',
+                '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet',
+                '-m', 'Commit disappearing current-source fixture'], check=True)
+sha = subprocess.check_output(['git', '-C', str(em._REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+namespace = {'__name__': 'current_source_disappearing', '__file__': str(entry)}
+exec(compile('def validate(outputs, binding):\n    return None\n', str(entry), 'exec'), namespace)
+sources = {str(path): em.digest(path) for path in (entry, module, Path(sys.executable).resolve())}
+arm = em.Adapter('current-source-disappearing', 'fixture-python', '1', sha, sources,
+                 sys.version, ('fixture-python',),
+                 (em.Component('fixture', (str(Path(sys.executable).resolve()), str(entry)), 2),),
+                 namespace['validate'], ('result.json',), {'goal': 'fixture'},
+                 qualification_evidence='Synthetic committed current-source control only')
+registry = em.Registry(); registry.register(arm)
+arm = registry.adapters('1')[0]
+assert em.Controller._source_current(arm)['files'][str(module)] == em.digest(module)
+original_read = SourceSnapshot.read_bytes
+removed = False
+def disappear_before_first_read(snapshot, path):
+    global removed
+    if Path(path).resolve() == module.resolve() and not removed:
+        removed = True
+        module.unlink()
+    return original_read(snapshot, path)
+SourceSnapshot.read_bytes = disappear_before_first_read
+try:
+    em.Controller._source_current(arm)
+except em.Refusal as exc:
+    assert exc.code == 'SOURCE_AUTHORITY_UNAVAILABLE', exc
+    print('body-read', exc.code)
+else:
+    raise AssertionError('disappearing snapshot source was accepted')
+'''
+    plugin = clone / 'vibe-ic-marketplace/plugins/vibe-ic'
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                       PYTHONPATH=str(plugin / 'programs'))
+    probe = subprocess.run([sys.executable, '-c', script], cwd=plugin,
+                           env=environment, capture_output=True, text=True, timeout=30)
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert probe.stdout.startswith('body-read SOURCE_AUTHORITY_UNAVAILABLE'), probe.stdout
