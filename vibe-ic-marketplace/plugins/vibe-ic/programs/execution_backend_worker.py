@@ -129,21 +129,130 @@ def resolve_contract(project: Path, patterns) -> tuple[dict, list[str]]:
 
 
 def resolve_input_contract(project: Path, declarations) -> list[str]:
-    declarations = condition_aware_declarations(project, declarations)
+    return _resolve_input_contract(project, declarations)["missing"]
+
+
+def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
+    """Resolve the issuer's one contract without dropping declaration shapes.
+
+    The result is deliberately aggregate: every absent declaration is returned
+    before the worker is allowed to call ``produce``.  Mapping declarations use
+    the canonical ``step_required_inputs_check.expand`` implementation, so
+    ``outputs: all``, OR alternatives and conditional no-DFT edges retain their
+    existing semantics.  String entries are only mandatory when the issuer
+    explicitly carried them as declarations; an optional entry may say
+    ``required: false``.
+    """
+    import hashlib
+    from step_required_inputs_check import expand
+    try:
+        import _flow_yaml
+        rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    except Exception:
+        rows = {}
+    declarations = condition_aware_declarations(project, declarations, rows)
     missing = []
-    for declaration in declarations or ():
-        if not isinstance(declaration, dict) or not declaration.get("path"):
-            continue
-        patterns = [part.strip() for part in str(declaration["path"]).split(" OR ")]
-        # A declared path is substantive only when it resolves to a regular,
-        # non-empty file.  Preserve OR semantics: one non-empty alternate is
-        # sufficient, while a zero-byte placeholder is still missing.
-        present = any(
-            p.is_file() and not p.is_symlink() and p.stat().st_size > 0
-            for pattern in patterns for p in project.glob(pattern))
-        if not present:
-            missing.append(str(declaration["path"]))
-    return missing
+    seen = set()
+
+    def add(value):
+        value = str(value)
+        if value not in seen:
+            seen.add(value)
+            missing.append(value)
+
+    def present(spec):
+        root = project.resolve()
+
+        def valid_candidate(candidate):
+            try:
+                resolved = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return False
+            if (candidate.is_symlink() or not resolved.is_relative_to(root)
+                    or not (candidate.is_file() or candidate.is_dir())):
+                return False
+            if candidate.is_file():
+                return candidate.stat().st_size > 0
+            # Directory declarations are part of the producer's staged
+            # closure.  Require at least one substantive file and validate
+            # every descendant so a symlink or escaped path cannot make the
+            # directory appear present.
+            files = []
+            for child in candidate.rglob('*'):
+                if child.is_symlink():
+                    return False
+                if child.is_file():
+                    try:
+                        child_resolved = child.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        return False
+                    if (not child_resolved.is_relative_to(root)
+                            or child.stat().st_size <= 0):
+                        continue
+                    files.append(child)
+            return bool(files)
+
+        for alternative in (part.strip() for part in str(spec).split(' OR ')):
+            if not alternative:
+                continue
+            path = Path(alternative)
+            if path.is_absolute() or '..' in path.parts:
+                add(alternative)
+                continue
+            for candidate in project.glob(alternative):
+                if valid_candidate(candidate):
+                    return True
+        return False
+
+    for entry in declarations or ():
+        if isinstance(entry, Mapping):
+            if entry.get('required', True) is False:
+                continue
+            if entry.get('from') == 'external' and entry.get('check') == 'none':
+                continue
+            try:
+                expanded = expand(dict(entry), rows)
+            except KeyError:
+                # Direct worker callers may carry the legacy path-only
+                # declaration shape.  The issuer still rejects that shape;
+                # here preserve its path and OR semantics for preflight.
+                path = entry.get('path')
+                expanded = [('external', path)] if isinstance(path, str) else []
+            except TypeError:
+                expanded = []
+            if not expanded:
+                if entry.get('path'):
+                    add(entry['path'])
+                continue
+            for _, spec in expanded:
+                if not present(spec):
+                    add(spec)
+        elif isinstance(entry, str):
+            if not present(entry):
+                add(entry)
+        else:
+            add(repr(entry))
+
+    observed = manifest.get('files', {}) if isinstance(manifest, Mapping) else {}
+    if isinstance(observed, Mapping):
+        for raw, expected in observed.items():
+            rel = Path(raw) if isinstance(raw, str) else None
+            digest = expected.get('sha256') if isinstance(expected, Mapping) else expected
+            if (rel is None or rel.is_absolute() or '..' in rel.parts or
+                    rel.as_posix() != raw or not isinstance(digest, str)):
+                add(raw)
+                continue
+            target = project / rel
+            try:
+                actual = hashlib.sha256(target.read_bytes()).hexdigest()
+            except OSError:
+                add(raw)
+                continue
+            if (target.is_symlink() or not target.is_file() or
+                    not target.stat().st_size or actual != digest.removeprefix('sha256:')):
+                add(raw)
+    return {'declarations': declarations, 'files': dict(observed) if isinstance(observed, Mapping) else {},
+            'missing': missing}
 
 
 def _binding(inputs: Path) -> dict:
@@ -167,9 +276,12 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     _copy_input_tree(inputs, project)
     binding = _binding(inputs)
     row = ROWS[str(step_id)]["canonical_row"]
-    input_contract = params.get("input_contract", row.get("required_inputs", ()))
-    input_contract = condition_aware_declarations(project, input_contract)
-    missing_inputs = resolve_input_contract(project, input_contract)
+    manifest = params.get('resolved_input_manifest')
+    input_contract = (manifest.get('declarations') if isinstance(manifest, Mapping)
+                      else params.get("input_contract", row.get("required_inputs", ())))
+    resolved = _resolve_input_contract(project, input_contract, manifest)
+    input_contract = resolved['declarations']
+    missing_inputs = resolved['missing']
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
     if missing_inputs:
@@ -227,6 +339,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         "canonical_receipts": canonical_receipts,
         "verdict": verdict, "detail": producer.get("detail", ""),
         "input_contract": input_contract, "missing_inputs": missing_inputs,
+        "resolved_input_manifest": resolved,
     }
     (outputs / "backend_result.json").write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result

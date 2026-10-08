@@ -16,7 +16,8 @@ import sys as _sys
 if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import argparse
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -41,6 +42,7 @@ USER_EXPLICIT_ULTRA = 'USER_EXPLICIT_ULTRA'
 DEFAULT_MODE = 'default-mode'
 ULTRA_MODE = 'ultra-mode'
 _CANONICAL_FRONTDOOR = (Path(__file__).with_name('vibe_ic_one_shot_runner.py').resolve())
+_BACKEND_MANIFEST_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -540,7 +542,12 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
         # searched directory remains valid for explicit absence routes.
         declarations.append(parameters['template'])
     for arm in runtime['registry'].adapters(step_id):
-        declarations.extend(arm.input_contract)
+        # String declarations are required by default.  A caller that intends
+        # an optional edge must carry an explicit mapping with
+        # ``required: false`` (or ``check: none``); do not erase absence by
+        # rewriting the adapter's contract here.
+        for item in arm.input_contract:
+            declarations.append(item)
     # A conditional producer's output is not a mandatory input when the same
     # flow condition has been measured false and the producer left its exact
     # design-declared receipt.  Evaluate this before expanding producer edges;
@@ -554,7 +561,8 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     from execution_provider_catalog import BACKEND_IDS
     if str(step_id) in BACKEND_IDS:
         from execution_adapters_backend import backend_project_input_contract
-        declarations.extend(backend_project_input_contract(root, str(step_id)))
+        declarations.extend(backend_project_input_contract(
+            root, str(step_id), collect_missing=True))
     # Frontend adapters retain YAML mappings; native adapters declare paths.
     # Use the canonical expansion for upstream `outputs: all` and keep an
     # unchecked external declaration out of the filesystem search.
@@ -586,7 +594,62 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
                         raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(path))
                     if path.is_file():
                         inputs[str(path.relative_to(root))] = path
+    # Keep the exact staged population and the declarations that produced it
+    # together.  The worker receives this through its typed parameter envelope
+    # so it cannot silently fall back to the row-only contract.
+    from execution_backend_worker import resolve_input_contract
+    # This issuer-side aggregate is a backend worker contract.  Frontend and
+    # analog routes keep their established optional/search semantics here.
+    missing = (resolve_input_contract(root, declarations)
+               if str(step_id) in BACKEND_IDS else [])
+    if parameters is not None:
+        import execution_backend_snapshot as _snapshot
+        parameters['resolved_input_manifest'] = {
+            'files': {name: _snapshot.sha(path)
+                      for name, path in sorted(inputs.items())},
+            'declarations': declarations,
+            'missing': missing,
+        }
     return inputs
+
+
+@contextmanager
+def _backend_manifest_parameters(runtime, step_id: str, manifest):
+    """Bind the current issuer manifest to this run's worker argv only.
+
+    Adapter registration is immutable source authority.  A dispatch-specific
+    manifest therefore gets a short-lived dataclass copy under a lock and is
+    restored after Controller execution/adoption, preventing a later run from
+    inheriting another project's input census.
+    """
+    if not manifest:
+        yield
+        return
+    from execution_provider_catalog import BACKEND_IDS
+    if str(step_id) not in BACKEND_IDS:
+        yield
+        return
+    with _BACKEND_MANIFEST_LOCK:
+        registry = runtime['registry']
+        originals = {}
+        try:
+            for arm in registry.adapters(str(step_id)):
+                component = arm.components[0] if len(arm.components) == 1 else None
+                if component is None or '--params-json' not in component.argv:
+                    continue
+                index = component.argv.index('--params-json') + 1
+                typed = json.loads(component.argv[index])
+                typed['resolved_input_manifest'] = manifest
+                argv = tuple(component.argv[:index] +
+                             (json.dumps(typed, sort_keys=True),) +
+                             component.argv[index + 1:])
+                originals[arm.arm_id] = registry._adapters[arm.arm_id]
+                registry._adapters[arm.arm_id] = replace(
+                    arm, components=(replace(component, argv=argv),))
+            yield
+        finally:
+            for arm_id, original in originals.items():
+                registry._adapters[arm_id] = original
 
 
 def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
@@ -904,9 +967,15 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         files = _fixed_inputs(runtime, step_id, parameters=parameters)
     else:
         _ensure_default_prelayout(runtime, str(step_id))
-        files = _fixed_inputs(runtime, step_id)
+        files = _fixed_inputs(runtime, step_id, parameters=parameters)
+    manifest = parameters.get('resolved_input_manifest')
+    if isinstance(manifest, dict) and manifest.get('missing'):
+        return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT',
+                    step_id=step_id, selected=None,
+                    missing_inputs=list(manifest['missing']))
     if not files:
         return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT', step_id=step_id, selected=None)
+    manifest = parameters.get('resolved_input_manifest')
     frontend = all(a.tool_id == 'frontend-worker' for a in applicable)
     objective = (dict(parameters or {}) if step_id == '0.5ic' else
                  dict(runtime['parameters'], **dict(parameters or {}))) if frontend else dict(applicable[0].objective)
@@ -920,21 +989,22 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         import execution_adapters_analog as analog
         analog_prepared = analog.prepare(context, project=runtime['project'],
             registry=runtime['registry'], controller=controller)
-    if step_id in runtime['contexts']:
-        if context.binding() != runtime['bindings'][step_id]:
-            raise Refusal('FIXED_STEP_REENTRY_CHANGED', step_id)
-        context = runtime['contexts'][step_id]
-        run, result = runtime['runs'][step_id]
-    else:
-        run = runtime['project'] / 'reports/execution' / runtime['policy']['request_receipt']['invocation_id'] / step_id
-        mode_label = runtime['policy'].get('mode_label')
-        if mode_label is None:
-            mode_label = ('ultra-mode' if runtime['policy'].get('mode') == 'ultra'
-                          else 'default-mode')
-        result = controller.run(context, run, mode_label)
-        runtime['contexts'][step_id] = context
-        runtime['bindings'][step_id] = context.binding()
-        runtime['runs'][step_id] = (run, result)
+    with _backend_manifest_parameters(runtime, step_id, manifest):
+        if step_id in runtime['contexts']:
+            if context.binding() != runtime['bindings'][step_id]:
+                raise Refusal('FIXED_STEP_REENTRY_CHANGED', step_id)
+            context = runtime['contexts'][step_id]
+            run, result = runtime['runs'][step_id]
+        else:
+            run = runtime['project'] / 'reports/execution' / runtime['policy']['request_receipt']['invocation_id'] / step_id
+            mode_label = runtime['policy'].get('mode_label')
+            if mode_label is None:
+                mode_label = ('ultra-mode' if runtime['policy'].get('mode') == 'ultra'
+                              else 'default-mode')
+            result = controller.run(context, run, mode_label)
+            runtime['contexts'][step_id] = context
+            runtime['bindings'][step_id] = context.binding()
+            runtime['runs'][step_id] = (run, result)
     # Selection remains in Core. A configured path is read only after the
     # current fixed step has produced an awaiting Ultra result.
     if result.get('status') == 'AWAITING_AI_SELECTION' and choice is None:

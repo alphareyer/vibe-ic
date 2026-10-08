@@ -40,6 +40,10 @@ BACKEND_PARAMETER_DEFAULTS = {
     "overlay": {}, "streamout_route": None, "simulators": None,
     "spice_paths": 1, "timeout_s": 60,
     "source_tree_sha": None,
+    # Issued immediately before dispatch by execution_policy._fixed_inputs.
+    # ``None`` keeps source-only registration stable; a live worker receives
+    # the exact path->digest census from that invocation.
+    "resolved_input_manifest": None,
 }
 
 # These are imported by the actual dispatcher/producer call paths.  Binding
@@ -649,7 +653,8 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
     return tuple(values)
 
 
-def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ...]:
+def backend_project_input_contract(project: Path, step_id: str, *,
+                                   collect_missing: bool = False) -> tuple[str, ...]:
     """Add only the current synthesis receipt namespace to a worker manifest.
 
     The static adapter contract cannot know the design's published synthesis
@@ -672,6 +677,9 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         try:
             resolved = target.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
+            if collect_missing:
+                result.append(raw)
+                return
             raise ValueError(f"backend checkpoint path is absent: {raw!r}") from exc
         if (target.is_symlink() or resolved != target
                 or not resolved.is_relative_to(root)
@@ -698,6 +706,10 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         summary = root / summary_raw
         try:
             doc = json.loads(summary.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            if collect_missing:
+                return (summary_raw,)
+            raise ValueError(f"Step-10 summary is not valid JSON: {summary_raw!r}")
         except (OSError, UnicodeError, ValueError) as exc:
             raise ValueError(f"Step-10 summary is not valid JSON: {summary_raw!r}") from exc
         subject = doc.get("subject") if isinstance(doc, Mapping) else None
@@ -722,6 +734,9 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             try:
                 actual = hashlib.sha256(target.read_bytes()).hexdigest()
             except OSError as exc:
+                if collect_missing:
+                    result.append(raw)
+                    continue
                 raise ValueError(f"Step-10 subject item is absent: {raw!r}") from exc
             if actual != digest.removeprefix("sha256:"):
                 raise ValueError(f"Step-10 subject digest changed: {raw!r}")
@@ -812,6 +827,9 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             try:
                 resolved = target.resolve(strict=True)
             except (OSError, RuntimeError) as exc:
+                if collect_missing:
+                    result.append(raw)
+                    continue
                 raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
             if (target.is_symlink() or resolved != target
                     or not resolved.is_relative_to(root)
@@ -828,12 +846,16 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             try:
                 resolved = target.resolve(strict=True)
             except (OSError, RuntimeError) as exc:
-                raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
-            if (target.is_symlink() or resolved != target
-                    or not resolved.is_relative_to(root)
-                    or not resolved.is_file()):
-                raise ValueError(f"step-7 input path is unsafe: {raw!r}")
-            result.append(raw)
+                if collect_missing:
+                    result.append(raw)
+                else:
+                    raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
+            else:
+                if (target.is_symlink() or resolved != target
+                        or not resolved.is_relative_to(root)
+                        or not resolved.is_file()):
+                    raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+                result.append(raw)
     # The Step-7 pad-ring record is itself a bound input.  Its
     # ``documents_scanned`` list is the producer's transitive source closure;
     # omit it and the isolated producer silently sees a smaller document set,
@@ -855,6 +877,9 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             try:
                 resolved = target.resolve(strict=True)
             except (OSError, RuntimeError) as exc:
+                if collect_missing:
+                    result.append(raw)
+                    continue
                 raise ValueError(f"pad-ring input path is absent: {raw!r}") from exc
             if (target.is_symlink() or resolved != target
                     or not resolved.is_relative_to(root)
@@ -892,8 +917,15 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
                 receipt = json.loads((folder_path / "vibeic_receipt.json").read_text())
                 state = json.loads((folder_path / "state_out.json").read_text())
             except (OSError, ValueError, TypeError):
-                raise ValueError("backend synthesis receipt/state is unreadable")
-            result.extend(_mapped_receipt_state_files(root, folder_path, receipt, state))
+                if collect_missing:
+                    result.extend((str((folder_path / "vibeic_receipt.json").relative_to(root)),
+                                   str((folder_path / "state_out.json").relative_to(root))))
+                else:
+                    raise ValueError("backend synthesis receipt/state is unreadable")
+            else:
+                result.extend(_mapped_receipt_state_files(
+                    root, folder_path, receipt, state,
+                    collect_missing=collect_missing))
     # The resolver validates the original producer state path from this
     # receipt; the resolved config is its explicit input fingerprint.
     if (root / "phase3/librelane/synthesis_resolved.json").is_file():
@@ -902,7 +934,8 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
 
 
 def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[str, object],
-                                state: Mapping[str, object]) -> tuple[str, ...]:
+                                state: Mapping[str, object], *,
+                                collect_missing: bool = False) -> tuple[str, ...]:
     """Admit receipt state files only after lexical, containment, and digest proof.
 
     The producer records absolute paths from its own project namespace.  The
@@ -949,6 +982,10 @@ def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[st
         try:
             resolved = target.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
+            if collect_missing:
+                seen.add(relative.as_posix())
+                mapped.append(relative.as_posix())
+                continue
             raise ValueError(f"staged project input is absent: {relative}") from exc
         if (target.is_symlink() or resolved != target or
                 not resolved.is_relative_to(project) or not resolved.is_file()):
