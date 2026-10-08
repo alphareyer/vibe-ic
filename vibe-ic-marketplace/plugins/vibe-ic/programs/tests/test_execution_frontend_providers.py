@@ -141,9 +141,16 @@ def test_non_step8_frontend_does_not_borrow_step8_sdc_verdict(tmp_path, monkeypa
 
     registry = em.Registry()
     p.register_factories(registry, step_ids=('1',))
-    evidence = registry.adapters('1')[0].validate(tmp_path, {'step_id': '1'})
+    arm = registry.adapters('1')[0]
+    evidence = arm.validate(tmp_path, {'step_id': '1'})
     assert evidence.verdict == 'NOT_MEASURED'
     assert all(value == 'NOT_MEASURED' for value in evidence.gates.values())
+    monkeypatch.setattr(
+        flow, 'check_step',
+        lambda *args, **kwargs: SimpleNamespace(
+            status='FAIL', reasons=['measured RTL consumer failure']))
+    failed = arm.validate(tmp_path, {'step_id': '1'})
+    assert failed.verdict == 'FAIL'
 
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'
