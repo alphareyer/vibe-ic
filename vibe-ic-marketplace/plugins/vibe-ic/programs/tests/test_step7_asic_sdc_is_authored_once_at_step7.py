@@ -509,6 +509,42 @@ def test_container_cid_rotation_does_not_regenerate_step7(tmp_path, monkeypatch)
     assert got["regenerated"] is None, got
 
 
+def test_io_pad_namespace_rotation_preserves_binding_but_supply_change_refuses(
+        tmp_path, monkeypatch):
+    """Run-local pad paths are ignored; a supply change is bound and refused."""
+    proj = _project(tmp_path)
+    rec_path = _pad_record(proj)
+    payload = json.loads(rec_path.read_text())
+    payload.update({
+        "project": str(proj),
+        "optional_ports_not_implemented": [{
+            "netlist": str(proj / "phase2/stage2/synth/netlist.v"),
+        }],
+    })
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    record_path = proj / CONS / T.ASIC_SDC_RECORD
+    before = record_path.read_bytes()
+
+    payload["project"] = "/private/backend/project"
+    payload["optional_ports_not_implemented"][0]["netlist"] = (
+        "/private/backend/phase2/stage2/synth/netlist.v")
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    accepted, why = T.read_step7_asic_sdc(R, proj, TOP, pdk)
+    observed = ("ACCEPTED" if accepted is not None else "REFUSED", why)
+    assert observed == ("ACCEPTED", "")
+    assert record_path.read_bytes() == before
+
+    payload["power_pad_plan"]["ground_net"] = "VSSA"
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    refused, why = T.read_step7_asic_sdc(R, proj, TOP, pdk)
+    observed = ("REFUSED" if refused is None else "ACCEPTED",
+                "@io_pad_record" in why)
+    assert observed == ("REFUSED", True)
+    assert record_path.read_bytes() == before
+
+
 def test_input_sdc_never_clobbers_a_hand_authored_legacy_sdc(tmp_path,
                                                               monkeypatch):
     """Wave-9: a higher-priority input must not make legacy input disposable."""

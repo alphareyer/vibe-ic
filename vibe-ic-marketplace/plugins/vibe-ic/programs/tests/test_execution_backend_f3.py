@@ -247,11 +247,29 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
 
     contract = backend_project_input_contract(project, "15")
 
-    observed = tuple(sorted(rel for rel in paths if rel in contract))
-    assert observed == tuple(sorted(paths))
-    assert "reports/container_image.json" in contract
+    expected = tuple(sorted((*paths, "reports/container_image.json")))
+    assert tuple(sorted(contract)) == expected
     assert "@code:timing.py" not in contract
     assert "@liberty_sha256" not in contract
+
+
+def test_step7_semantic_image_only_binding_carries_report(tmp_path):
+    """The @ binding names a semantic report that the isolated reader opens."""
+    project = tmp_path / "project"
+    report = project / "reports/container_image.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{\"image_ref\": \"pinned\"}\n")
+    record = project / "phase2/stage2/constraints/asic_sdc.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"inputs": {
+        "@container_image": "external-image-binding",
+    }}))
+
+    contract = backend_project_input_contract(project, "15")
+
+    observed = tuple(sorted(
+        path for path in contract if path == "reports/container_image.json"))
+    assert observed == ("reports/container_image.json",)
 
 
 def test_step7_pad_record_source_closure_is_carried(tmp_path):
