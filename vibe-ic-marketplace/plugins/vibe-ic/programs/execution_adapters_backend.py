@@ -706,8 +706,19 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
             "phase2/stage2/constraints/asic_sdc.json",
             issued_constraint,
+            *(("phase3/stage3/pnr/constraint.sdc",) if step_id == "15" else ()),
         ):
             carry_checkpoint_file(raw)
+        if step_id == "15":
+            for raw in (
+                "reports/phase2/sdc_check.json",
+                "reports/phase3/sta/pre_pnr_summary.json",
+                "phase3/stage3/sta/pre_pnr_timing.rpt",
+                "phase3/stage3/sta/prelayout_per_corner/sta_FF.rpt",
+                "phase3/stage3/sta/prelayout_per_corner/sta_SS.rpt",
+                "phase3/stage3/sta/prelayout_per_corner/sta_TT.rpt",
+            ):
+                carry_checkpoint_file(raw)
         # These are prior stage-1 proof inputs consumed by the compliance
         # reader.  Carry only files already issued by the checkpoint; missing
         # proof remains the consumer's honest FAIL.

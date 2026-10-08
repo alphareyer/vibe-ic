@@ -59991,6 +59991,24 @@ def _repair_residual_note(project: "Path", residual: bool,
 STEP10_CORNER_DIR = "prelayout_per_corner"
 
 
+def _portable_prelayout_gate(project: Path, report: dict) -> dict:
+    """Bind prelayout gate paths to project-relative consumer references."""
+    import librelane_contract as _llc
+    project = Path(project).resolve()
+    out = dict(report)
+    for key in ("netlist", "sdc", "source"):
+        value = out.get(key)
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            resolved = path.resolve()
+            if not resolved.is_relative_to(project):
+                raise _llc.Refusal("LL_PRELAYOUT_GATE_PATH_ESCAPE", value)
+            out[key] = str(resolved.relative_to(project))
+    return out
+
+
 def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                          runner_sdc: Path, design_staged: bool,
                          modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
@@ -60022,6 +60040,10 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     gates = project / "phase3/librelane/prelayout/gates"
     out: Dict[str, Any] = {"folder": folder, "resolved": resolved}
     out["sdc"] = _llp.judge_sdc(folder, resolved, runner_sdc, gates / "step8_sdc_opensta.json")
+    # Gate paths are portable consumer references; bytes remain bound by the
+    # producer digests and the project-contained source state.
+    out["sdc"] = _portable_prelayout_gate(project, out["sdc"])
+    _llc.write_json(gates / "step8_sdc_opensta.json", out["sdc"])
     out["slack"] = _llp.judge_slack(folder, gates / "step10_slack.json")
     notes.append(f"LibreLane STAPrePNR: {folder.relative_to(project)} "
                  f"(step 8 gate {out['sdc']['verdict']}, "
@@ -60065,6 +60087,106 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                      f"({out['sdc_arms'].get('reason')}); the spec-derived deck "
                      "stays the design's deck")
     return out
+
+
+def _publish_prelayout_summary(project: Path) -> Path:
+    """Emit Step 10's scoped summary from its current pre-layout reports."""
+    from librelane_contract import Refusal
+
+    project = Path(project).resolve()
+    pre_pnr = _pl.sta_dir(project) / "pre_pnr_timing.rpt"
+    if not pre_pnr.is_file() or not pre_pnr.stat().st_size:
+        raise Refusal("PRELAYOUT_STA_REPORT_ABSENT", str(pre_pnr))
+    summary = project / "reports/phase3/sta/pre_pnr_summary.json"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.unlink(missing_ok=True)
+    command = [sys.executable, str(PROGRAMS_DIR / "sta_report_check.py"),
+               str(project), "--mode", "sta",
+               "--under", "phase3/stage3/sta/pre_pnr_timing.rpt",
+               "--under", "phase3/stage3/sta/prelayout_per_corner",
+               "--json", str(summary)]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Refusal("PRELAYOUT_STA_SUMMARY_UNAVAILABLE", str(exc)) from exc
+    if completed.returncode != 0 or not summary.is_file() or not summary.stat().st_size:
+        detail = (completed.stderr or completed.stdout or
+                  "sta_report_check did not emit a summary").strip()
+        raise Refusal("PRELAYOUT_STA_SUMMARY_FAILED", detail[-500:])
+    return summary
+
+
+def publish_prelayout_reports(project: Path, folder: Path, *,
+                              receipt_sha256: Optional[str] = None) -> Dict[str, str]:
+    """Publish Step 10's canonical reports from an existing STAPrePNR run.
+
+    This is a publication seam only: the native producer has already run and
+    ``folder`` is its current, receipt-bound output.  The helper composes the
+    producer's per-corner reports, chooses a declared PRE_LAYOUT source, and
+    runs the existing scoped ``sta_report_check`` solely to emit the canonical
+    summary before the audit consumes it.
+    """
+    from librelane_contract import Refusal, digest, validate_step_receipt
+    import librelane_prelayout as _llp
+
+    project = Path(project).resolve()
+    raw_folder = Path(folder)
+    try:
+        if raw_folder.is_symlink():
+            raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder))
+        folder = raw_folder.resolve()
+        if (not folder.is_dir() or
+                not folder.is_relative_to(project)):
+            raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder))
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, Refusal):
+            raise
+        raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder)) from exc
+    state = folder / "state_out.json"
+    if state.is_symlink() or not state.is_file() or not state.stat().st_size:
+        raise Refusal("PRELAYOUT_NATIVE_STATE_ABSENT", str(state))
+    receipt = folder / "vibeic_receipt.json"
+    if (receipt_sha256 is not None and
+            (not isinstance(receipt_sha256, str) or
+             not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) or
+             receipt.is_symlink() or not receipt.is_file() or
+             digest(receipt) != receipt_sha256)):
+        raise Refusal("PRELAYOUT_NATIVE_RECEIPT_CHANGED", str(receipt))
+    # The producer receipt binds every retained report and its input/state
+    # identity.  A present state file by itself is not sufficient authority for
+    # publishing the canonical Step-10 views.
+    try:
+        validate_step_receipt(folder, "OpenROAD.STAPrePNR")
+    except Refusal as exc:
+        raise Refusal("PRELAYOUT_NATIVE_RECEIPT_INVALID", str(exc)) from exc
+
+    sta_out = _pl.sta_dir(project)
+    per_corner = sta_out / STEP10_CORNER_DIR
+    reports = _llp.compose_corner_reports(folder, per_corner,
+                                          _classify_corner_from_name)
+    if len(reports) < 2:
+        raise Refusal("PRELAYOUT_STA_CORNERS_INCOMPLETE",
+                      f"{len(reports)} corner report(s) from {folder}")
+    ordered = [per_corner / name for name in
+               ("sta_SS.rpt", "sta_TT.rpt", "sta_FF.rpt")]
+    ordered.extend(p for p in sorted(reports.values()) if p not in ordered)
+    source = next((p for p in ordered if p.is_file()), None)
+    if source is None or _sta_basis.declared_basis(source.read_text()) != "PRE_LAYOUT":
+        raise Refusal("PRELAYOUT_STA_BASIS_UNSUBSTANTIATED", str(source))
+
+    pre_pnr = sta_out / "pre_pnr_timing.rpt"
+    pre_pnr.parent.mkdir(parents=True, exist_ok=True)
+    pre_pnr.write_text(
+        "# PRE-LAYOUT STA (Step 10) — genuine OpenROAD.STAPrePNR on the "
+        "synthesis netlist\n"
+        f"# corner source: {source.name}\n" + source.read_text())
+
+    summary = _publish_prelayout_summary(project)
+    return {"state_out": str(state),
+            "state_out_sha256": digest(state),
+            "pre_pnr_timing": str(pre_pnr),
+            "pre_pnr_summary": str(summary)}
 
 
 def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,

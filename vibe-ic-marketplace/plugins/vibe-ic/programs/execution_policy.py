@@ -641,6 +641,30 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
         raise Refusal("PRELAYOUT_PUBLICATION_FAILED", str(exc)) from exc
     if not isinstance(result, dict) or not isinstance(result.get("sdc"), dict):
         raise Refusal("PRELAYOUT_PUBLICATION_FAILED", "native producer returned no SDC result")
+    native_folder = result.get("folder")
+    if not isinstance(native_folder, (str, os.PathLike)):
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", "native producer returned no folder")
+    import librelane_contract as _prelayout_ll
+    native_receipt = Path(native_folder) / "vibeic_receipt.json"
+    if (native_receipt.is_symlink() or not native_receipt.is_file() or
+            not native_receipt.stat().st_size):
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", "native producer returned no receipt")
+    native_receipt_sha256 = _prelayout_ll.digest(native_receipt)
+    # This is the actual Default Step-15 consumer seam.  The native producer
+    # must first be proven current by Step 8, then its three real corner views
+    # are published for Step 10, and only after that does dispatch_fixed_step
+    # take the Step-15 input census below.
+    import design_one_shot_runner as design
+    postcheck = design.step_sdc_validation_post_prelayout(
+        project, str(top), native_result={"folder": str(native_folder),
+                                          "receipt_sha256": native_receipt_sha256})
+    if getattr(postcheck, "status", None) != "PASS":
+        raise Refusal("PRELAYOUT_STEP8_POSTCHECK_FAILED", str(getattr(postcheck, "detail", postcheck)))
+    try:
+        phase3.publish_prelayout_reports(project, Path(native_folder),
+                                         receipt_sha256=native_receipt_sha256)
+    except Exception as exc:
+        raise Refusal("PRELAYOUT_STEP10_PUBLICATION_FAILED", str(exc)) from exc
     try:
         published = json.loads(gate.read_text())
     except (OSError, ValueError, TypeError) as exc:

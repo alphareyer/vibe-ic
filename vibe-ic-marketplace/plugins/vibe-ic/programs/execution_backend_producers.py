@@ -261,6 +261,61 @@ def _copy(source, target):
     shutil.copyfile(source, target)
 
 
+def _step15_sdc(project):
+    """Resolve the physical SDC published by the bounded Step 15 producer."""
+    project = Path(project)
+    pnr = project / PNR
+    record_path = pnr / 'step15_state.json'
+    if not record_path.is_file():
+        return _require(pnr / 'constraint.sdc')
+    try:
+        record = json.loads(record_path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError('record must be a mapping')
+        source = pnr / 'constraint.sdc'
+        views = record.get('views')
+        if not isinstance(views, dict):
+            raise ValueError('views missing')
+        # Schema/1 records predating the physical-deck split bind their native
+        # SDC directly to the canonical PNR deck.  Accept only that exact,
+        # contained regular file; do not invent an upstream/derived relation.
+        if 'sdc_derived' not in views and 'upstream_sdc' not in record:
+            if record.get('schema') != 'vibeic/step15-state-handoff/1':
+                raise ValueError('legacy schema invalid')
+            legacy = views.get('sdc')
+            resolved = source.resolve()
+            if (not isinstance(legacy, dict)
+                    or legacy.get('path') != str(source.relative_to(project))
+                    or not resolved.is_relative_to(project.resolve())
+                    or source.is_symlink() or not source.is_file()
+                    or not source.stat().st_size
+                    or legacy.get('sha256') != snap.sha(source)):
+                raise ValueError('legacy SDC binding changed')
+            # Reuse the existing raw state/PDN/handoff/view verifier.  The
+            # legacy deck is native; it is never relabelled as upstream.
+            _read_step15_bounded_state(project)
+            return _require(source)
+        info = views['sdc_derived']
+        upstream = record['upstream_sdc']
+        expected = project / PNR / 'step15.constraint.sdc'
+        if (not isinstance(info, dict) or not isinstance(upstream, dict)
+                or info.get('path') != str(expected.relative_to(project))):
+            raise ValueError('non-canonical derived path')
+        derived = expected
+        if (not derived.is_file() or derived.is_symlink()
+                or not derived.resolve().is_relative_to(project.resolve())):
+            raise ValueError('derived SDC path invalid')
+        if upstream['path'] != str(source.relative_to(project)) or upstream['sha256'] != snap.sha(source):
+            raise ValueError('upstream constraint changed')
+        if info['sha256'] != snap.sha(derived):
+            raise ValueError('derived SDC changed')
+        return _require(derived)
+    except em.Refusal as exc:
+        raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc
+
+
 def _parameters(project, params):
     import phase3_one_shot_runner as R
     import librelane_contract as ll
@@ -283,7 +338,7 @@ def _views(project, top, predecessor):
     routed = project / PNR / f'{top}_pnr.v'
     return {'def': _require(project / PNR / predecessor),
             'nl': _require(routed if routed.is_file() else nl),
-            'sdc': _require(project / PNR / 'constraint.sdc')}
+            'sdc': _step15_sdc(project)}
 
 
 def _state_chain(project, params, ids, predecessor, overlay=None):
@@ -304,7 +359,8 @@ def _state_chain(project, params, ids, predecessor, overlay=None):
         # those targets, preserving its path mapping and view checks.
         state = ll.state_from_direct(
             project, image, configs[ids[0]],
-            bound['views'],
+            {**{name: path for name, path in bound['views'].items()
+                if name != 'sdc_derived'}, 'sdc': _step15_sdc(project)},
             project / 'phase3/librelane' / (lane + '-config/bridge'),
             chain=[configs[s] for s in ids[1:]], mounts=mounts,
             metrics=bound['metrics'], metrics_source=bound['metrics_source'])
@@ -436,8 +492,17 @@ def _publish_step15_bounded_state(project, row):
         raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
     # Native chip-top netlist, SDC and power views, rather than the bare-core
     # synth views, travel with the ODB to the next isolated bounded worker.
-    for name, filename in (('nl', 'step15.nl.v'), ('sdc', 'constraint.sdc'),
-                           ('pnl', 'step15.pnl.v'), ('json_h', 'step15.h.json')):
+    upstream_sdc = _require(project / PNR / 'constraint.sdc')
+    native_sdc = document.get('sdc')
+    if not native_sdc:
+        raise em.Refusal('BACKEND_STEP15_SDC_ABSENT', str(native))
+    native_sdc = _require(native_sdc)
+    if not native_sdc.resolve().is_relative_to(project):
+        raise em.Refusal('BACKEND_STEP15_STATE_ESCAPE', str(native_sdc))
+    derived_sdc = project / PNR / 'step15.constraint.sdc'
+    _copy(native_sdc, derived_sdc)
+    views['sdc_derived'] = derived_sdc
+    for name, filename in (('nl', 'step15.nl.v'), ('pnl', 'step15.pnl.v'), ('json_h', 'step15.h.json')):
         if document.get(name):
             path = _require(document[name])
             if not path.resolve().is_relative_to(project):
@@ -462,6 +527,8 @@ def _publish_step15_bounded_state(project, row):
         'handoff': exported(handoff, 'step15_handoff.json'),
         'views': {name: {'path': str(path.relative_to(project)), 'sha256': snap.sha(path)}
                   for name, path in views.items()},
+        'upstream_sdc': {'path': str(upstream_sdc.relative_to(project)),
+                         'sha256': snap.sha(upstream_sdc)},
     }
     snap.dump(project / PNR / 'step15_state.json', record)
     # Same marker contract as the existing non-pad branch, bound to the
@@ -561,7 +628,7 @@ def _step17_direct_inputs(project, params, R, ll, pdk):
     floorplan = _require(pnr / 'floorplan.def')
     nl, _, _ = R.pnr_input_netlist(project, params['top'])
     nl = _require(nl)
-    sdc = _require(pnr / 'constraint.sdc')
+    sdc = _step15_sdc(project)
     state_value = params.get('step15_state') or params.get('state_in')
     state = Path(state_value) if state_value else None
     if state is None:
@@ -684,7 +751,7 @@ def _cts_split(project, params, R, ll, pdk, overlay):
     lane = 'execution-backend-' + sid
     ids = (['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing', 'Vibeic.ExternalCaptureLaunchRetap']
            if sid == '19' else ['OpenROAD.ResizerTimingPostCTS'])
-    scene = ch.signoff_scene_sdc(R, project / PNR / 'constraint.sdc',
+    scene = ch.signoff_scene_sdc(R, _step15_sdc(project),
                                 project / 'phase3/librelane' / (lane + '-config'))
     overlay['PNR_SDC_FILE'] = (str(scene), 'selected SDC + accepted signoff OCV scene')
     configs = ll.resolve_step_configs(project, image, pdk.name, ids + ['OpenROAD.STAMidPNR'],
@@ -983,7 +1050,7 @@ def produce_signoff(project, params):
         import si_signoff_timing_aware as si
         timing = rpt / 'si_timing.json'
         nl = _require(pnr / (top + '_pnr.v'))
-        sdc = _require(pnr / 'constraint.sdc')
+        sdc = _step15_sdc(project)
         voltage = R._pdk_nominal_voltage(pdk, container)
         if voltage is None:
             raise em.Refusal('BACKEND_SI_VOLTAGE_UNSTATED', sid)
