@@ -59991,6 +59991,24 @@ def _repair_residual_note(project: "Path", residual: bool,
 STEP10_CORNER_DIR = "prelayout_per_corner"
 
 
+def _portable_prelayout_gate(project: Path, report: dict) -> dict:
+    """Bind prelayout gate paths to project-relative consumer references."""
+    import librelane_contract as _llc
+    project = Path(project).resolve()
+    out = dict(report)
+    for key in ("netlist", "sdc", "source"):
+        value = out.get(key)
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            resolved = path.resolve()
+            if not resolved.is_relative_to(project):
+                raise _llc.Refusal("LL_PRELAYOUT_GATE_PATH_ESCAPE", value)
+            out[key] = str(resolved.relative_to(project))
+    return out
+
+
 def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                          runner_sdc: Path, design_staged: bool,
                          modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
@@ -60024,12 +60042,7 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     out["sdc"] = _llp.judge_sdc(folder, resolved, runner_sdc, gates / "step8_sdc_opensta.json")
     # Gate paths are portable consumer references; bytes remain bound by the
     # producer digests and the project-contained source state.
-    for key in ("netlist", "sdc", "source"):
-        value = out["sdc"].get(key)
-        if isinstance(value, str):
-            path = Path(value)
-            if path.is_absolute() and path.resolve().is_relative_to(project.resolve()):
-                out["sdc"][key] = str(path.resolve().relative_to(project.resolve()))
+    out["sdc"] = _portable_prelayout_gate(project, out["sdc"])
     _llc.write_json(gates / "step8_sdc_opensta.json", out["sdc"])
     out["slack"] = _llp.judge_slack(folder, gates / "step10_slack.json")
     notes.append(f"LibreLane STAPrePNR: {folder.relative_to(project)} "
