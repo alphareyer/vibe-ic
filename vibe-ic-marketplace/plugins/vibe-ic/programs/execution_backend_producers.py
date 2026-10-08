@@ -273,7 +273,14 @@ def _step15_sdc(project):
         info = record['views']['sdc_derived']
         upstream = record['upstream_sdc']
         source = pnr / 'constraint.sdc'
-        derived = project / info['path']
+        expected = project / PNR / 'step15.constraint.sdc'
+        if (not isinstance(info, dict) or not isinstance(upstream, dict)
+                or info.get('path') != str(expected.relative_to(project))):
+            raise ValueError('non-canonical derived path')
+        derived = expected
+        if (not derived.is_file() or derived.is_symlink()
+                or not derived.resolve().is_relative_to(project.resolve())):
+            raise ValueError('derived SDC path invalid')
         if upstream['path'] != str(source.relative_to(project)) or upstream['sha256'] != snap.sha(source):
             raise ValueError('upstream constraint changed')
         if info['sha256'] != snap.sha(derived):
@@ -326,7 +333,7 @@ def _state_chain(project, params, ids, predecessor, overlay=None):
         # those targets, preserving its path mapping and view checks.
         state = ll.state_from_direct(
             project, image, configs[ids[0]],
-            bound['views'],
+            {**bound['views'], 'sdc': bound['views'].get('sdc_derived')},
             project / 'phase3/librelane' / (lane + '-config/bridge'),
             chain=[configs[s] for s in ids[1:]], mounts=mounts,
             metrics=bound['metrics'], metrics_source=bound['metrics_source'])

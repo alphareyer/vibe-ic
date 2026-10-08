@@ -60022,6 +60022,15 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     gates = project / "phase3/librelane/prelayout/gates"
     out: Dict[str, Any] = {"folder": folder, "resolved": resolved}
     out["sdc"] = _llp.judge_sdc(folder, resolved, runner_sdc, gates / "step8_sdc_opensta.json")
+    # Gate paths are portable consumer references; bytes remain bound by the
+    # producer digests and the project-contained source state.
+    for key in ("netlist", "sdc", "source"):
+        value = out["sdc"].get(key)
+        if isinstance(value, str):
+            path = Path(value)
+            if path.is_absolute() and path.resolve().is_relative_to(project.resolve()):
+                out["sdc"][key] = str(path.resolve().relative_to(project.resolve()))
+    _llc.write_json(gates / "step8_sdc_opensta.json", out["sdc"])
     out["slack"] = _llp.judge_slack(folder, gates / "step10_slack.json")
     notes.append(f"LibreLane STAPrePNR: {folder.relative_to(project)} "
                  f"(step 8 gate {out['sdc']['verdict']}, "
