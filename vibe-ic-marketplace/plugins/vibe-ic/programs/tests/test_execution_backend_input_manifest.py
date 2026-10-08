@@ -107,6 +107,16 @@ def test_malformed_manifest_schema_does_not_call_producer_or_consumer(
     assert calls == []
 
 
+def test_manifest_accepts_pathless_external_check_none_declaration():
+    assert worker._valid_resolved_manifest({
+        "declarations": [{
+            "from": "external", "check": "none",
+            "what": "the PDK device models / tech decks",
+        }],
+        "files": {}, "missing": [],
+    })
+
+
 def test_directory_declaration_requires_nonempty_contained_file(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

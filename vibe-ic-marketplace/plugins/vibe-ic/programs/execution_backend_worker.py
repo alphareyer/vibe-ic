@@ -148,6 +148,10 @@ def _valid_manifest_declaration(entry) -> bool:
     source = entry.get('from')
     if source is not None and (not isinstance(source, str) or not source):
         return False
+    if entry.get('check') == 'none':
+        return (source == 'external' and
+                isinstance(entry.get('what'), str) and
+                bool(entry['what']))
     if entry.get('outputs') == 'all':
         return isinstance(source, str) and bool(source)
     # The worker retains the historical path-only shape for direct callers;
