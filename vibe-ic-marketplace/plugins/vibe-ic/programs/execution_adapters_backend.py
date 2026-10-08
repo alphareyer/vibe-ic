@@ -686,6 +686,22 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
                     or not resolved.is_file()):
                 raise ValueError(f"step-7 input path is unsafe: {raw!r}")
             result.append(rel.as_posix())
+        # ``@container_image`` is a semantic binding, but its canonical report
+        # is still a project file that the isolated reader must open to
+        # recompute that binding.  Keep the external digest key out of the
+        # manifest while carrying the exact report bytes through the worker.
+        if "@container_image" in bound:
+            raw = "reports/container_image.json"
+            target = root / raw
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
+            if (target.is_symlink() or resolved != target
+                    or not resolved.is_relative_to(root)
+                    or not resolved.is_file()):
+                raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+            result.append(raw)
     # The Step-7 pad-ring record is itself a bound input.  Its
     # ``documents_scanned`` list is the producer's transitive source closure;
     # omit it and the isolated producer silently sees a smaller document set,

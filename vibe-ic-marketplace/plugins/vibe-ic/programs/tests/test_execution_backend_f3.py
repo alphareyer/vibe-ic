@@ -240,6 +240,7 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
         **{rel: "digest-" + str(i) for i, rel in enumerate(paths)},
         "@code:timing.py": "external-code-digest",
         "@liberty_sha256": "external-liberty-digest",
+        "@container_image": "external-image-binding",
     }}))
 
     contract = backend_project_input_contract(project, "15")
