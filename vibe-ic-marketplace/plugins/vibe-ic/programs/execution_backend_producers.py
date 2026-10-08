@@ -270,6 +270,8 @@ def _step15_sdc(project):
         return _require(pnr / 'constraint.sdc')
     try:
         record = json.loads(record_path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError('record must be a mapping')
         source = pnr / 'constraint.sdc'
         views = record.get('views')
         if not isinstance(views, dict):
@@ -278,11 +280,20 @@ def _step15_sdc(project):
         # SDC directly to the canonical PNR deck.  Accept only that exact,
         # contained regular file; do not invent an upstream/derived relation.
         if 'sdc_derived' not in views and 'upstream_sdc' not in record:
+            if record.get('schema') != 'vibeic/step15-state-handoff/1':
+                raise ValueError('legacy schema invalid')
             legacy = views.get('sdc')
+            resolved = source.resolve()
             if (not isinstance(legacy, dict)
                     or legacy.get('path') != str(source.relative_to(project))
+                    or not resolved.is_relative_to(project.resolve())
+                    or source.is_symlink() or not source.is_file()
+                    or not source.stat().st_size
                     or legacy.get('sha256') != snap.sha(source)):
                 raise ValueError('legacy SDC binding changed')
+            # Reuse the existing raw state/PDN/handoff/view verifier.  The
+            # legacy deck is native; it is never relabelled as upstream.
+            _read_step15_bounded_state(project)
             return _require(source)
         info = views['sdc_derived']
         upstream = record['upstream_sdc']
@@ -299,7 +310,9 @@ def _step15_sdc(project):
         if info['sha256'] != snap.sha(derived):
             raise ValueError('derived SDC changed')
         return _require(derived)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except em.Refusal as exc:
+        raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc
 
 
