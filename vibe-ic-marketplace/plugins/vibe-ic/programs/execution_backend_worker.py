@@ -132,6 +132,49 @@ def resolve_input_contract(project: Path, declarations) -> list[str]:
     return _resolve_input_contract(project, declarations)["missing"]
 
 
+def _valid_manifest_declaration(entry) -> bool:
+    """Validate one JSON declaration before treating a manifest as authority."""
+    if isinstance(entry, str):
+        return bool(entry)
+    if not isinstance(entry, Mapping):
+        return False
+    if 'required' in entry and type(entry['required']) is not bool:
+        return False
+    if 'check' in entry and not isinstance(entry['check'], str):
+        return False
+    path = entry.get('path')
+    if path is not None and not isinstance(path, str):
+        return False
+    source = entry.get('from')
+    if source is not None and (not isinstance(source, str) or not source):
+        return False
+    if entry.get('outputs') == 'all':
+        return isinstance(source, str) and bool(source)
+    # The worker retains the historical path-only shape for direct callers;
+    # the issuer's canonical expand path still rejects it before issuance.
+    return isinstance(path, str) and bool(path)
+
+
+def _valid_resolved_manifest(manifest) -> bool:
+    if not isinstance(manifest, Mapping):
+        return False
+    declarations = manifest.get('declarations')
+    files = manifest.get('files')
+    missing = manifest.get('missing')
+    if (type(declarations) is not list or not isinstance(files, Mapping)
+            or type(missing) is not list or
+            not all(_valid_manifest_declaration(entry) for entry in declarations)
+            or not all(isinstance(item, str) for item in missing)):
+        return False
+    for raw, expected in files.items():
+        if not isinstance(raw, str) or not raw:
+            return False
+        digest = expected.get('sha256') if isinstance(expected, Mapping) else expected
+        if not isinstance(digest, str) or not digest:
+            return False
+    return True
+
+
 def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
     """Resolve the issuer's one contract without dropping declaration shapes.
 
@@ -251,6 +294,9 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
             if (target.is_symlink() or not target.is_file() or
                     not target.stat().st_size or actual != digest.removeprefix('sha256:')):
                 add(raw)
+    if isinstance(manifest, Mapping):
+        for item in manifest.get('missing', ()):
+            add(item)
     return {'declarations': declarations, 'files': dict(observed) if isinstance(observed, Mapping) else {},
             'missing': missing}
 
@@ -276,10 +322,16 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     _copy_input_tree(inputs, project)
     binding = _binding(inputs)
     row = ROWS[str(step_id)]["canonical_row"]
+    manifest_supplied = 'resolved_input_manifest' in params
     manifest = params.get('resolved_input_manifest')
-    input_contract = (manifest.get('declarations') if isinstance(manifest, Mapping)
-                      else params.get("input_contract", row.get("required_inputs", ())))
-    resolved = _resolve_input_contract(project, input_contract, manifest)
+    if manifest_supplied and not _valid_resolved_manifest(manifest):
+        input_contract = []
+        resolved = {'declarations': [], 'files': {},
+                    'missing': ['resolved_input_manifest']}
+    else:
+        input_contract = (manifest.get('declarations') if manifest_supplied
+                          else params.get("input_contract", row.get("required_inputs", ())))
+        resolved = _resolve_input_contract(project, input_contract, manifest)
     input_contract = resolved['declarations']
     missing_inputs = resolved['missing']
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}

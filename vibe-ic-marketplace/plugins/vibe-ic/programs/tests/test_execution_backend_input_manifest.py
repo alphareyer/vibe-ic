@@ -84,6 +84,29 @@ def test_manifest_hash_mismatch_is_fail_closed(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_malformed_manifest_schema_does_not_call_producer_or_consumer(
+        tmp_path, monkeypatch):
+    inputs = tmp_path / "inputs"
+    (inputs / "project").mkdir(parents=True)
+    calls = []
+    monkeypatch.setattr(worker, "produce",
+                        lambda project, params: calls.append("produce"))
+    monkeypatch.setattr(worker, "evaluate",
+                        lambda project, row: calls.append("evaluate"))
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({
+        "required_gates": [],
+    }))
+
+    result = worker.execute(
+        inputs, tmp_path / "outputs", step_id="15",
+        params={"resolved_input_manifest": {
+            "declarations": None, "files": {}, "missing": []}})
+
+    assert result["missing_inputs"] == ["resolved_input_manifest"]
+    assert result["verdict"] == "NOT_MEASURED"
+    assert calls == []
+
+
 def test_directory_declaration_requires_nonempty_contained_file(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
