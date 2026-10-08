@@ -171,9 +171,12 @@ def test_factory_reachability_reverse_and_dedup():
     assert any(x.endswith('sdc_validator_check.py') for x in eight.source_files)
 
 def test_real_boundary_consumes_output_and_reverse_red(tmp_path):
+    import pytest
     source=tmp_path/'input'/'docs'; source.mkdir(parents=True); (source/'L1.md').write_text('# doc\n')
     (tmp_path/'input'/'issued_manifest.json').write_text(json.dumps({'step_id':'D1','parameters':{},'files':{'input/docs/L1.md':__import__('hashlib').sha256((source/'L1.md').read_bytes()).hexdigest()}}))
-    result=p.produce('D1', tmp_path); assert result.state in ('NOT_MEASURED','NOT_IMPLEMENTED')
+    with pytest.raises(em.Refusal, match='ISSUED_FRONTEND_UNAVAILABLE: D1'):
+        p.produce('D1', tmp_path)
+    assert not (tmp_path/'frontend_outputs'/'D1').exists()
 
 def test_step6_explicitly_not_measured_without_fpga():
     result=p.produce('6', Path('/missing'), fpga=False)
