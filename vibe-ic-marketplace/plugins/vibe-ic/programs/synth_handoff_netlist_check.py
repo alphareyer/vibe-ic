@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -86,6 +87,82 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _runtime_pdk_mount(root: Path, guest: Path, receipt: dict) -> Path | None:
+    """Find an equivalent PDK mount in the current consumer runtime.
+
+    A native producer can record its host-side cache path even though the
+    consumer is running in a fresh attested container.  In that namespace the
+    recorded host path is intentionally absent; the image's PDK_ROOT is the
+    only valid alternate source.  Admit it only when every recorded config
+    file covered by this mount is present there with its receipt SHA-256.
+    """
+    runtime_value = os.environ.get("PDK_ROOT")
+    if not isinstance(runtime_value, str):
+        return None
+    runtime_root = Path(runtime_value)
+    if (not runtime_root.is_absolute() or runtime_root.is_symlink()
+            or not runtime_root.is_dir()):
+        return None
+    try:
+        relative_guest = guest.relative_to(root)
+    except ValueError:
+        return None
+    raw_runtime_mount = runtime_root / relative_guest
+    try:
+        runtime_mount = raw_runtime_mount.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (not runtime_mount.is_dir()
+            or not runtime_mount.is_relative_to(runtime_root.resolve())):
+        return None
+    inp = receipt.get("input") if isinstance(receipt, dict) else None
+    config_files = inp.get("config_files") if isinstance(inp, dict) else None
+    if not isinstance(config_files, dict) or not config_files:
+        return None
+    pdk_files = []
+    for recorded, expected in config_files.items():
+        if not isinstance(recorded, str):
+            return None
+        path = Path(recorded)
+        if (not path.is_absolute() or ".." in path.parts
+                or str(path) != recorded
+                or not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            return None
+        if not path.is_relative_to(guest):
+            continue
+        pdk_files.append((path, expected))
+    if not pdk_files:
+        return None
+    for path, expected in pdk_files:
+        relative = path.relative_to(guest)
+        candidate = raw_runtime_mount / relative
+        # The mount root itself may be the image's canonical PDK alias (for
+        # example gf180mcuD -> ciel/...); a symlink below that root is not an
+        # immutable file binding and must remain refused unless it resolves
+        # within the same runtime PDK root.  A symlink at the recorded file
+        # itself is always refused.
+        cursor = raw_runtime_mount
+        for part in relative.parts:
+            cursor /= part
+            if cursor.is_symlink():
+                try:
+                    linked = cursor.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return None
+                if (not linked.is_relative_to(runtime_root.resolve())
+                        or cursor == candidate):
+                    return None
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if (not resolved.is_relative_to(runtime_mount)
+                or not resolved.is_file() or _sha(resolved) != expected):
+            return None
+    return runtime_mount
+
+
 def _receipt_pdk_mounts(folder: Path, receipt: dict) -> list[tuple[Path, str]]:
     """Return the producer's bound guest-to-host PDK mounts.
 
@@ -119,9 +196,13 @@ def _receipt_pdk_mounts(folder: Path, receipt: dict) -> list[tuple[Path, str]]:
         host, guest_value = Path(str(item[0])).resolve(), item[1]
         guest = Path(str(guest_value))
         if (not isinstance(guest_value, str) or not guest.is_absolute()
-                or not host.is_dir()
                 or not (guest == root or guest.is_relative_to(root))):
             raise ValueError("native receipt has a foreign PDK mount")
+        if not host.is_dir():
+            runtime_host = _runtime_pdk_mount(root, guest, receipt)
+            if runtime_host is None:
+                raise ValueError("native receipt has a foreign PDK mount")
+            host = runtime_host
         mounts.append((host, guest_value))
     return mounts
 
