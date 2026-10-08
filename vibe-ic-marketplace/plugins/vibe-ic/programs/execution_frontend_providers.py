@@ -213,8 +213,9 @@ def _step6_board_evidence_present(root, concrete):
             return True
     reports = root / 'reports' / 'phase2' / 'fpga'
     if reports.is_dir():
-        # The disclosed skip/audit JSON is not physical evidence.  Other
-        # reports and programmer/bench artefacts are evidence of an attempt.
+        # Only the producer's exact no-run stub is an absence declaration.
+        # Other reports and programmer/bench artefacts are evidence of an
+        # attempted board result, even when their verdict says SKIP.
         for path in reports.rglob('*'):
             if not path.is_file() or path.name == 'quartus_map_audit.json':
                 continue
@@ -223,9 +224,9 @@ def _step6_board_evidence_present(root, concrete):
                     claim = json.loads(path.read_text())
                 except (OSError, ValueError, TypeError):
                     return True
-                if (isinstance(claim, dict) and
-                        claim.get('verdict') == 'SKIP' and
-                        claim.get('sof_present') is False):
+                if claim == {
+                        'verdict': 'SKIP',
+                        'evidence': 'usb_hid_tester_verify not run'}:
                     continue
                 return True
             if path.suffix.lower() != '.json':
