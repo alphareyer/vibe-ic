@@ -31,7 +31,7 @@ def test_default_step15_uses_real_producer_and_pnr_sdc(tmp_path,monkeypatch):
     monkeypatch.setattr(phase3,'_prelayout_librelane',publish); policy._ensure_default_prelayout(_runtime(project),'15')
     assert calls==[(pnr,{'7':'librelane','8':'librelane','10':'librelane'})]
 
-def test_default_step15_reuses_fresh_proof_without_producer(tmp_path,monkeypatch):
+def test_default_step15_calls_existing_producer_each_dispatch(tmp_path,monkeypatch):
     project,netlist,pnr=_fixture(tmp_path)
     calls=[]
     def publish(*args): calls.append(args); _proof(project,netlist,pnr); return {'sdc':{'verdict':'PASS'}}
@@ -39,25 +39,40 @@ def test_default_step15_reuses_fresh_proof_without_producer(tmp_path,monkeypatch
     assert len(calls)==1
 
 def test_default_step15_refuses_failed_producer(tmp_path, monkeypatch):
-    project, _, _ = _fixture(tmp_path)
+    project, _, pnr = _fixture(tmp_path)
+    gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS"}))
     def fail(*args): return {"sdc": {"verdict": "FAIL"}}
     monkeypatch.setattr(phase3, "_prelayout_librelane", fail)
-    with pytest.raises(policy.Refusal, match="PRELAYOUT_GATE_NOT_PUBLISHED"):
+    with pytest.raises(policy.Refusal, match="PRELAYOUT_GATE_IDENTITY_MISMATCH"):
         policy._ensure_default_prelayout(_runtime(project), "15")
+    assert json.loads(gate.read_text())["verdict"] == "PASS"
 
 
 def test_public_dispatch_calls_publication_before_input_census(tmp_path, monkeypatch):
-    project = tmp_path / "project"; project.mkdir()
+    project, netlist, pnr = _fixture(tmp_path)
     order = []
     adapter = types.SimpleNamespace(applicability="applicable", tool_id="backend", objective={})
     registry = types.SimpleNamespace(adapters=lambda step: [adapter])
     controller = types.SimpleNamespace(portfolio={"steps":[{"id":"15","mandatory_gate_programs":[]}]})
     runtime = {"project": project, "policy":{"mode":"default","request_receipt":{"invocation_id":"x"}},
-               "parameters":{}, "registry":registry, "controller":controller,
+               "parameters":{"top":"spm","pdk":object(),"container":"vibeic-eda"}, "registry":registry, "controller":controller,
                "contexts":{}, "runs":{}, "route":{"source_sha":"s","project_digest":"p","ic_ip_path":"i"}}
     monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
-    monkeypatch.setattr(policy, "_ensure_default_prelayout", lambda rt, step: order.append("publish"))
-    monkeypatch.setattr(policy, "_fixed_inputs", lambda rt, step, **kwargs: order.append("census") or {})
+    def publish(project_, top, pdk, runner_sdc, staged, modes, notes):
+        order.append("publish")
+        assert runner_sdc == pnr
+        (project_ / "phase3/librelane/prelayout/gates").mkdir(parents=True, exist_ok=True)
+        (project_ / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json").write_text(json.dumps({"verdict":"PASS"}))
+        return {"sdc": {"verdict":"PASS"}}
+    monkeypatch.setattr(phase3, "_prelayout_librelane", publish)
+    def census(rt, step, **kwargs):
+        order.append("census")
+        assert (project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json").is_file()
+        assert pnr.is_file()
+        return {}
+    monkeypatch.setattr(policy, "_fixed_inputs", census)
     result = policy.dispatch_fixed_step(project, "15")
     assert result["status"] == "NOT_MEASURED"
     assert order == ["publish", "census"]
