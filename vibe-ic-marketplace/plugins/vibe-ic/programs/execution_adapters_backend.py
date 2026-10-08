@@ -661,6 +661,72 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
     root = Path(project).resolve(strict=True)
     result: list[str] = []
 
+    def carry_checkpoint_file(raw: str, *, allow_directory: bool = False) -> None:
+        """Carry one issued checkpoint file after proving its namespace."""
+        rel = Path(raw)
+        if (rel.is_absolute() or not raw or ".." in rel.parts
+                or rel.as_posix() != raw):
+            raise ValueError(f"backend checkpoint path is unsafe: {raw!r}")
+        target = root / rel
+        try:
+            resolved = target.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"backend checkpoint path is absent: {raw!r}") from exc
+        if (target.is_symlink() or resolved != target
+                or not resolved.is_relative_to(root)
+                or not (resolved.is_file() or (allow_directory and resolved.is_dir()))):
+            raise ValueError(f"backend checkpoint path is unsafe: {raw!r}")
+        result.append(raw)
+
+    def carry_optional_checkpoint_file(raw: str) -> None:
+        """Carry an existing prior proof input without inventing absence."""
+        target = root / raw
+        if not target.exists():
+            return
+        carry_checkpoint_file(raw, allow_directory=(raw == "phase2/stage1/sim/tb"))
+
+    # A backend arm with a published synthesis netlist consumes the same
+    # issued proof namespace as the producer.  These files are deliberately
+    # enumerated: copying the whole reports tree would admit stale outputs.
+    # Their bytes remain bound by the ordinary input manifest after this
+    # function returns; absence is a hard refusal rather than a silent omit.
+    step7_record = root / "phase2/stage2/constraints/asic_sdc.json"
+    try:
+        step7 = json.loads(step7_record.read_text())
+    except (OSError, ValueError, TypeError):
+        step7 = None
+    issued_constraint = step7.get("path") if isinstance(step7, Mapping) else None
+    if (root / "phase2/stage2/synth/netlist.v").is_file() and isinstance(issued_constraint, str):
+        constraint_rel = Path(issued_constraint)
+        if (constraint_rel.parent != Path("phase2/stage2/constraints")
+                or not constraint_rel.name.endswith(".asic.sdc")):
+            raise ValueError(f"Step-7 constraint path is unsafe: {issued_constraint!r}")
+        for raw in (
+            "provenance.jsonl",
+            "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+            "phase2/stage2/constraints/asic_sdc.json",
+            issued_constraint,
+        ):
+            carry_checkpoint_file(raw)
+        # These are prior stage-1 proof inputs consumed by the compliance
+        # reader.  Carry only files already issued by the checkpoint; missing
+        # proof remains the consumer's honest FAIL.
+        for raw in (
+            "rig_topology.json",
+            "reports/phase2/cdc/netlist.json",
+            "reports/phase2/cdc/crossing.json",
+            "reports/phase2/cdc/async_input.json",
+            "reports/phase2/cdc/reset_dep.json",
+            "reports/phase2/lint/rtl_hygiene.json",
+            "reports/phase2/lint/rom_init_lint.json",
+            "reports/crosslayer/rewrite_equivalence_check.json",
+            "reports/phase1/extraction_coverage_report.md",
+            "reports/phase1/extraction_coverage_report.json",
+            "plugin_output/declaration.json",
+            "phase2/stage1/sim/tb",
+        ):
+            carry_optional_checkpoint_file(raw)
+
     # Step 7's ASIC SDC is an input-bound handoff.  Its record deliberately
     # stores project-relative paths separately from image/PDK/code bindings
     # (the latter are ``@`` keys and must remain external).  A backend arm
@@ -672,7 +738,6 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
     # This is intentionally data-driven: no design, PDK, or filename literal
     # is admitted, and the same safe-path checks used by the receipt mapper
     # reject absolute, traversal, non-canonical, symlinked, or missing paths.
-    step7_record = root / "phase2/stage2/constraints/asic_sdc.json"
     try:
         step7 = json.loads(step7_record.read_text())
     except (OSError, ValueError, TypeError):
