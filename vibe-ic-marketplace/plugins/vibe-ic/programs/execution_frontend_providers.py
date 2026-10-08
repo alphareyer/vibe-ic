@@ -45,6 +45,18 @@ ENGINES = {r: ('source-bound',) for r in ROWS}; ENGINES.update({'2':('yosys','ve
 APPLICABILITY = {r:'IC+IP' for r in ROWS}; APPLICABILITY['0.5ic']='IC+IP route authority'; APPLICABILITY['6']='IC only; FPGA evidence optional'
 DOWNSTREAM = {r: f'consumer:{";".join(outs)}' for r,outs in CANONICAL_ROWS.items()}
 
+_STEP6_ATTESTATION_ABSENCE_RULES = frozenset({
+    'missing-pass-json', 'bad-pass-json', 'pass-json-fields-missing',
+    'not-all-passed', 'not-enough-scenarios', 'no-programmer-log',
+    'no-hardware-evidence',
+})
+_STEP6_ATTESTATION_REASON = (
+    'no final .sof, programmer log or bench evidence exists: '
+    'no FPGA board test was performed')
+_STEP6_ATTESTATION_RULING = (
+    'owner 2026-09-25: steps 6 and 39 (FPGA on-board) are excluded from '
+    'the IC PASS goal; reported NOT_MEASURED, never PASS')
+
 
 def _machine_contracts():
     """Consume the checked-in catalog and coverage declarations as inputs."""
@@ -229,9 +241,36 @@ def _step6_board_evidence_present(root, concrete):
                         'evidence': 'usb_hid_tester_verify not run'}:
                     continue
                 return True
+            if path.name == 'on_board_attestation.json':
+                try:
+                    attestation = json.loads(path.read_text())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if _step6_attestation_is_absence(attestation):
+                    continue
+                return True
             if path.suffix.lower() != '.json':
                 return True
     return False
+
+
+def _step6_attestation_is_absence(value):
+    """Recognize only the attestation producer's typed no-hardware result."""
+    if not isinstance(value, dict) or set(value) != {
+            'overall', 'reason_class', 'reason', 'ruling', 'findings'}:
+        return False
+    if (value.get('overall') != 'NOT_MEASURED' or
+            value.get('reason_class') != 'hardware_required' or
+            value.get('reason') != _STEP6_ATTESTATION_REASON or
+            value.get('ruling') != _STEP6_ATTESTATION_RULING or
+            not isinstance(value.get('findings'), list)):
+        return False
+    return all(
+        isinstance(finding, dict) and set(finding) == {
+            'severity', 'rule', 'message'} and
+        finding.get('severity') == 'error' and
+        finding.get('rule') in _STEP6_ATTESTATION_ABSENCE_RULES
+        for finding in value['findings'])
 
 
 def _gate_verdict(program, path):

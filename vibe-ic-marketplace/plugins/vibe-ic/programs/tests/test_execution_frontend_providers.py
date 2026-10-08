@@ -315,6 +315,71 @@ def test_step6_skip_stub_with_scenario_measurement_evidence_fails(tmp_path):
     evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
     assert evidence.verdict == 'FAIL'
 
+
+def test_step6_actual_attestation_no_hardware_result_is_absence(tmp_path):
+    """The canonical attestation producer's typed no-hardware result is NM."""
+    (tmp_path / 'canonical.json').write_text(json.dumps({
+        'schema': 'frontend_worker_output/1', 'step_id': '6',
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'result': 'NOT_MEASURED', 'verdict': 'NOT_MEASURED',
+        'excluded_from_verdict': True, 'reason': 'Quartus/board unavailable',
+    }))
+    report = tmp_path / 'reports/phase2/fpga/on_board_attestation.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        'overall': 'NOT_MEASURED', 'reason_class': 'hardware_required',
+        'reason': ('no final .sof, programmer log or bench evidence exists: '
+                   'no FPGA board test was performed'),
+        'ruling': ('owner 2026-09-25: steps 6 and 39 (FPGA on-board) are '
+                   'excluded from the IC PASS goal; reported NOT_MEASURED, '
+                   'never PASS'),
+        'findings': [{'severity': 'error', 'rule': 'missing-pass-json',
+                      'message': 'reports/phase2/fpga/on_board_pass.json not found'}],
+    }))
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
+    assert evidence.verdict == 'NOT_MEASURED'
+
+
+def test_step6_attestation_fail_cannot_hide_typed_absence(tmp_path):
+    """A canonical attestation FAIL keeps measured failure precedence."""
+    (tmp_path / 'canonical.json').write_text(json.dumps({
+        'schema': 'frontend_worker_output/1', 'step_id': '6',
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'result': 'NOT_MEASURED', 'verdict': 'NOT_MEASURED',
+        'excluded_from_verdict': True, 'reason': 'Quartus/board unavailable',
+    }))
+    report = tmp_path / 'reports/phase2/fpga/on_board_attestation.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({'overall': 'FAIL', 'findings': [
+        {'severity': 'error', 'rule': 'bitstream-hash-mismatch',
+         'message': 'measured board result failed'}]}))
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
+    assert evidence.verdict == 'FAIL'
+
+
+def test_step6_malformed_or_partial_attestation_cannot_be_absence(tmp_path):
+    """Malformed or incomplete attestation JSON is an attempted result."""
+    (tmp_path / 'canonical.json').write_text(json.dumps({
+        'schema': 'frontend_worker_output/1', 'step_id': '6',
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'result': 'NOT_MEASURED', 'verdict': 'NOT_MEASURED',
+        'excluded_from_verdict': True, 'reason': 'Quartus/board unavailable',
+    }))
+    report = tmp_path / 'reports/phase2/fpga/on_board_attestation.json'
+    report.parent.mkdir(parents=True)
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    for payload in ('{"overall":', json.dumps({
+            'overall': 'NOT_MEASURED', 'reason_class': 'hardware_required',
+            'findings': [{'rule': 'partial'}]})):
+        report.write_text(payload)
+        evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
+        assert evidence.verdict == 'FAIL'
+
 def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp_path):
     # Incomplete input is a real expert handoff, not an eligible D1 positive.
     from dataclasses import replace
