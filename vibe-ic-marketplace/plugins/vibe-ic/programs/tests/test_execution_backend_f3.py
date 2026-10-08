@@ -30,10 +30,12 @@ from execution_adapters_backend import (
     validate,
     validate_streamout_receipt,
 )
+import execution_backend_worker as backend_worker
 from execution_backend_worker import resolve_input_contract
 from synth_handoff_netlist_check import _project_path_resolver
 import execution_backend_consumer
-from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table, current_source_identity
+from execution_provider_catalog import (BACKEND_IDS, BACKEND_ROWS, coverage_rows,
+                                         coverage_table, current_source_identity)
 
 BASE = current_source_identity()
 PRE_FIX_BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
@@ -139,6 +141,88 @@ def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path)
     assert result["step_id"] == "15"
     assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
     assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
+
+
+def _catalog_step15_worker_fixture(tmp_path, *, netlist_state):
+    """Build the exact Step-15 input contract from the live provider catalog."""
+    declarations = tuple(BACKEND_ROWS['15']['canonical_row']['required_inputs'])
+    netlist = next(entry['path'] for entry in declarations
+                   if 'post_dft_netlist.v' in entry['path'])
+    sdc = next(entry['path'] for entry in declarations if '*.sdc' in entry['path'])
+    inputs = tmp_path / 'inputs'
+    project = inputs / 'project'
+    sdc_path = project / Path(sdc).parent / 'fixture.sdc'
+    sdc_path.parent.mkdir(parents=True, exist_ok=True)
+    sdc_path.write_text('create_clock -period 10 [get_ports clk]\n')
+    netlist_path = project / netlist
+    if netlist_state == 'present':
+        netlist_path.parent.mkdir(parents=True, exist_ok=True)
+        netlist_path.write_text('module fixture; endmodule\n')
+    elif netlist_state == 'zero-byte':
+        netlist_path.parent.mkdir(parents=True, exist_ok=True)
+        netlist_path.write_bytes(b'')
+    binding = {
+        'step_id': '15',
+        'source_sha': current_source_identity(),
+        'required_gates': list(BACKEND_ROWS['15']['portfolio_policy']['mandatory_gate_programs']),
+    }
+    return inputs, tmp_path / 'outputs', declarations, netlist, binding
+
+
+@pytest.mark.parametrize('netlist_state', ['missing', 'zero-byte'])
+def test_step15_missing_input_skips_producer_and_gates(tmp_path, monkeypatch, netlist_state):
+    inputs, outputs, declarations, netlist, binding = _catalog_step15_worker_fixture(
+        tmp_path, netlist_state=netlist_state)
+    calls = []
+
+    def unexpected_produce(project, params):
+        calls.append('produce')
+        return {'verdict': 'PASS', 'canonical_receipts': [{'producer': 'unexpected'}]}
+
+    def unexpected_gates(project, row):
+        calls.append('gates')
+        return {'status': 'PASS', 'ledger': []}
+
+    monkeypatch.setattr(backend_worker, 'produce', unexpected_produce)
+    monkeypatch.setattr(backend_worker, 'evaluate', unexpected_gates)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps(binding))
+    result = backend_worker.execute(
+        inputs, outputs, step_id='15', params={'input_contract': list(declarations)})
+
+    assert calls == []
+    assert result['missing_inputs'] == [netlist]
+    assert result['native_receipts'] == []
+    assert result['verdict'] == 'NOT_MEASURED'
+
+
+def test_step15_complete_inputs_call_producer_then_gates(tmp_path, monkeypatch):
+    inputs, outputs, declarations, netlist, binding = _catalog_step15_worker_fixture(
+        tmp_path, netlist_state='present')
+    calls = []
+
+    def observed_produce(project, params):
+        calls.append('produce')
+        return {
+            'verdict': 'PASS',
+            'canonical_receipts': [{'producer': 'fixture', 'verdict': 'PASS'}],
+            'native_receipts': [],
+        }
+
+    def observed_gates(project, row):
+        calls.append('gates')
+        return {'status': 'PASS', 'ledger': [
+            {'gate': gate, 'rc': 0, 'verdict': 'PASS'}
+            for gate in binding['required_gates']]}
+
+    monkeypatch.setattr(backend_worker, 'produce', observed_produce)
+    monkeypatch.setattr(backend_worker, 'evaluate', observed_gates)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps(binding))
+    result = backend_worker.execute(
+        inputs, outputs, step_id='15', params={'input_contract': list(declarations)})
+
+    assert calls == ['produce', 'gates']
+    assert result['missing_inputs'] == []
+    assert result['native_receipts'] == []
 
 
 def test_required_input_zero_byte_is_missing_but_nonempty_or_alternate_is_valid(tmp_path):
