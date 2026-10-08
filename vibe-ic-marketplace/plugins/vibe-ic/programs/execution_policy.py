@@ -645,7 +645,9 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
         published = json.loads(gate.read_text())
     except (OSError, ValueError, TypeError) as exc:
         raise Refusal("PRELAYOUT_GATE_NOT_PUBLISHED", str(exc)) from exc
-    if result["sdc"].get("verdict") != "PASS" or published.get("verdict") != "PASS":
+    if (result["sdc"].get("verdict") != "PASS"
+            or not isinstance(published, dict)
+            or published.get("verdict") != "PASS"):
         raise Refusal("PRELAYOUT_GATE_IDENTITY_MISMATCH", str(gate))
 
 
