@@ -61,11 +61,12 @@ def _canonical_issued_transport(monkeypatch):
 def _issued_context(step_id, inputs, tmp_path, *, native_mode='librelane'):
     payload = receipt_chain.real_entry('IC', 'default', tmp_path)
     route = payload['route']
-    row = _spec(step_id)
+    portfolio_row = next(row for row in em.load_portfolio()['steps']
+                         if str(row['id']) == str(step_id))
     context = em.Context(
         str(step_id), route['source_sha'], inputs,
         {"metric": "canonical_evidence", "direction": "max"},
-        tuple(row["mandatory_gate_programs"]), native_mode,
+        tuple(portfolio_row["mandatory_gate_programs"]), native_mode,
         project_digest=route['project_digest'],
         **policy.controller_fields(ic_ip_path='IC', route_receipt=route))
     return context, route
