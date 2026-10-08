@@ -37699,6 +37699,7 @@ def _prepare_librelane_floorplan_for_route(
         io_view_discover=_discover_padring_io_views,
         placement: Optional[Dict[str, Any]] = None,
         strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        bounded_state: bool = False,
         ) -> Tuple[StepResult, Optional[str]]:
     """Steps 15/15.5ic through LibreLane, handed to the direct routing deck.
 
@@ -37744,6 +37745,15 @@ def _prepare_librelane_floorplan_for_route(
         a handler that names its step keeps that name for real refusals."""
         code = getattr(exc, "code", None)
         return code if _ll.tool_stop_reason(code) else default
+
+    # The legacy whole-route entry owns the generic Tcl consumer.  Refuse an
+    # empty/ambiguous deck before resolving or running any native chain; the
+    # bounded-state entry below intentionally does not require this deck.
+    if not bounded_state:
+        try:
+            _inject_padring_io_lefs(generic_pnr_tcl, ())
+        except (TypeError, ValueError) as exc:
+            return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
 
     if "dual" in modes.values():
         return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
@@ -37986,6 +37996,54 @@ def _prepare_librelane_floorplan_for_route(
             return _fail("PADRING_BTERM_GATE_FAILED",
                          f"pad_bterm_coincidence_check.py rc={rc}: {(out + err)[-800:]}",
                          status, reason)
+    # The bounded execution-backend Step 15 owns the native floorplan/ring/
+    # tap/PDN chain and hands its state to the next bounded row.  It does not
+    # enter the legacy monolithic routing-deck consumer below: that consumer
+    # intentionally requires the real generic pnr.tcl and keeps its strict
+    # read_verilog seam.  Returning here preserves every native tool/gate/
+    # handoff check above while making the state boundary explicit.
+    if bounded_state:
+        try:
+            io_lefs, io_gds = io_view_discover(pdk, container)
+        except (OSError, ValueError) as exc:
+            return _fail("LL_FLOORPLAN_PHYSICAL_VIEW_UNRESOLVED", str(exc))
+        pdn_step = by_step.get("OpenROAD.GeneratePDN")
+        if pdn_step is None:
+            return _fail("LL_FLOORPLAN_PDN_NOT_MEASURED",
+                         "bounded Step15 chain did not resolve OpenROAD.GeneratePDN")
+        pdn_state = pdn_step / "state_out.json"
+        native_state = final_state
+        if not native_state.is_file() or not pdn_state.is_file():
+            return _fail("LL_FLOORPLAN_STATE_HANDOFF_ABSENT",
+                         f"native_state={native_state.is_file()} "
+                         f"pdn_state={pdn_state.is_file()}")
+        for view in io_lefs:
+            if view not in pdk.macro_lefs:
+                pdk.macro_lefs.append(view)
+        for view in io_gds:
+            if view not in pdk.macro_gds:
+                pdk.macro_gds.append(view)
+        inventory_text = "".join(
+            f"read_lef {path}\n" for path in
+            [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs])
+        inventory = _record_physical_view_inventory(project, inventory_text)
+        notes.append(
+            f"bounded native state handoff: {native_state.relative_to(project)}; "
+            f"PDN state: {pdn_state.relative_to(project)}")
+        return StepResult(
+            "pad_ring_gen", "PASS", time.time() - t0, "; ".join(notes),
+            [str(padring), str(out_dir / "floorplan.def"),
+             str(out_dir / "librelane_floorplan.odb"), str(handoff), str(inventory)],
+            extras={"librelane_modes": modes,
+                    "librelane_steps": steps,
+                    "bounded_state": True,
+                    "native_state": str(native_state),
+                    "pdn_state": str(pdn_state),
+                    "floorplan": str(out_dir / "floorplan.def"),
+                    "odb": str(out_dir / "librelane_floorplan.odb"),
+                    "handoff": str(handoff),
+                    "physical_view_inventory": str(inventory)}), None
+
     consumed = out_dir / ("floorplan.def" if modes["15"] == "librelane" else "padring.def")
     try:
         io_lefs, io_gds = io_view_discover(pdk, container)

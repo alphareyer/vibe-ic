@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -296,6 +297,17 @@ def _state_chain(project, params, ids, predecessor, overlay=None):
     mounts = [(root.resolve(), ll.PDK_GUEST_ROOT)]
     if params.get('state_in'):
         state = _require(Path(params['state_in']))
+    elif predecessor == 'floorplan.def':
+        bound = _read_step15_bounded_state(project)
+        # The validated LibreLane handoff is now the source of truth for the
+        # canonical DEF/ODB targets.  Use the existing state bridge to read
+        # those targets, preserving its path mapping and view checks.
+        state = ll.state_from_direct(
+            project, image, configs[ids[0]],
+            bound['views'],
+            project / 'phase3/librelane' / (lane + '-config/bridge'),
+            chain=[configs[s] for s in ids[1:]], mounts=mounts,
+            metrics=bound['metrics'], metrics_source=bound['metrics_source'])
     else:
         state = ll.state_from_direct(project, image, configs[ids[0]],
                 _views(project, params['top'], predecessor),
@@ -315,6 +327,139 @@ def _handoff(project, ll, folder, names):
     target = {view: project / name for view, name in names.items()}
     return ll.handoff_to_direct(folder / 'state_out.json', target,
                project / RPT / ('execution-backend-' + folder.parent.name + '-handoff.json'))
+
+
+def _read_step15_bounded_state(project):
+    """Verify portable native lineage and return the actual Step17 input views."""
+    project = Path(project).resolve()
+    record_path = project / PNR / 'step15_state.json'
+    try:
+        record = json.loads(_require(record_path).read_text())
+        if record.get('schema') != 'vibeic/step15-state-handoff/1':
+            raise ValueError('state handoff schema')
+    except (OSError, ValueError, TypeError, AttributeError, em.Refusal) as exc:
+        raise em.Refusal('BACKEND_STEP15_STATE_ABSENT', str(record_path)) from exc
+
+    def verify(info, code):
+        if not isinstance(info, dict) or not isinstance(info.get('path'), str):
+            raise em.Refusal(code + '_ABSENT', str(info))
+        rel = Path(info['path'])
+        path = project / rel
+        if (rel.is_absolute() or '..' in rel.parts or not path.resolve().is_relative_to(project)
+                or path.is_symlink() or not path.is_file() or not path.stat().st_size):
+            raise em.Refusal(code + '_ABSENT', str(path))
+        if snap.sha(path) != info.get('sha256'):
+            raise em.Refusal(code + '_CHANGED', str(path))
+        return path
+
+    native = verify(record.get('native_state'), 'BACKEND_STEP15_STATE')
+    pdn = verify(record.get('pdn_state'), 'BACKEND_STEP15_PDN_STATE')
+    handoff = verify(record.get('handoff'), 'LL_HANDOFF')
+    raw = json.loads(handoff.read_text())
+    raw_views = raw.get('views')
+    if not isinstance(raw_views, dict):
+        raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
+    if raw.get('state_sha256') != snap.sha(native):
+        raise em.Refusal('LL_HANDOFF_STATE_CHANGED', str(handoff))
+    if (raw.get('state_sha256') != record.get('raw_state_sha256')
+            or raw.get('state_sha256') != record.get('handoff_state_sha256')):
+        raise em.Refusal('LL_HANDOFF_STATE_CHANGED', str(handoff))
+    views = {name: verify(info, 'LL_HANDOFF_VIEW')
+             for name, info in record.get('views', {}).items()}
+    for name in ('def', 'odb'):
+        info = raw_views.get(name, {})
+        published = (record.get('handoff_views') or {}).get(name, {})
+        if (name not in views or info.get('source_sha256') != snap.sha(views[name])
+                or info.get('dest_sha256') != snap.sha(views[name])
+                or info != published):
+            raise em.Refusal('LL_HANDOFF_VIEW_CHANGED', name)
+    marker = json.loads(_require(project / PNR / 'pdn.done').read_text())
+    pdn_info = record.get('pdn_state') or {}
+    if (marker.get('state') != pdn_info.get('path')
+            or marker.get('sha256') != snap.sha(pdn)
+            or marker.get('sha256') != record.get('raw_pdn_state_sha256')):
+        raise em.Refusal('BACKEND_STEP15_PDN_MARKER_CHANGED', str(pdn))
+    return {'views': views, 'metrics': json.loads(native.read_text()).get('metrics', {}),
+            'metrics_source': str(record_path), 'record': record}
+
+
+def _publish_step15_bounded_state(project, row):
+    """Export exact native state/receipt/view bytes into the carried PNR closure."""
+    project = Path(project).resolve()
+    extras = row.extras if isinstance(row.extras, dict) else {}
+    if not extras.get('bounded_state'):
+        raise em.Refusal('BACKEND_STEP15_STATE_MODE_UNBOUND', 'producer row')
+    def source(key):
+        path = _require(extras[key])
+        if not path.resolve().is_relative_to(project):
+            raise em.Refusal('BACKEND_STEP15_STATE_ESCAPE', str(path))
+        return path
+    native, pdn, handoff = (source(key) for key in ('native_state', 'pdn_state', 'handoff'))
+    document = json.loads(native.read_text())
+    raw_handoff = json.loads(handoff.read_text())
+    raw_views = raw_handoff.get('views')
+    if not isinstance(raw_views, dict):
+        raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
+    native_sha = snap.sha(native)
+    if raw_handoff.get('state_sha256') != native_sha:
+        raise em.Refusal('LL_HANDOFF_STATE_CHANGED', str(handoff))
+    # The native helper has already handed these exact bytes into the
+    # canonical PNR closure.  Require that boundary rather than copying an
+    # isolated LibreLane path here; Step17 must consume the actual handoff.
+    views = {}
+    for name, key, filename in (
+            ('def', 'floorplan', 'floorplan.def'),
+            ('odb', 'odb', 'librelane_floorplan.odb')):
+        path = source(key)
+        target = project / PNR / filename
+        if path.resolve() != target.resolve():
+            raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(target))
+        views[name] = target
+    for name in ('def', 'odb'):
+        info = raw_views.get(name, {})
+        if (info.get('source_sha256') != snap.sha(views[name])
+                or info.get('dest_sha256') != snap.sha(views[name])):
+            raise em.Refusal('LL_HANDOFF_VIEW_CHANGED', name)
+    if any(name not in raw_views for name in ('def', 'odb')):
+        raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
+    # Native chip-top netlist, SDC and power views, rather than the bare-core
+    # synth views, travel with the ODB to the next isolated bounded worker.
+    for name, filename in (('nl', 'step15.nl.v'), ('sdc', 'constraint.sdc'),
+                           ('pnl', 'step15.pnl.v'), ('json_h', 'step15.h.json')):
+        if document.get(name):
+            path = _require(document[name])
+            if not path.resolve().is_relative_to(project):
+                raise em.Refusal('BACKEND_STEP15_STATE_ESCAPE', str(path))
+            target = project / PNR / filename
+            _copy(path, target)
+            views[name] = target
+    def exported(path, filename):
+        target = project / PNR / filename
+        _copy(path, target)
+        return {'path': str(target.relative_to(project)), 'sha256': snap.sha(target)}
+    pdn_sha = snap.sha(pdn)
+    record = {
+        'schema': 'vibeic/step15-state-handoff/1',
+        'producer': 'execution_backend_producers.produce_pnr',
+        'raw_state_sha256': native_sha,
+        'raw_pdn_state_sha256': pdn_sha,
+        'handoff_state_sha256': raw_handoff.get('state_sha256'),
+        'handoff_views': {name: raw_views[name] for name in ('def', 'odb')},
+        'native_state': exported(native, 'step15_native_state.json'),
+        'pdn_state': exported(pdn, 'step15_pdn_state.json'),
+        'handoff': exported(handoff, 'step15_handoff.json'),
+        'views': {name: {'path': str(path.relative_to(project)), 'sha256': snap.sha(path)}
+                  for name, path in views.items()},
+    }
+    snap.dump(project / PNR / 'step15_state.json', record)
+    # Same marker contract as the existing non-pad branch, bound to the
+    # actual completed OpenROAD.GeneratePDN state (the exported copy is exact).
+    snap.dump(project / PNR / 'pdn.done', {
+        'state': str((project / PNR / 'step15_pdn_state.json').relative_to(project)),
+        'sha256': pdn_sha,
+    })
+    _read_step15_bounded_state(project)
+    return record
 
 
 def _logs(project, folders, name='openroad.log'):
@@ -681,7 +826,10 @@ def produce_pnr(project, params):
             # master free-run exclusion, pad connection and PDN semantics.
             row, _ = R._prepare_librelane_floorplan_for_route(
                 project, pdk, container, project / PNR, '',
-                {'15': 'librelane', '15.5ic': 'librelane'})
+                {'15': 'librelane', '15.5ic': 'librelane'},
+                bounded_state=True)
+            if row.status == 'PASS':
+                _publish_step15_bounded_state(project, row)
             return {'verdict': row.status, 'detail': row.detail}
         ids = ['Yosys.JsonHeader'] + ll.flow_segment(params['image_id'],
                     'OpenROAD.Floorplan', 'Odb.RemovePDNObstructions', flow='Classic')
@@ -699,6 +847,9 @@ def produce_pnr(project, params):
         by = dict(zip(ids, folders))
         _handoff(project, ll, folders[-1], {'def': PNR + 'floorplan.def',
                                            'odb': PNR + 'librelane_floorplan.odb'})
+        handoff_path = (project / RPT /
+                        ('execution-backend-' + folders[-1].parent.name +
+                         '-handoff.json'))
         pdn_step = by.get('OpenROAD.GeneratePDN')
         if pdn_step is None:
             raise em.Refusal('BACKEND_PDN_NOT_EXECUTED', sid)
@@ -711,6 +862,17 @@ def produce_pnr(project, params):
         # The done marker is a bound completed native PDN state, not rc0 alone.
         snap.dump(project / PNR / 'pdn.done', {'state': str(pdn_step / 'state_out.json'),
                   'sha256': snap.sha(pdn_step / 'state_out.json')})
+        # Core-only Step 15 uses the same portable state/DEF/ODB contract as
+        # the pad path.  Step17 receives only phase3/stage3/pnr, so export the
+        # actual native state lineage and handoff receipt there as well.
+        _publish_step15_bounded_state(project, SimpleNamespace(extras={
+            'bounded_state': True,
+            'native_state': str(folders[-1] / 'state_out.json'),
+            'pdn_state': str(pdn_step / 'state_out.json'),
+            'floorplan': str(project / PNR / 'floorplan.def'),
+            'odb': str(project / PNR / 'librelane_floorplan.odb'),
+            'handoff': str(handoff_path),
+        }))
     elif sid == '15.5ic':
         row = R.step_pad_ring_gen(project, container, pdk)
         return {'verdict': row.status, 'detail': row.detail}
