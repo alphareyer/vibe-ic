@@ -608,6 +608,7 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
     if not top or pdk is None or not container:
         return
     import phase3_one_shot_runner as phase3
+    import librelane_contract as llc
     netlist = phase3._pl.synth_dir(project) / f"{top}_synth.v"
     record_path = project / "phase2/stage2/constraints/asic_sdc.json"
     if not netlist.is_file() or not record_path.is_file():
@@ -619,32 +620,66 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
     issued_sdc = record.get("path") if isinstance(record, dict) else None
     if not isinstance(issued_sdc, str):
         raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", "missing path")
-    sdc = project / issued_sdc
-    if not sdc.is_file():
+    issued = Path(issued_sdc)
+    if issued.is_absolute() or '..' in issued.parts:
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", issued_sdc)
+    step7_sdc = project / issued
+    if not step7_sdc.is_file() or step7_sdc.is_symlink():
         raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", issued_sdc)
+    # Step 7's declaration is the binding/source proof.  The actual producer
+    # consumes the PnR deck after its unit/DRV derivation; comparing the gate
+    # to the raw ASIC declaration rejects valid measured runs.
+    sdc = project / "phase3/stage3/pnr/constraint.sdc"
+    if not sdc.is_file() or sdc.is_symlink():
+        raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", str(sdc.relative_to(project)))
     gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
-    current_netlist_sha = phase3._llc.digest(netlist)
-    current_sdc_sha = phase3._llc.digest(sdc)
+    current_netlist_sha = llc.digest(netlist)
+    current_sdc_sha = llc.digest(sdc)
+
+    def valid_gate(value):
+        if not isinstance(value, dict) or value.get("verdict") != "PASS":
+            return False
+        if (value.get("netlist_sha256") != current_netlist_sha or
+                value.get("sdc_sha256") != current_sdc_sha):
+            return False
+        source = value.get("source")
+        if not isinstance(source, str):
+            return False
+        source_path = Path(source)
+        try:
+            source_path = source_path.resolve()
+            if not source_path.is_relative_to(project.resolve()) or not source_path.is_file():
+                return False
+            if source_path.is_symlink():
+                return False
+            if value.get("state_out_sha256") != llc.digest(source_path):
+                return False
+            llc.validate_step_receipt(source_path.parent, "OpenROAD.STAPrePNR")
+        except (OSError, Refusal, ValueError, TypeError):
+            return False
+        return True
     current = None
     if gate.is_file():
         try:
             current = json.loads(gate.read_text())
         except (OSError, ValueError, TypeError):
             current = None
-    if (isinstance(current, dict) and current.get("verdict") == "PASS"
-            and current.get("netlist_sha256") == current_netlist_sha
-            and current.get("sdc_sha256") == current_sdc_sha):
+    if valid_gate(current):
         return
-    result = phase3.step_prelayout_signoff(project, str(top), pdk, str(container))
-    if result.status not in ("PASS", "PASS_WITH_WAIVERS"):
-        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", result.detail)
+    notes = []
+    try:
+        result = phase3._prelayout_librelane(
+            project, str(top), pdk, sdc, False,
+            {"7": "librelane", "8": "librelane", "10": "librelane"}, notes)
+    except Exception as exc:
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", str(exc)) from exc
+    if not isinstance(result, dict) or not isinstance(result.get("sdc"), dict):
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", "native producer returned no SDC result")
     try:
         published = json.loads(gate.read_text())
     except (OSError, ValueError, TypeError) as exc:
         raise Refusal("PRELAYOUT_GATE_NOT_PUBLISHED", str(exc)) from exc
-    if (published.get("verdict") != "PASS"
-            or published.get("netlist_sha256") != phase3._llc.digest(netlist)
-            or published.get("sdc_sha256") != phase3._llc.digest(sdc)):
+    if not valid_gate(published) or result["sdc"].get("verdict") != "PASS":
         raise Refusal("PRELAYOUT_GATE_IDENTITY_MISMATCH", str(gate))
 
 
