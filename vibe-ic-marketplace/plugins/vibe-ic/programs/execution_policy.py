@@ -589,6 +589,65 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     return inputs
 
 
+def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
+    """Publish the existing pre-layout producer before a Default backend row.
+
+    Step 15 consumes the Step-8 gate, so a stale or absent gate must be
+    repaired at its existing pre-layout owner before the input manifest is
+    issued.  This hook never synthesises or places a design; it only reuses
+    ``step_prelayout_signoff`` when the mapped netlist/SDC identity is not
+    already represented by a passing gate.
+    """
+    if str(step_id) != "15" or runtime.get("policy", {}).get("mode") != "default":
+        return
+    params = runtime.get("parameters", {})
+    project = Path(runtime["project"])
+    top = params.get("top")
+    pdk = params.get("pdk")
+    container = params.get("container")
+    if not top or pdk is None or not container:
+        return
+    import phase3_one_shot_runner as phase3
+    netlist = phase3._pl.synth_dir(project) / f"{top}_synth.v"
+    record_path = project / "phase2/stage2/constraints/asic_sdc.json"
+    if not netlist.is_file() or not record_path.is_file():
+        return
+    try:
+        record = json.loads(record_path.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", str(exc)) from exc
+    issued_sdc = record.get("path") if isinstance(record, dict) else None
+    if not isinstance(issued_sdc, str):
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", "missing path")
+    sdc = project / issued_sdc
+    if not sdc.is_file():
+        raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", issued_sdc)
+    gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
+    current_netlist_sha = phase3._llc.digest(netlist)
+    current_sdc_sha = phase3._llc.digest(sdc)
+    current = None
+    if gate.is_file():
+        try:
+            current = json.loads(gate.read_text())
+        except (OSError, ValueError, TypeError):
+            current = None
+    if (isinstance(current, dict) and current.get("verdict") == "PASS"
+            and current.get("netlist_sha256") == current_netlist_sha
+            and current.get("sdc_sha256") == current_sdc_sha):
+        return
+    result = phase3.step_prelayout_signoff(project, str(top), pdk, str(container))
+    if result.status not in ("PASS", "PASS_WITH_WAIVERS"):
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", result.detail)
+    try:
+        published = json.loads(gate.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise Refusal("PRELAYOUT_GATE_NOT_PUBLISHED", str(exc)) from exc
+    if (published.get("verdict") != "PASS"
+            or published.get("netlist_sha256") != phase3._llc.digest(netlist)
+            or published.get("sdc_sha256") != phase3._llc.digest(sdc)):
+        raise Refusal("PRELAYOUT_GATE_IDENTITY_MISMATCH", str(gate))
+
+
 def _choice_file_state(path: Path, *, snapshot: bool = False):
     """Capture a response version and content digest without following symlinks."""
     try:
@@ -817,6 +876,7 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     elif step_id == '0.5ic':
         files = _fixed_inputs(runtime, step_id, parameters=parameters)
     else:
+        _ensure_default_prelayout(runtime, str(step_id))
         files = _fixed_inputs(runtime, step_id)
     if not files:
         return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT', step_id=step_id, selected=None)
