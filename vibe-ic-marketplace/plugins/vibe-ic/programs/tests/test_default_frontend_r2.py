@@ -512,6 +512,81 @@ def test_step14_maps_guest_pdk_config_material_from_producer_mount(tmp_path, mon
     assert H.bound_handoff(p)["verdict"] == "PASS"
 
 
+def test_step14_rebinds_missing_host_mount_only_by_recorded_runtime_digests(
+        tmp_path, monkeypatch):
+    """A container consumer may not see the producer's host cache path."""
+    import shutil
+
+    p, _, _ = _produce(tmp_path, monkeypatch, ordinary=True)
+    folder = p / "phase3/librelane/02-yosys-synthesis"
+    receipt_path = folder / "vibeic_receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    record = json.loads((folder / "pdk_root.json").read_text())
+    producer_root = Path(record["mounts_under_it"][0][0])
+    runtime_root = tmp_path / "runtime-pdk"
+    shutil.copytree(producer_root, runtime_root)
+
+    # The recorded host path is absent in this consumer namespace; the guest
+    # mount is still the producer's declared /pdk root.
+    record["mounts_under_it"] = [[str(tmp_path / "unmounted-cache"), "/pdk"]]
+    put(folder / "pdk_root.json", record)
+    receipt["sha256"]["pdk_root.json"] = LC.digest(folder / "pdk_root.json")
+    put(receipt_path, receipt)
+    sidecar = p / "phase2/stage2/synth/synth_inputs.json"
+    sidecar_doc = json.loads(sidecar.read_text())
+    sidecar_doc["librelane_synthesis"]["receipt_sha256"] = LC.digest(receipt_path)
+    put(sidecar, sidecar_doc)
+    monkeypatch.setenv("PDK_ROOT", str(runtime_root))
+
+    assert H.bound_handoff(p)["verdict"] == "PASS"
+
+    # Reverse control: one changed consumed PDK byte remains foreign/unbound.
+    recorded = next(iter(receipt["input"]["config_files"]))
+    changed = runtime_root / Path(recorded).relative_to("/pdk")
+    changed.write_text(changed.read_text() + "\nchanged\n")
+    failed = H.bound_handoff(p)
+    assert failed["verdict"] == "FAIL", failed
+    assert any("pdk" in finding.lower() or "config material" in finding.lower()
+               for finding in failed["findings"])
+
+
+@pytest.mark.parametrize("damage", ["empty", "malformed", "partial",
+                                     "escape", "symlink"])
+def test_runtime_pdk_rebinding_refuses_incomplete_or_unsafe_census(
+        tmp_path, monkeypatch, damage):
+    import copy
+    import shutil
+
+    p, _, _ = _produce(tmp_path, monkeypatch, ordinary=True)
+    folder = p / "phase3/librelane/02-yosys-synthesis"
+    receipt = json.loads((folder / "vibeic_receipt.json").read_text())
+    record = json.loads((folder / "pdk_root.json").read_text())
+    runtime_root = tmp_path / "runtime-pdk"
+    shutil.copytree(record["mounts_under_it"][0][0], runtime_root)
+    monkeypatch.setenv("PDK_ROOT", str(runtime_root))
+
+    damaged = copy.deepcopy(receipt)
+    files = damaged["input"]["config_files"]
+    first = next(iter(files))
+    if damage == "empty":
+        damaged["input"]["config_files"] = {}
+    elif damage == "malformed":
+        files[first] = ""
+    elif damage == "partial":
+        (runtime_root / Path(first).relative_to("/pdk")).unlink()
+    elif damage == "escape":
+        damaged["input"]["config_files"] = {
+            "/pdk/../escape": files[first]}
+    else:
+        candidate = runtime_root / Path(first).relative_to("/pdk")
+        outside = tmp_path / "outside-pdk-file"
+        outside.write_bytes(candidate.read_bytes())
+        candidate.unlink()
+        candidate.symlink_to(outside)
+
+    assert H._runtime_pdk_mount(Path("/pdk"), Path("/pdk"), damaged) is None
+
+
 def test_step9_default_keeps_existing_phase2_coupling_gate(tmp_path, monkeypatch):
     p, _, _, calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
     monkeypatch.setattr(D, '_chip_top_coupling_refusals', lambda *_: [

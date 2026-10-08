@@ -8,6 +8,116 @@ from programs.tests.test_execution_receipt_chain import isolated_transport
 
 EXPECTED=('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 
+def test_step4_ultra_registers_independent_simulators(monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('4',))
+    arms = registry.adapters('4')
+    assert [a.arm_id for a in arms] == ['frontend_4_icarus', 'frontend_4_verilator']
+    assert [a.engine_families for a in arms] == [('iverilog',), ('verilator',)]
+    assert em._provider_identity(arms[0]) != em._provider_identity(arms[1])
+
+
+def test_step4_default_retains_one_composite_adapter(monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('4',))
+    assert [a.arm_id for a in registry.adapters('4')] == ['frontend_4']
+    assert registry.adapters('4')[0].engine_families == ('iverilog', 'verilator')
+
+
+def test_step4_canonical_failure_cannot_inherit_sdc_pass(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import execution_policy
+    import flow_compliance_check as flow
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    for rel, data in {
+        'reports/phase2/sdc_check.json': {'passed': True, 'program': 'sdc_syntax_check'},
+        'reports/sdc_validator.json': {'verdict': 'PASS', 'exit_code': 0, 'issues': []},
+        'reports/phase2/coverage/coverage_verilator.json': {'totals': {}},
+        'reports/phase2/coverage/coverage_actual.json': {'verdict': 'FAIL'},
+    }.items():
+        target = tmp_path / rel; target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data))
+    monkeypatch.setattr(flow, 'check_step', lambda *a, **k: SimpleNamespace(status='FAIL', reasons=['native coverage below threshold']))
+    monkeypatch.setattr(flow, '__check_program_exit_zero', lambda *a, **k: SimpleNamespace(passed=False, exit_code=1))
+    monkeypatch.setattr(flow, '_report_verdict', lambda *a: 'FAIL')
+    registry = em.Registry(); p.register_factories(registry, step_ids=('4',))
+    evidence = registry.adapters('4')[0].validate(tmp_path, {'step_id': '4'})
+    assert evidence.verdict == 'FAIL'
+    assert evidence.gates['verilator_coverage_measure'] == 'FAIL'
+
+
+def test_step4_zero_skip_denominator_blocks_native_run(tmp_path, monkeypatch):
+    import subprocess
+    import execution_step4 as step4
+    junit = tmp_path / 'results.xml'
+    def run(*args, **kwargs):
+        junit.write_text('<testsuites><testsuite><testcase name="skipped"><skipped/></testcase></testsuite></testsuites>')
+        return subprocess.CompletedProcess(args[0], 0, 'PROFESSIONAL_TB PASS', '')
+    monkeypatch.setattr(step4.subprocess, 'run', run)
+    result = step4._simulate(tmp_path, 'icarus')
+    assert result['rc'] == 0
+    assert result['verdict'] == 'FAIL'
+
+
+def test_step4_vacuous_not_applicable_rc2_is_translated_only_with_typed_report(tmp_path):
+    import subprocess
+    import sys
+    import execution_step4 as step4
+    report = tmp_path / 'reports' / 'vacuous.json'
+    cp = subprocess.run(
+        [sys.executable, str(Path(step4.__file__)), '--gate',
+         'vacuous_testbench_check', '.', '--json', str(report.relative_to(tmp_path))],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert json.loads(report.read_text())['verdict'] == 'NOT_APPLICABLE'
+
+
+def test_step4_functional_argv_overrides_outside_makefile_sources(tmp_path, monkeypatch):
+    import subprocess
+    import execution_step4 as step4
+    project = tmp_path / 'inputs'
+    rtl = project / 'phase2' / 'stage1' / 'rtl' / 'top.v'
+    makefile = project / 'phase2' / 'stage1' / 'sim_professional' / 'top' / 'Makefile'
+    rtl.parent.mkdir(parents=True)
+    makefile.parent.mkdir(parents=True)
+    rtl.write_text('module top; endmodule\n')
+    makefile.write_text('VERILOG_SOURCES := /outside/project/rtl.v\n')
+    import hashlib
+    files = {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in (rtl, makefile)}
+    (project / 'input').mkdir()
+    (project / 'input' / 'issued_manifest.json').write_text(json.dumps(
+        {'step_id': '4', 'parameters': {'top': 'top'}, 'files': files}))
+    output = tmp_path / 'outputs'
+    invoked = []
+
+    def run(argv, **kwargs):
+        invoked.append(list(argv))
+        junit = next(Path(arg.split('=', 1)[1]) for arg in argv
+                     if arg.startswith('COCOTB_RESULTS_FILE='))
+        junit.parent.mkdir(parents=True, exist_ok=True)
+        junit.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                         '<testcase name="native"/></testsuite>')
+        return subprocess.CompletedProcess(argv, 0, 'PROFESSIONAL_TB PASS', '')
+
+    monkeypatch.setattr(step4.subprocess, 'run', run)
+    monkeypatch.setattr(step4, 'measure_bundle', lambda *args, **kwargs:
+                        {'verdict': 'NOT_MEASURED', 'reason': 'focused control'})
+    step4.produce(project, output, 'icarus')
+    sources = next(arg for arg in invoked[0] if arg.startswith('VERILOG_SOURCES='))
+    assert sources.split('=', 1)[1].split() == [str(output / 'phase2/stage1/rtl/top.v')]
+    assert '/outside/project/rtl.v' not in sources
+
+
+def test_step4_refuses_empty_staged_rtl(tmp_path):
+    import execution_step4 as step4
+    with __import__('pytest').raises(ValueError, match='staged RTL population is empty'):
+        step4.staged_rtl(tmp_path)
+
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'
 
