@@ -336,7 +336,8 @@ def test_05ic_public_controller_eligible_and_adopted(tmp_path):
     ctx=issued_context(em.Context('0.5ic',sha,
                    {'input/step_0_5ic_answers.json':answers_path,
                     'input/submission_template_source/s1.yaml':slot},
-                   {'template':'input/submission_template_source','slot':'s1'},
+                   {'template':'input/submission_template_source','slot':'s1',
+                    'metric':'source_boundary'},
                    tuple(row['mandatory_gate_programs'])), project)
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
     result=controller.run(ctx,run)
