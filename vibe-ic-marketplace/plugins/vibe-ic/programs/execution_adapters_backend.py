@@ -714,6 +714,8 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         for raw in (
             "rig_topology.json",
             "reports/phase2/cdc/netlist.json",
+            "reports/phase2/cdc/netlist_front_end.json",
+            "reports/phase2/cdc/netlist.yosys.log",
             "reports/phase2/cdc/crossing.json",
             "reports/phase2/cdc/async_input.json",
             "reports/phase2/cdc/reset_dep.json",
