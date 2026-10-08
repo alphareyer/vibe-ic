@@ -428,8 +428,17 @@ def _run_one(project: Path, row: Dict[str, str], timeout: int
     return out
 
 
-def run(project: Path, timeout: int = 900) -> Dict[str, Any]:
-    clauses = declared_producer_clauses()
+def _run_clauses(project: Path, clauses: List[Dict[str, str]],
+                 timeout: int = 900) -> Dict[str, Any]:
+    """Execute only the supplied flow-declared producer clauses.
+
+    The phase runner uses :func:`run` for its final all-step refresh. Backend
+    workers need the same ownership decision *before* their consumer runs, but
+    must not sweep producers for unrelated steps (or make a later step's
+    document look like evidence for the current one). Keeping the census in one
+    helper preserves the existing ``owed`` and authorship rules for both call
+    paths.
+    """
     to_run, skipped = owed(project, clauses)
     results = [_run_one(project, row, timeout) for row in to_run]
     unexecutable = [r for r in results if not r.get("executed")]
@@ -464,6 +473,27 @@ def run(project: Path, timeout: int = 900) -> Dict[str, Any]:
         "verdict": ("ZERO_POPULATION" if population == 0
                     else "INCOMPLETE" if unexecutable else "PRODUCED"),
     }
+
+def run_for_step(project: Path, step_id: str, timeout: int = 900
+                 ) -> Dict[str, Any]:
+    """Run only the producers declared for one current flow step.
+
+    This is the pre-consumer seam used by a per-step backend worker.  The
+    declaration, ``owed`` sibling check and producer/audit authorship stamp are
+    exactly the same as the final flow refresh; filtering by the requested
+    step only prevents unrelated producer clauses from running in this step's
+    project and from being credited to its evidence.
+    """
+    sid = str(step_id)
+    clauses = [c for c in declared_producer_clauses()
+               if str(c.get("step")) == sid]
+    rec = _run_clauses(project, clauses, timeout)
+    rec["step_id"] = sid
+    rec["scope"] = "current-step"
+    return rec
+
+def run(project: Path, timeout: int = 900) -> Dict[str, Any]:
+    return _run_clauses(project, declared_producer_clauses(), timeout)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

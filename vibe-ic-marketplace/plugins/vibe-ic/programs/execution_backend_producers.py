@@ -1129,11 +1129,40 @@ def produce_signoff(project, params):
     return {'verdict': 'PASS', 'detail': '\n'.join(notes)}
 
 
+def _run_current_step_declared_producers(project, step_id):
+    """Materialize this row's flow-declared outputs before its consumer.
+
+    The phase runner's final refresh still owns the all-step sweep.  A backend
+    worker, however, evaluates its row immediately after ``produce``; calling
+    the existing step-filtered seam here lets that row author only its own
+    declared documents (with the producer authorship stamp) before the gate
+    reads them.  A helper failure remains an explicit receipt and never turns a
+    missing document into a pass.
+    """
+    try:
+        import flow_declared_producer_run as declared
+        return declared.run_for_step(Path(project), str(step_id))
+    except BaseException as exc:
+        return {
+            "program": "flow_declared_producer_run",
+            "scope": "current-step",
+            "step_id": str(step_id),
+            "verdict": "INCOMPLETE",
+            "executed": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
 def produce(project, params):
     if params['step_id'] in ('15', '15.5ic', '17', '18', '19', '20', '21'):
         result = produce_pnr(project, params)
     else:
         result = produce_signoff(project, params)
+    # The backend consumer runs immediately after this function.  Materialize
+    # only this row's flow-declared producer outputs now; the phase runner's
+    # later all-step refresh remains unchanged and does not get used as a
+    # substitute for current-step ownership.
+    result['current_step_declared_producers'] = (
+        _run_current_step_declared_producers(project, params['step_id']))
     # These are the existing canonical report producers, scoped to this row.
     # They consume actual native outputs; they do not stand in for native work.
     import phase3_one_shot_runner as R
