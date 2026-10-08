@@ -4,6 +4,16 @@ Functional simulation is arm-local. Verilator code coverage is a disclosed
 complementary measurement, rerun inside each arm; it is never borrowed from
 the other candidate. Canonical gates, rather than a simulator rc, qualify it.
 """
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE
+# name. Restore the standalone-file import condition used by this tree.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import argparse
 import fnmatch
 import hashlib
