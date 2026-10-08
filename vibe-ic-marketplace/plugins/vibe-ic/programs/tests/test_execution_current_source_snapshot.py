@@ -60,8 +60,8 @@ arm = em.Adapter('current-source-fixture', 'fixture-python', '1', sha, sources,
                  qualification_evidence='Synthetic committed current-source control only')
 registry = em.Registry(); registry.register(arm)
 arm = registry.adapters('1')[0]
-    before = em.Controller._source_current(arm)
-    assert str(module) in before['files'] and str(first / 'helper.py') in before['files']
+before = em.Controller._source_current(arm)
+assert str(module) in before['files'] and str(first / 'helper.py') in before['files']
 
 def mutate():
     if mutation == 'bytes':
@@ -76,7 +76,7 @@ def mutate():
     else:
         alias.unlink(); alias.symlink_to(second, target_is_directory=True)
 
-    if phase == 'within':
+if phase == 'within':
     resolver = em._provider_identity
     def resolve_then_mutate(*args, **kwargs):
         result = resolver(*args, **kwargs)
@@ -85,13 +85,13 @@ def mutate():
     # Deterministically mutate after the actual resolver has captured all
     # source/probe state, without substituting any identity or Git binding.
     em._provider_identity = resolve_then_mutate
-    else:
-        mutate()
-    try:
-        after = em.Controller._source_current(arm)
-        if phase == 'between' and after != before:
-            print(phase, mutation, 'PROVIDER_CLOSURE_CHANGED')
-            return
+else:
+    mutate()
+try:
+    after = em.Controller._source_current(arm)
+    if phase == 'between' and after != before:
+        print(phase, mutation, 'PROVIDER_CLOSURE_CHANGED')
+        raise SystemExit(0)
 except em.Refusal as exc:
     expected = ({'SOURCE_AUTHORITY_DIRTY', 'SOURCE_AUTHORITY_UNAVAILABLE'} if phase == 'within'
                 else {'ADAPTER_SOURCE_MISMATCH', 'ENTRY_SOURCE_CHANGED'})
