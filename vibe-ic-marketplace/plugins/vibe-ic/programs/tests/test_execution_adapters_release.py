@@ -137,7 +137,9 @@ def test_release_component_runs_through_public_controller_and_preserves_nm(tmp_p
     registry = register_release_adapters(
         em.Registry(), source_sha=BASE, available=True,
         route_receipt=route, declaration=declaration)
-    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    adapter = registry.adapters("16")[0]
+    controller = em.Controller(
+        registry, em.Budget(cpus=adapter.cpus, ram_mb=adapter.ram_mb, workers=1))
     plan = controller.plan(context, "default-mode")
     root = tmp_path / "run"
     assert plan["arms"] == ["release_36"]
@@ -261,8 +263,12 @@ def test_public_controller_rejects_removed_release_producer_call(tmp_path):
     mutant_adapter = replace(original, source_files=mutant_sources,
                              components=(component,))
     registry = em.Registry(); registry.register(mutant_adapter)
-    summary = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1)).run(
-        context, tmp_path / "mutant-run", "default-mode")
+    controller = em.Controller(
+        registry, em.Budget(cpus=mutant_adapter.cpus,
+                            ram_mb=mutant_adapter.ram_mb, workers=1))
+    plan = controller.plan(context, "default-mode")
+    assert plan["arms"] == [mutant_adapter.arm_id]
+    summary = controller.run(context, tmp_path / "mutant-run", "default-mode")
     assert summary["candidate_statuses"][mutant_adapter.arm_id] in {"NOT_MEASURED", "FAIL"}
 
 
