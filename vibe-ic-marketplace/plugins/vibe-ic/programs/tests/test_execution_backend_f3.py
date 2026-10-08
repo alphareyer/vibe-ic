@@ -250,6 +250,26 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
     assert "@liberty_sha256" not in contract
 
 
+def test_step7_pad_record_source_closure_is_carried(tmp_path):
+    """A pad producer must see every document its bound record scanned."""
+    project = tmp_path / "project"
+    paths = (
+        "phase1/input_doc/L3_external_interface.txt",
+        "phase1/input_doc/L9_constraints_floorplan.txt",
+    )
+    for rel in paths:
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rel + "\n")
+    record = project / "reports/phase3/io_pad_chip_top.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"documents_scanned": list(paths)}))
+
+    contract = backend_project_input_contract(project, "15")
+
+    assert all(rel in contract for rel in paths)
+
+
 @pytest.mark.parametrize("unsafe", [
     "../outside.json",
     "/absolute.json",

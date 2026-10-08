@@ -486,11 +486,27 @@ def test_container_record_changed_after_step7_regenerates(tmp_path,
     report.write_text(json.dumps({"container": ""}))
     pdk = _pdk(monkeypatch)
     _step7(proj, pdk)
-    report.write_text(json.dumps({"container": "", "changed": True}))
+    report.write_text(json.dumps({"container": "", "image_ref": "other"}))
     got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert got["regenerated"] is not None, got
     assert "inputs changed since step 7" in got["regenerated"]
-    assert "reports/container_image.json" in got["regenerated"]
+    assert "@container_image" in got["regenerated"]
+
+
+def test_container_cid_rotation_does_not_regenerate_step7(tmp_path, monkeypatch):
+    """A fresh continuation container keeps the same pinned image identity."""
+    proj = _project(tmp_path)
+    report = proj / "reports/container_image.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"container": "old", "image_ref": "same",
+                                  "image_id": "sha256:1", "verdict": "PASS"}))
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    report.write_text(json.dumps({"container": "new", "image_ref": "same",
+                                  "image_id": "sha256:1", "verdict": "PASS",
+                                  "attestation_path": "/new/run.json"}))
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
+    assert got["regenerated"] is None, got
 
 
 def test_input_sdc_never_clobbers_a_hand_authored_legacy_sdc(tmp_path,

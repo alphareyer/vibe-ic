@@ -1290,6 +1290,83 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def _container_image_binding(path: Path) -> str:
+    """Hash the image identity that can affect SDC authoring.
+
+    ``reports/container_image.json`` is rewritten for every fresh outer
+    container.  Its container CID, attestation path/hash, and requested name
+    identify *this invocation*, not the EDA image whose PDK defaults the SDC
+    author may read.  Binding the whole JSON therefore makes a valid Step-7
+    deck stale whenever a continuation starts in a new container.  Keep the
+    image identity and route in the freshness boundary; fall back to the raw
+    bytes when the record is not a usable object so malformed provenance is
+    never silently treated as current.
+    """
+    try:
+        record = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    if not isinstance(record, dict):
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    stable = {
+        key: record[key]
+        for key in ("execution_route", "image_id", "image_ref",
+                    "image_repo_digests", "image_match", "verdict")
+        if key in record
+    }
+    if not stable:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    return hashlib.sha256(json.dumps(
+        stable, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
+def _io_pad_record_binding(path: Path) -> str:
+    """Hash the pad producer facts consumed by Step 7, without run paths.
+
+    A backend arm reruns the canonical pad producer in a private project.  The
+    producer's report is intentionally re-rooted there, so ``project`` and
+    netlist path strings are invocation context rather than SDC inputs.  The
+    electrical/library identity and ring geometry remain bound, preserving
+    stale-record rejection while allowing an isolated consumer to use the
+    same measured producer result.
+    """
+    try:
+        record = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    if not isinstance(record, dict):
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    stable = {key: record[key] for key in (
+        "schema", "program", "verdict", "core_module", "chip_top_module",
+        "pad_placement", "exposed_output_splits", "io_library_liberty",
+        "power_pad_plan", "die_required_um", "documents_scanned"
+    ) if key in record}
+    if not stable:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "UNREADABLE"
+    return hashlib.sha256(json.dumps(
+        stable, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
 def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
                     container: str,
                     supply_ports: Sequence[str] = ()) -> Dict[str, Any]:
@@ -1418,7 +1495,12 @@ def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
               *sorted(project.glob("plugin_output/openlane_workdir_*/config.json"))):
         if f.is_file():
             _add(f)
-    _add(project / "reports" / "container_image.json")
+    image_record = project / "reports" / "container_image.json"
+    if image_record.is_file():
+        # The invocation-specific CID/attestation fields are deliberately not
+        # part of the SDC input boundary; a new continuation container with
+        # the same pinned image must not invalidate the deck.
+        items["@container_image"] = _container_image_binding(image_record)
     items["@pdk"] = str(getattr(pdk, "name", ""))
     liberty = Path(str(getattr(pdk, "liberty", "")))
     items["@liberty"] = str(liberty)
@@ -1437,7 +1519,10 @@ def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
     # under PDK-versioned paths; a view readable from this host is bound by
     # its bytes as well.
     io_rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
-    _add(io_rec)
+    if io_rec.is_file():
+        # The private backend producer re-roots report paths.  Bind the
+        # producer's electrical facts and geometry, not those run-local paths.
+        items["@io_pad_record"] = _io_pad_record_binding(io_rec)
     try:
         io_libs = json.loads(io_rec.read_text()).get("io_library_liberty") or []
     except (OSError, ValueError, AttributeError):

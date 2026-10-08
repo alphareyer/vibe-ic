@@ -686,6 +686,33 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
                     or not resolved.is_file()):
                 raise ValueError(f"step-7 input path is unsafe: {raw!r}")
             result.append(rel.as_posix())
+    # The Step-7 pad-ring record is itself a bound input.  Its
+    # ``documents_scanned`` list is the producer's transitive source closure;
+    # omit it and the isolated producer silently sees a smaller document set,
+    # then rewrites the same hardware record with different provenance.  Carry
+    # each project-relative source under the same fail-closed path rules.
+    io_record = root / "reports/phase3/io_pad_chip_top.json"
+    try:
+        io_doc = json.loads(io_record.read_text())
+    except (OSError, ValueError, TypeError):
+        io_doc = None
+    scanned = io_doc.get("documents_scanned") if isinstance(io_doc, Mapping) else None
+    if isinstance(scanned, list):
+        for raw in sorted({item for item in scanned if isinstance(item, str)}):
+            rel = Path(raw)
+            if (rel.is_absolute() or not raw or ".." in rel.parts
+                    or rel.as_posix() != raw):
+                raise ValueError(f"pad-ring input path is unsafe: {raw!r}")
+            target = root / rel
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"pad-ring input path is absent: {raw!r}") from exc
+            if (target.is_symlink() or resolved != target
+                    or not resolved.is_relative_to(root)
+                    or not resolved.is_file()):
+                raise ValueError(f"pad-ring input path is unsafe: {raw!r}")
+            result.append(rel.as_posix())
     sidecar = root / "phase2/stage2/synth/synth_inputs.json"
     try:
         doc = json.loads(sidecar.read_text())
