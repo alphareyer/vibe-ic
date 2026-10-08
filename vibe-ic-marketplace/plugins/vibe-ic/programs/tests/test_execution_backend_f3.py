@@ -386,6 +386,70 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
     assert "@liberty_sha256" not in contract
 
 
+@pytest.mark.parametrize("top", ["spm", "subservient"])
+def test_backend_checkpoint_closure_carries_issued_provenance_step8_and_constraints(tmp_path, top):
+    project = tmp_path / "project"
+    constraint = f"phase2/stage2/constraints/{top}.asic.sdc"
+    for rel in (
+        "phase2/stage2/synth/netlist.v",
+        "provenance.jsonl",
+        "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase2/stage2/constraints/asic_sdc.json",
+        constraint,
+        "rig_topology.json",
+        "reports/phase2/cdc/netlist.json",
+        "reports/phase2/lint/rtl_hygiene.json",
+        "reports/crosslayer/rewrite_equivalence_check.json",
+        "reports/phase1/extraction_coverage_report.md",
+        "plugin_output/declaration.json",
+        "phase2/stage1/sim/tb/tb_top.py",
+    ):
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"path": constraint}) if rel.endswith("asic_sdc.json")
+                          else rel + "\n")
+
+    contract = backend_project_input_contract(project, "15")
+
+    assert {
+        "provenance.jsonl",
+        "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase2/stage2/constraints/asic_sdc.json",
+        constraint,
+        "rig_topology.json",
+        "reports/phase2/cdc/netlist.json",
+        "reports/phase2/lint/rtl_hygiene.json",
+        "reports/crosslayer/rewrite_equivalence_check.json",
+        "reports/phase1/extraction_coverage_report.md",
+        "plugin_output/declaration.json",
+        "phase2/stage1/sim/tb",
+    } <= set(contract)
+
+    (project / "provenance.jsonl").unlink()
+    with pytest.raises(ValueError, match="backend checkpoint path is absent"):
+        backend_project_input_contract(project, "15")
+
+
+@pytest.mark.parametrize("path", [
+    "phase2/stage2/constraints/missing.asic.sdc",
+    "phase2/stage2/constraints/../escape.asic.sdc",
+])
+def test_backend_checkpoint_closure_rejects_missing_or_traversal_step7_path(tmp_path, path):
+    project = tmp_path / "project"
+    (project / "phase2/stage2/synth").mkdir(parents=True)
+    (project / "phase2/stage2/synth/netlist.v").write_text("netlist\n")
+    (project / "phase2/stage2/constraints").mkdir(parents=True)
+    (project / "phase2/stage2/constraints/asic_sdc.json").write_text(
+        json.dumps({"path": path}))
+    for rel in ("provenance.jsonl", "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"):
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("proof\n")
+
+    with pytest.raises(ValueError, match="Step-7 constraint path is unsafe|backend checkpoint path is absent"):
+        backend_project_input_contract(project, "15")
+
+
 def test_step7_semantic_image_only_binding_carries_report(tmp_path):
     """The @ binding names a semantic report that the isolated reader opens."""
     project = tmp_path / "project"
