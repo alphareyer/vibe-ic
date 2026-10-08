@@ -31,7 +31,9 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 from _hostpaths import require_repo  # noqa: E402
-from _release_kit import SUBJECT, build_gds, build_project, docs_dir  # noqa: E402
+from _release_kit import (  # noqa: E402
+    SUBJECT, build_gds, build_project, docs_dir,
+)
 
 
 DEF_NO_TOP_PG = """VERSION 5.8 ;
@@ -108,6 +110,12 @@ class _FakeSite:
 
 
 def _pdk(root: Path, cell_lef: str = CELL_LEF) -> Path:
+    # The strict producer compares the caller's exact directory identity with
+    # the project's current PDK declaration.  Keep the synthetic root named
+    # like the existing typed release fixture (gf180mcuD), rather than making
+    # the producer infer or forgive an identity mismatch.
+    if root.name != "gf180mcuD":
+        root = root / "gf180mcuD"
     magic = root / "libs.tech" / "magic"
     magic.mkdir(parents=True)
     (magic / "generic.magicrc").write_text("# test technology\n")
@@ -120,13 +128,78 @@ def _pdk(root: Path, cell_lef: str = CELL_LEF) -> Path:
 
 def _project(root: Path, def_text: str = DEF_NO_TOP_PG,
              design: str = "macro_a", gds: bytes | None = None) -> Path:
+    # Start from the existing release fixture builder so the owner-attested
+    # HARDMACRO route, current PDK declaration, and typed source layout are
+    # present.  The producer-specific routed DEF/GDS below remain the sole
+    # subject of these tests; no stale hardmacro view is used as evidence.
+    build_project(root, packages=(design,))
+    shutil = __import__("shutil")
+    shutil.rmtree(root / "phase3" / "stage4" / "hardmacro")
     pnr = root / "phase3" / "stage3" / "pnr"
     out = root / "phase3" / "stage4" / "gds"
-    pnr.mkdir(parents=True)
-    out.mkdir(parents=True)
+    pnr.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     (pnr / "routed.def").write_text(def_text)
     (out / f"{design}.gds").write_bytes(gds or build_gds(design, 100, 50))
     return root
+
+
+def _fixture_magic_sidecars(out_lef: Path) -> None:
+    """Write the producer's ordinary sidecars for a mocked Magic result."""
+    hm = Path(out_lef).parent
+    (hm / "digital_lef.tcl").write_text(
+        "# Fixture-bound Magic recipe; no native tool was run.\n")
+    (hm / "digital_lef.log").write_text(
+        "SYNTHETIC FIXTURE ONLY\nDIGITAL_LEF_WRITE_DONE\n")
+
+
+def _fixture_timing(project: Path, design: str, _container: str,
+                    out_dir: Path):
+    """Return a typed, hash-bound interface timing result for these tests."""
+    import _physical_current as current
+
+    pnr = project / "phase3" / "stage3" / "pnr"
+    spef_dir = project / "phase3" / "stage3" / "extracted" / "spef_corners"
+    report = project / "reports" / "phase3" / "sta_mcorner_ocv.rpt"
+    netlist = pnr / f"{design}_pnr.v"
+    sdc = pnr / "constraint.sdc"
+    spef = spef_dir / f"{design}.max.spef"
+    pdk_lib = project / "input" / "pdk" / "fixture.lib"
+    recipe = out_dir / f".{design}_fixture_etm.tcl"
+    for path in (pnr, spef_dir, report.parent, pdk_lib.parent, out_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    netlist.write_text(f"module {design} (input clk); endmodule\n")
+    sdc.write_text("create_clock -name clk -period 20 [get_ports clk]\n")
+    spef.write_text('*SPEF "IEEE 1481-1998"\n')
+    report.write_text("fixture-bound STA; no native measurement.\n")
+    pdk_lib.write_text("library (fixture) { cell (fixture) { } }\n")
+    recipe.write_text("# fixture-bound timing recipe\n")
+    (out_dir / "timing_native.log").write_text(
+        "SYNTHETIC FIXTURE ONLY\nTIMING_MODEL_DONE\n")
+    inputs = {
+        "netlist": current.entry(project, netlist),
+        "sdc": current.entry(project, sdc),
+        "spef": current.entry(project, spef),
+        "sta_report": current.entry(project, report),
+        "pdk_liberty": current.entry(project, pdk_lib, external=True),
+        "recipe": current.entry(project, recipe),
+    }
+    text = (
+        f"library ({design}_lib) {{\n"
+        f"  cell ({design}) {{\n"
+        "    timing () { related_pin : \"clk\"; }\n"
+        "  }\n"
+        "}\n"
+    )
+    return text, {
+        "method": "fixture-bound timing model",
+        "netlist": str(netlist),
+        "current_inputs": inputs,
+        "execution": {"rc": 0, "argv": ["synthetic-fixture", "timing"]},
+        "characterised": True,
+        "reason_class": None,
+        "why": "fixture-bound; no native measurement",
+    }
 
 
 def _lef_from_def(def_text: str, design: str) -> str:
@@ -148,7 +221,7 @@ def _lef_from_def(def_text: str, design: str) -> str:
     return "\n".join(lines)
 
 
-def _fake_magic(monkeypatch, captured: dict) -> None:
+def _fake_magic(monkeypatch, captured: dict, *, timing: bool = False) -> None:
     monkeypatch.setattr(gen, "find_magic_site", lambda _container="": _FakeSite())
 
     def fake_write(top, _gds, def_file, out_lef, _pdk_root, _full, _pinonly,
@@ -156,16 +229,19 @@ def _fake_magic(monkeypatch, captured: dict) -> None:
         text = Path(def_file).read_text()
         captured["def"] = text
         Path(out_lef).write_text(_lef_from_def(text, top))
+        _fixture_magic_sidecars(Path(out_lef))
         return True, ""
 
     monkeypatch.setattr(gen, "write_lef_with_magic", fake_write)
+    if timing:
+        monkeypatch.setattr(gen, "characterise_liberty", _fixture_timing)
 
 
 def test_generator_adds_pdk_rails_to_lef_and_liberty(tmp_path, monkeypatch):
     project = _project(tmp_path / "project")
     pdk = _pdk(tmp_path / "pdk")
     captured = {}
-    _fake_magic(monkeypatch, captured)
+    _fake_magic(monkeypatch, captured, timing=True)
 
     rc, record = gen.run(project, str(pdk), False, False)
 
@@ -224,9 +300,11 @@ def test_magic_success_that_drops_one_supply_is_not_integrable(
         head = text.index("  PIN rail_hi")
         tail = text.index("  END rail_hi") + len("  END rail_hi\n")
         Path(out_lef).write_text(text[:head] + text[tail:])
+        _fixture_magic_sidecars(Path(out_lef))
         return True, ""
 
     monkeypatch.setattr(gen, "write_lef_with_magic", drop_power)
+    monkeypatch.setattr(gen, "characterise_liberty", _fixture_timing)
     rc, record = gen.run(project, str(pdk), False, False)
 
     assert rc == 1
