@@ -228,12 +228,14 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
     paths = (
         "input/submission_template_source/0p5x0p5.json",
         "phase2/stage1/fpga/subservient.sdc",
-        "reports/container_image.json",
     )
     for rel in paths:
         target = project / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(rel + "\n")
+    report = project / "reports/container_image.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{\"image_ref\": \"pinned\"}\n")
     record = project / "phase2/stage2/constraints/asic_sdc.json"
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps({"inputs": {
@@ -247,6 +249,7 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
 
     observed = tuple(sorted(rel for rel in paths if rel in contract))
     assert observed == tuple(sorted(paths))
+    assert "reports/container_image.json" in contract
     assert "@code:timing.py" not in contract
     assert "@liberty_sha256" not in contract
 
