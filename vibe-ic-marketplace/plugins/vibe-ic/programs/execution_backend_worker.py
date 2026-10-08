@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+from typing import Any, Mapping
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -17,6 +18,90 @@ from execution_adapters_backend import ROWS
 from execution_backend_gates import evaluate, states
 from execution_backend_producers import produce
 from execution_backend_snapshot import sha
+
+
+_L20_DFT_ABSENT = {
+    "dft_present": False,
+    "scan_chains": [],
+    "bist_mbist": [],
+    "jtag_tap": None,
+}
+
+
+def _condition_is_exact_no_dft(condition: object) -> bool:
+    if not isinstance(condition, Mapping):
+        return False
+    declaration = condition.get("l_doc_declares")
+    return (isinstance(declaration, Mapping)
+            and declaration.get("l_doc") == "L20"
+            and declaration.get("all_absent") == _L20_DFT_ABSENT)
+
+
+def _receipt_owns_output(project: Path, output_spec: object) -> bool:
+    if not isinstance(output_spec, str) or " OR " in output_spec:
+        return False
+    output = Path(output_spec)
+    if output.is_absolute() or ".." in output.parts or not output.parts:
+        return False
+    marker = project / output.parent / "post_dft_not_run.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    owned = data.get("skips_required_output")
+    owns = (owned == output_spec if isinstance(owned, str)
+            else isinstance(owned, list) and output_spec in owned)
+    if not owns or data.get("reason_class") != "DESIGN_DECLARED_NA":
+        return False
+    try:
+        from flow_compliance_check import _marker_declares_output_not_applicable
+        return _marker_declares_output_not_applicable(project, data) is not None
+    except Exception:
+        return False
+
+
+def _conditioned_entry_is_not_owed(project: Path, entry: Mapping[str, Any],
+                                   rows: Mapping[str, Mapping[str, Any]]) -> bool:
+    row = rows.get(str(entry.get("from")))
+    if not isinstance(row, Mapping):
+        return False
+    condition = row.get("condition")
+    if not _condition_is_exact_no_dft(condition):
+        return False
+    try:
+        from flow_compliance_check import _check_condition
+        if _check_condition(project, condition):
+            return False
+    except Exception:
+        return False
+    specs: list[str] = []
+    if isinstance(entry.get("path"), str):
+        specs.append(entry["path"])
+    elif entry.get("outputs") == "all":
+        specs.extend(str(value) for value in (row.get("required_outputs") or ())
+                     if isinstance(value, str))
+    return bool(specs) and any(_receipt_owns_output(project, spec)
+                               for spec in specs)
+
+
+def condition_aware_declarations(project: Path, declarations,
+                                 rows: Mapping[str, Mapping[str, Any]] | None = None):
+    """Apply producer conditions before backend declarations are expanded."""
+    if rows is None:
+        try:
+            import _flow_yaml
+            rows = {str(row.get("id")): row for row in _flow_yaml.load()["steps"]}
+        except Exception:
+            rows = {}
+    filtered = []
+    for entry in declarations or ():
+        if (isinstance(entry, Mapping) and entry.get("from") != "external"
+                and _conditioned_entry_is_not_owed(project, entry, rows)):
+            continue
+        filtered.append(entry)
+    return filtered
 
 
 def _copy_input_tree(inputs: Path, project: Path) -> None:
@@ -44,6 +129,7 @@ def resolve_contract(project: Path, patterns) -> tuple[dict, list[str]]:
 
 
 def resolve_input_contract(project: Path, declarations) -> list[str]:
+    declarations = condition_aware_declarations(project, declarations)
     missing = []
     for declaration in declarations or ():
         if not isinstance(declaration, dict) or not declaration.get("path"):
@@ -82,6 +168,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     binding = _binding(inputs)
     row = ROWS[str(step_id)]["canonical_row"]
     input_contract = params.get("input_contract", row.get("required_inputs", ()))
+    input_contract = condition_aware_declarations(project, input_contract)
     missing_inputs = resolve_input_contract(project, input_contract)
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}

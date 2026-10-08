@@ -180,6 +180,52 @@ def _project_path_resolver(project: Path, folder: Path, state: dict):
     return resolve
 
 
+def mapped_receipt_state_files(project: Path, folder: Path,
+                               receipt: dict, state: dict | None = None
+                               ) -> tuple[str, ...]:
+    """Map producer state files into the current project, with proof.
+
+    Native receipts retain the absolute paths from the producer's project.
+    A relocated backend arm may use the corresponding current-project path
+    only when the receipt's lexical namespace resolves to that path and the
+    current bytes match the recorded digest.  Foreign, traversal, missing,
+    symlinked, ambiguous, or digest-mismatched entries are rejected instead
+    of being silently dropped or read from an ambient absolute path.
+    """
+    project = Path(project).resolve(strict=True)
+    folder = Path(folder).resolve(strict=True)
+    if not folder.is_relative_to((project / "phase3/librelane").resolve()):
+        raise ValueError("native receipt producer folder is outside project")
+    state = state if isinstance(state, dict) else json.loads(
+        (folder / "state_out.json").read_text())
+    inp = receipt.get("input") if isinstance(receipt, dict) else None
+    state_files = inp.get("state_files") if isinstance(inp, dict) else None
+    if not isinstance(state_files, dict):
+        raise ValueError("native receipt has malformed state_files")
+    resolver = _project_path_resolver(project, folder, state)
+    mapped: list[str] = []
+    seen: set[str] = set()
+    for raw, recorded in state_files.items():
+        if not isinstance(raw, str) or not isinstance(recorded, str):
+            raise ValueError("native receipt has malformed state_files entry")
+        path = Path(raw)
+        if (not path.is_absolute() or ".." in path.parts
+                or str(path) != raw):
+            raise ValueError(f"native receipt state path is unsafe: {raw}")
+        target = resolver(raw)
+        if (not target.is_absolute() or not target.is_relative_to(project)
+                or target.is_symlink() or not target.is_file()):
+            raise ValueError(f"native receipt state path is foreign: {raw}")
+        rel = target.relative_to(project).as_posix()
+        if rel in seen:
+            raise ValueError(f"native receipt state path maps ambiguously: {raw}")
+        if _sha(target) != recorded:
+            raise ValueError(f"native receipt state digest mismatch: {raw}")
+        seen.add(rel)
+        mapped.append(rel)
+    return tuple(mapped)
+
+
 def _native_synthesis(project: Path, folder: Path, top: str, *, path_resolver=None) -> tuple[Path, dict, dict]:
     """Verify the existing run_chain receipt against its consumed/output bytes."""
     import librelane_contract as LC
@@ -233,7 +279,10 @@ def _native_synthesis(project: Path, folder: Path, top: str, *, path_resolver=No
     if inp.get('config_files') != expected_config_files:
         raise ValueError('producer consumed stale or incomplete config material')
     for path, recorded in inp['state_files'].items():
-        if recorded != _sha(resolve_path(path)):
+        resolved = resolve_path(path)
+        if not resolved.is_absolute() or not resolved.is_relative_to(project):
+            raise ValueError(f'producer state_files contains a foreign path: {path}')
+        if recorded != _sha(resolved):
             raise ValueError(f'producer consumed stale state_files: {path}')
     stat = json.loads((folder / 'reports/stat.json').read_text())
     modules = stat.get('modules')
