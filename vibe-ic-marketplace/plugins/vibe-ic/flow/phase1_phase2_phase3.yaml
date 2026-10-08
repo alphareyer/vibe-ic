@@ -9724,6 +9724,10 @@ steps:
       - "phase3/mixed_signal/cosim/mixed_signal_results.json"
       - "reports/analog/mixed_signal/interface_si.json"
     gate:
+      # These clauses are independent evidence consumers. Run all of them
+      # after a producer refusal so one invocation records the complete M3
+      # blocking surface; `all_of` remains an AND and any refusal still fails.
+      all_of_eager: true
       all_of:
         # The front door produces M3 once. This check-only invocation
         # validates that receipt and its current outputs without producing a
@@ -9756,6 +9760,10 @@ steps:
     required_outputs:
       - "reports/analog/mixed_signal/signoff.json"
     gate:
+      # The producer receipt and derived signoff are both blocking evidence
+      # sources. Preserve both refusals in one run while keeping AND
+      # semantics; do not apply eager evaluation to dependency chains.
+      all_of_eager: true
       all_of:
         # Validate the single M4 producer receipt before the final derived
         # signoff gate. --check-only consumes current bytes; it does not run
