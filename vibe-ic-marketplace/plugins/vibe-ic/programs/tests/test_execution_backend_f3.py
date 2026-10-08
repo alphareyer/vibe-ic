@@ -133,8 +133,23 @@ def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
     # Rows without a long-runtime policy continue to honour the supplied
     # fixture timeout, keeping unit tests and bounded fixtures fast.
     assert timeout_by_step["15"] == 7
-    assert registry.adapters("15")[0].ram_mb == 256
+    assert registry.adapters("15")[0].ram_mb == 4096
     assert all(value > 0 for value in timeout_by_step.values())
+
+
+def test_openroad_backend_rows_use_measured_row_owned_ram_and_rcx_stays_default():
+    """Only rows that call the native OpenROAD family receive the measured bound."""
+    from execution_provider_catalog import BACKEND_ROWS
+    registry = register_backend_adapters(source_sha=BASE, available=False)
+    openroad_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                     "22", "23", "24", "25", "26", "32", "33", "34")
+    assert all("openroad" in BACKEND_ROWS[sid]["portfolio_policy"]["current_default"]["tool_ids"]
+               for sid in openroad_rows if sid not in {"22", "33"})
+    assert all(registry.adapters(sid)[0].ram_mb == 4096 for sid in openroad_rows)
+    # Step 22 is OpenRCX at the consumer label, but its Librelane signoff
+    # producer also enters the shared OpenROAD step chain.
+    assert registry.adapters("22")[0].ram_mb == 4096
+    assert registry.adapters("33")[0].ram_mb == 4096
 
 
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
