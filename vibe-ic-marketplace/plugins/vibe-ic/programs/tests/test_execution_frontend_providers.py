@@ -182,6 +182,79 @@ def test_step6_explicitly_not_measured_without_fpga():
     result=p.produce('6', Path('/missing'), fpga=False)
     assert result.state=='NOT_IMPLEMENTED'
 
+
+def test_step6_public_controller_keeps_declared_board_absence_unmeasured(tmp_path):
+    """The real Default route keeps a board-less Step 6 arm excluded."""
+    import subprocess
+    import pytest
+
+    project = tmp_path / 'project'
+    rtl = project / 'phase2/stage1/rtl/top.sv'
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text('module top(input logic clk, input logic rst); endmodule\n')
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    row = next(s for s in em.load_portfolio()['steps'] if str(s['id']) == '6')
+    sha = subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).parents[2], text=True).strip()
+    context = issued_context(em.Context(
+        '6', sha, {'phase2/stage1/rtl/top.sv': rtl},
+        {'top': 'top', 'container': 'default', 'metric': 'source_boundary'},
+        tuple(row['mandatory_gate_programs'])), project)
+    run = tmp_path / 'run'
+    controller = em.Controller(registry, em.Budget(1, 512, 1), em.load_portfolio())
+    result = controller.run(context, run)
+
+    receipt_path = run / 'frontend_6/receipt.json'
+    receipt = json.loads(receipt_path.read_text())
+    output = Path(receipt['output_root'])
+    canonical = json.loads((output / 'canonical.json').read_text())
+    assert result['status'] == 'NOT_MEASURED'
+    assert result['candidate_statuses'] == {'frontend_6': 'NOT_MEASURED'}
+    assert receipt['processes'][0]['rc'] == 0
+    assert receipt['evidence']['verdict'] == 'NOT_MEASURED'
+    assert receipt['evidence']['gates'] == {
+        name: 'NOT_MEASURED' for name in row['mandatory_gate_programs']}
+    assert canonical == {
+        'excluded_from_verdict': True,
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'reason': 'Quartus/board unavailable',
+        'result': 'NOT_MEASURED',
+        'schema': 'frontend_worker_output/1',
+        'step_id': '6',
+        'verdict': 'NOT_MEASURED',
+    }
+    assert not list(output.glob('phase2/stage1/fpga/output_files/*.sof'))
+    assert json.loads((run / 'comparison.json').read_text())['eligible_arms'] == []
+    choice = {
+        'arm_id': 'frontend_6',
+        'receipt_sha256': em.digest(receipt_path),
+        'rationale': 'board absence remains excluded',
+        'reviewer': 'test',
+        'binding': context.binding(),
+    }
+    with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
+        controller.adopt(context, run, choice)
+    assert not (run / 'selected').exists()
+
+
+def test_step6_typed_absence_with_programmer_evidence_still_fails(tmp_path):
+    """A partial board trace cannot be reclassified as the absence case."""
+    canonical = tmp_path / 'canonical.json'
+    canonical.write_text(json.dumps({
+        'schema': 'frontend_worker_output/1', 'step_id': '6',
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'result': 'NOT_MEASURED', 'verdict': 'NOT_MEASURED',
+        'excluded_from_verdict': True, 'reason': 'Quartus/board unavailable',
+    }))
+    log = tmp_path / 'reports/phase2/fpga/quartus_pgm.log'
+    log.parent.mkdir(parents=True)
+    log.write_text('quartus_pgm attempted\n')
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
+    assert evidence.verdict == 'FAIL'
+
 def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp_path):
     # Incomplete input is a real expert handoff, not an eligible D1 positive.
     from dataclasses import replace

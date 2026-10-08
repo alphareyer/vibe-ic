@@ -195,6 +195,44 @@ def _concrete_outputs(root, required):
     return found
 
 
+def _step6_board_evidence_present(root, concrete):
+    """Return whether a Step-6 project contains any board-run evidence.
+
+    A missing Quartus/board capability is the one typed exclusion the worker
+    is allowed to emit.  Any concrete FPGA output, build input, programmer
+    trace, bench artefact, or pass claim means that the board path was
+    attempted and must remain on the normal failing consumer path.
+    """
+    if concrete:
+        return True
+    fpga = root / 'phase2' / 'stage1' / 'fpga'
+    if fpga.is_dir():
+        if any(path.is_file() for path in fpga.rglob('*.qsf')):
+            return True
+        if any(path.is_file() for path in fpga.rglob('*.sof')):
+            return True
+    reports = root / 'reports' / 'phase2' / 'fpga'
+    if reports.is_dir():
+        # The disclosed skip/audit JSON is not physical evidence.  Other
+        # reports and programmer/bench artefacts are evidence of an attempt.
+        for path in reports.rglob('*'):
+            if not path.is_file() or path.name == 'quartus_map_audit.json':
+                continue
+            if path.name == 'on_board_pass.json':
+                try:
+                    claim = json.loads(path.read_text())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if isinstance(claim, dict) and (
+                        claim.get('all_scenarios_passed') is True or
+                        claim.get('verdict') == 'PASS'):
+                    return True
+                continue
+            if path.suffix.lower() != '.json':
+                return True
+    return False
+
+
 def _gate_verdict(program, path):
     try:
         doc=json.loads(path.read_text())
@@ -369,6 +407,31 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             if _row == '4':
                 from execution_step4 import validate as validate_step4
                 return validate_step4(root, facts, _gate_names)
+            if _row == '6':
+                canonical = root / 'canonical.json'
+                record = None
+                if canonical.is_file() and not canonical.is_symlink():
+                    try:
+                        record = json.loads(canonical.read_text())
+                    except (OSError, ValueError, TypeError):
+                        pass
+                typed_absence = (
+                    isinstance(record, dict) and
+                    record.get('schema') == 'frontend_worker_output/1' and
+                    record.get('step_id') == '6' and
+                    record.get('producer') == 'step_fpga_compile+quartus_map_audit' and
+                    record.get('result') == 'NOT_MEASURED' and
+                    record.get('verdict') == 'NOT_MEASURED' and
+                    record.get('reason') == 'Quartus/board unavailable' and
+                    type(record.get('excluded_from_verdict')) is bool and
+                    record.get('excluded_from_verdict') is True)
+                if typed_absence and not _step6_board_evidence_present(root, concrete):
+                    artifacts = {'canonical.json': digest(canonical)}
+                    return Evidence(
+                        facts, 'NOT_MEASURED',
+                        {name: 'NOT_MEASURED' for name in _gate_names},
+                        artifacts,
+                        detail='Step-6 board capability absent; typed exclusion remains unmeasured')
             if _row == '7':
                 # Step 7's producer is the canonical ASIC SDC/PVT emitter.  Its
                 # mandatory consumers (stage compliance, syntax, PVT and
