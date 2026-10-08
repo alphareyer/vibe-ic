@@ -595,8 +595,8 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
     Step 15 consumes the Step-8 gate, so a stale or absent gate must be
     repaired at its existing pre-layout owner before the input manifest is
     issued.  This hook never synthesises or places a design; it only reuses
-    ``step_prelayout_signoff`` when the mapped netlist/SDC identity is not
-    already represented by a passing gate.
+    ``_prelayout_librelane`` at the existing producer boundary.  Reuse and
+    currentness remain the producer's ``run_chain`` contract.
     """
     if str(step_id) != "15" or runtime.get("policy", {}).get("mode") != "default":
         return
@@ -608,7 +608,6 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
     if not top or pdk is None or not container:
         return
     import phase3_one_shot_runner as phase3
-    import librelane_contract as llc
     netlist = phase3._pl.synth_dir(project) / f"{top}_synth.v"
     record_path = project / "phase2/stage2/constraints/asic_sdc.json"
     if not netlist.is_file() or not record_path.is_file():
@@ -633,39 +632,6 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
     if not sdc.is_file() or sdc.is_symlink():
         raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", str(sdc.relative_to(project)))
     gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
-    current_netlist_sha = llc.digest(netlist)
-    current_sdc_sha = llc.digest(sdc)
-
-    def valid_gate(value):
-        if not isinstance(value, dict) or value.get("verdict") != "PASS":
-            return False
-        if (value.get("netlist_sha256") != current_netlist_sha or
-                value.get("sdc_sha256") != current_sdc_sha):
-            return False
-        source = value.get("source")
-        if not isinstance(source, str):
-            return False
-        source_path = Path(source)
-        try:
-            source_path = source_path.resolve()
-            if not source_path.is_relative_to(project.resolve()) or not source_path.is_file():
-                return False
-            if source_path.is_symlink():
-                return False
-            if value.get("state_out_sha256") != llc.digest(source_path):
-                return False
-            llc.validate_step_receipt(source_path.parent, "OpenROAD.STAPrePNR")
-        except (OSError, Refusal, ValueError, TypeError):
-            return False
-        return True
-    current = None
-    if gate.is_file():
-        try:
-            current = json.loads(gate.read_text())
-        except (OSError, ValueError, TypeError):
-            current = None
-    if valid_gate(current):
-        return
     notes = []
     try:
         result = phase3._prelayout_librelane(
@@ -679,7 +645,7 @@ def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
         published = json.loads(gate.read_text())
     except (OSError, ValueError, TypeError) as exc:
         raise Refusal("PRELAYOUT_GATE_NOT_PUBLISHED", str(exc)) from exc
-    if not valid_gate(published) or result["sdc"].get("verdict") != "PASS":
+    if result["sdc"].get("verdict") != "PASS" or published.get("verdict") != "PASS":
         raise Refusal("PRELAYOUT_GATE_IDENTITY_MISMATCH", str(gate))
 
 

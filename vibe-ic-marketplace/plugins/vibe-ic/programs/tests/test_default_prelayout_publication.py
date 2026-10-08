@@ -1,11 +1,10 @@
 from __future__ import annotations
-import json, sys
+import json, sys, types
 from pathlib import Path
 import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path: sys.path.insert(0, str(PROGRAMS))
 import execution_policy as policy
-import librelane_contract as llc
 import phase3_one_shot_runner as phase3
 
 def _fixture(tmp_path):
@@ -18,8 +17,10 @@ def _proof(project,netlist,pnr):
     folder=project/'phase3/librelane/prelayout/design_sdc/native'; folder.mkdir(parents=True,exist_ok=True)
     state=folder/'state_out.json'; fp=folder/'input_fingerprint.json'; pdk=folder/'pdk_root.json'; log=folder/'invocation.log'
     state.write_text(json.dumps({'nl':str(netlist)})); fp.write_text(json.dumps({'step':'OpenROAD.STAPrePNR'})); pdk.write_text('{}'); log.write_text('OpenROAD STAPrePNR\n')
-    hashes={p.name:llc.digest(p) for p in (state,fp,pdk,log)}; (folder/'vibeic_receipt.json').write_text(json.dumps({'input':{'step':'OpenROAD.STAPrePNR'},'sha256':hashes}))
-    gate=project/'phase3/librelane/prelayout/gates/step8_sdc_opensta.json'; gate.parent.mkdir(parents=True,exist_ok=True); gate.write_text(json.dumps({'verdict':'PASS','netlist_sha256':llc.digest(netlist),'sdc_sha256':llc.digest(pnr),'source':str(state),'state_out_sha256':llc.digest(state)})); return gate
+    import hashlib
+    digest=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    hashes={p.name:digest(p) for p in (state,fp,pdk,log)}; (folder/'vibeic_receipt.json').write_text(json.dumps({'input':{'step':'OpenROAD.STAPrePNR'},'sha256':hashes}))
+    gate=project/'phase3/librelane/prelayout/gates/step8_sdc_opensta.json'; gate.parent.mkdir(parents=True,exist_ok=True); gate.write_text(json.dumps({'verdict':'PASS','netlist_sha256':digest(netlist),'sdc_sha256':digest(pnr),'source':str(state),'state_out_sha256':digest(state)})); return gate
 
 def _runtime(project): return {'project':project,'policy':{'mode':'default'},'parameters':{'top':'spm','pdk':object(),'container':'vibeic-eda'}}
 
@@ -31,11 +32,32 @@ def test_default_step15_uses_real_producer_and_pnr_sdc(tmp_path,monkeypatch):
     assert calls==[(pnr,{'7':'librelane','8':'librelane','10':'librelane'})]
 
 def test_default_step15_reuses_fresh_proof_without_producer(tmp_path,monkeypatch):
-    project,netlist,pnr=_fixture(tmp_path); _proof(project,netlist,pnr)
-    monkeypatch.setattr(phase3,'_prelayout_librelane',lambda *a: pytest.fail('stale producer invoked')); policy._ensure_default_prelayout(_runtime(project),'15')
+    project,netlist,pnr=_fixture(tmp_path)
+    calls=[]
+    def publish(*args): calls.append(args); _proof(project,netlist,pnr); return {'sdc':{'verdict':'PASS'}}
+    monkeypatch.setattr(phase3,'_prelayout_librelane',publish); policy._ensure_default_prelayout(_runtime(project),'15')
+    assert len(calls)==1
 
-def test_default_step15_refuses_malformed_proof(tmp_path,monkeypatch):
-    project,netlist,pnr=_fixture(tmp_path); gate=_proof(project,netlist,pnr); gate.write_text('[]')
-    def fail(*a): raise policy.Refusal('PRELAYOUT_PUBLICATION_FAILED','bad')
-    monkeypatch.setattr(phase3,'_prelayout_librelane',fail)
-    with pytest.raises(policy.Refusal,match='PRELAYOUT_PUBLICATION_FAILED'): policy._ensure_default_prelayout(_runtime(project),'15')
+def test_default_step15_refuses_failed_producer(tmp_path, monkeypatch):
+    project, _, _ = _fixture(tmp_path)
+    def fail(*args): return {"sdc": {"verdict": "FAIL"}}
+    monkeypatch.setattr(phase3, "_prelayout_librelane", fail)
+    with pytest.raises(policy.Refusal, match="PRELAYOUT_GATE_NOT_PUBLISHED"):
+        policy._ensure_default_prelayout(_runtime(project), "15")
+
+
+def test_public_dispatch_calls_publication_before_input_census(tmp_path, monkeypatch):
+    project = tmp_path / "project"; project.mkdir()
+    order = []
+    adapter = types.SimpleNamespace(applicability="applicable", tool_id="backend", objective={})
+    registry = types.SimpleNamespace(adapters=lambda step: [adapter])
+    controller = types.SimpleNamespace(portfolio={"steps":[{"id":"15","mandatory_gate_programs":[]}]})
+    runtime = {"project": project, "policy":{"mode":"default","request_receipt":{"invocation_id":"x"}},
+               "parameters":{}, "registry":registry, "controller":controller,
+               "contexts":{}, "runs":{}, "route":{"source_sha":"s","project_digest":"p","ic_ip_path":"i"}}
+    monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
+    monkeypatch.setattr(policy, "_ensure_default_prelayout", lambda rt, step: order.append("publish"))
+    monkeypatch.setattr(policy, "_fixed_inputs", lambda rt, step, **kwargs: order.append("census") or {})
+    result = policy.dispatch_fixed_step(project, "15")
+    assert result["status"] == "NOT_MEASURED"
+    assert order == ["publish", "census"]
