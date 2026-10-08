@@ -396,6 +396,9 @@ def test_backend_checkpoint_closure_carries_issued_provenance_step8_and_constrai
         "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
         "phase3/stage3/pnr/constraint.sdc",
         "reports/phase2/sdc_check.json",
+        "reports/lec.json",
+        "reports/lec.rpt",
+        "reports/analog/stage_analog_compliance.json",
         "reports/phase3/sta/pre_pnr_summary.json",
         "phase3/stage3/sta/pre_pnr_timing.rpt",
         "phase3/stage3/sta/prelayout_per_corner/sta_FF.rpt",
@@ -415,6 +418,21 @@ def test_backend_checkpoint_closure_carries_issued_provenance_step8_and_constrai
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"path": constraint}) if rel.endswith("asic_sdc.json")
                           else rel + "\n")
+
+    import hashlib
+
+    sta_reports = (
+        "phase3/stage3/sta/pre_pnr_timing.rpt",
+        "phase3/stage3/sta/prelayout_per_corner/sta_FF.rpt",
+        "phase3/stage3/sta/prelayout_per_corner/sta_SS.rpt",
+        "phase3/stage3/sta/prelayout_per_corner/sta_TT.rpt",
+    )
+    (project / "reports/phase3/sta/pre_pnr_summary.json").write_text(json.dumps({
+        "subject": {"items": [
+            {"path": rel, "sha256": "sha256:" + hashlib.sha256((project / rel).read_bytes()).hexdigest()}
+            for rel in sta_reports
+        ]}
+    }))
 
     contract = backend_project_input_contract(project, "15")
 
