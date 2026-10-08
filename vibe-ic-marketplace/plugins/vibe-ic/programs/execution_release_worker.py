@@ -148,7 +148,8 @@ def produce(step: str, project: Path, params: dict) -> list[dict]:
             rc, report = hardmacro.run(
                 project, pdk_root, bool(params.get("full_lef", False)),
                 bool(params.get("pinonly", False)), str(params.get("container", "")),
-                str(params.get("cell_lef", "")), str(params.get("metal_prefix", "met")))
+                str(params.get("cell_lef", "")), str(params.get("metal_prefix", "met")),
+                pdk_name=params.get("pdk_name"))
             from dataclasses import asdict
             record_path = project / "reports/phase3/digital_hardmacro.json"
             record_path.parent.mkdir(parents=True, exist_ok=True)
