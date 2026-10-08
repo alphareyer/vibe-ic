@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).parent.parent / "synth_netlist_check.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import synth_netlist_check as snc  # noqa: E402
@@ -87,6 +89,19 @@ def test_native_binding_uses_receipt_covered_state_and_netlist(tmp_path):
     assert info["tool_total_cells"] == info["audited_total_cells"] == 1
 
 
+def test_wrong_receipt_stage_refuses_same_count_native_evidence(tmp_path):
+    paths = _fixture(tmp_path)
+    receipt = json.loads(paths["receipt"].read_text())
+    receipt["input"]["step"] = "OpenROAD.GlobalPlacement"
+    paths["receipt"].write_text(json.dumps(receipt))
+    binding = json.loads(paths["sidecar"].read_text())["librelane_synthesis"]
+    binding["receipt_sha256"] = _sha(paths["receipt"])
+    _rewrite_sidecar(paths, binding)
+    findings, info = _audit(paths)
+    assert info["status"] == "NATIVE_BINDING_REFUSED"
+    assert [finding.category for finding in findings] == ["TOOL_NETLIST_BINDING_CHANGED"]
+
+
 def test_state_or_selected_native_mutation_refuses_without_receipt_refresh(tmp_path):
     paths = _fixture(tmp_path)
     paths["state"].write_text(json.dumps({"nl": str(paths["native"]), "changed": True}))
@@ -136,11 +151,29 @@ def test_escaping_or_symlinked_native_folder_refuses(tmp_path):
     assert [finding.category for finding in findings] == ["TOOL_NETLIST_BINDING_CHANGED"]
 
     paths = _fixture(tmp_path / "symlink")
-    alias = paths["native"].parent / "alias"
-    alias.symlink_to(paths["native"], target_is_directory=True)
+    alias = paths["native"].parent.parent / "alias"
+    alias.symlink_to(paths["native"].parent, target_is_directory=True)
+    assert alias.exists() and alias.is_dir() and alias.is_symlink()
     binding = json.loads(paths["sidecar"].read_text())["librelane_synthesis"]
     binding["folder"] = "phase3/librelane/alias"
     _rewrite_sidecar(paths, binding)
     findings, info = _audit(paths)
     assert info["status"] == "NATIVE_BINDING_REFUSED"
     assert [finding.category for finding in findings] == ["TOOL_NETLIST_BINDING_CHANGED"]
+
+
+def test_canonical_audited_symlink_and_loop_are_stable_refusals(tmp_path):
+    paths = _fixture(tmp_path / "audited-link")
+    paths["audited"].unlink()
+    paths["audited"].symlink_to(paths["mapped"])
+    assert paths["audited"].is_symlink()
+    findings, info = _audit(paths)
+    assert info["status"] == "NATIVE_BINDING_REFUSED"
+    assert [finding.category for finding in findings] == ["TOOL_NETLIST_BINDING_CHANGED"]
+
+    paths = _fixture(tmp_path / "audited-loop")
+    paths["audited"].unlink()
+    paths["audited"].symlink_to(paths["audited"])
+    assert paths["audited"].is_symlink()
+    with pytest.raises(snc.NativeBindingRefusal):
+        snc._bound_native_netlist(paths["audited"])

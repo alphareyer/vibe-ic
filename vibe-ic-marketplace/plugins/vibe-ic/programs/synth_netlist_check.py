@@ -583,7 +583,7 @@ def _path_is_within(path: Path, root: Path) -> bool:
     """Return whether the resolved path remains under the resolved root."""
     try:
         return path.resolve().is_relative_to(root.resolve())
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -891,13 +891,22 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
     changes either netlist or derives an expected cell count.
     """
     try:
-        audited = netlist_path.resolve()
-        synth = audited.parent
-        if (audited.name != "netlist.v" or synth.name != "synth"
+        # Keep the lexical project namespace before resolving any symlink. A
+        # symlinked canonical input must refuse rather than disappear into a
+        # different project and silently fall back to the generic arm.
+        lexical = netlist_path.absolute()
+        synth = lexical.parent
+        if (lexical.name != "netlist.v" or synth.name != "synth"
                 or synth.parent.name != "stage2"
                 or synth.parent.parent.name != "phase2"):
             return None
         project = synth.parent.parent.parent
+        if project.is_symlink() or _path_has_symlink(lexical, project):
+            raise NativeBindingRefusal("audited native synthesis path changed")
+        try:
+            audited = lexical.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise NativeBindingRefusal("audited native synthesis path unreadable") from exc
         sidecar = synth / "synth_inputs.json"
         try:
             doc = json.loads(sidecar.read_text())
@@ -972,6 +981,10 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
             raise NativeBindingRefusal("native synthesis receipt is unreadable") from exc
         if not isinstance(receipt_doc, dict):
             raise NativeBindingRefusal("native synthesis receipt shape changed")
+        receipt_input = receipt_doc.get("input")
+        if (not isinstance(receipt_input, dict)
+                or receipt_input.get("step") != "Yosys.Synthesis"):
+            raise NativeBindingRefusal("native synthesis receipt stage changed")
         receipt_hashes = receipt_doc.get("sha256")
         if (not isinstance(receipt_hashes, dict)
                 or not _digest_matches(state_path, receipt_hashes.get("state_out.json"))
@@ -980,7 +993,8 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
         return candidate
     except NativeBindingRefusal:
         raise
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError,
+            json.JSONDecodeError) as exc:
         raise NativeBindingRefusal("native synthesis handoff is unreadable") from exc
 
 
