@@ -105,10 +105,22 @@ def test_step15_reader_refuses_coordinated_canonical_path_substitution(tmp_path)
 
 
 
-def test_step15_reader_refuses_changed_upstream_or_derived_sdc(tmp_path):
+@pytest.mark.parametrize('which', ['upstream', 'derived'])
+def test_step15_reader_refuses_changed_upstream_or_derived_sdc(tmp_path, which):
     _, isolated = _make_published_project(tmp_path)
     pnr = isolated / 'phase3/stage3/pnr'
-    (pnr / 'constraint.sdc').write_text('changed-upstream\n')
+    target = pnr / ('constraint.sdc' if which == 'upstream' else 'step15.constraint.sdc')
+    target.write_text('changed-' + which + '\n')
+    with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
+        producers._step15_sdc(isolated)
+
+
+def test_step15_reader_refuses_canonical_path_substitution(tmp_path):
+    _, isolated = _make_published_project(tmp_path)
+    pnr = isolated / 'phase3/stage3/pnr'
+    record = json.loads((pnr / 'step15_state.json').read_text())
+    record['views']['sdc_derived']['path'] = 'phase3/stage3/pnr/escape.sdc'
+    (pnr / 'step15_state.json').write_text(json.dumps(record))
     with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
         producers._step15_sdc(isolated)
 
