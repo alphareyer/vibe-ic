@@ -399,42 +399,7 @@ def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypat
     # A finite source fixture gives the public controller a real eligible arm;
     # the consumer spy proves adoption passes the immutable selected generation
     # rather than the mutable run root.
-    script = tmp_path / "backend_fixture.py"
-    script.write_text(
-        "import json, os, pathlib, sys\n"
-        "inputs, outputs = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
-        "binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
-        "result = {'binding': binding, 'step_id': '15', 'producer_verdict': 'PASS',\n"
-        " 'gates': {g: 'PASS' for g in binding['required_gates']},\n"
-        " 'canonical_receipts': [{'producer': 'backend_fixture'}],\n"
-        " 'outputs': {}, 'verdict': 'PASS'}\n"
-        "(outputs / 'backend_result.json').write_text(json.dumps(result))\n")
-    source = tmp_path / "seed.txt"
-    source.write_text("fixture\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
-                         {"metric": "canonical_evidence", "direction": "max"},
-                         tuple(_required_gates("15")), "librelane"), tmp_path)
-
-    def validator(outputs, binding):
-        result = json.loads((outputs / "backend_result.json").read_text())
-        return em.Evidence(binding, result["verdict"], result["gates"],
-                           {"backend_result.json": em.digest(outputs / "backend_result.json")})
-
-    adapter = em.Adapter(
-        "backend_consumer_fixture", "fixture", "15", BASE,
-        {str(Path(sys.executable).resolve()): em.digest(Path(sys.executable)),
-         str(script.resolve()): em.digest(script), str(Path(__file__).resolve()): em.digest(Path(__file__))},
-        sys.version, ("fixture",),
-        (em.Component("producer", (str(Path(sys.executable).resolve()), str(script),
-                                    "{inputs}", "{outputs}"), 5),), validator,
-        ("backend_result.json",), {"metric": "canonical_evidence", "direction": "max"},
-        output_contract={name: ("backend_result.json",) for name in row["canonical_outputs"]},
-        qualification_evidence="R2 finite producer fixture", available=True)
-    adapter = replace(adapter, source_files={**adapter.source_files,
-        **{str(p): em.digest(p) for p in em._source_closure(adapter.source_files)}})
-    registry = em.Registry(); register_source_fixture(registry, adapter, fixture_root=tmp_path)
-    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    controller, context, adapter = finite_backend(tmp_path)
     seen = {}
 
     def consume(selected, ctx, ctl, run, adopted):
@@ -443,12 +408,8 @@ def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypat
 
     monkeypatch.setattr(execution_backend_consumer, "import_selected", consume)
     root = tmp_path / "consumer-run"
-    assert controller.run(context, root)["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
-    receipt_path = root / adapter.arm_id / "receipt.json"
-    choice = {"arm_id": adapter.arm_id, "binding": context.binding(),
-              "receipt_sha256": em.digest(receipt_path), "reviewer": "R2 test",
-              "rationale": "selected-generation consumer control"}
-    assert controller.adopt(context, root, choice)["status"] == "ADOPTED"
+    assert controller.run(context, root, 'ultra-mode')["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
+    assert controller.adopt(context, root, H.choice(context, root, adapter.arm_id))["status"] == "ADOPTED"
     assert seen["status"] == "PROVISIONAL"
     assert seen["selected"].parent == root / "selected"
     assert seen["selected"] != root / adapter.arm_id / "outputs"
@@ -475,7 +436,10 @@ def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
         "from __future__ import annotations\nimport sys\nsys.path.insert(0, " + repr(str(PROGRAMS)) + ")", 1))
     mutant_adapter = replace(
         original_adapter,
-        source_files={**{k: v for k, v in original_adapter.source_files.items() if k != str(producer)},
+        # Keep the canonical worker in the complete source closure.  The
+        # temporary mutant changes the invoked producer bytes; it must not
+        # make enrollment fail before the changed producer is observed.
+        source_files={**original_adapter.source_files,
                       str(mutant.resolve()): em.digest(mutant)},
         components=(replace(original_adapter.components[0],
                             argv=tuple(str(mutant.resolve()) if x == str(producer) else x
@@ -705,27 +669,56 @@ def test_br2_002_real_components_stay_distinct_and_claims_have_source_evidence(t
     assert len({v['sha256'] for v in plan['independence'].values()}) == 2
 
 
+def validate_finite_backend(outputs, binding):
+    report = json.loads((outputs / 'backend_result.json').read_text())
+    actual = (outputs / 'value.txt').read_text()
+    expected = (outputs.parent / 'inputs/project/input/seed.txt').read_text().upper()
+    gates = dict(report['gates'])
+    if actual != expected or report['value'] != actual:
+        gates['finite-gate'] = 'FAIL'
+    return em.Evidence(report['binding'], report['verdict'], gates,
+                       {name: em.digest(outputs / name)
+                        for name in ('backend_result.json', 'value.txt')},
+                       report['metrics'])
+
+
 def finite_backend(tmp_path):
-    row = next(r for r in coverage_rows() if r['step_id'] == '15')
-    arm = backend._adapter(row, current_source_identity(), {'metric': 'canonical_evidence', 'direction': 'max'}, path='IC', available=True)
+    # This is a protocol-only text fixture.  Its finite gate is an observed
+    # controller component, and the validator independently checks the value
+    # before the adoption tests exercise the real consumer boundary.
     script = tmp_path / 'finite.py'
     script.write_text("import json,os,pathlib,sys\n"
-        "out=pathlib.Path(sys.argv[2]);binding=json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "inp,out=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]);binding=json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "value=(inp/'project/input/seed.txt').read_text().upper()\n"
+        "(out/'value.txt').write_text(value)\n"
         "r={'binding':binding,'step_id':'15','producer_verdict':'PASS','verdict':'PASS',"
-        "'gates':{g:'PASS' for g in binding['required_gates']},'outputs':{},'canonical_receipts':[{'scope':'SOFTWARE_FIXTURE_ONLY'}]}\n"
+        "'value':value,'gates':{'finite-gate':'PASS'},'metrics':{'cost':1},'outputs':{},'canonical_receipts':[{'scope':'SOFTWARE_FIXTURE_ONLY'}]}\n"
         "(out/'backend_result.json').write_text(json.dumps(r))\n")
-    arm = replace(arm, arm_id='finite', tool_id='finite', components=(em.Component('finite',
+    sources = {str(p.resolve()): em.digest(p) for p in
+               (Path(sys.executable), script)}
+    sources.update({str(p): em.digest(p) for p in em._source_closure(sources)})
+    arm = em.Adapter('finite', 'finite', '15', current_source_identity(), sources,
+        sys.version, ('finite',), (em.Component('finite-gate',
         (str(Path(sys.executable).resolve()), str(script), '{inputs}', '{outputs}'), 5),),
-        source_files={**arm.source_files, str(script): em.digest(script)})
+        validate_finite_backend, ('backend_result.json', 'value.txt'),
+        {'goal': 'uppercase', 'metric': 'cost', 'direction': 'min'}, available=True,
+        output_contract={name: (name,) for name in ('backend_result.json', 'value.txt')},
+        qualification_evidence='SOFTWARE_FIXTURE_ONLY: observed text-transform gate')
     seed = tmp_path / 'seed.txt'; seed.write_text('seed\n')
-    ctx = issued_context(em.Context('15', current_source_identity(), {'project/input/seed.txt': seed}, arm.objective,
-                      tuple(_required_gates('15')), 'librelane'), tmp_path)
-    return ctl(arm, fixture_root=tmp_path), ctx, arm
+    ctx = H.NeutralContext('15', current_source_identity(),
+        {'project/input/seed.txt': seed}, arm.objective, ('finite-gate',),
+        'librelane', ic_ip_path='IC',
+        route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
+    registry = em.Registry(); register_source_fixture(registry, arm, fixture_root=tmp_path)
+    portfolio = {'meta': {'test_only': True}, 'steps': [{
+        'id': '15', 'mandatory_gate_programs': ['finite-gate'],
+        'required_output_contract': ['backend_result.json', 'value.txt']}]}
+    return em.Controller(registry, em.Budget(1, 512, workers=1), portfolio), ctx, arm
 
 
 def test_br2_003_real_consumer_refusal_clears_persisted_selection(tmp_path):
     controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'fault'
-    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert controller.run(ctx, root, 'ultra-mode')['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
     actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
     assert actual == 'REFUSED:GATE_FAIL'
     persisted = json.loads((root / 'adoption.json').read_text())
@@ -743,7 +736,7 @@ def test_br2_003_consumer_commit_is_provisional_until_success(tmp_path, monkeypa
             raise RuntimeError('consumer fault')
         return answer
     monkeypatch.setattr(consumer, 'import_selected', consume)
-    controller.run(ctx, root)
+    controller.run(ctx, root, 'ultra-mode')
     actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
     persisted = json.loads((root / 'adoption.json').read_text())
     assert seen == ['PROVISIONAL']
@@ -944,7 +937,7 @@ def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
                         manifest=(Path(project) / 'manifest.json').read_bytes())
         return original(project, context, ctl, run, adoption)
     monkeypatch.setattr(consumer, 'import_selected', consume)
-    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert controller.run(ctx, root, 'ultra-mode')['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
     assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))) == 'REFUSED:GATE_FAIL'
     assert len(list((root / 'selected').iterdir())) == 0
     generation = captured['generation']; directory = Path(generation['directory'])
@@ -959,20 +952,27 @@ def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('answer', [None, {'status':'REFUSED'}, 'ERROR'])
 def test_r4_consumer_failure_cleans_only_new_generation(tmp_path, monkeypatch, answer):
-    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'rollback'
-    controller.run(ctx, root)
+    controller, ctx, arm = finite_backend(tmp_path)
+    prior_root = tmp_path / 'rollback-prior'
+    controller.run(ctx, prior_root, 'ultra-mode')
     monkeypatch.setattr(consumer, 'import_selected', lambda *args: {'status':'CONSUMED'})
-    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    accepted = controller.adopt(ctx, prior_root, H.choice(ctx, prior_root, arm.arm_id))
     previous = Path(accepted['selected_generation']['directory'])
     snapshot = {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
                 for p in previous.rglob('*') if p.is_file()}
+    # A fresh run gives the rollback path a genuinely new generation.  The
+    # controller's idempotent adoption fast path must not be mistaken for a
+    # second provisional commit on the already-adopted run.
+    root = tmp_path / 'rollback'
+    controller.run(ctx, root, 'ultra-mode')
     def refuse(*args):
         if answer == 'ERROR':
             raise RuntimeError('consumer failure after provisional selection')
         return answer
     monkeypatch.setattr(consumer, 'import_selected', refuse)
     assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))).startswith('REFUSED:')
-    assert list((root / 'selected').iterdir()) == [previous]
+    assert list((root / 'selected').iterdir()) == []
+    assert list((prior_root / 'selected').iterdir()) == [previous]
     assert snapshot == {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
                         for p in previous.rglob('*') if p.is_file()}
     controller._generation_current(accepted['selected_generation'])
@@ -999,7 +999,7 @@ def test_r4_partial_generation_copy_rolls_back(tmp_path, monkeypatch):
 
 def test_r4_manifest_is_provisional_until_consumer_success(tmp_path, monkeypatch):
     controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'commit'
-    controller.run(ctx, root); captured = []
+    controller.run(ctx, root, 'ultra-mode'); captured = []
     def consume(project, context, ctl, run, adoption):
         captured.append(em._issued(Path(project) / 'manifest.json')['status'])
         return {'status':'CONSUMED'}
