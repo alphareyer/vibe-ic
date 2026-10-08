@@ -1,6 +1,8 @@
 # Retained OpenROAD.STAPrePNR fixture
 
-These bytes were copied without modification from the retained 8HD-4 SPM run at `/home/reyerchu/fleet-artefacts/20261008/spm-step8-current101008al/project/phase3/librelane/prelayout/design_sdc/02-openroad-staprepnr` and its project-relative Step 8 inputs. The archive `spm-prelayout-real-project.tar.gz` had SHA256 `7bbc2b13c717f81699cee04984d64e6868a061651ac4a2099a4b5da31372924b`. The state and receipt files remain the producer's original bytes; corner reports are the three distinct TT/SS/FF reports.
+These bytes were copied without modification from the retained 8HD-4 SPM run at `/home/reyerchu/fleet-artefacts/20261008/spm-step8-current101008al/project/phase3/librelane/prelayout/design_sdc/02-openroad-staprepnr`. The source archive `spm-prelayout-real-project.tar.gz` had SHA256 `7bbc2b13c717f81699cee04984d64e6868a061651ac4a2099a4b5da31372924b`. The state, receipt, three distinct TT/SS/FF corner reports, and their actual `sta.log` discovery inputs are retained exactly.
+
+`default_prelayout_native.tar.gz` is deterministic and contains 58 receipt-bound native files, the producer `vibeic_receipt.json`, and the three corner `sta.log` files (62 archived members). Archive SHA256: `29dc94907ce2c02b45d14573dffab6e4ef9cb5c87f46c10a0790d3457e93484d`.
 
 The fixture is component evidence only; it is not a whole-IC result.
 
@@ -17,6 +19,7 @@ bc95c72eeb9ab87b34b080269febc49713be3451d92100fb5cd614634766fd3e  nom_ff_n40C_5v
 5f24b6ba16c4c16bf5132cb3255df1362fc2343e11e3f11098fb2a07e2324739  nom_ff_n40C_5v50/skew.max.rpt
 a45576727224970a7aaf75a6e6ce9b29482cf4cbbf4687a7ad94359a2d18640a  nom_ff_n40C_5v50/skew.min.rpt
 42945a6615cb0caf143188abb37a86d2009c4ca0ede5c579508b79e54453d308  nom_ff_n40C_5v50/spm__nom_ff_n40C_5v50.sdf
+3c8253487b5897358ccd1e4adc7dcd26f81f619cba6f9378b0dd31e1bbdab406  nom_ff_n40C_5v50/sta.log
 a522da7174b64a51d88cfc640b7c94e8e43bb552333a8a818f3c4d9eb8e78d6a  nom_ff_n40C_5v50/sta.process_stats.json
 632dcb45b325e7584a8fe83730489f7f18faeedbfcb35b6a9e10ae4aabd2560c  nom_ff_n40C_5v50/tns.max.rpt
 b1aa3dc664b43a1c95a6811378216dff6b8801950e0af02b91e0b55b56ff1646  nom_ff_n40C_5v50/tns.min.rpt
@@ -34,6 +37,7 @@ f7d521a2d0578e86a0fd3b2686105cadc6c1b1f0285a41254d52b3d817409923  nom_ss_125C_4v
 8079f5ef66b3ebefa80616707f0b41ddeb5841dac035758a9cabacf0902c7fc4  nom_ss_125C_4v50/skew.max.rpt
 4bff70e5a1819f629ef88f005b206e7986ef0ee008a23520220e969326aafa4d  nom_ss_125C_4v50/skew.min.rpt
 e66101b2891c1ddca341f141249804611431df569b09422fed7e8766f990cd59  nom_ss_125C_4v50/spm__nom_ss_125C_4v50.sdf
+88871d14b582de42e06da9d234b357305af50e0b1ce9e065d787f70e9df3ca17  nom_ss_125C_4v50/sta.log
 5762b5c14dccbe85ec09c4aecfcdd1f1326ae380674c1505938fd7e5d43c444b  nom_ss_125C_4v50/sta.process_stats.json
 958ece5c548ccb28eb46e2654718b505ffae6367f0fd70eb556910623b3ad2cf  nom_ss_125C_4v50/tns.max.rpt
 dd3a68fba27b4dd50bffd18e56a94ff7ee0719f06fd6af58c2754ff67ebef4f0  nom_ss_125C_4v50/tns.min.rpt
@@ -51,6 +55,7 @@ a309b83e9e0aed41c509fab78dd0d41e7d37694fa25af691aa86ae52156ab1c8  nom_tt_025C_5v
 9afa3678cf14e8fe9efd8365e477eab2d7275331cc667b981758812cf7947a14  nom_tt_025C_5v00/skew.max.rpt
 7983212d2061a1d66fecf87175aba705be9e63975496c248a8a9df729a1e8812  nom_tt_025C_5v00/skew.min.rpt
 b806a923be7f8a4ccc4beb493695dbc808989b32b87985eb193177070de63314  nom_tt_025C_5v00/spm__nom_tt_025C_5v00.sdf
+cf9cd2c8e980442438868d0148a3a7840b625975754e72c5234e3fa97005ab45  nom_tt_025C_5v00/sta.log
 047f0d01f9b7c0317e1b42e928b9d59d8177e008268a24cc1c9a97ec47088528  nom_tt_025C_5v00/sta.process_stats.json
 fcaa488a4fe46782e558fa04e87d465c4a882da2dd11c944a78240227c61e133  nom_tt_025C_5v00/tns.max.rpt
 0b4a4e3ea690a3ef14bcc8526ad17889959848dbc8ebfe6dc3964c6995f1ba0b  nom_tt_025C_5v00/tns.min.rpt

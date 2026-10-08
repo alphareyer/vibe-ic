@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
+import tarfile
 import types
 from pathlib import Path
 
@@ -17,7 +17,7 @@ import phase3_one_shot_runner as phase3
 import test_step8_post_prelayout as postcheck_fixtures
 
 
-RETAINED = Path(__file__).resolve().parent / "fixtures/default_prelayout_native"
+RETAINED_ARCHIVE = Path(__file__).resolve().parent / "fixtures/default_prelayout_native.tar.gz"
 
 
 def _fixture(tmp_path):
@@ -41,7 +41,19 @@ def _fixture(tmp_path):
 
 def _retained_native(project, netlist, pnr):
     folder = project / "phase3/librelane/prelayout/design_sdc/native"
-    shutil.copytree(RETAINED, folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(RETAINED_ARCHIVE, "r:gz") as archive:
+        for member in archive.getmembers():
+            name = Path(member.name)
+            if (name.is_absolute() or ".." in name.parts or
+                    not member.isfile()):
+                raise AssertionError(f"unsafe native fixture member: {member.name}")
+            target = folder / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            payload = archive.extractfile(member)
+            if payload is None:
+                raise AssertionError(f"unreadable native fixture member: {member.name}")
+            target.write_bytes(payload.read())
     state = folder / "state_out.json"
     gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
     gate.parent.mkdir(parents=True, exist_ok=True)
