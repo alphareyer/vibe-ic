@@ -479,7 +479,12 @@ def _required_gates(step_id):
                 if row['id'] == step_id)
 
 
-def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypatch):
+@pytest.mark.parametrize('execution_mode', [
+    pytest.param(None, id='default-auto-adopt'),
+    pytest.param('ultra-mode', id='ultra-explicit-adopt'),
+])
+def test_controller_adoption_calls_selected_backend_consumer(
+        tmp_path, monkeypatch, execution_mode):
     # A finite source fixture gives the public controller a real eligible arm;
     # the consumer spy proves adoption passes the immutable selected generation
     # rather than the mutable run root.
@@ -487,14 +492,25 @@ def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypat
     seen = {}
 
     def consume(selected, ctx, ctl, run, adopted):
-        seen.update(selected=Path(selected), run=Path(run), status=adopted["status"])
+        seen.update(selected=Path(selected), run=Path(run),
+                    status=adopted["status"],
+                    generation=dict(adopted["selected_generation"]))
         return {"status": "CONSUMED"}
 
     monkeypatch.setattr(execution_backend_consumer, "import_selected", consume)
     root = tmp_path / "consumer-run"
-    assert controller.run(context, root, 'ultra-mode')["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
-    assert controller.adopt(context, root, H.choice(context, root, adapter.arm_id))["status"] == "ADOPTED"
+    result = controller.run(context, root, execution_mode)
+    if execution_mode is None:
+        assert result["status"] == "ADOPTED"
+    else:
+        assert result["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
+        result = controller.adopt(
+            context, root, H.choice(context, root, adapter.arm_id))
+        assert result["status"] == "ADOPTED"
     assert seen["status"] == "PROVISIONAL"
+    assert seen["generation"]["status"] == "PROVISIONAL"
+    assert seen["selected"] == Path(seen["generation"]["directory"])
+    assert result["selected_generation"]["directory"] == str(seen["selected"])
     assert seen["selected"].parent == root / "selected"
     assert seen["selected"] != root / adapter.arm_id / "outputs"
 
