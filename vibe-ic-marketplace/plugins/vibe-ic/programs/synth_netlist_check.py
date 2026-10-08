@@ -559,7 +559,32 @@ def _digest_matches(path: Path, recorded: object) -> bool:
     actual = _sha256_file(path)
     if actual is None or not isinstance(recorded, str):
         return False
-    return actual.removeprefix("sha256:") == recorded.removeprefix("sha256:")
+    actual_hex = actual.removeprefix("sha256:")
+    recorded_hex = recorded.removeprefix("sha256:")
+    return (bool(re.fullmatch(r"[0-9a-fA-F]{64}", recorded_hex))
+            and actual_hex == recorded_hex.lower())
+
+
+def _path_has_symlink(path: Path, root: Path) -> bool:
+    """Reject symlink components between an issued path and its root."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Return whether the resolved path remains under the resolved root."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
 
 
 def _first_present(rec: dict, names: Tuple[str, ...]):
@@ -882,9 +907,14 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
             raise NativeBindingRefusal("native synthesis handoff sidecar is unreadable") from exc
         if not isinstance(doc, dict):
             raise NativeBindingRefusal("native synthesis handoff sidecar shape changed")
-        binding = doc.get("librelane_synthesis")
-        if not isinstance(binding, dict):
+        if (_path_has_symlink(sidecar, project)
+                or not _path_is_within(sidecar, project)):
+            raise NativeBindingRefusal("native synthesis handoff sidecar path changed")
+        if "librelane_synthesis" not in doc:
             return None
+        binding = doc["librelane_synthesis"]
+        if not isinstance(binding, dict):
+            raise NativeBindingRefusal("native synthesis handoff binding shape changed")
         if binding.get("schema") != "vibe-ic/librelane-synthesis-handoff/1":
             raise NativeBindingRefusal("native synthesis handoff schema changed")
         if not isinstance(binding.get("folder"), str) or not isinstance(binding.get("mapped"), str):
@@ -898,10 +928,17 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
         mapped = project / mapped_rel
         receipt = folder / "vibeic_receipt.json"
         state_path = folder / "state_out.json"
+        native_root = project / "phase3" / "librelane"
         if (not folder.is_dir() or not mapped.is_file()
-                or mapped.resolve().parent != audited.resolve().parent
                 or not audited.is_file() or not receipt.is_file()
                 or not state_path.is_file()
+                or not _path_is_within(folder, native_root)
+                or not _path_is_within(mapped, project)
+                or _path_has_symlink(folder, project)
+                or _path_has_symlink(mapped, project)
+                or _path_has_symlink(receipt, project)
+                or _path_has_symlink(state_path, project)
+                or mapped.resolve().parent != audited.resolve().parent
                 or not _digest_matches(mapped, binding.get("netlist_sha256"))
                 or not _digest_matches(audited, binding.get("netlist_sha256"))
                 or not _digest_matches(receipt, binding.get("receipt_sha256"))):
@@ -910,13 +947,36 @@ def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
             state = json.loads(state_path.read_text())
         except (OSError, ValueError, TypeError) as exc:
             raise NativeBindingRefusal("native synthesis state is unreadable") from exc
+        if not isinstance(state, dict):
+            raise NativeBindingRefusal("native synthesis state shape changed")
         native = state.get("nl")
         if not isinstance(native, str) or not Path(native).name:
             raise NativeBindingRefusal("native synthesis state netlist is absent")
-        candidate = folder / Path(native).name
+        native_path = Path(native)
+        folder_suffix = folder.relative_to(native_root)
+        expected_suffix = (Path("phase3") / "librelane" / folder_suffix
+                           / native_path.name)
+        if (not native_path.is_absolute() or ".." in native_path.parts
+                or tuple(native_path.parts[-len(expected_suffix.parts):])
+                != tuple(expected_suffix.parts)):
+            raise NativeBindingRefusal("native synthesis state netlist path changed")
+        candidate = folder / native_path.name
         if (not candidate.is_file()
+                or not _path_is_within(candidate, folder)
+                or _path_has_symlink(candidate, project)
                 or not _digest_matches(candidate, binding.get("netlist_sha256"))):
             raise NativeBindingRefusal("native synthesis state netlist changed")
+        try:
+            receipt_doc = json.loads(receipt.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            raise NativeBindingRefusal("native synthesis receipt is unreadable") from exc
+        if not isinstance(receipt_doc, dict):
+            raise NativeBindingRefusal("native synthesis receipt shape changed")
+        receipt_hashes = receipt_doc.get("sha256")
+        if (not isinstance(receipt_hashes, dict)
+                or not _digest_matches(state_path, receipt_hashes.get("state_out.json"))
+                or not _digest_matches(candidate, receipt_hashes.get(native_path.name))):
+            raise NativeBindingRefusal("native synthesis receipt coverage changed")
         return candidate
     except NativeBindingRefusal:
         raise
