@@ -49,6 +49,14 @@ def project(tmp_path):
                'set_input_delay 1 -clock clk [get_ports d]\n'
                'set_output_delay 1 -clock clk [get_ports q]\n')
     put(tmp_path / 'phase2/stage2/constraints/top.asic.sdc', deck.read_text())
+    put(tmp_path / 'phase2/stage2/constraints/pvt_matrix.json', {
+        'corners': [
+            {'name': 'ss', 'label': 'SS'},
+            {'name': 'tt', 'label': 'TT'},
+        ],
+        'primary_corner': 'TT',
+        'multi_corner': True,
+    })
     nl = put(tmp_path / 'phase2/stage2/synth/top_synth.v',
              'module top(input clk, d, output q); assign q=d; endmodule\n')
     put(tmp_path / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json',
@@ -80,7 +88,10 @@ def test_postcheck_pass_preserves_deferred_history_and_binds_current_inputs(tmp_
     doc = json.loads(Path(row.output_files[0]).read_text())
     assert len(doc['invocation_id']) == 32
     assert [x['rc'] for x in doc['records']] == [0, 0]
-    for name, path in [('opensta_gate', gate), ('pnr_sdc', deck), ('mapped_netlist', nl)]:
+    pvt = tmp_path / 'phase2/stage2/constraints/pvt_matrix.json'
+    assert doc['schema'] == 'sdc-post-prelayout/2'
+    for name, path in [('opensta_gate', gate), ('pnr_sdc', deck),
+                       ('mapped_netlist', nl), ('pvt_matrix', pvt)]:
         assert doc['binding']['inputs'][name]['sha256'] == LC.digest(path)
     history = json.loads(report.read_text())
     assert [x['status'] for x in history['steps']] == ['NOT_MEASURED', 'PASS']
@@ -91,9 +102,11 @@ def test_postcheck_pass_preserves_deferred_history_and_binds_current_inputs(tmp_
     assert D._aggregate_verdict([early, row]) == 'NOT_MEASURED'
 
 
-@pytest.mark.parametrize('changed', ['gate', 'deck', 'netlist'])
+@pytest.mark.parametrize('changed', ['gate', 'deck', 'netlist', 'pvt'])
 def test_mutation_during_consumers_refuses_current_postcheck(tmp_path, monkeypatch, changed):
-    paths = dict(zip(('gate', 'deck', 'netlist'), project(tmp_path)))
+    gate, deck, netlist = project(tmp_path)
+    paths = {'gate': gate, 'deck': deck, 'netlist': netlist,
+             'pvt': tmp_path / 'phase2/stage2/constraints/pvt_matrix.json'}
     original = D.subprocess.run
     calls = []
 
@@ -109,6 +122,32 @@ def test_mutation_during_consumers_refuses_current_postcheck(tmp_path, monkeypat
     assert 'CHANGED' in row.detail or 'STALE' in row.detail
     assert len(calls) == 1
     assert not (tmp_path / 'reports/phase2/sdc_check.json').exists()
+
+
+def test_pvt_mutation_after_receipt_demotes_current_verdict(tmp_path):
+    """A changed Step-7 PVT census cannot leave Step 8 current/PASS."""
+    project(tmp_path)
+    early = D.step_sdc_validation(tmp_path)
+    row = D.step_sdc_validation_post_prelayout(tmp_path, 'top')
+    assert row.status == 'PASS', row.detail
+    pvt = tmp_path / 'phase2/stage2/constraints/pvt_matrix.json'
+    pvt.write_text('{"corners":[{"name":"ff","label":"FF"}],\n'
+                   '"primary_corner":"FF"}\n')
+    assert D._aggregate_verdict([early, row]) == 'NOT_MEASURED'
+
+
+def test_legacy_step8_receipt_schema_is_not_current(tmp_path):
+    """An old /1 receipt cannot be replayed as a current PASS."""
+    project(tmp_path)
+    early = D.step_sdc_validation(tmp_path)
+    row = D.step_sdc_validation_post_prelayout(tmp_path, 'top')
+    assert row.status == 'PASS', row.detail
+    receipt = Path(row.output_files[0])
+    doc = json.loads(receipt.read_text())
+    doc['schema'] = 'sdc-post-prelayout/1'
+    receipt.write_text(json.dumps(doc) + '\n')
+    row.extras['receipt_sha256'] = LC.digest(receipt)
+    assert D._aggregate_verdict([early, row]) == 'NOT_MEASURED'
 
 
 def test_stale_netlist_bound_gate_is_not_reused(tmp_path):
