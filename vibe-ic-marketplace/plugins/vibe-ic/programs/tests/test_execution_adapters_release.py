@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from dataclasses import replace
@@ -12,6 +13,7 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import execution_modes as em
+import execution_policy as policy
 from execution_adapters_release import (
     ALL_IDS,
     EXTERNAL_IDS,
@@ -26,8 +28,46 @@ from execution_provider_catalog import RELEASE_IDS, coverage_rows, current_sourc
 import execution_release_worker as release_worker
 from execution_release_worker import _call, _canonical_gate_invocations, execute as execute_release
 from execution_release_rows import ROWS
+from programs.tests import test_execution_receipt_chain as receipt_chain
 
 BASE = current_source_identity()
+
+
+@pytest.fixture(autouse=True)
+def _canonical_issued_transport(monkeypatch):
+    """Give production Controller tests the real isolated issuer boundary."""
+    monkeypatch.setattr(policy, '_ordinary_runtime', None)
+    for name in (policy.ENV, policy._CAPABILITY_FD_ENV,
+                 'VIBEIC_EXECUTION_AUTH_SOCKET'):
+        monkeypatch.delenv(name, raising=False)
+    yield
+    for proc, fd, channel in receipt_chain._launchers:
+        try:
+            channel.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.terminate()
+            proc.wait(timeout=5)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    receipt_chain._launchers.clear()
+
+
+def _issued_context(step_id, inputs, tmp_path, *, native_mode='librelane'):
+    payload = receipt_chain.real_entry('IC', 'default', tmp_path)
+    route = payload['route']
+    row = _spec(step_id)
+    return em.Context(
+        str(step_id), route['source_sha'], inputs,
+        {"metric": "canonical_evidence", "direction": "max"},
+        tuple(row["consumer_gates"]), native_mode,
+        project_digest=route['project_digest'],
+        **policy.controller_fields(ic_ip_path='IC', route_receipt=route))
 
 
 def _spec(step):
@@ -90,9 +130,7 @@ def test_375ic_and_step39_keep_canonical_condition_semantics():
 def test_release_component_runs_through_public_controller_and_preserves_nm(tmp_path):
     source = tmp_path / "seed.txt"
     source.write_text("source-only\n")
-    context = em.Context("36", BASE, {"project/input/seed.txt": source},
-                         {"metric": "canonical_evidence", "direction": "max"},
-                         tuple(_spec("36")["consumer_gates"]), "librelane")
+    context = _issued_context("36", {"project/input/seed.txt": source}, tmp_path)
     registry = register_release_adapters(em.Registry(), source_sha=BASE, available=True)
     controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
     plan = controller.plan(context, "default-mode")
@@ -140,15 +178,13 @@ def test_current_source_bound_fixture_reaches_eligible_controller_arm(tmp_path):
     floorplan.write_text("VERSION 5.8 ;\n")
     sdc = tmp_path / "clock.sdc"
     sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
-    row = _spec("16")
-    context = em.Context(
-        "16", BASE,
+    context = _issued_context(
+        "16",
         {
             "project/phase3/stage3/pnr/floorplan.def": floorplan,
             "project/phase2/stage2/constraints/clock.sdc": sdc,
         },
-        {"metric": "canonical_evidence", "direction": "max"},
-        tuple(row["consumer_gates"]), "librelane")
+        tmp_path)
     registry = register_release_adapters(em.Registry(), source_sha=BASE, available=True)
     controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
     plan = controller.plan(context, "default-mode")
@@ -196,23 +232,17 @@ def test_public_controller_rejects_removed_release_producer_call(tmp_path):
     source.write_text("VERSION 5.8 ;\n")
     sdc = tmp_path / "clock.sdc"
     sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
-    row = _spec("16")
-    context = em.Context("16", BASE,
-                         {"project/phase3/stage3/pnr/floorplan.def": source,
-                          "project/phase2/stage2/constraints/clock.sdc": sdc},
-                         {"metric": "canonical_evidence", "direction": "max"},
-                         tuple(row["consumer_gates"]), "librelane")
+    context = _issued_context(
+        "16",
+        {"project/phase3/stage3/pnr/floorplan.def": source,
+         "project/phase2/stage2/constraints/clock.sdc": sdc},
+        tmp_path)
     original = register_release_adapters(source_sha=BASE, available=True).adapters("16")[0]
     worker = PROGRAMS / "execution_release_worker.py"
-    mutant = tmp_path / "execution_release_worker.py"
-    text = worker.read_text()
-    changed = text.replace("records = produce(str(step_id), project, params)", "records = []", 1)
-    assert changed != text
-    mutant.write_text(changed.replace(
-        "from __future__ import annotations",
-        "from __future__ import annotations\nimport sys\nsys.path.insert(0, " + repr(str(PROGRAMS)) + ")", 1))
+    mutant = PROGRAMS / "tests/fixtures/execution_release_worker_removed_producer.py"
+    assert mutant.is_file()
     mutant_sources = {k: v for k, v in original.source_files.items()
-                      if k != str(worker.resolve())}
+                      }
     mutant_sources[str(mutant.resolve())] = em.digest(mutant)
     component = replace(original.components[0], argv=tuple(
         str(mutant.resolve()) if x == str(worker.resolve()) else x
