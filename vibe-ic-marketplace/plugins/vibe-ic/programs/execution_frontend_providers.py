@@ -249,10 +249,14 @@ def choose(step_id):
     if step_id not in PROVIDERS: return None
     return PROVIDERS[step_id]
 
-def register_factories(registry, *, step_ids=None, project=None, parameters=None):
+def register_factories(registry, *, step_ids=None, project=None, parameters=None, execution_mode=None):
     """Register real source adapters in the existing Registry."""
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
     import execution_modes as em
+    from dataclasses import replace
+    if execution_mode is None:
+        import execution_policy
+        execution_mode = execution_policy.request()['mode']
     from execution_modes import Adapter, Component, Evidence, digest
     from execution_provider_catalog import source_closure, implementation_closure
     source_path=Path(__file__).resolve(); worker_path=source_path.with_name('execution_frontend_worker.py')
@@ -362,6 +366,9 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                                 detail='real producers, canonical YAML outputs, mandatory gates and issued snapshots validated',
                                 metrics={'source_boundary': 1.0},
                                 provenance={'producer_chain': chain} if chain is not None else {})
+            if _row == '4':
+                from execution_step4 import validate as validate_step4
+                return validate_step4(root, facts, _gate_names)
             if _row == '7':
                 # Step 7's producer is the canonical ASIC SDC/PVT emitter.  Its
                 # mandatory consumers (stage compliance, syntax, PVT and
@@ -416,6 +423,11 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                 'submission_template_check.py','tapeout_declaration_check.py'))
             closure=_source_closure(seeds)
             closure += (_FLOW_PATH, _COVERAGE_PATH, _CATALOG_PATH, _PORTFOLIO_PATH)
+        if row == '4':
+            closure += tuple(source_path.with_name(name) for name in (
+                'execution_step4.py', 'execution_step4_icarus.py',
+                'execution_step4_verilator.py'))
+            closure += tuple(source_path.with_name(name + '.py') for name in portfolio_gates)
         if row == '8':
             closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py','sdc_exception_correlation_check.py','derived_clock_sdc_required_check.py'))
         closure = tuple(set(closure) | set(em._source_closure(closure)) |
@@ -462,7 +474,38 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
         # Reserve bounded headroom for these source-bound producers; other
         # adapters retain their existing defaults.
         resources = {'ram_mb': 1024} if row in ('D1', '7') else {}
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,tuple(components),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row] + (('phase2/stage1/rtl', 'reports/phase2/cdc/crossing.json') if row == '8' else ()), **resources))
+        adapter = Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,tuple(components),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row] + (('phase2/stage1/rtl', 'reports/phase2/cdc/crossing.json') if row == '8' else ()), **resources)
+        if row == '4' and execution_mode in ('ultra', 'ultra-mode'):
+            # Ultra exposes two fixed simulator entry points. They share the
+            # declared Step 4 consumers, but each arm owns its simulator and
+            # runs the complete source-bound producer independently.
+            from execution_step4 import gate_commands
+            declared = gate_commands(contract)
+            gate_components = []
+            for gate in portfolio_gates:
+                try:
+                    parts = shlex.split(declared[gate])
+                except (KeyError, ValueError) as exc:
+                    raise ValueError(f'Step4 gate declaration unavailable: {gate}') from exc
+                # Controller runs every component in the arm output root. All
+                # relative command paths therefore resolve there; the explicit
+                # '.' project operand becomes the issued {outputs} path.
+                argv = ('python3', str(source_path.with_name(gate + '.py')),
+                        *(('{outputs}' if part == '.' else part) for part in parts[1:]))
+                gate_components.append(Component(gate, argv, timeout_s=120))
+            for simulator, engine in (('icarus', 'iverilog'), ('verilator', 'verilator')):
+                entry = str(source_path.with_name('execution_step4_' + simulator + '.py'))
+                registry.register(replace(adapter, arm_id='frontend_4_' + simulator,
+                    engine_families=(engine,),
+                    components=(Component('frontend_worker', ('python3', entry,
+                        '--inputs', '{inputs}', '--outputs', '{outputs}'), timeout_s=300),
+                        *gate_components),
+                    input_contract=INPUT_CONTRACTS[row] + ('phase2/stage1/rtl',
+                        'phase1/generated_docs', 'phase2/stage1/sim_professional'),
+                    cpus=4, ram_mb=12288, qualified=False,
+                    qualification_evidence='source-bound simulator; native canonical qualification pending'))
+        else:
+            registry.register(adapter)
     if step_ids is None:
         from execution_production import register_synthesis_adapter
         register_synthesis_adapter(registry, project=project, parameters=parameters,
