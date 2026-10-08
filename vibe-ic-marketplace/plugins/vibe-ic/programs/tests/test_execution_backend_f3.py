@@ -41,6 +41,21 @@ BASE = current_source_identity()
 PRE_FIX_BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
 
 
+def _step15_controller_inputs(tmp_path):
+    """Create substantive controller inputs from the live Step-15 contract."""
+    inputs = {}
+    for declaration in BACKEND_ROWS["15"]["canonical_row"]["required_inputs"]:
+        pattern = declaration["path"]
+        relative = pattern.replace("*.sdc", "fixture.sdc")
+        source = tmp_path / "step15-inputs" / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "create_clock -period 10 [get_ports clk]\n"
+            if source.suffix == ".sdc" else "module fixture; endmodule\n")
+        inputs[f"project/{relative}"] = source
+    return inputs
+
+
 def test_pre_fix_base_could_not_reach_backend_factory(tmp_path):
     path = "vibe-ic-marketplace/plugins/vibe-ic/programs/execution_adapters_backend.py"
     assert subprocess.run(["git", "cat-file", "-e", f"{PRE_FIX_BASE}:{path}"]).returncode != 0
@@ -123,10 +138,7 @@ def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
 
 
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
-    source = tmp_path / "seed.txt"
-    source.write_text("source-only\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
+    context = issued_context(em.Context("15", BASE, _step15_controller_inputs(tmp_path),
                          {"metric": "canonical_evidence", "direction": "max"},
                          tuple(_required_gates("15")), "librelane"), tmp_path, mode="default")
     registry = register_backend_adapters(em.Registry(), source_sha=BASE, available=True)
@@ -140,6 +152,7 @@ def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path)
     result = json.loads((root / adapter.arm_id / "outputs" / "backend_result.json").read_text())
     assert result["step_id"] == "15"
     assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
+    assert result["missing_inputs"] == []
     assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
 
 
@@ -516,10 +529,7 @@ def test_controller_adoption_calls_selected_backend_consumer(
 
 
 def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
-    source = tmp_path / "seed.txt"
-    source.write_text("source-only\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
+    context = issued_context(em.Context("15", BASE, _step15_controller_inputs(tmp_path),
                          {"metric": "canonical_evidence", "direction": "max"},
                          tuple(_required_gates("15")), "librelane"), tmp_path, mode="default")
     original_registry = register_backend_adapters(source_sha=BASE, available=True)
@@ -551,6 +561,7 @@ def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
         context, root, "default-mode")
     assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
     result = json.loads((root / mutant_adapter.arm_id / "outputs" / "backend_result.json").read_text())
+    assert result["missing_inputs"] == []
     assert result["producer_verdict"] == "PASS"
     assert result["canonical_receipts"] == []
 
