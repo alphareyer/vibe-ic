@@ -62,12 +62,13 @@ def _issued_context(step_id, inputs, tmp_path, *, native_mode='librelane'):
     payload = receipt_chain.real_entry('IC', 'default', tmp_path)
     route = payload['route']
     row = _spec(step_id)
-    return em.Context(
+    context = em.Context(
         str(step_id), route['source_sha'], inputs,
         {"metric": "canonical_evidence", "direction": "max"},
-        tuple(row["consumer_gates"]), native_mode,
+        tuple(row["mandatory_gate_programs"]), native_mode,
         project_digest=route['project_digest'],
         **policy.controller_fields(ic_ip_path='IC', route_receipt=route))
+    return context, route
 
 
 def _spec(step):
@@ -130,8 +131,11 @@ def test_375ic_and_step39_keep_canonical_condition_semantics():
 def test_release_component_runs_through_public_controller_and_preserves_nm(tmp_path):
     source = tmp_path / "seed.txt"
     source.write_text("source-only\n")
-    context = _issued_context("36", {"project/input/seed.txt": source}, tmp_path)
-    registry = register_release_adapters(em.Registry(), source_sha=BASE, available=True)
+    context, route = _issued_context("36", {"project/input/seed.txt": source}, tmp_path)
+    declaration = json.loads((tmp_path / "input/step_0_5ic_answers.json").read_text())
+    registry = register_release_adapters(
+        em.Registry(), source_sha=BASE, available=True,
+        route_receipt=route, declaration=declaration)
     controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
     plan = controller.plan(context, "default-mode")
     root = tmp_path / "run"
@@ -178,14 +182,17 @@ def test_current_source_bound_fixture_reaches_eligible_controller_arm(tmp_path):
     floorplan.write_text("VERSION 5.8 ;\n")
     sdc = tmp_path / "clock.sdc"
     sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
-    context = _issued_context(
+    context, route = _issued_context(
         "16",
         {
             "project/phase3/stage3/pnr/floorplan.def": floorplan,
             "project/phase2/stage2/constraints/clock.sdc": sdc,
         },
         tmp_path)
-    registry = register_release_adapters(em.Registry(), source_sha=BASE, available=True)
+    declaration = json.loads((tmp_path / "input/step_0_5ic_answers.json").read_text())
+    registry = register_release_adapters(
+        em.Registry(), source_sha=BASE, available=True,
+        route_receipt=route, declaration=declaration)
     controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
     plan = controller.plan(context, "default-mode")
     assert plan["arms"] == ["release_16"]
@@ -232,12 +239,15 @@ def test_public_controller_rejects_removed_release_producer_call(tmp_path):
     source.write_text("VERSION 5.8 ;\n")
     sdc = tmp_path / "clock.sdc"
     sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
-    context = _issued_context(
+    context, route = _issued_context(
         "16",
         {"project/phase3/stage3/pnr/floorplan.def": source,
          "project/phase2/stage2/constraints/clock.sdc": sdc},
         tmp_path)
-    original = register_release_adapters(source_sha=BASE, available=True).adapters("16")[0]
+    declaration = json.loads((tmp_path / "input/step_0_5ic_answers.json").read_text())
+    original = register_release_adapters(
+        source_sha=BASE, available=True, route_receipt=route,
+        declaration=declaration).adapters("16")[0]
     worker = PROGRAMS / "execution_release_worker.py"
     mutant = PROGRAMS / "tests/fixtures/execution_release_worker_removed_producer.py"
     assert mutant.is_file()
