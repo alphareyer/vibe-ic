@@ -473,6 +473,25 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
     assert "plugin_output/declaration.json" not in contract
 
 
+def test_required_checkpoint_proof_rejects_directory(tmp_path):
+    project = tmp_path / "project"
+    constraint = "phase2/stage2/constraints/subservient.asic.sdc"
+    for rel in (
+        "phase2/stage2/synth/netlist.v",
+        "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase2/stage2/constraints/asic_sdc.json",
+        constraint,
+    ):
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"path": constraint}) if rel.endswith("asic_sdc.json")
+                          else rel + "\n")
+    (project / "provenance.jsonl").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="backend checkpoint path is unsafe"):
+        backend_project_input_contract(project, "15")
+
+
 def test_step7_semantic_image_only_binding_carries_report(tmp_path):
     """The @ binding names a semantic report that the isolated reader opens."""
     project = tmp_path / "project"

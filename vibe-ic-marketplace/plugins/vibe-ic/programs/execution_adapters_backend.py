@@ -661,7 +661,7 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
     root = Path(project).resolve(strict=True)
     result: list[str] = []
 
-    def carry_checkpoint_file(raw: str) -> None:
+    def carry_checkpoint_file(raw: str, *, allow_directory: bool = False) -> None:
         """Carry one issued checkpoint file after proving its namespace."""
         rel = Path(raw)
         if (rel.is_absolute() or not raw or ".." in rel.parts
@@ -674,7 +674,7 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             raise ValueError(f"backend checkpoint path is absent: {raw!r}") from exc
         if (target.is_symlink() or resolved != target
                 or not resolved.is_relative_to(root)
-                or not (resolved.is_file() or resolved.is_dir())):
+                or not (resolved.is_file() or (allow_directory and resolved.is_dir()))):
             raise ValueError(f"backend checkpoint path is unsafe: {raw!r}")
         result.append(raw)
 
@@ -683,7 +683,7 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         target = root / raw
         if not target.exists():
             return
-        carry_checkpoint_file(raw)
+        carry_checkpoint_file(raw, allow_directory=(raw == "phase2/stage1/sim/tb"))
 
     # A backend arm with a published synthesis netlist consumes the same
     # issued proof namespace as the producer.  These files are deliberately
