@@ -77923,7 +77923,22 @@ def main() -> int:
     if util_warn:
         print(f"[WARN] {util_warn}", file=sys.stderr)
     args.util = norm_util
-    _execution.bootstrap(project, parameters={'top': args.top_name, 'pdk': pdk,
+    # Resolve the synthesizable ASIC top before the backend registry is
+    # issued.  Step 15's producer and consumer both validate the same
+    # synthesis handoff; passing the CLI placeholder here (usually
+    # ``chip_top``) while phase-3 later resolves ``subservient`` makes the
+    # consumer reject its producer's exact ``subservient_synth.v`` handoff.
+    import _chip_synth_read as _csr_top
+    effective_top = _csr_top.effective_top(project, args.top_name)
+    if (effective_top != args.top_name
+            and effective_top not in (f"{args.top_name}_asic",
+                                      f"{args.top_name}_pad_wrapper")):
+        print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
+              f"rtl/ — resolved synthesizable top to {effective_top!r} "
+              f"(instantiation-graph root; parity with phase-2 synth)",
+              file=sys.stderr)
+
+    _execution.bootstrap(project, parameters={'top': effective_top, 'pdk': pdk,
         'design_name': args.top_name, 'pdk_name': args.pdk, 'container': args.container,
         'die_um': args.die_um, 'util': args.util, **backend_parameters,
         # This process dispatches the backend, including resumed windows.
@@ -78032,29 +78047,6 @@ def main() -> int:
         except Exception:
             pass
         return 4
-
-    # Wave-on-fix v1.6.10 - resolve ASIC top once, share across all
-    # steps. step_synth's local override of `top` was not propagating
-    # to step_pnr, so PnR looked for `<requested_top>_synth.v` while
-    # synth had emitted `<asic_top>_synth.v`.
-    # R-0915-157 round 9: the resolution lives in `_chip_synth_read.
-    # effective_top`, the ONE definition the Step-5 proof's record is compared
-    # against. `<top>_asic` / `<top>_pad_wrapper` when rtl/ carries one; else
-    # the SAME structural resolver phase-2 uses — the orchestrator's --top-name
-    # is frequently the PROJECT / SKU name (e.g. `caravel_user_project`), whose
-    # synthesizable top module is a differently-named wrapper
-    # (`user_project_wrapper`); without it `synth -top <project>` fails its
-    # HIERARCHY pass while phase-2 synth PASSES on the same rtl/. A --top-name
-    # that IS a real module is returned unchanged.
-    import _chip_synth_read as _csr_top
-    effective_top = _csr_top.effective_top(project, args.top_name)
-    if (effective_top != args.top_name
-            and effective_top not in (f"{args.top_name}_asic",
-                                      f"{args.top_name}_pad_wrapper")):
-        print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
-              f"rtl/ — resolved synthesizable top to {effective_top!r} "
-              f"(instantiation-graph root; parity with phase-2 synth)",
-              file=sys.stderr)
 
     _print_run_banner(pdk.name, effective_top, args.top_name)
     if _window_sites is not None:

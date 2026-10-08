@@ -21,8 +21,11 @@ _resolve_asic_top_structural mirrors phase-2's precedence:
 """
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
+
+import pytest
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
@@ -112,3 +115,42 @@ def test_comment_mention_is_not_a_module(tmp_path):
          "endmodule\n")
     got = p3._resolve_asic_top_structural(tmp_path, "caravel_user_project", None)
     assert got == "the_real_top", got
+
+
+def _phase3_backend_bootstrap_top(source: str) -> str:
+    tree = ast.parse(source)
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    calls = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Name)
+             and node.func.value.id == "_execution"
+             and node.func.attr == "bootstrap"]
+    assert len(calls) == 1
+    parameters = next(keyword.value for keyword in calls[0].keywords
+                      if keyword.arg == "parameters")
+    assert isinstance(parameters, ast.Dict)
+    top = next(value for key, value in zip(parameters.keys, parameters.values)
+               if isinstance(key, ast.Constant) and key.value == "top")
+    return ast.unparse(top)
+
+
+def test_step15_backend_bootstrap_receives_the_resolved_top(tmp_path):
+    """The Step-15 worker must receive the same top that phase 3 resolves."""
+    _rtl(tmp_path, "subservient.v",
+         "module subservient(input clk, output q); assign q = clk; endmodule\n")
+    sys.path.insert(0, str(PROG))
+    import _chip_synth_read as csr  # noqa: E402
+
+    assert csr.effective_top(tmp_path, "chip_top") == "subservient"
+    assert _phase3_backend_bootstrap_top(
+        (PROG / "phase3_one_shot_runner.py").read_text()) == "effective_top"
+
+
+def test_reverse_placeholder_top_mutation_is_red():
+    source = (PROG / "phase3_one_shot_runner.py").read_text()
+    mutated = source.replace("'top': effective_top", "'top': args.top_name", 1)
+    assert mutated != source
+    with pytest.raises(AssertionError):
+        assert _phase3_backend_bootstrap_top(mutated) == "effective_top"
