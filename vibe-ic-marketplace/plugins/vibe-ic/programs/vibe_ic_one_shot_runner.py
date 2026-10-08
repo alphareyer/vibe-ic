@@ -2735,7 +2735,14 @@ def _main() -> int:
                 [str(project), "--top", phase3_top,
                  "--container", args.container, "--json", str(_m2_json)],
                 env=_phase_env)
+                # Keep the producer's process status visible before the
+                # controller fallback rebind below. This is both the actual
+                # fail-closed receipt and the status edge the wiring audit
+                # must follow.
                 _m2_rep = _read_report(_m2_json)
+                if _m2_rc != 0:
+                    _m2_rep = dict(_m2_rep)
+                _m2_rep["producer_rc"] = _m2_rc
             else:
                 _m2_rc, _m2_rep = _m2_dispatched
             # An exit status cannot stand in for a tool measurement. Missing
@@ -2767,6 +2774,9 @@ def _main() -> int:
                 [str(project), "--top", phase3_top, "--container", args.container,
                  "--json", str(_m3_json)], env=_phase_env)
                 _m3_rep = _read_report(_m3_json)
+                if _m3_rc != 0:
+                    _m3_rep = dict(_m3_rep)
+                _m3_rep["producer_rc"] = _m3_rc
             else:
                 _m3_rc, _m3_rep = _m3_dispatched
             _m3_verdict = "NOT_READY" if _m3_rc == 2 else "FAIL"
@@ -2805,6 +2815,9 @@ def _main() -> int:
                 PROGRAMS_DIR / "mixed_signal_signoff_run.py",
                 [str(project), "--top", phase3_top, "--json", str(_m4_json)], env=_phase_env)
                 _m4_rep = _read_report(_m4_json)
+                if _m4_rc != 0:
+                    _m4_rep = dict(_m4_rep)
+                _m4_rep["producer_rc"] = _m4_rc
             else:
                 _m4_rc, _m4_rep = _m4_dispatched
             _m4_gate_json = project / "reports/analog/mixed_signal/signoff_audit.json"

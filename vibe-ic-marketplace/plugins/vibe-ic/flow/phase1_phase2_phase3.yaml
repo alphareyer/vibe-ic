@@ -9724,7 +9724,16 @@ steps:
       - "phase3/mixed_signal/cosim/mixed_signal_results.json"
       - "reports/analog/mixed_signal/interface_si.json"
     gate:
+      # These clauses are independent evidence consumers. Run all of them
+      # after a producer refusal so one invocation records the complete M3
+      # blocking surface; `all_of` remains an AND and any refusal still fails.
+      all_of_eager: true
       all_of:
+        # The front door produces M3 once. This check-only invocation
+        # validates that receipt and its current outputs without producing a
+        # second set of evidence; the two independent gates below remain the
+        # behavioral verdicts.
+        - program_exit_zero: "mixed_signal_m3_run . --check-only --json reports/analog/mixed_signal/m3_native_audit.json"
         - program_exit_zero: "mixed_signal_cosim_check . --require-current-production --json reports/analog/mixed_signal/cosim_audit.json"
         - program_exit_zero: "mixed_signal_interface_si_check . --require-current-production --json reports/analog/mixed_signal/interface_si_audit.json"
     blocks_on: [M2]
@@ -9751,7 +9760,16 @@ steps:
     required_outputs:
       - "reports/analog/mixed_signal/signoff.json"
     gate:
-      program_exit_zero: "mixed_signal_signoff_check . --require-current-production --json reports/analog/mixed_signal/signoff_audit.json"
+      # The producer receipt and derived signoff are both blocking evidence
+      # sources. Preserve both refusals in one run while keeping AND
+      # semantics; do not apply eager evaluation to dependency chains.
+      all_of_eager: true
+      all_of:
+        # Validate the single M4 producer receipt before the final derived
+        # signoff gate. --check-only consumes current bytes; it does not run
+        # the producer a second time.
+        - program_exit_zero: "mixed_signal_signoff_run . --check-only --json reports/analog/mixed_signal/signoff_native_audit.json"
+        - program_exit_zero: "mixed_signal_signoff_check . --require-current-production --json reports/analog/mixed_signal/signoff_audit.json"
     blocks_on: [M3]
 
 

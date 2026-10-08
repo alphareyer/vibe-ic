@@ -13257,12 +13257,28 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # Wave 93 — preserve VACUOUS_HINT reasons from passing sub-gates so
         # the step-level handler can promote a step whose every executed
         # sub-gate was vacuously satisfied.
+        # Most all_of groups intentionally short-circuit: later checks often
+        # consume artifacts that an earlier producer must establish.  A small
+        # set of independent evidence groups (currently mixed-signal M3/M4)
+        # needs every clause to run even when the first producer receipt is
+        # bad, so the flow can publish the producer and consumer findings in
+        # one run.  This is explicit at the YAML gate (`all_of_eager: true`),
+        # and never changes the default dependency-aware behavior.
+        eager = gate.get("all_of_eager") is True
+        all_passed = True
         for _i, sub in enumerate(gate["all_of"]):
             if not isinstance(sub, dict):
                 continue
             p, r = _evaluate_gate(project, sub, skip_analog=skip_analog)
             if not p:
+                all_passed = False
                 reasons.extend(r)
+                if eager:
+                    # Every sibling is an independent blocking clause in an
+                    # eager group.  Keep its exact failure and continue; the
+                    # enclosing all_of remains false regardless of later
+                    # results, so this cannot turn a refusal into a pass.
+                    continue
                 # #306/#297 — the step has already failed, but the ADVISORY
                 # sub-gates still have something to say and this is the run
                 # where it matters most. Short-circuiting past them meant the
@@ -13387,7 +13403,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                     # make. `AWAITING_AGENT_PASS` was written into the taxonomy
                     # and was unreachable through the front door.
                     reasons.append(hint)
-        return True, reasons
+        return all_passed, reasons
 
     # `any_of` - list of sub-gates, any one passes
     if "any_of" in gate and isinstance(gate["any_of"], list):
