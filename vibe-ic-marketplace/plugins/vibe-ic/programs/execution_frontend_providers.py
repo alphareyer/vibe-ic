@@ -490,8 +490,16 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                 # Controller runs every component in the arm output root. All
                 # relative command paths therefore resolve there; the explicit
                 # '.' project operand becomes the issued {outputs} path.
-                argv = ('python3', str(source_path.with_name(gate + '.py')),
-                        *(('{outputs}' if part == '.' else part) for part in parts[1:]))
+                if gate == 'vacuous_testbench_check':
+                    # Its rc2 is a typed NOT_APPLICABLE result. The Controller
+                    # requires component rc0, so the Step4 bridge preserves
+                    # the report and translates only that disclosed tier.
+                    argv = ('python3', str(source_path.with_name('execution_step4.py')),
+                            '--gate', gate,
+                            *(('{outputs}' if part == '.' else part) for part in parts[1:]))
+                else:
+                    argv = ('python3', str(source_path.with_name(gate + '.py')),
+                            *(('{outputs}' if part == '.' else part) for part in parts[1:]))
                 gate_components.append(Component(gate, argv, timeout_s=120))
             for simulator, engine in (('icarus', 'iverilog'), ('verilator', 'verilator')):
                 entry = str(source_path.with_name('execution_step4_' + simulator + '.py'))

@@ -62,6 +62,19 @@ def test_step4_zero_skip_denominator_blocks_native_run(tmp_path, monkeypatch):
     assert result['rc'] == 0
     assert result['verdict'] == 'FAIL'
 
+
+def test_step4_vacuous_not_applicable_rc2_is_translated_only_with_typed_report(tmp_path):
+    import subprocess
+    import sys
+    import execution_step4 as step4
+    report = tmp_path / 'reports' / 'vacuous.json'
+    cp = subprocess.run(
+        [sys.executable, str(Path(step4.__file__)), '--gate',
+         'vacuous_testbench_check', '.', '--json', str(report.relative_to(tmp_path))],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert json.loads(report.read_text())['verdict'] == 'NOT_APPLICABLE'
+
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'
 

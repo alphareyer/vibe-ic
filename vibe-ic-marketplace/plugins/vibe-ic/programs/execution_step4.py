@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
@@ -180,10 +181,47 @@ def produce(project, output, simulator, **parameters):
 
 def main(simulator):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--inputs', required=True)
-    parser.add_argument('--outputs', required=True)
+    parser.add_argument('--gate')
+    parser.add_argument('--inputs')
+    parser.add_argument('--outputs')
+    parser.add_argument('gate_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.gate:
+        if args.gate != 'vacuous_testbench_check':
+            raise SystemExit('unsupported Step 4 gate bridge')
+        raise SystemExit(run_gate(args.gate, args.gate_args))
+    if not args.inputs or not args.outputs:
+        parser.error('--inputs and --outputs are required for a simulator arm')
     produce(args.inputs, args.outputs, simulator)
+
+
+def run_gate(gate, argv):
+    """Run a declared Step 4 gate, translating only typed N/A rc2.
+
+    The Controller treats a component's nonzero rc as PROCESS_ERROR, while
+    ``vacuous_testbench_check`` uses rc2 for its explicit, report-backed
+    ``NOT_APPLICABLE`` tier. Keep that tier visible in the report and make the
+    process seam agree with the canonical consumer. A crash/IO_ERROR or a
+    measured FAIL keeps its original nonzero status.
+    """
+    script = Path(__file__).with_name(gate + '.py')
+    cp = subprocess.run([sys.executable, str(script), *argv],
+                        cwd=Path.cwd(), capture_output=True, text=True)
+    if cp.stdout:
+        print(cp.stdout, end='')
+    if cp.stderr:
+        print(cp.stderr, end='', file=sys.stderr)
+    if cp.returncode != 2 or gate != 'vacuous_testbench_check':
+        return cp.returncode
+    try:
+        report_arg = argv.index('--json') + 1
+        report = Path(argv[report_arg])
+        if not report.is_absolute():
+            report = Path.cwd() / report
+        document = json.loads(report.read_text())
+    except (ValueError, IndexError, OSError, TypeError, json.JSONDecodeError):
+        return cp.returncode
+    return 0 if document.get('verdict') == 'NOT_APPLICABLE' else cp.returncode
 
 
 def gate_commands(contract):
@@ -249,3 +287,9 @@ def validate(project, facts, gate_names):
         verdict = 'NOT_MEASURED'
     return em.Evidence(facts, verdict, gates, outputs, metrics={'source_boundary': 1.0},
                        detail='Step4 canonical consumers: ' + '; '.join(canonical.reasons))
+
+
+if __name__ == '__main__':
+    # The normal producer entry points are the fixed Icarus/Verilator modules;
+    # direct execution is reserved for the typed gate bridge above.
+    main(None)
