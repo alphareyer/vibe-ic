@@ -498,8 +498,8 @@ def _producer_ram_mb(spec: Mapping[str, object], params: Mapping[str, object]) -
 def _producer_cpus(spec: Mapping[str, object], params: Mapping[str, object]) -> int:
     """Return the row-owned CPU admission bound, defaulting to one."""
     policy = spec.get("_portfolio_policy", spec.get("portfolio_policy", {}))
-    configured = policy.get("producer_cpus") if isinstance(policy, Mapping) else None
-    raw = 1 if configured is None else configured
+    has_value = isinstance(policy, Mapping) and "producer_cpus" in policy
+    raw = policy["producer_cpus"] if has_value else 1
     if isinstance(raw, bool) or type(raw) is not int or raw <= 0:
         raise em.Refusal("BACKEND_PRODUCER_CPUS_INVALID", repr(raw))
     return raw
