@@ -362,10 +362,11 @@ def test_05ic_public_controller_eligible_and_adopted(tmp_path):
     ('DIE', 'SELF_TAPEOUT.txt'),
     ('HARDMACRO', 'NO_TEMPLATE.txt'),
 ])
-def test_05ic_declared_absence_routes_public_production_and_refuses_na_gate(
+def test_05ic_declared_absence_routes_public_production_and_adopts_with_typed_na_gate(
         tmp_path, deliverable, marker):
-    """Both canonical absence routes run both producers and retain NA semantics."""
+    """Both absence routes retain typed NA evidence and adopt only when bound."""
     import hashlib, subprocess
+    from dataclasses import replace
     project=tmp_path/'project'; (project/'input').mkdir(parents=True)
     fixture=Path(__file__).parent/'fixtures/r0929_dieid_basis_self_tapeout_die/input/step_0_5ic_answers.json'
     answers=json.loads(fixture.read_text())
@@ -383,23 +384,34 @@ def test_05ic_declared_absence_routes_public_production_and_refuses_na_gate(
     reason=answers['operator_template']['absent_reason']
     ctx=issued_context(em.Context('0.5ic',sha,{'input/step_0_5ic_answers.json':answers_path},
                    {'template':'input/submission_template_source',
-                    'no_template_reason':reason},
+                    'no_template_reason':reason,
+                    'metric':'source_boundary'},
                    tuple(row['mandatory_gate_programs'])), project)
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
     result=controller.run(ctx,run)
-    assert result['candidate_statuses']['frontend_0_5ic']=='NOT_MEASURED'
+    assert result['candidate_statuses']['frontend_0_5ic']=='ELIGIBLE'
     receipt=json.loads((run/'frontend_0_5ic/receipt.json').read_text())
-    assert receipt['reason']=='GATE_NOT_MEASURED'
+    assert receipt['reason']=='ADAPTER_EVIDENCE'
+    assert receipt['evidence']['verdict']=='PASS'
+    assert receipt['binding']['objective']=={
+        'template':'input/submission_template_source',
+        'no_template_reason':reason,
+        'metric':'source_boundary'}
     assert receipt['evidence']['gates']=={
-        'submission_template_check':'NOT_MEASURED',
+        'submission_template_check':'NOT_APPLICABLE',
         'tapeout_declaration_check':'PASS'}
     assert f'input/submission_template/{marker}' in receipt['evidence']['outputs']
     choice={'arm_id':'frontend_0_5ic',
             'receipt_sha256':em.digest(run/'frontend_0_5ic/receipt.json'),
             'rationale':'declared absence was executed and retained as not applicable',
             'reviewer':'test', 'binding':ctx.binding()}
-    with __import__('pytest').raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
-        controller.adopt(ctx,run,choice)
+    assert receipt['producer_chain'] == receipt['evidence']['provenance']['producer_chain']
+    assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
+    missing_metric=replace(ctx, objective={k:v for k,v in ctx.objective.items()
+                                            if k != 'metric'})
+    with __import__('pytest').raises(em.Refusal):
+        controller.adopt(missing_metric,run,choice)
+    assert json.loads((run/'adoption.json').read_text())['status']=='ADOPTED'
 
 @__import__('pytest').mark.parametrize('row,required', [
     ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
@@ -477,6 +489,10 @@ def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
     with __import__('pytest').raises(ValueError):
         w.produce_05ic(tmp_path, tmp_path/'out', template='P',
                        no_template_reason='a declared absence with a searched path')
+    assert calls == []
+    with __import__('pytest').raises(ValueError, match='no_template_reason'):
+        w.produce_05ic(tmp_path, tmp_path/'out', template='input/template',
+                       no_template_reason='')
     assert calls == []
 
 def test_05ic_real_producers_order_and_outputs(tmp_path, monkeypatch):
