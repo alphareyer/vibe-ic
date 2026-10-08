@@ -355,7 +355,12 @@ def _read_step15_bounded_state(project):
     native = verify(record.get('native_state'), 'BACKEND_STEP15_STATE')
     pdn = verify(record.get('pdn_state'), 'BACKEND_STEP15_PDN_STATE')
     handoff = verify(record.get('handoff'), 'LL_HANDOFF')
-    raw = json.loads(handoff.read_text())
+    try:
+        raw = json.loads(handoff.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise em.Refusal('LL_HANDOFF_ABSENT', str(handoff)) from exc
+    if not isinstance(raw, dict):
+        raise em.Refusal('LL_HANDOFF_ABSENT', str(handoff))
     raw_views = raw.get('views')
     if not isinstance(raw_views, dict):
         raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
@@ -366,12 +371,19 @@ def _read_step15_bounded_state(project):
         raise em.Refusal('LL_HANDOFF_STATE_CHANGED', str(handoff))
     views = {name: verify(info, 'LL_HANDOFF_VIEW')
              for name, info in record.get('views', {}).items()}
+    canonical_views = {
+        'def': Path(PNR) / 'floorplan.def',
+        'odb': Path(PNR) / 'librelane_floorplan.odb',
+    }
     for name in ('def', 'odb'):
+        published = (record.get('views') or {}).get(name, {})
+        if Path(published.get('path', '')) != canonical_views[name]:
+            raise em.Refusal('LL_HANDOFF_VIEW_CHANGED', name)
         info = raw_views.get(name, {})
-        published = (record.get('handoff_views') or {}).get(name, {})
+        handoff_view = (record.get('handoff_views') or {}).get(name, {})
         if (name not in views or info.get('source_sha256') != snap.sha(views[name])
                 or info.get('dest_sha256') != snap.sha(views[name])
-                or info != published):
+                or info != handoff_view):
             raise em.Refusal('LL_HANDOFF_VIEW_CHANGED', name)
     marker = json.loads(_require(project / PNR / 'pdn.done').read_text())
     pdn_info = record.get('pdn_state') or {}
