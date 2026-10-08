@@ -407,13 +407,18 @@ def test_05ic_declared_absence_routes_public_production_and_adopts_with_typed_na
             'reviewer':'test', 'binding':ctx.binding()}
     assert receipt['producer_chain'] == receipt['evidence']['provenance']['producer_chain']
     assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
+    # This is a stale-choice binding mutation control. It must refuse before
+    # any fresh eligibility/adoption consumer can treat the missing metric as
+    # a valid absence route.
     missing_metric=replace(ctx, objective={k:v for k,v in ctx.objective.items()
                                             if k != 'metric'})
-    with __import__('pytest').raises(em.Refusal):
+    with __import__('pytest').raises(em.Refusal) as refused:
         controller.adopt(missing_metric,run,choice)
+    assert refused.value.code == 'AI_CHOICE_UNBOUND'
     refused=json.loads((run/'adoption.json').read_text())
     assert refused['status']=='REFUSED'
     assert refused['selected'] is None
+    assert refused['reason']=='AI_CHOICE_UNBOUND'
 
 @__import__('pytest').mark.parametrize('row,required', [
     ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
