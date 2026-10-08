@@ -69,6 +69,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import json
 from typing import Optional, Sequence
 
 import sys
@@ -206,7 +207,41 @@ def _unguarded_exec_argv(container: str, *rest: str,
     writing this: routing `container_deadline_argv` through the guard turned the
     landed rc-125 refusal into an exception.
     """
-    return ["docker", "exec", *opts, container, *rest]
+    if os.environ.get("VIBEIC_A4_FRESH_PROBES") != "1":
+        return ["docker", "exec", *opts, container, *rest]
+    # Fleet policy: keep the selected image and bind mounts, and run each
+    # probe in a fresh container. The canonical A4 corner launcher is unchanged.
+    inspected = subprocess.run(
+        ["docker", "inspect", container], capture_output=True, text=True,
+        check=True)
+    selected = json.loads(inspected.stdout)[0]
+    config = selected["Config"]
+    limits = selected["HostConfig"]
+    image = selected["Image"]
+    memory = limits.get("Memory")
+    if not isinstance(memory, int) or memory <= 0:
+        raise ValueError("fresh probe requires a declared memory ceiling")
+    allowed = {"-w", "--workdir", "-e", "--env", "-u", "--user"}
+    index = 0
+    while index < len(opts):
+        if opts[index] not in allowed or index + 1 >= len(opts):
+            raise ValueError("unsupported fresh-probe option")
+        index += 2
+    argv = ["docker", "run", "--rm", "--init", "--memory", str(memory),
+            "--memory-swap", str(memory), "--label", "vibeic.a4.probe=1"]
+    for mount in selected.get("Mounts", []):
+        if mount.get("Type") != "bind":
+            raise ValueError("fresh probe requires explicit bind mounts")
+        spec = mount["Source"] + ":" + mount["Destination"]
+        argv += ["-v", spec + ("" if mount.get("RW") else ":ro")]
+    for value in config.get("Env", []):
+        argv += ["-e", value]
+    argv += ["-e", "IIC_OSIC_TOOLS_QUIET=1"]
+    if config.get("WorkingDir"):
+        argv += ["-w", config["WorkingDir"]]
+    if config.get("User"):
+        argv += ["-u", config["User"]]
+    return [*argv, *opts, image, "--skip", *rest]
 
 
 # ---------------------------------------------------------------------------
