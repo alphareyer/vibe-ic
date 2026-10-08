@@ -398,6 +398,7 @@ def test_backend_checkpoint_closure_carries_issued_provenance_step8_and_constrai
         "reports/phase2/sdc_check.json",
         "reports/lec.json",
         "reports/lec.rpt",
+        "reports/analog/stage_analog_compliance.json",
         "reports/phase3/sta/pre_pnr_summary.json",
         "phase3/stage3/sta/pre_pnr_timing.rpt",
         "phase3/stage3/sta/prelayout_per_corner/sta_FF.rpt",
