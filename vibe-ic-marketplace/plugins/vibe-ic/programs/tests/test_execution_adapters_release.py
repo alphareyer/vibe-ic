@@ -61,6 +61,10 @@ def _canonical_issued_transport(monkeypatch):
 def _issued_context(step_id, inputs, tmp_path, *, native_mode='librelane'):
     payload = receipt_chain.real_entry('IC', 'default', tmp_path)
     route = payload['route']
+    return _context_for_route(step_id, inputs, route, native_mode=native_mode), route
+
+
+def _context_for_route(step_id, inputs, route, *, native_mode='librelane'):
     portfolio_row = next(row for row in em.load_portfolio()['steps']
                          if str(row['id']) == str(step_id))
     context = em.Context(
@@ -69,7 +73,7 @@ def _issued_context(step_id, inputs, tmp_path, *, native_mode='librelane'):
         tuple(portfolio_row["mandatory_gate_programs"]), native_mode,
         project_digest=route['project_digest'],
         **policy.controller_fields(ic_ip_path='IC', route_receipt=route))
-    return context, route
+    return context
 
 
 def _spec(step):
@@ -175,25 +179,35 @@ def test_375ip_worker_calls_declared_hardmacro_producer_and_stays_unmeasured(tmp
 
 
 def test_current_source_bound_fixture_reaches_eligible_controller_arm(tmp_path):
-    # Step 16 is a source-owned software producer/gate pair.  This explicit
-    # fixture contains only a DEF and a declared SDC clock; it is not a
-    # historical tapeout bundle and carries its exact input binding through
-    # the public Controller.
-    floorplan = tmp_path / "floorplan.def"
-    floorplan.write_text("VERSION 5.8 ;\n")
-    sdc = tmp_path / "clock.sdc"
+    # Step 16 is a source-owned native producer/gate pair.  This is the small
+    # complete clock-plan fixture also used by the backend dispatch controls:
+    # a real clock-pin DEF, declared SDC and the design's PDK target.  It is a
+    # source-bound fixture, not an actual IC/tapeout deliverable.
+    floorplan = tmp_path / "phase3/stage3/pnr/floorplan.def"
+    floorplan.parent.mkdir(parents=True)
+    floorplan.write_text(
+        'VERSION 5.8 ;\nDIVIDERCHAR "/" ;\nBUSBITCHARS "[]" ;\n'
+        'DESIGN neutral ;\nUNITS DISTANCE MICRONS 1000 ;\n'
+        'DIEAREA ( 0 0 ) ( 100000 100000 ) ;\n'
+        'PINS 1 ;\n- clk + NET clk + DIRECTION INPUT + USE CLOCK\n'
+        '  + PORT + LAYER met1 ( -100 -100 ) ( 100 100 ) + FIXED ( 0 50000 ) N ;\n'
+        'END PINS\nNETS 1 ;\n- clk ( PIN clk ) ;\nEND NETS\nEND DESIGN\n')
+    sdc = tmp_path / "phase2/stage2/constraints/clock.sdc"
+    sdc.parent.mkdir(parents=True)
     sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
-    context, route = _issued_context(
-        "16",
-        {
-            "project/phase3/stage3/pnr/floorplan.def": floorplan,
-            "project/phase2/stage2/constraints/clock.sdc": sdc,
-        },
-        tmp_path)
+    pdk = tmp_path / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json"
+    pdk.parent.mkdir(parents=True)
+    pdk.write_text(json.dumps({"fields": {"pdk_target": "sky130A"}}))
+    payload = receipt_chain.real_entry('IC', 'default', tmp_path)
+    route = payload['route']
     declaration = json.loads((tmp_path / "input/step_0_5ic_answers.json").read_text())
     registry = register_release_adapters(
         em.Registry(), source_sha=BASE, available=True,
         route_receipt=route, declaration=declaration)
+    fixed = policy._fixed_inputs({"project": tmp_path, "registry": registry}, "16")
+    assert fixed["phase1/generated_docs/L19_CONSTRAINTS_PDK.json"] == pdk
+    context = _context_for_route(
+        "16", {f"project/{name}": path for name, path in fixed.items()}, route)
     adapter = registry.adapters("16")[0]
     controller = em.Controller(
         registry, em.Budget(cpus=adapter.cpus, ram_mb=adapter.ram_mb, workers=1))
@@ -207,6 +221,41 @@ def test_current_source_bound_fixture_reaches_eligible_controller_arm(tmp_path):
     assert receipt["evidence"]["gates"]["clock_plan_check"] == "PASS"
     assert (root / "release_16" / "outputs" /
             "phase3/stage3/cts/clock_plan.json").is_file()
+
+
+def test_step16_fixed_inputs_bind_current_pdk_declaration_or_refuse_absence(tmp_path):
+    """The release worker receives current PDK declaration bytes via the normal collector."""
+    floorplan = tmp_path / "phase3/stage3/pnr/floorplan.def"
+    floorplan.parent.mkdir(parents=True)
+    floorplan.write_text("VERSION 5.8 ;\n")
+    sdc = tmp_path / "phase2/stage2/constraints/clock.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -name clk -period 10 [get_ports clk]\n")
+    pdk = tmp_path / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json"
+    pdk.parent.mkdir(parents=True)
+    pdk.write_text(json.dumps({"fields": {"pdk_target": "sky130A"}}))
+    registry = register_release_adapters(
+        em.Registry(), source_sha=BASE, available=True,
+        step_ids=("16",))
+    adapter = registry.adapters("16")[0]
+    from execution_backend_worker import resolve_input_contract
+    fixed = policy._fixed_inputs({"project": tmp_path, "registry": registry}, "16")
+    assert fixed["phase1/generated_docs/L19_CONSTRAINTS_PDK.json"] == pdk
+    assert resolve_input_contract(tmp_path, adapter.input_contract) == []
+
+    pdk.unlink()
+    fixed_missing = policy._fixed_inputs({"project": tmp_path, "registry": registry}, "16")
+    assert "phase1/generated_docs/L19_CONSTRAINTS_PDK.json" not in fixed_missing
+    assert resolve_input_contract(tmp_path, adapter.input_contract) == [
+        "reports/phase1/pdk_staging_read.json OR phase1/generated_docs/L19_CONSTRAINTS_PDK.json"
+    ]
+
+    staging = tmp_path / "reports/phase1/pdk_staging_read.json"
+    staging.parent.mkdir(parents=True)
+    staging.write_text(json.dumps({"adopted_pdk_target": "sky130A"}))
+    fixed_staging = policy._fixed_inputs({"project": tmp_path, "registry": registry}, "16")
+    assert fixed_staging["reports/phase1/pdk_staging_read.json"] == staging
+    assert resolve_input_contract(tmp_path, adapter.input_contract) == []
 
 
 def test_hardmacro_receipt_reverse_controls_keep_fail_and_refuse_fallback():
