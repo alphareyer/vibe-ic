@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,47 @@ def test_manifest_accepts_numeric_upstream_step_declaration():
         }],
         "files": {}, "missing": [],
     })
+
+
+def test_backend_manifest_transport_rebinds_and_restores_component_argv():
+    @dataclass(frozen=True)
+    class FakeComponent:
+        argv: tuple[str, ...]
+
+    @dataclass(frozen=True)
+    class FakeArm:
+        arm_id: str
+        components: tuple[FakeComponent, ...]
+
+    original_argv = (
+        "/usr/bin/python3", "execution_backend_worker.py", "{inputs}",
+        "{outputs}", "--step-id", "15", "--params-json",
+        json.dumps({"pdk_name": "gf180mcuD"}, sort_keys=True),
+    )
+    arm = FakeArm("backend_15", (FakeComponent(original_argv),))
+
+    class FakeRegistry:
+        def __init__(self):
+            self._adapters = {arm.arm_id: arm}
+
+        def adapters(self, step_id):
+            return [self._adapters[arm.arm_id]] if str(step_id) == "15" else []
+
+    registry = FakeRegistry()
+    runtime = {"registry": registry}
+    manifest = {
+        "declarations": [{"from": 12, "path": "phase2/stage2/synth/netlist.v"}],
+        "files": {"phase2/stage2/synth/netlist.v": "a" * 64},
+        "missing": [],
+    }
+
+    with policy._backend_manifest_parameters(runtime, "15", manifest):
+        current = registry.adapters("15")[0].components[0].argv
+        encoded = json.loads(current[current.index("--params-json") + 1])
+        assert encoded["resolved_input_manifest"] == manifest
+        assert encoded["resolved_input_manifest"]["declarations"][0]["from"] == 12
+
+    assert registry.adapters("15")[0].components[0].argv == original_argv
 
 
 def test_directory_declaration_requires_nonempty_contained_file(tmp_path):
