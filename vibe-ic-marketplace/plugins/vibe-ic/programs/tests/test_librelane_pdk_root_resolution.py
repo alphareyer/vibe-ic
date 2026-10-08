@@ -37,10 +37,10 @@ PROVENANCE_REL = getattr(contract, 'PDK_ROOT_PROVENANCE_REL',
                          'phase3/librelane_pdk_root.provenance.json')
 
 
-def resolution(project, pdk=None):
+def resolution(project, pdk=None, **kwargs):
     """`pdk_root_resolution`; on a contract without it, the old resolver's answer."""
     if hasattr(contract, 'pdk_root_resolution'):
-        return contract.pdk_root_resolution(project, pdk)
+        return contract.pdk_root_resolution(project, pdk, **kwargs)
     path = contract.resolve_pdk_root(project)
     if not path:
         raise contract.Refusal('LL_PDK_ROOT_NOT_DECLARED', 'pre-F14 resolver')
@@ -95,6 +95,10 @@ class FakeDocker:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """The stated world: an image carrying `stated_pdk` under GUEST_ROOT."""
+    # These fakes exercise the container-backed resolver.  Pin the route so
+    # the result does not depend on whether the test image happens to contain
+    # a docker client; native-handoff controls below explicitly pin LOCAL.
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.setenv(CACHE_ENV, str(tmp_path / 'cache'))
@@ -129,6 +133,79 @@ def test_declared_env_wins_over_the_image(env, monkeypatch):
     assert (answer['path'], answer['declared_by']) == ('/declared/by/env',
                                                        'env VIBEIC_LIBRELANE_PDK_ROOT')
     assert env.fake.calls == []
+
+
+def test_ordinary_declared_root_survives_native_probe_without_handoff(env, monkeypatch):
+    """The image-root rule is scoped to the production handoff seam."""
+    foreign_root = env.tmp / 'foreign-cache'
+    foreign_root.mkdir()
+    _switch(env.project, pdk_root_host=str(foreign_root))
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
+
+    answer = resolution(env.project, 'stated_pdk')
+    assert answer['path'] == str(foreign_root)
+    assert answer['source'] == 'declared'
+
+
+def test_native_handoff_uses_attested_image_root_and_container_keeps_declared(
+        env, monkeypatch):
+    image_root = env.tmp / 'image-pdks'
+    (image_root / 'stated_pdk').mkdir(parents=True)
+    foreign_root = env.tmp / 'foreign-cache'
+    foreign_root.mkdir()
+    _switch(env.project, image=env.image, pdk_root_host=str(foreign_root))
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(contract, 'local_image_attestation',
+                        lambda _image: {'image': env.image, 'image_id': IMAGE_ID,
+                                        'repo_digests': [env.image]})
+    monkeypatch.setenv('PDK_ROOT', str(image_root))
+
+    local = resolution(env.project, 'stated_pdk', native_handoff=True)
+    assert local['path'] == str(image_root)
+    assert local['source'] == 'resolved'
+    assert local['derivation']['cache'] == 'native'
+
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: False)
+    container = resolution(env.project, 'stated_pdk', native_handoff=True)
+    assert container['path'] == str(foreign_root)
+    assert container['source'] == 'declared'
+
+
+@pytest.mark.parametrize('route_key', ['execution_route', 'provider_route'])
+def test_native_handoff_refuses_explicit_remote_without_container(env, monkeypatch,
+                                                                   route_key):
+    foreign_root = env.tmp / 'foreign-cache'
+    foreign_root.mkdir()
+    _switch(env.project, image=env.image, pdk_root_host=str(foreign_root),
+            **{route_key: 'REMOTE'})
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(contract, 'local_image_attestation',
+                        lambda _image: pytest.fail(
+                            'REMOTE native route must refuse before image resolution'))
+
+    with pytest.raises(contract.Refusal, match='LL_LOCAL_REMOTE_MISMATCH'):
+        resolution(env.project, 'stated_pdk', native_handoff=True)
+
+
+def test_production_host_pdk_marks_the_native_handoff(monkeypatch, tmp_path):
+    import execution_production as production
+
+    root = tmp_path / 'root'
+    (root / 'stated_pdk').mkdir(parents=True)
+    seen = {}
+
+    def resolve(project, pdk, *, image=None, native_handoff=False, **_kw):
+        seen.update(project=project, pdk=pdk, image=image,
+                    native_handoff=native_handoff)
+        return {'path': str(root)}
+
+    monkeypatch.setattr(production, '_regular', lambda path: False)
+    monkeypatch.setattr(contract, 'pdk_root_resolution', resolve)
+    pdk = type('Pdk', (), {'name': 'stated_pdk'})()
+
+    result = production._host_pdk(tmp_path, pdk, 'sha256:' + 'ab' * 32)
+    assert result['pdk_root_host'] == str((root / 'stated_pdk').resolve())
+    assert seen['native_handoff'] is True
 
 
 # ------------------------------------------------------------ resolution ---

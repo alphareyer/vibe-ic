@@ -201,7 +201,7 @@ def _host_pdk(project: Path, pdk: object, image_id: str) -> dict:
         try:
             import librelane_contract
             resolved = librelane_contract.pdk_root_resolution(
-                project, name, image=image_id)
+                project, name, image=image_id, native_handoff=True)
             parent = Path(str(resolved["path"]))
             candidate = parent / name
             if candidate.is_dir():
