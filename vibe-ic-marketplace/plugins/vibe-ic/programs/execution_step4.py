@@ -126,6 +126,24 @@ def coverage_hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def staged_rtl(project):
+    """Return the nonempty, regular RTL population in the staged arm."""
+    root = Path(project).resolve()
+    rtl = sorted(root.joinpath('phase2/stage1/rtl').rglob('*.v'))
+    rtl += sorted(root.joinpath('phase2/stage1/rtl').rglob('*.sv'))
+    if not rtl:
+        raise ValueError('4: staged RTL population is empty')
+    for path in rtl:
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f'4: staged RTL file is unavailable: {path}') from exc
+        if (path.is_symlink() or not path.is_file() or
+                not resolved.is_relative_to(root)):
+            raise ValueError(f'4: staged RTL file is outside the arm: {path}')
+    return rtl
+
+
 def produce(project, output, simulator, **parameters):
     project, bound = stage(Path(project), Path(output))
     top = bound.get('top') or parameters.get('top')
@@ -137,9 +155,8 @@ def produce(project, output, simulator, **parameters):
         generated = professional_tb_gen.generate(project)
         if generated.get('status') != 'PASS':
             raise ValueError('4: professional bundle unavailable')
-    rtl = sorted((project / 'phase2/stage1/rtl').rglob('*.v'))
-    rtl += sorted((project / 'phase2/stage1/rtl').rglob('*.sv'))
-    functional = _simulate(bundle, simulator)
+    rtl = staged_rtl(project)
+    functional = _simulate(bundle, simulator, rtl=rtl)
     # Publish the same arm's actual JUnit bytes at the normal consumer seam.
     # A view is not a second measurement; the source transcript remains bound.
     primary_junit = Path(functional['junit'])

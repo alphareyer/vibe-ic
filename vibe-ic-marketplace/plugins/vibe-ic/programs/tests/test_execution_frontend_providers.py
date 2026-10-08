@@ -75,6 +75,49 @@ def test_step4_vacuous_not_applicable_rc2_is_translated_only_with_typed_report(t
     assert cp.returncode == 0, cp.stdout + cp.stderr
     assert json.loads(report.read_text())['verdict'] == 'NOT_APPLICABLE'
 
+
+def test_step4_functional_argv_overrides_outside_makefile_sources(tmp_path, monkeypatch):
+    import subprocess
+    import execution_step4 as step4
+    project = tmp_path / 'inputs'
+    rtl = project / 'phase2' / 'stage1' / 'rtl' / 'top.v'
+    makefile = project / 'phase2' / 'stage1' / 'sim_professional' / 'top' / 'Makefile'
+    rtl.parent.mkdir(parents=True)
+    makefile.parent.mkdir(parents=True)
+    rtl.write_text('module top; endmodule\n')
+    makefile.write_text('VERILOG_SOURCES := /outside/project/rtl.v\n')
+    import hashlib
+    files = {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in (rtl, makefile)}
+    (project / 'input').mkdir()
+    (project / 'input' / 'issued_manifest.json').write_text(json.dumps(
+        {'step_id': '4', 'parameters': {'top': 'top'}, 'files': files}))
+    output = tmp_path / 'outputs'
+    invoked = []
+
+    def run(argv, **kwargs):
+        invoked.append(list(argv))
+        junit = next(Path(arg.split('=', 1)[1]) for arg in argv
+                     if arg.startswith('COCOTB_RESULTS_FILE='))
+        junit.parent.mkdir(parents=True, exist_ok=True)
+        junit.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                         '<testcase name="native"/></testsuite>')
+        return subprocess.CompletedProcess(argv, 0, 'PROFESSIONAL_TB PASS', '')
+
+    monkeypatch.setattr(step4.subprocess, 'run', run)
+    monkeypatch.setattr(step4, 'measure_bundle', lambda *args, **kwargs:
+                        {'verdict': 'NOT_MEASURED', 'reason': 'focused control'})
+    step4.produce(project, output, 'icarus')
+    sources = next(arg for arg in invoked[0] if arg.startswith('VERILOG_SOURCES='))
+    assert sources.split('=', 1)[1].split() == [str(output / 'phase2/stage1/rtl/top.v')]
+    assert '/outside/project/rtl.v' not in sources
+
+
+def test_step4_refuses_empty_staged_rtl(tmp_path):
+    import execution_step4 as step4
+    with __import__('pytest').raises(ValueError, match='staged RTL population is empty'):
+        step4.staged_rtl(tmp_path)
+
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'
 
