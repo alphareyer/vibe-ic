@@ -280,6 +280,7 @@ def _python_module(name: str, search: list[Path], package: str = '',
     local extension modules and unresolved local dotted names fail closed.
     External modules belong to the separately pinned interpreter/image.
     """
+    requested_name = name
     if level:
         parts = package.split('.') if package else []
         if level > len(parts):
@@ -287,9 +288,22 @@ def _python_module(name: str, search: list[Path], package: str = '',
         name = '.'.join(parts[:len(parts) - level + 1] + ([name] if name else []))
     if not name or any(not part.isidentifier() for part in name.split('.')):
         raise ValueError(f'unresolved Python module: {name}')
+    try:
+        from execution_source_snapshot import active
+        snapshot = active()
+    except ImportError:
+        snapshot = None
+    if snapshot is not None:
+        lookup_key = ('provider-python-module', requested_name, package, level,
+                      tuple(str(path.absolute()) for path in search), name)
+        hit, cached = snapshot.module_lookup_get(lookup_key)
+        if hit:
+            return [tuple(row) for row in cached]
     from importlib.machinery import BuiltinImporter, FrozenImporter, EXTENSION_SUFFIXES
     top = name.split('.')[0]
     if BuiltinImporter.find_spec(top) is not None or FrozenImporter.find_spec(top) is not None:
+        if snapshot is not None:
+            snapshot.module_lookup_put(lookup_key, ())
         return []
     trusted = _python_trusted_roots()
     directories = search
@@ -301,33 +315,60 @@ def _python_module(name: str, search: list[Path], package: str = '',
         suffixes = [*EXTENSION_SUFFIXES, '.py', '.pyc']
         for directory in directories:
             package_dir = directory / part
-            if package_dir.is_dir():
+            if snapshot is not None:
+                package_state = snapshot.import_candidate(package_dir)
+                package_is_dir = package_state[4]
+            else:
+                package_is_dir = package_dir.is_dir()
+            if package_is_dir:
                 namespace = True
                 for suffix in suffixes:
                     candidate = package_dir / ('__init__' + suffix)
-                    if candidate.is_file():
+                    if snapshot is not None:
+                        candidate_state = snapshot.import_candidate(candidate)
+                        candidate_is_file = candidate_state[2]
+                    else:
+                        candidate_is_file = candidate.is_file()
+                    if candidate_is_file:
                         target = candidate; is_package = True; break
             if target is None:
                 for suffix in suffixes:
                     candidate = directory / (part + suffix)
-                    if candidate.is_file():
+                    if snapshot is not None:
+                        candidate_state = snapshot.import_candidate(candidate)
+                        candidate_is_file = candidate_state[2]
+                    else:
+                        candidate_is_file = candidate.is_file()
+                    if candidate_is_file:
                         target = candidate; break
             if target is not None:
                 break
         if target is None:
             if result or namespace:
                 raise ValueError(f'incomplete or namespace Python package: {name}')
+            if snapshot is not None:
+                snapshot.module_lookup_put(lookup_key, ())
             return []
-        resolved_target = target.resolve()
+        if snapshot is not None:
+            target_state = snapshot.import_candidate(target)
+            resolved_target = target_state[3]
+        else:
+            resolved_target = target.resolve()
         if not result and any(resolved_target.is_relative_to(root) for root in trusted):
+            if snapshot is not None:
+                snapshot.module_lookup_put(lookup_key, ())
             return []
-        if target.is_symlink() or target.suffix != '.py':
+        if (target_state[1] if snapshot is not None else target.is_symlink()) or target.suffix != '.py':
             raise ValueError(f'unsupported local Python module: {name}')
         owner = '.'.join(prefix) if is_package else '.'.join(prefix[:-1])
         result.append((resolved_target, owner))
         if not is_package and index < len(parts) - 1:
             raise ValueError(f'non-package dotted Python module: {name}')
         directories = [target.parent] if is_package else []
+    if snapshot is not None:
+        for path, _owner in result:
+            snapshot.read_bytes(path)
+        snapshot.module_lookup_put(lookup_key, result)
     return result
 
 

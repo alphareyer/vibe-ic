@@ -7,6 +7,7 @@ import pytest
 
 import execution_modes as em
 from execution_source_snapshot import SourceSnapshot, using
+from execution_provider_catalog import _python_module
 from programs.tests import test_execution_modes as H
 
 
@@ -173,3 +174,136 @@ def test_catalog_import_resolution_without_snapshot_remains_live(tmp_path):
     helper = tmp_path / 'snapshot_fresh_local_module.py'
     helper.write_text('value = 1\n')
     assert catalog._local_imports(str(entry), text) == (helper,)
+
+
+def test_snapshot_module_lookup_caches_ordered_positive_and_negative_identity(tmp_path):
+    first = tmp_path / 'first'; second = tmp_path / 'second'
+    first.mkdir(); second.mkdir()
+    (first / 'worker.py').write_text('value = "first"\n')
+    (second / 'worker.py').write_text('value = "second"\n')
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    with using(snapshot):
+        assert _python_module('worker', [first, second])[0][0] == (first / 'worker.py').resolve()
+        # The same request is a cache hit, while changing ordered search roots
+        # is a distinct lookup and preserves first-match semantics.
+        assert _python_module('worker', [first, second])[0][0] == (first / 'worker.py').resolve()
+        assert _python_module('worker', [second, first])[0][0] == (second / 'worker.py').resolve()
+        # Relative package/level arguments remain part of the lookup identity.
+        package = first / 'pkg'; package.mkdir()
+        (package / '__init__.py').write_text('value = 1\n')
+        (package / 'worker.py').write_text('value = 2\n')
+        assert _python_module('worker', [first], package='pkg', level=1)[-1][0] == (package / 'worker.py').resolve()
+        assert snapshot.stats['module_lookup_hits'] >= 1
+        assert snapshot.stats['module_lookup_misses'] >= 3
+        snapshot.finalize()
+
+
+def test_snapshot_repeated_module_lookup_does_not_repeat_live_stat_probes(tmp_path, monkeypatch):
+    module = tmp_path / 'worker.py'
+    module.write_text('value = 1\n')
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    original_stat = Path.stat
+    probes = []
+    def counted_stat(path, *args, **kwargs):
+        probes.append(path)
+        return original_stat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'stat', counted_stat)
+    with using(snapshot):
+        expected = [(module.resolve(), '')]
+        assert _python_module('worker', [tmp_path]) == expected
+        assert _python_module('missing_worker', [tmp_path]) == []
+        first_count = len(probes)
+        for _ in range(10):
+            assert _python_module('worker', [tmp_path]) == expected
+            assert _python_module('missing_worker', [tmp_path]) == []
+        assert len(probes) == first_count
+        snapshot.finalize()
+
+
+def test_snapshot_module_lookup_rejects_new_preferred_package(tmp_path):
+    module = tmp_path / 'worker.py'
+    module.write_text('value = 1\n')
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    with using(snapshot):
+        assert _python_module('worker', [tmp_path]) == [(module.resolve(), '')]
+        package = tmp_path / 'worker'; package.mkdir()
+        (package / '__init__.py').write_text('value = 2\n')
+        assert _python_module('worker', [tmp_path]) == [(module.resolve(), '')]
+        with pytest.raises(RuntimeError, match='SOURCE_AUTHORITY_DIRTY'):
+            snapshot.finalize()
+    assert _python_module('worker', [tmp_path]) == [((package / '__init__.py').resolve(), 'worker')]
+
+
+@pytest.mark.parametrize('mutation', ['new_helper', 'leaf_retarget', 'parent_retarget', 'bytes'])
+def test_snapshot_module_lookup_finalization_rejects_all_resolution_mutations(tmp_path, mutation):
+    first = tmp_path / 'first'; second = tmp_path / 'second'
+    first.mkdir(); second.mkdir()
+    helper = first / 'helper.py'
+    if mutation == 'new_helper':
+        # The initial negative lookup must be retained and finalization must
+        # reject the newly present module instead of silently accepting it.
+        name = 'late_helper'
+        target = first / 'late_helper.py'
+        symlink = None
+    elif mutation == 'leaf_retarget':
+        helper.write_text('value = 1\n')
+        target = helper
+        symlink = first / 'helper_link.py'
+        symlink.symlink_to(helper)
+        name = 'helper_link'
+    elif mutation == 'parent_retarget':
+        helper.write_text('value = 1\n')
+        (second / 'helper.py').write_text('value = 1\n')
+        (first / '__init__.py').write_text('value = 1\n')
+        (second / '__init__.py').write_text('value = 1\n')
+        alias = tmp_path / 'alias'
+        alias.symlink_to(first, target_is_directory=True)
+        target = alias
+        symlink = alias
+        name = 'alias.helper'
+    else:
+        helper.write_text('value = 1\n')
+        target = helper
+        symlink = None
+        name = 'helper'
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    search = [first]
+    with using(snapshot):
+        if mutation == 'parent_retarget':
+            assert _python_module(name, [tmp_path])[-1][0] == helper.resolve()
+        elif mutation == 'leaf_retarget':
+            with pytest.raises(ValueError, match='unsupported local Python module'):
+                _python_module(name, search)
+        else:
+            expected = [] if mutation == 'new_helper' else [(helper.resolve(), '')]
+            assert _python_module(name, search) == expected
+        if mutation == 'new_helper':
+            target.write_text('value = 3\n')
+        elif mutation == 'leaf_retarget':
+            symlink.unlink(); symlink.symlink_to(second / 'helper.py')
+        elif mutation == 'parent_retarget':
+            symlink.unlink(); symlink.symlink_to(second, target_is_directory=True)
+        else:
+            target.write_text('value = 9\n')
+        with pytest.raises(RuntimeError, match='SOURCE_AUTHORITY_(DIRTY|UNAVAILABLE)'):
+            snapshot.finalize()
+
+
+def test_finalized_snapshot_is_not_reused_for_later_module_authority(tmp_path):
+    from execution_provider_catalog import implementation_closure
+    entry = tmp_path / 'entry.py'
+    entry.write_text('import worker\n')
+    module = tmp_path / 'worker.py'
+    module.write_text('value = 1\n')
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    with using(snapshot):
+        assert _python_module('worker', [tmp_path])[0][0] == module.resolve()
+        assert implementation_closure(entry) == {entry, module}
+        snapshot.finalize()
+        module.unlink()
+        (tmp_path / 'worker').mkdir()
+        (tmp_path / 'worker' / '__init__.py').write_text('value = 2\n')
+        # active() deliberately stops exposing the finalized snapshot; the
+        # live resolver now observes package precedence and the new target.
+        assert _python_module('worker', [tmp_path])[0][0] == (tmp_path / 'worker' / '__init__.py').resolve()
+        assert implementation_closure(entry) == {entry, tmp_path / 'worker' / '__init__.py'}

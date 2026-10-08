@@ -60,7 +60,11 @@ _ACTIVE: ContextVar["SourceSnapshot | None"] = ContextVar(
 
 
 def active() -> "SourceSnapshot | None":
-    return _ACTIVE.get()
+    snapshot = _ACTIVE.get()
+    # A finalized registration snapshot is no longer an authority source for
+    # later resolution.  Callers under the same context must resolve live;
+    # the finalizer has already checked the provisional registration inputs.
+    return None if snapshot is not None and snapshot.finalized else snapshot
 
 
 @contextmanager
@@ -83,7 +87,8 @@ class SourceSnapshot:
                       "blob_computations": 0, "blob_cache_hits": 0,
                       "local_import_misses": 0, "local_import_hits": 0,
                       "provider_import_misses": 0, "provider_import_hits": 0,
-                      "import_probes": 0, "import_probe_hits": 0}
+                      "import_probes": 0, "import_probe_hits": 0,
+                      "module_lookup_misses": 0, "module_lookup_hits": 0}
         self.commit = self._git_text("rev-parse", "--verify", f"{source_sha}^{{commit}}")
         self.tree = self._git_text("rev-parse", "--verify", f"{self.commit}^{{tree}}")
         head = self._git_text("rev-parse", "HEAD")
@@ -98,6 +103,7 @@ class SourceSnapshot:
         self._git_blobs: dict[str, str] | None = None
         self._closures: dict[object, frozenset[Path]] = {}
         self._values: dict[object, object] = {}
+        self._module_lookups: dict[object, tuple] = {}
         self.finalized = False
 
     def _git_text(self, *args: str) -> str:
@@ -129,7 +135,8 @@ class SourceSnapshot:
     def _import_path_state(path: Path) -> tuple:
         # Include negative lookups and parent-link targets. Equal bytes at a
         # new target cannot preserve the original module-resolution proof.
-        return (path.exists(), path.is_symlink(), path.is_file(), path.resolve())
+        return (path.exists(), path.is_symlink(), path.is_file(), path.resolve(),
+                path.is_dir())
 
     def import_candidate(self, path: Path) -> tuple:
         spelling = Path(path).absolute()
@@ -169,6 +176,24 @@ class SourceSnapshot:
 
     def closure_put(self, key, paths):
         self._closures[key] = frozenset(self._resolve(p) for p in paths)
+
+    def module_lookup_get(self, key):
+        """Return a cached module lookup only while registration is open.
+
+        The value is a tuple of ``(resolved_path, package_owner)`` rows.  A
+        separate hit bit preserves cached empty results for modules that were
+        absent or interpreter-owned.  Finalized snapshots cannot answer a new
+        lookup: execution and adoption must resolve against current bytes.
+        """
+        if self.finalized or key not in self._module_lookups:
+            self.stats["module_lookup_misses"] += 1
+            return False, None
+        self.stats["module_lookup_hits"] += 1
+        return True, self._module_lookups[key]
+
+    def module_lookup_put(self, key, rows) -> None:
+        if not self.finalized:
+            self._module_lookups[key] = tuple(rows)
 
     def value_get(self, key):
         return self._values.get(key)
