@@ -270,9 +270,22 @@ def _step15_sdc(project):
         return _require(pnr / 'constraint.sdc')
     try:
         record = json.loads(record_path.read_text())
-        info = record['views']['sdc_derived']
-        upstream = record['upstream_sdc']
         source = pnr / 'constraint.sdc'
+        views = record.get('views')
+        if not isinstance(views, dict):
+            raise ValueError('views missing')
+        # Schema/1 records predating the physical-deck split bind their native
+        # SDC directly to the canonical PNR deck.  Accept only that exact,
+        # contained regular file; do not invent an upstream/derived relation.
+        if 'sdc_derived' not in views and 'upstream_sdc' not in record:
+            legacy = views.get('sdc')
+            if (not isinstance(legacy, dict)
+                    or legacy.get('path') != str(source.relative_to(project))
+                    or legacy.get('sha256') != snap.sha(source)):
+                raise ValueError('legacy SDC binding changed')
+            return _require(source)
+        info = views['sdc_derived']
+        upstream = record['upstream_sdc']
         expected = project / PNR / 'step15.constraint.sdc'
         if (not isinstance(info, dict) or not isinstance(upstream, dict)
                 or info.get('path') != str(expected.relative_to(project))):

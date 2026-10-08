@@ -153,3 +153,43 @@ def test_portable_gate_publisher_uses_project_relative_paths(tmp_path):
     import librelane_contract as llc
     with pytest.raises(llc.Refusal, match='LL_PRELAYOUT_GATE_PATH_ESCAPE'):
         phase3._portable_prelayout_gate(project, {'sdc': '/outside/constraint.sdc'})
+
+
+def test_legacy_schema_one_sdc_binding_accepts_then_refuses_changed_bytes(tmp_path):
+    _, isolated = _make_published_project(tmp_path)
+    pnr = isolated / 'phase3/stage3/pnr'
+    record = json.loads((pnr / 'step15_state.json').read_text())
+    derived = record['views'].pop('sdc_derived')
+    record.pop('upstream_sdc')
+    record['schema'] = 'vibeic/step15-state-handoff/1'
+    record['views']['sdc'] = {'path': 'phase3/stage3/pnr/constraint.sdc',
+                              'sha256': producers.snap.sha(pnr / 'constraint.sdc')}
+    (pnr / 'step15_state.json').write_text(json.dumps(record))
+    assert producers._step15_sdc(isolated) == pnr / 'constraint.sdc'
+    (pnr / 'constraint.sdc').write_text('legacy-changed\n')
+    with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
+        producers._step15_sdc(isolated)
+
+
+def test_actual_state_chain_bridge_passes_physical_sdc_to_state_from_direct(tmp_path, monkeypatch):
+    import librelane_contract as ll
+    import phase3_one_shot_runner as phase3
+    _, isolated = _make_published_project(tmp_path)
+    config = isolated / 'fixture-config.json'
+    config.write_text(json.dumps({'meta': {'step': 'OpenROAD.GlobalPlacementSkipIO'},
+                                  'DESIGN_NAME': 'bounded',
+                                  'inputs': ['def', 'odb', 'nl', 'sdc'], 'outputs': []}))
+    (isolated / 'fixture-config.views.json').write_text(json.dumps({'step': 'OpenROAD.GlobalPlacementSkipIO', 'inputs': ['def', 'odb', 'nl', 'sdc'], 'outputs': []}))
+    captured = {}
+    monkeypatch.setattr(ll, 'resolve_step_configs', lambda *a, **k: {'OpenROAD.GlobalPlacementSkipIO': config})
+    monkeypatch.setattr(phase3, '_resolved_cell_policy', lambda configs, root, pdk: (configs, []))
+    def run_chain(project, image, tasks, **kwargs):
+        captured['state'] = tasks[0][2]
+        return []
+    monkeypatch.setattr(ll, 'run_chain', run_chain)
+    params = {'image_id': 'fixture-image', 'pdk_name': 'fixture',
+              'pdk_root': str(tmp_path), 'step_id': '17', 'top': 'bounded'}
+    producers._state_chain(isolated, params, ['OpenROAD.GlobalPlacementSkipIO'], 'floorplan.def')
+    state = json.loads(Path(captured['state']).read_text())
+    assert state['sdc'] == str((isolated / 'phase3/stage3/pnr/step15.constraint.sdc').resolve())
+    assert 'sdc_derived' not in state
