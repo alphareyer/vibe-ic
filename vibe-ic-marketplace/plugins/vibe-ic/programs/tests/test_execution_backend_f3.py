@@ -216,6 +216,66 @@ def test_backend_project_contract_uses_published_synthesis_folder_only(tmp_path)
         backend_project_input_contract(project, "37")
 
 
+def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
+    """A fresh backend arm must preserve the exact Step-7 input population.
+
+    The image/PDK/code entries are external ``@`` bindings and stay out of the
+    project manifest.  Project-relative entries are the bytes the Step-7
+    consumer hashes, so dropping them would turn a valid receipt into a stale
+    ``SDC_SEAM_PENDING`` handoff in the isolated worker.
+    """
+    project = tmp_path / "project"
+    paths = (
+        "input/submission_template_source/0p5x0p5.json",
+        "phase2/stage1/fpga/subservient.sdc",
+        "reports/container_image.json",
+    )
+    for rel in paths:
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rel + "\n")
+    record = project / "phase2/stage2/constraints/asic_sdc.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"inputs": {
+        **{rel: "digest-" + str(i) for i, rel in enumerate(paths)},
+        "@code:timing.py": "external-code-digest",
+        "@liberty_sha256": "external-liberty-digest",
+    }}))
+
+    contract = backend_project_input_contract(project, "15")
+
+    observed = tuple(sorted(rel for rel in paths if rel in contract))
+    assert observed == tuple(sorted(paths))
+    assert "@code:timing.py" not in contract
+    assert "@liberty_sha256" not in contract
+
+
+@pytest.mark.parametrize("unsafe", [
+    "../outside.json",
+    "/absolute.json",
+    "reports/link.json",
+])
+def test_step7_bound_input_contract_rejects_unsafe_or_missing_paths(tmp_path,
+                                                                     unsafe):
+    project = tmp_path / "project"
+    record = project / "phase2/stage2/constraints/asic_sdc.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    if unsafe == "reports/link.json":
+        outside = tmp_path / "outside.json"
+        outside.write_text("outside\n")
+        link = project / unsafe
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside)
+    record.write_text(json.dumps({"inputs": {unsafe: "digest"}}))
+
+    try:
+        observed = backend_project_input_contract(project, "15")
+    except ValueError as exc:
+        assert str(exc).startswith("step-7 input path")
+        observed = "REJECTED"
+    assert observed == "REJECTED"
+
+
 _STEP12_POST_DFT = "phase2/stage2/synth/post_dft_netlist.v"
 _STEP12_NO_DFT = {
     "dft_present": False, "scan_chains": [], "bist_mbist": [], "jtag_tap": None,

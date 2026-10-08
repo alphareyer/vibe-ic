@@ -650,6 +650,42 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
     """
     root = Path(project).resolve(strict=True)
     result: list[str] = []
+
+    # Step 7's ASIC SDC is an input-bound handoff.  Its record deliberately
+    # stores project-relative paths separately from image/PDK/code bindings
+    # (the latter are ``@`` keys and must remain external).  A backend arm
+    # receives a fresh staged project, so carrying only the YAML row inputs
+    # silently drops those exact files and makes the read-only Step-7 reader
+    # observe a different input digest.  Carry the producer's non-``@`` paths
+    # verbatim; the consumer still owns the digest and provenance verdict.
+    #
+    # This is intentionally data-driven: no design, PDK, or filename literal
+    # is admitted, and the same safe-path checks used by the receipt mapper
+    # reject absolute, traversal, non-canonical, symlinked, or missing paths.
+    step7_record = root / "phase2/stage2/constraints/asic_sdc.json"
+    try:
+        step7 = json.loads(step7_record.read_text())
+    except (OSError, ValueError, TypeError):
+        step7 = None
+    bound = step7.get("inputs") if isinstance(step7, Mapping) else None
+    if isinstance(bound, Mapping):
+        for raw in sorted(bound):
+            if not isinstance(raw, str) or raw.startswith("@"):
+                continue
+            rel = Path(raw)
+            if (rel.is_absolute() or not raw or ".." in rel.parts
+                    or rel.as_posix() != raw):
+                raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+            target = root / rel
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
+            if (target.is_symlink() or resolved != target
+                    or not resolved.is_relative_to(root)
+                    or not resolved.is_file()):
+                raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+            result.append(rel.as_posix())
     sidecar = root / "phase2/stage2/synth/synth_inputs.json"
     try:
         doc = json.loads(sidecar.read_text())
