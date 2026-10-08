@@ -285,12 +285,13 @@ def test_runner_passes_the_selected_cell_lef_and_metal_prefix(
         return subprocess.CompletedProcess(cmd, 0, "produced\n", "")
 
     pdk = SimpleNamespace(
-        name="neutral_pdk",
+        name="sky130A",
         cell_lef="/pdk/stdcell.lef",
         metal_prefix="metal",
     )
+    named_root = "/foss/pdks/sky130A"
     monkeypatch.setattr(runner, "_hardmacro_pdk_dir",
-                        lambda _pdk, _container: "/pdk")
+                        lambda _pdk, _container: named_root)
     # CZT-11 — the DISPATCHER moved, the assertions did not. This step
     # dispatches its producer through `_progress_run` (no wall clock)
     # instead of `subprocess.run(timeout=N)`, so a stub bound to
@@ -302,6 +303,10 @@ def test_runner_passes_the_selected_cell_lef_and_metal_prefix(
     result = runner.step_digital_hardmacro_gen(tmp_path, pdk, "eda")
 
     assert result.status == "PASS"
+    assert "--pdk-root" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--pdk-root") + 1] == named_root
+    assert "--pdk-name" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--pdk-name") + 1] == pdk.name
     assert "--cell-lef" in seen["cmd"]
     assert seen["cmd"][seen["cmd"].index("--cell-lef") + 1] == pdk.cell_lef
     assert "--metal-prefix" in seen["cmd"]
