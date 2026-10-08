@@ -278,10 +278,10 @@ def test_runner_passes_the_selected_cell_lef_and_metal_prefix(
         tmp_path, monkeypatch):
     import phase3_one_shot_runner as runner
 
-    seen = {}
+    seen = {"cmds": []}
 
     def fake_run(cmd, **_kwargs):
-        seen["cmd"] = cmd
+        seen["cmds"].append([str(c) for c in cmd])
         return subprocess.CompletedProcess(cmd, 0, "produced\n", "")
 
     pdk = SimpleNamespace(
@@ -303,14 +303,19 @@ def test_runner_passes_the_selected_cell_lef_and_metal_prefix(
     result = runner.step_digital_hardmacro_gen(tmp_path, pdk, "eda")
 
     assert result.status == "PASS"
-    assert "--pdk-root" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--pdk-root") + 1] == named_root
-    assert "--pdk-name" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--pdk-name") + 1] == pdk.name
-    assert "--cell-lef" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--cell-lef") + 1] == pdk.cell_lef
-    assert "--metal-prefix" in seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--metal-prefix") + 1] == "metal"
+    producer = [cmd for cmd in seen["cmds"]
+                if any(str(part).endswith("digital_hardmacro_gen.py")
+                       for part in cmd)]
+    assert len(producer) == 1, seen["cmds"]
+    cmd = producer[0]
+    assert "--pdk-root" in cmd
+    assert cmd[cmd.index("--pdk-root") + 1] == named_root
+    assert "--pdk-name" in cmd
+    assert cmd[cmd.index("--pdk-name") + 1] == pdk.name
+    assert "--cell-lef" in cmd
+    assert cmd[cmd.index("--cell-lef") + 1] == pdk.cell_lef
+    assert "--metal-prefix" in cmd
+    assert cmd[cmd.index("--metal-prefix") + 1] == "metal"
 
 
 def test_capture_routes_digital_hardmacro_to_the_owning_generator():
