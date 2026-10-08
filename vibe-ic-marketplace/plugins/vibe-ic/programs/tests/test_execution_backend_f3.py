@@ -450,6 +450,29 @@ def test_backend_checkpoint_closure_rejects_missing_or_traversal_step7_path(tmp_
         backend_project_input_contract(project, "15")
 
 
+def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
+    project = tmp_path / "project"
+    constraint = "phase2/stage2/constraints/subservient.asic.sdc"
+    for rel in (
+        "phase2/stage2/synth/netlist.v",
+        "provenance.jsonl",
+        "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase2/stage2/constraints/asic_sdc.json",
+        constraint,
+        "reports/phase2/cdc/netlist.json",
+    ):
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"path": constraint}) if rel.endswith("asic_sdc.json")
+                          else rel + "\n")
+
+    contract = set(backend_project_input_contract(project, "15"))
+
+    assert "reports/phase2/cdc/netlist.json" in contract
+    assert "rig_topology.json" not in contract
+    assert "plugin_output/declaration.json" not in contract
+
+
 def test_step7_semantic_image_only_binding_carries_report(tmp_path):
     """The @ binding names a semantic report that the isolated reader opens."""
     project = tmp_path / "project"
