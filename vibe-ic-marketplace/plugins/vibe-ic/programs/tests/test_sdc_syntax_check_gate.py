@@ -16,6 +16,7 @@ def test_empty_project(tmp_path):
     r = _run([str(tmp_path)]); assert r.returncode == 1
 
 def test_valid_sdc(tmp_path):
-    sdc = tmp_path / "constraints.sdc"
+    sdc = tmp_path / "phase2/stage2/constraints/constraints.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
     sdc.write_text("create_clock -period 10.0 -name clk [get_ports clk]\n")
     r = _run([str(tmp_path)]); assert r.returncode == 1

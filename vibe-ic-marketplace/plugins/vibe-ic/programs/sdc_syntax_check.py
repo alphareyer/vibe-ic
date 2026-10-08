@@ -54,6 +54,8 @@ from pathlib import Path
 from typing import List, Tuple
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
+import _path_layout as _pl
+import sdc_constraints as _sdc
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +106,19 @@ MAX_PERIOD_NS = 10000.0
 # File discovery
 # ---------------------------------------------------------------------------
 def discover_sdc_files(base: Path) -> List[Path]:
-    """Find .sdc files in project directory recursively."""
-    return sorted(base.rglob("*.sdc"))
+    """Return the design SDC population for the Step-7/8 contract.
+
+    The flow's staged inputs are defined by :func:`sdc_constraints.collect_sdc_files`;
+    Step 7's declared Phase-2 outputs are the two direct roots appended here.
+    LibreLane run directories are deliberately outside this contract: their
+    tool-generated ``*.abc.sdc`` files are judged by the OpenSTA receipt, not by
+    the design regex arm. A recursive project scan would turn an intermediate
+    deck into a false design failure.
+    """
+    return _sdc.collect_sdc_files(
+        base,
+        extra_dirs=[_pl.fpga_early_dir(base), _pl.constraints_dir(base)],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +187,21 @@ def opensta_gate(base: Path) -> Tuple[str, List[Finding], bool]:
     except (OSError, ValueError) as exc:
         return mode, [Finding("OPENSTA_GATE_UNREADABLE", "ERROR", str(exc),
                               str(OPENSTA_GATE))], False
-    deck = Path(str(doc.get("sdc") or ""))
-    if not deck.is_file() or doc.get("sdc_sha256") != _llc.digest(deck):
+    raw_deck = Path(str(doc.get("sdc") or ""))
+    deck = raw_deck if raw_deck.is_absolute() else base / raw_deck
+    try:
+        resolved_base = base.resolve()
+        resolved_deck = deck.resolve(strict=False)
+        in_project = resolved_deck.is_relative_to(resolved_base)
+    except OSError:
+        in_project = False
+        resolved_deck = deck
+    if (not in_project or not resolved_deck.is_file()
+            or doc.get("sdc_sha256") != _llc.digest(resolved_deck)):
         return mode, [Finding("OPENSTA_GATE_STALE", "ERROR",
-                              f"record is not bound to the current bytes of {deck}",
+                              f"record is not bound to the current project SDC bytes of {resolved_deck}",
                               str(OPENSTA_GATE))], False
+    deck = resolved_deck
     status = doc.get("verdict")
     findings = [Finding("OPENSTA_" + str(status), "ERROR" if status != "PASS" else "INFO",
                         text, str(OPENSTA_GATE)) for text in doc.get("findings") or []]

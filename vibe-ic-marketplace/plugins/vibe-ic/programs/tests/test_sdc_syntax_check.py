@@ -16,6 +16,13 @@ sys.path.insert(0, str(SCRIPT.parent))
 import sdc_syntax_check as ssc  # noqa: E402
 
 
+def _write_sdc(tmp_path, text):
+    path = tmp_path / "phase2" / "stage2" / "constraints" / "timing.sdc"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Valid SDC → PASS
 # ---------------------------------------------------------------------------
@@ -28,7 +35,7 @@ create_clock -period 10 -name sys_clk [get_ports clk]
 set_input_delay -clock sys_clk -max 2.0 [get_ports data_in]
 set_output_delay -clock sys_clk -max 3.0 [get_ports data_out]
 """
-    (tmp_path / "timing.sdc").write_text(sdc)
+    _write_sdc(tmp_path, sdc)
 
     result = ssc.audit(str(tmp_path))
     assert result.passed is True
@@ -57,7 +64,7 @@ def test_no_create_clock_fail(tmp_path):
 set_input_delay -clock sys_clk -max 2.0 [get_ports data_in]
 set_output_delay -clock sys_clk -max 3.0 [get_ports data_out]
 """
-    (tmp_path / "timing.sdc").write_text(sdc)
+    _write_sdc(tmp_path, sdc)
 
     result = ssc.audit(str(tmp_path))
     assert result.passed is False
@@ -73,7 +80,7 @@ def test_no_timing_constraint_fail(tmp_path):
 # Clock only, no timing constraints
 create_clock -period 10 -name sys_clk [get_ports clk]
 """
-    (tmp_path / "timing.sdc").write_text(sdc)
+    _write_sdc(tmp_path, sdc)
 
     result = ssc.audit(str(tmp_path))
     assert result.passed is False
@@ -90,7 +97,7 @@ def test_unreasonable_period_fail(tmp_path):
 create_clock -period 0.001 -name fast_clk [get_ports clk]
 set_input_delay -clock fast_clk -max 0.0001 [get_ports data_in]
 """
-    (tmp_path / "timing.sdc").write_text(sdc)
+    _write_sdc(tmp_path, sdc)
 
     result = ssc.audit(str(tmp_path))
     assert result.passed is False
