@@ -52,6 +52,28 @@ RELEASE_PARAMETER_DEFAULTS = {
 }
 
 
+# ``phase3_one_shot_runner._read_declared_pdk_target`` accepts these two
+# source-owned declarations in order.  Keep them as one OR contract so a
+# project with either current declaration is admitted, while the normal
+# collector copies every matching current file and the worker still refuses
+# when neither declaration is present.
+_STEP16_PDK_DECLARATION = {
+    "from": "external",
+    "path": ("reports/phase1/pdk_staging_read.json OR "
+             "phase1/generated_docs/L19_CONSTRAINTS_PDK.json"),
+    "what": "current declared PDK identity consumed by emit_clock_plan",
+}
+
+
+def _release_input_contract(step_id: str) -> tuple[object, ...]:
+    # ``coverage_rows`` supplies the executable adapter row; the canonical
+    # flow declarations remain in the release-row table used by the worker.
+    declared = tuple(ROWS[str(step_id)].get("canonical", {}).get("required_inputs", ()) or ())
+    if str(step_id) == "16":
+        return (*declared, dict(_STEP16_PDK_DECLARATION))
+    return declared
+
+
 def _site_path(site: str) -> Path:
     module, _, symbol = site.partition(":")
     path = HERE / module
@@ -387,9 +409,10 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     # the release argv parameter map.
     params["source_sha"] = source_sha
     params["source_tree_sha"] = current_source_tree_identity()
+    input_contract = _release_input_contract(step_id)
     params.update({"route": path, "row": step_id, "runtime_status": "NOT_MEASURED",
                    "external_handoff": step_id in EXTERNAL_IDS,
-                   "input_contract": ROWS[step_id].get("canonical", {}).get("required_inputs")})
+                   "input_contract": input_contract})
     external = step_id in EXTERNAL_IDS
     unavailable = step_id in UNAVAILABLE_IDS
     role = "complementary" if external else "producer"
@@ -416,6 +439,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
         # Native OpenROAD reserves about 3.43 GiB of virtual address space
         # before reading the clock plan (EDA 0.4.1); Controller enforces RLIMIT_AS.
         cpus=1, ram_mb=4096 if step_id == "16" else 256,
+        input_contract=input_contract,
         role=role,
         own_no_tool_reason="One complete release producer owns the row; physical/external evidence remains outside software.",
     )
