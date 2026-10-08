@@ -594,7 +594,7 @@ def _step17_direct_inputs(project, params, R, ll, pdk):
     floorplan = _require(pnr / 'floorplan.def')
     nl, _, _ = R.pnr_input_netlist(project, params['top'])
     nl = _require(nl)
-    sdc = _require(pnr / 'constraint.sdc')
+    sdc = _step15_sdc(project)
     state_value = params.get('step15_state') or params.get('state_in')
     state = Path(state_value) if state_value else None
     if state is None:
@@ -717,7 +717,7 @@ def _cts_split(project, params, R, ll, pdk, overlay):
     lane = 'execution-backend-' + sid
     ids = (['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing', 'Vibeic.ExternalCaptureLaunchRetap']
            if sid == '19' else ['OpenROAD.ResizerTimingPostCTS'])
-    scene = ch.signoff_scene_sdc(R, project / PNR / 'constraint.sdc',
+    scene = ch.signoff_scene_sdc(R, _step15_sdc(project),
                                 project / 'phase3/librelane' / (lane + '-config'))
     overlay['PNR_SDC_FILE'] = (str(scene), 'selected SDC + accepted signoff OCV scene')
     configs = ll.resolve_step_configs(project, image, pdk.name, ids + ['OpenROAD.STAMidPNR'],
@@ -1016,7 +1016,7 @@ def produce_signoff(project, params):
         import si_signoff_timing_aware as si
         timing = rpt / 'si_timing.json'
         nl = _require(pnr / (top + '_pnr.v'))
-        sdc = _require(pnr / 'constraint.sdc')
+        sdc = _step15_sdc(project)
         voltage = R._pdk_nominal_voltage(pdk, container)
         if voltage is None:
             raise em.Refusal('BACKEND_SI_VOLTAGE_UNSTATED', sid)
