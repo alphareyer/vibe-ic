@@ -171,6 +171,8 @@ def _sealed_authority_store():
     def consume(path: Path) -> dict:
         document = json.loads(path.read_text())
         issued = ledger.get(str(path))
+        if issued is None:
+            raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
         if issued is not None and issued != document.get('payload'):
             if document.get('signature') == _hash(document.get('payload')):
                 raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
