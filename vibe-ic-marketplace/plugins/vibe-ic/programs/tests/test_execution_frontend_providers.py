@@ -255,6 +255,26 @@ def test_step6_typed_absence_with_programmer_evidence_still_fails(tmp_path):
     evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
     assert evidence.verdict == 'FAIL'
 
+
+def test_step6_typed_absence_with_failing_on_board_result_still_fails(tmp_path):
+    """A failing board result cannot be hidden by the typed absence record."""
+    (tmp_path / 'canonical.json').write_text(json.dumps({
+        'schema': 'frontend_worker_output/1', 'step_id': '6',
+        'producer': 'step_fpga_compile+quartus_map_audit',
+        'result': 'NOT_MEASURED', 'verdict': 'NOT_MEASURED',
+        'excluded_from_verdict': True, 'reason': 'Quartus/board unavailable',
+    }))
+    report = tmp_path / 'reports/phase2/fpga/on_board_pass.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        'verdict': 'FAIL', 'all_scenarios_passed': False,
+        'failed_scenarios': ['loopback'],
+    }))
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('6',))
+    evidence = registry.adapters('6')[0].validate(tmp_path, {'step_id': '6'})
+    assert evidence.verdict == 'FAIL'
+
 def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp_path):
     # Incomplete input is a real expert handoff, not an eligible D1 positive.
     from dataclasses import replace

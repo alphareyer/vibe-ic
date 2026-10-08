@@ -223,11 +223,11 @@ def _step6_board_evidence_present(root, concrete):
                     claim = json.loads(path.read_text())
                 except (OSError, ValueError, TypeError):
                     return True
-                if isinstance(claim, dict) and (
-                        claim.get('all_scenarios_passed') is True or
-                        claim.get('verdict') == 'PASS'):
-                    return True
-                continue
+                if (isinstance(claim, dict) and
+                        claim.get('verdict') == 'SKIP' and
+                        claim.get('sof_present') is False):
+                    continue
+                return True
             if path.suffix.lower() != '.json':
                 return True
     return False
