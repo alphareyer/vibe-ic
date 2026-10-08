@@ -62,11 +62,12 @@ def test_serialized_completion_cannot_replace_observed_process_authority(tmp_pat
 def test_same_process_authority_ledger_rejects_co_mutation(tmp_path):
     c, ctx, root = failed_measurement(tmp_path)
     path = root / 'a/issued-completion.json'
-    payload = json.loads(path.read_text())['payload']
-    with pytest.raises(AttributeError):
-        M._ISSUED_AUTHORITY._entries = {}
-    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_REWRITE'):
-        M._ISSUED_AUTHORITY[str(path)] = json.dumps({**payload, 'actual_status': 'ELIGIBLE'})
+    assert not hasattr(M, '_ISSUED_AUTHORITY')
+    original = M._issued(path)
+    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_REISSUE'):
+        M._issue_sealed(path, {**original, 'actual_status': 'ELIGIBLE'})
+    assert M._issued(path) == original
+    assert original['processes'][-1]['rc'] == 7
 
 
 def test_a_signature_alone_cannot_create_source_owned_completion(tmp_path):
@@ -190,16 +191,21 @@ def test_manifest_route_mutation_cannot_be_bought_with_mutable_receipts(tmp_path
     manifest_path = root / 'a/inputs/issued_manifest.json'
     receipt = H.read(root)
     arm = c.registry.adapters(ctx.step_id)[0]
+    # The unmodified Controller receipt is accepted before the mutable input
+    # and projected receipt are tampered with.
+    c._eligible(receipt, ctx, arm)
     mutated = {'step_id': '8', 'parameters': {'route': 'other'}, 'files': {}}
     manifest_path.chmod(0o644)
     manifest_path.write_text(json.dumps(mutated, sort_keys=True) + '\n')
-    # The adversary controls the mutable cache, receipt and AI choice digest.
-    M._ISSUED_AUTHORITY[str(manifest_path)] = M.digest(manifest_path)
+    # The adversary controls the mutable cache, receipt and AI choice digest,
+    # but cannot update the Controller's sealed manifest authority.
+    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_UNAVAILABLE'):
+        M._record_authority(manifest_path, M.digest(manifest_path))
     receipt['manifest_payload'] = mutated
     receipt['manifest_sha256'] = M.digest(manifest_path)
     receipt_path.write_text(json.dumps(receipt))
     with pytest.raises(M.Refusal, match='ISSUED_MANIFEST_CHANGED'):
-        M.Controller._eligible(receipt, ctx, arm)
+        c._eligible(receipt, ctx, arm)
     choice = H.choice(ctx, root)
     choice['receipt_sha256'] = M.digest(receipt_path)
     with pytest.raises(M.Refusal):

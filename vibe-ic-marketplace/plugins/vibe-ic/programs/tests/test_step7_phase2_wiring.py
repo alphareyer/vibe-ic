@@ -45,10 +45,18 @@ def test_phase2_declares_and_wires_canonical_step7_site():
 
 def test_step7_direct_path_uses_single_canonical_emitter(tmp_path, monkeypatch):
     calls = []
+    pdk_calls = []
     pdk = SimpleNamespace(name="test", liberty="/pdk/nom.lib")
-    monkeypatch.setattr(EP, "dispatch_fixed_step",
-                        lambda *args, **kwargs: None)
-    monkeypatch.setattr(D, "_phase2_pdk_config", lambda project: pdk)
+    monkeypatch.setattr(
+        EP, "dispatch_fixed_step",
+        lambda project, step, *, parameters: None,
+    )
+
+    def resolve_pdk(project, pdk_name):
+        pdk_calls.append((project, pdk_name))
+        return pdk
+
+    monkeypatch.setattr(D, "_phase2_pdk_config", resolve_pdk)
     monkeypatch.setattr(D._pl, "constraints_dir",
                         lambda project: Path(project) / "constraints")
     fake = {
@@ -71,7 +79,10 @@ def test_step7_direct_path_uses_single_canonical_emitter(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "_emit_step7_pvt_matrix", pvt)
     result = D.step_asic_sdc(tmp_path, "chip_top", "container")
     assert result.status == "PASS", result.detail
+    assert pdk_calls == [(tmp_path, None)]
     assert len(calls) == 1
+    assert calls[0][0][1:] == (tmp_path, "chip_top", pdk, "container")
+    assert calls[0][1] == {}
     assert (tmp_path / fake["path"]).is_file()
     assert (tmp_path / "constraints/pvt_matrix.json").is_file()
 
@@ -79,22 +90,30 @@ def test_step7_direct_path_uses_single_canonical_emitter(tmp_path, monkeypatch):
 def test_default_not_measured_frontend_result_falls_through_to_emitter(
         tmp_path, monkeypatch):
     """A source-bound placeholder cannot strand the canonical default path."""
+    dispatch_calls = []
+    pdk_calls = []
     pdk = SimpleNamespace(name="test", liberty="/pdk/nom.lib")
-    monkeypatch.setattr(EP, "dispatch_fixed_step",
-                        lambda *args, **kwargs: {
-                            "status": "NOT_MEASURED",
-                            "reason": "NO_RUNNABLE_ADAPTER"})
+
+    def dispatch_fixed_step(project, step, *, parameters):
+        dispatch_calls.append((project, step, parameters))
+        return {"status": "NOT_MEASURED", "reason": "NO_RUNNABLE_ADAPTER"}
+
+    monkeypatch.setattr(EP, "dispatch_fixed_step", dispatch_fixed_step)
     monkeypatch.setattr(EP, "_ordinary_runtime",
                         {"policy": {"mode": "default",
                                      "request_receipt": {"request_digest": "d" * 64}},
                          "project": tmp_path.resolve()})
-    monkeypatch.setattr(D, "_phase2_pdk_config", lambda project: pdk)
+    def resolve_pdk(project, pdk_name):
+        pdk_calls.append((project, pdk_name))
+        return pdk
+
+    monkeypatch.setattr(D, "_phase2_pdk_config", resolve_pdk)
     monkeypatch.setattr(D._pl, "constraints_dir",
                         lambda project: Path(project) / "constraints")
     called = []
     from _ppa import timing as T
     def emit(*args, **kwargs):
-        called.append(True)
+        called.append((args, kwargs))
         path = Path(args[1]) / "constraints/chip_top.asic.sdc"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("create_clock -period 10 [get_ports clk]\n")
@@ -105,7 +124,13 @@ def test_default_not_measured_frontend_result_falls_through_to_emitter(
         (Path(project) / "constraints/pvt_matrix.json", 2)))
     result = D.step_asic_sdc(tmp_path, "chip_top", "container")
     assert result.status == "PASS"
-    assert called
+    assert dispatch_calls == [(tmp_path, "7", {
+        "top": "chip_top", "container": "container", "ic_class": None,
+    })]
+    assert pdk_calls == [(tmp_path, None)]
+    assert len(called) == 1
+    assert called[0][0][1:] == (tmp_path, "chip_top", pdk, "container")
+    assert called[0][1] == {}
 
 
 def test_default_ordinary_step7_placeholder_releases_preflight_gate(
