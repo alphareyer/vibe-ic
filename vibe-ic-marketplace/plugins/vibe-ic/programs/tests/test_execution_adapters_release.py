@@ -178,6 +178,72 @@ def test_375ip_worker_calls_declared_hardmacro_producer_and_stays_unmeasured(tmp
     assert report["qualification"] in {"NOT_MEASURED", "FAIL"}
 
 
+def test_375ip_worker_passes_declared_pdk_name_to_hardmacro_producer(
+        tmp_path, monkeypatch):
+    import digital_hardmacro_gen as hardmacro
+    import phase3_one_shot_runner as runner
+
+    monkeypatch.setattr(
+        runner, "step_ip_release_docs_gen",
+        lambda *_args, **_kwargs: runner.StepResult(
+            "ip_release_docs_gen", "PASS"))
+    seen = {}
+
+    def fake_run(project, pdk_root, full_lef, pinonly, container="",
+                 cell_lef="", metal_prefix="met", pdk_name=None):
+        seen.update(project=project, pdk_root=pdk_root,
+                    pdk_name=pdk_name)
+        return (hardmacro.RC_REFUSED,
+                hardmacro.Record(status="REFUSED",
+                                 reason="bounded producer fixture"))
+
+    monkeypatch.setattr(hardmacro, "run", fake_run)
+    records = release_worker.produce("37.5ip", tmp_path, {
+        "pdk_name": "gf180mcuD",
+        "pdk_root": "/mounted/pdks",
+    })
+
+    assert seen == {
+        "project": tmp_path,
+        "pdk_root": "/mounted/pdks",
+        "pdk_name": "gf180mcuD",
+    }
+    produced = next(row for row in records
+                    if row.get("program") == "digital_hardmacro_gen.run")
+    assert produced["status"] == "REFUSED"
+
+
+def test_375ip_worker_does_not_invent_missing_pdk_identity(
+        tmp_path, monkeypatch):
+    import digital_hardmacro_gen as hardmacro
+    import phase3_one_shot_runner as runner
+
+    monkeypatch.setattr(
+        runner, "step_ip_release_docs_gen",
+        lambda *_args, **_kwargs: runner.StepResult(
+            "ip_release_docs_gen", "PASS"))
+    seen = {}
+
+    def refusing_run(_project, _pdk_root, _full_lef, _pinonly,
+                     _container="", _cell_lef="", _metal_prefix="met",
+                     pdk_name=None):
+        seen["pdk_name"] = pdk_name
+        raise hardmacro.PdkBindingRefusal(
+            "PDK_NAME_ABSENT",
+            "the caller must supply the canonical pdk_name")
+
+    monkeypatch.setattr(hardmacro, "run", refusing_run)
+    records = release_worker.produce("37.5ip", tmp_path, {
+        "pdk_root": "/mounted/pdks",
+    })
+
+    assert seen["pdk_name"] is None
+    refused = next(row for row in records
+                   if row.get("program") == "digital_hardmacro_gen.run")
+    assert refused["verdict"] == "NOT_MEASURED"
+    assert "PDK_NAME_ABSENT" in refused["reason"]
+
+
 def test_current_source_bound_fixture_reaches_eligible_controller_arm(tmp_path):
     # Step 16 is a source-owned native producer/gate pair.  This is the small
     # complete clock-plan fixture also used by the backend dispatch controls:

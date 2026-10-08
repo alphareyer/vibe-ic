@@ -589,6 +589,68 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     return inputs
 
 
+def _ensure_default_prelayout(runtime: dict, step_id: str) -> None:
+    """Publish the existing pre-layout producer before a Default backend row.
+
+    Step 15 consumes the Step-8 gate, so a stale or absent gate must be
+    repaired at its existing pre-layout owner before the input manifest is
+    issued.  This hook never synthesises or places a design; it only reuses
+    ``_prelayout_librelane`` at the existing producer boundary.  Reuse and
+    currentness remain the producer's ``run_chain`` contract.
+    """
+    if str(step_id) != "15" or runtime.get("policy", {}).get("mode") != "default":
+        return
+    params = runtime.get("parameters", {})
+    project = Path(runtime["project"])
+    top = params.get("top")
+    pdk = params.get("pdk")
+    container = params.get("container")
+    if not top or pdk is None or not container:
+        return
+    import phase3_one_shot_runner as phase3
+    netlist = phase3._pl.synth_dir(project) / f"{top}_synth.v"
+    record_path = project / "phase2/stage2/constraints/asic_sdc.json"
+    if not netlist.is_file() or not record_path.is_file():
+        return
+    try:
+        record = json.loads(record_path.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", str(exc)) from exc
+    issued_sdc = record.get("path") if isinstance(record, dict) else None
+    if not isinstance(issued_sdc, str):
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", "missing path")
+    issued = Path(issued_sdc)
+    if issued.is_absolute() or '..' in issued.parts:
+        raise Refusal("PRELAYOUT_STEP7_RECORD_INVALID", issued_sdc)
+    step7_sdc = project / issued
+    if not step7_sdc.is_file() or step7_sdc.is_symlink():
+        raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", issued_sdc)
+    # Step 7's declaration is the binding/source proof.  The actual producer
+    # consumes the PnR deck after its unit/DRV derivation; comparing the gate
+    # to the raw ASIC declaration rejects valid measured runs.
+    sdc = project / "phase3/stage3/pnr/constraint.sdc"
+    if not sdc.is_file() or sdc.is_symlink():
+        raise Refusal("PRELAYOUT_CURRENT_SDC_MISSING", str(sdc.relative_to(project)))
+    gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
+    notes = []
+    try:
+        result = phase3._prelayout_librelane(
+            project, str(top), pdk, sdc, False,
+            {"7": "librelane", "8": "librelane", "10": "librelane"}, notes)
+    except Exception as exc:
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", str(exc)) from exc
+    if not isinstance(result, dict) or not isinstance(result.get("sdc"), dict):
+        raise Refusal("PRELAYOUT_PUBLICATION_FAILED", "native producer returned no SDC result")
+    try:
+        published = json.loads(gate.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise Refusal("PRELAYOUT_GATE_NOT_PUBLISHED", str(exc)) from exc
+    if (result["sdc"].get("verdict") != "PASS"
+            or not isinstance(published, dict)
+            or published.get("verdict") != "PASS"):
+        raise Refusal("PRELAYOUT_GATE_IDENTITY_MISMATCH", str(gate))
+
+
 def _choice_file_state(path: Path, *, snapshot: bool = False):
     """Capture a response version and content digest without following symlinks."""
     try:
@@ -817,6 +879,7 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     elif step_id == '0.5ic':
         files = _fixed_inputs(runtime, step_id, parameters=parameters)
     else:
+        _ensure_default_prelayout(runtime, str(step_id))
         files = _fixed_inputs(runtime, step_id)
     if not files:
         return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT', step_id=step_id, selected=None)

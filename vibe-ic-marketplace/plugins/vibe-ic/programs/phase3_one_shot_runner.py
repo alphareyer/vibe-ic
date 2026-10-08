@@ -60658,6 +60658,8 @@ def step_digital_hardmacro_gen(project: Path,
     _pdk_dir = _hardmacro_pdk_dir(pdk, container)
     if _pdk_dir:
         cmd += ["--pdk-root", _pdk_dir]
+    if pdk and pdk.name:
+        cmd += ["--pdk-name", pdk.name]
     # Supply names are not inferred from design text.  They come from the
     # exact std-cell LEF already selected for this run; metal_prefix lets the
     # producer distinguish routed primary rails from well/substrate pins.

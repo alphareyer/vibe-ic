@@ -96,7 +96,8 @@ in a log.
 
 Usage:
     python3 digital_hardmacro_gen.py <project_dir> [--json <out>]
-                                     [--pdk-root <dir>] [--cell-lef <file>]
+                                     [--pdk-name <name>] [--pdk-root <dir>]
+                                     [--cell-lef <file>]
                                      [--metal-prefix <stem>]
                                      [--container <name>]
                                      [--full-lef] [--pinonly]
@@ -134,6 +135,19 @@ import _path_layout as _pl
 import _watchdog  # noqa: E402  plugin-wide progress-stall process supervision
 from _atomic_artefact import write_text as atomic_write_text
 from hardmacro_supply_intent import lef_pg_pins, liberty_pg_pins
+
+# The release caller owns declaration collection.  It passes the canonical
+# target selected from the shared Phase-1 inputs and the mounted PDK namespace
+# root; this producer resolves the exact technology directory and its own
+# magicrc.  These are paths, not a second declaration reader.
+PDK_CALLER_CONTRACT = {
+    "pdk_name": (
+        "reports/phase1/pdk_staging_read.json:adopted_pdk_target",
+        "phase1/generated_docs/L19_CONSTRAINTS_PDK.json:fields.pdk_target",
+    ),
+    "pdk_root": "mounted PDK namespace root supplied by the caller",
+    "refusal": "PdkBindingRefusal(code, detail, candidates)",
+}
 
 # SHARED READERS, imported rather than re-typed — the same rule the gate
 # follows. `parse_def_pins` is the canonical DEF PINS reader in this tree and
@@ -214,6 +228,27 @@ class Record:
     interface: dict = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
     current: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PdkBinding:
+    """The exact current PDK namespace selected by the release caller."""
+
+    pdk_name: str
+    pdk_root: Path
+    magicrc: Path
+
+
+class PdkBindingRefusal(ValueError):
+    """Typed, fail-closed refusal for an absent or ambiguous PDK binding."""
+
+    def __init__(self, code: str, detail: str, *, pdk_name=None,
+                 pdk_root=None, candidates=()):
+        self.code = str(code)
+        self.pdk_name = pdk_name
+        self.pdk_root = pdk_root
+        self.candidates = tuple(str(x) for x in candidates)
+        super().__init__(f"{self.code}: {detail}")
 
 
 # ── inputs ────────────────────────────────────────────────────────────────
@@ -688,16 +723,8 @@ def _magicrc_for(pdk_root: str) -> Optional[str]:
     chip/PDK-AGNOSTIC: no PDK name appears here; the rule is about HOW MANY
     technologies are in scope, never which.
     """
-    root = Path(pdk_root) if pdk_root else None
-    if not root or not root.is_dir():
-        return None
-    own = sorted(root.glob("libs.tech/magic/*.magicrc"))
-    if own:
-        return str(own[0])
-    hits = sorted(root.glob("*/libs.tech/magic/*.magicrc"))
-    if len(hits) == 1:
-        return str(hits[0])
-    return None
+    candidates = magicrc_candidates(pdk_root)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def magicrc_candidates(pdk_root: str) -> List[str]:
@@ -709,9 +736,92 @@ def magicrc_candidates(pdk_root: str) -> List[str]:
     root = Path(pdk_root) if pdk_root else None
     if not root or not root.is_dir():
         return []
-    own = sorted(root.glob("libs.tech/magic/*.magicrc"))
-    return [str(x) for x in (own or sorted(
-        root.glob("*/libs.tech/magic/*.magicrc")))]
+    own = sorted(x for x in root.glob("libs.tech/magic/*.magicrc")
+                 if x.is_file())
+    if own:
+        return [str(x) for x in own]
+    return [str(x) for x in sorted(
+        root.glob("*/libs.tech/magic/*.magicrc")) if x.is_file()]
+
+
+def resolve_pdk_binding(pdk_name: Optional[str],
+                        pdk_root: Optional[os.PathLike | str]) -> PdkBinding:
+    """Resolve the caller's named PDK without choosing from directory order.
+
+    ``pdk_root`` is the mounted PDK namespace (``/pdk``) or the exact named
+    PDK directory.  With a namespace root, only ``<root>/<pdk_name>`` is
+    considered.  The returned root is always that exact directory and the
+    returned magicrc is the one file under its ``libs.tech/magic`` namespace.
+    The caller's declaration collection is deliberately outside this module;
+    this function consumes its canonical ``pdk_name`` value.
+    """
+    if pdk_root is None or not str(os.fspath(pdk_root)).strip():
+        raise PdkBindingRefusal(
+            "PDK_ROOT_ABSENT",
+            "the caller did not supply a mounted PDK namespace root",
+            pdk_name=pdk_name, pdk_root=pdk_root)
+    root = Path(os.fspath(pdk_root))
+    if not root.is_dir():
+        raise PdkBindingRefusal(
+            "PDK_ROOT_ABSENT",
+            f"mounted PDK namespace root is not a directory: {root}",
+            pdk_name=pdk_name, pdk_root=str(root))
+
+    name = str(pdk_name).strip() if pdk_name is not None else ""
+    if not name:
+        candidates = magicrc_candidates(str(root))
+        code = "PDK_ROOT_AMBIGUOUS" if len(candidates) > 1 else "PDK_NAME_ABSENT"
+        detail = (
+            "the mounted PDK namespace contains multiple technology magicrcs; "
+            "the caller must supply the canonical pdk_name: "
+            + ", ".join(candidates)
+            if code == "PDK_ROOT_AMBIGUOUS" else
+            "the caller must supply the canonical pdk_name")
+        raise PdkBindingRefusal(code, detail, pdk_name=pdk_name,
+                                pdk_root=str(root), candidates=candidates)
+    if Path(name).name != name or name in {".", ".."}:
+        raise PdkBindingRefusal(
+            "PDK_NAME_INVALID", f"not an exact PDK directory name: {name!r}",
+            pdk_name=name, pdk_root=str(root))
+
+    # A specific PDK root is accepted only when its basename is the named
+    # current PDK.  Otherwise treat the argument as the mounted parent and
+    # bind the one explicitly named child.  No sibling scan is a fallback.
+    if (root / "libs.tech" / "magic").is_dir():
+        if root.name != name:
+            raise PdkBindingRefusal(
+                "PDK_ROOT_MISMATCH",
+                f"specific PDK root {root} is not named {name!r}",
+                pdk_name=name, pdk_root=str(root))
+        selected = root
+    else:
+        selected = root / name
+        if not selected.is_dir():
+            raise PdkBindingRefusal(
+                "PDK_ROOT_ABSENT",
+                f"named PDK directory is absent: {selected}",
+                pdk_name=name, pdk_root=str(root))
+
+    selected_resolved = selected.resolve()
+    if selected_resolved.name != name:
+        raise PdkBindingRefusal(
+            "PDK_ROOT_MISMATCH",
+            f"named PDK root resolves to {selected_resolved.name!r}, not {name!r}",
+            pdk_name=name, pdk_root=str(root))
+
+    candidates = magicrc_candidates(str(selected))
+    if not candidates:
+        raise PdkBindingRefusal(
+            "PDK_MAGICRC_ABSENT",
+            f"named PDK {name!r} has no libs.tech/magic/*.magicrc: {selected}",
+            pdk_name=name, pdk_root=str(root))
+    if len(candidates) != 1:
+        raise PdkBindingRefusal(
+            "PDK_MAGICRC_AMBIGUOUS",
+            f"named PDK {name!r} has multiple magicrc candidates: "
+            + ", ".join(candidates),
+            pdk_name=name, pdk_root=str(root), candidates=candidates)
+    return PdkBinding(name, selected_resolved, Path(candidates[0]).resolve())
 
 
 # ── WHERE MAGIC ACTUALLY IS ───────────────────────────────────────────────
@@ -798,8 +908,10 @@ def choose_magicrc(own: List[str], nested: List[str]) -> Optional[str]:
     design is abstracted against, which is the failure `_magicrc_for`'s own
     docstring records. See there for why more than one candidate REFUSES.
     """
-    if own:
+    if len(own) == 1:
         return own[0]
+    if own:
+        return None
     if len(nested) == 1:
         return nested[0]
     return None
@@ -1678,7 +1790,8 @@ def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
 def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
                          pdk_root: str, full_lef: bool, pinonly: bool,
                          timeout_s: int = 900, *, container: str = "",
-                         site: Optional["MagicSite"] = None
+                         site: Optional["MagicSite"] = None,
+                         magicrc: Optional[str] = None
                          ) -> Tuple[bool, str]:
     """(ok, reason). Never raises; a missing capability is a stated reason.
 
@@ -1691,7 +1804,12 @@ def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
         site = find_magic_site(container)
     if site is None:
         return False, magic_absent_reason(container)
-    magicrc = site.magicrc(pdk_root)
+    # A caller that supplied a named PDK binding has already resolved the
+    # exact technology file.  Do not ask the broad mounted parent to choose a
+    # sibling again.  Legacy callers may omit it and retain the strict,
+    # single-candidate resolver below.
+    if magicrc is None:
+        magicrc = site.magicrc(pdk_root)
     if magicrc is None:
         cands = site.magicrc_candidates(pdk_root)
         if len(cands) > 1:
@@ -1892,7 +2010,8 @@ def characterise_liberty(project: Path, design: str, container: str,
 
 def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         container: str = "", cell_lef: str = "",
-        metal_prefix: str = "met") -> Tuple[int, Record]:
+        metal_prefix: str = "met", pdk_name: Optional[str] = None
+        ) -> Tuple[int, Record]:
     rec = Record()
     rec.lef_policy = {"writer": "magic:lef write",
                       "abstract": not full_lef,
@@ -1924,20 +2043,52 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         return RC_REFUSED, rec
     import _physical_current as _pc
     import _tapeout_declaration as _td
+    pdk_binding: Optional[PdkBinding] = None
+    pdk_binding_refusal: Optional[PdkBindingRefusal] = None
     try:
         declaration = project / _td.DECLARATION_REL
         route, error = _td.load(declaration)
         if error or _td.answer(route, "deliverable") != _td.DELIVERABLE_HARDMACRO:
             raise ValueError("IP_ROUTE_NOT_OWNER_DECLARED_HARDMACRO")
-        pdk_name, technology = _pc.pdk_of(project)
+        current_pdk_name, technology = _pc.pdk_of(project)
+        # A legacy direct producer may pass the exact PDK directory and omit
+        # the redundant name; preserve that path only when the directory is
+        # itself unambiguous.  A mounted parent (especially one holding more
+        # than one technology) must receive the declared caller pdk_name.
+        exact_root = False
+        if pdk_name is None and pdk_root:
+            root_arg = Path(os.fspath(pdk_root))
+            exact_root = (root_arg.is_dir()
+                          and (root_arg / "libs.tech" / "magic").is_dir())
+        requested_pdk_name = (current_pdk_name if pdk_name is None and exact_root
+                              else (None if pdk_name is None
+                                    else str(pdk_name).strip()))
+        if pdk_name is not None and requested_pdk_name != current_pdk_name:
+            raise PdkBindingRefusal(
+                "PDK_NAME_MISMATCH",
+                f"caller pdk_name {requested_pdk_name!r} does not match "
+                f"current PDK identity {current_pdk_name!r}",
+                pdk_name=requested_pdk_name, pdk_root=pdk_root)
+        pdk_name = current_pdk_name
         inputs = {"def": _pc.entry(project, def_path),
                   "gds": _pc.entry(project, gds),
                   "route": _pc.entry(project, declaration),
-                  "technology": _pc.entry(project, technology),
-                  "pdk_magicrc": _pc.entry(project, _magicrc_for(pdk_root), external=True)}
+                  "technology": _pc.entry(project, technology)}
+        try:
+            pdk_binding = resolve_pdk_binding(requested_pdk_name, pdk_root)
+            pdk_root = str(pdk_binding.pdk_root)
+            inputs["pdk_magicrc"] = _pc.entry(
+                project, pdk_binding.magicrc, external=True)
+        except PdkBindingRefusal as exc:
+            # Missing/ambiguous native PDK metadata is a typed capability gap,
+            # not a reason to manufacture a hardmacro kit or raise Path(None).
+            pdk_binding_refusal = exc
     except (OSError, ValueError) as exc:
-        rec.status, rec.reason = "REFUSED", str(exc)
-        return RC_REFUSED, rec
+        if isinstance(exc, PdkBindingRefusal) and exc.code != "PDK_NAME_MISMATCH":
+            pdk_binding_refusal = exc
+        else:
+            rec.status, rec.reason = "REFUSED", str(exc)
+            return RC_REFUSED, rec
     geom = _require(_gds_geometry_count, "_gds_geometry_count")(gds.read_bytes())
     if geom <= 0:
         rec.status, rec.reason = "REFUSED", (
@@ -1970,9 +2121,12 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
     if not _PG_USES <= present_uses:
         # The PDK file can live only in the EDA container. Resolve the same
         # boundary Magic will use before reading either the tool or its inputs.
-        site = find_magic_site(container)
-        rails, rail_source, why = resolve_stdcell_rails(
-            site, pdk_root, cell_lef, metal_prefix)
+        if pdk_binding_refusal:
+            rails, rail_source, why = (None, None, str(pdk_binding_refusal))
+        else:
+            site = find_magic_site(container)
+            rails, rail_source, why = resolve_stdcell_rails(
+                site, pdk_root, cell_lef, metal_prefix)
         if not rails:
             rec.status, rec.reason = "REFUSED_NOT_INTEGRABLE", why
             rec.interface = {
@@ -2109,29 +2263,36 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         # says which environment answered. "magic is not on PATH" was reported
         # by a run whose own provenance already carried a successful magic
         # invocation; naming the site makes the statements comparable.
-        if site is None:
-            site = find_magic_site(container)
-        if site is None:
-            ok, why = False, magic_absent_reason(container)
+        if pdk_binding_refusal:
+            ok, why = False, str(pdk_binding_refusal)
         else:
-            rec.lef_policy["magic_site"] = site.where
-            ver = site.magic_version()
-            if ver:
-                rec.lef_policy["magic_version"] = ver
-            if effective_def_text == def_text:
-                magic_def = def_path
-                ok, why = write_lef_with_magic(
-                    design, gds, magic_def, lef_path, pdk_root, full_lef,
-                    pinonly, container=container, site=site)
+            if site is None:
+                site = find_magic_site(container)
+            if site is None:
+                ok, why = False, magic_absent_reason(container)
             else:
-                # A private working copy only. The signed-off routed DEF is an
-                # immutable input and is never rewritten to make a delivery.
-                with tempfile.TemporaryDirectory(prefix="digital-hm-pg-") as td:
-                    magic_def = Path(td) / def_path.name
-                    magic_def.write_text(effective_def_text, encoding="utf-8")
+                rec.lef_policy["magic_site"] = site.where
+                ver = site.magic_version()
+                if ver:
+                    rec.lef_policy["magic_version"] = ver
+                if effective_def_text == def_text:
+                    magic_def = def_path
                     ok, why = write_lef_with_magic(
                         design, gds, magic_def, lef_path, pdk_root, full_lef,
-                        pinonly, container=container, site=site)
+                        pinonly, container=container, site=site,
+                        magicrc=(str(pdk_binding.magicrc)
+                                 if pdk_binding else None))
+                else:
+                    # A private working copy only. The signed-off routed DEF is
+                    # immutable and is never rewritten to make a delivery.
+                    with tempfile.TemporaryDirectory(prefix="digital-hm-pg-") as td:
+                        magic_def = Path(td) / def_path.name
+                        magic_def.write_text(effective_def_text, encoding="utf-8")
+                        ok, why = write_lef_with_magic(
+                            design, gds, magic_def, lef_path, pdk_root,
+                            full_lef, pinonly, container=container, site=site,
+                            magicrc=(str(pdk_binding.magicrc)
+                                     if pdk_binding else None))
         if not ok:
             rec.status, rec.reason = "SKIPPED_NO_CAPABILITY", why
             rec.notes.append(
@@ -2290,6 +2451,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--json", default=None, help="write the JSON record here")
     ap.add_argument("--pdk-root", default=os.environ.get("PDK_ROOT", ""),
                     help="PDK_ROOT; the PDK's own magicrc is located under it")
+    ap.add_argument("--pdk-name", default=None,
+                    help="canonical current PDK name supplied by the caller")
     ap.add_argument("--cell-lef", default="",
                     help="the selected PDK std-cell LEF whose routing-metal "
                          "USE POWER/GROUND pins name the hardmacro rails")
@@ -2316,7 +2479,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         rc, rec = run(args.project_dir, args.pdk_root, args.full_lef,
                       args.pinonly, args.container, args.cell_lef,
-                      args.metal_prefix)
+                      args.metal_prefix, args.pdk_name)
     except RuntimeError as exc:
         rc, rec = RC_NO_CAPABILITY, Record(status="ERROR", reason=str(exc))
 

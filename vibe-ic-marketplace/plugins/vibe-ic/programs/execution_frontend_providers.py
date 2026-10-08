@@ -45,6 +45,18 @@ ENGINES = {r: ('source-bound',) for r in ROWS}; ENGINES.update({'2':('yosys','ve
 APPLICABILITY = {r:'IC+IP' for r in ROWS}; APPLICABILITY['0.5ic']='IC+IP route authority'; APPLICABILITY['6']='IC only; FPGA evidence optional'
 DOWNSTREAM = {r: f'consumer:{";".join(outs)}' for r,outs in CANONICAL_ROWS.items()}
 
+_STEP6_ATTESTATION_ABSENCE_RULES = frozenset({
+    'missing-pass-json', 'bad-pass-json', 'pass-json-fields-missing',
+    'not-all-passed', 'not-enough-scenarios', 'no-programmer-log',
+    'no-hardware-evidence',
+})
+_STEP6_ATTESTATION_REASON = (
+    'no final .sof, programmer log or bench evidence exists: '
+    'no FPGA board test was performed')
+_STEP6_ATTESTATION_RULING = (
+    'owner 2026-09-25: steps 6 and 39 (FPGA on-board) are excluded from '
+    'the IC PASS goal; reported NOT_MEASURED, never PASS')
+
 
 def _machine_contracts():
     """Consume the checked-in catalog and coverage declarations as inputs."""
@@ -193,6 +205,72 @@ def _concrete_outputs(root, required):
                 if path.is_file() and not path.is_symlink():
                     found[str(path.relative_to(root))]=str(spec)
     return found
+
+
+def _step6_board_evidence_present(root, concrete):
+    """Return whether a Step-6 project contains any board-run evidence.
+
+    A missing Quartus/board capability is the one typed exclusion the worker
+    is allowed to emit.  Any concrete FPGA output, build input, programmer
+    trace, bench artefact, or pass claim means that the board path was
+    attempted and must remain on the normal failing consumer path.
+    """
+    if concrete:
+        return True
+    fpga = root / 'phase2' / 'stage1' / 'fpga'
+    if fpga.is_dir():
+        if any(path.is_file() for path in fpga.rglob('*.qsf')):
+            return True
+        if any(path.is_file() for path in fpga.rglob('*.sof')):
+            return True
+    reports = root / 'reports' / 'phase2' / 'fpga'
+    if reports.is_dir():
+        # Only the producer's exact no-run stub is an absence declaration.
+        # Other reports and programmer/bench artefacts are evidence of an
+        # attempted board result, even when their verdict says SKIP.
+        for path in reports.rglob('*'):
+            if not path.is_file() or path.name == 'quartus_map_audit.json':
+                continue
+            if path.name == 'on_board_pass.json':
+                try:
+                    claim = json.loads(path.read_text())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if claim == {
+                        'verdict': 'SKIP',
+                        'evidence': 'usb_hid_tester_verify not run'}:
+                    continue
+                return True
+            if path.name == 'on_board_attestation.json':
+                try:
+                    attestation = json.loads(path.read_text())
+                except (OSError, ValueError, TypeError):
+                    return True
+                if _step6_attestation_is_absence(attestation):
+                    continue
+                return True
+            if path.suffix.lower() != '.json':
+                return True
+    return False
+
+
+def _step6_attestation_is_absence(value):
+    """Recognize only the attestation producer's typed no-hardware result."""
+    if not isinstance(value, dict) or set(value) != {
+            'overall', 'reason_class', 'reason', 'ruling', 'findings'}:
+        return False
+    if (value.get('overall') != 'NOT_MEASURED' or
+            value.get('reason_class') != 'hardware_required' or
+            value.get('reason') != _STEP6_ATTESTATION_REASON or
+            value.get('ruling') != _STEP6_ATTESTATION_RULING or
+            not isinstance(value.get('findings'), list)):
+        return False
+    return all(
+        isinstance(finding, dict) and set(finding) == {
+            'severity', 'rule', 'message'} and
+        finding.get('severity') == 'error' and
+        finding.get('rule') in _STEP6_ATTESTATION_ABSENCE_RULES
+        for finding in value['findings'])
 
 
 def _gate_verdict(program, path):
@@ -369,6 +447,31 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             if _row == '4':
                 from execution_step4 import validate as validate_step4
                 return validate_step4(root, facts, _gate_names)
+            if _row == '6':
+                canonical = root / 'canonical.json'
+                record = None
+                if canonical.is_file() and not canonical.is_symlink():
+                    try:
+                        record = json.loads(canonical.read_text())
+                    except (OSError, ValueError, TypeError):
+                        pass
+                typed_absence = (
+                    isinstance(record, dict) and
+                    record.get('schema') == 'frontend_worker_output/1' and
+                    record.get('step_id') == '6' and
+                    record.get('producer') == 'step_fpga_compile+quartus_map_audit' and
+                    record.get('result') == 'NOT_MEASURED' and
+                    record.get('verdict') == 'NOT_MEASURED' and
+                    record.get('reason') == 'Quartus/board unavailable' and
+                    type(record.get('excluded_from_verdict')) is bool and
+                    record.get('excluded_from_verdict') is True)
+                if typed_absence and not _step6_board_evidence_present(root, concrete):
+                    artifacts = {'canonical.json': digest(canonical)}
+                    return Evidence(
+                        facts, 'NOT_MEASURED',
+                        {name: 'NOT_MEASURED' for name in _gate_names},
+                        artifacts,
+                        detail='Step-6 board capability absent; typed exclusion remains unmeasured')
             if _row == '7':
                 # Step 7's producer is the canonical ASIC SDC/PVT emitter.  Its
                 # mandatory consumers (stage compliance, syntax, PVT and
