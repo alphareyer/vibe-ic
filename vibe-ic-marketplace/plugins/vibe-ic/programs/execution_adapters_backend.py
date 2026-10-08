@@ -9,6 +9,7 @@ producer receipt and every downstream gate are observed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import re
@@ -685,6 +686,49 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             return
         carry_checkpoint_file(raw, allow_directory=(raw == "phase2/stage1/sim/tb"))
 
+    def prelayout_subject_paths(summary_raw: str) -> tuple[str, ...]:
+        """Resolve Step 10's issued subject from its producer summary.
+
+        The summary is the existing STA consumer contract.  Do not maintain a
+        second hard-coded corner list here: a producer may publish a different
+        finite corner set, and the consumer binds every item by current bytes
+        and digest.  This adapter only validates the path namespace and digest
+        shape before carrying those exact files.
+        """
+        summary = root / summary_raw
+        try:
+            doc = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError(f"Step-10 summary is not valid JSON: {summary_raw!r}") from exc
+        subject = doc.get("subject") if isinstance(doc, Mapping) else None
+        items = subject.get("items") if isinstance(subject, Mapping) else None
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"Step-10 summary has no subject.items: {summary_raw!r}")
+        result: list[str] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ValueError("Step-10 subject.items contains a non-object")
+            raw = item.get("path")
+            digest = item.get("sha256")
+            rel = Path(raw) if isinstance(raw, str) else None
+            if (rel is None or rel.is_absolute() or not raw or ".." in rel.parts
+                    or rel.as_posix() != raw
+                    or rel.parent != Path("phase3/stage3/sta") and
+                       not rel.is_relative_to(Path("phase3/stage3/sta/prelayout_per_corner"))
+                    or not isinstance(digest, str)
+                    or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", digest)):
+                raise ValueError(f"Step-10 subject item is unsafe: {item!r}")
+            target = root / rel
+            try:
+                actual = hashlib.sha256(target.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ValueError(f"Step-10 subject item is absent: {raw!r}") from exc
+            if actual != digest.removeprefix("sha256:"):
+                raise ValueError(f"Step-10 subject digest changed: {raw!r}")
+            if raw not in result:
+                result.append(raw)
+        return tuple(result)
+
     # A backend arm with a published synthesis netlist consumes the same
     # issued proof namespace as the producer.  These files are deliberately
     # enumerated: copying the whole reports tree would admit stale outputs.
@@ -710,14 +754,13 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         ):
             carry_checkpoint_file(raw)
         if step_id == "15":
-            for raw in (
-                "reports/phase2/sdc_check.json",
-                "reports/phase3/sta/pre_pnr_summary.json",
-                "phase3/stage3/sta/pre_pnr_timing.rpt",
-                "phase3/stage3/sta/prelayout_per_corner/sta_FF.rpt",
-                "phase3/stage3/sta/prelayout_per_corner/sta_SS.rpt",
-                "phase3/stage3/sta/prelayout_per_corner/sta_TT.rpt",
-            ):
+            for raw in ("reports/phase2/sdc_check.json",
+                        "reports/phase3/sta/pre_pnr_summary.json"):
+                carry_checkpoint_file(raw)
+            for raw in prelayout_subject_paths(
+                    "reports/phase3/sta/pre_pnr_summary.json"):
+                carry_checkpoint_file(raw)
+            for raw in ("reports/lec.json", "reports/lec.rpt"):
                 carry_checkpoint_file(raw)
         # These are prior stage-1 proof inputs consumed by the compliance
         # reader.  Carry only files already issued by the checkpoint; missing
