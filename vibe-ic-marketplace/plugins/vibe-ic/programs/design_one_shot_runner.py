@@ -19599,12 +19599,16 @@ def step_sdc_validation(project: Path) -> StepResult:
                       reason_class=_V.ReasonClass.INPUT_ABSENT if status=='NOT_MEASURED' else '')
 
 
+_SDC_POSTCHECK_SCHEMA = 'sdc-post-prelayout/2'
+
+
 def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
     """Consume this project's current tool evidence, without a frontend context.
 
     Called only after the prelayout producer returns PASS. The two existing
     deterministic consumers run directly; an invocation-scoped receipt binds
-    their actual exit codes and output bytes to the inputs before and after.
+    their actual exit codes and output bytes to every declared Step-8 input
+    before and after, including Step 7's PVT matrix.
     """
     import librelane_contract as ll
     import shutil
@@ -19624,7 +19628,11 @@ def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
 
     def current_inputs():
         paths = {'opensta_gate': gate, 'pnr_sdc': deck,
-                 'mapped_netlist': netlist, 'l8': l8}
+                 'mapped_netlist': netlist, 'l8': l8,
+                 # Step 7's PVT matrix is a declared Step-8 input. Keep it as
+                 # a named binding (rather than relying on the SDC glob) so a
+                 # changed corner census invalidates this receipt.
+                 'pvt_matrix': project / 'phase2/stage2/constraints/pvt_matrix.json'}
         paths.update({str(p.relative_to(project)): p for p in
                       (project / 'phase2/stage2/constraints').glob('*.sdc')})
         for path in paths.values():
@@ -19691,7 +19699,7 @@ def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
             shutil.copyfile(src, dst)
     except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as exc:
         status, reason, detail = 'NOT_MEASURED', _V.ReasonClass.INCONCLUSIVE, str(exc)
-    _aa.write_json(receipt, {'schema': 'sdc-post-prelayout/1', 'invocation_id': invocation,
+    _aa.write_json(receipt, {'schema': _SDC_POSTCHECK_SCHEMA, 'invocation_id': invocation,
                             'binding': binding, 'records': records, 'status': status,
                             'detail': detail, 'started_ns': started, 'ended_ns': time.time_ns()})
     result = StepResult('sdc_validation', status, (time.time_ns() - started) / 1e9,
@@ -26831,7 +26839,16 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
         try:
             receipt = Path(latest.output_files[0])
             doc = json.loads(receipt.read_text())
-            current = (hashlib.sha256(receipt.read_bytes()).hexdigest() ==
+            receipt_binding = doc.get('binding')
+            bound_inputs = (receipt_binding.get('inputs')
+                            if isinstance(receipt_binding, dict) else None)
+            bound_sources = (receipt_binding.get('sources')
+                             if isinstance(receipt_binding, dict) else None)
+            current = (doc.get('schema') == _SDC_POSTCHECK_SCHEMA and
+                       isinstance(bound_inputs, dict) and
+                       isinstance(bound_sources, dict) and
+                       isinstance(bound_inputs.get('pvt_matrix'), dict) and
+                       hashlib.sha256(receipt.read_bytes()).hexdigest() ==
                        latest.extras.get('receipt_sha256') and
                        doc.get('invocation_id') == latest.extras.get('invocation_id') and
                        doc.get('status') == latest.status and
@@ -26840,10 +26857,10 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
                            hashlib.sha256(Path(r['output']).read_bytes()).hexdigest() == r['output_sha256']
                            for r in doc['records']) and
                        all(hashlib.sha256((PROGRAMS_DIR / name).read_bytes()).hexdigest() == sha
-                           for name, sha in doc['binding']['sources'].items()) and
+                           for name, sha in bound_sources.items()) and
                        all(Path(row['path']).is_file() and
                            hashlib.sha256(Path(row['path']).read_bytes()).hexdigest() == row['sha256']
-                           for row in doc['binding']['inputs'].values()))
+                           for row in bound_inputs.values()))
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             current = False
     effective = [s for s in plan if not (current and s is not latest and
