@@ -60117,7 +60117,8 @@ def _publish_prelayout_summary(project: Path) -> Path:
     return summary
 
 
-def publish_prelayout_reports(project: Path, folder: Path) -> Dict[str, str]:
+def publish_prelayout_reports(project: Path, folder: Path, *,
+                              receipt_sha256: Optional[str] = None) -> Dict[str, str]:
     """Publish Step 10's canonical reports from an existing STAPrePNR run.
 
     This is a publication seam only: the native producer has already run and
@@ -60126,7 +60127,7 @@ def publish_prelayout_reports(project: Path, folder: Path) -> Dict[str, str]:
     runs the existing scoped ``sta_report_check`` solely to emit the canonical
     summary before the audit consumes it.
     """
-    from librelane_contract import Refusal, digest
+    from librelane_contract import Refusal, digest, validate_step_receipt
     import librelane_prelayout as _llp
 
     project = Path(project).resolve()
@@ -60145,6 +60146,20 @@ def publish_prelayout_reports(project: Path, folder: Path) -> Dict[str, str]:
     state = folder / "state_out.json"
     if state.is_symlink() or not state.is_file() or not state.stat().st_size:
         raise Refusal("PRELAYOUT_NATIVE_STATE_ABSENT", str(state))
+    receipt = folder / "vibeic_receipt.json"
+    if (receipt_sha256 is not None and
+            (not isinstance(receipt_sha256, str) or
+             not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) or
+             receipt.is_symlink() or not receipt.is_file() or
+             digest(receipt) != receipt_sha256)):
+        raise Refusal("PRELAYOUT_NATIVE_RECEIPT_CHANGED", str(receipt))
+    # The producer receipt binds every retained report and its input/state
+    # identity.  A present state file by itself is not sufficient authority for
+    # publishing the canonical Step-10 views.
+    try:
+        validate_step_receipt(folder, "OpenROAD.STAPrePNR")
+    except Refusal as exc:
+        raise Refusal("PRELAYOUT_NATIVE_RECEIPT_INVALID", str(exc)) from exc
 
     sta_out = _pl.sta_dir(project)
     per_corner = sta_out / STEP10_CORNER_DIR

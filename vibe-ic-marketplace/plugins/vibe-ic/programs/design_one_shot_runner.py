@@ -19627,6 +19627,48 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
     records, binding = [], {}
     status, reason, detail = 'NOT_MEASURED', _V.ReasonClass.INPUT_ABSENT, ''
 
+    def rooted_path(value: object, label: str) -> Path:
+        """Resolve a producer-declared project path without following escapes."""
+        if not isinstance(value, (str, os.PathLike)) or not str(value).strip():
+            raise ValueError(f'SDC_POSTCHECK_PATH_INVALID: {label}')
+        raw = Path(os.fspath(value))
+        if '..' in raw.parts:
+            raise ValueError(f'SDC_POSTCHECK_PATH_ESCAPE: {label}')
+        candidate = raw if raw.is_absolute() else project / raw
+        try:
+            lexical = candidate.relative_to(project)
+        except ValueError:
+            lexical = None
+        if lexical is not None:
+            cursor = project
+            for part in lexical.parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    raise ValueError(f'SDC_POSTCHECK_PATH_SYMLINK: {label}')
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f'SDC_POSTCHECK_PATH_INVALID: {label}') from exc
+        if not resolved.is_relative_to(project):
+            raise ValueError(f'SDC_POSTCHECK_PATH_ESCAPE: {label}')
+        return resolved
+
+    def rooted_file(value: object, label: str) -> Path:
+        path = rooted_path(value, label)
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise ValueError(f'SDC_POSTCHECK_INPUT_ABSENT: {label}') from exc
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            raise ValueError(f'SDC_POSTCHECK_INPUT_ABSENT: {label}')
+        return path
+
+    def rooted_dir(value: object, label: str) -> Path:
+        path = rooted_path(value, label)
+        if not path.is_dir():
+            raise ValueError(f'SDC_POSTCHECK_INPUT_ABSENT: {label}')
+        return path
+
     def native_proof_current(gate_doc: dict) -> bool:
         """Accept Default's native producer only when its gate binds its folder."""
         if not isinstance(native_result, dict):
@@ -19634,20 +19676,23 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
         raw_folder = native_result.get('folder')
         if not isinstance(raw_folder, (str, os.PathLike)):
             return False
-        raw_path = Path(raw_folder)
         try:
-            if raw_path.is_symlink():
+            folder = rooted_dir(raw_folder, 'native_result.folder')
+            state = rooted_file(folder / 'state_out.json', 'native state_out.json')
+            receipt = rooted_file(folder / 'vibeic_receipt.json', 'native vibeic_receipt.json')
+            source = rooted_file(gate_doc.get('source'), 'step8 gate source')
+            expected_receipt = native_result.get('receipt_sha256')
+            if (not isinstance(expected_receipt, str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', expected_receipt) or
+                    ll.digest(receipt) != expected_receipt or
+                    source != state or gate_doc.get('state_out_sha256') != ll.digest(state)):
                 return False
-            folder = raw_path.resolve()
-            if (not folder.is_dir() or
-                    not folder.is_relative_to(project)):
-                return False
-            state = folder / 'state_out.json'
-            source = Path(str(gate_doc.get('source') or '')).resolve()
-            return (state.is_file() and not state.is_symlink() and
-                    source == state and
-                    gate_doc.get('state_out_sha256') == ll.digest(state))
-        except (OSError, RuntimeError, TypeError, ValueError):
+            # The receipt is the producer authority.  A state file's presence
+            # alone cannot establish that its report, invocation and input
+            # fingerprint are the same retained native run.
+            ll.validate_step_receipt(folder, 'OpenROAD.STAPrePNR')
+            return True
+        except (OSError, RuntimeError, TypeError, ValueError, ll.Refusal):
             return False
 
     def current_inputs():
@@ -19659,22 +19704,24 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
                  'pvt_matrix': project / 'phase2/stage2/constraints/pvt_matrix.json'}
         paths.update({str(p.relative_to(project)): p for p in
                       (project / 'phase2/stage2/constraints').glob('*.sdc')})
-        for path in paths.values():
-            if (path.is_symlink() or not path.is_file() or
-                    not path.resolve().is_relative_to(project) or not path.stat().st_size):
-                raise ValueError(f'SDC_POSTCHECK_INPUT_ABSENT: {path}')
+        paths = {name: rooted_file(path, name) for name, path in paths.items()}
         doc = json.loads(gate.read_text())
-        state = Path(str(doc.get('source') or ''))
-        if (state.is_symlink() or not state.is_file() or
-                not state.resolve().is_relative_to(project) or
-                doc.get('state_out_sha256') != ll.digest(state)):
+        state = rooted_file(doc.get('source'), 'step8 gate source')
+        if doc.get('state_out_sha256') != ll.digest(state):
             raise ValueError('SDC_POSTCHECK_GATE_STALE: OpenSTA state')
-        if (Path(str(doc.get('sdc') or '')).resolve() != deck.resolve() or
+        gate_deck = rooted_file(doc.get('sdc'), 'step8 gate sdc')
+        gate_netlist = rooted_file(doc.get('netlist'), 'step8 gate netlist')
+        if (gate_deck != deck or
                 doc.get('sdc_sha256') != ll.digest(deck) or
-                Path(str(doc.get('netlist') or '')).resolve() != netlist.resolve() or
-                Path(str(json.loads(state.read_text()).get('nl') or '')).resolve() != netlist.resolve() or
+                gate_netlist != netlist or
                 doc.get('netlist_sha256') != ll.digest(netlist)):
             raise ValueError('SDC_POSTCHECK_GATE_STALE: current deck/netlist')
+        state_doc = json.loads(state.read_text())
+        if not isinstance(state_doc.get('nl'), str) or not state_doc['nl']:
+            raise ValueError('SDC_POSTCHECK_STATE_UNBOUND: native netlist')
+        # The native state deliberately retains its original absolute paths.
+        # validate_step_receipt above binds their recorded input digests; the
+        # current project-facing gate binds the project-relative netlist.
         if doc.get('step') != '8' or doc.get('program') != 'librelane_prelayout.judge_sdc':
             raise ValueError('SDC_POSTCHECK_GATE_UNBOUND')
         paths['state_out'] = state
@@ -19689,6 +19736,9 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
 
     try:
         binding = current_inputs()
+        if (isinstance(native_result, dict) and native_result.get('folder') is not None
+                and not binding.get('native_proof')):
+            raise ValueError('SDC_POSTCHECK_NATIVE_PROOF_STALE')
         if (binding['mode'] not in ('librelane', 'dual') and
                 not binding.get('native_proof')):
             raise ValueError('SDC_POSTCHECK_TOOL_MODE_REQUIRED')

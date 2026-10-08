@@ -1,128 +1,250 @@
 from __future__ import annotations
-import json, shutil, sys, types
+
+import json
+import shutil
+import sys
+import types
 from pathlib import Path
+
 import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
-if str(PROGRAMS) not in sys.path: sys.path.insert(0, str(PROGRAMS))
-import execution_policy as policy
+if str(PROGRAMS) not in sys.path:
+    sys.path.insert(0, str(PROGRAMS))
 import design_one_shot_runner as design
+import execution_policy as policy
 import phase3_one_shot_runner as phase3
 import test_step8_post_prelayout as postcheck_fixtures
 
-NATIVE_PACKAGE = Path('/home/reyerchu/fleet-artefacts/20261008/spm-prelayout-current101008am/native-staprepnr')
+
+RETAINED = Path(__file__).resolve().parent / "fixtures/default_prelayout_native"
+
 
 def _fixture(tmp_path):
-    project=tmp_path/'project'; netlist=project/'phase2/stage2/synth/spm_synth.v'; declared=project/'phase2/stage2/constraints/spm.asic.sdc'; pnr=project/'phase3/stage3/pnr/constraint.sdc'; rec=project/'phase2/stage2/constraints/asic_sdc.json'
-    for p in (netlist,declared,pnr,rec): p.parent.mkdir(parents=True,exist_ok=True)
-    netlist.write_text('module spm; endmodule\n'); declared.write_text('create_clock -period 10 [get_ports clk]\n'); pnr.write_text('create_clock -period 9 [get_ports clk]\n'); rec.write_text(json.dumps({'path':str(declared.relative_to(project))}))
-    return project,netlist,pnr
+    project = tmp_path / "project"
+    netlist = project / "phase2/stage2/synth/spm_synth.v"
+    declared = project / "phase2/stage2/constraints/spm.asic.sdc"
+    pnr = project / "phase3/stage3/pnr/constraint.sdc"
+    rec = project / "phase2/stage2/constraints/asic_sdc.json"
+    pvt = project / "phase2/stage2/constraints/pvt_matrix.json"
+    l8 = project / "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+    for path in (netlist, declared, pnr, rec, pvt, l8):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module spm; endmodule\n")
+    declared.write_text("create_clock -period 10 [get_ports clk]\n")
+    pnr.write_text("create_clock -period 9 [get_ports clk]\n")
+    rec.write_text(json.dumps({"path": str(declared.relative_to(project))}))
+    pvt.write_text(json.dumps({"corners": [{"name": "TT"}], "primary_corner": "TT"}))
+    l8.write_text(json.dumps({"clocks": {"clk": {"period_ns": 10}}}))
+    return project, netlist, pnr
 
-def _proof(project,netlist,pnr):
-    folder=project/'phase3/librelane/prelayout/design_sdc/native'; folder.mkdir(parents=True,exist_ok=True)
-    state=folder/'state_out.json'; fp=folder/'input_fingerprint.json'; pdk=folder/'pdk_root.json'; log=folder/'invocation.log'
-    state.write_text(json.dumps({'nl':str(netlist)})); fp.write_text(json.dumps({'step':'OpenROAD.STAPrePNR'})); pdk.write_text('{}'); log.write_text('OpenROAD STAPrePNR\n')
-    import hashlib
-    digest=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-    hashes={p.name:digest(p) for p in (state,fp,pdk,log)}; (folder/'vibeic_receipt.json').write_text(json.dumps({'input':{'step':'OpenROAD.STAPrePNR'},'sha256':hashes}))
-    gate=project/'phase3/librelane/prelayout/gates/step8_sdc_opensta.json'; gate.parent.mkdir(parents=True,exist_ok=True); gate.write_text(json.dumps({'verdict':'PASS','netlist_sha256':digest(netlist),'sdc_sha256':digest(pnr),'source':str(state),'state_out_sha256':digest(state)})); return gate
 
-def _runtime(project): return {'project':project,'policy':{'mode':'default'},'parameters':{'top':'spm','pdk':object(),'container':'vibeic-eda'}}
-
-
-def test_default_step15_uses_real_producer_and_pnr_sdc(tmp_path,monkeypatch):
-    project,netlist,pnr=_fixture(tmp_path); calls=[]
-    def publish(project_,top,pdk,runner_sdc,staged,modes,notes):
-        calls.append((runner_sdc,modes)); _proof(project_,netlist,runner_sdc); return {'sdc':{'verdict':'PASS'}}
-    monkeypatch.setattr(phase3,'_prelayout_librelane',publish); policy._ensure_default_prelayout(_runtime(project),'15')
-    assert calls==[(pnr,{'7':'librelane','8':'librelane','10':'librelane'})]
-
-def test_default_step15_calls_existing_producer_each_dispatch(tmp_path,monkeypatch):
-    project,netlist,pnr=_fixture(tmp_path)
-    calls=[]
-    def publish(*args): calls.append(args); _proof(project,netlist,pnr); return {'sdc':{'verdict':'PASS'}}
-    monkeypatch.setattr(phase3,'_prelayout_librelane',publish); policy._ensure_default_prelayout(_runtime(project),'15')
-    assert len(calls)==1
-
-def test_default_step15_refuses_failed_producer(tmp_path, monkeypatch):
-    project, _, pnr = _fixture(tmp_path)
+def _retained_native(project, netlist, pnr):
+    folder = project / "phase3/librelane/prelayout/design_sdc/native"
+    shutil.copytree(RETAINED, folder)
+    state = folder / "state_out.json"
     gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
     gate.parent.mkdir(parents=True, exist_ok=True)
-    gate.write_text(json.dumps({"verdict": "PASS"}))
-    def fail(*args): return {"sdc": {"verdict": "FAIL"}}
-    monkeypatch.setattr(phase3, "_prelayout_librelane", fail)
-    with pytest.raises(policy.Refusal, match="PRELAYOUT_GATE_IDENTITY_MISMATCH"):
-        policy._ensure_default_prelayout(_runtime(project), "15")
-    assert json.loads(gate.read_text())["verdict"] == "PASS"
+    import librelane_contract as ll
+    gate.write_text(json.dumps({
+        "step": "8",
+        "program": "librelane_prelayout.judge_sdc",
+        "verdict": "PASS",
+        "netlist": str(netlist.relative_to(project)),
+        "netlist_sha256": ll.digest(netlist),
+        "sdc": str(pnr.relative_to(project)),
+        "sdc_sha256": ll.digest(pnr),
+        "source": str(state.relative_to(project)),
+        "state_out_sha256": ll.digest(state),
+    }))
+    return folder, gate
 
 
-def test_public_dispatch_calls_publication_before_input_census(tmp_path, monkeypatch):
+def _native_result(folder):
+    import librelane_contract as ll
+    return {"folder": folder, "receipt_sha256": ll.digest(folder / "vibeic_receipt.json")}
+
+
+def _runtime(project):
+    return {
+        "project": project,
+        "policy": {"mode": "default"},
+        "parameters": {"top": "spm", "pdk": object(), "container": "vibeic-eda"},
+    }
+
+
+def _stub_step8_and_step10(monkeypatch, order):
+    def post(*args, **kwargs):
+        order.append("step8")
+        return types.SimpleNamespace(status="PASS", detail="focused")
+
+    def publish(*args, **kwargs):
+        order.append("step10")
+        project = Path(args[0])
+        gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(json.dumps({"verdict": "PASS"}))
+        return {"pre_pnr_timing": "retained"}
+
+    monkeypatch.setattr(design, "step_sdc_validation_post_prelayout", post)
+    monkeypatch.setattr(phase3, "publish_prelayout_reports", publish)
+
+
+def test_default_step15_runs_native_then_step8_step10_before_census(tmp_path, monkeypatch):
+    project, netlist, pnr = _fixture(tmp_path)
+    order = []
+
+    def produce(project_, top, pdk, runner_sdc, staged, modes, notes):
+        order.append("native")
+        folder = project_ / "phase3/librelane/prelayout/design_sdc/native"
+        folder.mkdir(parents=True)
+        (folder / "vibeic_receipt.json").write_text("{}")
+        return {"folder": folder, "sdc": {"verdict": "PASS"}}
+
+    _stub_step8_and_step10(monkeypatch, order)
+    monkeypatch.setattr(phase3, "_prelayout_librelane", produce)
+    policy._ensure_default_prelayout(_runtime(project), "15")
+    assert order == ["native", "step8", "step10"]
+
+
+def test_public_dispatch_runs_publication_before_input_census(tmp_path, monkeypatch):
     project, netlist, pnr = _fixture(tmp_path)
     order = []
     adapter = types.SimpleNamespace(applicability="applicable", tool_id="backend", objective={})
     registry = types.SimpleNamespace(adapters=lambda step: [adapter])
-    controller = types.SimpleNamespace(portfolio={"steps":[{"id":"15","mandatory_gate_programs":[]}]})
-    runtime = {"project": project, "policy":{"mode":"default","request_receipt":{"invocation_id":"x"}},
-               "parameters":{"top":"spm","pdk":object(),"container":"vibeic-eda"}, "registry":registry, "controller":controller,
-               "contexts":{}, "runs":{}, "route":{"source_sha":"s","project_digest":"p","ic_ip_path":"i"}}
+    controller = types.SimpleNamespace(portfolio={"steps": [{"id": "15", "mandatory_gate_programs": []}]})
+    runtime = {
+        "project": project,
+        "policy": {"mode": "default", "request_receipt": {"invocation_id": "x"}},
+        "parameters": {"top": "spm", "pdk": object(), "container": "vibeic-eda"},
+        "registry": registry, "controller": controller, "contexts": {}, "runs": {},
+        "route": {"source_sha": "s", "project_digest": "p", "ic_ip_path": "i"},
+    }
     monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
-    def publish(project_, top, pdk, runner_sdc, staged, modes, notes):
-        order.append("publish")
-        assert runner_sdc == pnr
-        (project_ / "phase3/librelane/prelayout/gates").mkdir(parents=True, exist_ok=True)
-        (project_ / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json").write_text(json.dumps({"verdict":"PASS"}))
-        return {"sdc": {"verdict":"PASS"}}
-    monkeypatch.setattr(phase3, "_prelayout_librelane", publish)
+
+    def produce(project_, top, pdk, runner_sdc, staged, modes, notes):
+        order.append("native")
+        folder = project_ / "phase3/librelane/prelayout/design_sdc/native"
+        folder.mkdir(parents=True)
+        (folder / "vibeic_receipt.json").write_text("{}")
+        return {"folder": folder, "sdc": {"verdict": "PASS"}}
+
+    _stub_step8_and_step10(monkeypatch, order)
+    monkeypatch.setattr(phase3, "_prelayout_librelane", produce)
+
     def census(rt, step, **kwargs):
         order.append("census")
-        assert (project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json").is_file()
-        assert pnr.is_file()
         return {}
+
     monkeypatch.setattr(policy, "_fixed_inputs", census)
     result = policy.dispatch_fixed_step(project, "15")
     assert result["status"] == "NOT_MEASURED"
-    assert order == ["publish", "census"]
+    assert order == ["native", "step8", "step10", "census"]
 
 
-def test_postcheck_accepts_current_native_proof_without_switch(tmp_path):
-    gate, deck, netlist = postcheck_fixtures.project(tmp_path)
-    folder = tmp_path / 'phase3/librelane/prelayout/design_sdc'
-    for source in NATIVE_PACKAGE.iterdir():
-        if source.name != 'state_out.json':
-            shutil.copyfile(source, folder / source.name)
-    state = json.loads((folder / 'state_out.json').read_text())
-    state['nl'] = str(netlist)
-    (folder / 'state_out.json').write_text(json.dumps(state))
-    (folder / 'tt').rename(folder / 'nom_tt_025C_5v00')
-    for corner in ('nom_ss_125C_4v50', 'nom_ff_n40C_5v50'):
-        shutil.copytree(folder / 'nom_tt_025C_5v00', folder / corner)
-    sta_log = Path(postcheck_fixtures.LP.__file__).parent / 'calibration' / 'sta_prepnr_linked_clean_negative.log'
-    for corner in ('nom_ss_125C_4v50', 'nom_tt_025C_5v00', 'nom_ff_n40C_5v50'):
-        for report in ('max.rpt', 'min.rpt'):
-            shutil.copyfile(sta_log, folder / corner / report)
-    postcheck_fixtures.LP.judge_sdc(
-        folder, {'PNR_SDC_FILE': str(deck)}, deck, gate)
-    (tmp_path / 'phase3/librelane_switch.json').unlink()
+def test_default_step15_refuses_failed_native_producer(tmp_path, monkeypatch):
+    project, _, _ = _fixture(tmp_path)
+    gate = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS"}))
 
+    def fail(*args):
+        return {"sdc": {"verdict": "FAIL"}}
+
+    monkeypatch.setattr(phase3, "_prelayout_librelane", fail)
+    with pytest.raises(policy.Refusal, match="PRELAYOUT_PUBLICATION_FAILED"):
+        policy._ensure_default_prelayout(_runtime(project), "15")
+    assert json.loads(gate.read_text())["verdict"] == "PASS"
+
+
+def test_postcheck_publishes_retained_three_corner_reports(tmp_path):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    project = tmp_path
+    folder, gate = _retained_native(project, netlist, pnr)
     row = design.step_sdc_validation_post_prelayout(
-        tmp_path, 'top', native_result={'folder': folder})
-    assert row.status == 'PASS', row.detail
+        project, "top", native_result=_native_result(folder))
+    assert row.status == "PASS", row.detail
     receipt = json.loads(Path(row.output_files[0]).read_text())
-    assert receipt['binding']['native_proof'] is True
-    assert (tmp_path / 'reports/phase2/sdc_check.json').is_file()
-    published = phase3.publish_prelayout_reports(tmp_path, folder)
-    assert Path(published['pre_pnr_timing']).is_file()
-    assert Path(published['pre_pnr_summary']).is_file()
+    assert receipt["binding"]["native_proof"] is True
+    published = phase3.publish_prelayout_reports(
+        project, folder, receipt_sha256=_native_result(folder)["receipt_sha256"])
+    assert Path(published["pre_pnr_timing"]).is_file()
+    assert Path(published["pre_pnr_summary"]).is_file()
+    names = sorted(p.name for p in (project / "phase3/stage3/sta/prelayout_per_corner").glob("*.rpt"))
+    assert names == ["sta_FF.rpt", "sta_SS.rpt", "sta_TT.rpt"]
 
 
-def test_postcheck_rejects_changed_native_proof_before_tools(tmp_path, monkeypatch):
-    gate, deck, netlist = postcheck_fixtures.project(tmp_path)
-    switch = tmp_path / 'phase3/librelane_switch.json'
-    switch.unlink()
-    outside = tmp_path.parent / 'changed-native-proof'
-    outside.mkdir()
-    monkeypatch.setattr(design.subprocess, 'run',
-                        lambda *args, **kwargs: pytest.fail('changed proof must refuse before tools'))
+def test_changed_native_report_refuses_canonical_publication(tmp_path):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    project = tmp_path
+    folder, _ = _retained_native(project, netlist, pnr)
+    report = folder / "nom_tt_025C_5v00/max.rpt"
+    report.write_text(report.read_text() + "\nchanged\n")
+    with pytest.raises(Exception, match="PRELAYOUT_NATIVE_RECEIPT_INVALID"):
+        phase3.publish_prelayout_reports(project, folder)
+
+
+def test_changed_native_state_refuses_canonical_publication(tmp_path):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    folder, _ = _retained_native(tmp_path, netlist, pnr)
+    state = folder / "state_out.json"
+    state.write_text(state.read_text() + "\n")
+    with pytest.raises(Exception, match="PRELAYOUT_NATIVE_RECEIPT_INVALID"):
+        phase3.publish_prelayout_reports(tmp_path, folder)
+
+
+@pytest.mark.parametrize("field", ["source", "sdc", "netlist"])
+def test_project_relative_gate_escape_refuses_before_tools(tmp_path, monkeypatch, field):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    project = tmp_path
+    folder, gate = _retained_native(project, netlist, pnr)
+    doc = json.loads(gate.read_text())
+    doc[field] = "../outside"
+    gate.write_text(json.dumps(doc))
+    monkeypatch.setattr(design.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("path escape must refuse before tools"))
     row = design.step_sdc_validation_post_prelayout(
-        tmp_path, 'top', native_result={'folder': outside})
-    assert row.status == 'NOT_MEASURED'
-    assert 'TOOL_MODE_REQUIRED' in row.detail
+        project, "top", native_result={"folder": folder})
+    assert row.status == "NOT_MEASURED"
+    assert "PATH_ESCAPE" in row.detail or "GATE_STALE" in row.detail
+
+
+def test_project_relative_symlink_refuses_before_tools(tmp_path, monkeypatch):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    folder, gate = _retained_native(tmp_path, netlist, pnr)
+    link = tmp_path / "phase3/stage3/pnr/link.sdc"
+    link.symlink_to(pnr)
+    doc = json.loads(gate.read_text())
+    doc["sdc"] = str(link.relative_to(tmp_path))
+    gate.write_text(json.dumps(doc))
+    monkeypatch.setattr(design.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("symlink must refuse before tools"))
+    row = design.step_sdc_validation_post_prelayout(
+        tmp_path, "top", native_result={"folder": folder})
+    assert row.status == "NOT_MEASURED"
+    assert "SYMLINK" in row.detail
+
+
+def test_changed_native_receipt_refuses_current_native_proof(tmp_path):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    project = tmp_path
+    folder, _ = _retained_native(project, netlist, pnr)
+    receipt = folder / "vibeic_receipt.json"
+    expected = _native_result(folder)["receipt_sha256"]
+    receipt.write_text(receipt.read_text() + "\n")
+    row = design.step_sdc_validation_post_prelayout(
+        project, "top", native_result={"folder": folder,
+                                       "receipt_sha256": expected})
+    assert row.status == "NOT_MEASURED"
+    assert "SDC_POSTCHECK_NATIVE_PROOF_STALE" in row.detail
+
+
+def test_corrupt_native_receipt_hash_refuses_publication(tmp_path):
+    _, pnr, netlist = postcheck_fixtures.project(tmp_path)
+    folder, _ = _retained_native(tmp_path, netlist, pnr)
+    receipt = folder / "vibeic_receipt.json"
+    doc = json.loads(receipt.read_text())
+    doc["sha256"]["summary.rpt"] = "0" * 64
+    receipt.write_text(json.dumps(doc))
+    with pytest.raises(Exception, match="PRELAYOUT_NATIVE_RECEIPT_INVALID"):
+        phase3.publish_prelayout_reports(tmp_path, folder)
