@@ -12,6 +12,7 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import execution_backend_producers as backend_producers
+import execution_backend_worker as backend_worker
 import flow_declared_producer_run as declared
 
 
@@ -111,3 +112,41 @@ def test_backend_producer_orders_current_declared_outputs_before_consumer(
 
     assert events == ["native", ("declared", "15")]
     assert result["current_step_declared_producers"]["step_id"] == "15"
+
+
+def test_real_backend_worker_runs_declared_producer_before_consumer(
+        tmp_path, monkeypatch):
+    inputs = tmp_path / "inputs"
+    project_input = inputs / "project"
+    project_input.mkdir(parents=True)
+    (project_input / "fixture.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
+    outputs = tmp_path / "outputs"
+    events = []
+
+    def fake_native(project, params):
+        events.append("native")
+        pnr = project / "phase3/stage3/pnr"
+        pnr.mkdir(parents=True, exist_ok=True)
+        (pnr / "floorplan.def").write_text("synthetic floorplan\n")
+        (pnr / "pdn.done").write_text("synthetic pdn\n")
+        return {"verdict": "PASS", "detail": "fixture native"}
+
+    def observed_consumer(project, row):
+        report = project / "reports/phase2/gates/stage2_compliance.json"
+        assert json.loads(report.read_text())["invoked_as"] == "producer"
+        events.append("consumer")
+        return {"status": "PASS", "ledger": []}
+
+    monkeypatch.setattr(backend_producers, "produce_pnr", fake_native)
+    monkeypatch.setattr(backend_worker, "produce", backend_producers.produce)
+    monkeypatch.setattr(backend_worker, "evaluate", observed_consumer)
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({
+        "source_sha": "fixture", "required_gates": []}))
+
+    result = backend_worker.execute(
+        inputs, outputs, step_id="15",
+        params={"input_contract": [{"from": "external", "path": "fixture.sdc"}]})
+
+    assert events == ["native", "consumer"]
+    assert result["verdict"] == "PASS"
+    assert "reports/phase2/gates/stage2_compliance.json" in result["outputs"]
