@@ -2724,20 +2724,39 @@ class Controller:
 
     @staticmethod
     def _source_current(arm: Adapter, cwd: Path | None = None) -> dict:
-        for name, blob in arm.verified_source_blobs.items():
-            if _blob_bytes(Path(name)) != blob:
-                raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
-        for name, expected in arm.source_files.items():
-            path = Path(name)
-            if not path.is_file() or path.is_symlink() or digest(path) != expected:
-                raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
-        for component in arm.components:
-            if arm.invocation_sources.get(component.name) != _invocation_sources(component):
-                raise Refusal('ENTRY_SOURCE_CHANGED', component.name)
-        # Re-resolve the closure at execution and adoption, including newly
-        # introduced helpers. Registration and cached import paths are not
-        # authority for today's executed source bytes.
-        return _provider_identity(arm, cwd=cwd, include_execution=True)[2]
+        # Each execution/adoption check gets its own provisional snapshot. It
+        # amortizes repeated closure/module probes within this check only, then
+        # finalizes before the identity can become an authority receipt.
+        from execution_source_snapshot import using
+        try:
+            snapshot = SourceSnapshot(_REPO_ROOT, arm.source_sha)
+        except RuntimeError as exc:
+            code = str(exc).split(':', 1)[0]
+            raise Refusal(code if code.startswith('SOURCE_AUTHORITY_')
+                          else 'SOURCE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
+        with using(snapshot):
+            for name, blob in arm.verified_source_blobs.items():
+                path = Path(name)
+                if path.is_symlink() or not path.is_file() or _blob_bytes(path) != blob:
+                    raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
+            for name, expected in arm.source_files.items():
+                path = Path(name)
+                if not path.is_file() or path.is_symlink() or digest(path) != expected:
+                    raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
+            for component in arm.components:
+                if arm.invocation_sources.get(component.name) != _invocation_sources(component):
+                    raise Refusal('ENTRY_SOURCE_CHANGED', component.name)
+            # Re-resolve the closure at execution and adoption, including newly
+            # introduced helpers. Registration and cached import paths are not
+            # authority for today's executed source bytes.
+            identity = _provider_identity(arm, cwd=cwd, include_execution=True)[2]
+            try:
+                snapshot.finalize()
+            except RuntimeError as exc:
+                code = str(exc).split(':', 1)[0]
+                raise Refusal(code if code.startswith('SOURCE_AUTHORITY_')
+                              else 'SOURCE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
+            return identity
 
     def _eligible(self, receipt: dict, context: Context, arm: Adapter) -> None:
         binding = self._context_binding(context)
