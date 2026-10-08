@@ -267,7 +267,8 @@ def _provider_for_image(image: Any) -> LocalProviderIdentity | None:
     return _LOCAL_PROVIDER_IDENTITIES.get(str(image))
 
 
-def _provider_route_mismatch(image: Any, project: Path | None = None) -> Refusal | None:
+def _provider_route_mismatch(image: Any, project: Path | None = None, *,
+                             native_handoff: bool = False) -> Refusal | None:
     provider = _provider_for_image(image)
     if provider is not None:
         # A provider passed to a child has no project argument; an explicit
@@ -281,6 +282,14 @@ def _provider_route_mismatch(image: Any, project: Path | None = None) -> Refusal
     elif image is not None and _explicit_local_route(project):
         return Refusal('LL_LOCAL_REMOTE_MISMATCH',
                         f'Docker-backed image {image} cannot run on an explicit LOCAL route')
+    # A native Step-15 handoff must refuse an explicitly remote route before
+    # resolving the host's image.  Ordinary direct callers retain their
+    # declared route semantics; the native rule is opt-in at that seam.
+    if (native_handoff and
+            _provider_route_value(project) in {'REMOTE', 'CONTAINER', 'DOCKER'} and
+            _ce.no_container_route()):
+        return Refusal('LL_LOCAL_REMOTE_MISMATCH',
+                       'explicit remote route cannot run without a container route')
     return None
 
 
@@ -2429,7 +2438,8 @@ def prune_pdk_root_cache(current_image_id: str, docker: str = 'docker') -> dict[
 
 
 def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
-                        image: str | None = None, docker: str = 'docker') -> dict[str, Any]:
+                        image: str | None = None, docker: str = 'docker',
+                        native_handoff: bool = False) -> dict[str, Any]:
     """Declared > resolved at run time > refused by name, like `resolve_image`.
 
     1. declared: switch ``pdk_root_host``, else ``VIBEIC_LIBRELANE_PDK_ROOT``.
@@ -2442,7 +2452,8 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
     """
     path = project / 'phase3/librelane_switch.json' if project else None
     switch = _load(path) if path and path.is_file() else {}
-    mismatch = _provider_route_mismatch(image, project)
+    mismatch = _provider_route_mismatch(image, project,
+                                        native_handoff=native_handoff)
     if mismatch is not None:
         raise mismatch
     provider = _provider_for_image(image)
@@ -2459,10 +2470,14 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
         if project is not None and (project / 'phase3').is_dir():
             write_json(project / PDK_ROOT_PROVENANCE_REL, answer)
         return answer
-    if switch.get('pdk_root_host'):
+    # Only the production/native Step-15 handoff is already inside the EDA
+    # image.  Other direct callers may run on a host where this probe is true,
+    # but a declared root remains the contract they supplied explicitly.
+    local_image_route = native_handoff and _ce.no_container_route()
+    if switch.get('pdk_root_host') and not local_image_route:
         answer = {'path': str(switch['pdk_root_host']), 'source': 'declared',
                   'declared_by': 'phase3/librelane_switch.json pdk_root_host'}
-    elif os.environ.get('VIBEIC_LIBRELANE_PDK_ROOT'):
+    elif os.environ.get('VIBEIC_LIBRELANE_PDK_ROOT') and not local_image_route:
         answer = {'path': os.environ['VIBEIC_LIBRELANE_PDK_ROOT'], 'source': 'declared',
                   'declared_by': 'env VIBEIC_LIBRELANE_PDK_ROOT'}
     else:
@@ -2510,10 +2525,12 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
 
 
 def resolve_pdk_root(project: Path | None = None, pdk: str | None = None, *,
-                     image: str | None = None, docker: str = 'docker') -> str | None:
+                     image: str | None = None, docker: str = 'docker',
+                     native_handoff: bool = False) -> str | None:
     """The host PDK root per `pdk_root_resolution`, or None when it refuses."""
     try:
-        return pdk_root_resolution(project, pdk, image=image, docker=docker)['path']
+        return pdk_root_resolution(project, pdk, image=image, docker=docker,
+                                   native_handoff=native_handoff)['path']
     except Refusal:
         return None
 
