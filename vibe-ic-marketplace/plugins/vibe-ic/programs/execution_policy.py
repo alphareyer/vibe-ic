@@ -541,6 +541,12 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
         declarations.append(parameters['template'])
     for arm in runtime['registry'].adapters(step_id):
         declarations.extend(arm.input_contract)
+    # A conditional producer's output is not a mandatory input when the same
+    # flow condition has been measured false and the producer left its exact
+    # design-declared receipt.  Evaluate this before expanding producer edges;
+    # unknown or malformed conditions remain mandatory.
+    from execution_backend_worker import condition_aware_declarations
+    declarations = condition_aware_declarations(root, declarations, by_id)
     # Backend adapters publish one current synthesis receipt namespace per
     # project.  Keep this dynamic set narrow; a static ``phase3/librelane``
     # directory declaration would snapshot stale outputs from unrelated rows

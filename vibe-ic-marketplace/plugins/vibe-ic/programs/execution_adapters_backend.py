@@ -593,7 +593,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     )
 
 
-def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[str, ...]:
+def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[object, ...]:
     """Return the frozen project closure needed by a backend producer.
 
     ``required_inputs`` are the row's gate contract, not the producer's full
@@ -605,7 +605,11 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[s
     ``reports/execution`` and the worker's own output tree.
     """
     row = spec.get("canonical_row", {})
-    declared = [str(item.get("path")) for item in row.get("required_inputs", ())
+    # Keep producer metadata on the row declarations.  The fixed-input issuer
+    # and worker apply the producer's shared flow condition before expanding
+    # these entries; flattening them to strings here would make a conditional
+    # output mandatory again.
+    declared = [dict(item) for item in row.get("required_inputs", ())
                 if isinstance(item, Mapping) and item.get("path")]
     common = [
         "input/docs", "input/project.json", "input/step_0_5ic_answers.json", "input/submission_template",
@@ -623,7 +627,15 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[s
         common.append("phase3/stage3/pnr")
     if step_id in {"22", "23", "24", "30", "31", "32", "33", "34", "37", "37.3"}:
         common.extend(("phase3/stage3/extracted", "phase3/stage3/signoff"))
-    return tuple(dict.fromkeys((*declared, *common)))
+    values: list[object] = []
+    seen: set[str] = set()
+    for value in (*declared, *common):
+        key = (json.dumps(value, sort_keys=True, separators=(",", ":"))
+               if isinstance(value, Mapping) else str(value))
+        if key not in seen:
+            seen.add(key)
+            values.append(value)
+    return tuple(values)
 
 
 def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ...]:
@@ -651,11 +663,15 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             if not isinstance(value, str):
                 continue
             rel = Path(value)
-            if (not rel.is_absolute() and ".." not in rel.parts
-                    and rel.parts and (root / rel).resolve().is_relative_to(root)):
-                result.append(rel.as_posix())
-                if key == "folder":
-                    folder_path = root / rel
+            if (rel.is_absolute() or ".." in rel.parts or not rel.parts
+                    or not (root / rel).resolve().is_relative_to(root)):
+                raise ValueError(f"backend synthesis binding has unsafe {key}: {value}")
+            target = root / rel
+            if target.is_symlink():
+                raise ValueError(f"backend synthesis binding uses symlinked {key}: {value}")
+            result.append(rel.as_posix())
+            if key == "folder":
+                folder_path = target
         # The synthesis receipt's state_files can point to an earlier
         # producer in the same LibreLane chain (for example the Yosys JSON
         # header consumed by Yosys.Synthesis).  Include those exact relative
@@ -663,20 +679,77 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
         if folder_path is not None:
             try:
                 receipt = json.loads((folder_path / "vibeic_receipt.json").read_text())
-                state_files = receipt.get("input", {}).get("state_files", {})
+                state = json.loads((folder_path / "state_out.json").read_text())
             except (OSError, ValueError, TypeError):
-                state_files = {}
-            if isinstance(state_files, dict):
-                for raw in state_files:
-                    path = Path(str(raw))
-                    if (path.is_absolute() and path.is_relative_to(root)
-                            and ".." not in path.parts):
-                        result.append(path.relative_to(root).as_posix())
+                raise ValueError("backend synthesis receipt/state is unreadable")
+            result.extend(_mapped_receipt_state_files(root, folder_path, receipt, state))
     # The resolver validates the original producer state path from this
     # receipt; the resolved config is its explicit input fingerprint.
     if (root / "phase3/librelane/synthesis_resolved.json").is_file():
         result.append("phase3/librelane/synthesis_resolved.json")
     return tuple(dict.fromkeys(result))
+
+
+def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[str, object],
+                                state: Mapping[str, object]) -> tuple[str, ...]:
+    """Admit receipt state files only after lexical, containment, and digest proof.
+
+    The producer records absolute paths from its own project namespace.  The
+    worker gets a staged copy, so an old absolute path is usable only when its
+    relative path is derived from the current producer folder and the staged
+    bytes have the receipt's digest.  Foreign, traversal, duplicate, missing,
+    symlinked, or stale entries remain hard errors.
+    """
+    project = Path(project).resolve(strict=True)
+    folder = Path(folder).resolve(strict=True)
+    librelane = (project / "phase3/librelane").resolve(strict=True)
+    if not folder.is_relative_to(librelane):
+        raise ValueError("native receipt producer folder is outside project")
+    netlist_value = state.get("nl") if isinstance(state, Mapping) else None
+    recorded = Path(netlist_value) if isinstance(netlist_value, str) else Path()
+    rel_folder = folder.relative_to(project)
+    if (not isinstance(netlist_value, str) or not recorded.is_absolute()
+            or ".." in recorded.parts or str(recorded) != netlist_value):
+        raise ValueError("native state netlist path is not absolute")
+    recorded_parent = recorded.parent
+    if len(recorded_parent.parts) <= len(rel_folder.parts):
+        raise ValueError("native state netlist has no project prefix")
+    original_root = recorded_parent
+    for _ in rel_folder.parts:
+        original_root = original_root.parent
+    if original_root / rel_folder != recorded_parent:
+        raise ValueError("native state netlist folder is not canonical")
+    inp = receipt.get("input") if isinstance(receipt, Mapping) else None
+    state_files = inp.get("state_files") if isinstance(inp, Mapping) else None
+    if not isinstance(state_files, Mapping):
+        raise ValueError("native receipt has malformed state_files")
+    seen: set[str] = set()
+    mapped: list[str] = []
+    for raw, digest in state_files.items():
+        if (not isinstance(raw, str) or not isinstance(digest, str)
+                or not raw.startswith("/") or ".." in Path(raw).parts
+                or str(Path(raw)) != raw):
+            raise ValueError(f"native receipt state path is unsafe: {raw}")
+        source = Path(raw)
+        if not source.is_relative_to(original_root):
+            raise ValueError(f"native receipt state path is foreign: {raw}")
+        relative = source.relative_to(original_root)
+        target = project / relative
+        try:
+            resolved = target.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"staged project input is absent: {relative}") from exc
+        if (target.is_symlink() or resolved != target or
+                not resolved.is_relative_to(project) or not resolved.is_file()):
+            raise ValueError(f"native receipt state path is unsafe: {raw}")
+        rel = relative.as_posix()
+        if rel in seen:
+            raise ValueError(f"native receipt state path maps ambiguously: {raw}")
+        if em.digest(target) != digest:
+            raise ValueError(f"native receipt state digest mismatch: {raw}")
+        seen.add(rel)
+        mapped.append(rel)
+    return tuple(mapped)
 
 
 def register_backend_adapters(registry: em.Registry | None = None, *, source_sha: str,

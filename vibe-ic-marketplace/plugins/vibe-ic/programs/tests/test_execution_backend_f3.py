@@ -183,19 +183,101 @@ def test_backend_project_contract_uses_published_synthesis_folder_only(tmp_path)
     resolved.write_text("{}")
     folder = project / "phase3/librelane/02-yosys-synthesis"
     folder.mkdir(parents=True)
+    prior = project / "phase3/librelane/01-yosys-jsonheader/top.h.json"
+    prior.parent.mkdir(parents=True)
+    prior.write_text('{"module": "top"}\n')
+    old_state = "/original/project/phase3/librelane/02-yosys-synthesis/top.nl.v"
+    (folder / "state_out.json").write_text(json.dumps({"nl": old_state}))
     (folder / "vibeic_receipt.json").write_text(json.dumps({"input": {
         "state_files": {
-            str(project / "phase3/librelane/01-yosys-jsonheader/top.h.json"): "a",
-            "/foreign/project/state.json": "b"}}}))
+            "/original/project/phase3/librelane/01-yosys-jsonheader/top.h.json": em.digest(prior)
+        }}}))
     contract = backend_project_input_contract(project, "37")
     assert "phase3/librelane/02-yosys-synthesis" in contract
     assert "phase2/stage2/synth/top_synth.v" in contract
     assert "phase3/librelane" not in contract
     assert "phase3/librelane/01-yosys-jsonheader/top.h.json" in contract
-    assert "/foreign/project/state.json" not in contract
     from execution_provider_catalog import BACKEND_ROWS
     static = _backend_input_contract("37", BACKEND_ROWS["37"])
     assert "reports/pdk_via_patch_legalization.json" in static
+
+    def rewrite_state_files(state_files):
+        (folder / "vibeic_receipt.json").write_text(json.dumps({"input": {
+            "state_files": state_files}}))
+
+    rewrite_state_files({"/foreign/project/state.json": "b"})
+    with pytest.raises(ValueError, match="foreign"):
+        backend_project_input_contract(project, "37")
+    rewrite_state_files({"/original/project/phase3/librelane/01-yosys-jsonheader/top.h.json": "stale"})
+    with pytest.raises(ValueError, match="digest mismatch"):
+        backend_project_input_contract(project, "37")
+    rewrite_state_files({"/original/project/phase3/librelane/02-yosys-synthesis/../escape.json": em.digest(prior)})
+    with pytest.raises(ValueError, match="unsafe"):
+        backend_project_input_contract(project, "37")
+
+
+_STEP12_POST_DFT = "phase2/stage2/synth/post_dft_netlist.v"
+_STEP12_NO_DFT = {
+    "dft_present": False, "scan_chains": [], "bist_mbist": [], "jtag_tap": None,
+}
+
+
+def _step12_contract_project(project, fields=_STEP12_NO_DFT, *, marker=True):
+    docs = project / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "design.txt").write_text("A small arithmetic core with one clock and reset.\n")
+    generated = project / "phase1/generated_docs"
+    generated.mkdir(parents=True)
+    (generated / "L20_DFT_SCAN_TOPOLOGY.json").write_text(json.dumps({
+        "doc_id": "L20", "fields": fields,
+    }))
+    if marker:
+        marker_path = project / "phase2/stage2/synth/post_dft_not_run.json"
+        marker_path.parent.mkdir(parents=True)
+        marker_path.write_text(json.dumps({
+            "reason_class": "DESIGN_DECLARED_NA",
+            "skips_required_output": _STEP12_POST_DFT,
+            "declaration": {"l_doc": "L20", "fields": fields},
+        }))
+    return project
+
+
+def test_step12_no_dft_condition_removes_only_post_dft_obligation(tmp_path):
+    project = _step12_contract_project(tmp_path)
+    sdc = project / "phase2/stage2/constraints/core.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    declarations = [
+        {"from": 12, "path": _STEP12_POST_DFT},
+        {"from": 7, "path": "phase2/stage2/constraints/*.sdc"},
+    ]
+    assert resolve_input_contract(project, declarations) == []
+    sdc.unlink()
+    assert resolve_input_contract(project, declarations) == ["phase2/stage2/constraints/*.sdc"]
+
+
+@pytest.mark.parametrize("mutation", ["dft", "malformed", "partial", "marker"])
+def test_step12_condition_fail_closed_for_reverse_mutations(tmp_path, mutation):
+    project = _step12_contract_project(tmp_path)
+    l20 = project / "phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json"
+    if mutation == "dft":
+        l20.write_text(json.dumps({"doc_id": "L20", "fields": {
+            **_STEP12_NO_DFT, "dft_present": True,
+            "scan_chains": [{"name": "chain0"}],
+        }}))
+    elif mutation == "malformed":
+        l20.write_text("{not json")
+    elif mutation == "partial":
+        l20.write_text(json.dumps({"doc_id": "L20", "fields": {
+            "dft_present": False, "scan_chains": [], "bist_mbist": [],
+        }}))
+    else:
+        marker = project / "phase2/stage2/synth/post_dft_not_run.json"
+        marker.write_text(json.dumps({
+            "reason_class": "UNKNOWN", "skips_required_output": _STEP12_POST_DFT,
+            "declaration": {"l_doc": "L20", "fields": _STEP12_NO_DFT},
+        }))
+    assert resolve_input_contract(project, [{"from": 12, "path": _STEP12_POST_DFT}]) == [_STEP12_POST_DFT]
 
 
 def test_source_identity_binds_worker_runner_and_librelane_contract():
