@@ -482,6 +482,43 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
     assert "plugin_output/declaration.json" not in contract
 
 
+def test_cdc_native_citation_reader_accepts_carried_proof_and_rejects_changed_log(tmp_path):
+    """The real CDC reader accepts the carried native proof set only as-is."""
+    from programs.tests import test_t91_step3_cdc_netlist_front_end as cdc_fixture
+    import _cdc_netlist as cdc_netlist
+    import librelane_contract as ll
+
+    source = cdc_fixture._project(
+        tmp_path, "native_source", cdc_fixture.FIX / "multi_clock_sync.v",
+        "librelane", cdc_fixture.FIX / "multi_clock_sync.json")
+    isolated = tmp_path / "isolated_consumer"
+    shutil.copytree(source / "phase2/stage1/rtl", isolated / "phase2/stage1/rtl")
+    (isolated / "phase3").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / "phase3/librelane_switch.json",
+                    isolated / "phase3/librelane_switch.json")
+    for rel in (
+        "reports/phase2/cdc/netlist.json",
+        "reports/phase2/cdc/netlist_front_end.json",
+        "reports/phase2/cdc/netlist.yosys.log",
+    ):
+        target = isolated / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / rel, target)
+
+    netlist = cdc_netlist.load(isolated / "reports/phase2/cdc/netlist.json")
+    receipt = cdc_netlist.require_binding(
+        isolated, isolated / "reports/phase2/cdc/netlist.json", netlist)
+    assert receipt["producer"]["step"] == "Yosys.JsonHeader"
+    assert receipt["sha256"]["netlist.yosys.log"] == ll.digest(
+        isolated / "reports/phase2/cdc/netlist.yosys.log")
+
+    log = isolated / "reports/phase2/cdc/netlist.yosys.log"
+    log.write_bytes(log.read_bytes() + b"\nchanged-log-control\n")
+    with pytest.raises(cdc_netlist.Refusal, match="CDC_NETLIST_STALE"):
+        cdc_netlist.require_binding(
+            isolated, isolated / "reports/phase2/cdc/netlist.json", netlist)
+
+
 def test_required_checkpoint_proof_rejects_directory(tmp_path):
     project = tmp_path / "project"
     constraint = "phase2/stage2/constraints/subservient.asic.sdc"
