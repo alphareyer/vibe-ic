@@ -150,6 +150,20 @@ def test_legacy_step8_receipt_schema_is_not_current(tmp_path):
     assert D._aggregate_verdict([early, row]) == 'NOT_MEASURED'
 
 
+def test_malformed_step8_receipt_binding_is_not_current(tmp_path):
+    """A truthy non-object binding is refused instead of crashing roll-up."""
+    project(tmp_path)
+    early = D.step_sdc_validation(tmp_path)
+    row = D.step_sdc_validation_post_prelayout(tmp_path, 'top')
+    assert row.status == 'PASS', row.detail
+    receipt = Path(row.output_files[0])
+    doc = json.loads(receipt.read_text())
+    doc['binding'] = 'malformed'
+    receipt.write_text(json.dumps(doc) + '\n')
+    row.extras['receipt_sha256'] = LC.digest(receipt)
+    assert D._aggregate_verdict([early, row]) == 'NOT_MEASURED'
+
+
 def test_stale_netlist_bound_gate_is_not_reused(tmp_path):
     gate, deck, nl = project(tmp_path)
     nl.write_text(nl.read_text() + '// later netlist\n')

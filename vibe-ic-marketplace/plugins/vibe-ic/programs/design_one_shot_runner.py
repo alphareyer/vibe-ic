@@ -26839,9 +26839,14 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
         try:
             receipt = Path(latest.output_files[0])
             doc = json.loads(receipt.read_text())
-            bound_inputs = (doc.get('binding') or {}).get('inputs')
+            receipt_binding = doc.get('binding')
+            bound_inputs = (receipt_binding.get('inputs')
+                            if isinstance(receipt_binding, dict) else None)
+            bound_sources = (receipt_binding.get('sources')
+                             if isinstance(receipt_binding, dict) else None)
             current = (doc.get('schema') == _SDC_POSTCHECK_SCHEMA and
                        isinstance(bound_inputs, dict) and
+                       isinstance(bound_sources, dict) and
                        isinstance(bound_inputs.get('pvt_matrix'), dict) and
                        hashlib.sha256(receipt.read_bytes()).hexdigest() ==
                        latest.extras.get('receipt_sha256') and
@@ -26852,10 +26857,10 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
                            hashlib.sha256(Path(r['output']).read_bytes()).hexdigest() == r['output_sha256']
                            for r in doc['records']) and
                        all(hashlib.sha256((PROGRAMS_DIR / name).read_bytes()).hexdigest() == sha
-                           for name, sha in doc['binding']['sources'].items()) and
+                           for name, sha in bound_sources.items()) and
                        all(Path(row['path']).is_file() and
                            hashlib.sha256(Path(row['path']).read_bytes()).hexdigest() == row['sha256']
-                           for row in doc['binding']['inputs'].values()))
+                           for row in bound_inputs.values()))
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             current = False
     effective = [s for s in plan if not (current and s is not latest and
