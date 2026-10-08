@@ -192,10 +192,13 @@ def test_the_runner_hands_the_producer_the_designs_own_pdk(tmp_path, monkeypatch
         f"is None the producer sees only PDK_ROOT, which holds two "
         f"technologies, and refuses on every run")
 
-    seen = {}
+    seen = {"commands": []}
 
     def fake_run(cmd, **kw):
-        seen["cmd"] = cmd
+        # The producer is followed by its current-kit checker.  Preserve the
+        # complete dispatch stream and select the producer by executable name;
+        # asserting against the last command silently tested the checker.
+        seen["commands"].append(list(cmd))
         import subprocess as sp
         return sp.CompletedProcess(cmd, 0, "ok\n", "")
 
@@ -207,18 +210,23 @@ def test_the_runner_hands_the_producer_the_designs_own_pdk(tmp_path, monkeypatch
     # measuring what it was written to measure.
     monkeypatch.setattr(r._pr, "run", fake_run)
     r.step_digital_hardmacro_gen(tmp_path, pdk)
-    assert "--pdk-root" in seen["cmd"], (
+    producer = [cmd for cmd in seen["commands"]
+                if any(Path(part).name == "digital_hardmacro_gen.py"
+                       for part in cmd)]
+    assert len(producer) == 1, seen["commands"]
+    producer = producer[0]
+    assert "--pdk-root" in producer, (
         f"the producer was invoked without --pdk-root, so it falls back to "
-        f"$PDK_ROOT: {seen['cmd']}")
-    assert seen["cmd"][seen["cmd"].index("--pdk-root") + 1] == str(root / "somepdk")
+        f"$PDK_ROOT: {producer}")
+    assert producer[producer.index("--pdk-root") + 1] == str(root / "somepdk")
     # ...and the rest of what the step is obliged to hand over. #1991 added
     # these two and this arm did not notice, because its PDK double had no
     # such attributes to hand over. Asserting them is what makes the double's
     # completeness load-bearing rather than incidental.
-    assert "--cell-lef" in seen["cmd"], seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--cell-lef") + 1] == pdk.cell_lef
-    assert "--metal-prefix" in seen["cmd"], seen["cmd"]
-    assert seen["cmd"][seen["cmd"].index("--metal-prefix") + 1] == pdk.metal_prefix
+    assert "--cell-lef" in producer, producer
+    assert producer[producer.index("--cell-lef") + 1] == pdk.cell_lef
+    assert "--metal-prefix" in producer, producer
+    assert producer[producer.index("--metal-prefix") + 1] == pdk.metal_prefix
 
 
 def test_an_unrecognisable_layout_degrades_to_a_refusal_not_a_guess(tmp_path, monkeypatch):
