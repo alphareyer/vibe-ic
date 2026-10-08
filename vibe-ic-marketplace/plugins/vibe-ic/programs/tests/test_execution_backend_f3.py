@@ -179,7 +179,7 @@ def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path)
     registry = register_backend_adapters(em.Registry(), source_sha=BASE, available=True)
     adapter = registry.adapters("15")[0]
     controller = em.Controller(
-        registry, em.Budget(cpus=1, ram_mb=adapter.ram_mb, workers=1))
+        registry, em.Budget(cpus=adapter.cpus, ram_mb=adapter.ram_mb, workers=1))
     plan = controller.plan(context, "default-mode")
     root = tmp_path / "run"
     assert plan["arms"] == ["backend_15"]
@@ -594,7 +594,8 @@ def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
     register_source_fixture(registry, mutant_adapter, fixture_root=tmp_path)
     root = tmp_path / "mutated-run"
     summary = em.Controller(
-        registry, em.Budget(cpus=1, ram_mb=mutant_adapter.ram_mb, workers=1)).run(
+        registry, em.Budget(cpus=mutant_adapter.cpus,
+                            ram_mb=mutant_adapter.ram_mb, workers=1)).run(
         context, root, "default-mode")
     assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
     result = json.loads((root / mutant_adapter.arm_id / "outputs" / "backend_result.json").read_text())
