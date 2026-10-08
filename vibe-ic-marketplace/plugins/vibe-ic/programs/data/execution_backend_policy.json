@@ -213,7 +213,9 @@
           "reports/phase2/gates/stage2_compliance.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 13,
@@ -531,7 +533,9 @@
           "reports/phase3/io_pad_chip_top.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 9,
@@ -801,7 +805,9 @@
           "reports/phase3/placement_legality.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 5,
@@ -1019,7 +1025,9 @@
           "reports/spare_cell_coverage.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 6,
@@ -1243,7 +1251,9 @@
           "phase3/stage3/cts/clock_tree.rpt"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 8,
@@ -1510,7 +1520,9 @@
           "phase3/stage3/pnr/post_hold.def"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 7,
@@ -1844,7 +1856,9 @@
           "reports/phase3/drc_router.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 11,
@@ -2171,7 +2185,9 @@
           "reports/phase2/gates/spef_extraction.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 8,
@@ -2531,7 +2547,9 @@
           "reports/phase3/sta/architectural_residual.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 11,
@@ -2853,7 +2871,9 @@
           "reports/phase3/dynamic_ir.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 8,
@@ -3105,7 +3125,9 @@
           "reports/phase3/em_current_authority.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 7,
@@ -3375,7 +3397,9 @@
           "reports/phase3/antenna_signoff.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 7,
@@ -4902,7 +4926,9 @@
           "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 8,
@@ -5166,7 +5192,9 @@
           "reports/phase3/power.json"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 5,
@@ -5461,7 +5489,9 @@
           "reports/density.rpt OR reports/phase3/density.rpt"
         ],
         "controller_integration": "PROPOSED_HOOK; existing native producers unchanged",
-        "producer_ram_mb": 4096
+        "producer_timeout_s": 1800,
+        "producer_ram_mb": 4096,
+        "producer_cpus": 4
       },
       "original_harvest": {
         "original_item_count": 9,

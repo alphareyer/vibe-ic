@@ -25,6 +25,7 @@ from execution_adapters_backend import (
     _site_path,
     register_backend_adapters,
     _producer_timeout_s,
+    _producer_cpus,
     _backend_input_contract,
     backend_project_input_contract,
     validate,
@@ -123,18 +124,37 @@ def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
         step: _producer_timeout_s(BACKEND_ROWS[step], {"timeout_s": 7})
         for step in BACKEND_IDS
     }
-    # Step 37's stream-out producer is a physical native run and its policy
-    # explicitly grants the measured 30-minute window.
-    assert timeout_by_step["37"] >= 1800
+    # The mapped OpenROAD producer rows are physical native runs and their
+    # policy explicitly grants the measured 30-minute window.
+    long_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                 "22", "23", "24", "25", "26", "32", "33", "34", "37")
+    assert all(timeout_by_step[step] == 1800 for step in long_rows)
     # The registered adapter must carry the same row-owned policy through the
     # catalog, rather than merely passing the helper-level unit assertion.
     assert registry.adapters("37")[0].components[0].timeout_s == 1800
     assert registry.adapters("37")[0].ram_mb == 4096
     # Rows without a long-runtime policy continue to honour the supplied
     # fixture timeout, keeping unit tests and bounded fixtures fast.
-    assert timeout_by_step["15"] == 7
+    assert timeout_by_step["27"] == 7
     assert registry.adapters("15")[0].ram_mb == 4096
     assert all(value > 0 for value in timeout_by_step.values())
+
+
+def test_backend_producer_cpu_is_row_owned_positive_and_strictly_validated():
+    from execution_provider_catalog import BACKEND_ROWS
+    registry = register_backend_adapters(source_sha=BASE, available=False)
+    native_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                   "22", "23", "24", "25", "26", "32", "33", "34")
+    assert all(registry.adapters(step)[0].cpus == 4 for step in native_rows)
+    assert registry.adapters("27")[0].cpus == 1
+    assert _producer_cpus(BACKEND_ROWS["27"], {}) == 1
+    for bad in (True, 0, -1, 1.5, "4", None):
+        spec = dict(BACKEND_ROWS["15"])
+        policy = dict(spec["portfolio_policy"])
+        policy["producer_cpus"] = bad
+        spec["_portfolio_policy"] = policy
+        with pytest.raises(em.Refusal, match="BACKEND_PRODUCER_CPUS_INVALID"):
+            _producer_cpus(spec, {})
 
 
 def test_openroad_backend_rows_use_measured_row_owned_ram_and_rcx_stays_default():
