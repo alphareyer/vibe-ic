@@ -333,7 +333,8 @@ def _state_chain(project, params, ids, predecessor, overlay=None):
         # those targets, preserving its path mapping and view checks.
         state = ll.state_from_direct(
             project, image, configs[ids[0]],
-            {**bound['views'], 'sdc': bound['views'].get('sdc_derived')},
+            {**{name: path for name, path in bound['views'].items()
+                if name != 'sdc_derived'}, 'sdc': _step15_sdc(project)},
             project / 'phase3/librelane' / (lane + '-config/bridge'),
             chain=[configs[s] for s in ids[1:]], mounts=mounts,
             metrics=bound['metrics'], metrics_source=bound['metrics_source'])
