@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1439
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1439)
+- **Total programs (excluding helpers / shims):** 1442
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1442)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1430 |
+| `any` | 1433 |
 
 ## Alphabetical listing
 
@@ -444,6 +444,9 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `execution_release_rows` | any | — | Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p... |
 | `execution_release_worker` | any | — | Real source-owned release component for the common execution controller. |
 | `execution_source_snapshot` | any | — | One-operation source snapshot for adapter registration. |
+| `execution_step4` | any | — | Step 4 simulator arms over one frozen professional cocotb bundle. |
+| `execution_step4_icarus` | any | — | Native Icarus Step 4 candidate; fixed simulator, shared canonical consumers. |
+| `execution_step4_verilator` | any | — | Native Verilator Step 4 candidate; fixed simulator, shared canonical consumers. |
 | `execution_step_protocol` | any | — | Small source-bound Step9 request protocol. |
 | `execution_synthesis_engines` | any | — | Source-owned Step 9 synthesis identities and evidence boundary. |
 | `expert_decision_table` | any | — | a decision table is DATED, and a stale one is refused. |
@@ -1511,7 +1514,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1430 programs)
+### `any` (1433 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1927,6 +1930,9 @@ _(no programs in this group)_
 - `execution_release_rows` — Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p...
 - `execution_release_worker` — Real source-owned release component for the common execution controller.
 - `execution_source_snapshot` — One-operation source snapshot for adapter registration.
+- `execution_step4` — Step 4 simulator arms over one frozen professional cocotb bundle.
+- `execution_step4_icarus` — Native Icarus Step 4 candidate; fixed simulator, shared canonical consumers.
+- `execution_step4_verilator` — Native Verilator Step 4 candidate; fixed simulator, shared canonical consumers.
 - `execution_step_protocol` — Small source-bound Step9 request protocol.
 - `execution_synthesis_engines` — Source-owned Step 9 synthesis identities and evidence boundary.
 - `expert_decision_table` — a decision table is DATED, and a stale one is refused.
