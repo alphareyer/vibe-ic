@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _release_kit import (  # noqa: E402
     CONTROL,
     SUBJECT,
+    _write_current_kit,
     build_project,
     docs_dir,
 )
@@ -454,6 +455,10 @@ def test_the_regenerated_manifest_passes_again(tmp_path):
     view.write_text(view.read_text(encoding="utf-8") + "\n// a later build\n",
                     encoding="utf-8")
     assert check(project).returncode == RC_FAIL
+    # A new view is a new producer run. Re-issue the fixture's strict current
+    # receipt so the consumer can verify the new bytes instead of accepting a
+    # stale packet or weakening its hash refusal.
+    _write_current_kit(project, SUBJECT)
     generate(project)
     assert check(project).returncode == RC_PASS
 
