@@ -460,6 +460,8 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
         "phase2/stage2/constraints/asic_sdc.json",
         constraint,
         "reports/phase2/cdc/netlist.json",
+        "reports/phase2/cdc/netlist_front_end.json",
+        "reports/phase2/cdc/netlist.yosys.log",
     ):
         target = project / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -468,7 +470,14 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
 
     contract = set(backend_project_input_contract(project, "15"))
 
-    assert "reports/phase2/cdc/netlist.json" in contract
+    assert {
+        "reports/phase2/cdc/netlist.json",
+        "reports/phase2/cdc/netlist_front_end.json",
+        "reports/phase2/cdc/netlist.yosys.log",
+    } <= contract
+    # The actual worker resolver receives every existing adjacent proof; it
+    # does not silently stage only the JSON netlist.
+    assert resolve_input_contract(project, [{"path": path} for path in contract]) == []
     assert "rig_topology.json" not in contract
     assert "plugin_output/declaration.json" not in contract
 
