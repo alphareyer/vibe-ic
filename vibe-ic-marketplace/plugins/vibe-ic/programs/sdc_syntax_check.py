@@ -105,7 +105,7 @@ MAX_PERIOD_NS = 10000.0
 # ---------------------------------------------------------------------------
 # File discovery
 # ---------------------------------------------------------------------------
-def discover_sdc_files(base: Path) -> List[Path]:
+def discover_sdc_files(base: Path, *, include_phase3: bool = True) -> List[Path]:
     """Return the design SDC population for the Step-7/8 contract.
 
     The flow's staged inputs are defined by :func:`sdc_constraints.collect_sdc_files`;
@@ -115,10 +115,17 @@ def discover_sdc_files(base: Path) -> List[Path]:
     the design regex arm. A recursive project scan would turn an intermediate
     deck into a false design failure.
     """
-    return _sdc.collect_sdc_files(
-        base,
-        extra_dirs=[_pl.fpga_early_dir(base), _pl.constraints_dir(base)],
-    )
+    extra_dirs = [_pl.fpga_early_dir(base), _pl.constraints_dir(base)]
+    if include_phase3:
+        # Direct mode owns the Phase-3 design deck.  In dual mode OpenSTA's
+        # current receipt is authoritative for that same deck, so the regex
+        # arm audits only the staged design constraints to avoid double-counting.
+        extra_dirs.extend([
+            _pl.phase3_stage3_dir(base) / "constraints",
+            _pl.cts_dir(base) / "constraints",
+            _pl.pnr_dir(base),
+        ])
+    return _sdc.collect_sdc_files(base, extra_dirs=extra_dirs)
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +226,7 @@ def audit(project_dir: str) -> AuditResult:
         return AuditResult(program="sdc_syntax_check", passed=tool_passed,
                            findings=tool_findings,
                            summary={"mode": mode, "judge": str(OPENSTA_GATE)})
-    result = _regex_audit(project_dir)
+    result = _regex_audit(project_dir, include_phase3=(mode == "direct"))
     if mode != "direct":
         result.findings = tool_findings + result.findings
         result.passed = result.passed and tool_passed
@@ -227,7 +234,7 @@ def audit(project_dir: str) -> AuditResult:
     return result
 
 
-def _regex_audit(project_dir: str) -> AuditResult:
+def _regex_audit(project_dir: str, *, include_phase3: bool = True) -> AuditResult:
     findings: List[Finding] = []
     base = Path(project_dir)
 
@@ -244,7 +251,7 @@ def _regex_audit(project_dir: str) -> AuditResult:
             summary={"files_checked": 0, "valid_files": 0},
         )
 
-    sdc_files = discover_sdc_files(base)
+    sdc_files = discover_sdc_files(base, include_phase3=include_phase3)
 
     if not sdc_files:
         findings.append(Finding(
