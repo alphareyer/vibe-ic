@@ -411,7 +411,9 @@ def test_05ic_declared_absence_routes_public_production_and_adopts_with_typed_na
                                             if k != 'metric'})
     with __import__('pytest').raises(em.Refusal):
         controller.adopt(missing_metric,run,choice)
-    assert json.loads((run/'adoption.json').read_text())['status']=='ADOPTED'
+    refused=json.loads((run/'adoption.json').read_text())
+    assert refused['status']=='REFUSED'
+    assert refused['selected'] is None
 
 @__import__('pytest').mark.parametrize('row,required', [
     ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
