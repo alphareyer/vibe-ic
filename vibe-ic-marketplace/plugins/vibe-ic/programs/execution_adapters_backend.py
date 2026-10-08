@@ -760,7 +760,8 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
             for raw in prelayout_subject_paths(
                     "reports/phase3/sta/pre_pnr_summary.json"):
                 carry_checkpoint_file(raw)
-            for raw in ("reports/lec.json", "reports/lec.rpt"):
+            for raw in ("reports/lec.json", "reports/lec.rpt",
+                        "reports/analog/stage_analog_compliance.json"):
                 carry_checkpoint_file(raw)
         # These are prior stage-1 proof inputs consumed by the compliance
         # reader.  Carry only files already issued by the checkpoint; missing

@@ -15,7 +15,7 @@ def _project(tmp_path):
         q=root/rel; q.parent.mkdir(parents=True,exist_ok=True); q.write_text('bound\n')
     summary = root/'reports/phase3/sta/pre_pnr_summary.json'; summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps({'subject': {'items': [{'path': rel, 'sha256': 'sha256:' + __import__('hashlib').sha256((root/rel).read_bytes()).hexdigest()} for rel in sta_items]}}))
-    for rel in ('reports/lec.json', 'reports/lec.rpt'):
+    for rel in ('reports/lec.json', 'reports/lec.rpt', 'reports/analog/stage_analog_compliance.json'):
         q=root/rel; q.parent.mkdir(parents=True,exist_ok=True); q.write_text('bound\n')
     return root
 
@@ -75,5 +75,14 @@ def test_step15_contract_refuses_changed_subject_digest(tmp_path):
     doc = json.loads(summary.read_text())
     doc['subject']['items'][0]['sha256'] = 'sha256:' + '0' * 64
     summary.write_text(json.dumps(doc))
+    with pytest.raises(ValueError):
+        backend.backend_project_input_contract(root, '15')
+
+
+def test_step15_contract_carries_and_requires_stage_analog_producer_proof(tmp_path):
+    root = _project(tmp_path)
+    paths = backend.backend_project_input_contract(root, '15')
+    assert 'reports/analog/stage_analog_compliance.json' in paths
+    (root / 'reports/analog/stage_analog_compliance.json').unlink()
     with pytest.raises(ValueError):
         backend.backend_project_input_contract(root, '15')
