@@ -307,3 +307,23 @@ def test_finalized_snapshot_is_not_reused_for_later_module_authority(tmp_path):
         # live resolver now observes package precedence and the new target.
         assert _python_module('worker', [tmp_path])[0][0] == (tmp_path / 'worker' / '__init__.py').resolve()
         assert implementation_closure(entry) == {entry, tmp_path / 'worker' / '__init__.py'}
+
+
+def test_source_current_uses_and_finalizes_a_fresh_snapshot_per_check(monkeypatch):
+    registry = em.Registry()
+    registry.register(H.adapter('source-current'))
+    arm = registry.adapters('1')[0]
+    snapshots = []
+    original = em.SourceSnapshot
+
+    class TrackingSnapshot(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            snapshots.append(self)
+
+    monkeypatch.setattr(em, 'SourceSnapshot', TrackingSnapshot)
+    first = em.Controller._source_current(arm)
+    second = em.Controller._source_current(arm)
+    assert first == second
+    assert len(snapshots) == 2
+    assert all(snapshot.finalized for snapshot in snapshots)
