@@ -554,6 +554,14 @@ def _sha256_file(path: Path) -> Optional[str]:
     return "sha256:" + h.hexdigest()
 
 
+def _digest_matches(path: Path, recorded: object) -> bool:
+    """Compare a recorded digest in either issued spelling."""
+    actual = _sha256_file(path)
+    if actual is None or not isinstance(recorded, str):
+        return False
+    return actual.removeprefix("sha256:") == recorded.removeprefix("sha256:")
+
+
 def _first_present(rec: dict, names: Tuple[str, ...]):
     """``(value, field-name)`` for the first of *names* the record carries.
 
@@ -843,6 +851,79 @@ def audit_area_stats(netlist_path: Path) -> Tuple[List[Finding], dict]:
 TOOL_EMITTED_NETLIST_NAME = "netlist_yosys.v"
 
 
+class NativeBindingRefusal(ValueError):
+    """The issued native synthesis handoff is present but no longer valid."""
+
+
+def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:
+    """Resolve the current mapped synthesis product from its issued binding.
+
+    A LibreLane synthesis publishes ``netlist.v`` as the checked mapped copy,
+    while the generic Yosys producer may leave ``netlist_yosys.v`` beside it.
+    The latter is a different synthesis arm and must not be used as the
+    corroborating source when ``synth_inputs.json`` names a native handoff.
+    This helper only selects a receipt/state-bound native sibling; it never
+    changes either netlist or derives an expected cell count.
+    """
+    try:
+        audited = netlist_path.resolve()
+        synth = audited.parent
+        if (audited.name != "netlist.v" or synth.name != "synth"
+                or synth.parent.name != "stage2"
+                or synth.parent.parent.name != "phase2"):
+            return None
+        project = synth.parent.parent.parent
+        sidecar = synth / "synth_inputs.json"
+        try:
+            doc = json.loads(sidecar.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, TypeError) as exc:
+            raise NativeBindingRefusal("native synthesis handoff sidecar is unreadable") from exc
+        if not isinstance(doc, dict):
+            raise NativeBindingRefusal("native synthesis handoff sidecar shape changed")
+        binding = doc.get("librelane_synthesis")
+        if not isinstance(binding, dict):
+            return None
+        if binding.get("schema") != "vibe-ic/librelane-synthesis-handoff/1":
+            raise NativeBindingRefusal("native synthesis handoff schema changed")
+        if not isinstance(binding.get("folder"), str) or not isinstance(binding.get("mapped"), str):
+            raise NativeBindingRefusal("native synthesis handoff paths absent")
+        folder_rel = Path(binding["folder"])
+        mapped_rel = Path(binding["mapped"])
+        if (folder_rel.is_absolute() or mapped_rel.is_absolute()
+                or ".." in folder_rel.parts or ".." in mapped_rel.parts):
+            raise NativeBindingRefusal("native synthesis handoff path escaped project")
+        folder = project / folder_rel
+        mapped = project / mapped_rel
+        receipt = folder / "vibeic_receipt.json"
+        state_path = folder / "state_out.json"
+        if (not folder.is_dir() or not mapped.is_file()
+                or mapped.resolve().parent != audited.resolve().parent
+                or not audited.is_file() or not receipt.is_file()
+                or not state_path.is_file()
+                or not _digest_matches(mapped, binding.get("netlist_sha256"))
+                or not _digest_matches(audited, binding.get("netlist_sha256"))
+                or not _digest_matches(receipt, binding.get("receipt_sha256"))):
+            raise NativeBindingRefusal("native synthesis handoff bytes or receipt changed")
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            raise NativeBindingRefusal("native synthesis state is unreadable") from exc
+        native = state.get("nl")
+        if not isinstance(native, str) or not Path(native).name:
+            raise NativeBindingRefusal("native synthesis state netlist is absent")
+        candidate = folder / Path(native).name
+        if (not candidate.is_file()
+                or not _digest_matches(candidate, binding.get("netlist_sha256"))):
+            raise NativeBindingRefusal("native synthesis state netlist changed")
+        return candidate
+    except NativeBindingRefusal:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise NativeBindingRefusal("native synthesis handoff is unreadable") from exc
+
+
 def tool_emitted_netlist(netlist_path: Path,
                          declared_source: Optional[Path] = None) -> Optional[Path]:
     """The synthesiser's own output file beside ``netlist_path``, or ``None``.
@@ -852,7 +933,11 @@ def tool_emitted_netlist(netlist_path: Path,
     corroborate against, and pretending otherwise would compare a file with
     itself and call the agreement evidence.
     """
-    candidate = declared_source or (netlist_path.parent / TOOL_EMITTED_NETLIST_NAME)
+    candidate = declared_source or _bound_native_netlist(netlist_path)
+    if candidate is None and declared_source is None:
+        candidate = netlist_path.parent / TOOL_EMITTED_NETLIST_NAME
+    if candidate is None:
+        return None
     if not candidate.is_file():
         return None
     try:
@@ -883,7 +968,15 @@ def audit_cell_census(netlist_path: Path, cell_counts: Dict[str, int],
         "status": "",
     }
 
-    source = tool_emitted_netlist(netlist_path, declared_source)
+    try:
+        source = tool_emitted_netlist(netlist_path, declared_source)
+    except NativeBindingRefusal as exc:
+        info["status"] = "NATIVE_BINDING_REFUSED"
+        findings.append(Finding(
+            severity="ERROR", category="TOOL_NETLIST_BINDING_CHANGED",
+            message=str(exc),
+        ))
+        return findings, info
     if source is None:
         info["status"] = "NO_TOOL_EMITTED_NETLIST"
         findings.append(Finding(
