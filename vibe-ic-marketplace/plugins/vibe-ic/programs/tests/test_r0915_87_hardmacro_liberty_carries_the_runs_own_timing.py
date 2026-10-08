@@ -12,12 +12,14 @@ DEF-derived pg_pins added, the gen step PASSed, the check PASSed, and step
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import digital_hardmacro_gen as G  # noqa: E402
+import _physical_current as PC  # noqa: E402
 
 RPT = ("=== SETUP corner: process=SS liberty=/pdk/ss.lib, SPEF=d.max.spef ===\n"
        "STA_BASIS: POST_ROUTE_SPEF\n"
@@ -28,13 +30,16 @@ ETM = ('library (d) {\n  cell ("d") {\n    pin ("clk") { direction : input ; }\n
 
 
 def _inputs(p: Path, rpt: str = RPT) -> None:
+    lib = p / "fixture_pdk/ss.lib"
+    lib.parent.mkdir(parents=True)
+    lib.write_text('library (ss) { cell (BUF) { area : 1; } }\n')
     pnr = p / "phase3/stage3/pnr"; pnr.mkdir(parents=True)
     (pnr / "d_pnr.v").write_text("module d; endmodule\n")
     (pnr / "constraint.sdc").write_text("create_clock -period 10 clk\n")
     sp = p / "phase3/stage3/extracted/spef_corners"; sp.mkdir(parents=True)
     (sp / "d.max.spef").write_text("*SPEF\n")
     r = p / "reports/phase3"; r.mkdir(parents=True)
-    (r / "sta_mcorner_ocv.rpt").write_text(rpt)
+    (r / "sta_mcorner_ocv.rpt").write_text(rpt.replace("/pdk/ss.lib", str(lib)))
 
 
 def test_missing_post_route_inputs_are_blocked_by_upstream_and_run_nothing(tmp_path, monkeypatch):
@@ -55,7 +60,9 @@ def test_a_report_naming_no_setup_corner_is_blocked(tmp_path, monkeypatch):
 def _fake_sta(out_text: str, rc: int = 0):
     def run(argv, *a, **k):
         tcl = Path(argv[-1].split()[-1])
-        lib_out = Path(tcl.read_text().split()[-1])
+        line = next(line for line in tcl.read_text().splitlines()
+                    if line.startswith("write_timing_model "))
+        lib_out = Path(line.split()[-1])
         if out_text:
             lib_out.write_text(out_text)
         return rc, "", "sta said no" if rc else ""
@@ -68,9 +75,15 @@ def test_arcs_from_the_runs_own_sta_are_delivered(tmp_path, monkeypatch):
     monkeypatch.setattr(G.shutil, "which", lambda n: "/usr/bin/sta")
     text, rec = G.characterise_liberty(tmp_path, "d", "", tmp_path / "hm")
     assert rec["characterised"] is True and rec["arcs"] == 1
-    assert rec["liberty"] == "/pdk/ss.lib", "must be the SETUP corner the STA used"
+    assert rec["liberty"] == str(tmp_path / "fixture_pdk/ss.lib"), "must be the SETUP corner the STA used"
     assert "CHARACTERISED" in text and "timing ()" in text
-    assert not list((tmp_path / "hm").glob(".d_etm*")), "scratch left behind"
+    # The current receipt binds the exact Tcl recipe used by STA, so this
+    # source-owned input remains as evidence rather than being deleted as
+    # unbound scratch.
+    recipe = tmp_path / "hm/.d_etm.tcl"
+    assert recipe.is_file()
+    assert {p.name for p in (tmp_path / "hm").glob(".d_etm*")} == {".d_etm.tcl"}
+    assert rec["current_inputs"]["recipe"] == PC.entry(tmp_path, recipe)
 
 
 def test_zero_arcs_or_tool_failure_is_an_execution_error(tmp_path, monkeypatch):

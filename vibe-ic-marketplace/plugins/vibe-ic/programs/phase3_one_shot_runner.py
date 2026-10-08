@@ -72843,6 +72843,22 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
         done = signoff.run_sta_script(project, tool['image'], tool['mounts'], tcl_path, log)
         rc, out, err = done.returncode, done.stdout, done.stderr
         log.write_text((out or '') + '\n' + (err or ''))
+        if rc != 0 or not out_json.is_file():
+            raise current.Refusal(
+                f"OpenSTA did not produce the timing JSON (rc={rc})")
+        try:
+            json.loads(out_json.read_text(errors='replace'))
+        except Exception as exc:
+            marker_text = (out or '') + (err or '') + log.read_text(errors='replace')
+            emit_done = "SI_TIMING_JSON_EMIT_DONE" in marker_text
+            notes.append(
+                f"SI timing-aware: the timing JSON at {out_json.name} is present "
+                f"({out_json.stat().st_size} bytes) but DOES NOT PARSE "
+                f"({exc}); "
+                f"{'the emit completed' if emit_done else 'TRUNCATED — the emit aborted'}; "
+                "the consumer must keep the CONSERVATIVE ENVELOPE rather than "
+                "crediting nominal timing")
+            raise current.Refusal("CURRENT_TIMING_JSON_UNPARSEABLE")
         current.timing_has_windows(out_json)
         current.finish(receipt, rc, [('timing_windows', out_json)], receipt_path)
     except (OSError, ValueError, KeyError, TypeError) as exc:

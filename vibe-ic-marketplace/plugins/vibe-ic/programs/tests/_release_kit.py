@@ -326,7 +326,98 @@ def build_project(root: Path, packages: Sequence[str] = (SUBJECT, CONTROL),
                 "output wire dout", f"output wire [{bus_width - 1}:0] dout")
         (kit / f"{name}.v").write_text(verilog, encoding="utf-8")
         (kit / f"{name}.gds").write_bytes(build_gds(name))
+    if packages:
+        _write_current_kit(root, packages[0])
     return root
+
+
+def _write_current_kit(project: Path, name: str) -> None:
+    """Issue the strict current-kit receipt for the synthetic delivery.
+
+    The release consumers intentionally require the same closed receipt as a
+    real 37.5ip run.  This fixture has no native EDA measurement, so every
+    receipt row is bound to bytes written above and the execution markers say
+    explicitly that the packet is synthetic.  Keeping this at the fixture
+    producer boundary lets the consumers retain their refusal/hash checks.
+    """
+    import _physical_current as current
+
+    hm = project / "phase3" / "stage4" / "hardmacro"
+
+    def put(rel: str, text: str) -> Path:
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    declaration = put(
+        "input/submission_template/tapeout_declaration.json",
+        json.dumps({
+            "schema": "vibe-ic/tapeout_declaration/1",
+            "answers": {"deliverable": "HARDMACRO"},
+            "answer_provenance": {"deliverable": {
+                "answered_by": "owner",
+                "citation": "_release_kit.py: synthetic IP delivery"}},
+        }, indent=2) + "\n")
+    signoff_gds = project / "phase3" / "stage4" / "gds" / f"{name}.gds"
+    signoff_gds.parent.mkdir(parents=True, exist_ok=True)
+    signoff_gds.write_bytes((hm / f"{name}.gds").read_bytes())
+    timing_netlist = put(
+        f"phase3/stage3/pnr/{name}_pnr.v",
+        (hm / f"{name}.v").read_text(encoding="utf-8"))
+    sources = {
+        "def": put(
+            "phase3/stage3/pnr/routed.def",
+            f"VERSION 5.8 ;\nDESIGN {name} ;\nEND DESIGN\n"),
+        "gds": signoff_gds,
+        "route": declaration,
+        "technology": put(
+            "reports/phase3/technology_units.json",
+            json.dumps({"pdk": PDK}) + "\n"),
+        "timing_netlist": timing_netlist,
+        "timing_sdc": put(
+            "phase2/stage2/constraints/fixture.sdc",
+            "create_clock -name clk -period 20 [get_ports clk]\n"),
+        "timing_spef": put(
+            "phase3/stage3/pnr/fixture.spef",
+            '*SPEF "IEEE 1481-1998"\n'),
+        "timing_sta_report": put(
+            "reports/phase3/fixture_sta.rpt",
+            "Synthetic timing fixture; no native measurement.\n"),
+        "timing_recipe": put(
+            "phase3/stage4/hardmacro/fixture_timing.tcl",
+            "# Synthetic timing recipe.\n"),
+        "pdk_timing_liberty": put(
+            "input/pdk/fixture.lib",
+            (hm / f"{name}.lib").read_text(encoding="utf-8")),
+        "pdk_magicrc": put(
+            "input/pdk/fixture.magicrc",
+            "# Synthetic technology setup.\n"),
+        "lef_recipe": put(
+            "phase3/stage4/hardmacro/fixture_lef.tcl",
+            "# Synthetic LEF recipe.\n"),
+    }
+    outputs = {
+        role: hm / f"{name}{suffix}"
+        for role, suffix in (("lef", ".lef"), ("liberty", ".lib"),
+                             ("gds", ".gds"), ("verilog", ".v"))}
+    outputs["log"] = put(
+        "phase3/stage4/hardmacro/fixture_lef.log",
+        "SYNTHETIC FIXTURE ONLY\nDIGITAL_LEF_WRITE_DONE\n")
+    outputs["timing_log"] = put(
+        "phase3/stage4/hardmacro/fixture_timing.log",
+        "SYNTHETIC FIXTURE ONLY\nTIMING_MODEL_DONE\n")
+    record = current.build(
+        project, "37.5ip", "stage4", name, PDK, "magic+opensta",
+        {role: current.entry(project, path)
+         for role, path in sources.items()},
+        {role: current.entry(project, path)
+         for role, path in outputs.items()},
+        {"rc": 0, "argv": ["synthetic-fixture", "lef"],
+         "timing": {"rc": 0, "argv": ["synthetic-fixture", "timing"]}})
+    record["fixture"] = "Synthetic current-kit receipt; no native measurement."
+    (hm / "current_kit.json").write_text(
+        json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
 def docs_dir(project: Path, release: str = SUBJECT) -> Path:

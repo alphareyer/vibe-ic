@@ -33,8 +33,10 @@ already handles, because the emitter's own docstring says an unavailable slack
 degrades that pin to advisory.
 """
 import json
+import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +45,8 @@ sys.path.insert(0, str(PROG))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import si_signoff_timing_aware as M  # noqa: E402
 import phase3_one_shot_runner as R   # noqa: E402
+import librelane_signoff as LS      # noqa: E402
+from test_default_current_power import project as current_project  # noqa: E402
 from _tcl_walk import walk           # noqa: E402
 
 # NO SKIP. `tclsh` is resolved the way the PROGRAM resolves a tool it needs —
@@ -140,21 +144,28 @@ class _Pdk:
     macro_libs = ()
 
 
-def _consume(tmp_path, monkeypatch, body, stdout=""):
-    out_json = tmp_path / "subservient_si_timing.json"
+def _consume(tmp_path, monkeypatch, body, stdout="", rc=0):
+    # Current Step-23 state, material hashes and corner identity must reach the
+    # producer before this control can distinguish its JSON failure modes.
+    project, _folder, _lib = current_project(tmp_path)
+    out_json = project / "phase3/stage3/extracted/neutral_si_timing.json"
 
-    def _exec(container, cmd, timeout=1800, **kw):
-        out_json.write_text(body)
-        return 0, stdout, ""
+    def _run(project, image, mounts, script, log, **kw):
+        if body is not None:
+            out_json.write_text(body)
+        marker = re.search(r"VIBEIC_CURRENT_DONE [a-f0-9]+", script.read_text())[0]
+        output = stdout + ("\n" + marker + "\n" if rc == 0 else "")
+        log.write_text(output)
+        return SimpleNamespace(returncode=rc, stdout=output, stderr="")
 
-    monkeypatch.setattr(R, "_docker_exec", _exec)
+    monkeypatch.setattr(LS, "run_sta_script", _run)
     monkeypatch.setattr(R, "_to_container_path", lambda p, c: str(p))
-    for name in ("spef", "sdc", "netlist"):
-        (tmp_path / name).write_text("x")
     notes = []
     ok = R._emit_si_timing_json(
-        tmp_path, "subservient", _Pdk(), "c",
-        tmp_path / "spef", tmp_path / "sdc", tmp_path / "netlist",
+        project, "neutral", _Pdk(), "c",
+        project / "phase3/stage3/extracted/neutral.spef",
+        project / "phase3/stage3/pnr/constraint.sdc",
+        project / "phase3/stage3/pnr/neutral_pnr.v",
         out_json, notes)
     return ok, notes
 
@@ -166,7 +177,7 @@ def test_a_truncated_timing_json_is_refused_and_named(tmp_path, monkeypatch):
     assert ok is False
     note = " ".join(notes)
     assert "DOES NOT PARSE" in note
-    assert "subservient_si_timing.json" in note
+    assert "neutral_si_timing.json" in note
     assert "TRUNCATED" in note and "the emit aborted" in note
     assert "CONSERVATIVE ENVELOPE" in note
 
@@ -185,7 +196,7 @@ def test_a_malformed_but_complete_json_says_malformed_not_truncated(
 def test_a_parseable_timing_json_is_accepted(tmp_path, monkeypatch):
     """THE NEGATIVE CONTROL: the new guard may not refuse a good file."""
     ok, notes = _consume(tmp_path, monkeypatch,
-                         '{"tool": "OpenSTA", "pins": {"a": {"slack_max": 1.0}}}')
+                         '{"tool": "OpenSTA", "pins": {"a": {"slack_max": 1.0, "arr_rise_max": 2.0}}}')
     assert ok is True
     assert not [n for n in notes if "DOES NOT PARSE" in n]
 
@@ -193,19 +204,7 @@ def test_a_parseable_timing_json_is_accepted(tmp_path, monkeypatch):
 def test_an_absent_json_keeps_its_own_older_refusal(tmp_path, monkeypatch):
     """A LANDED CONTRACT: 'the tool produced nothing' and 'the tool produced
     something unreadable' are different sentences and both must survive."""
-    out_json = tmp_path / "subservient_si_timing.json"
-
-    def _exec(container, cmd, timeout=1800, **kw):
-        return 1, "", ""
-
-    monkeypatch.setattr(R, "_docker_exec", _exec)
-    monkeypatch.setattr(R, "_to_container_path", lambda p, c: str(p))
-    for name in ("spef", "sdc", "netlist"):
-        (tmp_path / name).write_text("x")
-    notes = []
-    ok = R._emit_si_timing_json(tmp_path, "subservient", _Pdk(), "c",
-                                tmp_path / "spef", tmp_path / "sdc",
-                                tmp_path / "netlist", out_json, notes)
+    ok, notes = _consume(tmp_path, monkeypatch, None, rc=1)
     assert ok is False
     assert "did not produce the timing JSON" in " ".join(notes)
 

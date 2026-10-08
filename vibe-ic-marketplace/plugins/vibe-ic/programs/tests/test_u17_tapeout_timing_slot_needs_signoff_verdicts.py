@@ -69,6 +69,10 @@ def _project(tmp_path: Path, slack: float) -> Path:
     TT.write_step32_no_repair(proj)
     TT.write_step23_other_clauses(proj)
     _write(proj / _STA_REL, _path_group(slack) * 20)
+    # Step 34 is outside this timing control. Declare its direct arm so the
+    # current native-density obligation cannot veto this timing-only fixture.
+    _write(proj / "phase3/librelane_switch.json", json.dumps({
+        "steps": {"34": "direct"}}))
     return proj
 
 

@@ -675,7 +675,11 @@ def test_05ic_live_issuance_rejects_substitution_before_producers(
         manifest = inputs / 'issued_manifest.json'
         plan = json.loads((plan_path.parent / 'plan.json').read_text())
         if variant == 'missing_live_issuer':
-            em._ISSUED_AUTHORITY.pop(str(plan_path))
+            # Fault injection only: remove the current store's live entry.
+            # The old public index no longer owns immutable issuance.
+            import inspect
+            ledger = inspect.getclosurevars(em._consume_sealed).nonlocals['ledger']
+            assert ledger.pop(str(plan_path)) == plan
         elif variant == 'stale_signature':
             doc = json.loads(plan_path.read_text())
             doc['signature'] = '0' * 64
@@ -695,8 +699,13 @@ def test_05ic_live_issuance_rejects_substitution_before_producers(
                 plan['issued_manifest_sha256'] = em.digest(manifest)
                 env['VIBEIC_ISSUED_MANIFEST_SHA256'] = em.digest(manifest)
             (plan_path.parent / 'plan.json').write_text(json.dumps(plan))
-            # Even this interpreter's real signer cannot replace its immutable issuance.
-            plan_path.write_text(json.dumps(em._seal(plan)))
+            # Test-only reflection simulates a signer compromise without
+            # adding an enrollment/re-signing API to production. A valid
+            # signature still cannot replace the originally issued bytes.
+            import hashlib, hmac, inspect
+            key = inspect.getclosurevars(em._issue_sealed).nonlocals['key']
+            signature = hmac.new(key, em._hash(plan).encode(), hashlib.sha256).hexdigest()
+            plan_path.write_text(json.dumps({'payload': plan, 'signature': signature}))
         elif variant in ('manifest_substitution', 'parameters_substitution', 'step_substitution'):
             doc = json.loads(manifest.read_text())
             if variant == 'step_substitution':
