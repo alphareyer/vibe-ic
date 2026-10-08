@@ -117,6 +117,40 @@ def test_step4_refuses_empty_staged_rtl(tmp_path):
     import execution_step4 as step4
     with __import__('pytest').raises(ValueError, match='staged RTL population is empty'):
         step4.staged_rtl(tmp_path)
+def test_non_step8_frontend_does_not_borrow_step8_sdc_verdict(tmp_path, monkeypatch):
+    """Step 1 review-pending evidence cannot become PASS from Step 8 files."""
+    from types import SimpleNamespace
+    import flow_compliance_check as flow
+
+    rtl = tmp_path / 'phase2/stage1/rtl/top.sv'
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text('module top; endmodule\n')
+    for rel, data in {
+        'reports/phase2/sdc_check.json':
+            {'passed': True, 'program': 'sdc_syntax_check'},
+        'reports/sdc_validator.json':
+            {'verdict': 'PASS', 'exit_code': 0, 'issues': []},
+    }.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+    monkeypatch.setattr(
+        flow, 'check_step',
+        lambda *args, **kwargs: SimpleNamespace(
+            status='NOT_MEASURED', reasons=['awaiting_signed_judgement']))
+
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('1',))
+    arm = registry.adapters('1')[0]
+    evidence = arm.validate(tmp_path, {'step_id': '1'})
+    assert evidence.verdict == 'NOT_MEASURED'
+    assert all(value == 'NOT_MEASURED' for value in evidence.gates.values())
+    monkeypatch.setattr(
+        flow, 'check_step',
+        lambda *args, **kwargs: SimpleNamespace(
+            status='FAIL', reasons=['measured RTL consumer failure']))
+    failed = arm.validate(tmp_path, {'step_id': '1'})
+    assert failed.verdict == 'FAIL'
 
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'

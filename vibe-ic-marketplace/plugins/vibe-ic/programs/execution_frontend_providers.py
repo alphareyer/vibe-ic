@@ -385,6 +385,21 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                     detail='Step-7 producer emitted source-bound artifacts; '
                            'canonical consumer qualification remains unmeasured')
             gate_result=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
+            if _row != '8':
+                # Step 8 owns the SDC syntax/validator reports below.  They
+                # cannot qualify another frontend row whose own consumer
+                # result is pending (or failed), especially a conditional AI
+                # review row such as Step 1.
+                gate = str(getattr(gate_result, 'status', gate_result))
+                names = _gate_names
+                gates = {name: ('PASS' if gate == 'PASS' else gate)
+                         for name in names}
+                verdict = ('FAIL' if gate == 'FAIL' else
+                           'PASS' if gate == 'PASS' and artifacts else
+                           'NOT_MEASURED')
+                return Evidence(facts, verdict, gates, artifacts,
+                                metrics={'source_boundary': 1.0},
+                                detail='real canonical artifacts and canonical gate validated')
             gate = getattr(gate_result, 'status', gate_result)
             # The canonical checker returns a typed StepResult whose overall
             # status also includes optional downstream clauses.  Step 8's

@@ -495,6 +495,16 @@ def _producer_ram_mb(spec: Mapping[str, object], params: Mapping[str, object]) -
     return raw
 
 
+def _producer_cpus(spec: Mapping[str, object], params: Mapping[str, object]) -> int:
+    """Return the row-owned CPU admission bound, defaulting to one."""
+    policy = spec.get("_portfolio_policy", spec.get("portfolio_policy", {}))
+    has_value = isinstance(policy, Mapping) and "producer_cpus" in policy
+    raw = policy["producer_cpus"] if has_value else 1
+    if isinstance(raw, bool) or type(raw) is not int or raw <= 0:
+        raise em.Refusal("BACKEND_PRODUCER_CPUS_INVALID", repr(raw))
+    return raw
+
+
 def _step37_route_specs() -> tuple[dict, ...]:
     """Expose one streamout producer family; direct Magic is fallback refusal."""
     spec = next(row for row in coverage_rows() if row["step_id"] == "37")
@@ -587,7 +597,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
             "source-bound component; native qualification NOT_MEASURED; producer site=" + str(producer)),
         available=available, availability_reason=("STEP30_CAPABILITY_OR_LIVE_SHARE_UNAVAILABLE" if missing_step30_authority
                               else "" if available else "NATIVE_EXECUTION_NOT_MEASURED"),
-        cpus=1, ram_mb=_producer_ram_mb(spec, params), output_contract=output_contract,
+        cpus=_producer_cpus(spec, params), ram_mb=_producer_ram_mb(spec, params), output_contract=output_contract,
         own_no_tool_reason="One complete producer owns all row outputs and gates; checker components are complementary.",
         input_contract=input_contract,
     )
@@ -685,6 +695,49 @@ def backend_project_input_contract(project: Path, step_id: str) -> tuple[str, ..
                     or not resolved.is_relative_to(root)
                     or not resolved.is_file()):
                 raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+            result.append(rel.as_posix())
+        # ``@container_image`` is a semantic binding, but its canonical report
+        # is still a project file that the isolated reader must open to
+        # recompute that binding.  Keep the external digest key out of the
+        # manifest while carrying the exact report bytes through the worker.
+        if "@container_image" in bound:
+            raw = "reports/container_image.json"
+            target = root / raw
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"step-7 input path is absent: {raw!r}") from exc
+            if (target.is_symlink() or resolved != target
+                    or not resolved.is_relative_to(root)
+                    or not resolved.is_file()):
+                raise ValueError(f"step-7 input path is unsafe: {raw!r}")
+            result.append(raw)
+    # The Step-7 pad-ring record is itself a bound input.  Its
+    # ``documents_scanned`` list is the producer's transitive source closure;
+    # omit it and the isolated producer silently sees a smaller document set,
+    # then rewrites the same hardware record with different provenance.  Carry
+    # each project-relative source under the same fail-closed path rules.
+    io_record = root / "reports/phase3/io_pad_chip_top.json"
+    try:
+        io_doc = json.loads(io_record.read_text())
+    except (OSError, ValueError, TypeError):
+        io_doc = None
+    scanned = io_doc.get("documents_scanned") if isinstance(io_doc, Mapping) else None
+    if isinstance(scanned, list):
+        for raw in sorted({item for item in scanned if isinstance(item, str)}):
+            rel = Path(raw)
+            if (rel.is_absolute() or not raw or ".." in rel.parts
+                    or rel.as_posix() != raw):
+                raise ValueError(f"pad-ring input path is unsafe: {raw!r}")
+            target = root / rel
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"pad-ring input path is absent: {raw!r}") from exc
+            if (target.is_symlink() or resolved != target
+                    or not resolved.is_relative_to(root)
+                    or not resolved.is_file()):
+                raise ValueError(f"pad-ring input path is unsafe: {raw!r}")
             result.append(rel.as_posix())
     sidecar = root / "phase2/stage2/synth/synth_inputs.json"
     try:

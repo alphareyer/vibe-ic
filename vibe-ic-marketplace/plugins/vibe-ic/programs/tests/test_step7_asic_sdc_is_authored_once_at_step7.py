@@ -486,11 +486,63 @@ def test_container_record_changed_after_step7_regenerates(tmp_path,
     report.write_text(json.dumps({"container": ""}))
     pdk = _pdk(monkeypatch)
     _step7(proj, pdk)
-    report.write_text(json.dumps({"container": "", "changed": True}))
+    report.write_text(json.dumps({"container": "", "image_ref": "other"}))
     got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert got["regenerated"] is not None, got
     assert "inputs changed since step 7" in got["regenerated"]
-    assert "reports/container_image.json" in got["regenerated"]
+    assert "@container_image" in got["regenerated"]
+
+
+def test_container_cid_rotation_does_not_regenerate_step7(tmp_path, monkeypatch):
+    """A fresh continuation container keeps the same pinned image identity."""
+    proj = _project(tmp_path)
+    report = proj / "reports/container_image.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"container": "old", "image_ref": "same",
+                                  "image_id": "sha256:1", "verdict": "PASS"}))
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    report.write_text(json.dumps({"container": "new", "image_ref": "same",
+                                  "image_id": "sha256:1", "verdict": "PASS",
+                                  "attestation_path": "/new/run.json"}))
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
+    assert got["regenerated"] is None, got
+
+
+def test_io_pad_namespace_rotation_preserves_binding_but_supply_change_refuses(
+        tmp_path, monkeypatch):
+    """Run-local pad paths are ignored; a supply change is bound and refused."""
+    proj = _project(tmp_path)
+    rec_path = _pad_record(proj)
+    payload = json.loads(rec_path.read_text())
+    payload.update({
+        "project": str(proj),
+        "optional_ports_not_implemented": [{
+            "netlist": str(proj / "phase2/stage2/synth/netlist.v"),
+        }],
+    })
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    record_path = proj / CONS / T.ASIC_SDC_RECORD
+    before = record_path.read_bytes()
+
+    payload["project"] = "/private/backend/project"
+    payload["optional_ports_not_implemented"][0]["netlist"] = (
+        "/private/backend/phase2/stage2/synth/netlist.v")
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    accepted, why = T.read_step7_asic_sdc(R, proj, TOP, pdk)
+    observed = ("ACCEPTED" if accepted is not None else "REFUSED", why)
+    assert observed == ("ACCEPTED", "")
+    assert record_path.read_bytes() == before
+
+    payload["power_pad_plan"]["ground_net"] = "VSSA"
+    rec_path.write_text(json.dumps(payload, sort_keys=True))
+    refused, why = T.read_step7_asic_sdc(R, proj, TOP, pdk)
+    observed = ("REFUSED" if refused is None else "ACCEPTED",
+                "@io_pad_record" in why)
+    assert observed == ("REFUSED", True)
+    assert record_path.read_bytes() == before
 
 
 def test_input_sdc_never_clobbers_a_hand_authored_legacy_sdc(tmp_path,

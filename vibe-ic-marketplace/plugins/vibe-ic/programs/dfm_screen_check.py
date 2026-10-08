@@ -425,7 +425,15 @@ def audit(project: Path) -> dict:
         "metal_fill_density.json"
     density_ref = None
     tool_ref = _step34_tool_density(project)
-    if tool_ref is not None:
+    # A stale/missing tool-side index is not a measurement and must not hide
+    # the canonical Step-34 gate report.  In particular, the default-mode
+    # producer can leave ``fill_librelane.json`` with ``status=ABSENT`` while
+    # the blocking gate has already recorded PASS; treating that placeholder
+    # as authoritative turns an honest no-via skip into a false advisory.
+    # Keep measured/failed tool evidence authoritative, and fall back to the
+    # explicit gate report when the tool record says it has no measurement.
+    tool_status = tool_ref.get("status") if isinstance(tool_ref, dict) else None
+    if tool_ref is not None and tool_status not in (None, "ABSENT"):
         per_layer = tool_ref.get("per_layer")
         per_layer_pass = per_layer is None or per_layer.get("verdict") == "PASS"
         density_ref = {"source": tool_ref.get("source"),

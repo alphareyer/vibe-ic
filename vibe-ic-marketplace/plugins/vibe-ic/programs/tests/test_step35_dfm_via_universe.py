@@ -278,7 +278,8 @@ def test_def_with_neither_declarations_nor_references_is_an_honest_skip(
     rep = DFM.audit(p)
     assert rep["via_redundancy"] is None
     assert "VIA_DEFS_NOT_FOUND" in _cats(rep)
-    assert rep["verdict"] == "PASS" and rep["rc"] == 0
+    assert rep["verdict"] == "PASS"
+    assert rep["rc"] == 0
 
 
 def test_declared_vias_with_no_signal_use_are_disclosed_not_silent(tmp_path):

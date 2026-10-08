@@ -377,8 +377,8 @@ def test_m2_receipt_rebind_refuses_path_or_digest_drift(tmp_path, drift):
             "boundary")
 
 
-@pytest.mark.parametrize("drift", ("missing_key", "empty_inputs", "unknown_receipt_key",
-                                   "unsafe_key", "subject"))
+@pytest.mark.parametrize("drift", ("missing_key", "empty_inputs", "empty_issued_inputs",
+                                   "unknown_receipt_key", "unsafe_key", "subject"))
 def test_m2_receipt_rebind_refuses_incomplete_or_unbound_subject(tmp_path, drift):
     staged, canonical, issued, receipt = _m2_receipt_rebind_fixture(tmp_path)
     key = next(iter(receipt["inputs"]))
@@ -388,6 +388,9 @@ def test_m2_receipt_rebind_refuses_incomplete_or_unbound_subject(tmp_path, drift
         pass
     elif drift == "empty_inputs":
         receipt["inputs"].clear()
+    elif drift == "empty_issued_inputs":
+        receipt["inputs"][key] = value
+        issued = {}
     elif drift == "unknown_receipt_key":
         receipt["inputs"][key] = value
         extra = staged / "extra/current.bin"
@@ -401,7 +404,9 @@ def test_m2_receipt_rebind_refuses_incomplete_or_unbound_subject(tmp_path, drift
         receipt["inputs"][key] = value
         subject = str((tmp_path / "other-project").resolve())
         (tmp_path / "other-project").mkdir()
-    with pytest.raises(ValueError, match="MIXED_M2_"):
+    expected = (r"^MIXED_M2_ISSUED_INPUTS_INVALID$"
+                if drift == "empty_issued_inputs" else r"MIXED_M2_")
+    with pytest.raises(ValueError, match=expected):
         worker.rebind_m2_receipt_inputs(receipt, staged, subject,
                                         str(canonical.resolve()), issued, "boundary")
 
@@ -559,11 +564,22 @@ def test_actual_m2_worker_runs_checked_in_placed_fixture_and_existing_consumer(t
     shutil.copyfile(source, target)
     params = {"top_name": "boundary", "container": "host", "pdk": "auto",
               "project_subject": str(project.resolve())}
+    issued_input_paths = (
+        "input/pdk/liberty/neutral.lib",
+        "phase2/stage2/constraints/boundary.upf",
+        "phase3/mixed_signal/top_merged.gds",
+        "phase3/stage3/pnr/boundary_pnr.v",
+        "phase3/stage3/pnr/routed.def",
+    )
     binding = {"step_id": "M2", "objective": params,
                "required_gates": ["mixed_signal_power_domain_run",
                    "power_domain_crossing_check", "level_shifter_required_check",
                    "isolation_cell_required_check", "power_domain_signal_crossing_check"],
-               "inputs": {}}
+               # The worker rebinds a PASS receipt only against the exact
+               # current bytes issued by the controller.  Empty and stale
+               # bindings remain covered by the dedicated refusal controls.
+               "inputs": {relative: worker.sha(project / relative)
+                          for relative in issued_input_paths}}
     monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps(binding))
     inputs = tmp_path / "issued-inputs"
     shutil.copytree(project, inputs)
@@ -575,7 +591,30 @@ def test_actual_m2_worker_runs_checked_in_placed_fixture_and_existing_consumer(t
     verdicts = {row["verdict"] for row in receipt["gate_records"]}
     if shutil.which("yosys"):
         assert receipt["producer_verdict"] == "PASS"
-        assert native_m2.invoke(outputs / "project", "--check-only") == 0
+        # The rebound receipt names the canonical subject.  The obsolete
+        # staged-root consumer must refuse that mismatch rather than silently
+        # treating the worker snapshot as current.
+        staged_consumer_report = "reports/analog/mixed_signal/power_domain_staged_consumer.json"
+        assert native_m2.invoke(outputs / "project", "--check-only",
+                                "--json", staged_consumer_report) == 1
+        staged_report = json.loads(
+            (outputs / "project" / native_m2.REPORTS /
+             "power_domain_staged_consumer.json").read_text())
+        assert staged_report["findings"][0]["rule"] == "STALE_INPUT"
+
+        # Publish the worker's complete exported population to the canonical
+        # subject, checking every declared digest before the existing consumer
+        # reads it.  This is the same bounded adoption boundary the controller
+        # uses; no receipt or output byte is synthesized here.
+        for relative, expected in receipt["outputs"].items():
+            exported = outputs / relative
+            assert exported.is_file() and not exported.is_symlink()
+            assert worker.sha(exported) == expected
+            target = project / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(exported, target)
+            assert worker.sha(target) == expected
+        assert native_m2.invoke(project, "--check-only") == 0
     else:
         assert "NOT_MEASURED" in verdicts or receipt["producer_verdict"] == "NOT_MEASURED"
 

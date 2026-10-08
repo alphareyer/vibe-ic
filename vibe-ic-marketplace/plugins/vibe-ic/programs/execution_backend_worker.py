@@ -172,26 +172,30 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     missing_inputs = resolve_input_contract(project, input_contract)
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
-    try:
-        params = dict(params, step_id=str(step_id), project=project)
-        producer = produce(project, params)
-        if not isinstance(producer, dict):
-            producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}
-    except BaseException as exc:
-        producer = {"verdict": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}",
-                    "canonical_receipts": [{
-                        "schema": "vibeic/backend-producer-receipt/1",
-                        "producer": "execution_backend_producers.produce",
-                        "step_id": str(step_id), "verdict": "NOT_MEASURED",
-                        "detail": f"{type(exc).__name__}: {exc}"}]}
-    # A producer exception must not erase a measured FAIL, and a consumer
-    # exception must not prevent the canonical gate from being represented in
-    # the digest-bound result.  Both remain source-only until native receipts.
     if missing_inputs:
+        # Do not launch a producer against an incomplete project.  In
+        # particular, a native producer may create or mutate artifacts before
+        # the later gate stage can report the missing input.  The existing
+        # fail-closed ledger remains the sole result for this path.
         gate_result = {"status": "NOT_MEASURED", "ledger": [{
             "gate": gate, "rc": None, "verdict": "NOT_MEASURED",
             "reason": "REQUIRED_INPUT_ABSENT"} for gate in binding.get("required_gates", ())]}
     else:
+        try:
+            params = dict(params, step_id=str(step_id), project=project)
+            producer = produce(project, params)
+            if not isinstance(producer, dict):
+                producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}
+        except BaseException as exc:
+            producer = {"verdict": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}",
+                        "canonical_receipts": [{
+                            "schema": "vibeic/backend-producer-receipt/1",
+                            "producer": "execution_backend_producers.produce",
+                            "step_id": str(step_id), "verdict": "NOT_MEASURED",
+                            "detail": f"{type(exc).__name__}: {exc}"}]}
+        # A producer exception must not erase a measured FAIL, and a consumer
+        # exception must not prevent the canonical gate from being represented in
+        # the digest-bound result.  Both remain source-only until native receipts.
         try:
             gate_result = evaluate(project, row)
         except BaseException as exc:

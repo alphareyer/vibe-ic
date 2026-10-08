@@ -25,18 +25,36 @@ from execution_adapters_backend import (
     _site_path,
     register_backend_adapters,
     _producer_timeout_s,
+    _producer_cpus,
     _backend_input_contract,
     backend_project_input_contract,
     validate,
     validate_streamout_receipt,
 )
+import execution_backend_worker as backend_worker
 from execution_backend_worker import resolve_input_contract
 from synth_handoff_netlist_check import _project_path_resolver
 import execution_backend_consumer
-from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table, current_source_identity
+from execution_provider_catalog import (BACKEND_IDS, BACKEND_ROWS, coverage_rows,
+                                         coverage_table, current_source_identity)
 
 BASE = current_source_identity()
 PRE_FIX_BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
+
+
+def _step15_controller_inputs(tmp_path):
+    """Create substantive controller inputs from the live Step-15 contract."""
+    inputs = {}
+    for declaration in BACKEND_ROWS["15"]["canonical_row"]["required_inputs"]:
+        pattern = declaration["path"]
+        relative = pattern.replace("*.sdc", "fixture.sdc")
+        source = tmp_path / "step15-inputs" / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "create_clock -period 10 [get_ports clk]\n"
+            if source.suffix == ".sdc" else "module fixture; endmodule\n")
+        inputs[f"project/{relative}"] = source
+    return inputs
 
 
 def test_pre_fix_base_could_not_reach_backend_factory(tmp_path):
@@ -106,39 +124,154 @@ def test_backend_producer_timeout_is_row_owned_and_fixture_parameterized():
         step: _producer_timeout_s(BACKEND_ROWS[step], {"timeout_s": 7})
         for step in BACKEND_IDS
     }
-    # Step 37's stream-out producer is a physical native run and its policy
-    # explicitly grants the measured 30-minute window.
-    assert timeout_by_step["37"] >= 1800
+    # The mapped OpenROAD producer rows are physical native runs and their
+    # policy explicitly grants the measured 30-minute window.
+    long_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                 "22", "23", "24", "25", "26", "32", "33", "34", "37")
+    assert all(timeout_by_step[step] == 1800 for step in long_rows)
     # The registered adapter must carry the same row-owned policy through the
     # catalog, rather than merely passing the helper-level unit assertion.
     assert registry.adapters("37")[0].components[0].timeout_s == 1800
     assert registry.adapters("37")[0].ram_mb == 4096
     # Rows without a long-runtime policy continue to honour the supplied
     # fixture timeout, keeping unit tests and bounded fixtures fast.
-    assert timeout_by_step["15"] == 7
-    assert registry.adapters("15")[0].ram_mb == 256
+    assert timeout_by_step["27"] == 7
+    assert registry.adapters("15")[0].ram_mb == 4096
     assert all(value > 0 for value in timeout_by_step.values())
 
 
+def test_backend_producer_cpu_is_row_owned_positive_and_strictly_validated():
+    from execution_provider_catalog import BACKEND_ROWS
+    registry = register_backend_adapters(source_sha=BASE, available=False)
+    native_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                   "22", "23", "24", "25", "26", "32", "33", "34")
+    assert all(registry.adapters(step)[0].cpus == 4 for step in native_rows)
+    assert registry.adapters("27")[0].cpus == 1
+    assert _producer_cpus(BACKEND_ROWS["27"], {}) == 1
+    for bad in (True, 0, -1, 1.5, "4", None):
+        spec = dict(BACKEND_ROWS["15"])
+        policy = dict(spec["portfolio_policy"])
+        policy["producer_cpus"] = bad
+        spec["_portfolio_policy"] = policy
+        with pytest.raises(em.Refusal, match="BACKEND_PRODUCER_CPUS_INVALID"):
+            _producer_cpus(spec, {})
+
+
+def test_openroad_backend_rows_use_measured_row_owned_ram_and_rcx_stays_default():
+    """Only rows that call the native OpenROAD family receive the measured bound."""
+    from execution_provider_catalog import BACKEND_ROWS
+    registry = register_backend_adapters(source_sha=BASE, available=False)
+    openroad_rows = ("15", "15.5ic", "17", "18", "19", "20", "21",
+                     "22", "23", "24", "25", "26", "32", "33", "34")
+    assert all("openroad" in BACKEND_ROWS[sid]["portfolio_policy"]["current_default"]["tool_ids"]
+               for sid in openroad_rows if sid not in {"22", "33"})
+    assert all(registry.adapters(sid)[0].ram_mb == 4096 for sid in openroad_rows)
+    # Step 22 is OpenRCX at the consumer label, but its Librelane signoff
+    # producer also enters the shared OpenROAD step chain.
+    assert registry.adapters("22")[0].ram_mb == 4096
+    assert registry.adapters("33")[0].ram_mb == 4096
+
+
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
-    source = tmp_path / "seed.txt"
-    source.write_text("source-only\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
+    context = issued_context(em.Context("15", BASE, _step15_controller_inputs(tmp_path),
                          {"metric": "canonical_evidence", "direction": "max"},
                          tuple(_required_gates("15")), "librelane"), tmp_path, mode="default")
     registry = register_backend_adapters(em.Registry(), source_sha=BASE, available=True)
-    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    adapter = registry.adapters("15")[0]
+    controller = em.Controller(
+        registry, em.Budget(cpus=adapter.cpus, ram_mb=adapter.ram_mb, workers=1))
     plan = controller.plan(context, "default-mode")
     root = tmp_path / "run"
     assert plan["arms"] == ["backend_15"]
     summary = controller.run(context, root, "default-mode")
     assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
-    adapter = registry.adapters("15")[0]
     result = json.loads((root / adapter.arm_id / "outputs" / "backend_result.json").read_text())
     assert result["step_id"] == "15"
     assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
+    assert result["missing_inputs"] == []
     assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
+
+
+def _catalog_step15_worker_fixture(tmp_path, *, netlist_state):
+    """Build the exact Step-15 input contract from the live provider catalog."""
+    declarations = tuple(BACKEND_ROWS['15']['canonical_row']['required_inputs'])
+    netlist = next(entry['path'] for entry in declarations
+                   if 'post_dft_netlist.v' in entry['path'])
+    sdc = next(entry['path'] for entry in declarations if '*.sdc' in entry['path'])
+    inputs = tmp_path / 'inputs'
+    project = inputs / 'project'
+    sdc_path = project / Path(sdc).parent / 'fixture.sdc'
+    sdc_path.parent.mkdir(parents=True, exist_ok=True)
+    sdc_path.write_text('create_clock -period 10 [get_ports clk]\n')
+    netlist_path = project / netlist
+    if netlist_state == 'present':
+        netlist_path.parent.mkdir(parents=True, exist_ok=True)
+        netlist_path.write_text('module fixture; endmodule\n')
+    elif netlist_state == 'zero-byte':
+        netlist_path.parent.mkdir(parents=True, exist_ok=True)
+        netlist_path.write_bytes(b'')
+    binding = {
+        'step_id': '15',
+        'source_sha': current_source_identity(),
+        'required_gates': list(BACKEND_ROWS['15']['portfolio_policy']['mandatory_gate_programs']),
+    }
+    return inputs, tmp_path / 'outputs', declarations, netlist, binding
+
+
+@pytest.mark.parametrize('netlist_state', ['missing', 'zero-byte'])
+def test_step15_missing_input_skips_producer_and_gates(tmp_path, monkeypatch, netlist_state):
+    inputs, outputs, declarations, netlist, binding = _catalog_step15_worker_fixture(
+        tmp_path, netlist_state=netlist_state)
+    calls = []
+
+    def unexpected_produce(project, params):
+        calls.append('produce')
+        return {'verdict': 'PASS', 'canonical_receipts': [{'producer': 'unexpected'}]}
+
+    def unexpected_gates(project, row):
+        calls.append('gates')
+        return {'status': 'PASS', 'ledger': []}
+
+    monkeypatch.setattr(backend_worker, 'produce', unexpected_produce)
+    monkeypatch.setattr(backend_worker, 'evaluate', unexpected_gates)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps(binding))
+    result = backend_worker.execute(
+        inputs, outputs, step_id='15', params={'input_contract': list(declarations)})
+
+    assert calls == []
+    assert result['missing_inputs'] == [netlist]
+    assert result['native_receipts'] == []
+    assert result['verdict'] == 'NOT_MEASURED'
+
+
+def test_step15_complete_inputs_call_producer_then_gates(tmp_path, monkeypatch):
+    inputs, outputs, declarations, netlist, binding = _catalog_step15_worker_fixture(
+        tmp_path, netlist_state='present')
+    calls = []
+
+    def observed_produce(project, params):
+        calls.append('produce')
+        return {
+            'verdict': 'PASS',
+            'canonical_receipts': [{'producer': 'fixture', 'verdict': 'PASS'}],
+            'native_receipts': [],
+        }
+
+    def observed_gates(project, row):
+        calls.append('gates')
+        return {'status': 'PASS', 'ledger': [
+            {'gate': gate, 'rc': 0, 'verdict': 'PASS'}
+            for gate in binding['required_gates']]}
+
+    monkeypatch.setattr(backend_worker, 'produce', observed_produce)
+    monkeypatch.setattr(backend_worker, 'evaluate', observed_gates)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps(binding))
+    result = backend_worker.execute(
+        inputs, outputs, step_id='15', params={'input_contract': list(declarations)})
+
+    assert calls == ['produce', 'gates']
+    assert result['missing_inputs'] == []
+    assert result['native_receipts'] == []
 
 
 def test_required_input_zero_byte_is_missing_but_nonempty_or_alternate_is_valid(tmp_path):
@@ -228,26 +361,68 @@ def test_step7_bound_non_at_inputs_are_carried_into_backend_contract(tmp_path):
     paths = (
         "input/submission_template_source/0p5x0p5.json",
         "phase2/stage1/fpga/subservient.sdc",
-        "reports/container_image.json",
     )
     for rel in paths:
         target = project / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(rel + "\n")
+    report = project / "reports/container_image.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{\"image_ref\": \"pinned\"}\n")
     record = project / "phase2/stage2/constraints/asic_sdc.json"
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps({"inputs": {
         **{rel: "digest-" + str(i) for i, rel in enumerate(paths)},
         "@code:timing.py": "external-code-digest",
         "@liberty_sha256": "external-liberty-digest",
+        "@container_image": "external-image-binding",
     }}))
 
     contract = backend_project_input_contract(project, "15")
 
-    observed = tuple(sorted(rel for rel in paths if rel in contract))
-    assert observed == tuple(sorted(paths))
+    expected = tuple(sorted((*paths, "reports/container_image.json")))
+    assert tuple(sorted(contract)) == expected
     assert "@code:timing.py" not in contract
     assert "@liberty_sha256" not in contract
+
+
+def test_step7_semantic_image_only_binding_carries_report(tmp_path):
+    """The @ binding names a semantic report that the isolated reader opens."""
+    project = tmp_path / "project"
+    report = project / "reports/container_image.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("{\"image_ref\": \"pinned\"}\n")
+    record = project / "phase2/stage2/constraints/asic_sdc.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"inputs": {
+        "@container_image": "external-image-binding",
+    }}))
+
+    contract = backend_project_input_contract(project, "15")
+
+    observed = tuple(sorted(
+        path for path in contract if path == "reports/container_image.json"))
+    assert observed == ("reports/container_image.json",)
+
+
+def test_step7_pad_record_source_closure_is_carried(tmp_path):
+    """A pad producer must see every document its bound record scanned."""
+    project = tmp_path / "project"
+    paths = (
+        "phase1/input_doc/L3_external_interface.txt",
+        "phase1/input_doc/L9_constraints_floorplan.txt",
+    )
+    for rel in paths:
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rel + "\n")
+    record = project / "reports/phase3/io_pad_chip_top.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"documents_scanned": list(paths)}))
+
+    contract = backend_project_input_contract(project, "15")
+
+    assert all(rel in contract for rel in paths)
 
 
 @pytest.mark.parametrize("unsafe", [
@@ -353,70 +528,44 @@ def _required_gates(step_id):
                 if row['id'] == step_id)
 
 
-def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypatch):
+@pytest.mark.parametrize('execution_mode', [
+    pytest.param(None, id='default-auto-adopt'),
+    pytest.param('ultra-mode', id='ultra-explicit-adopt'),
+])
+def test_controller_adoption_calls_selected_backend_consumer(
+        tmp_path, monkeypatch, execution_mode):
     # A finite source fixture gives the public controller a real eligible arm;
     # the consumer spy proves adoption passes the immutable selected generation
     # rather than the mutable run root.
-    script = tmp_path / "backend_fixture.py"
-    script.write_text(
-        "import json, os, pathlib, sys\n"
-        "inputs, outputs = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
-        "binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
-        "result = {'binding': binding, 'step_id': '15', 'producer_verdict': 'PASS',\n"
-        " 'gates': {g: 'PASS' for g in binding['required_gates']},\n"
-        " 'canonical_receipts': [{'producer': 'backend_fixture'}],\n"
-        " 'outputs': {}, 'verdict': 'PASS'}\n"
-        "(outputs / 'backend_result.json').write_text(json.dumps(result))\n")
-    source = tmp_path / "seed.txt"
-    source.write_text("fixture\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
-                         {"metric": "canonical_evidence", "direction": "max"},
-                         tuple(_required_gates("15")), "librelane"), tmp_path)
-
-    def validator(outputs, binding):
-        result = json.loads((outputs / "backend_result.json").read_text())
-        return em.Evidence(binding, result["verdict"], result["gates"],
-                           {"backend_result.json": em.digest(outputs / "backend_result.json")})
-
-    adapter = em.Adapter(
-        "backend_consumer_fixture", "fixture", "15", BASE,
-        {str(Path(sys.executable).resolve()): em.digest(Path(sys.executable)),
-         str(script.resolve()): em.digest(script), str(Path(__file__).resolve()): em.digest(Path(__file__))},
-        sys.version, ("fixture",),
-        (em.Component("producer", (str(Path(sys.executable).resolve()), str(script),
-                                    "{inputs}", "{outputs}"), 5),), validator,
-        ("backend_result.json",), {"metric": "canonical_evidence", "direction": "max"},
-        output_contract={name: ("backend_result.json",) for name in row["canonical_outputs"]},
-        qualification_evidence="R2 finite producer fixture", available=True)
-    adapter = replace(adapter, source_files={**adapter.source_files,
-        **{str(p): em.digest(p) for p in em._source_closure(adapter.source_files)}})
-    registry = em.Registry(); register_source_fixture(registry, adapter, fixture_root=tmp_path)
-    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    controller, context, adapter = finite_backend(tmp_path)
     seen = {}
 
     def consume(selected, ctx, ctl, run, adopted):
-        seen.update(selected=Path(selected), run=Path(run), status=adopted["status"])
+        seen.update(selected=Path(selected), run=Path(run),
+                    status=adopted["status"],
+                    generation=dict(adopted["selected_generation"]))
         return {"status": "CONSUMED"}
 
     monkeypatch.setattr(execution_backend_consumer, "import_selected", consume)
     root = tmp_path / "consumer-run"
-    assert controller.run(context, root)["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
-    receipt_path = root / adapter.arm_id / "receipt.json"
-    choice = {"arm_id": adapter.arm_id, "binding": context.binding(),
-              "receipt_sha256": em.digest(receipt_path), "reviewer": "R2 test",
-              "rationale": "selected-generation consumer control"}
-    assert controller.adopt(context, root, choice)["status"] == "ADOPTED"
+    result = controller.run(context, root, execution_mode)
+    if execution_mode is None:
+        assert result["status"] == "ADOPTED"
+    else:
+        assert result["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
+        result = controller.adopt(
+            context, root, H.choice(context, root, adapter.arm_id))
+        assert result["status"] == "ADOPTED"
     assert seen["status"] == "PROVISIONAL"
+    assert seen["generation"]["status"] == "PROVISIONAL"
+    assert seen["selected"] == Path(seen["generation"]["directory"])
+    assert result["selected_generation"]["directory"] == str(seen["selected"])
     assert seen["selected"].parent == root / "selected"
     assert seen["selected"] != root / adapter.arm_id / "outputs"
 
 
 def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
-    source = tmp_path / "seed.txt"
-    source.write_text("source-only\n")
-    row = next(r for r in coverage_rows() if r["step_id"] == "15")
-    context = issued_context(em.Context("15", BASE, {"project/input/seed.txt": source},
+    context = issued_context(em.Context("15", BASE, _step15_controller_inputs(tmp_path),
                          {"metric": "canonical_evidence", "direction": "max"},
                          tuple(_required_gates("15")), "librelane"), tmp_path, mode="default")
     original_registry = register_backend_adapters(source_sha=BASE, available=True)
@@ -433,7 +582,10 @@ def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
         "from __future__ import annotations\nimport sys\nsys.path.insert(0, " + repr(str(PROGRAMS)) + ")", 1))
     mutant_adapter = replace(
         original_adapter,
-        source_files={**{k: v for k, v in original_adapter.source_files.items() if k != str(producer)},
+        # Keep the canonical worker in the complete source closure.  The
+        # temporary mutant changes the invoked producer bytes; it must not
+        # make enrollment fail before the changed producer is observed.
+        source_files={**original_adapter.source_files,
                       str(mutant.resolve()): em.digest(mutant)},
         components=(replace(original_adapter.components[0],
                             argv=tuple(str(mutant.resolve()) if x == str(producer) else x
@@ -441,10 +593,13 @@ def test_public_controller_refuses_changed_actual_producer_call(tmp_path):
     registry = em.Registry()
     register_source_fixture(registry, mutant_adapter, fixture_root=tmp_path)
     root = tmp_path / "mutated-run"
-    summary = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1)).run(
+    summary = em.Controller(
+        registry, em.Budget(cpus=mutant_adapter.cpus,
+                            ram_mb=mutant_adapter.ram_mb, workers=1)).run(
         context, root, "default-mode")
     assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
     result = json.loads((root / mutant_adapter.arm_id / "outputs" / "backend_result.json").read_text())
+    assert result["missing_inputs"] == []
     assert result["producer_verdict"] == "PASS"
     assert result["canonical_receipts"] == []
 
@@ -663,27 +818,56 @@ def test_br2_002_real_components_stay_distinct_and_claims_have_source_evidence(t
     assert len({v['sha256'] for v in plan['independence'].values()}) == 2
 
 
+def validate_finite_backend(outputs, binding):
+    report = json.loads((outputs / 'backend_result.json').read_text())
+    actual = (outputs / 'value.txt').read_text()
+    expected = (outputs.parent / 'inputs/project/input/seed.txt').read_text().upper()
+    gates = dict(report['gates'])
+    if actual != expected or report['value'] != actual:
+        gates['finite-gate'] = 'FAIL'
+    return em.Evidence(report['binding'], report['verdict'], gates,
+                       {name: em.digest(outputs / name)
+                        for name in ('backend_result.json', 'value.txt')},
+                       report['metrics'])
+
+
 def finite_backend(tmp_path):
-    row = next(r for r in coverage_rows() if r['step_id'] == '15')
-    arm = backend._adapter(row, current_source_identity(), {'metric': 'canonical_evidence', 'direction': 'max'}, path='IC', available=True)
+    # This is a protocol-only text fixture.  Its finite gate is an observed
+    # controller component, and the validator independently checks the value
+    # before the adoption tests exercise the real consumer boundary.
     script = tmp_path / 'finite.py'
     script.write_text("import json,os,pathlib,sys\n"
-        "out=pathlib.Path(sys.argv[2]);binding=json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "inp,out=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]);binding=json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "value=(inp/'project/input/seed.txt').read_text().upper()\n"
+        "(out/'value.txt').write_text(value)\n"
         "r={'binding':binding,'step_id':'15','producer_verdict':'PASS','verdict':'PASS',"
-        "'gates':{g:'PASS' for g in binding['required_gates']},'outputs':{},'canonical_receipts':[{'scope':'SOFTWARE_FIXTURE_ONLY'}]}\n"
+        "'value':value,'gates':{'finite-gate':'PASS'},'metrics':{'cost':1},'outputs':{},'canonical_receipts':[{'scope':'SOFTWARE_FIXTURE_ONLY'}]}\n"
         "(out/'backend_result.json').write_text(json.dumps(r))\n")
-    arm = replace(arm, arm_id='finite', tool_id='finite', components=(em.Component('finite',
+    sources = {str(p.resolve()): em.digest(p) for p in
+               (Path(sys.executable), script)}
+    sources.update({str(p): em.digest(p) for p in em._source_closure(sources)})
+    arm = em.Adapter('finite', 'finite', '15', current_source_identity(), sources,
+        sys.version, ('finite',), (em.Component('finite-gate',
         (str(Path(sys.executable).resolve()), str(script), '{inputs}', '{outputs}'), 5),),
-        source_files={**arm.source_files, str(script): em.digest(script)})
+        validate_finite_backend, ('backend_result.json', 'value.txt'),
+        {'goal': 'uppercase', 'metric': 'cost', 'direction': 'min'}, available=True,
+        output_contract={name: (name,) for name in ('backend_result.json', 'value.txt')},
+        qualification_evidence='SOFTWARE_FIXTURE_ONLY: observed text-transform gate')
     seed = tmp_path / 'seed.txt'; seed.write_text('seed\n')
-    ctx = issued_context(em.Context('15', current_source_identity(), {'project/input/seed.txt': seed}, arm.objective,
-                      tuple(_required_gates('15')), 'librelane'), tmp_path)
-    return ctl(arm, fixture_root=tmp_path), ctx, arm
+    ctx = H.NeutralContext('15', current_source_identity(),
+        {'project/input/seed.txt': seed}, arm.objective, ('finite-gate',),
+        'librelane', ic_ip_path='IC',
+        route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
+    registry = em.Registry(); register_source_fixture(registry, arm, fixture_root=tmp_path)
+    portfolio = {'meta': {'test_only': True}, 'steps': [{
+        'id': '15', 'mandatory_gate_programs': ['finite-gate'],
+        'required_output_contract': ['backend_result.json', 'value.txt']}]}
+    return em.Controller(registry, em.Budget(1, 512, workers=1), portfolio), ctx, arm
 
 
 def test_br2_003_real_consumer_refusal_clears_persisted_selection(tmp_path):
     controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'fault'
-    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert controller.run(ctx, root, 'ultra-mode')['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
     actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
     assert actual == 'REFUSED:GATE_FAIL'
     persisted = json.loads((root / 'adoption.json').read_text())
@@ -701,7 +885,7 @@ def test_br2_003_consumer_commit_is_provisional_until_success(tmp_path, monkeypa
             raise RuntimeError('consumer fault')
         return answer
     monkeypatch.setattr(consumer, 'import_selected', consume)
-    controller.run(ctx, root)
+    controller.run(ctx, root, 'ultra-mode')
     actual = observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id)))
     persisted = json.loads((root / 'adoption.json').read_text())
     assert seen == ['PROVISIONAL']
@@ -902,7 +1086,7 @@ def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
                         manifest=(Path(project) / 'manifest.json').read_bytes())
         return original(project, context, ctl, run, adoption)
     monkeypatch.setattr(consumer, 'import_selected', consume)
-    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert controller.run(ctx, root, 'ultra-mode')['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
     assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))) == 'REFUSED:GATE_FAIL'
     assert len(list((root / 'selected').iterdir())) == 0
     generation = captured['generation']; directory = Path(generation['directory'])
@@ -917,20 +1101,27 @@ def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('answer', [None, {'status':'REFUSED'}, 'ERROR'])
 def test_r4_consumer_failure_cleans_only_new_generation(tmp_path, monkeypatch, answer):
-    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'rollback'
-    controller.run(ctx, root)
+    controller, ctx, arm = finite_backend(tmp_path)
+    prior_root = tmp_path / 'rollback-prior'
+    controller.run(ctx, prior_root, 'ultra-mode')
     monkeypatch.setattr(consumer, 'import_selected', lambda *args: {'status':'CONSUMED'})
-    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    accepted = controller.adopt(ctx, prior_root, H.choice(ctx, prior_root, arm.arm_id))
     previous = Path(accepted['selected_generation']['directory'])
     snapshot = {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
                 for p in previous.rglob('*') if p.is_file()}
+    # A fresh run gives the rollback path a genuinely new generation.  The
+    # controller's idempotent adoption fast path must not be mistaken for a
+    # second provisional commit on the already-adopted run.
+    root = tmp_path / 'rollback'
+    controller.run(ctx, root, 'ultra-mode')
     def refuse(*args):
         if answer == 'ERROR':
             raise RuntimeError('consumer failure after provisional selection')
         return answer
     monkeypatch.setattr(consumer, 'import_selected', refuse)
     assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))).startswith('REFUSED:')
-    assert list((root / 'selected').iterdir()) == [previous]
+    assert list((root / 'selected').iterdir()) == []
+    assert list((prior_root / 'selected').iterdir()) == [previous]
     assert snapshot == {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
                         for p in previous.rglob('*') if p.is_file()}
     controller._generation_current(accepted['selected_generation'])
@@ -957,7 +1148,7 @@ def test_r4_partial_generation_copy_rolls_back(tmp_path, monkeypatch):
 
 def test_r4_manifest_is_provisional_until_consumer_success(tmp_path, monkeypatch):
     controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'commit'
-    controller.run(ctx, root); captured = []
+    controller.run(ctx, root, 'ultra-mode'); captured = []
     def consume(project, context, ctl, run, adoption):
         captured.append(em._issued(Path(project) / 'manifest.json')['status'])
         return {'status':'CONSUMED'}
