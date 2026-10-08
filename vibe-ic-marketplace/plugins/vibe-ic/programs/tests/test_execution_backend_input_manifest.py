@@ -117,6 +117,15 @@ def test_manifest_accepts_pathless_external_check_none_declaration():
     })
 
 
+def test_manifest_accepts_numeric_upstream_step_declaration():
+    assert worker._valid_resolved_manifest({
+        "declarations": [{
+            "from": 12, "path": "phase2/stage2/synth/netlist.v",
+        }],
+        "files": {}, "missing": [],
+    })
+
+
 def test_directory_declaration_requires_nonempty_contained_file(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

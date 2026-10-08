@@ -146,14 +146,16 @@ def _valid_manifest_declaration(entry) -> bool:
     if path is not None and not isinstance(path, str):
         return False
     source = entry.get('from')
-    if source is not None and (not isinstance(source, str) or not source):
+    source_is_step = (isinstance(source, int) and not isinstance(source, bool))
+    source_is_name = isinstance(source, str) and bool(source)
+    if source is not None and not (source_is_step or source_is_name):
         return False
     if entry.get('check') == 'none':
         return (source == 'external' and
                 isinstance(entry.get('what'), str) and
                 bool(entry['what']))
     if entry.get('outputs') == 'all':
-        return isinstance(source, str) and bool(source)
+        return source_is_step or source_is_name
     # The worker retains the historical path-only shape for direct callers;
     # the issuer's canonical expand path still rejects it before issuance.
     return isinstance(path, str) and bool(path)
