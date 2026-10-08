@@ -19,3 +19,16 @@ def test_backend_contract_carries_canonical_pnr_sdc(tmp_path):
 def test_backend_contract_refuses_missing_or_changed_pnr_sdc(tmp_path):
     root=_project(tmp_path); (root/'phase3/stage3/pnr/constraint.sdc').unlink()
     with pytest.raises(ValueError): backend.backend_project_input_contract(root,'15')
+
+def test_step15_contract_materializes_canonical_sdc_bytes_in_private_project(tmp_path):
+    from execution_backend_worker import _copy_input_tree
+    root = _project(tmp_path)
+    inputs = tmp_path / 'inputs'; (inputs / 'project').mkdir(parents=True)
+    source = inputs / 'project'
+    for rel in backend.backend_project_input_contract(root, '15'):
+        src = root / rel
+        if src.is_file():
+            dst = source / rel; dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(src.read_bytes())
+    private = tmp_path / 'private'
+    _copy_input_tree(inputs, private)
+    assert (private / 'phase3/stage3/pnr/constraint.sdc').read_bytes() == (root / 'phase3/stage3/pnr/constraint.sdc').read_bytes()

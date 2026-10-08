@@ -394,6 +394,7 @@ def test_backend_checkpoint_closure_carries_issued_provenance_step8_and_constrai
         "phase2/stage2/synth/netlist.v",
         "provenance.jsonl",
         "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase3/stage3/pnr/constraint.sdc",
         "phase2/stage2/constraints/asic_sdc.json",
         constraint,
         "rig_topology.json",
