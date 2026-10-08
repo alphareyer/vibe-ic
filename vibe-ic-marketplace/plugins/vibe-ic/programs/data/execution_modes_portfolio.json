@@ -9698,6 +9698,7 @@
       ],
       "limitations_en": "Functional AMS, RNM model agreement and post-route interface SI are complementary. A bridge cannot stand in for all three.",
       "mandatory_gate_programs": [
+        "mixed_signal_m3_run",
         "mixed_signal_cosim_check",
         "mixed_signal_interface_si_check"
       ],
@@ -9835,6 +9836,7 @@
       ],
       "limitations_en": "Analog macro blackboxing is not full transistor signoff. Final mixed-signal verdict includes A7/A9/M2/M3 obligations and exact top GDS.",
       "mandatory_gate_programs": [
+        "mixed_signal_signoff_run",
         "mixed_signal_signoff_check"
       ],
       "required_output_contract": [
