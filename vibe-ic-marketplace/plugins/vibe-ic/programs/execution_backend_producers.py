@@ -261,6 +261,28 @@ def _copy(source, target):
     shutil.copyfile(source, target)
 
 
+def _step15_sdc(project):
+    """Resolve the physical SDC published by the bounded Step 15 producer."""
+    project = Path(project)
+    pnr = project / PNR
+    record_path = pnr / 'step15_state.json'
+    if not record_path.is_file():
+        return _require(pnr / 'constraint.sdc')
+    try:
+        record = json.loads(record_path.read_text())
+        info = record['views']['sdc_derived']
+        upstream = record['upstream_sdc']
+        source = pnr / 'constraint.sdc'
+        derived = project / info['path']
+        if upstream['path'] != str(source.relative_to(project)) or upstream['sha256'] != snap.sha(source):
+            raise ValueError('upstream constraint changed')
+        if info['sha256'] != snap.sha(derived):
+            raise ValueError('derived SDC changed')
+        return _require(derived)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc
+
+
 def _parameters(project, params):
     import phase3_one_shot_runner as R
     import librelane_contract as ll
@@ -283,7 +305,7 @@ def _views(project, top, predecessor):
     routed = project / PNR / f'{top}_pnr.v'
     return {'def': _require(project / PNR / predecessor),
             'nl': _require(routed if routed.is_file() else nl),
-            'sdc': _require(project / PNR / 'constraint.sdc')}
+            'sdc': _step15_sdc(project)}
 
 
 def _state_chain(project, params, ids, predecessor, overlay=None):
@@ -436,8 +458,17 @@ def _publish_step15_bounded_state(project, row):
         raise em.Refusal('LL_HANDOFF_VIEW_ABSENT', str(handoff))
     # Native chip-top netlist, SDC and power views, rather than the bare-core
     # synth views, travel with the ODB to the next isolated bounded worker.
-    for name, filename in (('nl', 'step15.nl.v'), ('sdc', 'constraint.sdc'),
-                           ('pnl', 'step15.pnl.v'), ('json_h', 'step15.h.json')):
+    upstream_sdc = _require(project / PNR / 'constraint.sdc')
+    native_sdc = document.get('sdc')
+    if not native_sdc:
+        raise em.Refusal('BACKEND_STEP15_SDC_ABSENT', str(native))
+    native_sdc = _require(native_sdc)
+    if not native_sdc.resolve().is_relative_to(project):
+        raise em.Refusal('BACKEND_STEP15_STATE_ESCAPE', str(native_sdc))
+    derived_sdc = project / PNR / 'step15.constraint.sdc'
+    _copy(native_sdc, derived_sdc)
+    views['sdc_derived'] = derived_sdc
+    for name, filename in (('nl', 'step15.nl.v'), ('pnl', 'step15.pnl.v'), ('json_h', 'step15.h.json')):
         if document.get(name):
             path = _require(document[name])
             if not path.resolve().is_relative_to(project):
@@ -462,6 +493,8 @@ def _publish_step15_bounded_state(project, row):
         'handoff': exported(handoff, 'step15_handoff.json'),
         'views': {name: {'path': str(path.relative_to(project)), 'sha256': snap.sha(path)}
                   for name, path in views.items()},
+        'upstream_sdc': {'path': str(upstream_sdc.relative_to(project)),
+                         'sha256': snap.sha(upstream_sdc)},
     }
     snap.dump(project / PNR / 'step15_state.json', record)
     # Same marker contract as the existing non-pad branch, bound to the

@@ -29,6 +29,7 @@ def _make_published_project(tmp_path: Path) -> tuple[Path, Path]:
     odb = _write(raw / "librelane_floorplan.odb", "ODB-BYTES\n")
     netlist = _write(raw / "step15.nl.v", "module bounded; endmodule\n")
     sdc = _write(raw / "constraint.sdc", "create_clock -period 10 [get_ports clk]\n")
+    upstream_sdc = _write(pnr / 'constraint.sdc', 'upstream-clock\n')
     canonical_def = pnr / "floorplan.def"
     canonical_odb = pnr / "librelane_floorplan.odb"
     shutil.copyfile(floorplan, canonical_def)
@@ -70,6 +71,9 @@ def test_step15_publisher_to_isolated_reader_consumes_canonical_def_and_odb(tmp_
 
     assert state["views"]["def"] == isolated / "phase3/stage3/pnr/floorplan.def"
     assert state["views"]["odb"] == isolated / "phase3/stage3/pnr/librelane_floorplan.odb"
+    assert state["views"]["sdc_derived"] == isolated / "phase3/stage3/pnr/step15.constraint.sdc"
+    assert (isolated / 'phase3/stage3/pnr/constraint.sdc').read_text() == 'upstream-clock\n'
+    assert (isolated / 'phase3/stage3/pnr/step15.constraint.sdc').read_text() == 'create_clock -period 10 [get_ports clk]\n'
 
 
 def test_step15_reader_refuses_coordinated_canonical_path_substitution(tmp_path):
@@ -99,6 +103,14 @@ def test_step15_reader_refuses_coordinated_canonical_path_substitution(tmp_path)
         producers._read_step15_bounded_state(isolated)
     assert caught.value.code == "LL_HANDOFF_VIEW_CHANGED"
 
+
+
+def test_step15_reader_refuses_changed_upstream_or_derived_sdc(tmp_path):
+    _, isolated = _make_published_project(tmp_path)
+    pnr = isolated / 'phase3/stage3/pnr'
+    (pnr / 'constraint.sdc').write_text('changed-upstream\n')
+    with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
+        producers._step15_sdc(isolated)
 
 def test_step15_reader_refuses_non_mapping_handoff_with_stable_code(tmp_path):
     _, isolated = _make_published_project(tmp_path)
