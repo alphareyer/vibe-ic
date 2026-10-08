@@ -19602,7 +19602,8 @@ def step_sdc_validation(project: Path) -> StepResult:
 _SDC_POSTCHECK_SCHEMA = 'sdc-post-prelayout/2'
 
 
-def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
+def step_sdc_validation_post_prelayout(project: Path, top: str,
+                                       *, native_result: Optional[dict] = None) -> StepResult:
     """Consume this project's current tool evidence, without a frontend context.
 
     Called only after the prelayout producer returns PASS. The two existing
@@ -19625,6 +19626,29 @@ def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
     started = time.time_ns()
     records, binding = [], {}
     status, reason, detail = 'NOT_MEASURED', _V.ReasonClass.INPUT_ABSENT, ''
+
+    def native_proof_current(gate_doc: dict) -> bool:
+        """Accept Default's native producer only when its gate binds its folder."""
+        if not isinstance(native_result, dict):
+            return False
+        raw_folder = native_result.get('folder')
+        if not isinstance(raw_folder, (str, os.PathLike)):
+            return False
+        raw_path = Path(raw_folder)
+        try:
+            if raw_path.is_symlink():
+                return False
+            folder = raw_path.resolve()
+            if (not folder.is_dir() or
+                    not folder.is_relative_to(project)):
+                return False
+            state = folder / 'state_out.json'
+            source = Path(str(gate_doc.get('source') or '')).resolve()
+            return (state.is_file() and not state.is_symlink() and
+                    source == state and
+                    gate_doc.get('state_out_sha256') == ll.digest(state))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
 
     def current_inputs():
         paths = {'opensta_gate': gate, 'pnr_sdc': deck,
@@ -19655,6 +19679,7 @@ def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
             raise ValueError('SDC_POSTCHECK_GATE_UNBOUND')
         paths['state_out'] = state
         return {'project': str(project), 'mode': ll.selected_mode(project, '8'),
+                'native_proof': native_proof_current(doc),
                 'inputs': {name: {'path': str(path), 'sha256': ll.digest(path)}
                            for name, path in paths.items()},
                 'sources': {name: ll.digest(PROGRAMS_DIR / name) for name in
@@ -19664,7 +19689,8 @@ def step_sdc_validation_post_prelayout(project: Path, top: str) -> StepResult:
 
     try:
         binding = current_inputs()
-        if binding['mode'] not in ('librelane', 'dual'):
+        if (binding['mode'] not in ('librelane', 'dual') and
+                not binding.get('native_proof')):
             raise ValueError('SDC_POSTCHECK_TOOL_MODE_REQUIRED')
         commands = (
             ('sdc_syntax_check', [sys.executable, str(PROGRAMS_DIR / 'sdc_syntax_check.py'),

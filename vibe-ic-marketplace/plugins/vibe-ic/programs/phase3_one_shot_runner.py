@@ -60089,6 +60089,91 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     return out
 
 
+def _publish_prelayout_summary(project: Path) -> Path:
+    """Emit Step 10's scoped summary from its current pre-layout reports."""
+    from librelane_contract import Refusal
+
+    project = Path(project).resolve()
+    pre_pnr = _pl.sta_dir(project) / "pre_pnr_timing.rpt"
+    if not pre_pnr.is_file() or not pre_pnr.stat().st_size:
+        raise Refusal("PRELAYOUT_STA_REPORT_ABSENT", str(pre_pnr))
+    summary = project / "reports/phase3/sta/pre_pnr_summary.json"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.unlink(missing_ok=True)
+    command = [sys.executable, str(PROGRAMS_DIR / "sta_report_check.py"),
+               str(project), "--mode", "sta",
+               "--under", "phase3/stage3/sta/pre_pnr_timing.rpt",
+               "--under", "phase3/stage3/sta/prelayout_per_corner",
+               "--json", str(summary)]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Refusal("PRELAYOUT_STA_SUMMARY_UNAVAILABLE", str(exc)) from exc
+    if completed.returncode != 0 or not summary.is_file() or not summary.stat().st_size:
+        detail = (completed.stderr or completed.stdout or
+                  "sta_report_check did not emit a summary").strip()
+        raise Refusal("PRELAYOUT_STA_SUMMARY_FAILED", detail[-500:])
+    return summary
+
+
+def publish_prelayout_reports(project: Path, folder: Path) -> Dict[str, str]:
+    """Publish Step 10's canonical reports from an existing STAPrePNR run.
+
+    This is a publication seam only: the native producer has already run and
+    ``folder`` is its current, receipt-bound output.  The helper composes the
+    producer's per-corner reports, chooses a declared PRE_LAYOUT source, and
+    runs the existing scoped ``sta_report_check`` solely to emit the canonical
+    summary before the audit consumes it.
+    """
+    from librelane_contract import Refusal, digest
+    import librelane_prelayout as _llp
+
+    project = Path(project).resolve()
+    raw_folder = Path(folder)
+    try:
+        if raw_folder.is_symlink():
+            raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder))
+        folder = raw_folder.resolve()
+        if (not folder.is_dir() or
+                not folder.is_relative_to(project)):
+            raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder))
+    except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, Refusal):
+            raise
+        raise Refusal("PRELAYOUT_NATIVE_FOLDER_UNBOUND", str(raw_folder)) from exc
+    state = folder / "state_out.json"
+    if state.is_symlink() or not state.is_file() or not state.stat().st_size:
+        raise Refusal("PRELAYOUT_NATIVE_STATE_ABSENT", str(state))
+
+    sta_out = _pl.sta_dir(project)
+    per_corner = sta_out / STEP10_CORNER_DIR
+    reports = _llp.compose_corner_reports(folder, per_corner,
+                                          _classify_corner_from_name)
+    if len(reports) < 2:
+        raise Refusal("PRELAYOUT_STA_CORNERS_INCOMPLETE",
+                      f"{len(reports)} corner report(s) from {folder}")
+    ordered = [per_corner / name for name in
+               ("sta_SS.rpt", "sta_TT.rpt", "sta_FF.rpt")]
+    ordered.extend(p for p in sorted(reports.values()) if p not in ordered)
+    source = next((p for p in ordered if p.is_file()), None)
+    if source is None or _sta_basis.declared_basis(source.read_text()) != "PRE_LAYOUT":
+        raise Refusal("PRELAYOUT_STA_BASIS_UNSUBSTANTIATED", str(source))
+
+    pre_pnr = sta_out / "pre_pnr_timing.rpt"
+    pre_pnr.parent.mkdir(parents=True, exist_ok=True)
+    pre_pnr.write_text(
+        "# PRE-LAYOUT STA (Step 10) — genuine OpenROAD.STAPrePNR on the "
+        "synthesis netlist\n"
+        f"# corner source: {source.name}\n" + source.read_text())
+
+    summary = _publish_prelayout_summary(project)
+    return {"state_out": str(state),
+            "state_out_sha256": digest(state),
+            "pre_pnr_timing": str(pre_pnr),
+            "pre_pnr_summary": str(summary)}
+
+
 def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                            container: str) -> StepResult:
     """Steps 7 + 10 (pre-layout, stage-2) — emitted RIGHT AFTER synth, BEFORE PnR.
