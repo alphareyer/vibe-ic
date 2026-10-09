@@ -58921,8 +58921,63 @@ def _clock_plan_stale_inputs(project: Path, existing_plan,
     return sorted(set(changed) | set(added))
 
 
+def _clock_plan_lef_paths(project: Path, pdk: PdkConfig) -> List[str]:
+    """Return the exact de-duplicated LEF load set for Step 16.
+
+    The producer records every entry as ``pdk_lef_N``.  Reuse must compare
+    against this same complete set; checking only ``pdk_lef_0`` and
+    ``pdk_lef_1`` would silently accept a newly-added macro/IO LEF.
+    """
+    lefs = list(dict.fromkeys([
+        str(pdk.tech_lef), str(pdk.cell_lef),
+        *(str(path) for path in (getattr(pdk, "macro_lefs", []) or [])),
+    ]))
+    if _chip_path_requests_pad_ring(project):
+        from _pad_ring import discover_io_lefs
+        root, tree = _padring_pdk_root_and_tree(pdk, None)
+        io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
+        if not io_lefs:
+            raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
+        lefs = list(dict.fromkeys([*lefs, *io_lefs]))
+    return lefs
+
+
+def _clock_plan_receipt_lef_refusal(project: Path, record: Any,
+                                    pdk: Optional[PdkConfig]) -> str:
+    """Refuse reuse when the receipt's complete LEF set differs from PDK."""
+    if pdk is None:
+        return "CURRENT_PDK_CONTEXT_MISSING"
+    if not isinstance(record, dict) or record.get("pdk") != pdk.name:
+        return ("CURRENT_PDK_CHANGED: recorded="
+                f"{record.get('pdk') if isinstance(record, dict) else None} "
+                f"expected={getattr(pdk, 'name', None)}")
+    try:
+        expected = [Path(path).resolve() for path in
+                    _clock_plan_lef_paths(project, pdk)]
+    except (OSError, ValueError, TypeError) as exc:
+        return f"CURRENT_PDK_LEF_SET_UNAVAILABLE: {exc}"
+    inputs = record.get("inputs") if isinstance(record, dict) else None
+    if not isinstance(inputs, dict):
+        return "CURRENT_INPUTS_MISSING"
+    rows = []
+    for role, row in inputs.items():
+        if not re.fullmatch(r"pdk_lef_\d+", str(role)):
+            continue
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            return f"CURRENT_PDK_LEF_ROW_INVALID: {role}"
+        rows.append((int(str(role).rsplit("_", 1)[1]),
+                     Path(row["path"]).resolve()))
+    actual = [path for _, path in sorted(rows)]
+    if actual != expected:
+        return ("CURRENT_PDK_LEF_SET_CHANGED: recorded="
+                f"{[str(path) for path in actual]} expected="
+                f"{[str(path) for path in expected]}")
+    return ""
+
+
 def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
-                    pnr_out: Path, notes: List[str]) -> Optional[str]:
+                    pnr_out: Path, notes: List[str],
+                    *, pdk: Optional[PdkConfig] = None) -> Optional[str]:
     """Write the Step-16 `clock_plan.json`; return its path, or None.
 
     Split out of `step_canonicalize_artefacts` so the decision it encodes can
@@ -58982,12 +59037,24 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
             # place until the late flow audit.
             try:
                 import _physical_current as _pc
-                refusal = _pc.validate(
-                    project, existing.get("current"), step="16",
-                    stage="stage3", tools=("openroad",),
-                    required_inputs=("floorplan", "recipe", "pdk_lef_0",
-                                     "pdk_lef_1", "sdc_0"),
-                    required_outputs=("log",), marker="CLOCK_PLAN_DONE")
+                refusal = _clock_plan_receipt_lef_refusal(
+                    project, existing.get("current"), pdk)
+                required_inputs = ["floorplan", "recipe", "sdc_0"]
+                if pdk is None:
+                    # Direct legacy callers do not carry the resolved PDK;
+                    # retain their minimum contract.  The canonical runner
+                    # passes pdk and checks the complete dynamic LEF set.
+                    required_inputs.extend(("pdk_lef_0", "pdk_lef_1"))
+                else:
+                    expected_lefs = _clock_plan_lef_paths(project, pdk)
+                    required_inputs.extend(
+                        f"pdk_lef_{i}" for i in range(len(expected_lefs)))
+                if not refusal:
+                    refusal = _pc.validate(
+                        project, existing.get("current"), step="16",
+                        stage="stage3", tools=("openroad",),
+                        required_inputs=tuple(required_inputs),
+                        required_outputs=("log",), marker="CLOCK_PLAN_DONE")
             except Exception as exc:  # noqa: BLE001 — reuse must fail closed
                 refusal = f"CURRENT_VALIDATION_ERROR: {type(exc).__name__}: {exc}"
             if refusal:
@@ -59050,17 +59117,15 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         pdk = _detect_pdk(project, declared_pdk)
         if pdk is None:
             raise ValueError("CLOCK_PLAN_PDK_NOT_RESOLVED")
-        if _chip_path_requests_pad_ring(project):
-            # This independent DEF reader needs the same physical IO masters
-            # as pad_ring_gen/PnR. Missing masters drop COMPONENTS before their
-            # NETS references fail; the DEF itself need not be malformed.
-            from _pad_ring import discover_io_lefs
-            root, tree = _padring_pdk_root_and_tree(pdk, None)
-            io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
-            if not io_lefs:
-                raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
-            pdk = replace(pdk, macro_lefs=list(dict.fromkeys(
-                [*(pdk.macro_lefs or []), *io_lefs])))
+        # Keep native loading and reuse validation on the exact same complete
+        # technology/cell/macro/IO LEF set; do not mutate the run-wide PDK.
+        # ``PdkConfig`` is a dataclass in production, while focused callers
+        # use small namespace doubles.  Copying keeps the run-wide object
+        # immutable and supports both shapes without weakening the LEF set.
+        import copy
+        pdk_for_run = copy.copy(pdk)
+        pdk_for_run.macro_lefs = _clock_plan_lef_paths(project, pdk)[2:]
+        pdk = pdk_for_run
         floorplan = _pl.pnr_dir(project) / "floorplan.def"
         return _pc.clock_plan(project, clock_plan, floorplan, sdc_paths, pdk)
     except (OSError, ValueError, RuntimeError) as exc:
@@ -62259,7 +62324,8 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
         written.append(str(pdn_path))
 
     clock_path = _pl.cts_dir(project) / "clock_plan.json"
-    plan_path = emit_clock_plan(project, clock_path, primary_def, pnr, notes)
+    plan_path = emit_clock_plan(project, clock_path, primary_def, pnr, notes,
+                                pdk=pdk)
     if plan_path:
         written.append(plan_path)
 
@@ -62393,12 +62459,14 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     clock_verdict = (clock_gate_doc.get("verdict")
                      if isinstance(clock_gate_doc, dict) else None)
     clock_ok = (clock_gate_rc == 0 and
-                clock_verdict in ("PASS", "WAIVED"))
+                clock_verdict == "PASS")
     # A missing plan after a producer refusal is an unmeasured subject here;
     # the standalone flow gate still reports CLOCK_PLAN_MISSING as FAIL when
     # it adjudicates the declared Step 16 row.  If a plan exists, however, a
     # failing consumer is a measured failure and must propagate as FAIL.
     clock_status = ("PASS" if clock_ok else
+                    "WAIVED" if clock_gate_rc == 0
+                    and clock_verdict == "WAIVED" else
                     "FAIL" if clock_gate_rc == 1 and clock_path.is_file()
                     else "NOT_MEASURED")
     clock_output = {"status": clock_status,
@@ -62416,8 +62484,11 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                                     "FAIL" if spef_sha and not extraction_ok else
                                     "NOT_MEASURED")}}
     states = [row["status"] for row in outputs.values()]
-    status = ("FAIL" if "FAIL" in states else "PASS" if all(
-        state == "PASS" for state in states) else "NOT_MEASURED")
+    status = ("FAIL" if "FAIL" in states else
+              "NOT_MEASURED" if "NOT_MEASURED" in states else
+              "WAIVED" if "WAIVED" in states else
+              "PASS" if all(state == "PASS" for state in states)
+              else "NOT_MEASURED")
     nonpass = ", ".join(f"{name}={row['status']}" for name, row in outputs.items()
                         if row["status"] != "PASS")
     record = {"schema": "vibeic.postpnr_canonical_basis.v1",
@@ -63452,7 +63523,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # step 16's plan is derived from the SDCs alone (digest-keyed and
         # idempotent; the post-stream pass re-checks it)
         _plan_pre = emit_clock_plan(project, cts_out / "clock_plan.json",
-                                    primary_def, pnr_out, notes)
+                                    primary_def, pnr_out, notes, pdk=pdk)
         if _plan_pre:
             written.append(_plan_pre)
         return StepResult("prestream_evidence", "PASS", time.time() - t0,
@@ -63932,7 +64003,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # project whose SDC names a clock anything other than nothing.
     clock_plan = cts_out / "clock_plan.json"
     _plan_written = emit_clock_plan(project, clock_plan, primary_def,
-                                    pnr_out, notes)
+                                    pnr_out, notes, pdk=pdk)
     if _plan_written:
         written.append(_plan_written)
     # #519: CTS report is now emitted AT CTS COMPLETION inside step_pnr (so a

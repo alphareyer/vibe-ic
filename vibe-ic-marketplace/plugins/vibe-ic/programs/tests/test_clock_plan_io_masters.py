@@ -134,6 +134,37 @@ def test_existing_macro_views_are_retained_and_duplicate_io_is_read_once(setup):
     assert pdk.macro_lefs == [str(macro), str(io)]
 
 
+def test_reuse_refuses_when_pdk_adds_macro_lef(setup):
+    project, floor, plan, io, pdk, calls = setup
+    first = runner.emit_clock_plan(project, plan, floor, floor.parent, [],
+                                   pdk=pdk)
+    assert first == str(plan)
+    macro = put(io.parents[3], "new_macro/lef/memory.lef",
+                "MACRO memory\nEND memory\n")
+    pdk.macro_lefs = [str(macro)]
+    notes = []
+    second = runner.emit_clock_plan(project, plan, floor, floor.parent, notes,
+                                    pdk=pdk)
+    assert second == str(plan), notes
+    assert len(calls) == 2
+    assert f"read_lef {{{macro}}}" in calls[-1]
+    assert any("CURRENT_PDK_LEF_SET_CHANGED" in note for note in notes)
+
+
+def test_reuse_refuses_when_pdk_identity_changes(setup):
+    project, floor, plan, _io, pdk, calls = setup
+    first = runner.emit_clock_plan(project, plan, floor, floor.parent, [],
+                                   pdk=pdk)
+    assert first == str(plan)
+    pdk.name = "different_pdk"
+    notes = []
+    second = runner.emit_clock_plan(project, plan, floor, floor.parent, notes,
+                                    pdk=pdk)
+    assert second == str(plan), notes
+    assert len(calls) == 2
+    assert any("CURRENT_PDK_CHANGED" in note for note in notes)
+
+
 def test_wrong_tree_does_not_borrow_another_technology_io(setup):
     _, _, plan, io, pdk, _ = setup
     io.unlink()

@@ -92,3 +92,42 @@ def test_default_clock_consumer_is_same_invocation_and_reuses_current(
     second = runner._canonicalize_postpnr_prerequisites(
         project, "chip_top", pdk, "")
     assert len(native_calls) == 1
+
+
+def test_clock_waiver_is_not_promoted_to_pass(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    pnr = project / "phase3/stage3/pnr"
+    def_text = "VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n"
+    _write(project, "phase1/generated_docs/L19_CONSTRAINTS_PDK.json",
+           json.dumps({"fields": {"pdk_target": "neutral"}}))
+    _write(project, "reports/phase3/technology_units.json",
+           json.dumps({"pdk": "neutral"}) + "\n")
+    _write(project, "phase3/stage3/pnr/floorplan.def", def_text)
+    _write(project, "phase3/stage3/pnr/chip_top.def", def_text)
+    _write(project, "phase3/stage3/pnr/routed.def", def_text)
+    _write(project, "waivers.json", json.dumps({
+        "waived_steps": [{"id": "clock_plan", "ticket": "WAIVE-16",
+                          "reason": "fixture only"}],
+    }))
+    pdk_root = tmp_path / "pdk"
+    tech = _write(pdk_root, "tech.lef", "VERSION 5.8 ;\nEND LIBRARY\n")
+    cell = _write(pdk_root, "cells.lef", "MACRO neutral\nEND neutral\n")
+    liberty = _write(pdk_root, "neutral.lib", "library (neutral) {}\n")
+    pdk = runner.PdkConfig(
+        name="neutral", liberty=str(liberty), tech_lef=str(tech),
+        cell_lef=str(cell), cell_gds=None, site="unit", drc_deck=None)
+    monkeypatch.setattr(runner, "emit_clock_plan", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_emit_spef", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_librelane_signoff_modes",
+                        lambda *_a: ("invalid", ""))
+    monkeypatch.setattr(runner, "_postpnr_extraction_inputs",
+                        lambda *_a: (None, ""))
+
+    result = runner._canonicalize_postpnr_prerequisites(
+        project, "chip_top", pdk, "")
+    basis = json.loads(
+        (project / "reports/phase3/postpnr_canonical_basis.json").read_text())
+    clock = basis["outputs"]["clock_plan"]
+    assert clock["verdict"] == "WAIVED"
+    assert clock["status"] == "WAIVED"
+    assert result.status != "PASS"
