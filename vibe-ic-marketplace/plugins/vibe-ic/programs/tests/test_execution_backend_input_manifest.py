@@ -499,18 +499,22 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
     route = {
         "kind": "issued-route", "schema": 1, "ic_ip_path": "IC",
         "source_sha": "a" * 40, "project_digest": "b" * 64,
-        "request_digest": "c" * 64, "intent_label": "PROGRAM_DEFAULT",
-        "mode_intent": "default",
+        "request_digest": "c" * 64, "intent_label": "USER_EXPLICIT_ULTRA",
+        "mode_intent": "ultra",
     }
     route["route_digest"] = em._hash(route)
     monkeypatch.setattr(policy, "controller_fields", lambda **_kwargs: {
         "ic_ip_path": "IC", "route_receipt": route,
-        "intent_label": "PROGRAM_DEFAULT", "request_digest": route["request_digest"],
+        "intent_label": "USER_EXPLICIT_ULTRA", "request_digest": route["request_digest"],
     })
     runtime = {
         "project": project.resolve(), "registry": registry,
         "controller": controller, "route": route,
-        "policy": {"mode": "default", "mode_label": "default-mode",
+        # This test exercises the explicit backend manifest transport through
+        # Controller.  Default mode deliberately bypasses that seam and lets
+        # the caller's canonical producer own the step; Ultra is the mode
+        # whose candidate worker receives and validates this manifest.
+        "policy": {"mode": "ultra", "mode_label": "ultra-mode",
                     "request_receipt": {"invocation_id": "manifest-test"}},
         "parameters": {}, "contexts": {}, "bindings": {}, "runs": {},
     }
