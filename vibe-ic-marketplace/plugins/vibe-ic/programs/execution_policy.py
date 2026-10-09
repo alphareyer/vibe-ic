@@ -1065,13 +1065,10 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         # provider; only backend dispatch receives the issuer manifest.
         files = (_fixed_inputs(runtime, step_id, parameters=parameters)
                  if is_backend else _fixed_inputs(runtime, step_id))
-    manifest = parameters.get('resolved_input_manifest')
-    if isinstance(manifest, dict) and manifest.get('missing'):
-        return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT',
-                    step_id=step_id, selected=None,
-                    missing_inputs=list(manifest['missing']))
-    if not files:
-        return dict(status='NOT_MEASURED', reason='ORDINARY_INPUT_ABSENT', step_id=step_id, selected=None)
+    # Ultra still records a controller run when the fixed row has no current
+    # inputs.  The resulting receipt is the evidence of NOT_MEASURED and keeps
+    # the row re-entry/adoption contract intact; Default has already returned
+    # above and never reaches this controller path.
     manifest = parameters.get('resolved_input_manifest')
     frontend = all(a.tool_id == 'frontend-worker' for a in applicable)
     objective = (dict(parameters or {}) if step_id == '0.5ic' else
