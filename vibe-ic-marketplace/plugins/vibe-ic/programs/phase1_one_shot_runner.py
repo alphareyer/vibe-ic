@@ -1139,7 +1139,12 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
     step's own two gate clauses, which `flow_compliance_check` evaluates.
     """
     import execution_policy
-    if execution_policy._ordinary_runtime is not None:
+    # Default owns this step's two canonical producers directly.  The live
+    # policy runtime is still present for route/input binding, but it must not
+    # turn the producer into a Controller arm or require an adoption receipt.
+    # Ultra keeps the existing fixed-row dispatch below this branch.
+    if (execution_policy._ordinary_runtime is not None and
+            execution_policy._ordinary_runtime.get('policy', {}).get('mode') != 'default'):
         _, bound_answers, error = _step_0_5ic_answers(project)
         if error:
             return 1

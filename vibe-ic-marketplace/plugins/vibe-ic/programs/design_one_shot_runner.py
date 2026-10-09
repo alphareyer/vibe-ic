@@ -19578,6 +19578,22 @@ def step_qsf_gen(project: Path, top_name: str = "chip_top",
 def step_sdc_validation(project: Path) -> StepResult:
     import librelane_contract as _llc
     mode = _llc.selected_mode(project, '8')
+    import execution_policy as _execution
+    _runtime = _execution._ordinary_runtime
+    # Default's Step-8 consumer is evaluated after the canonical pre-layout
+    # producer has emitted the mapped netlist and current gate receipt.  The
+    # early phase-2 row remains an explicit deferred observation; it must not
+    # call the generic frontend Controller merely because the direct tool
+    # switch has no pre-synth consumer yet.
+    if (_runtime is not None and
+            _runtime.get('policy', {}).get('mode') == 'default'):
+        return StepResult('sdc_validation', 'NOT_MEASURED', 0.0,
+                          'SDC_VALIDATION_DEFERRED: Default canonical '
+                          'prelayout producer must emit the mapped netlist '
+                          'before Step 8 consumers run',
+                          extras={'deferred_until': 'post_prelayout',
+                                  'mode': mode},
+                          reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     if mode in ('librelane', 'dual'):
         # The OpenSTA producer consumes Step 9's mapped netlist.  This site
         # precedes synthesis; a frozen frontend worker cannot produce its
@@ -19587,7 +19603,6 @@ def step_sdc_validation(project: Path) -> StepResult:
                           'OpenSTA gate are evaluated after prelayout signoff',
                           extras={'deferred_until': 'post_prelayout', 'mode': mode},
                           reason_class=_V.ReasonClass.UPSTREAM_FAILED)
-    import execution_policy as _execution
     result = _execution.dispatch_fixed_step(project, '8')
     if result is None:
         return StepResult('sdc_validation', 'NOT_MEASURED', 0.0,

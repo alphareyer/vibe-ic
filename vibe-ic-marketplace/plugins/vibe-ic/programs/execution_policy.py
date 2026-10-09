@@ -1011,6 +1011,25 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     runtime = _ordinary_runtime
     if Path(project).resolve() != runtime['project']:
         raise Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
+
+    # Default is a single program-first route.  Its producer is the caller's
+    # canonical function, so this policy seam must not construct a Controller
+    # context, run a frontend worker, wait for a choice, or adopt an arm.  A
+    # few producers still need typed preparation before their own body runs:
+    # Step 9 freezes its current input manifest and Step 15 publishes the
+    # existing pre-layout handoff.  Those preparations are producer setup;
+    # neither invokes Controller.run/adopt.  Ultra remains below this branch
+    # and keeps the multi-arm selection lifecycle unchanged.
+    if runtime.get('policy', {}).get('mode') == 'default':
+        if choice is not None:
+            raise Refusal('DEFAULT_SELECTION_NOT_ALLOWED', str(step_id))
+        parameters = dict(parameters or {})
+        if step_id == '9':
+            _prepare_step9(runtime, parameters)
+        elif step_id == '15':
+            _ensure_default_prelayout(runtime, str(step_id))
+        return None
+
     if step_id == '9':
         _prepare_step9(runtime, dict(parameters or {}))
     controller = runtime['controller']
@@ -1171,6 +1190,14 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
             route_digest=issued['route']['route_digest'],
             controller_qualification='NOT_MEASURED')
         return None
+
+    # Every ordinary Default site is owned by the caller's canonical producer
+    # function.  Returning here prevents the generic row dispatcher from
+    # turning a source-bound worker receipt into the step's producer evidence.
+    # The caller still executes its normal function and its own typed gates.
+    if runtime.get('policy', {}).get('mode') == 'default':
+        return None
+
     result = dispatch_ordinary_rows(project, span, site, refusal_factory)
     # These sites have real program-first producers in the Phase-2 runner.
     # Their ordinary Default frontend rows are source-bound qualification arms;
@@ -1293,6 +1320,11 @@ def phase1_producer_disclosure(project: Path) -> dict | None:
 
 def dispatch_ordinary_rows(project, step_ids, site, result_factory):
     if _ordinary_runtime is None:
+        return None
+    # See dispatch_fixed_step: Default has one caller-owned producer per row.
+    # This guard also covers Phase-3 window and direct row helpers that call
+    # dispatch_ordinary_rows without first passing through dispatch_ordinary_site.
+    if _ordinary_runtime.get('policy', {}).get('mode') == 'default':
         return None
     results = []
     for step_id in step_ids:
