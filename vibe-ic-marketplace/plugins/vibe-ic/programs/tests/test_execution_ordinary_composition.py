@@ -64,16 +64,9 @@ def test_canonical_default_bootstrap_reaches_producer_receipt_and_consumer(
     assert runtime['policy']['mode_label'] == 'default-mode'
     import design_one_shot_runner as design
     consumed = design.step_sdc_validation(project)
-    assert consumed.status == 'PASS', consumed
-    result = consumed.extras['execution_result']
-    assert result['status'] == 'ADOPTED', result
-    run = Path(result['run_root'])
-    receipt = json.loads((run / 'frontend_8/receipt.json').read_text())
-    assert receipt['status'] == 'ELIGIBLE'
-    assert any(item['component'] == 'frontend_worker'
-               for item in receipt['processes'])
-    assert json.loads((run / 'adoption.json').read_text())['status'] == 'ADOPTED'
-    assert (project / 'reports/phase2/sdc_check.json').is_file()
+    assert consumed.status == 'NOT_MEASURED', consumed
+    assert consumed.extras['deferred_until'] == 'post_prelayout'
+    assert not runtime['runs']
 
 
 def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_path):
@@ -117,7 +110,10 @@ def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_p
             adapter=next(a for a in runtime['registry'].adapters('16') if a.arm_id==arm)
             assert receipt['processes'][0]['component']==adapter.components[0].name
             evidence=json.loads((root/arm/'outputs/release-evidence.json').read_text())
-            assert evidence['missing_inputs']==['phase3/stage3/pnr/floorplan.def','phase2/stage2/constraints/*.sdc']
+            assert evidence['missing_inputs']==[
+                'phase3/stage3/pnr/floorplan.def',
+                'phase2/stage2/constraints/*.sdc',
+                'reports/phase1/pdk_staging_read.json OR phase1/generated_docs/L19_CONSTRAINTS_PDK.json']
             assert evidence['producer_verdict']=='NOT_MEASURED'
             assert evidence['producer'][0]['program']=='phase3_one_shot_runner.emit_clock_plan'
             assert evidence['producer'][0]['rc']==2
