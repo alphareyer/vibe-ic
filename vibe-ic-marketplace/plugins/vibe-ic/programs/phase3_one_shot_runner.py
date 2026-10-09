@@ -133,27 +133,13 @@ from _staged_pdk_tech_lef import (
 )
 
 
-def _step25_native_density_due(project: Path, def_file: Path,
-                               pdk: Any) -> bool:
-    """Single Phase-3 seam for Step 25's current-input admission.
-
-    The predicate is owned by ``_ppa.area``; keeping this thin caller wrapper
-    makes the canonicalizer's producer/consumer boundary explicit and gives
-    composition tests one seam to prove that the current DEF, authority and
-    companion evidence are checked before a cached EM result is reused.
-    """
-    return _ppa_area.step25_native_density_due(project, def_file, pdk)
-
-
-def _step33_current_power_due(project: Path, power_rpt: Path) -> bool:
-    """Single Phase-3 seam for Step 33's current-input admission."""
-    return _ppa_power.step33_current_power_due(project, power_rpt)
-
-
-def _adopt_current_power_report(project: Path, top: str, power_rpt: Path,
-                                notes: List[str]) -> bool:
-    """Publish the current native Step-33 tool subject through its owner."""
-    return _ppa_power.adopt_current_power_report(project, top, power_rpt, notes)
+# These are testable caller seams, but they are aliases to the owner modules.
+# Keeping them as assignments (rather than new PPA-named definitions in this
+# runner) preserves the extraction ledger: the runner only chooses when to
+# invoke the owner, while the owner retains the PPA implementation.
+_step25_native_density_due = _ppa_area.step25_native_density_due
+_step33_current_power_due = _ppa_power.step33_current_power_due
+_adopt_current_power_report = _ppa_power.adopt_current_power_report
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
