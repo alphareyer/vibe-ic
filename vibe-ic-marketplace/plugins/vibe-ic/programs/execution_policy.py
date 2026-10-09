@@ -1073,6 +1073,21 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     # the row re-entry/adoption contract intact; Default has already returned
     # above and never reaches this controller path.
     manifest = parameters.get('resolved_input_manifest')
+    # An explicit backend population is authoritative.  If the issuer could
+    # not bind every required input, stop before constructing a Controller
+    # context or invoking a worker.  Ambient files in the project tree must
+    # not silently fill an omitted/zero-byte explicit input.
+    if (inputs is not None and is_backend and isinstance(manifest, dict)
+            and manifest.get('missing')):
+        missing = sorted({str(item) for item in manifest['missing']})
+        return {
+            'status': 'NOT_MEASURED',
+            'reason': 'ORDINARY_INPUT_ABSENT',
+            'step_id': step_id,
+            'selected': None,
+            'missing_inputs': missing,
+            'resolved_input_manifest': manifest,
+        }
     frontend = all(a.tool_id == 'frontend-worker' for a in applicable)
     objective = (dict(parameters or {}) if step_id == '0.5ic' else
                  dict(runtime['parameters'], **dict(parameters or {}))) if frontend else dict(applicable[0].objective)
