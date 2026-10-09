@@ -58973,6 +58973,28 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
                     f"clock_plan.json was derived from different SDC content "
                     f"than is present now ({stale_against[:4]}) — re-derived "
                     "rather than left stale")
+        if not needs_refresh:
+            # A populated plan and unchanged SDC digests are not enough to
+            # reuse the native subject.  The receipt also binds the floorplan,
+            # recipe, PDK LEFs, SDC bytes, and measured log.  Validate that
+            # binding before deciding that this producer already ran; otherwise
+            # a changed floorplan could leave an old OpenROAD measurement in
+            # place until the late flow audit.
+            try:
+                import _physical_current as _pc
+                refusal = _pc.validate(
+                    project, existing.get("current"), step="16",
+                    stage="stage3", tools=("openroad",),
+                    required_inputs=("floorplan", "recipe", "pdk_lef_0",
+                                     "pdk_lef_1", "sdc_0"),
+                    required_outputs=("log",), marker="CLOCK_PLAN_DONE")
+            except Exception as exc:  # noqa: BLE001 — reuse must fail closed
+                refusal = f"CURRENT_VALIDATION_ERROR: {type(exc).__name__}: {exc}"
+            if refusal:
+                needs_refresh = True
+                notes.append(
+                    f"clock_plan.json current subject is not reusable "
+                    f"({refusal}) — re-derived")
     if not (needs_refresh and primary_def.is_file()):
         return None
 
@@ -62241,6 +62263,29 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     if plan_path:
         written.append(plan_path)
 
+    # Step 16's consumer belongs to this same canonical invocation.  The
+    # checker is read-only: it does not run OpenROAD and it reads the plan and
+    # current receipt just emitted (or the existing subject that passed the
+    # reuse identity check above).  Keeping the report in the flow's declared
+    # location makes the later audit consume exactly this invocation's verdict.
+    clock_gate_report = (_pl.reports_phase2_dir(project) /
+                         "gates/clock_plan.json")
+    clock_gate_report.parent.mkdir(parents=True, exist_ok=True)
+    _clock_gate_before = (clock_gate_report.read_bytes()
+                          if clock_gate_report.is_file() else None)
+    clock_gate_rc = None
+    clock_gate_doc = None
+    try:
+        import clock_plan_check as _clock_gate
+        clock_gate_rc = _clock_gate.main(
+            [str(project), "--json", str(clock_gate_report)])
+        if clock_gate_report.is_file():
+            clock_gate_doc = json.loads(clock_gate_report.read_text())
+            if clock_gate_report.read_bytes() != _clock_gate_before:
+                written.append(str(clock_gate_report))
+    except Exception as exc:  # noqa: BLE001 — disclose, never infer PASS
+        notes.append(f"clock_plan_check NOT_MEASURED: {type(exc).__name__}: {exc}")
+
     # U3 — Step 21's router-DRC projection (`routed.drc.rpt` and its
     # `reports/phase3/drc_router.rpt` mirror) reads only the router transcript.
     # Its other two writers are the pre- and post-stream canonicalize passes,
@@ -62345,20 +62390,27 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                       "NOT_MEASURED")
     except (OSError, IndexError):
         pdn_status = "NOT_MEASURED"
-    try:
-        clock_doc = json.loads(clock_path.read_text())
-        clock_ok = (isinstance(clock_doc, dict)
-                    and isinstance(clock_doc.get("clocks"), list)
-                    and bool(clock_doc["clocks"])
-                    and clock_doc.get("derived_from") ==
-                    _pl.clock_plan_sdc_digests(
-                        project, _pl.clock_plan_input_sdcs(project)))
-    except (OSError, ValueError, TypeError):
-        clock_ok = False
+    clock_verdict = (clock_gate_doc.get("verdict")
+                     if isinstance(clock_gate_doc, dict) else None)
+    clock_ok = (clock_gate_rc == 0 and
+                clock_verdict in ("PASS", "WAIVED"))
+    # A missing plan after a producer refusal is an unmeasured subject here;
+    # the standalone flow gate still reports CLOCK_PLAN_MISSING as FAIL when
+    # it adjudicates the declared Step 16 row.  If a plan exists, however, a
+    # failing consumer is a measured failure and must propagate as FAIL.
+    clock_status = ("PASS" if clock_ok else
+                    "FAIL" if clock_gate_rc == 1 and clock_path.is_file()
+                    else "NOT_MEASURED")
+    clock_output = {"status": clock_status,
+                    "verdict": clock_verdict,
+                    "report": (str(clock_gate_report.relative_to(project))
+                               if clock_gate_report.is_file() else None),
+                    "report_sha256": (_sha256_file(clock_gate_report)
+                                      if clock_gate_report.is_file() else None)}
     outputs = {"sdc": {"status": "PASS" if sdc_sha else "NOT_MEASURED"},
                "sdc_check": {"status": sdc_check_status},
                "pdn": {"status": pdn_status},
-               "clock_plan": {"status": "PASS" if clock_ok else "NOT_MEASURED"},
+               "clock_plan": clock_output,
                "spef": {"status": ("PASS" if spef_sha and extraction_ok
                                     and extraction_inputs is not None else
                                     "FAIL" if spef_sha and not extraction_ok else
@@ -62376,6 +62428,8 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
               "pdn_sha256": _sha256_file(pdn_path) if pdn_path.is_file() else None,
               "clock_plan_sha256": (_sha256_file(clock_path)
                                     if clock_path.is_file() else None),
+              "clock_plan_gate_sha256": clock_output["report_sha256"],
+              "clock_plan_gate_verdict": clock_verdict,
               "spef_sha256": spef_sha,
               "spef_check_pass": extraction_ok,
               "spef_extraction_sha256": (_sha256_file(extraction_report)
