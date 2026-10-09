@@ -2,11 +2,9 @@
 """Flow step FS1: the phase-2 runner runs the FMEDA producer before the audit.
 
 The FS1 gate's first clause, `fmeda_fault_injection_coverage ... --json
-reports/phase2/safety/fmeda_coverage.json`, was the only thing anywhere that
-ran the producer, so the report existed only once the audit had written it
-(flow YAML, step FS1). `design_one_shot_runner.step_fmeda_fault_injection`
-runs the command the gate states, and `main()` dispatches it after the
-DFT/LEC chain (FS1 blocks on step 11).
+reports/phase2/safety/fmeda_coverage.json`, is also run synchronously by
+`design_one_shot_runner.step_fmeda_fault_injection` before the audit reads the
+report. `main()` dispatches it after the DFT/LEC chain (FS1 blocks on step 11).
 
 The arms call the real producer on a real RTL tree; no simulator is needed
 because the designs here declare no safety mechanism or have no RTL.
@@ -18,6 +16,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 if str(PROGRAMS) not in sys.path:
@@ -80,6 +79,39 @@ def test_an_rtl_dir_with_no_source_is_not_measured(tmp_path):
     assert row.reason_class == "input_absent"
     report = json.loads((project / REPORT).read_text())
     assert report["verdict"] == "UNMEASURED_NO_RTL_READ"
+
+
+def test_a_failed_current_producer_cannot_reuse_a_stale_report(tmp_path,
+                                                               monkeypatch):
+    """A prior FS1 PASS must not survive a producer that writes nothing.
+
+    MUTATION THIS CATCHES: reading the canonical report after a failed
+    producer without clearing it first, which turns the stale PASS into the
+    current run's result.
+    """
+    mod = _runner()
+    project = _project(tmp_path, {"cnt.v": COUNTER})
+    report = project / REPORT
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        "program": "fmeda_fault_injection_coverage",
+        "verdict": "PASS",
+        "applicable": True,
+        "injected_faults": 1,
+        "detected_faults": 1,
+        "baseline_valid": True,
+    }))
+
+    monkeypatch.setattr(
+        mod._pr, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="current producer failed"),
+    )
+    row = mod.step_fmeda_fault_injection(project)
+
+    assert row.status == "NOT_MEASURED"
+    assert row.extras["producer_exit"] == 1
+    assert not report.exists(), "a failed run must not leave a stale report"
 
 
 def test_a_flow_without_the_clause_runs_nothing(tmp_path):

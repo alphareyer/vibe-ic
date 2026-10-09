@@ -23204,11 +23204,10 @@ def step_fmeda_fault_injection(project: Path,
                                ) -> StepResult:
     """Flow step FS1: run the FMEDA fault-injection producer.
 
-    The flow's FS1 gate named `fmeda_fault_injection_coverage` as its first
-    clause and no runner called it, so its report existed only after the audit
-    wrote it (flow YAML, FS1). This runs the same command the gate states,
-    from the project directory, so the report is run evidence before the audit
-    reads it. The gate still re-runs the producer and keeps its own verdict.
+    The flow's FS1 gate names `fmeda_fault_injection_coverage` as its first
+    clause. This runs the same command the gate states, from the project
+    directory, so the report is run evidence before the audit reads it. The
+    gate still re-runs the producer and keeps its own verdict.
 
     `not_applicable` is the CALLER's own applicability reason -- the runner's
     `_analog_rtl_track_absent` predicate, the same one it hands
@@ -23222,21 +23221,31 @@ def step_fmeda_fault_injection(project: Path,
     """
     t0 = time.time()
     name = "fmeda_fault_injection"
+    command = fmeda_producer_command(flow_yaml)
+    import flow_declared_producer_run as _fdp
+    if command is None:
+        rel = "reports/phase2/safety/fmeda_coverage.json"
+    else:
+        rel = _fdp._JSON_RE.search(command).group(1)
+    # The report is this invocation's producer output.  Remove any prior-run
+    # copy before launching so a producer failure cannot be misreported from a
+    # stale PASS/FAIL document that the current run never wrote.
+    out = project / rel
+    try:
+        out.unlink()
+    except FileNotFoundError:
+        pass
     if not_applicable:
         return StepResult(name, "NOT_APPLICABLE", time.time() - t0,
                           f"no digital RTL to fault-inject by design: "
                           f"{not_applicable}",
                           declared_by=str(not_applicable))
-    command = fmeda_producer_command(flow_yaml)
     if command is None:
         return StepResult(name, "NOT_MEASURED", time.time() - t0,
                           f"the flow declares no {FMEDA_PRODUCER} --json "
                           f"clause under step {FMEDA_STEP_ID}, so there is "
                           f"no producer command to run",
                           reason_class=_V.ReasonClass.NOT_EXECUTED)
-    import flow_declared_producer_run as _fdp
-    rel = _fdp._JSON_RE.search(command).group(1)
-    out = project / rel
     argv = [sys.executable, str(PROGRAMS_DIR / f"{FMEDA_PRODUCER}.py"),
             *command.split()[1:]]
     try:
