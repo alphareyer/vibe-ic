@@ -23,6 +23,16 @@ import execution_modes as em
 PNR = 'phase3/stage3/pnr/'
 RPT = 'reports/phase3/'
 
+# These rows are produced by the native PnR producer itself.  Their flow
+# programs are consumers, so they intentionally have no
+# ``flow_declared_producer_run`` clause.  Keep this allow-list explicit: a
+# missing declared producer on any other row must remain a refusal.
+_NATIVE_CURRENT_STEP_ROWS = {
+    '18': 'execution_backend_producers.produce_pnr',
+    '19': 'execution_backend_producers._cts_split',
+    '20': 'execution_backend_producers._cts_split',
+}
+
 
 def _step30_parallel_instruments(simulators, run_one):
     """Run distinct Step30 instruments and collect every sibling outcome.
@@ -1157,10 +1167,136 @@ def _run_current_step_declared_producers(project, step_id):
         }
 
 
-def _current_step_producer_authority(record):
+def _native_current_step_receipt(project, step_id, params, result,
+                                 started_ns):
+    """Create the current receipt for rows whose producer is native PnR.
+
+    Rows 18--20 deliberately list only their consumer programs in the flow.
+    Running those consumers through ``flow_declared_producer_run`` would make
+    the gate certify its own output.  The native producer therefore owns a
+    separate, small receipt contract here.  It is created only after the
+    producer returns and binds the resolved input manifest plus every
+    canonical output byte written by that invocation.
+    """
+    sid = str(step_id)
+    producer_name = _NATIVE_CURRENT_STEP_ROWS.get(sid)
+    if producer_name is None:
+        return None
+    verdict = result.get('verdict') if isinstance(result, dict) else None
+    receipt = {
+        'schema': 'vibeic/native-current-step-receipt/1',
+        'step_id': sid,
+        'producer': producer_name,
+        'verdict': ('PRODUCED' if verdict == 'PASS'
+                    else 'FAIL' if verdict == 'FAIL' else 'NOT_MEASURED'),
+        'started_ns': int(started_ns),
+        'finished_ns': time.time_ns(),
+        'inputs': {},
+        'outputs': {},
+        'output_specs': [],
+    }
+    manifest = params.get('resolved_input_manifest')
+    files = manifest.get('files') if isinstance(manifest, dict) else None
+    if not isinstance(files, dict) or not files:
+        receipt['verdict'] = 'NOT_MEASURED'
+        receipt['reason'] = 'NATIVE_CURRENT_INPUT_MANIFEST_ABSENT'
+        return receipt
+    for raw, expected in sorted(files.items()):
+        if not isinstance(raw, str) or Path(raw).is_absolute() or '..' in Path(raw).parts:
+            receipt['verdict'] = 'NOT_MEASURED'
+            receipt['reason'] = f'NATIVE_CURRENT_INPUT_PATH_INVALID: {raw!r}'
+            return receipt
+        path = Path(project) / raw
+        try:
+            digest = snap.sha(path)
+        except (OSError, ValueError):
+            receipt['verdict'] = 'NOT_MEASURED'
+            receipt['reason'] = f'NATIVE_CURRENT_INPUT_ABSENT: {raw}'
+            return receipt
+        expected_sha = (expected.get('sha256') if isinstance(expected, dict)
+                        else expected)
+        expected_sha = str(expected_sha).removeprefix('sha256:')
+        if digest != expected_sha:
+            receipt['verdict'] = 'NOT_MEASURED'
+            receipt['reason'] = f'NATIVE_CURRENT_INPUT_CHANGED: {raw}'
+            return receipt
+        receipt['inputs'][raw] = {'sha256': digest}
+
+    try:
+        from execution_adapters_backend import ROWS
+        row = ROWS[sid]['canonical_row']
+        from execution_backend_gates import contracts
+        contract = contracts(Path(project), row)
+    except (KeyError, OSError, ValueError, TypeError, em.Refusal) as exc:
+        receipt['verdict'] = 'NOT_MEASURED'
+        receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_CONTRACT_UNAVAILABLE: {exc}'
+        return receipt
+    for spec, paths in contract.items():
+        receipt['output_specs'].append(spec)
+        for raw, digest in sorted(paths.items()):
+            path = Path(project) / raw
+            try:
+                stat = path.stat()
+            except OSError:
+                receipt['verdict'] = 'NOT_MEASURED'
+                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_ABSENT: {raw}'
+                return receipt
+            # A prior-run output must not be credited when the native producer
+            # returned without writing this invocation's artefact.
+            # Filesystem timestamp resolution can lag the process clock by a
+            # few milliseconds.  A prior-run artefact is still rejected when
+            # it is materially older than this invocation.
+            if stat.st_mtime_ns + 5_000_000 < int(started_ns):
+                receipt['verdict'] = 'NOT_MEASURED'
+                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_STALE: {raw}'
+                return receipt
+            actual = snap.sha(path)
+            if actual != digest:
+                receipt['verdict'] = 'NOT_MEASURED'
+                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_CHANGED: {raw}'
+                return receipt
+            receipt['outputs'][raw] = {
+                'sha256': actual, 'size': stat.st_size,
+                'mtime_ns': stat.st_mtime_ns,
+            }
+    if receipt['verdict'] == 'PRODUCED' and not receipt['outputs']:
+        receipt['verdict'] = 'NOT_MEASURED'
+        receipt['reason'] = 'NATIVE_CURRENT_OUTPUT_EMPTY'
+    return receipt
+
+
+def _current_step_producer_authority(record, project=None):
     """Classify the current-step producer census before consumer evaluation."""
     if not isinstance(record, dict):
         return False, "current-step producer record is malformed", "NOT_MEASURED"
+    if record.get('schema') == 'vibeic/native-current-step-receipt/1':
+        sid = str(record.get('step_id'))
+        expected_producer = _NATIVE_CURRENT_STEP_ROWS.get(sid)
+        if expected_producer is None or record.get('producer') != expected_producer:
+            return False, "native current producer identity is invalid", "NOT_MEASURED"
+        if record.get('verdict') != 'PRODUCED':
+            status = 'FAIL' if record.get('verdict') == 'FAIL' else 'NOT_MEASURED'
+            return False, record.get('reason', 'native producer did not complete'), status
+        if type(record.get('started_ns')) is not int or type(record.get('finished_ns')) is not int:
+            return False, "native current producer timing is missing", "NOT_MEASURED"
+        if not isinstance(record.get('inputs'), dict) or not record['inputs']:
+            return False, "native current producer inputs are missing", "NOT_MEASURED"
+        outputs = record.get('outputs')
+        if not isinstance(outputs, dict) or not outputs:
+            return False, "native current producer outputs are missing", "NOT_MEASURED"
+        if project is None:
+            return False, "native current producer project is missing", "NOT_MEASURED"
+        for raw, info in outputs.items():
+            if (not isinstance(raw, str) or not isinstance(info, dict)
+                    or not isinstance(info.get('sha256'), str)):
+                return False, "native current producer output receipt is malformed", "NOT_MEASURED"
+            path = Path(project) / raw
+            try:
+                if path.is_symlink() or not path.is_file() or snap.sha(path) != info['sha256']:
+                    return False, f"native current producer output changed: {raw}", "NOT_MEASURED"
+            except OSError:
+                return False, f"native current producer output absent: {raw}", "NOT_MEASURED"
+        return True, "", "PASS"
     results = record.get("results")
     if not isinstance(results, list):
         return False, "current-step producer results are missing", "NOT_MEASURED"
@@ -1201,6 +1337,7 @@ def _current_step_producer_authority(record):
     return True, "", "PASS"
 
 def produce(project, params):
+    started_ns = time.time_ns()
     if params['step_id'] in ('15', '15.5ic', '17', '18', '19', '20', '21'):
         result = produce_pnr(project, params)
     else:
@@ -1209,8 +1346,14 @@ def produce(project, params):
     # only this row's flow-declared producer outputs now; the phase runner's
     # later all-step refresh remains unchanged and does not get used as a
     # substitute for current-step ownership.
-    current = _run_current_step_declared_producers(project, params['step_id'])
-    allowed, reason, authority_verdict = _current_step_producer_authority(current)
+    sid = str(params['step_id'])
+    if sid in _NATIVE_CURRENT_STEP_ROWS:
+        current = _native_current_step_receipt(
+            Path(project), sid, params, result, started_ns)
+    else:
+        current = _run_current_step_declared_producers(project, sid)
+    allowed, reason, authority_verdict = _current_step_producer_authority(
+        current, project=Path(project))
     current['consumer_allowed'] = allowed
     current['authority_verdict'] = authority_verdict
     current['authority_detail'] = reason
@@ -1223,7 +1366,6 @@ def produce(project, params):
     # These are the existing canonical report producers, scoped to this row.
     # They consume actual native outputs; they do not stand in for native work.
     import phase3_one_shot_runner as R
-    sid = params['step_id']
     names = {'23': {'sta_signoff', 'sta_corner', 'sta_record', 'sta_architectural_residual'},
              '24': {'ir_drop'}, '25': {'em_signoff'}, '26': {'antenna'}}.get(sid, set())
     table = {row[0]: row for row in R._DECLARED_SIGNOFF_GATES}

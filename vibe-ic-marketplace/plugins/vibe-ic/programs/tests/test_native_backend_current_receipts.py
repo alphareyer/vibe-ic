@@ -1,0 +1,123 @@
+"""Native Default producer/consumer boundaries for backend rows 18--20."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+PROGRAMS = Path(__file__).resolve().parents[1]
+if str(PROGRAMS) not in sys.path:
+    sys.path.insert(0, str(PROGRAMS))
+
+import execution_backend_producers as producers  # noqa: E402
+import execution_backend_worker as worker  # noqa: E402
+
+
+def _write(project: Path, relative: str, text: str) -> Path:
+    path = project / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _native_outputs(project: Path, step: str) -> None:
+    if step == "18":
+        _write(project, "phase3/stage3/pnr/spare_cells.json",
+               json.dumps({"spare_count": 4, "target_density": 0.01}))
+        _write(project, "reports/spare_cell_coverage.json",
+               json.dumps({"verdict": "PASS", "spare_count": 4}))
+    elif step == "19":
+        _write(project, "phase3/stage3/pnr/post_cts.def",
+               "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
+        _write(project, "phase3/stage3/cts/clock_tree.rpt",
+               "clock latency 1.0 skew 0.1 buffers 2\n")
+    else:
+        _write(project, "phase3/stage3/pnr/post_hold.def",
+               "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
+
+
+def _manifest(project: Path, relative: str) -> dict:
+    path = project / relative
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {"declarations": [{"from": "external", "path": relative}],
+            "files": {relative: digest}, "missing": []}
+
+
+def test_native_rows_create_current_receipt_after_producer(tmp_path, monkeypatch):
+    for step, predecessor in (("18", "placed.def"),
+                              ("19", "placed.def"),
+                              ("20", "post_cts.def")):
+        project = tmp_path / step
+        _write(project, f"phase3/stage3/pnr/{predecessor}", "input\n")
+        events = []
+
+        def native(current_project, _params, *, _events=events, _step=step):
+            _events.append("producer")
+            _native_outputs(current_project, _step)
+            return {"verdict": "PASS", "detail": "native fixture"}
+
+        monkeypatch.setattr(producers, "produce_pnr", native)
+        result = producers.produce(
+            project, {"step_id": step,
+                      "resolved_input_manifest": _manifest(
+                          project, f"phase3/stage3/pnr/{predecessor}")})
+        current = result["current_step_declared_producers"]
+        assert events == ["producer"]
+        assert current["schema"] == "vibeic/native-current-step-receipt/1"
+        assert current["verdict"] == "PRODUCED"
+        assert current["step_id"] == step
+        assert producers._current_step_producer_authority(
+            current, project=project) == (True, "", "PASS")
+
+
+def test_native_receipt_mutation_blocks_consumer(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    predecessor = "phase3/stage3/pnr/placed.def"
+    _write(project, predecessor, "input\n")
+    events = []
+
+    def native(current_project, _params):
+        events.append("producer")
+        _native_outputs(current_project, "18")
+        return {"verdict": "PASS", "detail": "native fixture"}
+
+    monkeypatch.setattr(producers, "produce_pnr", native)
+    result = producers.produce(
+        project, {"step_id": "18",
+                  "resolved_input_manifest": _manifest(project, predecessor)})
+    current = result["current_step_declared_producers"]
+    output = project / "phase3/stage3/pnr/spare_cells.json"
+    output.write_text(output.read_text() + "mutated\n")
+    assert producers._current_step_producer_authority(
+        current, project=project) == (
+            False, "native current producer output changed: "
+            "phase3/stage3/pnr/spare_cells.json", "NOT_MEASURED")
+
+
+def test_worker_calls_consumer_only_after_native_receipt(tmp_path, monkeypatch):
+    inputs = tmp_path / "inputs" / "project"
+    predecessor = inputs / "phase3/stage3/pnr/placed.def"
+    predecessor.parent.mkdir(parents=True)
+    predecessor.write_text("input\n")
+    outputs = tmp_path / "outputs"
+    events = []
+
+    def native(project, _params):
+        events.append("producer")
+        _native_outputs(project, "18")
+        return {"verdict": "PASS", "detail": "native fixture"}
+
+    monkeypatch.setattr(producers, "produce_pnr", native)
+    monkeypatch.setattr(worker, "evaluate",
+                        lambda _project, _row: events.append("consumer") or
+                        {"status": "PASS", "ledger": []})
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({
+        "required_gates": [], "source_sha": "fixture"}))
+    result = worker.execute(inputs.parent, outputs, step_id="18", params={})
+    assert events == ["producer", "consumer"]
+    assert result["verdict"] == "PASS"
+    assert result["canonical_receipts"][0]["schema"] == \
+        "vibeic/backend-producer-receipt/1"
+

@@ -353,6 +353,17 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         resolved = _resolve_input_contract(project, input_contract, manifest)
     input_contract = resolved['declarations']
     missing_inputs = resolved['missing']
+    # A caller that did not supply a resolved manifest still needs a concrete
+    # input identity for native current receipts.  Snapshot the copied input
+    # tree before the producer can write any output; this is provenance, not a
+    # replacement for the declaration/missing-input check above.
+    producer_manifest = dict(resolved)
+    if not producer_manifest.get('files'):
+        producer_manifest['files'] = {
+            str(path.relative_to(project)): sha(path)
+            for path in project.rglob('*')
+            if path.is_file() and not path.is_symlink()
+        }
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
     if missing_inputs:
@@ -365,7 +376,8 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
             "reason": "REQUIRED_INPUT_ABSENT"} for gate in binding.get("required_gates", ())]}
     else:
         try:
-            params = dict(params, step_id=str(step_id), project=project)
+            params = dict(params, step_id=str(step_id), project=project,
+                          resolved_input_manifest=producer_manifest)
             producer = produce(project, params)
             if not isinstance(producer, dict):
                 producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}
@@ -380,7 +392,8 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         # incomplete, zero-population, nonzero, or wrong-owner, do not let the
         # consumer manufacture a PASS from pre-existing/audit-authored files.
         current = producer.get("current_step_declared_producers")
-        allowed, reason, authority_verdict = _current_step_producer_authority(current)
+        allowed, reason, authority_verdict = _current_step_producer_authority(
+            current, project=project)
         if not allowed:
             if producer.get('verdict') != 'FAIL':
                 producer['verdict'] = authority_verdict
