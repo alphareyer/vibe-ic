@@ -119,7 +119,8 @@ def test_default_step15_runs_native_then_step8_step10_before_census(tmp_path, mo
     assert order == ["native", "step8", "step10"]
 
 
-def test_public_dispatch_runs_publication_before_input_census(tmp_path, monkeypatch):
+def test_default_dispatch_runs_prelayout_preparation_without_controller_census(
+        tmp_path, monkeypatch):
     project, netlist, pnr = _fixture(tmp_path)
     order = []
     adapter = types.SimpleNamespace(applicability="applicable", tool_id="backend", objective={})
@@ -150,8 +151,12 @@ def test_public_dispatch_runs_publication_before_input_census(tmp_path, monkeypa
 
     monkeypatch.setattr(policy, "_fixed_inputs", census)
     result = policy.dispatch_fixed_step(project, "15")
-    assert result["status"] == "NOT_MEASURED"
-    assert order == ["native", "step8", "step10", "census"]
+    # Default owns Step 15's canonical pre-layout producer.  The policy seam
+    # performs only its typed preparation and returns control to the caller;
+    # it must not construct a Controller input census or publish a candidate
+    # result of its own.
+    assert result is None
+    assert order == ["native", "step8", "step10"]
 
 
 def test_default_step15_refuses_failed_native_producer(tmp_path, monkeypatch):
