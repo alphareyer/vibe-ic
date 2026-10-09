@@ -58302,6 +58302,18 @@ def run_pre_audit_producers(project: Path, container: str = "", *,
         if (only_names is not None and name not in only_names
                 or name in skip_names):
             continue
+        # These files belong to this producer.  Remove a previous invocation's
+        # copy before attempting the producer so a timeout/refusal cannot leave
+        # bytes that the later compliance audit mistakes for this run's output.
+        # The producer's own StepResult remains the authority; this unlink only
+        # invalidates an unbound prior-run fallback.
+        try:
+            (project / out_rel).unlink(missing_ok=True)
+        except OSError as exc:
+            rows.append(_signoff_not_checked(
+                name, time.time(),
+                f"cannot invalidate prior producer output {out_rel}: {exc}"))
+            continue
         if name == "foundry_handoff":
             import foundry_handoff_package_check as _handoff_check
             sources = _handoff_check.layout_member_sources(project)
@@ -76535,6 +76547,40 @@ def _pre_audit_generator_names() -> FrozenSet[str]:
                      in _PRE_AUDIT_PRODUCERS)
 
 
+def _successful_pre_audit_generator_names(
+        project: Path, rows: Sequence[StepResult],
+        run_started_at: Optional[float] = None) -> FrozenSet[str]:
+    """Return derived producers that completed *in this invocation*.
+
+    A pre-audit call is not enough to suppress the retry path: a timeout or
+    refusal is precisely when the old derived producer must remain available.
+    Require the producer row to be PASS, to name its canonical output, and for
+    that output to have been written after this run started.  This keeps the
+    Default chain synchronous while preventing a prior-run file from being
+    credited as current evidence.
+    """
+    not_before = (_RUN_STARTED_AT if run_started_at is None
+                  else float(run_started_at))
+    by_name = {row.name: row for row in rows}
+    done: set[str] = set()
+    for name, program, out_rel, _extra in _PRE_AUDIT_PRODUCERS:
+        row = by_name.get(name)
+        if row is None or row.status != "PASS":
+            continue
+        expected = project / out_rel
+        if not expected.is_file():
+            continue
+        if not any(Path(path) == expected for path in row.output_files):
+            continue
+        try:
+            if expected.stat().st_mtime < not_before:
+                continue
+        except OSError:
+            continue
+        done.add(program)
+    return frozenset(done)
+
+
 def _run_derived_artefact_generators(project: Path, effective_top: Optional[str],
                                      *, skip_names: Iterable[str] = ()) \
                                      -> List[Dict[str, Any]]:
@@ -79109,17 +79155,16 @@ def main() -> int:
     # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
     # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
     # already exist (not a snapshot written moments too early).
-    # foundry_handoff_pack_gen and tapeout_checklist_gen already ran in the
-    # synchronous pre-audit producer chain above.  Re-running either here
-    # would overwrite the producer result after its consumer boundary and, for
-    # the checklist, would recreate the old handoff-before-checklist race.
+    # foundry_handoff_pack_gen and tapeout_checklist_gen that PASSed and wrote
+    # current outputs already ran in the synchronous pre-audit chain above.
+    # Only those exact successes are skipped.  A refusal/timeout leaves its
+    # derived retry available; the pre-audit call has already invalidated the
+    # old output, so the retry cannot consume stale bytes.
     plan.extend(_derived_generator_refusals(
         _run_derived_artefact_generators(
             project, effective_top,
-            # On a refused layout the pre-audit chain was not attempted, so
-            # retain the derived generator's own refusal handling.  A measured
-            # chain skips only the producer names it already attempted.
-            skip_names=(_pre_audit_generator_names()
+            skip_names=(_successful_pre_audit_generator_names(
+                project, _pre_audit_rows)
                         if not _layout_refusal else frozenset()))))
 
     # ORGANIC #655 — the post-hoc audits, on the run that just finished.

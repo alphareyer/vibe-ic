@@ -79,6 +79,57 @@ def test_pre_audit_release_producers_are_not_launched_again(monkeypatch, tmp_pat
     assert calls == []
 
 
+def test_failed_pre_audit_invalidates_owned_output(monkeypatch, tmp_path):
+    """A timeout must not leave a prior handoff eligible for the audit."""
+    out = tmp_path / "phase3/stage4/foundry_handoff/mask_spec.json"
+    out.parent.mkdir(parents=True)
+    out.write_text('{"generated_at":"previous-run"}')
+
+    def refused(project, name, program, out_rel, extra_argv=()):
+        return P._signoff_not_checked(name, 0.0, "forced timeout")
+
+    monkeypatch.setattr(P, "_run_declared_signoff_gate", refused)
+    rows = P.run_pre_audit_producers(tmp_path,
+                                     only_names=("foundry_handoff",))
+    assert rows and rows[0].status == "NOT_MEASURED"
+    assert not out.exists(), "failed producer must not leave stale evidence"
+
+
+def test_only_current_pass_with_fresh_output_suppresses_retry(tmp_path):
+    """The derived retry is skipped only for a current PASS output."""
+    now = __import__("time").time()
+    rows = []
+    for name, _program, out_rel, _extra in P._PRE_AUDIT_PRODUCERS:
+        if name == "gds_xor":
+            continue
+        out = tmp_path / out_rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("current")
+        rows.append(P.StepResult(name, "PASS", output_files=[str(out)]))
+
+    done = P._successful_pre_audit_generator_names(tmp_path, rows,
+                                                    run_started_at=now - 1)
+    assert done == {
+        "foundry_handoff_pack_gen.py",
+        "tapeout_checklist_gen.py",
+    }
+
+
+def test_old_pass_output_does_not_suppress_retry(tmp_path):
+    """A previous-run PASS is not a current producer invocation."""
+    now = __import__("time").time()
+    out = tmp_path / "reports/audit/tapeout_checklist.json"
+    out.parent.mkdir(parents=True)
+    out.write_text("previous")
+    old = now - 60
+    import os
+    os.utime(out, (old, old))
+    row = P.StepResult("tapeout_checklist", "PASS",
+                       output_files=[str(out)])
+    assert P._successful_pre_audit_generator_names(
+        tmp_path, [row], run_started_at=now - 1) == frozenset()
+
+
 def test_e2e_fixed_order_checklist_sees_foundry(tmp_path):
     # Run the generators in the module-constant order; the foundry-producing
     # generator runs first, so the checklist grades present artefacts.
