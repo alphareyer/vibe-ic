@@ -464,6 +464,17 @@ def test_shipped_rom_globs_publish_the_actual_producer_verdict(tmp_path, unsafe)
     assert [f["rule"] for f in findings] == (["quartus-unsafe-rom-init"] if unsafe else [])
 
 
+def test_first_producer_receipt_binds_the_target_bytes(tmp_path):
+    row = _rom_producer_project(tmp_path)
+    result = P._run_one(tmp_path, row, timeout=30)
+    target = tmp_path / row["target"]
+
+    assert result["target_sha256"] == P._target_digest(target)
+    before = result["target_sha256"]
+    target.write_text(target.read_text() + "\nmutated after producer\n")
+    assert P._target_digest(target) != before
+
+
 def test_rom_globs_without_any_source_still_refuse(tmp_path):
     row = _rom_producer_project(tmp_path, source_count=0)
     result = P._run_one(tmp_path, row, timeout=30)

@@ -481,10 +481,19 @@ def _run_one(project: Path, row: Dict[str, str], timeout: int
         out.update({"rc": None, "executed": False, "note": str(exc)})
         return out
     target = project / row["target"]
+    # Bind the receipt to the bytes produced by THIS invocation as well as to
+    # the producer role.  Reused results already carried this digest through
+    # ``prior_targets``; first-run results must carry it too, otherwise the
+    # evidence for a fresh producer is weaker than the evidence for a reuse.
+    target_exists_after = (target.is_file() and not target.is_symlink()
+                           and target.stat().st_size > 0)
     out.update({"rc": rc, "executed": True,
                 "elapsed_s": round(time.time() - t0, 2),
-                "target_exists_after": (target.is_file() and not target.is_symlink()
-                                        and target.stat().st_size > 0),
+                "target_exists_after": target_exists_after,
+                "target_sha256": (_target_digest(target)
+                                  if target_exists_after else None),
+                "target_content_valid": (_producer_target_has_content(target)
+                                          if target_exists_after else False),
                 "authorship": _document_role(target) if target.exists() else None,
                 "tail": tail})
     return out
