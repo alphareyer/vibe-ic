@@ -13,6 +13,7 @@ if str(PROGRAMS) not in sys.path:
 
 import execution_backend_producers as producers  # noqa: E402
 import execution_backend_worker as worker  # noqa: E402
+from execution_provider_catalog import BACKEND_SITES  # noqa: E402
 
 
 def _write(project: Path, relative: str, text: str) -> Path:
@@ -43,6 +44,18 @@ def _manifest(project: Path, relative: str) -> dict:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return {"declarations": [{"from": "external", "path": relative}],
             "files": {relative: digest}, "missing": []}
+
+
+def _registry_outputs(project: Path, step: str) -> list[str]:
+    from execution_adapters_backend import ROWS
+    paths = []
+    for spec in ROWS[step]['canonical_row']['required_outputs']:
+        raw = str(spec).split(' OR ')[0]
+        if '*' in raw:
+            raw = raw.replace('*', 'fixture')
+        path = _write(project, raw, '{}\n' if raw.endswith('.json') else 'fixture\n')
+        paths.append(str(path.relative_to(project)))
+    return paths
 
 
 def test_native_rows_create_current_receipt_after_producer(tmp_path, monkeypatch):
@@ -120,4 +133,118 @@ def test_worker_calls_consumer_only_after_native_receipt(tmp_path, monkeypatch):
     assert result["verdict"] == "PASS"
     assert result["canonical_receipts"][0]["schema"] == \
         "vibeic/backend-producer-receipt/1"
+
+
+def test_registry_rows_create_receipts_from_catalog_sites(tmp_path, monkeypatch):
+    for step in ('27', '32'):
+        project = tmp_path / step
+        input_path = _write(project, 'inputs/current.txt', 'current\n')
+        outputs = _registry_outputs(project, step)
+
+        def native(current_project, _params, _outputs=outputs):
+            for raw in _outputs:
+                _write(current_project, raw,
+                       '{"fresh": 1}\n' if raw.endswith('.json') else 'fresh\n')
+            return {'verdict': 'PASS', 'detail': 'registry fixture'}
+
+        monkeypatch.setattr(producers, 'produce_signoff', native)
+        result = producers.produce(
+            project, {'step_id': step,
+                      'resolved_input_manifest': _manifest(
+                          project, str(input_path.relative_to(project)))})
+        current = result['current_step_declared_producers']
+        assert result['verdict'] == 'PASS'
+        assert current['verdict'] == 'PRODUCED'
+        assert current['producer'] == list(BACKEND_SITES[step])
+        assert set(current['preexisting_outputs']) == set(outputs)
+        assert producers._current_step_producer_authority(
+            current, project=project) == (True, '', 'PASS')
+
+
+def test_registry_receipt_rejects_unchanged_preexisting_output(tmp_path, monkeypatch):
+    project = tmp_path / 'stale'
+    input_path = _write(project, 'inputs/current.txt', 'current\n')
+    _registry_outputs(project, '27')
+
+    monkeypatch.setattr(producers, 'produce_signoff',
+                        lambda _project, _params: {'verdict': 'PASS'})
+    result = producers.produce(
+        project, {'step_id': '27',
+                  'resolved_input_manifest': _manifest(
+                      project, str(input_path.relative_to(project)))})
+    current = result['current_step_declared_producers']
+    assert result['verdict'] == 'NOT_MEASURED'
+    assert current['reason'].startswith('NATIVE_CURRENT_OUTPUT_UNCHANGED:')
+
+
+def test_registry_receipt_rejects_missing_output(tmp_path, monkeypatch):
+    project = tmp_path / 'missing'
+    input_path = _write(project, 'inputs/current.txt', 'current\n')
+    monkeypatch.setattr(producers, 'produce_signoff',
+                        lambda _project, _params: {'verdict': 'PASS'})
+    result = producers.produce(
+        project, {'step_id': '32',
+                  'resolved_input_manifest': _manifest(
+                      project, str(input_path.relative_to(project)))})
+    current = result['current_step_declared_producers']
+    assert result['verdict'] == 'NOT_MEASURED'
+    assert current['reason'].startswith('NATIVE_CURRENT_OUTPUT_CONTRACT_UNAVAILABLE:')
+
+
+def test_registry_measured_fail_survives_missing_outputs(tmp_path, monkeypatch):
+    project = tmp_path / 'fail'
+    input_path = _write(project, 'inputs/current.txt', 'current\n')
+    monkeypatch.setattr(producers, 'produce_signoff',
+                        lambda _project, _params: {
+                            'verdict': 'FAIL', 'detail': 'native failure'})
+    result = producers.produce(
+        project, {'step_id': '32',
+                  'resolved_input_manifest': _manifest(
+                      project, str(input_path.relative_to(project)))})
+    assert result['verdict'] == 'FAIL'
+
+
+def test_registry_receipt_rejects_wrong_identity_and_mutated_input(tmp_path, monkeypatch):
+    project = tmp_path / 'mutation'
+    input_path = _write(project, 'inputs/current.txt', 'current\n')
+    outputs = _registry_outputs(project, '32')
+
+    def native(current_project, _params):
+        for raw in outputs:
+            _write(current_project, raw, 'fresh\n')
+        return {'verdict': 'PASS'}
+
+    monkeypatch.setattr(producers, 'produce_signoff', native)
+    current = producers.produce(
+        project, {'step_id': '32',
+                  'resolved_input_manifest': _manifest(
+                      project, str(input_path.relative_to(project)))})[
+                          'current_step_declared_producers']
+    wrong = dict(current, producer=['wrong-site'])
+    assert producers._current_step_producer_authority(
+        wrong, project=project) == (
+            False, 'native current producer identity is invalid', 'NOT_MEASURED')
+    input_path.write_text('mutated\n')
+    assert producers._current_step_producer_authority(
+        current, project=project) == (
+            False, 'native current producer input changed: inputs/current.txt',
+            'NOT_MEASURED')
+
+
+def test_worker_does_not_promote_entire_tree_to_producer_inputs(tmp_path, monkeypatch):
+    inputs = tmp_path / 'inputs' / 'project'
+    inputs.mkdir(parents=True)
+    _write(inputs, 'unrelated.txt', 'must not enter receipt\n')
+    outputs = tmp_path / 'outputs'
+    seen = {}
+
+    def fake_produce(_project, params):
+        seen['files'] = params['resolved_input_manifest']['files']
+        return {'verdict': 'NOT_MEASURED', 'current_step_declared_producers': None}
+
+    monkeypatch.setattr(worker, 'produce', fake_produce)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING',
+                       json.dumps({'required_gates': []}))
+    worker.execute(inputs.parent, outputs, step_id='32', params={})
+    assert seen['files'] == {}
 

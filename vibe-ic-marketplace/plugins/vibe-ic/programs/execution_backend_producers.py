@@ -34,6 +34,87 @@ _NATIVE_CURRENT_STEP_ROWS = {
 }
 
 
+def _native_registry_current_step_rows():
+    """Return registry producers eligible for the current-step native seam.
+
+    The catalog is the source of producer identity.  A row is eligible here
+    only when it is a backend row with canonical outputs, names at least one
+    producer site, and has no flow-declared producer clause.  The explicit
+    18--20 map remains authoritative for its existing behavior.
+    """
+    try:
+        from execution_provider_catalog import BACKEND_ROWS, BACKEND_SITES
+        import flow_declared_producer_run as declared
+        import yaml
+        if not Path(declared.FLOW_YAML).is_file():
+            return {}
+        try:
+            flow_doc = yaml.safe_load(Path(declared.FLOW_YAML).read_text(errors='replace'))
+        except (OSError, ValueError, yaml.YAMLError):
+            return {}
+        if not isinstance(flow_doc, (dict, list)):
+            return {}
+        clauses = declared.declared_producer_clauses()
+    except (ImportError, OSError, TypeError, ValueError, AttributeError):
+        return {}
+    if not isinstance(clauses, list):
+        return {}
+    declared_steps = {str(row.get('step')) for row in clauses
+                      if isinstance(row, dict) and row.get('step') is not None}
+    rows = {}
+    for raw_sid, sites in BACKEND_SITES.items():
+        sid = str(raw_sid)
+        if sid in _NATIVE_CURRENT_STEP_ROWS or sid in declared_steps:
+            continue
+        row = BACKEND_ROWS.get(sid)
+        canonical = row.get('canonical_row') if isinstance(row, dict) else None
+        if (not isinstance(canonical, dict)
+                or not canonical.get('required_outputs')
+                or not isinstance(sites, (tuple, list)) or not sites
+                or any(not isinstance(site, str) or not site for site in sites)):
+            continue
+        rows[sid] = list(sites)
+    return rows
+
+
+def _native_current_step_producer(step_id):
+    sid = str(step_id)
+    explicit = _NATIVE_CURRENT_STEP_ROWS.get(sid)
+    if explicit is not None:
+        return explicit
+    return _native_registry_current_step_rows().get(sid)
+
+
+def _native_output_identity(path):
+    path = Path(path)
+    try:
+        if path.is_symlink() or not path.is_file() or not path.stat().st_size:
+            return None
+        stat = path.stat()
+        return {'sha256': snap.sha(path), 'size': stat.st_size,
+                'mtime_ns': stat.st_mtime_ns, 'st_dev': stat.st_dev,
+                'st_ino': stat.st_ino}
+    except (OSError, ValueError):
+        return None
+
+
+def _native_current_step_output_snapshot(project, step_id):
+    """Capture output identities before the native producer is invoked."""
+    try:
+        from execution_adapters_backend import ROWS
+        specs = ROWS[str(step_id)]['canonical_row'].get('required_outputs', ())
+    except (KeyError, OSError, TypeError, ValueError):
+        return {}
+    before = {}
+    for spec in specs:
+        for pattern in str(spec).split(' OR '):
+            for path in sorted(Path(project).glob(pattern.strip())):
+                identity = _native_output_identity(path)
+                if identity is not None:
+                    before[str(path.relative_to(project))] = identity
+    return before
+
+
 def _step30_parallel_instruments(simulators, run_one):
     """Run distinct Step30 instruments and collect every sibling outcome.
 
@@ -1168,20 +1249,19 @@ def _run_current_step_declared_producers(project, step_id):
 
 
 def _native_current_step_receipt(project, step_id, params, result,
-                                 started_ns):
-    """Create the current receipt for rows whose producer is native PnR.
+                                 started_ns, prior_outputs=None):
+    """Create the current receipt for a registry-backed native producer.
 
-    Rows 18--20 deliberately list only their consumer programs in the flow.
-    Running those consumers through ``flow_declared_producer_run`` would make
-    the gate certify its own output.  The native producer therefore owns a
-    separate, small receipt contract here.  It is created only after the
-    producer returns and binds the resolved input manifest plus every
-    canonical output byte written by that invocation.
+    Rows with no flow-declared producer deliberately need a separate receipt;
+    running their consumers through ``flow_declared_producer_run`` would make
+    the gate certify its own output.  The receipt binds the resolved input
+    manifest plus every canonical output byte written by that invocation.
     """
     sid = str(step_id)
-    producer_name = _NATIVE_CURRENT_STEP_ROWS.get(sid)
+    producer_name = _native_current_step_producer(sid)
     if producer_name is None:
         return None
+    prior_outputs = dict(prior_outputs or {})
     verdict = result.get('verdict') if isinstance(result, dict) else None
     receipt = {
         'schema': 'vibeic/native-current-step-receipt/1',
@@ -1194,6 +1274,7 @@ def _native_current_step_receipt(project, step_id, params, result,
         'inputs': {},
         'outputs': {},
         'output_specs': [],
+        'preexisting_outputs': prior_outputs,
     }
     manifest = params.get('resolved_input_manifest')
     files = manifest.get('files') if isinstance(manifest, dict) else None
@@ -1242,13 +1323,14 @@ def _native_current_step_receipt(project, step_id, params, result,
                 receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_ABSENT: {raw}'
                 return receipt
             # A prior-run output must not be credited when the native producer
-            # returned without writing this invocation's artefact.
-            # Filesystem timestamp resolution can lag the process clock by a
-            # few milliseconds.  A prior-run artefact is still rejected when
-            # it is materially older than this invocation.
-            if stat.st_mtime_ns + 5_000_000 < int(started_ns):
+            # returned without writing or replacing this invocation's artefact.
+            # Compare the complete pre-invocation identity rather than using a
+            # wall-clock threshold, which can credit a no-op on coarse filesystems.
+            before = prior_outputs.get(raw)
+            after = _native_output_identity(path)
+            if before is not None and after == before:
                 receipt['verdict'] = 'NOT_MEASURED'
-                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_STALE: {raw}'
+                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_UNCHANGED: {raw}'
                 return receipt
             actual = snap.sha(path)
             if actual != digest:
@@ -1271,7 +1353,7 @@ def _current_step_producer_authority(record, project=None):
         return False, "current-step producer record is malformed", "NOT_MEASURED"
     if record.get('schema') == 'vibeic/native-current-step-receipt/1':
         sid = str(record.get('step_id'))
-        expected_producer = _NATIVE_CURRENT_STEP_ROWS.get(sid)
+        expected_producer = _native_current_step_producer(sid)
         if expected_producer is None or record.get('producer') != expected_producer:
             return False, "native current producer identity is invalid", "NOT_MEASURED"
         if record.get('verdict') != 'PRODUCED':
@@ -1286,8 +1368,22 @@ def _current_step_producer_authority(record, project=None):
             return False, "native current producer outputs are missing", "NOT_MEASURED"
         if project is None:
             return False, "native current producer project is missing", "NOT_MEASURED"
+        inputs = record.get('inputs')
+        for raw, info in (inputs or {}).items():
+            if (not isinstance(raw, str) or Path(raw).is_absolute()
+                    or '..' in Path(raw).parts or not isinstance(info, dict)
+                    or not isinstance(info.get('sha256'), str)):
+                return False, "native current producer input receipt is malformed", "NOT_MEASURED"
+            path = Path(project) / raw
+            try:
+                if (path.is_symlink() or not path.is_file()
+                        or snap.sha(path) != info['sha256']):
+                    return False, f"native current producer input changed: {raw}", "NOT_MEASURED"
+            except OSError:
+                return False, f"native current producer input absent: {raw}", "NOT_MEASURED"
         for raw, info in outputs.items():
             if (not isinstance(raw, str) or not isinstance(info, dict)
+                    or Path(raw).is_absolute() or '..' in Path(raw).parts
                     or not isinstance(info.get('sha256'), str)):
                 return False, "native current producer output receipt is malformed", "NOT_MEASURED"
             path = Path(project) / raw
@@ -1338,6 +1434,8 @@ def _current_step_producer_authority(record, project=None):
 
 def produce(project, params):
     started_ns = time.time_ns()
+    sid = str(params['step_id'])
+    prior_outputs = _native_current_step_output_snapshot(Path(project), sid)
     if params['step_id'] in ('15', '15.5ic', '17', '18', '19', '20', '21'):
         result = produce_pnr(project, params)
     else:
@@ -1346,10 +1444,9 @@ def produce(project, params):
     # only this row's flow-declared producer outputs now; the phase runner's
     # later all-step refresh remains unchanged and does not get used as a
     # substitute for current-step ownership.
-    sid = str(params['step_id'])
-    if sid in _NATIVE_CURRENT_STEP_ROWS:
+    if _native_current_step_producer(sid) is not None:
         current = _native_current_step_receipt(
-            Path(project), sid, params, result, started_ns)
+            Path(project), sid, params, result, started_ns, prior_outputs)
     else:
         current = _run_current_step_declared_producers(project, sid)
     allowed, reason, authority_verdict = _current_step_producer_authority(

@@ -320,6 +320,37 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
             'missing': missing}
 
 
+def _declared_input_files(project: Path, declarations) -> dict[str, str]:
+    """Derive a direct caller's input identity from declared paths only."""
+    import hashlib
+    from step_required_inputs_check import expand
+    try:
+        import _flow_yaml
+        rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    except Exception:
+        rows = {}
+    specs = []
+    for entry in condition_aware_declarations(project, declarations, rows):
+        if isinstance(entry, str):
+            specs.append(entry)
+            continue
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get('from') == 'external' and entry.get('check') == 'none':
+            continue
+        try:
+            expanded = expand(dict(entry), rows)
+        except (KeyError, TypeError, ValueError):
+            expanded = []
+        if expanded:
+            specs.extend(spec for _, spec in expanded if isinstance(spec, str))
+        elif isinstance(entry.get('path'), str):
+            specs.append(entry['path'])
+    found, _ = resolve_contract(project, specs)
+    return {name: digest for name, digest in found.items()
+            if isinstance(digest, str) and digest}
+
+
 def _binding(inputs: Path) -> dict:
     raw = os.environ.get("VIBEIC_EXECUTION_BINDING")
     if raw:
@@ -353,17 +384,12 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         resolved = _resolve_input_contract(project, input_contract, manifest)
     input_contract = resolved['declarations']
     missing_inputs = resolved['missing']
-    # A caller that did not supply a resolved manifest still needs a concrete
-    # input identity for native current receipts.  Snapshot the copied input
-    # tree before the producer can write any output; this is provenance, not a
-    # replacement for the declaration/missing-input check above.
+    # The resolved declaration contract is the only producer input identity.
+    # Never replace an empty/conditional declaration with the entire copied
+    # project tree: that would admit stale outputs and unrelated inputs.
     producer_manifest = dict(resolved)
-    if not producer_manifest.get('files'):
-        producer_manifest['files'] = {
-            str(path.relative_to(project)): sha(path)
-            for path in project.rglob('*')
-            if path.is_file() and not path.is_symlink()
-        }
+    if not manifest_supplied:
+        producer_manifest['files'] = _declared_input_files(project, input_contract)
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
     if missing_inputs:
