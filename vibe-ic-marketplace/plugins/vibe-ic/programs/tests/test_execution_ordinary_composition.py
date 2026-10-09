@@ -333,9 +333,8 @@ def test_canonical_phase1_entry_defers_post_phase1_registration(tmp_path, monkey
         runtime = policy._ordinary_runtime
         assert current == project
         assert runtime['parameters']['skip_analog'] is skip_analog
-        assert runtime['registry'].adapters('0.5ic')
-        assert not runtime['registry'].adapters('A1')
-        assert not runtime['registry'].adapters('9')
+        assert 'registry' not in runtime
+        assert 'controller' not in runtime
         assert not declaration.exists()
         reached.append(True)
         raise ReachedPhase1Producer

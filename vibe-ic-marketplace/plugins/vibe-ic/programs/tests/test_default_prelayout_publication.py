@@ -119,18 +119,15 @@ def test_default_step15_runs_native_then_step8_step10_before_census(tmp_path, mo
     assert order == ["native", "step8", "step10"]
 
 
-def test_default_dispatch_runs_prelayout_preparation_without_controller_census(
+def test_default_dispatch_leaves_prelayout_to_canonical_producer(
         tmp_path, monkeypatch):
     project, netlist, pnr = _fixture(tmp_path)
     order = []
-    adapter = types.SimpleNamespace(applicability="applicable", tool_id="backend", objective={})
-    registry = types.SimpleNamespace(adapters=lambda step: [adapter])
-    controller = types.SimpleNamespace(portfolio={"steps": [{"id": "15", "mandatory_gate_programs": []}]})
     runtime = {
         "project": project,
         "policy": {"mode": "default", "request_receipt": {"invocation_id": "x"}},
         "parameters": {"top": "spm", "pdk": object(), "container": "vibeic-eda"},
-        "registry": registry, "controller": controller, "contexts": {}, "runs": {},
+        "contexts": {}, "runs": {},
         "route": {"source_sha": "s", "project_digest": "p", "ic_ip_path": "i"},
     }
     monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
@@ -142,21 +139,15 @@ def test_default_dispatch_runs_prelayout_preparation_without_controller_census(
         (folder / "vibeic_receipt.json").write_text("{}")
         return {"folder": folder, "sdc": {"verdict": "PASS"}}
 
-    _stub_step8_and_step10(monkeypatch, order)
-    monkeypatch.setattr(phase3, "_prelayout_librelane", produce)
+    def trap(*args, **kwargs):
+        raise AssertionError("Default policy dispatched the pre-layout producer")
 
-    def census(rt, step, **kwargs):
-        order.append("census")
-        return {}
-
-    monkeypatch.setattr(policy, "_fixed_inputs", census)
+    monkeypatch.setattr(policy, "_ensure_default_prelayout", trap)
     result = policy.dispatch_fixed_step(project, "15")
-    # Default owns Step 15's canonical pre-layout producer.  The policy seam
-    # performs only its typed preparation and returns control to the caller;
-    # it must not construct a Controller input census or publish a candidate
-    # result of its own.
+    # The phase-3 caller owns the canonical pre-layout producer.  The policy
+    # seam must not publish it or construct a Controller input census.
     assert result is None
-    assert order == ["native", "step8", "step10"]
+    assert order == []
 
 
 def test_default_step15_refuses_failed_native_producer(tmp_path, monkeypatch):
