@@ -56,8 +56,16 @@ def import_selected(project, context, controller, run, adopted):
     # Passing an empty synthetic row would turn the consumer into a census
     # call; the canonical row carries the declared gate and output semantics.
     gates = evaluate(selected_dir, ROWS[str(context.step_id)]["canonical_row"])
-    if gates.get("status") == "FAIL":
-        raise em.Refusal("GATE_FAIL", context.step_id)
+    # A typed consumer receipt is earned only by the canonical gate's measured
+    # PASS.  NOT_MEASURED, MISSING and conditional/non-applicable dispositions
+    # stay refusals here; the policy's explicit route-condition path handles
+    # a declared N/A before a backend generation can be selected.
+    if gates.get("status") != "PASS":
+        raise em.Refusal(
+            "GATE_FAIL" if gates.get("status") == "FAIL"
+            else "BACKEND_CANONICAL_CONSUMER_REFUSED",
+            context.step_id,
+        )
     return {"status": "CONSUMED", "step_id": context.step_id,
             "source_sha": context.source_sha, "consumer": gates,
             "design_verdict": "PASS"}
