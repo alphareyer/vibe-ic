@@ -263,16 +263,21 @@ def test_optional_backend_consumer_edges_preserve_present_files_and_empty_waiver
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     present = policy_backend_contract(project, "15")
-    assert set(optional) <= set(present)
+    present_paths = {
+        item if isinstance(item, str) else item.get("path")
+        for item in present
+    }
+    assert set(optional) <= present_paths
     present_parameters = {}
     present_files = policy._fixed_inputs(
         {"project": project, "registry": Registry()}, "15",
         parameters=present_parameters)
     assert set(optional) <= set(present_files)
-    present_strings = {item for item in
-                      present_parameters["resolved_input_manifest"]["declarations"]
-                      if isinstance(item, str)}
-    assert set(optional) <= present_strings
+    present_declaration_paths = {
+        item if isinstance(item, str) else item.get("path")
+        for item in present_parameters["resolved_input_manifest"]["declarations"]
+    }
+    assert set(optional) <= present_declaration_paths
 
     inputs = tmp_path / "inputs/project"
     outputs = tmp_path / "outputs"
@@ -301,6 +306,56 @@ def test_optional_backend_consumer_edges_preserve_present_files_and_empty_waiver
     assert result["missing_inputs"] == []
     assert set(result["resolved_input_manifest"]["files"]) == set(optional)
     assert calls == ["produce", "evaluate"]
+
+
+def test_issuer_and_worker_share_zero_byte_missing_contract(tmp_path, monkeypatch):
+    """Issuer and worker agree on ordinary zero bytes but preserve waivers."""
+    project = tmp_path / "project"
+    project.mkdir()
+    ordinary = project / "phase2/stage2/synth/fsm_encoding.enc"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_bytes(b"")
+    (project / "waivers.json").write_bytes(b"")
+    monkeypatch.setattr(_flow_yaml, "load", lambda: {"steps": [{
+        "id": "15", "required_inputs": [],
+    }]})
+
+    class Registry:
+        def adapters(self, step_id):
+            return [SimpleNamespace(input_contract=(str(ordinary.relative_to(project)),))]
+
+    parameters = {}
+    files = policy._fixed_inputs(
+        {"project": project, "registry": Registry()}, "15",
+        parameters=parameters)
+    manifest = parameters["resolved_input_manifest"]
+    ordinary_raw = str(ordinary.relative_to(project))
+    assert ordinary_raw in files and ordinary_raw in manifest["files"]
+    assert "waivers.json" in files and "waivers.json" in manifest["files"]
+    assert ordinary_raw in manifest["missing"]
+    assert "waivers.json" not in manifest["missing"]
+
+    inputs = tmp_path / "inputs/project"
+    outputs = tmp_path / "outputs"
+    for raw, source in files.items():
+        target = inputs / raw
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    calls = []
+    monkeypatch.setattr(worker, "produce",
+                        lambda project, params: calls.append("produce"))
+    monkeypatch.setattr(worker, "evaluate",
+                        lambda project, row: calls.append("evaluate"))
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({
+        "required_gates": [],
+    }))
+    result = worker.execute(
+        tmp_path / "inputs", outputs, step_id="15",
+        params={"resolved_input_manifest": manifest})
+    assert result["missing_inputs"] == manifest["missing"]
+    assert ordinary_raw in result["missing_inputs"]
+    assert "waivers.json" not in result["missing_inputs"]
+    assert calls == []
 
 
 @pytest.mark.parametrize("omitted, empty", [

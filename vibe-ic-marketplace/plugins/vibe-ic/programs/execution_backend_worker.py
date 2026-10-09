@@ -128,8 +128,9 @@ def resolve_contract(project: Path, patterns) -> tuple[dict, list[str]]:
     return found, missing
 
 
-def resolve_input_contract(project: Path, declarations) -> list[str]:
-    return _resolve_input_contract(project, declarations)["missing"]
+def resolve_input_contract(project: Path, declarations, manifest=None) -> list[str]:
+    """Return the aggregate missing set used by issuer and worker preflight."""
+    return _resolve_input_contract(project, declarations, manifest)["missing"]
 
 
 def _valid_manifest_declaration(entry) -> bool:
@@ -202,6 +203,17 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
     declarations = condition_aware_declarations(project, declarations, rows)
     missing = []
     seen = set()
+    # An existing empty waiver is malformed input that must reach the schema
+    # consumer.  Every other zero-byte member remains a preflight missing
+    # input.  Grant this exception only through the explicit optional mapping
+    # emitted by the backend issuer.
+    zero_byte_allowed = {
+        str(entry.get('path'))
+        for entry in declarations or ()
+        if isinstance(entry, Mapping)
+        and entry.get('required') is False
+        and isinstance(entry.get('path'), str)
+    }
 
     def add(value):
         value = str(value)
@@ -298,7 +310,8 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
                 add(raw)
                 continue
             if (target.is_symlink() or not target.is_file() or
-                    not target.stat().st_size or actual != digest.removeprefix('sha256:')):
+                    (not target.stat().st_size and str(rel) not in zero_byte_allowed)
+                    or actual != digest.removeprefix('sha256:')):
                 add(raw)
     if isinstance(manifest, Mapping):
         for item in manifest.get('missing', ()):

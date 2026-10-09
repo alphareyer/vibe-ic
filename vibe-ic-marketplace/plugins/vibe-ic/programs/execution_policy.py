@@ -561,8 +561,14 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     from execution_provider_catalog import BACKEND_IDS
     if str(step_id) in BACKEND_IDS:
         from execution_adapters_backend import backend_project_input_contract
-        declarations.extend(backend_project_input_contract(
-            root, str(step_id), collect_missing=True))
+        for item in backend_project_input_contract(
+                root, str(step_id), collect_missing=True):
+            # Preserve the public helper's historical path-string API while
+            # giving an existing waiver its explicit optional semantics in the
+            # issuer/worker manifest.  Other dynamic paths remain required.
+            declarations.append(
+                {'from': 'external', 'path': item, 'required': False}
+                if item == 'waivers.json' else item)
     # Frontend adapters retain YAML mappings; native adapters declare paths.
     # Use the canonical expansion for upstream `outputs: all` and keep an
     # unchecked external declaration out of the filesystem search.
@@ -600,8 +606,15 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     from execution_backend_worker import resolve_input_contract
     # This issuer-side aggregate is a backend worker contract.  Frontend and
     # analog routes keep their established optional/search semantics here.
-    missing = (resolve_input_contract(root, declarations)
-               if str(step_id) in BACKEND_IDS else [])
+    if str(step_id) in BACKEND_IDS:
+        import execution_backend_snapshot as _snapshot
+        manifest_files = {
+            name: _snapshot.sha(path) for name, path in sorted(inputs.items())
+        }
+        missing = resolve_input_contract(
+            root, declarations, {'files': manifest_files, 'missing': []})
+    else:
+        missing = []
     if parameters is not None:
         import execution_backend_snapshot as _snapshot
         parameters['resolved_input_manifest'] = {

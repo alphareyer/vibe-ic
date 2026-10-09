@@ -955,7 +955,14 @@ def backend_project_input_contract(project: Path, step_id: str, *,
     # receipt; the resolved config is its explicit input fingerprint.
     if (root / "phase3/librelane/synthesis_resolved.json").is_file():
         result.append("phase3/librelane/synthesis_resolved.json")
-    return tuple(dict.fromkeys(result))
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in result:
+        key = str(item)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return tuple(unique)
 
 
 def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[str, object],
