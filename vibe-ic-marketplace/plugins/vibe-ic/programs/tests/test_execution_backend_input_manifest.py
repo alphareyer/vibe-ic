@@ -5,6 +5,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,11 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import execution_backend_worker as worker
+from execution_adapters_backend import (
+    ROWS,
+    _backend_input_contract,
+    backend_project_input_contract as policy_backend_contract,
+)
 import execution_policy as policy
 import _flow_yaml
 
@@ -211,6 +217,84 @@ def test_issuer_manifest_aggregates_missing_row_inputs_before_dispatch(
         "reports/phase2/gates/missing_b.json",
         "input/submission_template",
     }
+
+
+def test_optional_backend_consumer_edges_are_present_only_when_nonempty(
+        tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    optional = {
+        "phase3/librelane_switch.json": b'{"mode":"librelane"}\n',
+        "waivers.json": b'{"waived_steps":[]}\n',
+        "input/pdk/liberty/sky.lib": b"library sky {}\n",
+    }
+    monkeypatch.setattr(_flow_yaml, "load", lambda: {"steps": [{
+        "id": "15", "required_inputs": [],
+    }]})
+    static_contract = _backend_input_contract("15", ROWS["15"])
+
+    class Registry:
+        def adapters(self, step_id):
+            return [SimpleNamespace(input_contract=static_contract)]
+
+    absent = policy_backend_contract(project, "15")
+    assert not (set(optional) & set(absent))
+    (project / "waivers.json").write_bytes(b"")
+    assert "waivers.json" not in policy_backend_contract(project, "15")
+    (project / "waivers.json").unlink()
+    absent_parameters = {}
+    policy._fixed_inputs(
+        {"project": project, "registry": Registry()}, "15",
+        parameters=absent_parameters)
+    absent_manifest = absent_parameters["resolved_input_manifest"]
+    absent_strings = {item for item in absent_manifest["declarations"]
+                      if isinstance(item, str)}
+    assert not (set(optional) & absent_strings)
+    assert not (set(optional) & set(absent_manifest["missing"]))
+
+    for raw, data in optional.items():
+        path = project / raw
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    present = policy_backend_contract(project, "15")
+    assert set(optional) <= set(present)
+    present_parameters = {}
+    present_files = policy._fixed_inputs(
+        {"project": project, "registry": Registry()}, "15",
+        parameters=present_parameters)
+    assert set(optional) <= set(present_files)
+    present_strings = {item for item in
+                      present_parameters["resolved_input_manifest"]["declarations"]
+                      if isinstance(item, str)}
+    assert set(optional) <= present_strings
+
+    inputs = tmp_path / "inputs/project"
+    outputs = tmp_path / "outputs"
+    for raw in optional:
+        target = inputs / raw
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / raw, target)
+    manifest = {
+        "declarations": [{"path": raw} for raw in optional],
+        "files": {raw: worker.sha(inputs / raw) for raw in optional},
+        "missing": [],
+    }
+    calls = []
+    monkeypatch.setattr(worker, "produce",
+                        lambda project, params: calls.append("produce") or {
+                            "verdict": "NOT_MEASURED"})
+    monkeypatch.setattr(worker, "evaluate",
+                        lambda project, row: calls.append("evaluate") or {
+                            "status": "NOT_MEASURED", "ledger": []})
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({
+        "required_gates": [],
+    }))
+    result = worker.execute(
+        tmp_path / "inputs", outputs, step_id="15",
+        params={"resolved_input_manifest": manifest})
+    assert result["missing_inputs"] == []
+    assert set(result["resolved_input_manifest"]["files"]) == set(optional)
+    assert calls == ["produce", "evaluate"]
 
 
 @pytest.mark.parametrize("omitted, empty", [

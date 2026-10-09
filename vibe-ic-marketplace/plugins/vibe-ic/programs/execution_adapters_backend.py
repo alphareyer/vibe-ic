@@ -630,7 +630,7 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
         "input/docs", "input/project.json", "input/step_0_5ic_answers.json", "input/submission_template",
         "phase1/generated_docs", "phase1/pdk_staging_read.json",
         "phase1/merged_docs", "phase2/stage1/rtl", "phase2/stage2", "reports/phase2/dft",
-        "phase2/stage2/synth/synth_inputs.json", "phase3/librelane_switch.json",
+        "phase2/stage2/synth/synth_inputs.json",
         "reports/pdk_via_patch_legalization.json",
     ]
     # PnR and streamout rows consume the current physical checkpoint.  Keep
@@ -693,6 +693,25 @@ def backend_project_input_contract(project: Path, step_id: str, *,
         if not target.exists():
             return
         carry_checkpoint_file(raw, allow_directory=(raw == "phase2/stage1/sim/tb"))
+
+    def carry_optional_nonempty_file(raw: str) -> None:
+        """Carry a current optional consumer file only when it has bytes."""
+        target = root / raw
+        if (target.is_symlink() or not target.is_file()
+                or target.stat().st_size <= 0):
+            return
+        carry_checkpoint_file(raw)
+
+    # These are optional consumer edges.  Their absence means the consumer's
+    # own condition does not apply; it must not become an issuer prerequisite.
+    carry_optional_nonempty_file("phase3/librelane_switch.json")
+    carry_optional_nonempty_file("waivers.json")
+    liberty_root = root / "input/pdk/liberty"
+    if liberty_root.is_dir() and not liberty_root.is_symlink():
+        for target in sorted(liberty_root.glob("*.lib")):
+            if target.is_symlink() or not target.is_file():
+                continue
+            carry_optional_nonempty_file(str(target.relative_to(root)))
 
     def prelayout_subject_paths(summary_raw: str) -> tuple[str, ...]:
         """Resolve Step 10's issued subject from its producer summary.
