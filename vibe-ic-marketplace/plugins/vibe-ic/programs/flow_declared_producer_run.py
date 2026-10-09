@@ -56,6 +56,7 @@ chip-AGNOSTIC: everything is read from the flow yaml and the project tree.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -270,11 +271,12 @@ def _glob_exists(project: Path, spec: str) -> bool:
             continue
         if any(ch in alt for ch in "*?["):
             try:
-                if next(iter(project.glob(alt)), None) is not None:
-                    return True
+                for candidate in project.glob(alt):
+                    if _is_run_owned_evidence(project, candidate):
+                        return True
             except (OSError, ValueError, IndexError):
                 continue
-        elif (project / alt).exists():
+        elif _is_run_owned_evidence(project, project / alt):
             return True
     return False
 
@@ -310,6 +312,56 @@ def _audit_claims(project: Path, sid: str, rel: str) -> bool:
         return bool(_fcc._prior_audit_created(project, sid, [rel]))
     except Exception:  # noqa: BLE001 — a sibling that cannot be read is named
         return False
+
+
+@functools.lru_cache(maxsize=1)
+def _flow_gate_json_targets() -> set[str]:
+    """Return declared gate ``--json`` destinations, without reading a run tree."""
+    try:
+        import yaml  # noqa: PLC0415
+        flow = yaml.safe_load(FLOW_YAML.read_text(errors="replace"))
+    except (ImportError, OSError, ValueError):
+        return set()
+    found: set[str] = set()
+    for step in _iter_steps(flow):
+        for command in _iter_commands(step.get("gate") or {}, []):
+            match = _JSON_RE.search(command)
+            if match:
+                found.add(match.group(1))
+    return found
+
+
+def _is_run_owned_evidence(project: Path, path: Path, *, for_input: bool = False) -> bool:
+    """Whether a concrete output can prove that its owning step ran.
+
+    Audit reports are observations, not producer inputs.  A role stamp is
+    authoritative when present; for the input closure an unstamped path that
+    is a declared gate ``--json`` destination is excluded, because legacy gate
+    writers have no way to distinguish their audit invocation from the run.
+    Producer documents at the same path retain precedence through
+    ``invoked_as``.
+    """
+    try:
+        if path.is_symlink():
+            return False
+        path = path.resolve()
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        rel = path.relative_to(project).as_posix()
+    except (OSError, ValueError):
+        return False
+    if rel == REPORT_REL or rel.startswith("reports/audit/"):
+        return False
+    role = _document_role(path)
+    if role == _ga.ROLE_AUDIT:
+        return False
+    if role == _ga.ROLE_PRODUCER:
+        return True
+    # For an unstamped JSON gate result, the input closure cannot treat the
+    # file as a producer input: legacy audit writers carry no role.  The
+    # sibling-presence check remains presence based for compatibility with
+    # pre-stamp producer outputs; ownership is resolved by ``owed`` itself.
+    return not for_input or rel not in _flow_gate_json_targets()
 
 
 def owed(project: Path, clauses: List[Dict[str, str]]
@@ -556,6 +608,14 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
         if path.is_symlink():
             raise ValueError("producer input is a symlink: " + relative)
         if path.is_file():
+            # The audit can leave gate reports beside the producer's real
+            # inputs.  Including those bytes makes a later audit rewrite the
+            # producer's input identity and can make its own JSON appear to be
+            # current producer evidence.  Keep producer-stamped reports; only
+            # audit-owned or attribution-free declared gate outputs are
+            # removed from the closure.
+            if not _is_run_owned_evidence(project, path, for_input=True):
+                continue
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     source = subprocess.check_output(
         ["git", "-C", str(PROGRAMS_DIR), "rev-parse", "HEAD"], text=True).strip()

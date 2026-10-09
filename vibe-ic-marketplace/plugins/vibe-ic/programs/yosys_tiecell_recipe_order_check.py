@@ -132,9 +132,11 @@ Exit codes (the flow_compliance_check three-way convention, routed through
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -359,6 +361,159 @@ def find_ys_scripts(project: Path) -> List[Path]:
     return sorted(set(found))
 
 
+_NATIVE_YOSYS_STEP = "Yosys.Synthesis"
+_NATIVE_COMMANDS_REL = "phase3/librelane"
+
+
+def _native_recipe_commands(text: str) -> List[Tuple[str, str]]:
+    """Extract recipe bodies from one native LibreLane ``COMMANDS`` file.
+
+    LibreLane's command journal is a record of the command *as invoked*, not a
+    ``.ys`` file.  Depending on the installed pyosys wrapper it is either a
+    plain command stream or a shell line containing ``yosys -p``.  Keep the
+    extraction deliberately narrow: a journal that names only the wrapper
+    (``yosys -c``) does not disclose the recipe and must remain unmeasured.
+    """
+    out: List[Tuple[str, str]] = []
+    stream: List[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # A command journal may retain the same GNU framing used by the runner
+        # logs.  Reuse the canonical parser so apostrophes in paths cannot
+        # silently truncate the body.
+        match = re.search(r"--\s*Running command\s*`(.+?)'[ \t]*--[ \t]*$",
+                          line)
+        command = match.group(1).strip() if match else line
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+        # Find a real ``-p``/``--commands`` argument on a yosys invocation.
+        # ``-c`` executes pyosys code and is intentionally not accepted as a
+        # recipe: its source is not the current recipe bytes in this receipt.
+        body = None
+        for idx, token in enumerate(tokens):
+            if token in ("-p", "--commands", "--command") and idx + 1 < len(tokens):
+                body = tokens[idx + 1]
+                break
+        if body is not None:
+            out.append(("inline", body))
+            continue
+        # A native journal produced by the pyosys adapter can contain one
+        # Yosys command per line.  Only accept a stream whose first token is a
+        # known Yosys command; shell wrappers and arbitrary log prose are not
+        # recipe evidence.
+        if tokens[0] in {"read_verilog", "hierarchy", "proc", "flatten",
+                         "synth", "techmap", "dfflibmap", "abc", "setundef",
+                         "hilomap", "clean", "opt_clean", "write_verilog",
+                         "stat", "splitnets", "dffunmap"}:
+            stream.append(command)
+    if stream:
+        out.append(("commands", "\n".join(stream)))
+    return out
+
+
+def _native_yosys_recipe(project: Path) -> Optional[dict]:
+    """Read the current native Yosys recipe, or disclose why it is unreadable.
+
+    The presence of a native synthesis receipt is an authority boundary.  Once
+    that boundary exists, a legacy ``.ys`` file or old synth log is not a
+    substitute for the current tool source.  ``native_commands.jsonl`` by
+    itself is only a worker journal and deliberately does not establish this
+    boundary (nor does it provide a recipe).
+    """
+    root = project / _NATIVE_COMMANDS_REL
+    receipts: List[Path] = []
+    native_dirs: List[Path] = []
+    if root.is_dir():
+        for folder in sorted(p for p in root.iterdir() if p.is_dir()):
+            receipt_path = folder / "vibeic_receipt.json"
+            config_path = folder / "config.json"
+            try:
+                receipt = json.loads(receipt_path.read_text(errors="replace")) \
+                    if receipt_path.is_file() else {}
+                config = json.loads(config_path.read_text(errors="replace")) \
+                    if config_path.is_file() else {}
+            except (OSError, ValueError):
+                receipt, config = {}, {}
+            if (receipt.get("input", {}).get("step") == _NATIVE_YOSYS_STEP
+                    or config.get("meta", {}).get("step") == _NATIVE_YOSYS_STEP):
+                native_dirs.append(folder)
+                if receipt_path.is_file():
+                    receipts.append(receipt_path)
+    native_seen = bool(native_dirs)
+    # An output-side journal without the producer receipt is explicitly not a
+    # recipe source; report it only when it is the sole native trace.
+    worker_journal = sorted(project.rglob("native_commands.jsonl"))
+    if not receipts and not worker_journal:
+        return None
+    report = {"mode": "native_pyosys", "findings": [], "violations": [],
+              "native_receipts": [str(p.relative_to(project)) for p in receipts]}
+    for receipt_path in receipts:
+        try:
+            receipt = json.loads(receipt_path.read_text(errors="replace"))
+            step = receipt.get("input", {}).get("step")
+            if step != _NATIVE_YOSYS_STEP:
+                continue
+            hashes = receipt.get("sha256")
+            if not isinstance(hashes, dict) or not hashes:
+                raise ValueError("native receipt has no output hash map")
+            # A receipt is only current evidence when every byte it names is
+            # still present and unchanged.  Never replace this with a fresh
+            # digest: that would bless a mutated native run.
+            folder = receipt_path.parent.resolve()
+            for rel, expected in hashes.items():
+                target = (folder / str(rel)).resolve()
+                if not target.is_relative_to(folder) or not target.is_file():
+                    raise ValueError(f"native receipt output missing: {rel}")
+                got = hashlib.sha256(target.read_bytes()).hexdigest()
+                if got != str(expected):
+                    raise ValueError(f"native receipt digest mismatch: {rel}")
+            commands_path = receipt_path.parent / "COMMANDS"
+            if not commands_path.is_file() or not commands_path.stat().st_size:
+                raise ValueError("native Yosys receipt has no COMMANDS source")
+            command_rows = _native_recipe_commands(
+                commands_path.read_text(errors="replace"))
+            if not command_rows:
+                raise ValueError("native COMMANDS has no readable pyosys recipe")
+            for unit, body in command_rows:
+                d = (diagnose_inline_command(body) if unit == "inline"
+                     else diagnose(body))
+                d["source"] = str(commands_path.relative_to(project))
+                report["findings"].append(d)
+                if d.get("verdict") in ("CLEAN", "VIOLATION"):
+                    report["violations"].extend(d.get("violations", []))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            report["findings"].append({
+                "source": str(receipt_path.relative_to(project)),
+                "verdict": "NOT_CHECKED",
+                "reason": str(exc), "violations": [],
+            })
+    judged = [f for f in report["findings"]
+              if f.get("verdict") in ("CLEAN", "VIOLATION")]
+    if judged:
+        report["verdict"] = "VIOLATION" if report["violations"] else "CLEAN"
+        report["summary"] = {"skipped": False, "reason": "native_pyosys_receipt",
+                             "judged": len(judged),
+                             "denominator": len(report["findings"])}
+    else:
+        report["verdict"] = "NOT_CHECKED"
+        report["summary"] = {"skipped": True,
+                             "reason": ("native_receipt_without_recipe"
+                                        if native_seen else
+                                        "native_command_journal_without_receipt"),
+                             "judged": 0,
+                             "denominator": len(report["findings"])}
+        report["reason"] = (
+            "native Yosys producer receipt/source was not readable; legacy-only "
+            "recipes are not accepted as current evidence")
+    return report
+
+
 def has_mapped_netlist(project: Path) -> List[str]:
     """Project-relative paths of published STRUCTURAL netlists.
 
@@ -408,6 +563,18 @@ def audit_project(project: Path) -> dict:
         "violations": [],
         "netlists_published": has_mapped_netlist(project),
     }
+
+    # A current LibreLane producer owns the synthesis recipe.  Consume its
+    # receipt and COMMANDS source before looking at any legacy project script;
+    # accepting a stale ``.ys``/log beside a native run would prove a different
+    # producer and turn an absent native source into a false clean bill.
+    native = _native_yosys_recipe(project)
+    if native is not None:
+        report.update(native)
+        report["gate"] = GATE
+        report["project"] = str(project)
+        report["netlists_published"] = has_mapped_netlist(project)
+        return report
 
     # --- (1) .ys scripts --------------------------------------------------
     ys_files = find_ys_scripts(project)

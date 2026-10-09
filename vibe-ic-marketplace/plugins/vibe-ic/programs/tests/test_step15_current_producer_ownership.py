@@ -92,6 +92,47 @@ def test_current_step_scope_filters_before_owed_and_run(tmp_path, monkeypatch):
     assert record["executed"] == 1
 
 
+def test_audit_gate_json_is_not_a_step_sibling_or_input_closure(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    gate_json = project / "reports/lec_equivalence_check.json"
+    gate_json.parent.mkdir(parents=True)
+    gate_json.write_text(json.dumps({"invoked_as": "audit", "verdict": "PASS"}) + "\n")
+    producer_json = project / "reports/real_producer.json"
+    producer_json.write_text(json.dumps({
+        "invoked_as": "producer", "program": "real_producer",
+    }) + "\n")
+
+    clauses = [{"step": "15", "program": "stage2_compliance",
+                "target": "reports/phase2/gates/stage2_compliance.json",
+                "siblings": ["reports/lec_equivalence_check.json"]}]
+    to_run, skipped = declared.owed(project, clauses)
+    assert not to_run
+    assert skipped and "did not perform" in skipped[0]["why"]
+
+    identity = declared._current_input_identity(project, clauses)
+    assert "reports/lec_equivalence_check.json" not in identity["files"]
+    assert "reports/real_producer.json" in identity["files"]
+
+
+def test_audit_role_gate_output_is_excluded_but_producer_role_survives(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    audit_json = project / "reports/analog/a1_spec.json"
+    audit_json.parent.mkdir(parents=True)
+    audit_json.write_text(json.dumps({"invoked_as": "audit", "verdict": "PASS"}) + "\n")
+    producer_json = project / "reports/analog/a1_spec_produced.json"
+    producer_json.write_text(json.dumps({
+        "invoked_as": "producer", "program": "analog_a1_spec_extract_check",
+    }) + "\n")
+    identity = declared._current_input_identity(project, [{
+        "step": "A1", "program": "analog_a1_spec_extract_check",
+        "target": "reports/analog/a1_spec.json",
+    }])
+    assert "reports/analog/a1_spec.json" not in identity["files"]
+    assert "reports/analog/a1_spec_produced.json" in identity["files"]
+
+
 def test_backend_producer_orders_current_declared_outputs_before_consumer(
         tmp_path, monkeypatch):
     events = []

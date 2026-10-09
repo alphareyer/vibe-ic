@@ -239,6 +239,99 @@ def test_neither_project_dir_nor_ys_file_is_a_usage_error():
     assert "project_dir" in err or "--ys-file" in err
 
 
+def _native_project(tmp_path, commands, *, receipt=True):
+    project = tmp_path / "native"
+    folder = project / "phase3/librelane/06-yosys-synthesis"
+    folder.mkdir(parents=True)
+    (folder / "COMMANDS").write_text(commands)
+    if receipt:
+        state = folder / "state_out.json"
+        state.write_text("{}\n")
+        import hashlib
+        (folder / "vibeic_receipt.json").write_text(json.dumps({
+            "input": {"step": "Yosys.Synthesis"},
+            "sha256": {"state_out.json": hashlib.sha256(
+                state.read_bytes()).hexdigest()},
+        }))
+    return project
+
+
+def test_native_receipt_and_commands_win_over_legacy_recipe(tmp_path):
+    project = _native_project(tmp_path, _GOOD)
+    legacy = project / "phase2/stage2/synth/legacy.ys"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_NO_SETUNDEF)
+
+    code, out, err = _run([str(project)])
+
+    assert code == 0, out + err
+    report = json.loads((project / "report.json").read_text()) \
+        if (project / "report.json").is_file() else None
+    # The CLI has no implicit report path; inspect through its public helper so
+    # this assertion cannot pass by reading a legacy gate output.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tiecell", PROG)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.audit_project(project)
+    assert report["mode"] == "native_pyosys"
+    assert report["verdict"] == "CLEAN"
+    assert report["summary"]["reason"] == "native_pyosys_receipt"
+
+
+def test_native_trace_without_receipt_is_not_measured_and_never_uses_legacy(
+        tmp_path):
+    project = _native_project(tmp_path, _NO_SETUNDEF, receipt=False)
+    (project / "phase3/librelane/native_commands.jsonl").write_text('{}\n')
+    legacy = project / "phase2/stage2/synth/legacy.ys"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_GOOD)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tiecell", PROG)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.audit_project(project)
+    assert report["mode"] == "native_pyosys"
+    assert report["verdict"] == "NOT_CHECKED"
+    assert report["summary"]["reason"] == "native_command_journal_without_receipt"
+
+
+def test_native_receipt_without_current_commands_is_not_measured(tmp_path):
+    project = _native_project(tmp_path, "", receipt=True)
+    (project / "phase2/stage2/synth/legacy.ys").parent.mkdir(parents=True)
+    (project / "phase2/stage2/synth/legacy.ys").write_text(_GOOD)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tiecell", PROG)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.audit_project(project)
+    assert report["mode"] == "native_pyosys"
+    assert report["verdict"] == "NOT_CHECKED"
+    assert report["summary"]["reason"] == "native_receipt_without_recipe"
+
+
+def test_unrelated_native_receipt_does_not_shadow_legacy_recipe(tmp_path):
+    project = tmp_path / "legacy"
+    folder = project / "phase3/librelane/13-openroad-floorplan"
+    folder.mkdir(parents=True)
+    (folder / "vibeic_receipt.json").write_text(json.dumps({
+        "input": {"step": "OpenROAD.Floorplan"}, "sha256": {},
+    }))
+    legacy = project / "phase2/stage2/synth/legacy.ys"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_NO_SETUNDEF)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tiecell", PROG)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = mod.audit_project(project)
+    assert report["mode"] == "ys_script"
+    assert report["verdict"] == "VIOLATION"
+
+
 # ===== PROJECT MODE (the wiring shape flow Step 14 declares) ================
 #
 # The gate used to accept ONLY `--ys-file`, while the flow YAML invokes every
