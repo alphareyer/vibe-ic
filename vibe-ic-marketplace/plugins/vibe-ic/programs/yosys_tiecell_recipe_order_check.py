@@ -400,7 +400,13 @@ def _native_recipe_commands(text: str) -> List[Tuple[str, str]]:
             if token in ("-p", "--commands", "--command") and idx + 1 < len(tokens):
                 body = tokens[idx + 1]
                 break
-        if body is not None:
+        # The option spelling alone is not an executable identity.  A line
+        # such as ``printf -p ...`` must never become synthesis evidence.  A
+        # resolved tool path is accepted by basename, while wrappers (``env``,
+        # ``sh -c``) remain unreadable until the native receipt binds a direct
+        # Yosys invocation.
+        executable = Path(tokens[0]).name.lower()
+        if body is not None and executable == "yosys":
             out.append(("inline", body))
             continue
         # A native journal produced by the pyosys adapter can contain one
@@ -449,10 +455,24 @@ def _native_yosys_recipe(project: Path) -> Optional[dict]:
     # An output-side journal without the producer receipt is explicitly not a
     # recipe source; report it only when it is the sole native trace.
     worker_journal = sorted(project.rglob("native_commands.jsonl"))
-    if not receipts and not worker_journal:
+    if not receipts and not worker_journal and not native_seen:
         return None
     report = {"mode": "native_pyosys", "findings": [], "violations": [],
               "native_receipts": [str(p.relative_to(project)) for p in receipts]}
+    # A Yosys.Synthesis config is itself a native marker.  If its producer
+    # receipt disappeared, do not fall through to a neighbouring legacy .ys
+    # file: that file may describe another producer/run.
+    for folder in native_dirs:
+        receipt_path = folder / "vibeic_receipt.json"
+        if not receipt_path.is_file():
+            config_path = folder / "config.json"
+            report["findings"].append({
+                "source": str(config_path.relative_to(project))
+                if config_path.is_file() else str(folder.relative_to(project)),
+                "verdict": "NOT_CHECKED",
+                "reason": "native Yosys config has no producer receipt",
+                "violations": [],
+            })
     for receipt_path in receipts:
         try:
             receipt = json.loads(receipt_path.read_text(errors="replace"))
@@ -474,6 +494,13 @@ def _native_yosys_recipe(project: Path) -> Optional[dict]:
                 if got != str(expected):
                     raise ValueError(f"native receipt digest mismatch: {rel}")
             commands_path = receipt_path.parent / "COMMANDS"
+            # LibreLane's old receipts often carry output/config digests but
+            # omit COMMANDS.  COMMANDS is mutable outside the receipt, so it
+            # cannot be used as the current recipe unless its own digest is
+            # bound.  Keep the native authority boundary and disclose
+            # NOT_CHECKED instead of trusting bytes beside the receipt.
+            if "COMMANDS" not in hashes:
+                raise ValueError("native Yosys receipt does not bind COMMANDS digest")
             if not commands_path.is_file() or not commands_path.stat().st_size:
                 raise ValueError("native Yosys receipt has no COMMANDS source")
             command_rows = _native_recipe_commands(
@@ -495,9 +522,22 @@ def _native_yosys_recipe(project: Path) -> Optional[dict]:
             })
     judged = [f for f in report["findings"]
               if f.get("verdict") in ("CLEAN", "VIOLATION")]
-    if judged:
-        report["verdict"] = "VIOLATION" if report["violations"] else "CLEAN"
+    incomplete = [f for f in report["findings"]
+                  if f.get("verdict") == "NOT_CHECKED"]
+    if report["violations"]:
+        # Preserve measured failure precedence when one native source is bad
+        # and another is incomplete.
+        report["verdict"] = "VIOLATION"
         report["summary"] = {"skipped": False, "reason": "native_pyosys_receipt",
+                             "judged": len(judged),
+                             "denominator": len(report["findings"])}
+    elif incomplete:
+        # CLEAN + NOT_CHECKED is incomplete evidence, never a clean aggregate.
+        report["verdict"] = "NOT_CHECKED"
+        report["summary"] = {"skipped": True,
+                             "reason": ("native_receipt_without_recipe"
+                                        if native_seen else
+                                        "native_command_journal_without_receipt"),
                              "judged": len(judged),
                              "denominator": len(report["findings"])}
     else:

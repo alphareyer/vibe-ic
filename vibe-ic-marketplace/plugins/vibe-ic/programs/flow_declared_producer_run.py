@@ -613,8 +613,16 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
             # producer's input identity and can make its own JSON appear to be
             # current producer evidence.  Keep producer-stamped reports; only
             # audit-owned or attribution-free declared gate outputs are
-            # removed from the closure.
-            if not _is_run_owned_evidence(project, path, for_input=True):
+            # removed from the closure.  A zero-byte *source* is still a
+            # semantic input: it must invalidate reuse when it changes to (or
+            # from) empty.  Zero-byte outputs remain excluded by
+            # `_is_run_owned_evidence` and cannot prove a producer ran.
+            if path.stat().st_size == 0:
+                if (relative.startswith("reports/audit/") or
+                        relative in _flow_gate_json_targets() or
+                        _document_role(path) == _ga.ROLE_AUDIT):
+                    continue
+            elif not _is_run_owned_evidence(project, path, for_input=True):
                 continue
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     source = subprocess.check_output(
