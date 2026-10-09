@@ -58254,10 +58254,14 @@ _PRE_AUDIT_PRODUCERS = (
     # each step's gate writes its verdict to its own path (see the two clauses in
     # the flow yaml). `tapeout_checklist_gen` takes `--json` as an alias for `--out`
     # so this runner's one spelling reaches it.
-    ("tapeout_checklist", "tapeout_checklist_gen.py",
-     "reports/audit/tapeout_checklist.json", ()),
     ("foundry_handoff", "foundry_handoff_pack_gen.py",
      "phase3/stage4/foundry_handoff/mask_spec.json", ()),
+    # The checklist snapshots the handoff documents, so the producer order is
+    # a data dependency: assemble the handoff before grading it.  The later
+    # derived-generator pass is deliberately told these two producers have
+    # already run; it must not refresh either file a second time.
+    ("tapeout_checklist", "tapeout_checklist_gen.py",
+     "reports/audit/tapeout_checklist.json", ()),
     # R-0915-129 / SLT53B handback — step 37.3's receipt must be PRODUCED, and by
     # something other than the step's own gate clause. A step whose declared
     # output IS its gate's product can never satisfy the audit: compliance reads
@@ -76525,8 +76529,15 @@ _DERIVED_ARTEFACT_GENERATORS = (
 )
 
 
-def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
-                                     ) -> List[Dict[str, Any]]:
+def _pre_audit_generator_names() -> FrozenSet[str]:
+    """Names already attempted by the synchronous pre-audit producer chain."""
+    return frozenset(program for _name, program, _out_rel, _extra
+                     in _PRE_AUDIT_PRODUCERS)
+
+
+def _run_derived_artefact_generators(project: Path, effective_top: Optional[str],
+                                     *, skip_names: Iterable[str] = ()) \
+                                     -> List[Dict[str, Any]]:
     """Run `_DERIVED_ARTEFACT_GENERATORS` in order and return each outcome.
 
     Best-effort for rc 0/1 (each artefact has its own gate); an rc-2 refusal
@@ -76540,9 +76551,15 @@ def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
     step failed at the audit with the flag simply "absent", and finding the
     cause took a replay on a copy. A non-zero exit is now printed with the
     generator's own message, and every outcome is returned to the caller.
+    ``skip_names`` is used when a producer was already attempted earlier in
+    the same synchronous run; skipped producers are consumed through their
+    original ``StepResult`` rather than being launched a second time.
     """
     outcomes: List[Dict[str, Any]] = []
+    skip = frozenset(str(name) for name in skip_names)
     for gen, kind in _DERIVED_ARTEFACT_GENERATORS:
+        if gen in skip:
+            continue
         gen_path = PROGRAMS_DIR / gen
         if not gen_path.is_file():
             continue
@@ -79092,8 +79109,18 @@ def main() -> int:
     # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
     # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
     # already exist (not a snapshot written moments too early).
+    # foundry_handoff_pack_gen and tapeout_checklist_gen already ran in the
+    # synchronous pre-audit producer chain above.  Re-running either here
+    # would overwrite the producer result after its consumer boundary and, for
+    # the checklist, would recreate the old handoff-before-checklist race.
     plan.extend(_derived_generator_refusals(
-        _run_derived_artefact_generators(project, effective_top)))
+        _run_derived_artefact_generators(
+            project, effective_top,
+            # On a refused layout the pre-audit chain was not attempted, so
+            # retain the derived generator's own refusal handling.  A measured
+            # chain skips only the producer names it already attempted.
+            skip_names=(_pre_audit_generator_names()
+                        if not _layout_refusal else frozenset()))))
 
     # ORGANIC #655 — the post-hoc audits, on the run that just finished.
     for prog, rel_json, kind in _POST_RUN_AUDITS:

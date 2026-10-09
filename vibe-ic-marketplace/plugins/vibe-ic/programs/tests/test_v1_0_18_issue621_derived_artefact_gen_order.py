@@ -54,6 +54,31 @@ def test_constant_order_foundry_before_checklist():
         < order.index("tapeout_checklist_gen.py")
 
 
+def test_pre_audit_release_producers_are_not_launched_again(monkeypatch, tmp_path):
+    """The canonical synchronous chain owns these two writes exactly once."""
+    overlap = {
+        gen for gen, _kind in P._DERIVED_ARTEFACT_GENERATORS
+        if gen in P._pre_audit_generator_names()
+    }
+    assert overlap == {
+        "foundry_handoff_pack_gen.py",
+        "tapeout_checklist_gen.py",
+    }
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args[0])
+        raise AssertionError("a pre-audit producer was launched twice")
+
+    monkeypatch.setattr(P.subprocess, "run", fake_run)
+    monkeypatch.setattr(P, "_DERIVED_ARTEFACT_GENERATORS",
+                        tuple((name, "release") for name in overlap))
+    assert P._run_derived_artefact_generators(
+        tmp_path, None, skip_names=P._pre_audit_generator_names()) == []
+    assert calls == []
+
+
 def test_e2e_fixed_order_checklist_sees_foundry(tmp_path):
     # Run the generators in the module-constant order; the foundry-producing
     # generator runs first, so the checklist grades present artefacts.
