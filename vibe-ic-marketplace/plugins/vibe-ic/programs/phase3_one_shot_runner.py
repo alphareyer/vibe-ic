@@ -133,6 +133,29 @@ from _staged_pdk_tech_lef import (
 )
 
 
+def _step25_native_density_due(project: Path, def_file: Path,
+                               pdk: Any) -> bool:
+    """Single Phase-3 seam for Step 25's current-input admission.
+
+    The predicate is owned by ``_ppa.area``; keeping this thin caller wrapper
+    makes the canonicalizer's producer/consumer boundary explicit and gives
+    composition tests one seam to prove that the current DEF, authority and
+    companion evidence are checked before a cached EM result is reused.
+    """
+    return _ppa_area.step25_native_density_due(project, def_file, pdk)
+
+
+def _step33_current_power_due(project: Path, power_rpt: Path) -> bool:
+    """Single Phase-3 seam for Step 33's current-input admission."""
+    return _ppa_power.step33_current_power_due(project, power_rpt)
+
+
+def _adopt_current_power_report(project: Path, top: str, power_rpt: Path,
+                                notes: List[str]) -> bool:
+    """Publish the current native Step-33 tool subject through its owner."""
+    return _ppa_power.adopt_current_power_report(project, top, power_rpt, notes)
+
+
 PROGRAMS_DIR = Path(__file__).resolve().parent
 TOOLS_IN_CONTAINER = "/foss/tools"
 PDKS_IN_CONTAINER = "/foss/pdks"
@@ -63254,7 +63277,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         except (OSError, ValueError):
             _em_dual_due = True
     _em_native_due = (primary_def.is_file()
-                      and _ppa_area.step25_native_density_due(
+                      and _step25_native_density_due(
                           project, primary_def, pdk))
     if primary_def.is_file() and (_signoff_regen(ir_rpt, primary_def)
                                   or _signoff_regen(em_rpt, primary_def)
@@ -64611,7 +64634,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     from librelane_contract import selected_mode as _ll_mode33
     _m33 = _ll_mode33(project, "33")
     _power_current_due = (primary_def.is_file()
-                          and _ppa_power.step33_current_power_due(
+                          and _step33_current_power_due(
                               project, power_rpt))
     _power_direct_ran = primary_def.is_file() and not _power_current_due
     if primary_def.is_file() and (_signoff_regen(power_rpt, primary_def)
