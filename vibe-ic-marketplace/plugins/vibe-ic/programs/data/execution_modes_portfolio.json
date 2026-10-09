@@ -10,6 +10,15 @@
     "as_of": "2026-10-03",
     "evidence_scope": "CURRENT_SOURCE_RUNNER_INTEGRATION; RUNTIME_AVAILABILITY_AND EDA_RESULTS REMAIN PER_INVOCATION",
     "controller_scope": "SHARED REGISTRY/CONTROLLER HOOKED INTO FIVE ORDINARY RUNNER FRONT DOORS; FIXED-STEP ADAPTER AVAILABILITY AND QUALIFICATION REMAIN PER INVOCATION",
+    "default_mode": {
+      "status": "COMPLETE_ROUTING",
+      "execution": "canonical-producer-first",
+      "step_count": 70,
+      "controller": "ultra-only",
+      "default_tool_selection": "librelane-then-openroad-then-other-or-canonical-program",
+      "runtime_evidence": "PER_INVOCATION",
+      "whole_flow_verdict": "NOT_CLAIMED"
+    },
     "policy_globally_implemented": false,
     "registered_production_executors": 54,
     "runnable_eda_candidates": null,

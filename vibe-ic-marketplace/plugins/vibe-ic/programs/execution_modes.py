@@ -1689,6 +1689,15 @@ def _validate_portfolio(data: dict, *, snapshot=None) -> None:
     flow_sha, requirements = _canonical_flow_requirements()
     snapshot = snapshot or _active_source_snapshot()
     meta = data.get('meta') or {}
+    default_mode = meta.get('default_mode')
+    if (not isinstance(default_mode, dict)
+            or default_mode.get('status') != 'COMPLETE_ROUTING'
+            or default_mode.get('execution') != 'canonical-producer-first'
+            or default_mode.get('step_count') != 70
+            or default_mode.get('controller') != 'ultra-only'
+            or default_mode.get('runtime_evidence') != 'PER_INVOCATION'
+            or default_mode.get('whole_flow_verdict') != 'NOT_CLAIMED'):
+        raise Refusal('PORTFOLIO_DEFAULT_ROUTING_UNBOUND', str(default_mode))
     if meta.get('canonical_flow_sha256') != flow_sha:
         raise Refusal('PORTFOLIO_STALE_CANONICAL', str(meta.get('canonical_flow_sha256')))
     ids = [s['id'] for s in data['steps']]

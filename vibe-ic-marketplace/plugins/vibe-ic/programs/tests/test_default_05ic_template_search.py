@@ -1,18 +1,17 @@
 """Canonical Default lookup preserves absent and present operator evidence."""
-import hashlib
 import json
-from pathlib import Path
 
 import pytest
 import execution_policy as policy
 import phase1_one_shot_runner as phase1
-from programs.tests.test_execution_receipt_chain import isolated_transport, real_entry
+from programs.tests.test_execution_receipt_chain import isolated_transport, real_entry  # noqa: F401
 from programs.tests.test_default_d1_entry import _raw_docs_project
 
 
 def test_derived_answer_documents_reach_the_real_gate_and_remain_bound(tmp_path):
     import area_budget_basis_gen as area
-    import execution_modes as modes
+    import submission_template_check
+    import tapeout_declaration_check
     from programs.tests.test_r0929_deliverable_consistency import _project
     from programs.tests._route_fixture import stage_owner_route
 
@@ -30,30 +29,35 @@ def test_derived_answer_documents_reach_the_real_gate_and_remain_bound(tmp_path)
     real_entry('IC', 'default', project)
     policy.bootstrap(project, parameters={'skip_analog': True}, phase1_only=True)
     assert phase1._run_step_0_5ic(project) == 0
-    receipt_path, = (project / 'reports/execution').glob(
-        '*/0.5ic/frontend_0_5ic/receipt.json')
-    receipt = json.loads(receipt_path.read_text())
-    output = Path(receipt['output_root'])
-    assert all(row['rc'] == 0 for row in receipt['processes'])
-    gate = json.loads((output / 'reports/execution_gates/tapeout_declaration_check.json').read_text())
-    assert gate['verdict'] == 'PASS' and gate['refusals'] == []
-    assert receipt['evidence']['gates']['submission_template_check'] == 'NOT_APPLICABLE'
-    adoption = json.loads((receipt_path.parent.parent / 'adoption.json').read_text())
-    assert adoption['status'] == 'ADOPTED'
-    assert not modes.required_gate_satisfied('0.5ic', 'tapeout_declaration_check', 'NOT_APPLICABLE')
-    assert not modes.required_gate_satisfied('32', 'submission_template_check', 'NOT_APPLICABLE')
+    output = project / 'reports/phase1'
+    assert all((output / name).is_file() for name in (
+        'submission_template.json', 'submission_template_answers.json',
+        'submission_template_fetch.json', 'tapeout_declaration.json'))
+    # Default is the canonical producer path.  The flow gates consume those
+    # reports directly; there is no Controller plan, worker receipt, or
+    # adoption record to make a component look like a whole-flow result.
+    gate_dir = project / 'reports/execution_gates'
+    gate_dir.mkdir()
+    assert submission_template_check.main([
+        str(project), '--json', str(gate_dir / 'submission_template_check.json')]) == 0
+    assert tapeout_declaration_check.main([
+        str(project), '--json', str(gate_dir / 'tapeout_declaration_check.json')]) == 0
+    assert json.loads((gate_dir / 'submission_template_check.json').read_text())[
+        'check']['verdict'] == 'NOT_APPLICABLE'
+    assert json.loads((gate_dir / 'tapeout_declaration_check.json').read_text())[
+        'verdict'] == 'PASS'
+    assert not list((project / 'reports/execution').glob('*/*/plan.json'))
+    assert not list((project / 'reports/execution').glob('*/0.5ic/adoption.json'))
+    # The direct producer reads the staged documents; it does not create a
+    # second mutable copy whose hash would become a separate adoption claim.
     for name, content in docs.items():
-        assert receipt['binding']['inputs'][name] == hashlib.sha256(content).hexdigest()
-        assert (output / name).read_bytes() == content
-    modes.consume_frontend_chain(output, receipt['binding'])
-    changed = output / next(iter(docs))
-    changed.write_bytes(changed.read_bytes() + b'\nchanged after staging\n')
-    with pytest.raises(modes.Refusal, match='STAGED_INPUT_COPY_CHANGED'):
-        modes.consume_frontend_chain(output, receipt['binding'])
+        assert (project / name).read_bytes() == content
 
 
 @pytest.mark.parametrize('present', [False, True], ids=['missing', 'present'])
 def test_default_05ic_uses_canonical_search_and_real_gates(tmp_path, present):
+    import submission_template_check
+    import tapeout_declaration_check
     project = tmp_path / 'subject'
     if present:
         _raw_docs_project(project)
@@ -77,51 +81,54 @@ def test_default_05ic_uses_canonical_search_and_real_gates(tmp_path, present):
     policy.bootstrap(project, parameters={'skip_analog': True}, phase1_only=True)
     rc = phase1._run_step_0_5ic(project)
     assert answer_path.read_bytes() == owner_bytes
-    receipts = list((project / 'reports/execution').glob('*/0.5ic/frontend_0_5ic/receipt.json'))
-    assert len(receipts) == 1
-    receipt = json.loads(receipts[0].read_text())
-    worker, *gates = receipt['processes']
-    assert worker['component'] == 'frontend_worker' and worker['rc'] == 0, receipt
-    assert receipt['binding']['objective']['template'] == 'input/submission_template_source'
-    output = Path(receipt['output_root'])
-    chain = json.loads((output / 'issued-producer-chain.json').read_text())['payload']
-    assert [Path(stage['argv'][1]).name for stage in chain['stages']] == [
-        'submission_template_ingest.py', 'tapeout_declaration_gen.py']
-    assert all(stage['rc'] == 0 for stage in chain['stages'])
+    output = project / 'reports/phase1'
+    assert all((output / name).is_file() for name in (
+        'submission_template.json', 'submission_template_answers.json',
+        'submission_template_fetch.json', 'tapeout_declaration.json'))
+    assert not list((project / 'reports/execution').glob('*/*/receipt.json'))
+    assert not list((project / 'reports/execution').glob('*/0.5ic/adoption.json'))
+    ingest = json.loads((output / 'submission_template.json').read_text())['ingest']
+    declaration = json.loads((output / 'tapeout_declaration.json').read_text())
+    gate_dir = project / 'reports/execution_gates'
+    gate_dir.mkdir()
+    submission_rc = submission_template_check.main([
+        str(project), '--json', str(gate_dir / 'submission_template_check.json')])
+    tapeout_rc = tapeout_declaration_check.main([
+        str(project), '--json', str(gate_dir / 'tapeout_declaration_check.json')])
     for name in ('submission_template', 'tapeout_declaration'):
-        rel = 'reports/phase1/' + name + '.json'
-        assert hashlib.sha256((output / rel).read_bytes()).hexdigest() == chain['outputs'][rel]
-        assert (output / rel).stat().st_ctime_ns == chain['output_ctimes'][rel]
-    ingest = json.loads((output / 'reports/phase1/submission_template.json').read_text())['ingest']
+        assert (output / (name + '.json')).stat().st_size
     assert ingest['lookup']['attempted'] is True
     assert len(ingest['lookup']['searched']) == 1
     assert ingest['lookup']['searched'][0].endswith('/input/submission_template_source')
     if present:
-        assert len(gates) == 2 and all(gate['rc'] == 0 for gate in gates)
+        assert submission_rc == 0 and tapeout_rc == 0
         assert rc == 0
         assert ingest['status'] == 'INGESTED'
-        assert receipt['evidence']['gates'] == {
-            'submission_template_check': 'PASS', 'tapeout_declaration_check': 'PASS'}
-        assert json.loads((receipts[0].parent.parent / 'adoption.json').read_text())['status'] == 'ADOPTED'
-        assert 'input/submission_template_source/s1.yaml' in receipt['binding']['inputs']
+        assert json.loads((gate_dir / 'submission_template_check.json').read_text())[
+            'check']['verdict'] == 'PASS'
+        assert json.loads((gate_dir / 'tapeout_declaration_check.json').read_text())[
+            'verdict'] == 'PASS'
+        assert json.loads((output / 'submission_template.json').read_text())[
+            'ingest']['slots'][0]['source_relpath'] == 's1.yaml'
+        assert declaration['route'] == 'SHUTTLE'
     else:
-        assert rc == 1
+        # The producer records the absence; the blocking verdict belongs to
+        # the canonical gate that consumes its report.
+        assert rc == 0
         assert ingest['status'] == 'ABSENT'
         assert ingest['no_template_reason'] is None
         assert ingest['path_selector']['declared'] is False
-        assert len(gates) == 1
-        assert gates[0]['component'] == 'submission_template_check' and gates[0]['rc'] == 1
-        gate = json.loads((output / 'reports/execution_gates/submission_template_check.json').read_text())
+        assert submission_rc == 1
+        gate = json.loads((gate_dir / 'submission_template_check.json').read_text())
         assert gate['check']['verdict'] == 'FAIL'
         assert 'NO_TEMPLATE_WITHOUT_REASON' in {row['rule'] for row in gate['check']['refusals']}
-        # Existing component execution stops at the first nonzero gate. Keep
-        # that refusal and its unmeasured remainder; it cannot be adopted.
-        assert receipt['status'] == 'NOT_MEASURED'
-        assert receipt['reason'] == 'PROCESS_ERROR'
-        assert receipt['detail'] == 'PROCESS_ERROR: submission_template_check: rc=1'
-        assert not (output / 'reports/execution_gates/tapeout_declaration_check.json').exists()
-        assert not (receipts[0].parent.parent / 'selected').exists()
-        for marker in ('NO_TEMPLATE.txt', 'SELF_TAPEOUT.txt'):
-            assert not (project / 'input/submission_template' / marker).exists()
-        assert not (output / 'input/submission_template/NO_TEMPLATE.txt').exists()
+        # The flow evaluator stops at this first blocking clause.  Running the
+        # second gate above is only a direct consumer check in this test; it
+        # must not turn the first FAIL into a pass.
+        assert tapeout_rc in (0, 2)
+        assert not (project / 'input/submission_template/NO_TEMPLATE.txt').exists()
+        # The declaration producer retires the ingest marker and publishes the
+        # self-tapeout route for a DIE, even though the submission gate still
+        # refuses the missing reason.
+        assert (project / 'input/submission_template/SELF_TAPEOUT.txt').is_file()
         assert not (project / 'input/submission_template_source').exists()

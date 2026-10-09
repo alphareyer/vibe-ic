@@ -1,9 +1,22 @@
-# Execution modes: standalone contract and proposed runner hooks
+# Execution modes: canonical Default routing and Ultra qualification
 
-This is a partially integrated global controller, not a migration of the 70
-producers. `programs/execution_modes.py` is an executable Python API tested with
-finite neutral text tools. No production runner calls it, and its production
-adapter registry is empty. No EDA result or IC signoff was measured in this lane.
+The execution policy now has two deliberately separate paths across all 70
+canonical flow rows:
+
+* **Default mode** is program-first. The caller owns the one canonical producer
+  for the row and its declared gates. The policy seam returns to that caller;
+  it does not run a candidate arm, wait for an AI choice, or adopt a receipt.
+  Step 9 input preparation and Step 15 pre-layout publication are typed
+  producer preparation and still do not call `Controller.run` or `adopt`.
+* **Ultra mode** is the qualification path. It may run the registered candidate
+  arms through `Controller`, preserve isolated receipts, and let AI adopt an
+  eligible result. Ultra evidence never changes the Default producer contract.
+
+The same resolved dependency manifest is used for preparation, preflight,
+worker launch, and downstream consumption. A missing input is reported before a
+native tool starts; a producer receipt and its consumer gate remain separate
+proof layers. This routing completion does not claim that an EDA tool is
+installed on every host or that either benchmark IC has passed.
 
 The public portfolio is `programs/data/execution_modes_portfolio.json`. It imports
 the final source/policy inventory bound to main
@@ -16,7 +29,8 @@ controller adapter. Every arm says `controller_runnable: false`. Licensed
 candidates explicitly require both a license and a completed adapter.
 
 `current_default` describes the pinned existing source; `policy_default` describes
-the policy target and retains its deployment limitations. A9 keeps its native
+the policy target and retains its deployment limitations. The `meta.default_mode`
+record is the static 70-row routing contract, not a whole-flow verdict. A9 keeps its native
 L22-selected ngspice / `d_cosim` primary with Icarus libvvp. A2 retains explicit
 topology choice, A3 retains the own netlist producer with ngspice validation, and
 A4 retains its current ngspice sweep. PyOPUS, Xschem, CACE and SpiceBind remain
@@ -121,29 +135,40 @@ refusal, issued-plan and selected-generation names. Legitimate names such as
 `neutral.a` keep their existing output layout. Unavailable output directories or
 adoption records return named finite refusals, rather than raw filesystem errors.
 
-## Proposed integration and explicit remaining work
+## Integration boundary and remaining work
 
-The phase runner owners should add an independent execution-policy request
-field/flag, resolve native identity through its existing implementation switch,
-and build a `Context` from the current frozen project inputs, objective,
-canonical gates and output contract. Their source-owned adapter must freeze
-complete transitive tool/PDK/config inputs, bind the deployed container/image and
-license probe, and consume each native report through its real gate. Component
-command rendering must use the arm-local inputs and outputs; dependent producer
-segments cannot run out of order or reuse a mutable shared upstream directory.
+The canonical runners now select the execution policy at their existing front
+door. Default rows continue through their source-owned producer and gate
+functions. Ultra rows build a `Context` from the current frozen project inputs,
+objective, canonical gates, and output contract; the source-owned adapter freezes
+the transitive tool/PDK/config inputs and binds the deployed image and license
+probe before `Controller.run`.
 
-The owners can then call `plan`, `run`, obtain an actual AI decision on eligible
-receipts, call `adopt`, and transactionally import the selected outputs through
-the existing adoption consumer. Every consumer must propagate refusals before
-advancing. This lane proposes those hooks only; native dual-mode semantics,
-image/PDK provenance, real EDA adapters, production AI dispatch, transactional
-native-output import and all-70 rollout remain unimplemented here.
+The policy change is a routing completion, not an EDA qualification claim. The
+following remain per invocation or outside the Default routing contract:
+
+* native tool availability, exact image/PDK provenance, and licensed seats;
+* actual synthesis, P&R, signoff, and physical evidence for a design;
+* Ultra candidate qualification, AI adoption, and native selected-output import;
+* external or unavailable rows whose producer is an attested handoff rather than
+  a local executable.
+
+Every consumer must propagate a producer or gate refusal before advancing. A
+component receipt, a source wiring check, or a direct LibreLane/OpenROAD run is
+not a whole IC PASS.
 
 Shared writers retain `phase1_one_shot_runner.py`, `design_one_shot_runner.py`,
 `phase3_one_shot_runner.py`, `analog_one_shot_runner.py`, the canonical flow YAML,
 `CAPTURE_ROUTING.json` and `librelane_contract.py`. This lane edits none of them.
 
 ## Acceptance scope
+
+`programs/tests/test_default_mode_routing_contract.py` loads the canonical YAML
+and portfolio, checks all 70 IDs and source bindings, and proves that every
+Default fixed-row dispatch returns to the caller while `Controller.run` and
+`Controller.adopt` are guarded. The focused pinned-container suite also covers
+the shared manifest, producer ownership, Step 7/9/15 wiring, and the direct
+0.5ic gates.
 
 `programs/tests/test_execution_modes.py` runs real finite subprocesses with an
 explicit neutral text contract, not mocked EDA engines or fake production
@@ -152,10 +177,9 @@ isolated frozen inputs, ordered dependent components, actual rc, cancellation,
 partial output, current source/digest checks and eligible-only selection.
 A real-repository artifact test consumes the pinned canonical YAML and public
 portfolio, preserves all 70 IDs, checks final A9 policy and rejects the empty
-production registry. The expected-contract base probe observes concrete values
-from the old native consumer on f881; on this branch it exercises the standalone
-parser. It does not prove production integration. Reverse source mutations test
-the substantive evidence guards separately.
+production registry. Reverse source mutations test the substantive evidence
+guards separately. These tests establish routing and evidence contracts; they do
+not prove an IC tape-out.
 
 The initial review's two hash-bound original proof scripts are rerun unchanged
 against the original reviewed source and the repair: 14 original negative
@@ -175,8 +199,9 @@ portfolio are runner properties, not design facts in L1-L27.
 Consuming layer: n/a — the standalone controller consumes the mode, current
 frozen inputs, adapter registry and evidence; production hooks are proposed.
 
-Consumer program: `programs/execution_modes.py` (`mode`, `Controller.plan`,
-`Controller.run`, `Controller.adopt`).
+Consumer program: `programs/execution_policy.py` for live routing and
+`programs/execution_modes.py` (`mode`, `Controller.plan`, `Controller.run`,
+`Controller.adopt`) for Ultra candidate execution.
 
 Boundary class: structural — two enumerable policies, explicit executable
 adapter contracts and binding checks. AI selection remains judgement over
@@ -190,9 +215,10 @@ declared objective, output mapping, gate verdicts and receipt-bound AI rationale
 Bucket A (program): deterministic admission, execution and evidence binding;
 the best-result judgement remains Bucket B (skill/AI).
 
-evidence: `programs/tests/test_execution_modes.py` executes the controller and
-consumes `flow/phase1_phase2_phase3.yaml`; `programs/librelane_contract.py`
-`selected_mode` preserves the separate native implementation switch.
+evidence: `programs/tests/test_default_mode_routing_contract.py` exercises every
+canonical row; `programs/tests/test_execution_modes.py` executes the Ultra
+controller; `programs/librelane_contract.py` `selected_mode` preserves the
+separate native implementation switch.
 
 **Verdict**: NOT_A_LAYER_FACT
 
