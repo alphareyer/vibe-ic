@@ -613,6 +613,53 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     return inputs
 
 
+def _manifest_for_explicit_inputs(runtime, step_id: str, parameters, supplied):
+    """Bind an explicit population to the same issuer declarations as staging."""
+    probe = dict(parameters or {})
+    _fixed_inputs(runtime, step_id, parameters=probe)
+    issued = probe.get('resolved_input_manifest')
+    if not isinstance(issued, dict) or not isinstance(issued.get('declarations'), list):
+        raise Refusal('ORDINARY_INPUT_MANIFEST_INVALID', str(step_id))
+    root = runtime['project'].resolve()
+    files = {}
+    import execution_backend_snapshot as _snapshot
+    for raw, source in dict(supplied or {}).items():
+        rel = Path(raw) if isinstance(raw, str) else None
+        path = Path(source) if isinstance(source, (str, Path)) else None
+        if (rel is None or path is None or rel.is_absolute() or not raw or
+                '..' in rel.parts or rel.as_posix() != raw):
+            raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(raw))
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(raw)) from exc
+        if (path.is_symlink() or not resolved.is_relative_to(root)
+                or not path.is_file() or path.stat().st_size <= 0):
+            raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(raw))
+        files[raw] = _snapshot.sha(path)
+    # Resolve against a temporary copy of the exact supplied population, not
+    # the ambient project tree.  This keeps explicit dispatches on the same
+    # complete declaration contract as ordinary fixed-input issuance.
+    from execution_backend_worker import _resolve_input_contract
+    with tempfile.TemporaryDirectory(prefix='vibeic-input-manifest-') as folder:
+        staged = Path(folder)
+        for raw, source in dict(supplied or {}).items():
+            target = staged / raw
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(Path(source), target)
+            except OSError:
+                shutil.copyfile(Path(source), target)
+        checked = _resolve_input_contract(
+            staged, issued['declarations'], {'files': files})
+    parameters['resolved_input_manifest'] = {
+        'declarations': checked['declarations'],
+        'files': files,
+        'missing': checked['missing'],
+    }
+    return dict(supplied or {})
+
+
 @contextmanager
 def _backend_manifest_parameters(runtime, step_id: str, manifest):
     """Bind the current issuer manifest to this run's worker argv only.
@@ -962,7 +1009,9 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         baselines[step_id] = _choice_file_state(response_path, snapshot=True)
     parameters = dict(parameters or {})
     if inputs is not None:
-        files = dict(inputs)
+        from execution_provider_catalog import BACKEND_IDS
+        files = (_manifest_for_explicit_inputs(runtime, step_id, parameters, inputs)
+                 if str(step_id) in BACKEND_IDS else dict(inputs))
     elif step_id == '0.5ic':
         files = _fixed_inputs(runtime, step_id, parameters=parameters)
     else:

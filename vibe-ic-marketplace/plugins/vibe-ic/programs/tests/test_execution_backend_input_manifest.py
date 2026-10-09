@@ -210,3 +210,117 @@ def test_issuer_manifest_aggregates_missing_row_inputs_before_dispatch(
         "reports/phase2/gates/missing_b.json",
         "input/submission_template",
     }
+
+
+def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
+        tmp_path, monkeypatch):
+    """Explicit inputs use the issuer contract before the Controller seam."""
+    import execution_modes as em
+
+    project = tmp_path / "project"
+    project.mkdir()
+    present_a = project / "required_a.v"
+    present_b = project / "required_b.v"
+    present_a.write_text("module a; endmodule\n")
+    present_b.write_text("module b; endmodule\n")
+    declarations = [
+        {"from": "external", "path": "required_a.v"},
+        {"from": "external", "path": "required_b.v"},
+    ]
+
+    def fixed(_runtime, _step_id, *, parameters=None):
+        parameters["resolved_input_manifest"] = {
+            "declarations": declarations, "files": {}, "missing": []}
+        return {}
+
+    monkeypatch.setattr(policy, "_fixed_inputs", fixed)
+    monkeypatch.setattr(policy, "_ensure_default_prelayout", lambda *_args: None)
+    monkeypatch.setattr(em, "_verify_route_authority", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(em, "_git_source_authority", lambda *_args: ("commit", "tree"))
+
+    @dataclass(frozen=True)
+    class FakeComponent:
+        argv: tuple[str, ...]
+
+    @dataclass(frozen=True)
+    class FakeArm:
+        arm_id: str
+        tool_id: str
+        applicability: str
+        objective: dict
+        input_contract: tuple
+        components: tuple[FakeComponent, ...]
+
+    original_argv = (
+        "python3", "execution_backend_worker.py", "--params-json",
+        json.dumps({"pdk_name": "gf180mcuD"}, sort_keys=True),
+    )
+    arm = FakeArm("backend_15", "backend-worker", "applicable",
+                  {"metric": "source_boundary"}, (),
+                  (FakeComponent(original_argv),))
+
+    class FakeRegistry:
+        def __init__(self):
+            self._adapters = {arm.arm_id: arm}
+
+        def adapters(self, step_id):
+            return [self._adapters[arm.arm_id]] if str(step_id) == "15" else []
+
+    class FakeController:
+        def __init__(self, registry):
+            self.registry = registry
+            self.calls = []
+            self.seen_manifests = []
+            self.portfolio = {"steps": [{
+                "id": "15", "mandatory_gate_programs": ("manifest_gate",),
+            }]}
+
+        def run(self, context, run, mode):
+            self.calls.append((context, run, mode))
+            argv = self.registry.adapters("15")[0].components[0].argv
+            self.seen_manifests.append(
+                json.loads(argv[argv.index("--params-json") + 1])
+                .get("resolved_input_manifest"))
+            return {"status": "NOT_MEASURED", "candidate_statuses": {}}
+
+    registry = FakeRegistry()
+    controller = FakeController(registry)
+    route = {
+        "kind": "issued-route", "schema": 1, "ic_ip_path": "IC",
+        "source_sha": "a" * 40, "project_digest": "b" * 64,
+        "request_digest": "c" * 64, "intent_label": "PROGRAM_DEFAULT",
+        "mode_intent": "default",
+    }
+    route["route_digest"] = em._hash(route)
+    monkeypatch.setattr(policy, "controller_fields", lambda **_kwargs: {
+        "ic_ip_path": "IC", "route_receipt": route,
+        "intent_label": "PROGRAM_DEFAULT", "request_digest": route["request_digest"],
+    })
+    runtime = {
+        "project": project.resolve(), "registry": registry,
+        "controller": controller, "route": route,
+        "policy": {"mode": "default", "mode_label": "default-mode",
+                    "request_receipt": {"invocation_id": "manifest-test"}},
+        "parameters": {}, "contexts": {}, "bindings": {}, "runs": {},
+    }
+    monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
+
+    positive = policy.dispatch_fixed_step(
+        project, "15", inputs={"required_a.v": present_a, "required_b.v": present_b})
+    assert positive["status"] == "NOT_MEASURED"
+    assert len(controller.calls) == 1
+    assert controller.calls[0][0].inputs == {
+        "required_a.v": present_a, "required_b.v": present_b}
+    assert controller.seen_manifests[0]["declarations"] == declarations
+    assert controller.seen_manifests[0]["missing"] == []
+    assert set(controller.seen_manifests[0]["files"]) == {
+        "required_a.v", "required_b.v"}
+    assert registry.adapters("15")[0].components[0].argv == original_argv
+
+    missing = policy.dispatch_fixed_step(
+        project, "15", inputs={})
+    assert missing["status"] == "NOT_MEASURED"
+    assert missing["reason"] == "ORDINARY_INPUT_ABSENT"
+    assert set(missing["missing_inputs"]) == {"required_a.v", "required_b.v"}
+    assert len(controller.calls) == 1
+    assert registry.adapters("15")[0].components[0].argv == original_argv
