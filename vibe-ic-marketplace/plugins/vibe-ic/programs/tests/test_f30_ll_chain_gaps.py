@@ -42,6 +42,7 @@ import librelane_contract as contract  # noqa: E402
 import pad_ring_check as CHK  # noqa: E402
 import pad_ring_gen as GEN  # noqa: E402
 from _stated_eda_image import state_the_image  # noqa: E402
+from _clock_plan_fixture import current_fixture  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -278,7 +279,7 @@ _PLAN = [{"name": "clk", "period_ns": 20, "source": "clk"},
 CTS_STEP = "phase3/librelane/19-cts-hold/01-openroad-cts"
 
 
-def _cts_project(tmp_path: Path, stem: str) -> Path:
+def _cts_project(tmp_path: Path, stem: str, monkeypatch=None) -> Path:
     """The step-19 LibreLane handoff as `librelane_cts_hold` writes it, around
     one real LibreLane CTS step folder (calibration/<stem>.{rpt,log})."""
     p = tmp_path / stem
@@ -293,8 +294,10 @@ def _cts_project(tmp_path: Path, stem: str) -> Path:
     sdc = p / "phase3/stage3/pnr/constraint.sdc"
     sdc.parent.mkdir(parents=True)
     shutil.copyfile(CAL / "cal_two_clocks.sdc", sdc)
+    if monkeypatch is not None:
+        current_fixture(monkeypatch, p, sdc.read_text(), preserve_plan=True)
     receipt = p / "reports/phase3/librelane_cts_hold_handoff.json"
-    receipt.parent.mkdir(parents=True)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(json.dumps({
         "chain": {"OpenROAD.CTS": CTS_STEP},
         "views": {"cts_rpt": {"source": str(folder / "cts.rpt"),
@@ -324,8 +327,8 @@ def test_the_ll_cts_report_names_no_root_but_its_transcript_does():
     assert (CAL / f"{SEEN}.log").read_text().count("CTS-0007") == 2
 
 
-def test_step16_reads_the_roots_librelane_cts_recorded(tmp_path):
-    rc, rules = _clock_gate(_cts_project(tmp_path, SEEN))
+def test_step16_reads_the_roots_librelane_cts_recorded(tmp_path, monkeypatch):
+    rc, rules = _clock_gate(_cts_project(tmp_path, SEEN, monkeypatch))
     assert rc == 0, rules
     assert "CTS_CLOCK_MISSING" not in rules
     assert f"{CTS_STEP}/openroad-cts.log" in rules["CTS_CLOCKS_SEEN"]
@@ -363,10 +366,10 @@ def test_an_unbound_transcript_is_never_read_and_fails_closed(tmp_path, break_it
     assert "phase3/stage3/cts/clock_tree.rpt" in rules["CTS_CLOCK_MISSING"]
 
 
-def test_without_a_receipt_the_report_is_the_transcript(tmp_path):
+def test_without_a_receipt_the_report_is_the_transcript(tmp_path, monkeypatch):
     """The direct path is unchanged: its clock_tree.rpt carries the CTS lines
     itself, and no receipt means that file is read as it is."""
-    p = _cts_project(tmp_path, SEEN)
+    p = _cts_project(tmp_path, SEEN, monkeypatch)
     (p / "reports/phase3/librelane_cts_hold_handoff.json").unlink()
     rc, rules = _clock_gate(p)
     assert rc == 1 and "CTS_CLOCK_MISSING" in rules

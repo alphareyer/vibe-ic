@@ -807,7 +807,12 @@ def main(argv=None):
             native.append({"name": name, "period_ns": float(period), "source": source})
         if f"CLOCK_PLAN_PDK {current['pdk']}\n" not in text:
             refusal = "CLOCK_PLAN_NATIVE_PDK_CHANGED"
-        if plan.get("clocks") != native or not native:
+        # Compare the normalized substance already emitted above.  The native
+        # transcript is a measurement, while the plan may use equivalent
+        # schema spellings (period/frequency, port/pin/source).  The current
+        # input/output hashes remain mandatory; this only avoids rejecting an
+        # equivalent clock description because its JSON shape differs.
+        if summary != native or not native:
             refusal = "CLOCK_PLAN_NATIVE_VALUES_CHANGED"
         recorded = {r["path"] for role, r in current["inputs"].items()
                     if role.startswith("sdc_")}

@@ -72,6 +72,7 @@ if str(_PROGRAMS) not in sys.path:
 import _path_layout as PL             # noqa: E402
 import clock_plan_check as C          # noqa: E402
 import phase3_one_shot_runner as R    # noqa: E402
+from _clock_plan_fixture import current_fixture  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
@@ -299,7 +300,7 @@ def test_stale_refresh_never_replaces_a_good_plan_with_a_synthetic_one(
         f"synthetic fallback: {after}")
 
 
-def test_a_stale_refresh_that_can_re_derive_does_rewrite(tmp_path):
+def test_a_stale_refresh_that_can_re_derive_does_rewrite(tmp_path, monkeypatch):
     """The two-sided control: the guard must not turn the refresh off. With a
     real SDC present, a stale plan IS re-derived — and the new plan records the
     provenance that makes it fresh."""
@@ -308,6 +309,10 @@ def test_a_stale_refresh_that_can_re_derive_does_rewrite(tmp_path):
     proj = _project(tmp_path, plan=stale)
     _write(proj / "phase3/stage3/pnr/routed.def",
            "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
+
+    # Bind a real current subject while deliberately retaining the stale SDC
+    # provenance, so the next producer invocation must re-derive it.
+    current_fixture(monkeypatch, proj, _SDC, preserve_provenance=True)
 
     _run_step16(proj)
 
@@ -383,15 +388,25 @@ def test_gate_does_not_flag_a_fresh_plan(tmp_path):
     assert "CLOCK_PLAN_STALE" not in [f["rule"] for f in doc["findings"]]
 
 
-def test_the_staleness_disclosure_is_advisory(tmp_path):
-    """Blocking would FAIL every already-completed run for a provenance
-    condition that produced no wrong content."""
+def test_the_staleness_disclosure_keeps_current_binding_blocking(
+        tmp_path, monkeypatch):
+    """A stale disclosure is advisory, but changed bound inputs still fail.
+
+    The receipt is a same-invocation subject binding.  Once the SDC bytes are
+    edited, the consumer must refuse that old native measurement; otherwise a
+    stale plan could be called current merely because its clock values look
+    plausible.
+    """
     proj = _project(tmp_path)
+    current_fixture(monkeypatch, proj, _SDC, preserve_provenance=True)
     (proj / _SDC_REL).write_text(
         "create_clock -name clk -period 4.0 [get_ports clk]\n")
     r, doc = _run_gate(proj, tmp_path / "o.json")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert doc["verdict"] == "PASS", doc["verdict"]
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert doc["verdict"] == "FAIL"
+    assert "CLOCK_PLAN_STALE" in [f["rule"] for f in doc["findings"]]
+    assert "CLOCK_PLAN_CURRENT_REFUSED" in [
+        f["rule"] for f in doc["findings"]]
 
 
 # ===========================================================================
@@ -424,8 +439,9 @@ def test_d1_a_clock_with_no_period_still_fails(tmp_path):
     assert "CLOCK_NO_PERIOD" in [f["rule"] for f in doc["findings"]]
 
 
-def test_d1_a_healthy_fresh_plan_still_passes(tmp_path):
+def test_d1_a_healthy_fresh_plan_still_passes(tmp_path, monkeypatch):
     proj = _project(tmp_path)
+    current_fixture(monkeypatch, proj, _SDC)
     r, doc = _run_gate(proj, tmp_path / "o.json")
     assert r.returncode == 0
     assert doc["verdict"] == "PASS"
