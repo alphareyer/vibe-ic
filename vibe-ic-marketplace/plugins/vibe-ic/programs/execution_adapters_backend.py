@@ -694,24 +694,30 @@ def backend_project_input_contract(project: Path, step_id: str, *,
             return
         carry_checkpoint_file(raw, allow_directory=(raw == "phase2/stage1/sim/tb"))
 
-    def carry_optional_nonempty_file(raw: str) -> None:
-        """Carry a current optional consumer file only when it has bytes."""
+    def carry_optional_file(raw: str, *, require_nonempty: bool = True) -> None:
+        """Carry an existing optional consumer file without changing its bytes."""
         target = root / raw
-        if (target.is_symlink() or not target.is_file()
-                or target.stat().st_size <= 0):
+        if target.is_symlink() or not target.is_file():
+            return
+        # Liberty and switch globs are presence conditions whose empty files
+        # do not name a usable input.  waivers.json is different: an existing
+        # empty file is malformed input and must reach the consumer so its
+        # schema check fails closed instead of silently taking the missing-file
+        # waiver synthesis path.
+        if require_nonempty and target.stat().st_size <= 0:
             return
         carry_checkpoint_file(raw)
 
     # These are optional consumer edges.  Their absence means the consumer's
     # own condition does not apply; it must not become an issuer prerequisite.
-    carry_optional_nonempty_file("phase3/librelane_switch.json")
-    carry_optional_nonempty_file("waivers.json")
+    carry_optional_file("phase3/librelane_switch.json")
+    carry_optional_file("waivers.json", require_nonempty=False)
     liberty_root = root / "input/pdk/liberty"
     if liberty_root.is_dir() and not liberty_root.is_symlink():
         for target in sorted(liberty_root.glob("*.lib")):
             if target.is_symlink() or not target.is_file():
                 continue
-            carry_optional_nonempty_file(str(target.relative_to(root)))
+            carry_optional_file(str(target.relative_to(root)))
 
     def prelayout_subject_paths(summary_raw: str) -> tuple[str, ...]:
         """Resolve Step 10's issued subject from its producer summary.

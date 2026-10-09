@@ -173,6 +173,13 @@ def test_openroad_backend_rows_use_measured_row_owned_ram_and_rcx_stays_default(
 
 
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
+    """A direct source registration has no issuer manifest and must refuse.
+
+    The canonical dispatch path injects ``resolved_input_manifest`` immediately
+    before Controller execution.  ``build_registry`` is a source-only public
+    registration helper, so its intentional ``None`` placeholder must remain a
+    fail-closed worker input rather than a smaller row-only fallback.
+    """
     context = issued_context(em.Context("15", BASE, _step15_controller_inputs(tmp_path),
                          {"metric": "canonical_evidence", "direction": "max"},
                          tuple(_required_gates("15")), "librelane"), tmp_path, mode="default")
@@ -184,12 +191,13 @@ def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path)
     root = tmp_path / "run"
     assert plan["arms"] == ["backend_15"]
     summary = controller.run(context, root, "default-mode")
-    assert summary["candidate_statuses"]["backend_15"] in {"NOT_MEASURED", "FAIL"}
+    assert summary["candidate_statuses"]["backend_15"] == "NOT_MEASURED"
     result = json.loads((root / adapter.arm_id / "outputs" / "backend_result.json").read_text())
     assert result["step_id"] == "15"
-    assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
-    assert result["missing_inputs"] == []
-    assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
+    assert "gate_ledger" in result and result["verdict"] == "NOT_MEASURED"
+    assert result["missing_inputs"] == ["resolved_input_manifest"]
+    assert result["native_receipts"] == []
+    assert result["canonical_receipts"] == []
 
 
 def _catalog_step15_worker_fixture(tmp_path, *, netlist_state):

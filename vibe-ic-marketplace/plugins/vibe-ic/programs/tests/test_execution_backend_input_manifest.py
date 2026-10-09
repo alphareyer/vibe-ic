@@ -219,7 +219,7 @@ def test_issuer_manifest_aggregates_missing_row_inputs_before_dispatch(
     }
 
 
-def test_optional_backend_consumer_edges_are_present_only_when_nonempty(
+def test_optional_backend_consumer_edges_preserve_present_files_and_empty_waivers(
         tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
@@ -240,7 +240,13 @@ def test_optional_backend_consumer_edges_are_present_only_when_nonempty(
     absent = policy_backend_contract(project, "15")
     assert not (set(optional) & set(absent))
     (project / "waivers.json").write_bytes(b"")
-    assert "waivers.json" not in policy_backend_contract(project, "15")
+    # An existing empty waiver file is malformed input.  Keep it in the
+    # consumer population so flow_compliance_check's schema gate rejects it;
+    # treating it as absent would synthesize a different waiver set.
+    assert "waivers.json" in policy_backend_contract(project, "15")
+    from flow_compliance_check import _load_waivers
+    with pytest.raises(SystemExit):
+        _load_waivers(project)
     (project / "waivers.json").unlink()
     absent_parameters = {}
     policy._fixed_inputs(
