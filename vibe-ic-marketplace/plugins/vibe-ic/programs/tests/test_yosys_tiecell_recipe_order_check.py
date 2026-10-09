@@ -248,10 +248,13 @@ def _native_project(tmp_path, commands, *, receipt=True):
         state = folder / "state_out.json"
         state.write_text("{}\n")
         import hashlib
+        commands_digest = hashlib.sha256(
+            (folder / "COMMANDS").read_bytes()).hexdigest()
         (folder / "vibeic_receipt.json").write_text(json.dumps({
             "input": {"step": "Yosys.Synthesis"},
             "sha256": {"state_out.json": hashlib.sha256(
-                state.read_bytes()).hexdigest()},
+                state.read_bytes()).hexdigest(),
+                "COMMANDS": commands_digest},
         }))
     return project
 

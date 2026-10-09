@@ -531,6 +531,14 @@ def _native_yosys_recipe(project: Path) -> Optional[dict]:
         report["summary"] = {"skipped": False, "reason": "native_pyosys_receipt",
                              "judged": len(judged),
                              "denominator": len(report["findings"])}
+    elif judged and not incomplete:
+        # A current receipt-bound COMMANDS stream was read and every judged
+        # recipe satisfied both ordering rules.  Do not collapse a measured
+        # CLEAN into NOT_CHECKED merely because the violation list is empty.
+        report["verdict"] = "CLEAN"
+        report["summary"] = {"skipped": False, "reason": "native_pyosys_receipt",
+                             "judged": len(judged),
+                             "denominator": len(report["findings"])}
     elif incomplete:
         # CLEAN + NOT_CHECKED is incomplete evidence, never a clean aggregate.
         report["verdict"] = "NOT_CHECKED"
