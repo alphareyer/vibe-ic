@@ -552,7 +552,8 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
         # Freeze only this invocation's declared template source. A missing
         # searched directory remains valid for explicit absence routes.
         declarations.append(parameters['template'])
-    for arm in runtime['registry'].adapters(step_id):
+    registry = runtime.get('registry')
+    for arm in registry.adapters(step_id) if registry is not None else ():
         # String declarations are required by default.  A caller that intends
         # an optional edge must carry an explicit mapping with
         # ``required: false`` (or ``check: none``); do not erase absence by
