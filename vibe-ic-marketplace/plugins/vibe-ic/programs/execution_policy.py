@@ -634,7 +634,7 @@ def _manifest_for_explicit_inputs(runtime, step_id: str, parameters, supplied):
         except (OSError, RuntimeError) as exc:
             raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(raw)) from exc
         if (path.is_symlink() or not resolved.is_relative_to(root)
-                or not path.is_file() or path.stat().st_size <= 0):
+                or not path.is_file()):
             raise Refusal('ORDINARY_INPUT_PATH_UNSAFE', str(raw))
         files[raw] = _snapshot.sha(path)
     # Resolve against a temporary copy of the exact supplied population, not

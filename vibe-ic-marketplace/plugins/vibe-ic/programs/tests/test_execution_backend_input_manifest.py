@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -212,8 +213,13 @@ def test_issuer_manifest_aggregates_missing_row_inputs_before_dispatch(
     }
 
 
+@pytest.mark.parametrize("omitted, empty", [
+    ((), None),
+    (("required_a.v", "required_b.v"), None),
+    (("required_b.v",), "required_a.v"),
+], ids=["complete", "two_missing", "zero_byte_and_missing"])
 def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, omitted, empty):
     """Explicit inputs use the issuer contract before the Controller seam."""
     import execution_modes as em
 
@@ -223,20 +229,30 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
     present_b = project / "required_b.v"
     present_a.write_text("module a; endmodule\n")
     present_b.write_text("module b; endmodule\n")
-    declarations = [
-        {"from": "external", "path": "required_a.v"},
-        {"from": "external", "path": "required_b.v"},
-    ]
-
-    def fixed(_runtime, _step_id, *, parameters=None):
-        parameters["resolved_input_manifest"] = {
-            "declarations": declarations, "files": {}, "missing": []}
-        return {}
-
-    monkeypatch.setattr(policy, "_fixed_inputs", fixed)
-    monkeypatch.setattr(policy, "_ensure_default_prelayout", lambda *_args: None)
+    for name in ("input/step_0_5ic_answers.json",
+                 "input/submission_template/README.md", "reports/prior.json"):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+    monkeypatch.setattr(_flow_yaml, "load", lambda: {"steps": [
+        {"id": 12, "required_outputs": ["required_a.v", "required_b.v"]},
+        {"id": "15", "required_inputs": [{"from": 12, "outputs": "all"}]},
+    ]})
     monkeypatch.setattr(em, "_verify_route_authority", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(em, "_git_source_authority", lambda *_args: ("commit", "tree"))
+    producer_calls, consumer_calls = [], []
+
+    def produce(project, params):
+        producer_calls.append(project)
+        return {"verdict": "NOT_MEASURED", "detail": "mock producer boundary"}
+
+    def evaluate(project, row):
+        consumer_calls.append(project)
+        return {"status": "NOT_MEASURED", "ledger": []}
+
+    monkeypatch.setattr(worker, "produce", produce)
+    monkeypatch.setattr(worker, "evaluate", evaluate)
+    monkeypatch.setenv("VIBEIC_EXECUTION_BINDING", json.dumps({"required_gates": []}))
 
     @dataclass(frozen=True)
     class FakeComponent:
@@ -253,10 +269,10 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
 
     original_argv = (
         "python3", "execution_backend_worker.py", "--params-json",
-        json.dumps({"pdk_name": "gf180mcuD"}, sort_keys=True),
+        json.dumps({"resolved_input_manifest": None}, sort_keys=True),
     )
     arm = FakeArm("backend_15", "backend-worker", "applicable",
-                  {"metric": "source_boundary"}, (),
+                  {"metric": "source_boundary"}, ("reports/prior.json",),
                   (FakeComponent(original_argv),))
 
     class FakeRegistry:
@@ -271,6 +287,7 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
             self.registry = registry
             self.calls = []
             self.seen_manifests = []
+            self.worker_results = []
             self.portfolio = {"steps": [{
                 "id": "15", "mandatory_gate_programs": ("manifest_gate",),
             }]}
@@ -278,9 +295,15 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
         def run(self, context, run, mode):
             self.calls.append((context, run, mode))
             argv = self.registry.adapters("15")[0].components[0].argv
-            self.seen_manifests.append(
-                json.loads(argv[argv.index("--params-json") + 1])
-                .get("resolved_input_manifest"))
+            params = json.loads(argv[argv.index("--params-json") + 1])
+            self.seen_manifests.append(params.get("resolved_input_manifest"))
+            staged = run / "inputs"
+            for name, source in context.inputs.items():
+                target = staged / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            self.worker_results.append(worker.execute(
+                staged, run / "outputs", step_id="15", params=params))
             return {"status": "NOT_MEASURED", "candidate_statuses": {}}
 
     registry = FakeRegistry()
@@ -304,23 +327,37 @@ def test_explicit_backend_dispatch_uses_exact_population_and_blocks_missing(
         "parameters": {}, "contexts": {}, "bindings": {}, "runs": {},
     }
     monkeypatch.setattr(policy, "_ordinary_runtime", runtime)
-
-    positive = policy.dispatch_fixed_step(
-        project, "15", inputs={"required_a.v": present_a, "required_b.v": present_b})
-    assert positive["status"] == "NOT_MEASURED"
-    assert len(controller.calls) == 1
-    assert controller.calls[0][0].inputs == {
-        "required_a.v": present_a, "required_b.v": present_b}
-    assert controller.seen_manifests[0]["declarations"] == declarations
-    assert controller.seen_manifests[0]["missing"] == []
-    assert set(controller.seen_manifests[0]["files"]) == {
-        "required_a.v", "required_b.v"}
-    assert registry.adapters("15")[0].components[0].argv == original_argv
-
-    missing = policy.dispatch_fixed_step(
-        project, "15", inputs={})
-    assert missing["status"] == "NOT_MEASURED"
-    assert missing["reason"] == "ORDINARY_INPUT_ABSENT"
-    assert set(missing["missing_inputs"]) == {"required_a.v", "required_b.v"}
-    assert len(controller.calls) == 1
+    issued_params = {}
+    complete = policy._fixed_inputs(runtime, "15", parameters=issued_params)
+    assert issued_params["resolved_input_manifest"]["missing"] == []
+    assert {"required_a.v", "required_b.v"} <= set(complete)
+    supplied = {name: path for name, path in complete.items() if name not in omitted}
+    expected_missing = set(omitted)
+    if empty:
+        supplied[empty].write_bytes(b"")
+        expected_missing.add(empty)
+        explicit_params = {}
+        assert policy._manifest_for_explicit_inputs(
+            runtime, "15", explicit_params, supplied) == supplied
+        manifest = explicit_params["resolved_input_manifest"]
+        assert manifest["files"][empty] == worker.sha(supplied[empty])
+        assert set(manifest["missing"]) == expected_missing
+    result = policy.dispatch_fixed_step(
+        project, "15", inputs=supplied, parameters={"resolved_input_manifest": None})
+    assert result["status"] == "NOT_MEASURED"
+    if expected_missing:
+        # Ambient project files still exist: only the supplied population counts.
+        assert present_a.is_file() and present_b.is_file()
+        assert controller.calls == []
+        assert producer_calls == consumer_calls == []
+        assert result["reason"] == "ORDINARY_INPUT_ABSENT"
+        assert set(result["missing_inputs"]) == expected_missing
+        assert runtime["contexts"] == runtime["runs"] == {}
+    else:
+        assert len(controller.calls) == len(producer_calls) == len(consumer_calls) == 1
+        assert controller.calls[0][0].inputs == supplied
+        assert controller.seen_manifests == [issued_params["resolved_input_manifest"]]
+        assert controller.worker_results[0]["missing_inputs"] == []
+        assert controller.worker_results[0]["resolved_input_manifest"] == (
+            issued_params["resolved_input_manifest"])
     assert registry.adapters("15")[0].components[0].argv == original_argv
