@@ -178,7 +178,7 @@ def test_default_ordinary_step7_placeholder_releases_preflight_gate(
 
 def test_default_ordinary_step9_placeholder_releases_preflight_gate(
         tmp_path, monkeypatch):
-    """The Default Step-9 source arm must release to the Yosys producer."""
+    """Default Step 9 goes straight to the caller-owned Yosys producer."""
     placeholder = SimpleNamespace(
         status="NOT_MEASURED",
         extras={"execution_results": [{
@@ -203,12 +203,12 @@ def test_default_ordinary_step9_placeholder_releases_preflight_gate(
     monkeypatch.setattr(EP, "_ordinary_runtime",
                         {"policy": {"mode": "default"}})
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
-                                     "yosys_synth", lambda *a: None) is measured_fail
+                                     "yosys_synth", lambda *a: None) is None
 
 
-def test_default_step9_placeholder_marks_canonical_producer_fallback(
+def test_default_step9_does_not_create_a_controller_fallback_token(
         tmp_path, monkeypatch):
-    """The released Step-9 placeholder must suppress Controller re-entry."""
+    """Default must not create a per-row Controller fallback token."""
     placeholder = SimpleNamespace(
         status="NOT_MEASURED",
         extras={"execution_results": [{
@@ -221,16 +221,8 @@ def test_default_step9_placeholder_marks_canonical_producer_fallback(
     monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
                                      "yosys_synth", lambda *a: None) is None
-    assert runtime["program_first_fallback_sites"] == {
-        ("yosys_synth", str(tmp_path.resolve()), "d" * 64)}
-    handoff = EP.consume_program_first_fallback(tmp_path, "yosys_synth")
-    assert handoff is not None
-    assert EP.is_program_first_fallback_handoff(handoff, tmp_path,
-                                                "yosys_synth") is True
+    assert "program_first_fallback_sites" not in runtime
     assert EP.consume_program_first_fallback(tmp_path, "yosys_synth") is None
-    assert EP.is_program_first_fallback_handoff(handoff, tmp_path / "other",
-                                                "yosys_synth") is False
-    EP.release_program_first_fallback(handoff)
 
 
 def test_default_step9_fallback_marker_is_not_consumed_by_ultra(
@@ -256,7 +248,7 @@ def test_default_step9_worker_error_does_not_release_to_native_producer(
                         lambda *args, **kwargs: worker_error)
     monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
-                                     "yosys_synth", lambda *a: None) is worker_error
+                                     "yosys_synth", lambda *a: None) is None
     assert "program_first_fallback_sites" not in runtime
 
 
@@ -273,7 +265,7 @@ def test_default_step9_fallback_requires_placeholder_reason(tmp_path, monkeypatc
                             lambda *args, _row=worker_error, **kwargs: _row)
         monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
         assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
-                                         "yosys_synth", lambda *a: None) is worker_error
+                                         "yosys_synth", lambda *a: None) is None
         assert "program_first_fallback_sites" not in runtime
 
 
@@ -287,7 +279,7 @@ def test_default_step9_fallback_requires_request_digest(tmp_path, monkeypatch):
                         lambda *args, **kwargs: placeholder)
     monkeypatch.setattr(EP, "_ordinary_runtime", runtime)
     assert EP.dispatch_ordinary_site(tmp_path, "design_one_shot_runner",
-                                     "yosys_synth", lambda *a: None) is placeholder
+                                     "yosys_synth", lambda *a: None) is None
     assert "program_first_fallback_sites" not in runtime
 
 
