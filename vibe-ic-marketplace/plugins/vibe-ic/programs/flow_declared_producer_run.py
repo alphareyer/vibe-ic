@@ -272,11 +272,11 @@ def _glob_exists(project: Path, spec: str) -> bool:
         if any(ch in alt for ch in "*?["):
             try:
                 for candidate in project.glob(alt):
-                    if _is_run_owned_evidence(project, candidate):
+                    if _is_run_owned_evidence(project, candidate, allow_empty=True):
                         return True
             except (OSError, ValueError, IndexError):
                 continue
-        elif _is_run_owned_evidence(project, project / alt):
+        elif _is_run_owned_evidence(project, project / alt, allow_empty=True):
             return True
     return False
 
@@ -331,7 +331,8 @@ def _flow_gate_json_targets() -> set[str]:
     return found
 
 
-def _is_run_owned_evidence(project: Path, path: Path, *, for_input: bool = False) -> bool:
+def _is_run_owned_evidence(project: Path, path: Path, *, for_input: bool = False,
+                           allow_empty: bool = False) -> bool:
     """Whether a concrete output can prove that its owning step ran.
 
     Audit reports are observations, not producer inputs.  A role stamp is
@@ -339,20 +340,15 @@ def _is_run_owned_evidence(project: Path, path: Path, *, for_input: bool = False
     is a declared gate ``--json`` destination is excluded, because legacy gate
     writers have no way to distinguish their audit invocation from the run.
     Producer documents at the same path retain precedence through
-    ``invoked_as``.
+    ``invoked_as``. ``allow_empty`` is used only for declared sibling
+    presence: an empty marker is still evidence that the run performed a
+    step. Producer documents and input-identity files remain nonempty-gated.
     """
     try:
         if path.is_symlink():
             return False
         path = path.resolve()
-        if not path.is_file():
-            return False
-        # Sibling outputs answer only whether the step ran; the flow has
-        # historically treated an empty marker (for example `b.flag`) as
-        # presence. Input closure and producer targets require substantive
-        # bytes, but the sibling-presence probe must not turn `A OR B` into a
-        # false absence merely because B is a zero-byte marker.
-        if for_input and path.stat().st_size <= 0:
+        if not path.is_file() or (not allow_empty and path.stat().st_size <= 0):
             return False
         rel = path.relative_to(project).as_posix()
     except (OSError, ValueError):
