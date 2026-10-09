@@ -69,6 +69,28 @@ def test_canonical_default_bootstrap_reaches_producer_receipt_and_consumer(
     assert not runtime['runs']
 
 
+def test_canonical_default_bootstrap_is_metadata_only(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    project.mkdir()
+    R.real_entry('IC', 'default', project)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default constructed an Ultra runtime object')
+
+    monkeypatch.setattr(em, 'Registry', forbidden)
+    monkeypatch.setattr(em, 'Controller', forbidden)
+    runtime = policy.bootstrap(project, parameters={'skip_analog': True})
+
+    assert runtime['policy']['mode'] == 'default'
+    assert runtime['route']['project'] == str(project.resolve())
+    assert runtime['parameters'] == {'skip_analog': True}
+    assert runtime['contexts'] == {}
+    assert runtime['bindings'] == {}
+    assert runtime['runs'] == {}
+    assert 'registry' not in runtime
+    assert 'controller' not in runtime
+
+
 def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_path):
     project=tmp_path/'project';project.mkdir()
     issued=R.real_entry('IC','ultra',project)

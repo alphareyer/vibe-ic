@@ -455,18 +455,11 @@ def bootstrap(project: Path, *, parameters: dict | None = None,
               phase1_only: bool = False):
     global _ordinary_runtime
     value = request()
-    # Keep imported/default helpers observationally inert, but let the live
-    # canonical launcher bootstrap the same Controller for its program-default
-    # request.  The capability FD is the authority boundary; a caller-authored
-    # default environment must never construct a production registry.
+    # The capability FD is the authority boundary; a caller-authored default
+    # environment must never construct a production registry.
     if value['mode'] == 'default' and _CAPABILITY_FD_ENV not in os.environ:
         return None
     from execution_authority import consume
-    import execution_modes as em
-    from execution_frontend_providers import register_factories
-    from execution_adapters_backend import register_backend_adapters, BACKEND_PARAMETER_DEFAULTS
-    from execution_adapters_release import register_release_adapters, RELEASE_PARAMETER_DEFAULTS
-    from execution_source_snapshot import SourceSnapshot, using
     issued = consume()
     project = Path(project).resolve(strict=True)
     route = issued['route']
@@ -479,6 +472,24 @@ def bootstrap(project: Path, *, parameters: dict | None = None,
             raise Refusal('ORDINARY_RUNTIME_REENTRY', str(project))
         return _ordinary_runtime
     params = dict(parameters or {})
+
+    # Default is a canonical-producer route.  Keep only the current issued
+    # route metadata for disclosure and caller-owned handoffs; constructing a
+    # Registry or Controller here would create the Ultra scheduler before the
+    # canonical producer runs and would reintroduce policy-owned Step 9/15
+    # side effects.  Ultra continues through the full adapter bootstrap below.
+    if value['mode'] == 'default':
+        _ordinary_runtime = dict(
+            identity=identity, project=project, policy=value, route=route,
+            parameters=params, contexts={}, bindings={}, runs={},
+            phase1_only=bool(phase1_only))
+        return _ordinary_runtime
+
+    import execution_modes as em
+    from execution_frontend_providers import register_factories
+    from execution_adapters_backend import register_backend_adapters, BACKEND_PARAMETER_DEFAULTS
+    from execution_adapters_release import register_release_adapters, RELEASE_PARAMETER_DEFAULTS
+    from execution_source_snapshot import SourceSnapshot, using
     declaration_path = project / 'reports/phase1/tapeout_declaration.json'
     if declaration_path.is_file():
         declaration = json.loads(declaration_path.read_text())
@@ -1014,20 +1025,12 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
 
     # Default is a single program-first route.  Its producer is the caller's
     # canonical function, so this policy seam must not construct a Controller
-    # context, run a frontend worker, wait for a choice, or adopt an arm.  A
-    # few producers still need typed preparation before their own body runs:
-    # Step 9 freezes its current input manifest and Step 15 publishes the
-    # existing pre-layout handoff.  Those preparations are producer setup;
-    # neither invokes Controller.run/adopt.  Ultra remains below this branch
-    # and keeps the multi-arm selection lifecycle unchanged.
+    # context, run a frontend worker, wait for a choice, adopt an arm, or run
+    # producer preparation.  Ultra remains below this branch and keeps the
+    # multi-arm selection lifecycle unchanged.
     if runtime.get('policy', {}).get('mode') == 'default':
         if choice is not None:
             raise Refusal('DEFAULT_SELECTION_NOT_ALLOWED', str(step_id))
-        parameters = dict(parameters or {})
-        if step_id == '9':
-            _prepare_step9(runtime, parameters)
-        elif step_id == '15':
-            _ensure_default_prelayout(runtime, str(step_id))
         return None
 
     if step_id == '9':

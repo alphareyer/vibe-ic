@@ -30,11 +30,10 @@ def test_default_mode_covers_every_canonical_row_without_controller(tmp_path, mo
 
     project = tmp_path / 'subject'
     project.mkdir()
-    sentinel = object()
-    monkeypatch.setattr(policy, '_prepare_step9',
-                        lambda runtime, parameters: None)
-    monkeypatch.setattr(policy, '_ensure_default_prelayout',
-                        lambda runtime, step_id: None)
+    def trap(*args, **kwargs):
+        raise AssertionError('Default invoked a policy producer preparation hook')
+    monkeypatch.setattr(policy, '_prepare_step9', trap)
+    monkeypatch.setattr(policy, '_ensure_default_prelayout', trap)
     monkeypatch.setattr(em.Controller, 'run',
                         lambda *args, **kwargs: (_ for _ in ()).throw(
                             AssertionError('Default called Controller.run')))
@@ -44,8 +43,6 @@ def test_default_mode_covers_every_canonical_row_without_controller(tmp_path, mo
     runtime = {
         'project': project.resolve(),
         'policy': {'mode': 'default'},
-        'controller': sentinel,
-        'registry': sentinel,
     }
     monkeypatch.setattr(policy, '_ordinary_runtime', runtime)
     for step_id in ids:
