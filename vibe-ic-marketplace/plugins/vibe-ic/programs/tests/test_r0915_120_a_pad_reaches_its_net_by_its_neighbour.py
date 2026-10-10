@@ -64,6 +64,7 @@ def _cmds():
 # owns a special wire exactly covering this terminal.
 _HARNESS = r"""
 set ::terms {%(terms)s}
+set ::bonds {%(bonds)s}
 
 proc global_connect {args} { return "" }
 proc pin_access {args} { return "" }
@@ -77,6 +78,7 @@ proc _mk {i} {
       getMTerm { return ::MT_@I }
       getNet   { return ::NT_@I }
       getBBox  { return ::BB_@I }
+      getGeometries { return [list [list ::LY_@I ::BB_@I]] }
     }
     return 0
   }]
@@ -93,6 +95,14 @@ proc _mk {i} {
     switch -- $method {
       getName   { return [lindex $t 2] }
       getSWires { if {[lindex $t 8]} { return [list ::SW_@I] } ; return {} }
+      getBTerms {
+        set out {}; set j 0
+        foreach bond $::bonds {
+          if {[lindex $bond 1] eq [lindex $t 2]} { lappend out ::BT_$j }
+          incr j
+        }
+        return $out
+      }
     }
     return 0
   }]
@@ -110,6 +120,38 @@ proc _mk {i} {
       return 0
     }]
   }
+  proc ::LY_$i {method args} [string map [list @I $i] {
+    set layer [lindex [lindex $::terms @I] 9]
+    return [expr {$layer eq "" ? "M1" : $layer}]
+  }]
+}
+
+for {set j 0} {$j < [llength $::bonds]} {incr j} {
+  proc ::BT_$j {method args} [string map [list @J $j] {
+    switch -- $method {
+      getSigType { return [lindex [lindex $::bonds @J] 7] }
+      getBPins {
+        if {[lindex [lindex $::bonds @J] 8] eq "0"} { return {} }
+        return [list ::BP_@J]
+      }
+    }
+    return {}
+  }]
+  proc ::BP_$j {method args} [string map [list @J $j] {
+    return [list ::BX_@J]
+  }]
+  proc ::BX_$j {method args} [string map [list @J $j] {
+    set b [lindex $::bonds @J]
+    switch -- $method {
+      xMin { return [lindex $b 2] } yMin { return [lindex $b 3] }
+      xMax { return [lindex $b 4] } yMax { return [lindex $b 5] }
+      getTechLayer { return ::BL_@J }
+    }
+    return 0
+  }]
+  proc ::BL_$j {method args} [string map [list @J $j] {
+    return [lindex [lindex $::bonds @J] 6]
+  }]
 }
 
 set ::instorder {}
@@ -156,11 +198,12 @@ proc ::BLK {method args} {
 """
 
 
-def _drive(terms):
+def _drive(terms, bonds=()):
     if tclsh is None:                                    # pragma: no cover
         pytest.skip("tclsh not installed")
     rows = " ".join("{%s}" % " ".join(str(f) for f in t) for t in terms)
-    script = (_HARNESS % {"terms": rows}) + _block()
+    bond_rows = " ".join("{%s}" % " ".join(str(f) for f in b) for b in bonds)
+    script = (_HARNESS % {"terms": rows, "bonds": bond_rows}) + _block()
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "pg.tcl"
         p.write_text(script)
@@ -266,3 +309,34 @@ def test_the_block_still_never_routes():
     cmds = _cmds()
     assert "detailed_route -verbose" not in cmds
     assert "global_route" not in cmds
+
+
+@needs_tclsh
+@pytest.mark.parametrize('bond,connected', [
+    (["external", "VDD", 0, 0, 100, 100, "M1", "POWER", 1], True),
+    (["external", "OTHER", 0, 0, 100, 100, "M1", "POWER", 1], False),
+    (["external", "VDD", 0, 0, 100, 100, "M2", "POWER", 1], False),
+    (["external", "VDD", 101, 0, 200, 100, "M1", "POWER", 1], False),
+    (["external", "VDD", 0, 0, 100, 100, "M1", "POWER", 0], False),
+    (["external", "VDD", 0, 0, 100, 100, "M1", "SIGNAL", 1], False),
+])
+def test_external_supply_bond_requires_actual_same_net_layer_contact(bond,connected):
+    r = _drive([_PAD_A], [bond])
+    out = r.stdout + r.stderr
+    assert ("PG_ABUTMENT_NOT_CONNECTED" not in out) is connected, out
+    if connected:
+        assert "PG_BOND_CONTACT_OK: 1 terminal(s)" in out
+        assert "PG_ABUTMENT_OK" in out
+    else:
+        assert "padA/VDD" in out
+
+
+@needs_tclsh
+def test_a_contacted_supply_bond_does_not_rescue_a_distant_same_net_terminal():
+    remote = ["distant", "VDD", "VDD", 1000, 0, 1100, 100, "POWER", 0]
+    bond = ["external", "VDD", 0, 0, 100, 100, "M1", "POWER", 1]
+    r = _drive([_PAD_A, remote], [bond])
+    out = r.stdout + r.stderr
+    assert "PG_BOND_CONTACT_OK: 1 terminal(s)" in out
+    assert "PG_ABUTMENT_NOT_CONNECTED" in out
+    assert "distant/VDD" in out

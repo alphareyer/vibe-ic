@@ -10412,7 +10412,7 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
     metal the router had ignored, so they must be re-routed now that the
     physical-only cells' rails are net-owned shapes the spacing engine sees.
     Both halves are NONFATAL-guarded; the audit below is the gate."""
-    rr = (
+    rr = _terminal_contact_helpers_tcl() + (
         "# R-0915-105 — ONLY WHEN THE RE-CONNECT ACTUALLY CHANGED SOMETHING,\n"
         "# AND NEVER SILENTLY. A whole-design `detailed_route` rips and re-lays\n"
         "# every wire; issuing one when the re-connect changed nothing spends\n"
@@ -10541,6 +10541,8 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "set _pgab_bad {}\n"
         "set _pgab_nr {}\n"
         "set _pgab_cache [dict create]\n"
+        "set _pgab_bond_cache [dict create]\n"
+        "set _pgab_by_bond 0\n"
         "set _pgab_n_inst 0\n"
         "set _pgab_n_term 0\n"
         "set _pgab_every 2000\n"
@@ -10594,6 +10596,27 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "[lindex $_pgab_r 1] <= $_pgab_by1 && "
         "[lindex $_pgab_r 3] >= $_pgab_by0} { set _pgab_hit 1; break }\n"
         "      }\n"
+        # External supply bonds terminate at native BPin geometry; their
+        # resistor-fed core grids correctly belong to different nets.
+        "      if {!$_pgab_hit} {\n"
+        "        set _pgab_key [list $_pgab_nn $_pgab_sg]\n"
+        "        if {![dict exists $_pgab_bond_cache $_pgab_key]} {\n"
+        "          set _pgab_bonds {}; set _pgab_bts {}\n"
+        "          catch { set _pgab_bts [$_pgab_n getBTerms] }\n"
+        "          foreach _pgab_bt $_pgab_bts {\n"
+        "            if {[catch {set _pgab_bs [$_pgab_bt getSigType]}] || "
+        "$_pgab_bs ne $_pgab_sg} { continue }\n"
+        "            set _pgab_bonds [concat $_pgab_bonds "
+        "[_vibeic_term_shapes $_pgab_bt B]]\n"
+        "          }\n"
+        "          dict set _pgab_bond_cache $_pgab_key $_pgab_bonds\n"
+        "        }\n"
+        "        set _pgab_bonds [dict get $_pgab_bond_cache $_pgab_key]\n"
+        "        if {[llength $_pgab_bonds] && "
+        "[_vibeic_shapes_touch [_vibeic_term_shapes $_pgab_t I] $_pgab_bonds]} {\n"
+        "          set _pgab_hit 1; incr _pgab_by_bond\n"
+        "        }\n"
+        "      }\n"
         "      if {!$_pgab_hit} {\n"
         "        lappend _pgab_nr [list [$_pgab_i getName] "
         "[[$_pgab_t getMTerm] getName] $_pgab_nn "
@@ -10606,6 +10629,8 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "[llength $_pgab_nr] on no rail\"\n"
         "  flush stdout\n"
         "}\n"
+        "puts \"PG_BOND_CONTACT_OK: $_pgab_by_bond terminal(s) physically "
+        "touch their own same-layer supply bond\"\n"
         # R-0915-120's second question, asked ONLY of the no-rail set, so a
         # design where that set is empty pays nothing for it.
         "set _pgab_by_abut 0\n"
@@ -26955,6 +26980,55 @@ def _repair_design_margin_tcl(marker: str, extra: str = "") -> str:
         f"}} else {{ puts \"{marker.upper()}_MARGIN_APPLIED: {m}\" }}\n")
 
 
+def _terminal_contact_helpers_tcl() -> str:
+    """Placed terminal shapes and same-layer contact for existing audits."""
+    return (
+        # Shapes of ONE terminal as {layer x0 y0 x1 y1} records. Empty list ==
+        # "could not look", which the caller must not read as "no overlap".
+        "proc _vibeic_term_shapes {_t _kind} {\n"
+        "  set _out {}\n"
+        "  if {$_kind eq \"I\"} {\n"
+        "    if {[catch {set _gs [$_t getGeometries]}]} { return {} }\n"
+        "    foreach _g $_gs {\n"
+        "      if {[catch {\n"
+        "        lassign $_g _ly _rc\n"
+        "        lappend _out [list [$_ly getName] [$_rc xMin] [$_rc yMin] "
+        "[$_rc xMax] [$_rc yMax]]\n"
+        "      }]} { continue }\n"
+        "    }\n"
+        "  } else {\n"
+        "    if {[catch {set _bps [$_t getBPins]}]} { return {} }\n"
+        "    foreach _bp $_bps {\n"
+        "      if {[catch {set _bxs [$_bp getBoxes]}]} { continue }\n"
+        "      foreach _b $_bxs {\n"
+        "        if {[catch {\n"
+        "          lappend _out [list [[$_b getTechLayer] getName] [$_b xMin] "
+        "[$_b yMin] [$_b xMax] [$_b yMax]]\n"
+        "        }]} { continue }\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "  return $_out\n"
+        "}\n"
+        # Two terminals touch when ANY pair of their shapes overlaps ON THE SAME
+        # layer. Same-layer is the load-bearing half: two rectangles that share
+        # an (x,y) footprint on different layers are not connected.
+        "proc _vibeic_shapes_touch {_a _b} {\n"
+        "  foreach _p $_a {\n"
+        "    lassign $_p _pl _px0 _py0 _px1 _py1\n"
+        "    foreach _q $_b {\n"
+        "      lassign $_q _ql _qx0 _qy0 _qx1 _qy1\n"
+        "      if {$_pl ne $_ql} { continue }\n"
+        "      if {$_px1 < $_qx0 || $_qx1 < $_px0} { continue }\n"
+        "      if {$_py1 < $_qy0 || $_qy1 < $_py0} { continue }\n"
+        "      return 1\n"
+        "    }\n"
+        "  }\n"
+        "  return 0\n"
+        "}\n"
+    )
+
+
 def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
                                  membership_path: Optional[str] = None,
                                  stage: Optional[str] = None,
@@ -27032,50 +27106,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
     unchanged, including the `SHIP_UNROUTED_NETS:` line the promotion gate
     parses."""
     _st = f"stage={stage} " if stage else ""
-    return (
-        # Shapes of ONE terminal as {layer x0 y0 x1 y1} records. Empty list ==
-        # "could not look", which the caller must not read as "no overlap".
-        "proc _vibeic_term_shapes {_t _kind} {\n"
-        "  set _out {}\n"
-        "  if {$_kind eq \"I\"} {\n"
-        "    if {[catch {set _gs [$_t getGeometries]}]} { return {} }\n"
-        "    foreach _g $_gs {\n"
-        "      if {[catch {\n"
-        "        lassign $_g _ly _rc\n"
-        "        lappend _out [list [$_ly getName] [$_rc xMin] [$_rc yMin] "
-        "[$_rc xMax] [$_rc yMax]]\n"
-        "      }]} { continue }\n"
-        "    }\n"
-        "  } else {\n"
-        "    if {[catch {set _bps [$_t getBPins]}]} { return {} }\n"
-        "    foreach _bp $_bps {\n"
-        "      if {[catch {set _bxs [$_bp getBoxes]}]} { continue }\n"
-        "      foreach _b $_bxs {\n"
-        "        if {[catch {\n"
-        "          lappend _out [list [[$_b getTechLayer] getName] [$_b xMin] "
-        "[$_b yMin] [$_b xMax] [$_b yMax]]\n"
-        "        }]} { continue }\n"
-        "      }\n"
-        "    }\n"
-        "  }\n"
-        "  return $_out\n"
-        "}\n"
-        # Two terminals touch when ANY pair of their shapes overlaps ON THE SAME
-        # layer. Same-layer is the load-bearing half: two rectangles that share
-        # an (x,y) footprint on different layers are not connected.
-        "proc _vibeic_shapes_touch {_a _b} {\n"
-        "  foreach _p $_a {\n"
-        "    lassign $_p _pl _px0 _py0 _px1 _py1\n"
-        "    foreach _q $_b {\n"
-        "      lassign $_q _ql _qx0 _qy0 _qx1 _qy1\n"
-        "      if {$_pl ne $_ql} { continue }\n"
-        "      if {$_px1 < $_qx0 || $_qx1 < $_px0} { continue }\n"
-        "      if {$_py1 < $_qy0 || $_qy1 < $_py0} { continue }\n"
-        "      return 1\n"
-        "    }\n"
-        "  }\n"
-        "  return 0\n"
-        "}\n"
+    return _terminal_contact_helpers_tcl() + (
         "proc _vibeic_uf_find {_arr _x} {\n"
         "  upvar 1 $_arr _a\n"
         "  while {$_a($_x) != $_x} { set _x $_a($_x) }\n"
