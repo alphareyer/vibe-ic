@@ -26445,7 +26445,9 @@ def main() -> int:
             _preflight_refusal("asic_sdc"),
             step_asic_sdc, project, args.top_name, args.container, ic_class,
             pdk_name=args.pdk, _use_controller=False))
-    if _execution._ordinary_runtime is not None:
+    if (_execution._ordinary_runtime is not None
+            and not _before_entry("yosys_synth", _entry_site)
+            and not _after_exit("asic_sdc")):
         # Step 8 is the consumer validation of the Step-7 artefacts.  The
         # default controller may return NOT_MEASURED for this source-bound
         # row; step_asic_sdc itself falls through to the canonical producer.
@@ -26464,7 +26466,14 @@ def main() -> int:
     # runner's OWN predicate — the same one the step itself uses — is handed to
     # the pre-flight instead of a second copy of the judgement.
     _analog_absent, _analog_reason = _analog_rtl_track_absent(project, ic_class)
-    if _after_exit("yosys_synth"):
+    if _before_entry("yosys_synth", _entry_site):
+        plan.append(StepResult(
+            "yosys_synth", "NOT_APPLICABLE", 0.0,
+            f"run declared --entry-step {args.entry_step}; Step 9 is upstream "
+            "of this entry and was not dispatched. Its netlist was supplied "
+            "by the checkpoint, not produced here.",
+            declared_by=f"--entry-step {args.entry_step}"))
+    elif _after_exit("yosys_synth"):
         plan.append(_exit_sentinel("yosys_synth"))
     else:
         plan.append(_spf.gate(

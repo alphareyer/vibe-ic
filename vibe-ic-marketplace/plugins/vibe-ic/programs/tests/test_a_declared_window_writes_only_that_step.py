@@ -58,6 +58,74 @@ def _calls(node: ast.AST):
     return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
 
 
+@pytest.mark.parametrize("entry,exit_site,expected", [
+    (None, None, ["asic_sdc", "sdc_validation", "yosys_synth"]),
+    ("yosys_synth", None, ["sdc_validation", "yosys_synth"]),
+    ("dft_lec_chain", None, []),
+    (None, "rtl_validate", []),
+    (None, "yosys_synth", ["asic_sdc", "sdc_validation", "yosys_synth"]),
+])
+def test_resume_does_not_repeat_upstream_synthesis(entry, exit_site, expected):
+    """Drive the real dispatch branches; an admitted checkpoint is supplied.
+
+    The tool callbacks stand in for expensive native programs. Only dispatch
+    and upstream preservation are under test; no EDA PASS is manufactured.
+    """
+    from types import SimpleNamespace
+    main = _main_node()
+    names = {"_site_order", "_before_entry", "_after_exit", "_exit_sentinel"}
+    nodes = [n for n in main.body if isinstance(n, ast.FunctionDef)
+             and n.name in names]
+    for node in main.body:
+        if not isinstance(node, ast.If):
+            continue
+        text = ast.unparse(node)
+        if ("_before_entry('asic_sdc'" in text
+                or "plan.append(step_sdc_validation(project))" in text
+                or "_spf.gate(" in text and "'yosys_synth'" in text):
+            nodes.append(node)
+    tree = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
+    sites = (('rtl_gen', ('1',)), ('rtl_validate', ('2', '3')),
+             ('sim', ('4',)), ('asic_sdc', ('7',)),
+             ('yosys_synth', ('9',)), ('dft_lec_chain', ('11', '12', '13')))
+    called = []
+    untouched = {"netlist": b"valid checkpoint netlist"}
+    def producer(name):
+        def run(*_args, **_kwargs):
+            called.append(name)
+            if name == 'yosys_synth':
+                untouched['netlist'] = b'new synthesis output'
+            return SimpleNamespace(name=name, status='PASS')
+        return run
+    env = {
+        '_spf': SimpleNamespace(RUNNER_PLANS={
+            'design_one_shot_runner': SimpleNamespace(sites=sites)},
+            gate=lambda _project, _runner, _site, _refusal, fn, *a, **kw: fn(*a)),
+        '_execution': SimpleNamespace(_ordinary_runtime={'policy': {'mode': 'default'}}),
+        '_entry_site': entry,
+        '_exit_pruned': [name for name, _ in sites][
+            [name for name, _ in sites].index(exit_site) + 1:] if exit_site else [],
+        'StepResult': lambda name, status, duration, detail, **kw: SimpleNamespace(
+            name=name, status=status, detail=detail, **kw),
+        'step_asic_sdc': producer('asic_sdc'),
+        'step_sdc_validation': producer('sdc_validation'),
+        'step_yosys_synth': producer('yosys_synth'),
+        '_preflight_refusal': lambda *_: None,
+        'args': SimpleNamespace(entry_step='11' if entry else None,
+                                exit_step='2' if exit_site else None,
+                                top_name='unit_top', container='host', pdk='unit_pdk'),
+        'project': Path('/supplied/checkpoint'), 'ic_class': {},
+        '_analog_absent': False, '_analog_reason': '', 'plan': [],
+    }
+    exec(compile(tree, str(RUNNER), 'exec'), env)
+    assert called == expected
+    if entry == 'dft_lec_chain':
+        assert untouched['netlist'] == b'valid checkpoint netlist'
+        row = next(r for r in env['plan'] if r.name == 'yosys_synth')
+        assert row.status == 'NOT_APPLICABLE'
+        assert 'upstream' in row.detail
+
+
 def _dotted(call: ast.Call) -> str:
     f = call.func
     if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
