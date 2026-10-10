@@ -497,13 +497,13 @@ def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path, with_input_plan):
     assert "the input REQUIRES DRC clean" in out
 
 
-def test_actual_failed_prelayout_timing_is_not_hidden(tmp_path):
-    """Phase admission must preserve a real producer's failing timing result."""
+def test_actual_failed_signoff_timing_is_not_hidden(tmp_path):
+    """Preserve FAIL on the post-route STA record this L24 gate consumes."""
     proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
     _emit_l24(proj)
-    _report(proj, "phase3/sta/pre_pnr_summary.json", {
+    _report(proj, "phase3/sta/post_route_summary.json", {
         "program": "eda_report_audit:sta", "invoked_as": "producer",
-        "passed": False, "summary": {"declared_sta_basis": "PRE_LAYOUT"},
+        "passed": False, "summary": {"declared_sta_basis": "POST_ROUTE"},
     })
     rc, out = _run_gate(proj)
     assert rc == 1, out
