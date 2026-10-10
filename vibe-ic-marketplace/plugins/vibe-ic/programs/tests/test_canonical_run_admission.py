@@ -79,11 +79,25 @@ def test_canonical_program_paths_bind_dispatch_and_frontend_contracts():
     paths = cra.canonical_program_paths(PROGRAMS)
     names = {path.name for path in paths}
     assert {
+        "vibe_ic_one_shot_runner.py",
         "design_one_shot_runner.py", "phase3_one_shot_runner.py",
         "execution_policy.py", "execution_modes.py",
         "execution_frontend_providers.py", "execution_frontend_worker.py",
         "librelane_contract.py",
     }.issubset(names)
+
+
+def test_frontdoor_source_fix_reopens_checkpoint_operation(tmp_path):
+    project = _project(tmp_path / "proj")
+    programs = tmp_path / "programs"
+    programs.mkdir()
+    frontdoor = programs / "vibe_ic_one_shot_runner.py"
+    frontdoor.write_text("def main(): return 1\n")
+    paths = cra.canonical_program_paths(programs)
+    assert _admit(project, programs=paths).admitted
+    assert not _admit(project, programs=paths).admitted
+    frontdoor.write_text("def main(): return 0\n")
+    assert _admit(project, programs=paths).admitted
 
 
 def test_canonical_authored_rtl_change_reopens_phase2_admission(tmp_path):

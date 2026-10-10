@@ -168,6 +168,7 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
     """The shared P2/P3 program contract, identical at every entry point."""
     programs_dir = Path(programs_dir).resolve()
     return (
+        programs_dir / "vibe_ic_one_shot_runner.py",
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
         programs_dir / "librelane_contract.py",
