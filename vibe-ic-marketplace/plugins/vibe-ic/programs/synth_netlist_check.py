@@ -280,7 +280,8 @@ def audit_netlist(
         nl_mtime = netlist_path.stat().st_mtime
         stale_against = [str(p) for p in rtl_files
                          if p.stat().st_mtime > nl_mtime]
-        if stale_against:
+        if stale_against and not _native_inputs_match_current_rtl(
+                netlist_path, rtl_files):
             stats["stale_vs_rtl"] = True
             findings.append(Finding(
                 severity="ERROR",
@@ -878,6 +879,58 @@ TOOL_EMITTED_NETLIST_NAME = "netlist_yosys.v"
 
 class NativeBindingRefusal(ValueError):
     """The issued native synthesis handoff is present but no longer valid."""
+
+
+def _native_inputs_match_current_rtl(netlist_path: Path,
+                                     rtl_files: List[Path]) -> bool:
+    """Accept a content-identical native cache despite a newer RTL mtime.
+
+    LibreLane records the hashes of the RTL inputs and of its native netlist
+    in ``input_fingerprint.json``/``vibeic_receipt.json``.  A deterministic
+    regeneration can rewrite identical RTL bytes and change only mtime; the
+    old mtime-only stale check then rejects a valid cache.  This helper only
+    suppresses that finding when the producer's own input and output hashes
+    bind the cache to *all* current RTL files and to the audited netlist.
+    """
+    try:
+        lexical = netlist_path.absolute()
+        project = lexical.parents[3]
+        native_root = project / "phase3" / "librelane"
+        if not native_root.is_dir() or not rtl_files:
+            return False
+        digest = hashlib.sha256(netlist_path.read_bytes()).hexdigest()
+        wanted = {}
+        for path in rtl_files:
+            wanted[str(path.absolute())] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for fp in native_root.rglob("input_fingerprint.json"):
+            try:
+                doc = json.loads(fp.read_text())
+            except (OSError, ValueError, TypeError):
+                continue
+            cfg = doc.get("config_files")
+            states = doc.get("state_files")
+            if not isinstance(cfg, dict) or not isinstance(states, dict):
+                continue
+            if any(cfg.get(raw) not in (sha, f"sha256:{sha}")
+                   for raw, sha in wanted.items()):
+                continue
+            if not any(value in (digest, f"sha256:{digest}")
+                       for value in states.values()):
+                continue
+            receipt = fp.with_name("vibeic_receipt.json")
+            try:
+                rdoc = json.loads(receipt.read_text())
+            except (OSError, ValueError, TypeError):
+                continue
+            rsha = rdoc.get("sha256") if isinstance(rdoc, dict) else None
+            if not isinstance(rsha, dict) or not any(
+                    value in (digest, f"sha256:{digest}")
+                    for value in rsha.values()):
+                continue
+            return True
+    except (OSError, IndexError, ValueError, TypeError):
+        return False
+    return False
 
 
 def _bound_native_netlist(netlist_path: Path) -> Optional[Path]:

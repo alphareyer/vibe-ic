@@ -4,6 +4,8 @@ Tests verify correct detection of missing/empty/too-small synthesis netlists,
 including valid netlists, comment-only files, and wire-only files.
 """
 import json
+import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +86,32 @@ def test_explicit_mapped_tool_netlist_preserves_generic_phase2_sibling(tmp_path)
     assert subprocess.run(argv, capture_output=True).returncode == 1
     native.unlink()
     assert subprocess.run(argv, capture_output=True).returncode == 1
+
+
+def test_native_content_bound_cache_not_rejected_by_mtime(tmp_path):
+    """A native receipt with matching RTL/output hashes outranks mtime."""
+    project = tmp_path / "project"
+    synth = project / "phase2" / "stage2" / "synth"
+    native = project / "phase3" / "librelane" / "02-yosys-synthesis"
+    rtl = project / "phase2" / "stage1" / "rtl" / "spm.v"
+    synth.mkdir(parents=True)
+    native.mkdir(parents=True)
+    rtl.parent.mkdir(parents=True)
+    netlist = synth / "spm_synth.v"
+    netlist.write_text(VALID_15_CELLS)
+    rtl.write_text("module spm(input clk, output y); assign y = clk; endmodule\n")
+    digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    fp = {"config_files": {str(rtl.absolute()): digest(rtl)},
+          "state_files": {"spm.nl.v": digest(netlist)}}
+    (native / "input_fingerprint.json").write_text(json.dumps(fp))
+    (native / "vibeic_receipt.json").write_text(json.dumps(
+        {"sha256": {"spm.nl.v": digest(netlist)}}))
+    old = netlist.stat().st_mtime - 20
+    os.utime(netlist, (old, old))
+    os.utime(rtl, (old + 10, old + 10))
+
+    findings, _stats = snc.audit_netlist(netlist, min_cells=10, rtl_paths=[rtl])
+    assert not any(f.category == "STALE_NETLIST" for f in findings)
 
 
 # ===========================================================================
