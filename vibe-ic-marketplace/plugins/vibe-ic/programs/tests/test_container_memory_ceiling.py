@@ -330,6 +330,8 @@ def test_technology_facts_argv_carries_the_ceiling(monkeypatch):
     command, and the sweep would still be green.
     """
     import submission_template_fetch as stf
+    import _container_exec
+    monkeypatch.setattr(_container_exec, "no_container_route", lambda: False)
 
     class _Judged:
         ref = "repo@sha256:" + "0" * 64

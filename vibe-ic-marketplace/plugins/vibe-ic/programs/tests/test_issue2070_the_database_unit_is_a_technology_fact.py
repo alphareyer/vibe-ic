@@ -417,8 +417,10 @@ def _declared(proj: Path):
 
 @pytest.mark.parametrize("stream_um,compressed", [
     (0.001, False), (0.002, False), (None, False), (0.001, True)])
+@pytest.mark.parametrize("local_route", [False, True])
 def test_fetch_declares_cell_stream_units_not_lef_units(tmp_path, monkeypatch,
-                                                       stream_um, compressed):
+                                                       stream_um, compressed,
+                                                       local_route):
     """Run the producer's actual GDS probe and both declaration consumers.
 
     Only the container transport is substituted. The binary GDS reader and
@@ -427,6 +429,7 @@ def test_fetch_declares_cell_stream_units_not_lef_units(tmp_path, monkeypatch,
     import os
     from types import SimpleNamespace
     import _eda_image
+    import _container_exec
     from _hostpaths import require_repo
     from test_general_precheck import write_gds
     import general_precheck as GP
@@ -452,11 +455,16 @@ def test_fetch_declares_cell_stream_units_not_lef_units(tmp_path, monkeypatch,
     monkeypatch.setattr(STF, "_registry_entry", lambda _: row)
     monkeypatch.setattr(_eda_image, "judged_image", lambda **_: SimpleNamespace(
         ref="registry.invalid/eda@sha256:test", digest="sha256:test", version="test"))
+    monkeypatch.setattr(_container_exec, "no_container_route", lambda: local_route)
 
     def transport(argv, timeout=600):
-        assert argv[0:2] == ["docker", "run"]
-        pos = argv.index("--skip")
-        command = argv[pos + 1:]
+        if local_route:
+            assert argv[0] != "docker", "an in-image PDK read started nested Docker"
+            command = list(argv)
+        else:
+            assert argv[0:2] == ["docker", "run"]
+            pos = argv.index("--skip")
+            command = argv[pos + 1:]
         if command[0] == "python3":
             command[0] = sys.executable
         env = dict(os.environ, PYTHONPATH=str(_PROGRAMS),

@@ -85,6 +85,7 @@ if str(_HERE) not in sys.path:
 import _submission_template as _st                            # noqa: E402
 import _tapeout_declaration as _decl                          # noqa: E402
 import _docker_memory as _dmem                                # noqa: E402
+import _container_exec as _cex                               # noqa: E402
 import tapeout_readiness_check as _theirs                     # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text  # noqa: E402
 
@@ -594,10 +595,14 @@ def technology_facts(pdk: str, image: str,
     # `oom_score_adj` — it takes the desktop session, not the run that caused
     # the pressure. Spliced immediately after the run verb, exactly as the one
     # other `docker run` in this file does.
-    rc, out, err = _run(["docker", "run", "--rm",
-                         *_dmem.docker_memory_flags(),
-                         digest, "--skip",
-                         "bash", "-lc", script], timeout=600)
+    local = _cex.local_exec_mode(ATTRIBUTION)
+    if local:
+        rc, out, err = _run(["bash", "-lc", script], timeout=600)
+    else:
+        rc, out, err = _run(["docker", "run", "--rm",
+                             *_dmem.docker_memory_flags(),
+                             digest, "--skip",
+                             "bash", "-lc", script], timeout=600)
     path, line_no, statement = None, None, None
     for raw in (out or "").splitlines():
         s = raw.strip()
@@ -657,12 +662,18 @@ def technology_facts(pdk: str, image: str,
         "path = paths[0]\n"
         "layout = read_layout(Path(path))\n"
         "print('VIBEIC_STREAM_DBU=' + json.dumps({'cell_gds': path, 'value': layout.dbu_um}))\n")
-    rc, out, err = _run([
-        "docker", "run", "--rm", *_dmem.docker_memory_flags(),
-        "-v", f"{_HERE}:/vibeic_programs:ro",
-        "-e", "PYTHONPATH=/vibeic_programs", "-e", "PYTHONDONTWRITEBYTECODE=1",
-        digest, "--skip", "python3", "-c", probe, f"{root}/{gds_glob}"],
-        timeout=600)
+    if local:
+        local_probe = f"import sys; sys.path.insert(0, {str(_HERE)!r})\n" + probe
+        rc, out, err = _run([
+            sys.executable, "-B", "-c", local_probe, f"{root}/{gds_glob}"],
+            timeout=600)
+    else:
+        rc, out, err = _run([
+            "docker", "run", "--rm", *_dmem.docker_memory_flags(),
+            "-v", f"{_HERE}:/vibeic_programs:ro",
+            "-e", "PYTHONPATH=/vibeic_programs", "-e", "PYTHONDONTWRITEBYTECODE=1",
+            digest, "--skip", "python3", "-c", probe, f"{root}/{gds_glob}"],
+            timeout=600)
     try:
         # The image entrypoint prints banners and the command itself. Only a
         # complete, uniquely marked result line belongs to this probe.
