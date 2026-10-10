@@ -115,6 +115,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import functools
 import hashlib
 import heapq
 import json
@@ -64099,6 +64100,27 @@ def _semantic_gate_root(gate_name: str, project: Path) -> Path:
     return project
 
 
+def _clear_invocation_ic_name(fn):
+    """Keep the docs runner's CLI identity scoped to one invocation.
+
+    ``--ic-name`` is a per-run choice, but the docs runner is also called
+    in-process by the front-door tests.  A raised boundary (or any other
+    exception) used to leave ``_CLI_IC_NAME_OVERRIDE`` set for the next test,
+    causing every unrelated fixture to be reported under the previous name.
+    The wrapper preserves the existing main entry point while clearing the
+    process-global override on every exit path.
+    """
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            global _CLI_IC_NAME_OVERRIDE
+            _CLI_IC_NAME_OVERRIDE = None
+    return _wrapped
+
+
+@_clear_invocation_ic_name
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0]
