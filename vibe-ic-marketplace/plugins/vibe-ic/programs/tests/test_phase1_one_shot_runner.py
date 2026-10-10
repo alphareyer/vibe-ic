@@ -273,6 +273,10 @@ def test_docs_delegate_rc2_is_not_measured_and_blocks_downstream(
         tmp_path, monkeypatch):
     """A VACUOUS delegated gate result remains blocking at the front door."""
     import phase1_one_shot_runner as runner
+    import execution_policy as policy
+    # This test calls main in-process, rather than launching a fresh CLI.
+    # Restore its project metadata when the test ends.
+    monkeypatch.setattr(policy, '_ordinary_runtime', None)
 
     project = tmp_path / "proj"
     (project / "input" / "docs").mkdir(parents=True)

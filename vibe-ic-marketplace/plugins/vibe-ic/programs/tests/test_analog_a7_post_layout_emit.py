@@ -24,14 +24,6 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def isolated_policy_runtime(monkeypatch):
-    # Standalone runner calls retain metadata; they must not leave another
-    # test reading a project it did not supply.
-    import execution_policy as policy
-    monkeypatch.setattr(policy, '_ordinary_runtime', None)
-
-
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
 import _analog_producer_common as PC

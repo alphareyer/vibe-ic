@@ -25,14 +25,6 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def isolated_policy_runtime(monkeypatch):
-    # The runner publishes project metadata in-process. Keep each test's
-    # project independent and restore the previous runtime after the test.
-    import execution_policy as policy
-    monkeypatch.setattr(policy, '_ordinary_runtime', None)
-
-
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
 import analog_a6_librelane_drc as A6
