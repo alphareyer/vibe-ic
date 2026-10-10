@@ -27,6 +27,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parent.parent
 if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
@@ -89,19 +91,29 @@ def test_DEFECT_unmapped_netlist_must_not_be_reported_reusable(tmp_path):
         "than a wrong-PDK one and must be rejected")
 
 
-def test_FIXED_liberty_mapped_netlist_is_still_reusable(tmp_path):
+@pytest.mark.parametrize("quoted", [False, True])
+def test_FIXED_liberty_mapped_netlist_is_still_reusable(tmp_path, quoted):
     """FIXED HALF. The fix must not make the guard reject everything: a netlist
     whose masters all exist in the liberty is still reusable."""
     nl = _write(tmp_path, "spm_synth.v", MAPPED_NETLIST)
-    lib = _write(tmp_path, "lib.lib", LIBERTY_TEXT)
+    text = LIBERTY_TEXT
+    if quoted:
+        import re
+        text = re.sub(r"cell \(([^)]+)\)", r'cell ("\1")', text)
+    lib = _write(tmp_path, "lib.lib", text)
     assert p3._netlist_matches_liberty(nl, str(lib)) is True
 
 
-def test_wrong_pdk_netlist_still_rejected_for_the_original_reason(tmp_path):
+@pytest.mark.parametrize("quoted", [False, True])
+def test_wrong_pdk_netlist_still_rejected_for_the_original_reason(tmp_path, quoted):
     """Regression pin: the behaviour that already worked keeps working, and is
     rejected by the MASTER-SAMPLING arm, not by the new generic check."""
     nl = _write(tmp_path, "other.v", WRONG_PDK_NETLIST)
-    lib = _write(tmp_path, "lib.lib", LIBERTY_TEXT)
+    text = LIBERTY_TEXT
+    if quoted:
+        import re
+        text = re.sub(r"cell \(([^)]+)\)", r'cell ("\1")', text)
+    lib = _write(tmp_path, "lib.lib", text)
     assert p3._netlist_matches_liberty(nl, str(lib)) is False
     assert not p3._GENERIC_PRIM_MASTER_RE.search(WRONG_PDK_NETLIST), (
         "the wrong-PDK fixture must contain no generic primitive, so its "

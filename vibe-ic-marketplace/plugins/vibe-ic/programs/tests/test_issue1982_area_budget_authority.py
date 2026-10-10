@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 PLUGIN = PROGRAMS.parent
@@ -84,6 +85,24 @@ def _run(program: Path, project: Path, report_rel: str):
 
 def _limit(w=40, h=50):
     return {"status": LIMIT, "max_die_dimensions_um": [w, h]}
+
+
+@pytest.mark.parametrize("measured,expected_rc,expected_verdict", [
+    (900.0, 0, "PASS"), (1100.0, 1, "FAIL"),
+])
+def test_auto_sized_die_still_checks_generic_document_cell_budget(
+        tmp_path, measured, expected_rc, expected_verdict):
+    project = _project(tmp_path, {
+        "status": NOT_APPLICABLE,
+        "rationale": "The input delegates die dimensions to the canonical flow.",
+    }, chip_area=measured)
+    source = project / "input/docs/design.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("Core standard-cell area budget: 1000 square micrometres.\n")
+    cp, report = _run(AREA_GATE, project, "reports/phase2/gates/area_budget.json")
+    assert cp.returncode == expected_rc, cp.stdout + cp.stderr
+    assert report["verdict"] == expected_verdict
+    assert report["comparison"]["cell_ceiling_um2"] == 1000.0
 
 
 def test_explicit_budget_reaches_l19_and_passes_with_units_and_sources(tmp_path):

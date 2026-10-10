@@ -13321,7 +13321,7 @@ def _netlist_matches_liberty(netlist_path: Path,
             if liberty_path else ""
         if not lib_txt:
             return True
-        cells = set(re.findall(r"cell\s*\(\s*([^\s\)]+)", lib_txt))
+        cells = set(re.findall(r'cell\s*\(\s*"?([^\s\)"]+)', lib_txt))
         if not cells:
             return True
         return all(t in cells or t.lstrip("\\") in cells

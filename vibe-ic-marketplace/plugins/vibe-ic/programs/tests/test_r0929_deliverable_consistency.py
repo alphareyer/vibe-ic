@@ -112,6 +112,26 @@ def _gen():
     return importlib.import_module("area_budget_basis_gen")
 
 
+@pytest.mark.parametrize("statement", [
+    "Die dimensions should be sized by the canonical IC flow and IO requirements.",
+    "Die area is determined by the run.",
+])
+def test_explicit_flow_sizing_is_retained_as_an_outcome(tmp_path, statement):
+    project = tmp_path / "project"
+    source = project / "input/docs/requirements.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(statement)
+    doc = TD.blank_declaration()
+    doc["answers"]["deliverable"] = "DIE"
+    doc["answer_provenance"] = {
+        "deliverable": {"answered_by": "owner", "citation": CITATION},
+    }
+    result = _gen().derive(project, doc)
+    assert result["status"] == "WRITE", result
+    assert result["budget"]["status"] == "NOT_APPLICABLE"
+    assert result["budget"]["basis"]["die_area_decided_by_the_run"]
+
+
 def _answers(deliverable="DIE", owner=True, rationale=STALE):
     doc = {
         "schema": "vibe-ic/step_0_5ic_answers/1",

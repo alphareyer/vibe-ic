@@ -168,7 +168,8 @@ _TOTAL_POWER_METRIC_RE = re.compile(
 # the second one must be reported rather than turned into the first. So the
 # pattern accepts a unit SHAPE and `Metric.to_canonical` refuses the ones the
 # table does not carry, recording each refusal with the text it read.
-_UM2 = r"(?:[a-zA-Zµμ]{1,7})\s*(?:\^2|²|\*\*2|2)"
+_UM2 = (r"(?:(?:[a-zA-Zµμ]{1,7})\s*(?:\^2|²|\*\*2|2)"
+        r"|square\s+(?:micromet(?:re|er)s?|microns?))")
 _AREA_UNITS = {"um^2": 1.0}
 _POWER_UNIT_RE = r"(?:[a-zA-Zµμ]{0,2}\s*W)\b"
 _POWER_UNITS = {"w": 1e6, "mw": 1e3, "uw": 1.0, "nw": 1e-3}
@@ -194,6 +195,9 @@ def _norm_unit(raw: str) -> str:
     """A unit token reduced to its comparison key: no spaces, lowercased, and
     every spelling of `micro` folded to `u`."""
     t = re.sub(r"\s+", "", str(raw or "")).lower()
+    if t in {"squaremicrometre", "squaremicrometres", "squaremicrometer",
+             "squaremicrometers", "squaremicron", "squaremicrons"}:
+        return "um^2"
     t = t.replace("µ", "u").replace("μ", "u")
     t = t.replace("²", "^2").replace("**2", "^2").replace("um2", "um^2")
     t = t.replace("micron^2", "um^2").replace("micron", "um")
@@ -405,6 +409,23 @@ def parse_signoff_statements(text: str, metric: "Metric",
     for j, line in enumerate(lines):
         if _cells(line):
             continue                      # rows are handled above
+        # An explicit budget is an absolute design target, not a measured
+        # baseline. Read it even when the requirement is prose in a general
+        # design document rather than a technology-keyed acceptance table.
+        budget = re.search(r"\b(?:budget|ceiling|limit)\s*[:=]\s*"
+                           + metric.value_re.pattern, line, re.IGNORECASE)
+        if (budget and metric.metric_re.search(line[:budget.start()])
+                and not _is_denied(line)):
+            value = _num(budget.group(1))
+            value = (metric.to_canonical(value, budget.group(2))
+                     if value is not None else None)
+            if value is not None and value > 0:
+                attribution, attribution_line = _attribution(lines, j)
+                out["ceilings"].append({
+                    "source": source, "line": j + 1, "row": line.strip(),
+                    "attribution": attribution,
+                    "attribution_line": attribution_line,
+                    "value": value, "absolute_budget": True})
         if not metric.prose_re.search(line):
             continue
         if _is_denied(line):
@@ -603,6 +624,20 @@ def resolve_texts(items: Sequence[Tuple[str, str]],
     rep["attributions_seen"] = sorted({
         str(b["attribution"]).splitlines()[0].strip()
         for b in stmts["baselines"]})
+
+    targets = [r for r in stmts["ceilings"] if r.get("absolute_budget")]
+    if (targets and len(targets) == len(stmts["ceilings"])
+            and not stmts["baselines"] and not keyed and not stmts["ratios"]):
+        values = sorted({float(r["value"]) for r in targets})
+        if len(values) != 1:
+            return _refuse(rep, metric, "absolute_budget_ambiguous",
+                           f"the input declares conflicting absolute budgets {values}")
+        target = targets[0]
+        rep.update({"tier": "input_absolute_budget", "determined": True,
+                    "threshold": values[0], "source": target["source"],
+                    "line": target["line"], "row": target["row"],
+                    "note": "Explicit input budget; no measured baseline or ratio inferred."})
+        return _with_aliases(rep)
 
     if not cands:
         return _refuse(
@@ -1114,6 +1149,21 @@ def l7_docs_of(project: Path) -> List[Tuple[str, str]]:
                             f.read_text(errors="ignore")))
             except (OSError, ValueError):
                 continue
+    # General input names also carry explicit budgets. Use the existing
+    # design-input walker; retain only budget lines here so unrelated tables
+    # do not become additional L7 baselines.
+    import floorplan_contract as _fpc
+    for rel, path, text in _fpc._iter_input_files(project):
+        if (path.suffix.lower() not in (".md", ".txt", ".rst")
+                or rel.startswith("input/submission_template")
+                or str(path.resolve()) in seen):
+            continue
+        lines = [line if re.search(r"\b(?:budget|ceiling|limit)\s*[:=]", line,
+                                   re.IGNORECASE) else ""
+                 for line in text.splitlines()]
+        if any(lines):
+            out.append((rel, "\n".join(lines)))
+            seen.add(str(path.resolve()))
     return out
 
 

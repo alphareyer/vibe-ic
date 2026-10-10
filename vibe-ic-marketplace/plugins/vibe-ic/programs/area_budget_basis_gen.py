@@ -110,7 +110,8 @@ _FREEDOM_RE = re.compile("|".join(_FREEDOM_MARKERS), re.IGNORECASE)
 #: "the die area is decided by the run": an outcome, not a ceiling.
 _OUTCOME_RE = re.compile(
     r"跑出後決定|(?:由|依)[^。.;；\n]{0,40}?(?:決定|推算)"
-    r"|determined\s+by\s+the\s+(?:run|flow|implementation)"
+    r"|(?:determined|sized)\s+by\s+the\s+"
+    r"(?:(?:canonical|IC)\s+)*(?:run|flow|implementation)"
     r"|an?\s+outcome\s+of", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 _BULLET_RE = re.compile(r"^[\s>*+\-]+")

@@ -1290,6 +1290,23 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
             src = (merged_answers if merged_answers.is_file()
                    else answers_path)
             if src is not None:
+                # Derive the design-owned area disposition before the
+                # declaration copies it. The existing producer preserves
+                # explicit owner answers and leaves unsupported input unset.
+                import area_budget_basis_gen as _area_basis
+                area_doc, area_error = _TD.load(src)
+                if area_error or not isinstance(area_doc, dict):
+                    print(f"      ERROR: area basis input unreadable: {area_error}",
+                          file=sys.stderr)
+                    return 1
+                area_result = _area_basis.derive(project, area_doc)
+                if area_result["status"] == "WRITE":
+                    area_rc = _area_basis.main([
+                        str(project), "--answers", str(src), "--json",
+                        str(project / "reports/phase1/area_budget_basis.json"),
+                    ])
+                    if area_rc != 0:
+                        return 1
                 argv = argv + ["--answers", str(src)]
         name = Path(argv[1]).name
         # Same replacement as `_run_expert_track`, same reason. See there.
