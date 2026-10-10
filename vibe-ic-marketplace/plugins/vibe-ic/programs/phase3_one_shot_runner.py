@@ -33453,7 +33453,8 @@ puts "{_PNR_STAGE_MARKER} placement"
 {spare_protection_tcl}if {{[catch {{detailed_placement}} _sp_dp_err]}} {{
   puts "SPARE_LEGALIZE_NONFATAL: $_sp_dp_err"
 }}
-{spare_postfix_tcl}# === v0.1.26 SETUP / DRV repair (pre-CTS) ===
+{spare_postfix_tcl}write_def {out_dir_c}/post_spare.def
+# === v0.1.26 SETUP / DRV repair (pre-CTS) ===
 # The prior template only ran `repair_timing -hold` post-CTS — it NEVER
 # buffered high-fanout nets nor fixed setup. That left control/enable nets
 # (e.g. FSM init/next/state decode driving hundreds of next-state flops, and
@@ -37195,7 +37196,8 @@ def step_pad_assignment(project: Path, container: Optional[str] = None,
 
 
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
-                      pdk: Optional[PdkConfig] = None) -> StepResult:
+                      pdk: Optional[PdkConfig] = None, *,
+                      librelane_state: Optional[Path] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
 
     A producer refusal is FAIL, a fully absent declaration is SKIP, and only
@@ -37232,7 +37234,9 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         pdk, "tech_lef", None) else None
     specs = [
         ("pad_assignment_gen.py", pdk_args),
-        ("pad_ring_gen.py", pdk_args),
+        ("pad_ring_gen.py", pdk_args + (
+            ["--librelane-state", str(librelane_state)]
+            if librelane_state is not None else [])),
         ("pad_ring_check.py", pdk_args),
     ]
     if tech_lef_c:
@@ -37997,6 +38001,10 @@ def _prepare_librelane_floorplan_for_route(
                                   {"def": out_dir / "placed.def",
                                    "odb": out_dir / "librelane_placed.odb"},
                                   placed_handoff)
+            _ll.handoff_to_direct(folders[-1] / "state_out.json",
+                                  {"def": out_dir / "post_spare.def",
+                                   "odb": out_dir / "post_spare.odb"},
+                                  project / "reports/phase3/librelane_spare_handoff.json")
     except _ll.Refusal as exc:
         return _fail(exc.code, str(exc))
     if modes["15"] == "librelane" and "OpenROAD.TapEndcapInsertion" not in by_step:
@@ -76990,6 +76998,9 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     direct = _phase3_step_sites()
     spans = dict(sites)
     pnr_ids = set(spans["pnr"]) | {"15.5ic"}
+    import execution_policy
+    if set(ids).issubset(pnr_ids) and execution_policy.request()['mode'] == 'default':
+        return ["default_pnr"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
         return ["enclosing_pnr"]
     if set(ids).issubset(_PHASE3_CANONICALIZER_IDS):
@@ -77807,7 +77818,7 @@ def _step32_lets_the_chain_continue(status: str) -> bool:
     chain continues to stream-out on PASS and, like the pre-stream gate, on an
     owner-signed WAIVED -- otherwise a signed waiver at step 32 would stop the
     flow before the final post-stream capture, the only one that counts."""
-    return status in ("PASS", "WAIVED")
+    return status in ("PASS", "WAIVED", "NOT_APPLICABLE")
 
 
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
@@ -77846,7 +77857,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
     _views: Dict[str, Any] = {}
-    if not set(selected) & {"pnr", "enclosing_pnr", "enclosing_phase3"}:
+    if not set(selected) & {"pnr", "default_pnr", "enclosing_pnr", "enclosing_phase3"}:
         # A window that routes again -- the `pnr` site, or a partial-PnR /
         # whole-phase window dispatched as `enclosing_*`, which runs step_pnr
         # in this process -- derives its views itself and must start from the
@@ -77899,7 +77910,13 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                     f"window refused unadmitted routed GDS: {error or basis}",
                     reason_class=_V.ReasonClass.UPSTREAM_FAILED))
                 break
-        if site in ("enclosing_phase3", "enclosing_pnr",
+        if site == "default_pnr":
+            row = _default_pnr_rows(
+                project, top, pdk, args.container,
+                _phase3_window_steps(args.entry_step, args.exit_step),
+                die_um=args.die_um, util=args.util,
+                spare_density=getattr(args, 'spare_density', None))
+        elif site in ("enclosing_phase3", "enclosing_pnr",
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
                 project, top, pdk, args, window_ids,
@@ -78003,7 +78020,17 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     report["steps_view"] = _pl.emit_steps_view(
         project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
         only_steps=window_ids)
-    gate_results = _phase3_window_full_gate_audit(project, window_ids)
+    if selected == ['default_pnr']:
+        # This driver already ran each row's unchanged canonical consumer.
+        # Reuse that invocation's result; a stopped row never authorizes a
+        # second audit of old files or gates belonging to unexecuted rows.
+        gate_results = dict(rows[0].extras.get('canonical_gate_checks', {}))
+        for sid in window_ids:
+            gate_results.setdefault(sid, {
+                'status': 'NOT_MEASURED',
+                'reasons': ['not executed: the preceding Default row stopped']})
+    else:
+        gate_results = _phase3_window_full_gate_audit(project, window_ids)
     audit_doc["audit_kind"] = "bounded_full_declared_gates"
     audit_doc["declared_gate_checks"] = gate_results
     audit_doc["declared_output_checks"] = _phase3_window_output_audit(
@@ -78021,7 +78048,10 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     report["audit_scope"] = "bounded; full declared gates for selected steps"
     report["bounded_disclosures"][0] = {
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
-        "why": "all gate clauses of selected canonical steps ran on an isolated copy"}
+        "why": ("each executed Default row's canonical consumer ran on the same project; "
+                "unexecuted rows remain NOT_MEASURED"
+                if selected == ['default_pnr'] else
+                "all gate clauses of selected canonical steps ran on an isolated copy")}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
@@ -78137,6 +78167,143 @@ def _publish_in_progress_steps(project: Path, plan: List[StepResult]) -> None:
     _aa.write_json(project / _ca.REPORT_REL, record)
 
 
+def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
+                      step_ids: List[str], *, die_um: str, util: float,
+                      spare_density=None) -> StepResult:
+    """Run existing native producers in canonical order on one local project.
+
+    A row finishes and its unchanged canonical consumer runs before the next
+    producer starts. No enclosing PnR, candidate worker, private project copy,
+    or all-step producer refresh is needed to resume at an intermediate row.
+    """
+    import execution_backend_producers as producers
+    import execution_backend_worker as worker
+    import execution_backend_gates as backend_gates
+    import execution_modes as modes
+    import librelane_contract as ll
+    import _flow_yaml
+    import flow_compliance_check as compliance
+
+    t0 = time.time()
+    flow_rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    params = {**_backend_parameter_values(project, pdk), 'top': top,
+              'container': container, 'die_um': die_um, 'util': util,
+              'spare_density': spare_density}
+    rows: List[StepResult] = []
+    outputs: List[str] = []
+    checks: Dict[str, Any] = {}
+    for sid in step_ids:
+        row_def = flow_rows[sid]
+        if not compliance._check_condition(project, row_def.get('condition')):
+            rows.append(StepResult(
+                f'default_step_{sid}', 'SKIP', 0.0,
+                'canonical design condition is not applicable',
+                extras={'step_id': sid}))
+            checks[sid] = {'status': 'NOT_APPLICABLE',
+                           'reasons': ['canonical design condition is not applicable']}
+            continue
+        started = time.time()
+        print(f'[default] step {sid} START: {row_def["name"]}', flush=True)
+        missing = worker.resolve_input_contract(
+            project, row_def.get('required_inputs', ()))
+        if missing:
+            rows.append(StepResult(
+                f'default_step_{sid}', 'NOT_MEASURED', time.time() - started,
+                'missing current inputs: ' + '; '.join(missing),
+                extras={'step_id': sid, 'missing_inputs': missing},
+                reason_class=_V.ReasonClass.INPUT_ABSENT))
+            break
+        # Withdraw the previous invocation's citations from the live report
+        # before the row's producer changes their files. The completed rows
+        # of this invocation, including actual output paths, remain visible.
+        _publish_in_progress_steps(project, rows)
+        try:
+            if sid == '16':
+                notes: List[str] = []
+                clock_path = _pl.cts_dir(project) / 'clock_plan.json'
+                produced = emit_clock_plan(
+                    project, clock_path, _pl.pnr_dir(project) / 'floorplan.def',
+                    _pl.pnr_dir(project), notes, pdk=pdk)
+                result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
+                          'detail': '; '.join(notes)}
+                gate = backend_gates.evaluate(project, row_def)
+                files, missing_outputs = worker.resolve_contract(
+                    project, row_def.get('required_outputs', ()))
+                status = ('FAIL' if gate['status'] == 'FAIL' else
+                          'PASS' if produced and gate['status'] == 'PASS'
+                          and not missing_outputs else 'NOT_MEASURED')
+                receipt = {**result, 'step_id': sid, 'verdict': status,
+                           'outputs': files, 'missing_outputs': missing_outputs,
+                           'gate_ledger': gate['ledger'],
+                           'canonical_step_result': gate.get('step')}
+            else:
+                manifest = {
+                    'declarations': row_def.get('required_inputs', []),
+                    'files': worker._declared_input_files(
+                        project, row_def.get('required_inputs', ())),
+                    'missing': [],
+                }
+                result = producers.produce(project, {
+                    **params, 'step_id': sid,
+                    'resolved_input_manifest': manifest,
+                    'stop_on_producer_failure': True})
+                current = result.get('current_step_declared_producers')
+                if isinstance(current, dict):
+                    current['direct_producer'] = {
+                        'producer': 'execution_backend_producers.produce',
+                        'started_ns': int(started * 1_000_000_000),
+                        'finished_ns': time.time_ns(),
+                        'verdict': result.get('verdict', 'NOT_MEASURED')}
+                receipt = worker.execute_current_step(
+                    project, step_id=sid, producer=result)
+                status = receipt['verdict']
+                files = (receipt['outputs'] if result.get('verdict') == 'PASS'
+                         else {})
+        except (modes.Refusal, ll.Refusal, OSError, ValueError, TypeError) as exc:
+            status = ('FAIL' if isinstance(exc, ll.Refusal)
+                      and exc.code == 'LL_STEP_FAILED' else 'NOT_MEASURED')
+            receipt = {'step_id': sid, 'verdict': status,
+                       'detail': f'{type(exc).__name__}: {exc}', 'outputs': {}}
+            files = {}
+        receipt_path = project / f'reports/phase3/default_steps/{sid}/backend_result.json'
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        _aa.write_json(receipt_path, receipt)
+        checks[sid] = (receipt.get('canonical_step_result') or {
+            'status': status, 'reasons': [str(receipt.get('detail', ''))]})
+        detail = str(receipt.get('detail', ''))
+        if status != 'PASS':
+            reasons = checks[sid].get('reasons', [])
+            if reasons:
+                detail += '; canonical consumer: ' + '; '.join(map(str, reasons))
+        current_outputs = [str(project / rel) for rel in files]
+        rows.append(StepResult(
+            f'default_step_{sid}', status, time.time() - started,
+            detail,
+            current_outputs + [str(receipt_path)],
+            extras={'step_id': sid, 'backend_result': str(receipt_path)},
+            reason_class=(_V.ReasonClass.UPSTREAM_REFUSED
+                          if status == 'NOT_MEASURED' else '')))
+        outputs.extend(current_outputs + [str(receipt_path)])
+        _publish_in_progress_steps(project, rows)
+        print(f'[default] step {sid} {status}: {rows[-1].detail}', flush=True)
+        if status != 'PASS':
+            break
+        if sid == '21':
+            # Downstream legacy physical consumers use the top-named alias.
+            # It is the current routing producer's bytes, never a prior DEF.
+            shutil.copy2(_pl.pnr_dir(project) / 'routed.def',
+                         _pl.pnr_dir(project) / f'{top}.def')
+    failed = next((row for row in rows if row.status not in ('PASS', 'SKIP')), None)
+    return StepResult(
+        'pnr', failed.status if failed else 'PASS', time.time() - t0,
+        (f'canonical step {failed.extras["step_id"]}: {failed.detail}' if failed
+         else 'canonical native rows completed: ' + ', '.join(step_ids)),
+        list(dict.fromkeys(outputs)),
+        extras={'canonical_steps': [asdict(row) for row in rows],
+                'requested_steps': step_ids, 'canonical_gate_checks': checks},
+        reason_class=failed.reason_class if failed else '')
+
+
 def _default_step15_with_backend_receipt(
         project: Path, top: str, pdk: PdkConfig, container: str,
         die_um: str, util: float, *, spare_density=None,
@@ -78144,15 +78311,19 @@ def _default_step15_with_backend_receipt(
         pad_ring_results: Optional[List[StepResult]] = None,
         em_floor_for_resize: Optional[Dict[str, Any]] = None,
         density_from_tool_default: bool = False) -> StepResult:
-    """Run Default's direct Step-15 producer and its current consumer once.
+    """Run Default's canonical 15--22 rows on one project, in order.
 
-    Default deliberately bypasses the Ultra Controller.  The direct PnR call
-    therefore owns the native producer invocation, while the backend worker's
-    current-step authority and consumer still need to run on that same tree
-    before the later all-step producer refresh.
+    Each producer and its current consumer complete before the next row.
+    The legacy enclosing session below remains for the existing Ultra path.
     """
     import flow_declared_producer_run as _declared
     import execution_backend_worker as _backend_worker
+
+    import execution_policy
+    if execution_policy.request()['mode'] == 'default':
+        return _default_pnr_rows(
+            project, top, pdk, container, _phase3_window_steps('15', '22'),
+            die_um=die_um, util=util, spare_density=spare_density)
 
     started_ns = time.time_ns()
     row = step_pnr(

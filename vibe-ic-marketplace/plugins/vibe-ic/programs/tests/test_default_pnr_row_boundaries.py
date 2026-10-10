@@ -1,0 +1,453 @@
+"""Default dispatch controls; mocked native transport is not IC evidence."""
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import phase3_one_shot_runner as runner
+import execution_backend_producers as producers
+import execution_backend_worker as worker
+import execution_backend_gates as gates
+import execution_policy
+
+
+def test_backend_consumers_use_the_same_canonical_flow_as_default():
+    import _flow_yaml
+    from execution_provider_catalog import BACKEND_ROWS
+    canonical = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    for sid, backend in BACKEND_ROWS.items():
+        assert backend['canonical_row'] == canonical[sid], sid
+
+
+def test_routing_resolves_flow_gates_before_native_execution(tmp_path, monkeypatch):
+    import librelane_contract as ll
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, ll, SimpleNamespace(name='unit'), ''))
+    monkeypatch.setattr(ll, 'flow_segment', lambda *args, **kwargs:
+                        ['Odb.HeuristicDiodeInsertion', 'OpenROAD.GlobalRouting',
+                         'OpenROAD.DetailedRouting', 'Checker.TrDRC',
+                         'Odb.ReportDisconnectedPins', 'Checker.DisconnectedPins'])
+
+    def configs(project, image, pdk, ids, **kwargs):
+        config_root = project / 'phase3/librelane' / kwargs['folder']
+        config_root.mkdir(parents=True)
+        (config_root / 'flow_gates.json').write_text(json.dumps({
+            'Odb.HeuristicDiodeInsertion': {'RUN_HEURISTIC_DIODE_INSERTION': False}}))
+        resolved = {sid: config_root / (sid + '.json') for sid in ids}
+        for config in resolved.values():
+            config.write_text(json.dumps({'DESIGN_NAME': 'unit'}))
+        return resolved
+
+    state = tmp_path / 'current_post_hold_state.json'
+    state.write_text('{}')
+    monkeypatch.setattr(ll, 'resolve_step_configs', configs)
+    monkeypatch.setattr(runner, '_resolved_cell_policy', lambda configs, *args: (configs, {}))
+    monkeypatch.setattr(producers, '_predecessor_state', lambda *args: state)
+
+    def native(project, image, chain, **kwargs):
+        ids = [sid for sid, config, input_state in chain]
+        assert 'Odb.HeuristicDiodeInsertion' not in ids
+        assert 'OpenROAD.GlobalRouting' in ids and 'OpenROAD.DetailedRouting' in ids
+        assert 'Checker.TrDRC' in ids
+        assert 'Odb.ReportDisconnectedPins' not in ids and 'Checker.DisconnectedPins' not in ids
+        assert all(input_state == state for sid, config, input_state in chain)
+        nvr_config = next(config for sid, config, _ in chain
+                          if sid == 'Vibeic.NamedViolationReroute')
+        nvr = json.loads(nvr_config.read_text())
+        assert nvr['VIBEIC_NVR_DRC_REPORT'].endswith('/02-openroad-detailedrouting/unit.drc')
+        assert Path(nvr['VIBEIC_NVR_TCL']).is_file()
+        assert nvr['VIBEIC_NVR_REPORT_PATH'].endswith(runner.ROUTER_DRC_REPORT_NAME)
+        raise RuntimeError('native boundary reached with resolved flow gates')
+
+    monkeypatch.setattr(ll, 'run_chain', native)
+    with pytest.raises(RuntimeError, match='native boundary reached'):
+        producers.produce_pnr(tmp_path, {
+            'step_id': '21', 'top': 'unit', 'pdk_name': 'unit',
+            'image_id': 'unit-image', 'pdk_root': str(tmp_path),
+        })
+
+
+@pytest.mark.parametrize('final_bytes', [b'AFTER REPAIR: 0 violations\n', b''])
+@pytest.mark.parametrize('measured', [True, False])
+def test_routing_publishes_the_native_report_after_named_violation_repair(
+        tmp_path, monkeypatch, final_bytes, measured):
+    import librelane_route as route
+    drt, nvr = tmp_path / 'detailed_route', tmp_path / 'named_repair'
+    drt.mkdir(); nvr.mkdir()
+    (drt / 'unit.drc').write_text('BEFORE REPAIR: 5 violations\n')
+    final = nvr / 'named_viol_after.drc'
+    final.write_bytes(final_bytes)
+    pnr = tmp_path / 'phase3/stage3/pnr'
+    pnr.mkdir(parents=True)
+    (pnr / 'routed.def').write_text(
+        'VERSION 5.8 ;\nCOMPONENTS 1 ;\n- u1 unit + PLACED ( 0 0 ) N ;\n'
+        'END COMPONENTS\nEND DESIGN\n')
+    log = tmp_path / 'routing.log'
+    log.write_text('native detailed route and named repair transcript\n')
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, None, None, ''))
+    monkeypatch.setattr(route, 'chain_ids', lambda *args, **kwargs: [route.DRT, route.NVR])
+    monkeypatch.setattr(producers, '_state_chain', lambda *args, **kwargs:
+                        (None, {}, {route.DRT: drt, route.NVR: nvr}))
+    monkeypatch.setattr(producers, '_handoff', lambda *args, **kwargs: {})
+    monkeypatch.setattr(producers, '_logs', lambda *args, **kwargs: log)
+
+    def receipt(out, routed_def, transcript):
+        assert (out / runner.ROUTER_DRC_REPORT_NAME).read_bytes() == final.read_bytes()
+        return {'verdict': 'measured'} if measured else None
+
+    monkeypatch.setattr(runner, '_write_router_drc_receipt', receipt)
+    monkeypatch.setattr(runner, '_emit_router_drc_report', lambda *args, **kwargs: True)
+    monkeypatch.setattr(runner, '_PROV_SINK', tmp_path)
+    params = {'step_id': '21', 'top': 'unit', 'image_id': 'unit-image'}
+    if measured:
+        result = producers.produce_pnr(tmp_path, params)
+        assert result['verdict'] == 'PASS'
+        import provenance_check
+        report = tmp_path / 'provenance_gate.json'
+        assert provenance_check.main([
+            str(tmp_path), '--output', 'phase3/stage3/pnr/routed.def',
+            '--tool', 'openroad', '--require-measured', '--json', str(report)]) == 0
+        assert json.loads(report.read_text())['checks'][0]['status'] == 'PASS'
+    else:
+        with pytest.raises(producers.em.Refusal, match='BACKEND_ROUTER_TERMINAL_UNMEASURED'):
+            producers.produce_pnr(tmp_path, params)
+        assert not (tmp_path / 'provenance.jsonl').exists()
+
+
+def test_hold_retry_uses_the_cts_producer_state_after_a_previous_hold_run(tmp_path):
+    import hashlib
+    pnr = tmp_path / 'phase3/stage3/pnr'
+    pnr.mkdir(parents=True)
+    cts = tmp_path / 'native_cts'
+    hold = tmp_path / 'native_hold'
+    cts.mkdir(); hold.mkdir()
+    cts_def, hold_def = cts / 'unit.def', hold / 'unit.def'
+    cts_def.write_text('the current CTS checkpoint\n')
+    hold_def.write_text('the previous Hold result\n')
+    cts_state, hold_state = cts / 'state_out.json', hold / 'state_out.json'
+    cts_state.write_text(json.dumps({'def': str(cts_def)}))
+    hold_state.write_text(json.dumps({'def': str(hold_def)}))
+    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    (cts / 'vibeic_receipt.json').write_text(json.dumps({
+        'sha256': {'state_out.json': sha(cts_state)}}))
+    views = {}
+    for label, source in [('cts', cts_def), ('hold', hold_def)]:
+        dest = pnr / f'post_{label}.def'
+        dest.write_bytes(source.read_bytes())
+        views[f'post_{label}_def'] = {
+            'dest': str(dest), 'dest_sha256': sha(dest),
+            'source': str(source), 'source_sha256': sha(source)}
+    receipt = tmp_path / 'reports/phase3/librelane_cts_hold_handoff.json'
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({
+        'measured_state': str(hold_state), 'measured_state_sha256': sha(hold_state),
+        'views': views}))
+    assert producers._predecessor_state(tmp_path, 'post_cts.def') == cts_state
+    assert producers._predecessor_state(tmp_path, 'post_hold.def') == hold_state
+    cts_def.write_text('changed after its handoff\n')
+    with pytest.raises(producers.em.Refusal, match='BACKEND_PREDECESSOR_STATE_UNBOUND'):
+        producers._predecessor_state(tmp_path, 'post_cts.def')
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('LL_STEP_FAILED', 'FAIL'), ('LL_FLOW_GATES_UNRESOLVED', 'NOT_MEASURED')])
+def test_native_tool_refusal_is_recorded_at_the_actual_default_row(
+        tmp_path, monkeypatch, code, expected):
+    import librelane_contract as ll
+    calls = install_transport(monkeypatch, tmp_path)
+
+    def refused(project, params):
+        calls.append(('producer', params['step_id']))
+        raise ll.Refusal(code, 'routing native invocation log')
+
+    monkeypatch.setattr(producers, 'produce', refused)
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '',
+        ['21', '22'], die_um='auto', util=0.4)
+    assert result.status == expected
+    assert calls == [('producer', '21')]
+    assert 'canonical step 21' in result.detail and code in result.detail
+    saved = json.loads((tmp_path / 'reports/phase3/default_steps/21/backend_result.json').read_text())
+    assert saved['verdict'] == expected and not saved['outputs']
+
+
+@pytest.mark.parametrize('first,last', [('15', '15'), ('15', '16'),
+                                      ('17', '17'), ('19', '22')])
+def test_default_partial_pnr_selects_rows_without_enclosing_run(first, last, monkeypatch):
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    assert runner._phase3_window_sites(first, last) == ['default_pnr']
+
+
+def install_transport(monkeypatch, project, *, failed_step=None):
+    calls = []
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *args: {})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *args: [])
+
+    def producer(project_, params):
+        sid = params['step_id']
+        calls.append(('producer', sid))
+        return {'verdict': 'PASS', 'detail': 'offline dispatch transport'}
+
+    def consumer(project_, *, step_id, producer):
+        calls.append(('consumer', step_id))
+        return {'step_id': step_id,
+                'verdict': 'FAIL' if step_id == failed_step else 'PASS',
+                'detail': 'offline consumer transport', 'outputs': {}}
+
+    def monolithic(*args, **kwargs):
+        pytest.fail('Default reached the enclosing PnR session')
+
+    monkeypatch.setattr(producers, 'produce', producer)
+    monkeypatch.setattr(worker, 'execute_current_step', consumer)
+    monkeypatch.setattr(runner, 'step_pnr', monolithic)
+    return calls
+
+
+def test_resume_at_cts_does_not_execute_prior_rows_and_stops_on_failure(tmp_path, monkeypatch):
+    calls = install_transport(monkeypatch, tmp_path, failed_step='19')
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '',
+        ['19', '20', '21', '22'], die_um='auto', util=0.4)
+    assert calls == [('producer', '19'), ('consumer', '19')]
+    assert result.status == 'FAIL'
+    assert 'canonical step 19' in result.detail
+    saved = json.loads((tmp_path / 'reports/phase3/default_steps/19/backend_result.json').read_text())
+    assert saved['step_id'] == '19' and saved['verdict'] == 'FAIL'
+    assert not (tmp_path / 'reports/phase3/default_steps/20').exists()
+
+
+def test_missing_cts_inputs_stop_before_any_native_tool(tmp_path, monkeypatch):
+    calls = install_transport(monkeypatch, tmp_path)
+    monkeypatch.setattr(worker, 'resolve_input_contract',
+                        lambda *args: ['placed.def', 'clock_plan.json'])
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '',
+        ['19'], die_um='auto', util=0.4)
+    assert calls == []
+    assert result.status == 'NOT_MEASURED'
+    assert 'placed.def' in result.detail and 'clock_plan.json' in result.detail
+
+
+def test_floorplan_window_finishes_before_placement(tmp_path, monkeypatch):
+    calls = install_transport(monkeypatch, tmp_path)
+
+    def clock(project, output, *args, **kwargs):
+        calls.append(('producer', '16'))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text('{"clocks": [{"name": "clk", "period_ns": 10}]}')
+        return str(output)
+
+    def clock_gate(project, row):
+        calls.append(('consumer', str(row['id'])))
+        return {'status': 'PASS', 'ledger': []}
+
+    monkeypatch.setattr(runner, 'emit_clock_plan', clock)
+    monkeypatch.setattr(gates, 'evaluate', clock_gate)
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '',
+        ['15', '16'], die_um='auto', util=0.4)
+    assert calls == [('producer', '15'), ('consumer', '15'),
+                     ('producer', '16'), ('consumer', '16')]
+    assert result.status == 'PASS'
+    assert [row['extras']['step_id'] for row in result.extras['canonical_steps']] == ['15', '16']
+
+
+def test_single_default_driver_routes_the_full_existing_pnr_order(tmp_path, monkeypatch):
+    captured = []
+
+    def drive(project, top, pdk, container, step_ids, **kwargs):
+        captured.extend(step_ids)
+        return runner.StepResult('pnr', 'FAIL', 0, 'canonical step 19')
+
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(runner, '_default_pnr_rows', drive)
+    result = runner._default_step15_with_backend_receipt(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', 'auto', 0.4)
+    assert captured == ['15', '15.5ic', '16', '17', '18', '19', '20', '21', '22']
+    assert result.status == 'FAIL' and result.detail == 'canonical step 19'
+
+
+def test_default_native_refusal_does_not_run_report_producers(tmp_path, monkeypatch):
+    monkeypatch.setattr(producers, 'produce_pnr', lambda *args:
+                        {'verdict': 'NOT_MEASURED', 'detail': 'SDC_SEAM_PENDING'})
+    monkeypatch.setattr(producers, '_run_current_step_declared_producers',
+                        lambda *args: pytest.fail('reports ran after native refusal'))
+    result = producers.produce(tmp_path, {
+        'step_id': '15', 'stop_on_producer_failure': True})
+    assert result == {'verdict': 'NOT_MEASURED', 'detail': 'SDC_SEAM_PENDING'}
+
+
+def test_default_pad_ring_consumes_the_floorplan_native_ring(tmp_path, monkeypatch):
+    state = tmp_path / 'phase3/librelane/current-floorplan/06-openroad-padring/state_out.json'
+    state.parent.mkdir(parents=True)
+    state.write_text('{}')
+    handoff = tmp_path / 'reports/phase3/librelane_padring_handoff.json'
+    handoff.parent.mkdir(parents=True)
+    handoff.write_text(json.dumps({'state': str(state)}))
+    bound = {'record': {'handoff_views': {'def': {
+        'source': str(state.parent.parent / '11-openroad-generatepdn/chip.def')}}}}
+    calls = []
+
+    def ring(project, container, pdk, **kwargs):
+        calls.append(kwargs.get('librelane_state'))
+        return runner.StepResult('pad_ring_gen', 'PASS', detail='native ring checked')
+
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (SimpleNamespace(step_pad_ring_gen=ring), None, None, ''))
+    monkeypatch.setattr(producers, '_read_step15_bounded_state', lambda *args: bound)
+    result = producers.produce_pnr(tmp_path, {'step_id': '15.5ic', 'top': 'unit'})
+    assert result['verdict'] == 'PASS'
+    assert calls == [state]
+
+
+def test_default_pad_ring_rejects_another_floorplan_native_ring(tmp_path, monkeypatch):
+    state = tmp_path / 'phase3/librelane/old-floorplan/06-openroad-padring/state_out.json'
+    state.parent.mkdir(parents=True)
+    state.write_text('{}')
+    handoff = tmp_path / 'reports/phase3/librelane_padring_handoff.json'
+    handoff.parent.mkdir(parents=True)
+    handoff.write_text(json.dumps({'state': str(state)}))
+    bound = {'record': {'handoff_views': {'def': {
+        'source': str(tmp_path / 'phase3/librelane/current-floorplan/11-openroad-generatepdn/chip.def')}}}}
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (SimpleNamespace(step_pad_ring_gen=lambda *a, **k:
+                         pytest.fail('a different native ring reached the producer')),
+                         None, None, ''))
+    monkeypatch.setattr(producers, '_read_step15_bounded_state', lambda *args: bound)
+    with pytest.raises(producers.em.Refusal, match='BACKEND_PADRING_STATE_CHANGED'):
+        producers.produce_pnr(tmp_path, {'step_id': '15.5ic', 'top': 'unit'})
+
+
+def test_pad_ring_native_report_still_runs_the_independent_gate(tmp_path, monkeypatch):
+    calls = []
+    state = tmp_path / 'native/state_out.json'
+    for raw in ('phase3/stage3/pnr/padring.def', 'reports/phase3/padring.json',
+                'reports/phase3/pad_assignment.json'):
+        path = tmp_path / raw
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(runner._pr, 'run', run)
+    result = runner.step_pad_ring_gen(tmp_path, librelane_state=state)
+    assert result.status == 'PASS'
+    assert [call[1].rsplit('/', 1)[-1] for call in calls] == [
+        'pad_assignment_gen.py', 'pad_ring_gen.py', 'pad_ring_check.py']
+    assert calls[1][-2:] == ['--librelane-state', str(state)]
+    assert '--librelane-state' not in calls[2]
+
+
+def test_default_placement_publishes_its_native_handoff_for_the_consumer(tmp_path, monkeypatch):
+    canonical = tmp_path / 'reports/phase3/librelane_placement_handoff.json'
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text('{"state": "prior-placement"}')
+    folder = tmp_path / 'native/current-placement'
+    receipt = {'state': str(folder / 'state_out.json'),
+               'views': {'def': {'dest_sha256': 'current-placed-def'}}}
+    ll = SimpleNamespace(flow_segment=lambda *a: [
+        'OpenROAD.GlobalPlacement', 'OpenROAD.RepairDesignPostGPL',
+        'OpenROAD.DetailedPlacement'],
+        handoff_to_direct=lambda *a: receipt)
+    monkeypatch.setattr(producers, '_parameters', lambda *args: (None, ll, None, ''))
+    monkeypatch.setattr(producers, '_state_chain', lambda *args:
+                        (ll, {}, {'OpenROAD.DetailedPlacement': folder}))
+    monkeypatch.setattr(producers, '_logs', lambda *args: None)
+    result = producers.produce_pnr(tmp_path, {
+        'step_id': '17', 'top': 'unit', 'image_id': 'fixture'})
+    assert result['verdict'] == 'PASS'
+    assert json.loads(canonical.read_text()) == receipt
+
+
+@pytest.mark.parametrize('role', ['producer', 'audit'])
+def test_placement_report_identifies_the_actual_writer_for_the_consumer(
+        tmp_path, monkeypatch, role):
+    import placement_legality_check as placement
+    import flow_declared_producer_run as declared
+    import _gate_authorship as authorship
+
+    monkeypatch.setenv(authorship.ROLE_ENV, role)
+    output = tmp_path / 'placement.json'
+    summary = {'placed_def': 'phase3/stage3/pnr/placed.def',
+               'declared_components': 1, 'parsed_components': 1,
+               'placed': 1, 'unplaced': 0, 'density_pct': None,
+               'density_source': None}
+    placement._emit(SimpleNamespace(json=str(output)), tmp_path,
+                    'PASS', summary, [], None)
+    document = json.loads(output.read_text())
+    assert document['program'] == 'placement_legality_check'
+    assert authorship.role_of(document) == role
+    assert declared._producer_target_has_content(output) is (role == 'producer')
+
+
+def test_spare_checkpoint_is_an_explicit_cts_input():
+    import _flow_yaml
+    rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    checkpoint = 'phase3/stage3/pnr/post_spare.def'
+    assert checkpoint in rows['18']['required_outputs']
+    assert {'from': 18, 'path': checkpoint} in rows['19']['required_inputs']
+
+
+def test_spare_producer_preserves_placement_and_uses_its_native_state(tmp_path, monkeypatch):
+    import hashlib
+    pnr = tmp_path / 'phase3/stage3/pnr'
+    pnr.mkdir(parents=True)
+    placed = pnr / 'placed.def'
+    placed.write_text('current legal placement\n')
+    state = tmp_path / 'native/placement/state_out.json'
+    state.parent.mkdir(parents=True)
+    state.write_text('{}')
+    rpt = tmp_path / 'reports/phase3'
+    rpt.mkdir(parents=True)
+    (rpt / 'librelane_placement_handoff.json').write_text(json.dumps({
+        'state': str(state), 'state_sha256': hashlib.sha256(state.read_bytes()).hexdigest(),
+        'views': {'def': {'dest': str(placed),
+                         'dest_sha256': hashlib.sha256(placed.read_bytes()).hexdigest()}}}))
+    folder = tmp_path / 'native/spares'
+    folder.mkdir(parents=True)
+    (folder / 'spare_cells.json').write_text('{"count": 6}')
+    captured = {}
+
+    def chain(project, params, ids, predecessor, overlay):
+        captured.update(params=params, overlay=overlay)
+        return ll, {}, {'Vibeic.InsertSpareCells': folder}
+
+    def handoff(native, destinations, receipt):
+        for dest in destinations.values():
+            dest.write_text('current placement with spares\n')
+        return {'state': str(native), 'views': {}}
+
+    ll = SimpleNamespace(handoff_to_direct=handoff)
+    r = SimpleNamespace(_emit_spare_cell_coverage=lambda *a: None)
+    monkeypatch.setattr(producers, '_parameters', lambda *a: (r, ll, None, ''))
+    monkeypatch.setattr(producers, '_state_chain', chain)
+    monkeypatch.setattr(producers, '_logs', lambda *a: None)
+    result = producers.produce_pnr(tmp_path, {
+        'step_id': '18', 'top': 'unit', 'spare_density': 0.05})
+    assert result['verdict'] == 'PASS'
+    assert placed.read_text() == 'current legal placement\n'
+    assert (pnr / 'post_spare.def').read_text() == 'current placement with spares\n'
+    assert captured['params']['state_in'] == str(state)
+    assert captured['overlay']['VIBEIC_SPARE_DENSITY'][0] == 0.05
+    assert (rpt / 'librelane_spare_handoff.json').is_file()
+
+
+def test_stopped_default_window_does_not_audit_old_or_unexecuted_outputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, '_default_pnr_rows', lambda *args, **kwargs:
+        runner.StepResult('pnr', 'NOT_MEASURED', detail='current input missing',
+                          reason_class=runner._V.ReasonClass.INPUT_ABSENT,
+                          extras={'canonical_gate_checks': {}}))
+    monkeypatch.setattr(runner, '_phase3_window_full_gate_audit', lambda *args:
+                        pytest.fail('Default repeated the gate or audited old outputs'))
+    args = SimpleNamespace(entry_step='19', exit_step='20', container='',
+                           die_um='auto', util=0.4)
+    assert runner._run_phase3_window(tmp_path, 'unit', SimpleNamespace(name='unit'),
+                                      args, ['default_pnr']) == 1
+    saved = list((tmp_path / 'reports/audit/windows').glob('*/phase23_completion_audit.json'))
+    assert len(saved) == 1
+    report = json.loads(saved[0].read_text())
+    assert report['verdict'] == 'NOT_MEASURED'
+    assert report['declared_gate_checks']['20']['status'] == 'NOT_MEASURED'

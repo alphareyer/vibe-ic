@@ -83,6 +83,7 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
+import _gate_authorship as _ga  # noqa: E402
 
 
 _GATE_NAME = "placement_legality_check"
@@ -794,6 +795,7 @@ def inspect(project: Path):
 
 def _emit(args, project, verdict, summary, findings, waiver):
     out = {
+        "program": _GATE_NAME,
         "gate": _GATE_NAME,
         "verdict": verdict,
         "step_label": _GATE_LABEL,
@@ -818,7 +820,8 @@ def _emit(args, project, verdict, summary, findings, waiver):
     if args.json:
         out_path = Path(args.json)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+        out_path.write_text(json.dumps(_ga.stamp(out), indent=2,
+                                       ensure_ascii=False) + "\n")
     print(f"=== {_GATE_NAME} ({project.name}) ===")
     print(f"  verdict: {verdict}")
     if summary["declared_components"] is not None:

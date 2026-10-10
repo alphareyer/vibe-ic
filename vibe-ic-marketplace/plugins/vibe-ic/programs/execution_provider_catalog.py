@@ -12,11 +12,22 @@ from functools import lru_cache
 import json
 from pathlib import Path
 import subprocess
+import sys
 from typing import Iterable
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 BACKEND_POLICY = json.loads((HERE / "data/execution_backend_policy.json").read_text())
 BACKEND_ROWS = BACKEND_POLICY["rows"]
+
+# Resource and tool policy lives in the catalog; executable step contracts
+# come from the canonical flow used by the runner and input preparation.
+# A stored policy snapshot must not make the consumer check older outputs.
+import _flow_yaml
+_canonical_rows = {str(row["id"]): row for row in _flow_yaml.load()["steps"]}
+for _sid, _backend in BACKEND_ROWS.items():
+    _backend["canonical_row"] = _canonical_rows[_sid]
 
 try:
     from execution_release_rows import ROWS as RELEASE_ROWS

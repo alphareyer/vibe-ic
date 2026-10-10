@@ -1627,13 +1627,15 @@ def _main() -> int:
                    help="START the flow at this canonical step id. The step "
                         "decides WHICH runner owns the entry, and THIS "
                         "orchestrator can be entered at D1 for Phase 1, "
-                        "2/4/1/9/11 for Phase 2, and Phase-3 (15/31/37) "
+                        "2/4/1/9/11 for Phase 2, and Phase-3 (15..22/31/37) "
                         "with --exit-step for a bounded backend window. "
                         "Analog (A1..A9) steps are owned by "
                         "analog_one_shot_runner and are REFUSED here: run "
                         "that runner directly. Only a step that HEADS a "
                         "dispatch span is enterable; a mid-span step is "
-                        "refused rather than approximated. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
+                        "refused rather than approximated, except Default's "
+                        "native PnR rows, which have individual checkpoints. "
+                        "With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--exit-step", default=None,
                    help="STOP dispatch after this canonical step id. Phase-2 "
                         "exits are forwarded to the phase2 runner; Phase-3 "
@@ -1917,6 +1919,13 @@ def _main() -> int:
                   file=sys.stderr)
             return 2
         _entry_runner = _spf_o.runner_for_step(str(args.entry_step))
+        if _entry_runner is None and execution_policy_value['mode'] == 'default':
+            # Default's native backend rows have their own input contracts
+            # and checkpoints. They no longer need the monolithic PnR head.
+            pnr_steps = set(dict(_spf_o.RUNNER_PLANS[
+                'phase3_one_shot_runner'].sites)['pnr']) | {'15.5ic'}
+            if str(args.entry_step) in pnr_steps:
+                _entry_runner = 'phase3_one_shot_runner'
         if _entry_runner is None:
             _all = {r: list(_spf_o.enterable_steps(r))
                     for r in _spf_o.RUNNER_PLANS}

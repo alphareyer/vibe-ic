@@ -5144,6 +5144,9 @@ steps:
     programs:
       - spare_cell_coverage_check
     required_outputs:
+      # Preserve Step 17's placement checkpoint. CTS consumes this distinct
+      # checkpoint after the native spare insertion and legalisation.
+      - "phase3/stage3/pnr/post_spare.def"
       # `spare_cells.json` is the eda_pnr step's MEASUREMENT of the spare
       # pool it inserted. `spare_cell_coverage.json` is the GRADE of that
       # measurement, and `spare_cell_coverage_check` is its sole declaring
@@ -5215,8 +5218,8 @@ steps:
     name: "CTS (Clock Tree Synthesis)"
     stage: stage3
     required_inputs:
-      - from: 17
-        path: "phase3/stage3/pnr/placed.def"
+      - from: 18
+        path: "phase3/stage3/pnr/post_spare.def"
       - from: 16
         path: "phase3/stage3/cts/clock_plan.json"
     mcp_tools: [eda_pnr]

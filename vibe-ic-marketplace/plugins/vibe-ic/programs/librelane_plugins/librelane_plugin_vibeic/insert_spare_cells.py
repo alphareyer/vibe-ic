@@ -149,7 +149,10 @@ def insert(reader, config: dict, plan: dict) -> dict:
     dpl = reader.design.getOpendp()
     measured = {"inserted": 0, "tieoff_candidates": 0, "tieoff_connected": 0,
                 "tieoff_drivers": 0, "pg_connected": 0, "pg_unconnected": 0,
-                "pg_unconnected_pins": [], "firm_locked": 0}
+                "pg_unconnected_pins": [], "firm_locked": 0,
+                "placed_cells": sum(i.getMaster().getType() in _LOGIC_TYPES
+                                    for i in block.getInsts()),
+                "tieoff_inputs": []}
     spares = []
     for rec in plan.get("instances") or []:
         name, cell = rec.get("name"), rec.get("cell")
@@ -210,6 +213,11 @@ def insert(reader, config: dict, plan: dict) -> dict:
             if it.getSigType() in _SUPPLY_SIG_TYPES or not it.isInputSignal():
                 continue
             net = it.getNet()
+            measured["tieoff_inputs"].append({
+                "inst": inst.getName(), "pin": it.getMTerm().getName(),
+                "use": it.getSigType(),
+                "net": net.getName() if net is not None else None,
+            })
             say(f"SPARE_INPUT_PIN {inst.getName()} {it.getMTerm().getName()} "
                 f"{it.getSigType()} {net.getName() if net is not None else '-'}")
     say("SPARE_TIEOFF_DONE: nets " + " ".join(n.getName() for n in tie_nets))
@@ -269,8 +277,22 @@ def cli(reader, report_path, output_nl, output_pnl):
     measured = insert(reader, config, plan)
     plan["plan_source"] = source
     plan["measured"] = measured
-    plan["tied_off"] = bool(measured["tieoff_candidates"] == measured["tieoff_connected"]
-                            and plan.get("instances"))
+    # The existing coverage consumer reads a measured density and every
+    # spare input, not the requested density or a count of selected pins.
+    plan["count"] = measured["inserted"]
+    plan["placed_cells_est"] = measured["placed_cells"]
+    plan["actual_density"] = (measured["inserted"] / measured["placed_cells"]
+                              if measured["placed_cells"] else 0.0)
+    inputs = measured["tieoff_inputs"]
+    plan["tied_off"] = bool(inputs and all(p["net"] for p in inputs)
+                            and measured["inserted"] == len(plan.get("instances") or []))
+    plan["tie_off"] = {
+        "measured": True, "inputs": inputs,
+        "candidates": len(inputs),
+        "connected": sum(p["net"] is not None for p in inputs),
+        "drivers": measured["tieoff_drivers"],
+        "tied_off": plan["tied_off"],
+    }
     reader.design.evalTclString(f"write_verilog {{{output_nl}}}")
     reader.design.evalTclString(f"write_verilog -include_pwr_gnd {{{output_pnl}}}")
     tmp = report_path + ".tmp"

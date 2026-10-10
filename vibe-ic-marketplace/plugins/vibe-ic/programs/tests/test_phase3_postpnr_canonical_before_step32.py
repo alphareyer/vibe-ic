@@ -100,6 +100,13 @@ def _routed_project(root: Path) -> tuple[Path, Path]:
 
 def test_default_step15_publishes_current_route_before_its_consumer(
         tmp_path, monkeypatch):
+    """Preserve the enclosing wrapper's publication checks on its Ultra path.
+
+    Default now checks Floorplan before Placement/Routing; its independent
+    per-row order and outputs are tested by test_default_pnr_row_boundaries.
+    """
+    import execution_policy
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
     import execution_backend_worker as backend
     import flow_declared_producer_run as declared
 
@@ -154,6 +161,9 @@ def test_default_step15_publishes_current_route_before_its_consumer(
 
 def test_default_step15_failed_route_never_publishes_success_outputs(
         tmp_path, monkeypatch):
+    """The retained enclosing producer must still refuse stale output credit."""
+    import execution_policy
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
     import execution_backend_worker as backend
     import flow_declared_producer_run as declared
 

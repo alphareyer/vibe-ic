@@ -25,6 +25,8 @@ def _write(project: Path, relative: str, text: str) -> Path:
 
 def _native_outputs(project: Path, step: str) -> None:
     if step == "18":
+        _write(project, "phase3/stage3/pnr/post_spare.def",
+               "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
         _write(project, "phase3/stage3/pnr/spare_cells.json",
                json.dumps({"spare_count": 4, "target_density": 0.01}))
         _write(project, "reports/spare_cell_coverage.json",

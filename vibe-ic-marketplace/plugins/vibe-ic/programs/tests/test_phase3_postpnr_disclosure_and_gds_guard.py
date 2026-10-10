@@ -319,6 +319,14 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
         return _f
 
     monkeypatch.setattr(R, "step_pnr", _fake_pnr)
+    # This fixture owns geometry-cache decisions. Stub the new Default
+    # native dispatch at its transport boundary; the real per-row behavior
+    # and producer/consumer order are covered by test_default_pnr_row_boundaries.
+    def _fake_default_rows(proj, top, pdk, container, step_ids, *, die_um, util,
+                           **kwargs):
+        assert step_ids == ['15', '15.5ic', '16', '17', '18', '19', '20', '21', '22']
+        return R.step_pnr(proj, top, pdk, container, die_um, util, **kwargs)
+    monkeypatch.setattr(R, "_default_pnr_rows", _fake_default_rows)
     monkeypatch.setattr(R, "step_gds", _fake_gds)
     monkeypatch.setattr(R, "step_synth", _step("synth"))
     monkeypatch.setattr(R, "step_drc", _step("drc"))
@@ -348,6 +356,8 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
+    # Native image/PDK discovery is outside this geometry-only transport.
+    monkeypatch.setattr(R, "_backend_parameter_values", lambda *a, **k: {})
     monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
                         lambda *a, **k: object())
     monkeypatch.setattr(R, "commercial_pdk_fallback_guard",
@@ -363,6 +373,19 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
                         lambda proj, top, hint=None: top)
     monkeypatch.setattr(R, "_DERIVED_ARTEFACT_GENERATORS", ())
     monkeypatch.setattr(R._pl, "emit_final_summary", lambda *a, **k: False)
+    # The final whole-flow refresh cannot measure this geometry transport:
+    # no native synthesis/signoff ran. Keep that result NOT_MEASURED while
+    # leaving the real cache, geometry and GDS-admission assertions intact.
+    import subprocess
+    real_run = subprocess.run
+    def scoped_run(argv, *args, **kwargs):
+        if (isinstance(argv, (list, tuple)) and len(argv) > 1
+                and Path(str(argv[1])).name in (
+                    "flow_compliance_check.py", "flow_declared_producer_run.py")):
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="geometry transport: whole-flow NOT_MEASURED\n", stderr="")
+        return real_run(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", scoped_run)
 
     monkeypatch.setattr(sys, "argv", [
         "phase3_one_shot_runner", str(project), "--top-name", TOP,

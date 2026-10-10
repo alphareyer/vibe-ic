@@ -79,6 +79,52 @@ def test_insertion_ties_the_clock_use_input_and_enumerates_every_pin(
     assert "SPARE_INPUT_PIN spare_dff_0 Q" not in out
 
 
+@pytest.mark.parametrize("with_tie_cell", [True, False])
+def test_native_report_reaches_the_existing_coverage_gate(
+        monkeypatch, tmp_path, with_tie_cell):
+    """Read the actual native JSON, including a CLOCK input and an ODB count."""
+    m = _mig97()
+    monkeypatch.setitem(m._PINS, "dffq", [
+        ("D", "SIGNAL", "INPUT"), ("CLK", "CLOCK", "INPUT"),
+        ("Q", "SIGNAL", "OUTPUT"), ("VDD", "POWER", "INOUT"),
+        ("VSS", "GROUND", "INOUT")])
+    monkeypatch.setattr(m._ITerm, "isInputSignal", lambda self: self.mterm.io == "INPUT")
+    mod, reader, _dpl, _tcl = m._odbpy(monkeypatch)
+    for i in range(99):
+        reader.block.insts[f"logic_{i}"] = m._Inst(
+            reader.block, m._Master("nand2"), f"logic_{i}")
+    plan = {
+        "count": 2, "density": 0.02,
+        # Deliberately wrong caller estimates must not replace ODB measurement.
+        "placed_cells_est": 1, "actual_density": 2.0,
+        "instances": [
+            {"name": "spare_inv_0", "cell": "inv", "llx": 10, "lly": 20},
+            {"name": "spare_dff_0", "cell": "dffq", "llx": 50, "lly": 20},
+        ],
+    }
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+    reader.config = {"VIBEIC_SPARE_PLAN": str(plan_path)}
+    if with_tie_cell:
+        reader.config["SYNTH_TIELO_CELL"] = "tiel/ZN"
+    report = tmp_path / "spare_cells.json"
+    mod.cli.callback(reader=reader, report_path=str(report),
+                     output_nl="/o/nl.v", output_pnl="/o/pnl.v")
+    doc = json.loads(report.read_text())
+    assert doc["placed_cells_est"] == 100
+    assert doc["actual_density"] == pytest.approx(0.02)
+    assert doc["count"] == 2
+    assert len(doc["tie_off"]["inputs"]) == 3
+    clk = next(p for p in doc["tie_off"]["inputs"] if p["pin"] == "CLK")
+    assert clk["use"] == "CLOCK"
+    assert clk["net"] == ("spare_tielo_spare_dff_0" if with_tie_cell else None)
+    verdict = cov.evaluate_coverage(doc)
+    assert verdict["verdict"] == ("PASS" if with_tie_cell else "FAIL"), verdict
+    assert doc["tied_off"] is with_tie_cell
+    if not with_tie_cell:
+        assert "spare_dff_0/CLK" in verdict["tie_off_inputs"]["without_net"]
+
+
 # v5c's step log shape: the count over the pins the step chose, then (new)
 # every input it has. spare_dff_0/CLK carries no net.
 _V5C_LOG = """SPARE_TIEOFF_CONNECTED 12 of 12

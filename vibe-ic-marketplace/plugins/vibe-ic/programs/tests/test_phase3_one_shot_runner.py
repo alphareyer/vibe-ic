@@ -332,12 +332,19 @@ def test_default_step15_direct_invocation_binds_backend_receipt_before_consumer(
 
     import flow_declared_producer_run as declared
     import execution_backend_worker as worker
-    monkeypatch.setattr(RUNNER, "step_pnr", fake_pnr)
+    import execution_backend_producers as producers
+    def bounded_producer(project, params):
+        result = fake_pnr(project)
+        return {'verdict': result.status, 'detail': result.detail}
+    monkeypatch.setattr(producers, 'produce_pnr', bounded_producer)
+    monkeypatch.setattr(producers, '_native_current_step_producer', lambda *_: None)
+    monkeypatch.setattr(RUNNER, '_backend_parameter_values', lambda *_: {})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *_: [])
     monkeypatch.setattr(declared, "run_for_step", fake_declared)
     monkeypatch.setattr(worker, "evaluate", fake_consumer)
 
-    row = RUNNER._default_step15_with_backend_receipt(
-        project, "chip_top", None, "fixture", "auto", 0.30)
+    row = RUNNER._default_pnr_rows(
+        project, "chip_top", None, "fixture", ['15'], die_um="auto", util=0.30)
 
     assert events == ["producer", "declared", "consumer"]
     assert row.status == "PASS"
@@ -346,7 +353,7 @@ def test_default_step15_direct_invocation_binds_backend_receipt_before_consumer(
     assert receipt["step_id"] == "15"
     assert receipt["verdict"] == "PASS"
     assert receipt["current_step_declared_producers"]["direct_producer"][
-        "producer"] == "phase3_one_shot_runner.step_pnr"
+        "producer"] == "execution_backend_producers.produce"
     source = pathlib.Path(RUNNER.__file__).read_text()
     main = source[source.index("def main("):]
     assert '_recorded("pnr", _default_step15_with_backend_receipt)' in main
@@ -369,12 +376,19 @@ def test_default_step15_consumer_refusal_survives_headline_rollup(tmp_path, monk
     def refused(*_args, **_kwargs):
         raise ValueError("current producer input missing")
 
-    monkeypatch.setattr(RUNNER, "step_pnr", native)
+    import execution_backend_producers as producers
+    def bounded_producer(project, params):
+        result = native(project)
+        return {'verdict': result.status, 'detail': result.detail}
+    monkeypatch.setattr(producers, 'produce_pnr', bounded_producer)
+    monkeypatch.setattr(producers, '_native_current_step_producer', lambda *_: None)
+    monkeypatch.setattr(RUNNER, '_backend_parameter_values', lambda *_: {})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *_: [])
     monkeypatch.setattr(declared, "run_for_step", refused)
     monkeypatch.setattr(worker, "evaluate", lambda *_args, **_kwargs:
                         pytest.fail("refused producer cannot authorize consumer"))
-    row = RUNNER._default_step15_with_backend_receipt(
-        tmp_path, "chip_top", None, "fixture", "auto", 0.30)
+    row = RUNNER._default_pnr_rows(
+        tmp_path, "chip_top", None, "fixture", ['15'], die_um="auto", util=0.30)
     assert row.status == "NOT_MEASURED"
     assert row.reason_class == RUNNER._V.ReasonClass.UPSTREAM_REFUSED
     assert RUNNER._aggregate_verdict([row]) != "PASS"

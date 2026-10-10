@@ -140,7 +140,8 @@ def seed_arms(project: Path) -> List[int]:
 
 def chain_ids(image: str, *, seeded: bool = False,
               flow_segment: Optional[Callable[..., List[str]]] = None,
-              gated_off: Optional[Dict[str, List[str]]] = None) -> List[str]:
+              gated_off: Optional[Dict[str, List[str]]] = None,
+              canonical_routing_only: bool = False) -> List[str]:
     """The image's own Chip-flow order for the segment, as step ids (a flow
     instance suffix such as `-1` dropped), the measure-only STA removed, every
     step the flow's own gates switch off (`gated_off`, from
@@ -150,6 +151,12 @@ def chain_ids(image: str, *, seeded: bool = False,
     order = (flow_segment or _ll.flow_segment)(image, *SEGMENT)
     ids = [re.sub(r"-\d+$", "", s) for s in order]
     ids = [s for s in ids if s not in MEASURE_ONLY and s not in (gated_off or {})]
+    if canonical_routing_only:
+        # The reference segment includes full-flow electrical validation.
+        # Vibe-IC's Step 31 owns ERC, including unused spare outputs and
+        # floating-input checks. Step 21 retains its native router DRC checker.
+        ids = [s for s in ids if s not in (
+            'Odb.ReportDisconnectedPins', 'Checker.DisconnectedPins')]
     if DRT not in ids:
         raise ValueError(f"LL_ROUTE_SEGMENT_HAS_NO_DETAILED_ROUTE: {order}")
     at = ids.index(DRT)
@@ -157,6 +164,32 @@ def chain_ids(image: str, *, seeded: bool = False,
     if seeded:
         ids[at] = DRT_SEEDED
     return ids
+
+
+def named_violation_config(R, *, project: Path, configs: Dict[str, Path],
+                           ids: Sequence[str], lane: str, cfg_dir: Path,
+                           reserved_instance_names=None) -> Path:
+    """Bind the existing reroute pass to this chain's detailed-route report."""
+    import librelane_contract as ll
+    drt_index = next(i for i, sid in enumerate(ids) if sid in (DRT, DRT_SEEDED))
+    drt_id = ids[drt_index]
+    drt_folder = (project / 'phase3/librelane' / lane /
+                  (f'{drt_index + 1:02d}-' + drt_id.lower().replace('.', '-')))
+    design = json.loads(configs[DRT].read_text()).get('DESIGN_NAME')
+    report = (cfg_dir / 'nvr' / lane / R.ROUTER_DRC_REPORT_NAME).resolve()
+    body = cfg_dir / 'nvr' / lane / 'named_violation_reroute.body.tcl'
+    report.parent.mkdir(parents=True, exist_ok=True)
+    R._aa.write_text(body, R._named_violation_reroute_tcl(
+        str(report), reserved_instance_names=reserved_instance_names))
+    config = configs[NVR]
+    return ll.derive_step_config(config, config.with_name(f'{NVR}@{lane}.json'), {
+        'VIBEIC_NVR_TCL': (str(body.resolve()),
+                          'phase3_one_shot_runner._named_violation_reroute_tcl'),
+        'VIBEIC_NVR_REPORT_PATH': (str(report), "this chain's working router report"),
+        'VIBEIC_NVR_DRC_REPORT': (
+            str((drt_folder / f'{design}.drc').resolve()),
+            f"{drt_id}'s own final -output_drc report"),
+    })
 
 
 def _cut(R, lines: List[str], marker: str) -> List[str]:
@@ -532,27 +565,14 @@ def execute(
             # reads the detailed route's own report from that folder.
             drt_folder = base / (f"{drt_index + 1:02d}-"
                                  + arm_ids[drt_index].lower().replace(".", "-"))
-            design = json.loads(configs[DRT].read_text()).get("DESIGN_NAME")
-            # The runner's one reroute pass, emitted for the report path this
-            # arm's reroute step reads and rewrites.
-            nvr_rpt = (cfg_dir / "nvr" / lane / R.ROUTER_DRC_REPORT_NAME).resolve()
-            nvr_tcl = cfg_dir / "nvr" / lane / "named_violation_reroute.body.tcl"
-            nvr_rpt.parent.mkdir(parents=True, exist_ok=True)
-            R._aa.write_text(nvr_tcl, R._named_violation_reroute_tcl(
-                str(nvr_rpt), reserved_instance_names=reserved))
+            nvr_config = named_violation_config(
+                R, project=project, configs=configs, ids=arm_ids, lane=lane,
+                cfg_dir=cfg_dir, reserved_instance_names=reserved)
             steps = []
             for sid in arm_ids:
                 cfg = configs[sid]
                 if sid == NVR:
-                    cfg = _ll.derive_step_config(cfg, cfg.with_name(f"{NVR}@{lane}.json"), {
-                        "VIBEIC_NVR_TCL": (str(nvr_tcl.resolve()),
-                                           "phase3_one_shot_runner._named_violation_reroute_tcl"),
-                        "VIBEIC_NVR_REPORT_PATH": (
-                            str(nvr_rpt), "this arm's working copy of the router's report"),
-                        "VIBEIC_NVR_DRC_REPORT": (
-                            str((drt_folder / f"{design}.drc").resolve()),
-                            f"{arm_ids[drt_index]}'s own -output_drc report (its final "
-                            "drt run, copied to the step folder by drt.tcl)")})
+                    cfg = nvr_config
                 elif sid == DRT_SEEDED:
                     cfg = _ll.derive_step_config(cfg, cfg.with_name(f"{DRT_SEEDED}@{seed}.json"), {
                         "VIBEIC_DRT_OR_SEED": (seed, "phase3/librelane_switch.json "

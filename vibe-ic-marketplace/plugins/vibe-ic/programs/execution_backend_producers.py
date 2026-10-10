@@ -432,15 +432,69 @@ def _views(project, top, predecessor):
             'sdc': _step15_sdc(project)}
 
 
-def _state_chain(project, params, ids, predecessor, overlay=None):
+def _predecessor_state(project, predecessor):
+    """Read the native checkpoint actually handed to the preceding row."""
+    names = {
+        'placed.def': ('librelane_placement_handoff.json', 'def'),
+        'post_spare.def': ('librelane_spare_handoff.json', 'def'),
+        'post_cts.def': ('librelane_cts_hold_handoff.json', 'post_cts_def'),
+        'post_hold.def': ('librelane_cts_hold_handoff.json', 'post_hold_def'),
+    }
+    receipt_name, view_name = names[predecessor]
+    try:
+        document = json.loads(_require(project / RPT / receipt_name).read_text())
+        view = document['views'][view_name]
+        canonical = _require(project / PNR / predecessor)
+        if (Path(view['dest']).resolve() != canonical.resolve()
+                and (project / view['dest']).resolve() != canonical.resolve()):
+            raise ValueError('receipt names another predecessor DEF')
+        if view['dest_sha256'] != snap.sha(canonical):
+            raise ValueError('predecessor DEF changed after its handoff')
+        raw = document.get('measured_state', document.get('state'))
+        expected = document.get('measured_state_sha256', document.get('state_sha256'))
+        if predecessor == 'post_cts.def' and 'post_hold_def' in document['views']:
+            # The shared report's latest measurement is now Hold. A Hold
+            # retry must start at the CTS view's own native producer state.
+            source = _require(project / view['source'])
+            if snap.sha(source) != view['source_sha256'] or snap.sha(source) != snap.sha(canonical):
+                raise ValueError('CTS source differs from its handed checkpoint')
+            raw = source.parent / 'state_out.json'
+            native = json.loads(_require(source.parent / 'vibeic_receipt.json').read_text())
+            expected = native['sha256']['state_out.json']
+        state = _require(project / raw)
+        if expected != snap.sha(state):
+            raise ValueError('predecessor native state changed after its handoff')
+        return state
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise em.Refusal('BACKEND_PREDECESSOR_STATE_UNBOUND',
+                         f'{predecessor}: {exc}') from exc
+
+
+def _state_chain(project, params, ids, predecessor, overlay=None, *, respect_flow_gates=False):
     import librelane_contract as ll
     import phase3_one_shot_runner as R
     image, pdk, root = params['image_id'], params['pdk_name'], Path(params['pdk_root'])
     lane = 'execution-backend-' + params['step_id'].replace('.', '-')
     configs = ll.resolve_step_configs(project, image, pdk, ids,
                     pdk_root=root, folder=lane + '-config', overlay=overlay)
+    if respect_flow_gates:
+        gated_off = ll.flow_gated_off(project / 'phase3/librelane' / (lane + '-config'))
+        ids = [sid for sid in ids if sid not in gated_off]
     configs, _ = R._resolved_cell_policy(configs, root, pdk)
+    if params['step_id'] == '21':
+        import librelane_route as route
+        spare_record = project / PNR / 'spare_cells.json'
+        spares = json.loads(spare_record.read_text()) if spare_record.is_file() else {}
+        reserved = [row['name'] for row in spares.get('instances', []) if row.get('name')]
+        configs[route.NVR] = route.named_violation_config(
+            R, project=project, configs=configs, ids=ids, lane=lane,
+            cfg_dir=project / 'phase3/librelane' / (lane + '-config'),
+            reserved_instance_names=reserved or None)
     mounts = [(root.resolve(), ll.PDK_GUEST_ROOT)]
+    if predecessor in ('placed.def', 'post_spare.def', 'post_hold.def') and not params.get('state_in'):
+        # Carry the actual database/netlist/metrics; rebuilding from an old
+        # top_pnr.v can silently import a previous run's spares or clock tree.
+        params = {**params, 'state_in': str(_predecessor_state(project, predecessor))}
     if params.get('state_in'):
         state = _require(Path(params['state_in']))
     elif predecessor == 'floorplan.def':
@@ -854,7 +908,7 @@ def _cts_split(project, params, R, ll, pdk, overlay):
         raise em.Refusal('BACKEND_CTS_HOLD_CORNERS_UNSTATED', sid)
     if sid == '19':
         instances = configs['OpenROAD.CTS'].parent / 'pre_cts.instances'
-        components = R._parse_def_components(_require(project / PNR / 'placed.def'))
+        components = R._parse_def_components(_require(project / PNR / 'post_spare.def'))
         if not components:
             raise em.Refusal('BACKEND_PRE_CTS_INSTANCE_POPULATION_EMPTY', sid)
         instances.write_text('\n'.join(name for name, _ in components) + '\n')
@@ -873,10 +927,9 @@ def _cts_split(project, params, R, ll, pdk, overlay):
         ll.derive_step_config(native, selected, {'PNR_CORNERS': ([corner], 'resolved STA_CORNERS, one measurement per corner')})
         chain.append(('OpenROAD.STAMidPNR', selected))
     mounts = [(root.resolve(), ll.PDK_GUEST_ROOT)]
-    views = _views(project, params['top'], 'placed.def' if sid == '19' else 'post_cts.def')
+    predecessor = 'post_spare.def' if sid == '19' else 'post_cts.def'
     state = (_require(Path(params['state_in'])) if params.get('state_in') else
-             ll.state_from_direct(project, image, configs[ids[0]], views,
-                     configs[ids[0]].parent / 'bridge', chain=[cfg for _, cfg in chain[1:]], mounts=mounts))
+             _predecessor_state(project, predecessor))
     folders = ll.run_chain(project, image, [(s, cfg, state) for s, cfg in chain],
                           mounts=mounts, lane=lane, pdk_root=ll.PDK_GUEST_ROOT)
     production = folders[len(ids) - 1]
@@ -1044,19 +1097,42 @@ def produce_pnr(project, params):
             'handoff': str(handoff_path),
         }))
     elif sid == '15.5ic':
-        row = R.step_pad_ring_gen(project, container, pdk)
+        # The Chip chain places pads before tap/PDN, as LibreLane requires.
+        # Describe and independently check that actual native ring here;
+        # dispatching the direct placer again changes the selected tool and
+        # can reject orientations the native PadRing already honoured.
+        bound = _read_step15_bounded_state(project)
+        try:
+            handoff = json.loads(_require(
+                project / RPT / 'librelane_padring_handoff.json').read_text())
+            ring_state = _require(Path(handoff['state']))
+            floorplan_source = Path(bound['record']['handoff_views']['def']['source'])
+            if ring_state.parent.parent != floorplan_source.parent.parent:
+                raise ValueError('PadRing belongs to another native floorplan chain')
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise em.Refusal('BACKEND_PADRING_STATE_CHANGED', str(exc)) from exc
+        row = R.step_pad_ring_gen(project, container, pdk,
+                                  librelane_state=ring_state)
         return {'verdict': row.status, 'detail': row.detail}
     elif sid == '17':
         ids = ll.flow_segment(params['image_id'], 'OpenROAD.GlobalPlacement', 'OpenROAD.DetailedPlacement')
         at = ids.index('OpenROAD.RepairDesignPostGPL')
         ids.insert(at + 1, 'Vibeic.PostGPLFanoutClosure')
         ll, configs, by = _state_chain(project, params, ids, 'floorplan.def', overlay)
-        _handoff(project, ll, by[ids[-1]], {'def': PNR + 'placed.def', 'odb': PNR + 'librelane_placed.odb'})
+        handoff = _handoff(project, ll, by[ids[-1]], {
+            'def': PNR + 'placed.def', 'odb': PNR + 'librelane_placed.odb'})
+        snap.dump(project / RPT / 'librelane_placement_handoff.json', handoff)
         _logs(project, by.values(), 'librelane_placement.log')
     elif sid == '18':
         ids = ['Vibeic.InsertSpareCells']
+        params = {**params, 'state_in': str(_predecessor_state(project, 'placed.def'))}
+        if params.get('spare_density') is not None:
+            overlay['VIBEIC_SPARE_DENSITY'] = (
+                params['spare_density'], 'runner --spare-density')
         ll, configs, by = _state_chain(project, params, ids, 'placed.def', overlay)
-        _handoff(project, ll, by[ids[-1]], {'def': PNR + 'placed.def', 'odb': PNR + 'librelane_placed.odb'})
+        handoff = _handoff(project, ll, by[ids[-1]], {
+            'def': PNR + 'post_spare.def', 'odb': PNR + 'post_spare.odb'})
+        snap.dump(project / RPT / 'librelane_spare_handoff.json', handoff)
         _logs(project, by.values(), 'librelane_spare_cells.log')
         reports = list(by[ids[-1]].rglob('spare_cells.json'))
         if len(reports) != 1:
@@ -1067,20 +1143,32 @@ def produce_pnr(project, params):
         return _cts_split(project, params, R, ll, pdk, overlay)
     elif sid == '21':
         import librelane_route as route
-        ids = route.chain_ids(params['image_id'], gated_off=ll.flow_gated_off(params['image_id']))
-        ll, configs, by = _state_chain(project, params, ids, 'post_hold.def', overlay)
-        _handoff(project, ll, by[ids[-1]], {'def': PNR + 'routed.def', 'odb': PNR + 'routed.odb',
+        ids = route.chain_ids(params['image_id'], canonical_routing_only=True)
+        ll, configs, by = _state_chain(project, params, ids, 'post_hold.def', overlay,
+                                       respect_flow_gates=True)
+        _handoff(project, ll, list(by.values())[-1], {'def': PNR + 'routed.def', 'odb': PNR + 'routed.odb',
                                          'nl': PNR + top + '_pnr.v'})
         log = _logs(project, by.values())
-        reports = list(by['OpenROAD.DetailedRouting'].rglob('*.drc'))
-        if len(reports) != 1:
-            raise em.Refusal('BACKEND_ROUTER_NATIVE_DRC_ABSENT', str(reports))
-        _copy(reports[0], project / PNR / R.ROUTER_DRC_REPORT_NAME)
+        # The reroute step's own saved report describes the final native
+        # route. The detailed router's earlier report predates that repair.
+        final_drc = by[route.NVR] / 'named_viol_after.drc'
+        # A completed zero-violation native run writes an empty DRC report.
+        # Its measurement is qualified by the transcript/DEF receipt below,
+        # not by requiring a violation to make the file nonempty.
+        if not final_drc.is_file() or final_drc.is_symlink():
+            raise em.Refusal('BACKEND_ROUTER_REPORT_ABSENT', str(final_drc))
+        shutil.copyfile(final_drc, project / PNR / R.ROUTER_DRC_REPORT_NAME)
         # Use the accepted receipt emitter; an incomplete routing transcript
         # refuses instead of creating a zero-error router certificate.
         if R._write_router_drc_receipt(project / PNR, project / PNR / 'routed.def', log.read_text()) is None:
             raise em.Refusal('BACKEND_ROUTER_TERMINAL_UNMEASURED', sid)
         R._emit_router_drc_report(project, project / PNR, project / RPT, [])
+        # Publish the surviving product of this completed native chain before
+        # the unchanged provenance consumer reads the canonical DEF.
+        R._log_surviving_artefact(
+            [str(project / PNR / 'routed.def'), str(project / PNR / (top + '_pnr.v'))],
+            produced_by='LibreLane native routing chain (step 21)',
+            tool='openroad', exit_code=0)
     else:
         raise em.Refusal('BACKEND_UNKNOWN_PNR_STEP', sid)
     return {'verdict': 'PASS', 'detail': 'native ordered chain complete; canonical gates still required'}
@@ -1446,6 +1534,11 @@ def produce(project, params):
         result = produce_pnr(project, params)
     else:
         result = produce_signoff(project, params)
+    if params.get('stop_on_producer_failure') and result.get('verdict') != 'PASS':
+        # The local Default caller cannot advance without this producer's
+        # outputs. Do not spend time generating downstream compliance reports
+        # after preparation or the native tool already refused this row.
+        return result
     # The backend consumer runs immediately after this function.  Materialize
     # only this row's flow-declared producer outputs now; the phase runner's
     # later all-step refresh remains unchanged and does not get used as a
