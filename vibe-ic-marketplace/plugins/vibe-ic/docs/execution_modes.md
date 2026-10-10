@@ -23,7 +23,7 @@ worker preflight and downstream consumption. This routing completion does not
 claim that either benchmark IC has passed.
 
 The public portfolio is `programs/data/execution_modes_portfolio.json`. It imports
-the final source/policy inventory bound to main
+the historical source/policy inventory bound to main
 `f88175263d96c3a76b4cb18f72c7714c68ec6627`, inventory SHA256
 `d364f39fc37b77f5ba711cea7cab879345de56c157784cf847a66108ebc518bc`:
 70 canonical step IDs, 63 tools, 333 arm descriptions. Private receipt paths and
@@ -57,6 +57,7 @@ executable bindings. A portfolio description alone cannot register an executor.
 Adapters and validators are trusted reviewed implementation code, not commands
 loaded from a public JSON file or a security boundary against hostile programs.
 
+The standalone qualification API
 `Controller.plan(context, execution_mode, superiority)` selects one applicable,
 available, qualified primary in default mode: LibreLane, then OpenROAD, then
 another qualified tool. Own code needs an explicit scoped no-applicable-tool
@@ -141,6 +142,9 @@ adoption records return named finite refusals, rather than raw filesystem errors
 
 ## Integration boundary and remaining work
 
+The normal Default CLI does not call this standalone planning API; its canonical
+caller executes the configured producer directly.
+
 The canonical runners now select the execution policy at their existing front
 door. Default rows continue through their source-owned producer and gate
 functions. Ultra rows build a `Context` from the current frozen project inputs,
@@ -161,9 +165,20 @@ Every consumer must propagate a producer or gate refusal before advancing. A
 component receipt, a source wiring check, or a direct LibreLane/OpenROAD run is
 not a whole IC PASS.
 
-Shared writers retain `phase1_one_shot_runner.py`, `design_one_shot_runner.py`,
-`phase3_one_shot_runner.py`, `analog_one_shot_runner.py`, the canonical flow YAML,
-`CAPTURE_ROUTING.json` and `librelane_contract.py`. This lane edits none of them.
+This repair updates the existing front door, Phase-1/2/3 runners and
+`librelane_contract.py`; it does not replace the canonical flow YAML or
+`CAPTURE_ROUTING.json` with a new flow.
+
+### Default Step 8 ordering
+
+In native `direct` mode, Phase 2 runs the existing SDC syntax and L8 contract
+checks immediately and requires their newly written, nonempty reports. In
+`librelane` or `dual` mode, the early Step-8 observation is deferred until the
+mapped synthesis output exists. Phase 2 then calls the existing pre-layout
+producer and its post-pre-layout SDC consumer before its own audit. This closes
+the former cycle in which the Phase-2 audit required evidence that only the
+later Phase-3 caller could produce. A failed or unmeasured producer retains
+that verdict. A resumed window outside Step 8 does not repeat this work.
 
 ## Acceptance scope
 
@@ -200,8 +215,9 @@ not additional EDA adapters or production rollout evidence.
 Producing layer: n/a — execution policy, environment availability and tool
 portfolio are runner properties, not design facts in L1-L27.
 
-Consuming layer: n/a — the standalone controller consumes the mode, current
-frozen inputs, adapter registry and evidence; production hooks are proposed.
+Consuming layer: n/a — the canonical Default runners consume the mode and run
+their source-owned producers; the Ultra controller consumes frozen inputs,
+adapter registry and candidate evidence.
 
 Consumer program: `programs/execution_policy.py` for live routing and
 `programs/execution_modes.py` (`mode`, `Controller.plan`, `Controller.run`,
