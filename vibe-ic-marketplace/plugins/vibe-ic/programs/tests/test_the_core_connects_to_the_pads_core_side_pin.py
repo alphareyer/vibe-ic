@@ -108,6 +108,49 @@ def test_an_input_port_takes_the_face_that_repeats_the_terminal():
     assert faces.ties["OE"] == 0, "an input port must leave the terminal Hi-Z"
 
 
+@pytest.mark.parametrize('rail,expected', [
+    (None, None), ('unmatched_rail', None),
+    ('core_rail', 'receiver_core'), ('io_rail', 'receiver_io'),
+])
+def test_receiver_selection_uses_its_actual_supply_and_active_low_enable(rail, expected):
+    pins = PR.parse_liberty_pad_cells('''
+cell (dual_receiver) {
+  pin (BOND) {
+    is_pad : true;
+    direction : inout;
+    function : "DRIVER";
+    three_state : "DRIVER_DISABLE";
+  }
+  pin (DRIVER) {
+    direction : input;
+  }
+  pin (DRIVER_DISABLE) {
+    direction : input;
+  }
+  pin (RECEIVER_DISABLE) {
+    direction : input;
+  }
+  pin (receiver_core) {
+    direction : output;
+    function : "BOND&!RECEIVER_DISABLE";
+    related_power_pin : "core_rail";
+  }
+  pin (receiver_io) {
+    direction : output;
+    function : "BOND&!RECEIVER_DISABLE";
+    related_power_pin : "io_rail";
+  }
+}
+''')['dual_receiver']
+    faces = PR.pad_cell_faces(pins, 'input', core_power_pins=[rail] if rail else None)
+    if expected is None:
+        assert faces.refused and faces.core_pin == ''
+    else:
+        assert faces.refused == '' and faces.core_pin == expected
+        assert faces.ties['RECEIVER_DISABLE'] == 0
+        assert faces.ties['DRIVER_DISABLE'] == 1
+
+
 def test_an_output_port_drives_the_terminals_function_pin():
     faces = PR.pad_cell_faces(_cells()["fixture_io__bi"], "output")
     assert faces.core_pin == "A"

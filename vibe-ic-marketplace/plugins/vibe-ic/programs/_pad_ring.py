@@ -711,13 +711,13 @@ _LIB_CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?([A-Za-z0-9_$]+)"?\s*\)\s*\{',
 _LIB_PIN_RE = re.compile(r'^\s*pin\s*\(\s*"?([A-Za-z0-9_$\[\]]+)"?\s*\)\s*\{',
                          re.M)
 _LIB_ATTR_RE = re.compile(
-    r'^\s*(direction|function|three_state|is_pad|input_signal_level)\s*:\s*'
+    r'^\s*(direction|function|three_state|is_pad|input_signal_level|related_power_pin)\s*:\s*'
     r'"?([^";]*)"?\s*;', re.M)
 
 
 def parse_liberty_pad_cells(text: str
                             ) -> Dict[str, Dict[str, Dict[str, Optional[str]]]]:
-    """`{cell: {pin: {direction, function, three_state, is_pad, level}}}`.
+    """Signal roles, functions and related power pins from each Liberty cell.
 
     THE LIBERTY IS WHERE A PAD CELL SAYS WHICH FACE IS WHICH, and it says it
     without naming conventions: `is_pad : true` marks the bond terminal, the
@@ -737,7 +737,7 @@ def parse_liberty_pad_cells(text: str
             pend = hits[j + 1].start() if j + 1 < len(hits) else len(body)
             rec: Dict[str, Optional[str]] = {
                 "direction": None, "function": None, "three_state": None,
-                "is_pad": None, "input_signal_level": None}
+                "is_pad": None, "input_signal_level": None, "related_power_pin": None}
             for a in _LIB_ATTR_RE.finditer(body, ph.end(), pend):
                 rec[a.group(1)] = a.group(2).strip()
             pins[ph.group(1)] = rec
@@ -1077,7 +1077,8 @@ class PadFaces:
 
 def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
                    port_direction: str,
-                   declared: Optional[Dict[str, int]] = None) -> PadFaces:
+                   declared: Optional[Dict[str, int]] = None, *,
+                   core_power_pins: Optional[Sequence[str]] = None) -> PadFaces:
     """Resolve one pad master against one port direction.
 
     THE RULE, and every clause of it is read out of the Liberty above:
@@ -1090,6 +1091,9 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
                  is an ENABLE and is tied to make the product transparent
                  (`((IE*PAD))` -> IE=1). The terminal must also be left
                  undriven, so the cell's own `three_state` is tied TRUE.
+                 Multiple receivers are resolved by their related_power_pin
+                 and the producer's actual core supply connection. Active-low
+                 controls are tied low to satisfy their complemented literal.
       OUTPUT     the terminal's `function` names the core-side driver input,
       PORT       and `three_state` is tied FALSE so the driver is enabled.
       REFUSED    an expression this cannot read, a missing terminal, more than
@@ -1142,6 +1146,9 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
             if (rec.get("direction") == "output" and lits
                     and any(p == terminal and not neg for neg, p in lits)):
                 cands.append((pin, lits))
+        if len(cands) > 1 and core_power_pins:
+            cands = [(pin, lits) for pin, lits in cands
+                     if pins[pin].get('related_power_pin') in core_power_pins]
         if len(cands) != 1:
             return PadFaces(refused=(
                 f"{len(cands)} output pin(s) repeat the terminal {terminal!r}; "
@@ -1150,11 +1157,9 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
         for neg, lit in lits:
             if lit == terminal:
                 continue
-            if neg:
-                return PadFaces(refused=(
-                    f"the core face {core_pin!r} inverts its enable "
-                    f"{lit!r}; this step ties only non-inverted enables"))
-            ties[lit] = 1
+            # A complemented literal is an active-low receiver control.
+            # Satisfy it exactly as a positive enable, without guessing names.
+            ties[lit] = 0 if neg else 1
             reasons[lit] = (f"enables the core face {core_pin!r}, whose "
                             f"function is {pins[core_pin]['function']!r}")
         # three_state is the condition for Hi-Z. An input port WANTS Hi-Z, so

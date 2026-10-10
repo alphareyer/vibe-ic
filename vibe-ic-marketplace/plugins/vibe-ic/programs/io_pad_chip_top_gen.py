@@ -2222,8 +2222,13 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 f"the IO library's Liberty declares no cell {master!r}, so "
                 f"its faces are unknown")
             continue
+        core_power_pins = sorted(pin for pin, net in
+                                 (rc.get('power_connections') or {}).items()
+                                 if net == (rec.get('power_pad_plan') or {}).get('power_net'))
         faces = PR.pad_cell_faces(lib_cells[master], str(rc["direction"]),
-                                  declared_aux.get(str(rc["port"])))
+                                  declared_aux.get(str(rc["port"])),
+                                  **({'core_power_pins': core_power_pins}
+                                     if core_power_pins else {}))
         if faces.refused:
             faces_refused[inst] = faces.refused
             continue
