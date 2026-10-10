@@ -448,7 +448,8 @@ def _reports_for_check(project: Path, check: str
             relative = path.relative_to(project)
         except ValueError:
             continue
-        if relative.parts[:2] == ("reports", "audit"):
+        if (relative.parts[:2] == ("reports", "audit")
+                or _is_input_or_audit_record(path)):
             continue
         try:
             payload = json.loads(path.read_text(errors="replace"))
@@ -535,14 +536,19 @@ def _phase3_record_matches_inputs(path: Path, current: Optional[dict]) -> bool:
     A producer that did bind its report to the netlist or staged constraints
     cannot silently regain currency when those inputs change in place.
     """
-    if current is None:
-        return True  # FX_P2's no-netlist behavior
     try:
         payload = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
         return True  # legacy record; the existing mtime rule still applies
     if not isinstance(payload, dict):
         return True
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary.get("declared_sta_basis") == "PRE_LAYOUT":
+        # Canonical Phase2 prelayout STA uses this report directory too.
+        # A timing result before PnR cannot prove Phase3 was executed.
+        return False
+    if current is None:
+        return True  # FX_P2's no-netlist behavior for Phase3 records
     if payload.get("phase3_inputs") is not None:
         return payload["phase3_inputs"] == current
     if payload.get("phase2_synth") is not None:
@@ -558,6 +564,7 @@ def _is_input_or_audit_record(path: Path) -> bool:
         return False
     return isinstance(payload, dict) and (
         payload.get("program") == "flow_compliance_check"
+        or payload.get("invoked_as") == "audit"
         # Step7 publishes the pad-driving input while authoring its SDC.
         # Its reports/phase3 location does not make it a signoff result.
         or payload.get("schema") == "vibeic.pad_input_drive.v1")

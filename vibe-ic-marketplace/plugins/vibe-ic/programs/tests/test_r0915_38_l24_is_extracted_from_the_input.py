@@ -434,7 +434,7 @@ def test_every_verdict_spelling_a_real_run_uses_is_read(tmp_path, payload,
 
 # ── the deadlock, and the control that holds it shut ─────────────────────
 
-@pytest.mark.parametrize("with_input_plan", [False, True])
+@pytest.mark.parametrize("with_input_plan", [False, True, "sta_audit", "prelayout"])
 def test_a_requirement_is_not_unmet_before_the_phase_that_measures_it(
         tmp_path, with_input_plan):
     """MEASURED: the phase-2 strict-structural audit invokes this gate, so a
@@ -447,7 +447,17 @@ def test_a_requirement_is_not_unmet_before_the_phase_that_measures_it(
     have measured it. Before that it is recorded, named, and not blocking."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
-    if with_input_plan:
+    if with_input_plan == "prelayout":
+        _report(proj, "phase3/sta/pre_pnr_summary.json", {
+            "program": "eda_report_audit:sta", "invoked_as": "producer",
+            "passed": True, "summary": {"declared_sta_basis": "PRE_LAYOUT"},
+        })
+    elif with_input_plan == "sta_audit":
+        _report(proj, "phase3/sta/pre_pnr_summary.json", {
+            "program": "eda_report_audit:sta", "invoked_as": "audit",
+            "passed": False, "findings": ["native STA has not run"],
+        })
+    elif with_input_plan:
         _report(proj, "phase3/pad_input_drive.json", {
             "schema": "vibeic.pad_input_drive.v1", "applies": True,
             "verdict": "NOT_MEASURED", "sdc_lines": [],
@@ -460,14 +470,24 @@ def test_a_requirement_is_not_unmet_before_the_phase_that_measures_it(
     assert "REQUIRES" not in out
 
 
-@pytest.mark.parametrize("with_input_plan", [False, True])
+@pytest.mark.parametrize("with_input_plan", [False, True, "sta_audit", "prelayout"])
 def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path, with_input_plan):
     """THE CONTROL. The arm is not toothless: declare that phase 3 ran, with
     no DRC report in it, and the same project FAILS naming the requirement."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
     _phase3_ran(proj)
-    if with_input_plan:
+    if with_input_plan == "prelayout":
+        _report(proj, "phase3/sta/pre_pnr_summary.json", {
+            "program": "eda_report_audit:sta", "invoked_as": "producer",
+            "passed": True, "summary": {"declared_sta_basis": "PRE_LAYOUT"},
+        })
+    elif with_input_plan == "sta_audit":
+        _report(proj, "phase3/sta/pre_pnr_summary.json", {
+            "program": "eda_report_audit:sta", "invoked_as": "audit",
+            "passed": False, "findings": ["native STA has not run"],
+        })
+    elif with_input_plan:
         _report(proj, "phase3/pad_input_drive.json", {
             "schema": "vibeic.pad_input_drive.v1", "applies": True,
             "verdict": "NOT_MEASURED", "sdc_lines": [],
@@ -475,6 +495,19 @@ def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path, with_input_plan):
     rc, out = _run_gate(proj)
     assert rc == 1, out
     assert "the input REQUIRES DRC clean" in out
+
+
+def test_actual_failed_prelayout_timing_is_not_hidden(tmp_path):
+    """Phase admission must preserve a real producer's failing timing result."""
+    proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
+    _emit_l24(proj)
+    _report(proj, "phase3/sta/pre_pnr_summary.json", {
+        "program": "eda_report_audit:sta", "invoked_as": "producer",
+        "passed": False, "summary": {"declared_sta_basis": "PRE_LAYOUT"},
+    })
+    rc, out = _run_gate(proj)
+    assert rc == 1, out
+    assert "STA" in out
 
 
 def test_a_phase3_producer_report_without_a_summary_still_counts(tmp_path):
