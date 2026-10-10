@@ -283,6 +283,40 @@ def test_a_design_that_declares_no_pad_placement_writes_nothing(tmp_path):
     assert not (proj / "phase3/stage3/pnr/chip_top_io.v").exists()
 
 
+def test_pad_placement_in_an_ordinary_design_document_is_consumed(tmp_path):
+    proj = _project(tmp_path)
+    doc = proj / "input/docs/L3_external_interface.md"
+    doc.rename(doc.with_name("design.md"))
+    result = _run(GEN, proj, _pdk(tmp_path / "pdk"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(_record(proj)["pad_instances"]) == 5
+
+
+def test_reviewed_implementation_pad_plan_is_a_fallback_input(tmp_path):
+    proj = _project(tmp_path, doc="# Interface\nNo fixed pad placement.\n")
+    plan = proj / "phase3/stage3/pnr/io_pad_placement_plan.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(DOC)
+    result = _run(GEN, proj, _pdk(tmp_path / "pdk"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    placement, _, errors, _ = PAD.LPP.read_project_placement(proj)
+    assert not errors
+    assert placement.source == "phase3/stage3/pnr/io_pad_placement_plan.md"
+    assert len(_record(proj)["pad_instances"]) == 5
+
+
+def test_declared_pad_placement_precedes_implementation_plan(tmp_path):
+    proj = _project(tmp_path)
+    plan = proj / "phase3/stage3/pnr/io_pad_placement_plan.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(DOC.replace("`rst`", "`not_a_port`"))
+    result = _run(GEN, proj, _pdk(tmp_path / "pdk"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    placement, _, errors, _ = PAD.LPP.read_project_placement(proj)
+    assert not errors
+    assert placement.source == "input/docs/L3_external_interface.md"
+
+
 # --------------------------------------------------------------------------- #
 # refusals
 # --------------------------------------------------------------------------- #

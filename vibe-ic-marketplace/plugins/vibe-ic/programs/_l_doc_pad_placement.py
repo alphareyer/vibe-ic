@@ -3,6 +3,10 @@
 pad ring, out of its own L-documents, and out of the IO library those
 documents delegate to.
 
+When the input does not fix a placement, the engineering agent may produce
+`phase3/stage3/pnr/io_pad_placement_plan.md`. This is an implementation plan,
+recorded under its own source path, and never overrides an input placement.
+
 WHY THIS MODULE EXISTS
 ======================
 MEASURED on the self-tape-out re-run: `pad_assignment_gen` reported verdict
@@ -872,6 +876,12 @@ def discover_docs(project: Path) -> List[Path]:
             for p in sorted(root.glob(pattern)):
                 if p.is_file() and p not in seen:
                     seen.append(p)
+    # Original design documents do not need an L-layer filename. Use the
+    # shared input reader, retaining the established documents' precedence.
+    import floorplan_contract as _fpc
+    for _rel, path, _text in _fpc._iter_input_files(project):
+        if path not in seen:
+            seen.append(path)
     return seen
 
 
@@ -892,7 +902,13 @@ def read_project_placement(project: Path
     params: Dict[str, int] = {}
     unreadable: List[Dict[str, str]] = []
     scanned: List[str] = []
-    for path in discover_docs(project):
+    plan = project / "phase3/stage3/pnr/io_pad_placement_plan.md"
+    paths = discover_docs(project)
+    if plan.is_file():
+        paths.append(plan)
+    for path in paths:
+        if path == plan and placement is not None:
+            continue
         try:
             text = path.read_text(errors="replace")
         except OSError as exc:
