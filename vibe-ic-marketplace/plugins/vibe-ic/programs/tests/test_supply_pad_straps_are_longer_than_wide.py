@@ -258,3 +258,25 @@ def test_a_supply_net_with_no_core_facing_pin_is_not_measured(
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_rotated_native_pads_measure_the_actual_core_facing_pins(tmp_path, monkeypatch):
+    project, root = _tree(tmp_path)
+    lef = root / "testpdk/libs.ref/test_io/lef/test_io.lef"
+    text = lef.read_text()
+    # Swap the shallow pin rectangles to the master bottom edge, without
+    # changing the cell outline. The native R180 rows face them into the core.
+    text = text.replace("1.000 99.000 4.000 100.000", "1.000 0.000 4.000 1.000")
+    text = text.replace("6.000 99.000 9.000 100.000", "6.000 0.000 9.000 1.000")
+    lef.write_text(text)
+    cfg = root / "testpdk/libs.tech/someflow/test_io/config.tcl"
+    with cfg.open("a") as f:
+        for axis in ("HORIZONTAL", "VERTICAL", "CORNER"):
+            f.write(f'set ::env(PAD_ROTATION_{axis}) "R180"\n')
+    rec = _produce(project, root, monkeypatch)
+    reach = rec["power_pad_plan"]["pad_strap_reach"]
+    assert reach["verdict"] == "MEASURED"
+    assert reach["reach_um"] == pytest.approx(2.0)
+    assert rec["derived_answers"]["pad_rotations"]["vertical"] == "R180"
+    for cell in reach["cells"].values():
+        assert all(side["straps"] for side in cell["sides"].values())

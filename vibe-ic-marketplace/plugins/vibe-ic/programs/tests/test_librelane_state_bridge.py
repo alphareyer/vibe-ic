@@ -954,3 +954,30 @@ def test_native_ring_connects_produced_core_supply_pair_without_registry_ring(tm
                     "PDN_CORE_RING_HOFFSET"} & set(out)
     else:
         assert not {"PDN_CORE_RING", "PDN_CORE_RING_CONNECT_TO_PADS"} & set(out)
+
+
+@pytest.mark.parametrize('numeric', [float, str], ids=['numbers', 'native_decimal_strings'])
+@pytest.mark.parametrize('with_ring_layer', [False, True], ids=['pad_layer', 'also_native_ring_layer'])
+def test_native_supply_ring_geometry_reserves_its_real_ring_and_pad_straps(numeric, with_ring_layer):
+    cfg = {"DIE_AREA": [0, 0, 1030, 1030], "CORE_AREA": [204, 204, 826, 826],
+           "PDN_CORE_RING": True, "PDN_CORE_RING_CONNECT_TO_PADS": True,
+           "PDN_VERTICAL_LAYER": "lv", "PDN_HORIZONTAL_LAYER": "lh",
+           "PDN_CORE_RING_VOFFSET": 6, "PDN_CORE_RING_HOFFSET": 6,
+           "PDN_CORE_RING_VWIDTH": 1.6, "PDN_CORE_RING_HWIDTH": 1.6,
+           "PDN_CORE_RING_VSPACING": 1.7, "PDN_CORE_RING_HSPACING": 1.7}
+    record = {"verdict": "WROTE", "die_required_um": {
+        "ring_depth_um": 204, "pad_strap_reach_um": 17.1}, "power_pad_plan": {
+        "pad_strap_reach": {"verdict": "MEASURED", "cells": {
+            "pdk_supply": {"sides": {"S": {"straps": [{"layer": "lp"}]}}}}}}}
+    cfg['DIE_AREA'] = list(map(numeric, cfg['DIE_AREA']))
+    cfg['CORE_AREA'] = list(map(numeric, cfg['CORE_AREA']))
+    if with_ring_layer:
+        record['power_pad_plan']['pad_strap_reach']['cells']['pdk_supply']['sides']['S']['straps'].append(
+            {'layer': 'lv'})
+    adjusted, connects, details = contract.native_supply_pdn_geometry(cfg, record)
+    assert adjusted["CORE_AREA"] == [233, 233, 797, 797]
+    assert adjusted["DIE_AREA"] == cfg["DIE_AREA"]
+    assert set(map(tuple, connects)) == {("lp", "lv"), ("lp", "lh")}
+    assert details["core_inset_um"] == 233
+    assert details['core_area_changed'] is True
+    assert cfg["CORE_AREA"] == list(map(numeric, [204, 204, 826, 826]))

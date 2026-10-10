@@ -3239,6 +3239,41 @@ def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
          f"{built.get('frontend', 'unrecorded')})")
 
 
+def native_supply_pdn_geometry(config: dict, record: dict) -> tuple[dict, list[list[str]], dict]:
+    """Reserve the resolved native ring and connect actual core-facing pad metal."""
+    from math import ceil
+    result = dict(config)
+    reach = (record.get('power_pad_plan') or {}).get('pad_strap_reach') or {}
+    required = record.get('die_required_um') or {}
+    if not (config.get('PDN_CORE_RING') and config.get('PDN_CORE_RING_CONNECT_TO_PADS')
+            and record.get('verdict') == 'WROTE' and reach.get('verdict') == 'MEASURED'):
+        return result, [], {}
+    die, core = config.get('DIE_AREA'), config.get('CORE_AREA')
+    if not die or not core:
+        return result, [], {}
+    widths = [float(config['PDN_CORE_RING_' + axis + 'WIDTH']) for axis in ('V', 'H')]
+    spacing = max(float(config['PDN_CORE_RING_' + axis + 'SPACING']) for axis in ('V', 'H'))
+    offset = max(float(config['PDN_CORE_RING_' + axis + 'OFFSET']) for axis in ('V', 'H'))
+    gap = max(spacing, float(required['pad_strap_reach_um']) - min(widths) + spacing)
+    inset = ceil(float(required['ring_depth_um']) + offset + 2 * max(widths) + spacing + gap)
+    d, c = list(map(float, die)), list(map(float, core))
+    result['CORE_AREA'] = [max(c[0], d[0] + inset), max(c[1], d[1] + inset),
+                           min(c[2], d[2] - inset), min(c[3], d[3] - inset)]
+    if result['CORE_AREA'][0] >= result['CORE_AREA'][2] or result['CORE_AREA'][1] >= result['CORE_AREA'][3]:
+        raise Refusal('LL_PAD_PDN_CORE_DOES_NOT_FIT', f'{inset} um inset in {die}')
+    pad_layers = {strap['layer'] for cell in reach.get('cells', {}).values()
+                  for side in cell.get('sides', {}).values() for strap in side.get('straps', [])}
+    ring_layers = {config.get('PDN_CORE_' + axis + '_LAYER') or config['PDN_' + axis + '_LAYER']
+                   for axis in ('VERTICAL', 'HORIZONTAL')}
+    connects = [list(pair) for pair in sorted({(pad, ring) for pad in pad_layers - ring_layers
+                                             for ring in ring_layers if pad != ring})]
+    return result, connects, {'core_inset_um': inset,
+                             'core_area_changed': _rect_differs(c, result['CORE_AREA']),
+                             'pad_layers': sorted(pad_layers),
+                             'ring_layers': sorted(ring_layers),
+                             'source': 'resolved native PDN ring + IO producer LEF pin geometry'}
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -3356,6 +3391,45 @@ Path(output, "flow_gates.json").write_text(json.dumps({
         if not path.is_file() or _load(path).get('meta', {}).get('step') != step:
             raise Refusal('LL_STEP_CONFIG_MISSING',
                           f'{step}: no config at {path} naming meta.step {step!r}')
+    # Complete the native ring using the same invocation's resolved geometry.
+    # Custom registry recipes retain their existing declared handling.
+    if 'OpenROAD.GeneratePDN' in configs and 'OpenROAD.Floorplan' in configs:
+        pdn = _load(configs['OpenROAD.GeneratePDN'])
+        record_path = project / CHIP_TOP_RECORD_REL
+        if not pdn.get('PDN_CFG') and record_path.is_file():
+            floor = _load(configs['OpenROAD.Floorplan'])
+            adjusted, connects, geometry = native_supply_pdn_geometry(
+                {**pdn, 'CORE_AREA': floor.get('CORE_AREA')}, _load(record_path))
+            if geometry:
+                changed = geometry['core_area_changed']
+                if changed and not str(sources.get('CORE_AREA', '')).startswith(
+                        'reports/phase3/floorplan_rectangles.json'):
+                    raise Refusal('LL_DECLARED_CORE_PAD_PDN_CLEARANCE',
+                                  f"{floor['CORE_AREA']} needs {geometry['core_inset_um']} um inset")
+                recipe = emit_pdn_cfg(image, pdk, root / 'pdn_cfg.tcl',
+                                      docker=docker, native_connects=connects)
+                for path in configs.values():
+                    snapshot = _load(path)
+                    if 'CORE_AREA' in snapshot:
+                        snapshot['CORE_AREA'] = adjusted['CORE_AREA']
+                    if recipe and 'PDN_CFG' in snapshot:
+                        snapshot['PDN_CFG'] = str(recipe.resolve())
+                    write_json(path, snapshot)
+                emitted['CORE_AREA'] = adjusted['CORE_AREA']
+                sources['CORE_AREA'] = str(sources.get('CORE_AREA')) + '; ' + geometry['source']
+                if recipe:
+                    emitted['PDN_CFG'] = str(recipe.resolve())
+                    sources['PDN_CFG'] = geometry['source']
+                write_json(design, emitted)
+                write_json(design.with_suffix('.provenance.json'), sources)
+                rectangles = project / 'reports/phase3/floorplan_rectangles.json'
+                if rectangles.is_file() and changed:
+                    fact = _load(rectangles)
+                    fact['core_pad_um'] = max(float(fact.get('core_pad_um') or 0),
+                                              geometry['core_inset_um'])
+                    fact['native_pdn_supply_geometry'] = geometry
+                    write_json(rectangles, fact)
+                write_json(root / 'native_pdn_supply_geometry.json', {**geometry, 'connects': connects})
     return configs
 
 
@@ -3404,7 +3478,8 @@ def _extract_pdn_payload(stdout: str) -> str:
     return records[0]
 
 
-def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') -> Path | None:
+def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker',
+                 native_connects: list[list[str]] | None = None) -> Path | None:
     """The image's own PDN script plus the PDK registry's pad-facing connects.
 
     LibreLane has no variable for an extra ``add_pdn_connect``; its default
@@ -3422,7 +3497,9 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') 
                  if isinstance(e, dict) and e.get('name') == pdk), None) or {}
     connects = [pair for pair in ring.get('connects') or []
                 if isinstance(pair, list) and len(pair) == 2]
-    if not (ring.get('connect_to_pad_layers') and connects):
+    if native_connects:
+        connects = sorted({tuple(pair) for pair in connects + native_connects})
+    if not ((ring.get('connect_to_pad_layers') and connects) or native_connects):
         return None
     script = ('import json,os,librelane;print(json.dumps({' + repr(_PDN_PAYLOAD_KEY) +
               ':open(os.path.join(os.path.dirname(librelane.__file__),'
@@ -3440,7 +3517,9 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') 
     # before the source-owned registry additions; never strip Tcl text that may
     # legitimately contain an ``[INFO]`` fragment or trailing newlines.
     separator = '' if native.endswith('\n\n') else ('\n' if native.endswith('\n') else '\n\n')
-    suffix = [f'# vibe-ic: pdk_registry.json pdks[name={pdk}].pdn_ring.connects',
+    basis = ('IO producer core-facing LEF pins + resolved native PDN ring'
+             if native_connects else f'pdk_registry.json pdks[name={pdk}].pdn_ring.connects')
+    suffix = [f'# vibe-ic: {basis}',
               *[f'add_pdn_connect -grid stdcell_grid -layers {{{a} {b}}}' for a, b in connects]]
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(native + separator + '\n'.join(suffix) + '\n')

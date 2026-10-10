@@ -859,6 +859,7 @@ def _supply_pad_strap_reach(pair: Sequence[Dict[str, object]],
                                 float, float, float, float]]]]],
                             sizes: Dict[str, Tuple[float, float]],
                             connect_layers: Optional[Sequence[str]],
+                            pad_rotations: Optional[Dict[str, str]] = None,
                             ) -> Dict[str, object]:
     """How far from the pad edge the PDN ring must lie for pdngen to strap
     each supply cell to it.
@@ -907,14 +908,22 @@ def _supply_pad_strap_reach(pair: Sequence[Dict[str, object]],
         by_side: Dict[str, object] = {}
         for side in SIDES:
             orient = PR.SIDE_ORIENT[side]
-            outline = PR.orient_rect((0.0, 0.0, size[0], size[1]), orient, size)
+            # Native row-axis rotations: vertical controls S/N, horizontal
+            # controls W/E. Apply the PDK reference rotation before the
+            # placer's measured per-side transform, just as make_io_sites does.
+            axis = "vertical" if side in ("S", "N") else "horizontal"
+            reference = PR.normalise_orient((pad_rotations or {}).get(axis, "R0"))
+            rotated = PR.orient_rect((0.0, 0.0, size[0], size[1]), reference, size)
+            rotated_size = (rotated[2] - rotated[0], rotated[3] - rotated[1])
+            outline = PR.orient_rect(rotated, orient, rotated_size)
             placed_size = (outline[2] - outline[0], outline[3] - outline[1])
             straps = []
             for pin in pins:
                 for layer, rect in ports.get(pin) or []:
                     if layers and layer not in layers:
                         continue
-                    placed = PR.orient_rect(rect, orient, size)
+                    placed = PR.orient_rect(PR.orient_rect(rect, reference, size),
+                                            orient, rotated_size)
                     if not _faces_core(placed, side, placed_size):
                         continue
                     across_x = side in ("E", "W")
@@ -2004,8 +2013,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         for text in per_lef:
             for master, master_pins in PR.parse_lef_pin_ports(text).items():
                 pin_ports.setdefault(master, master_pins)
+        rotations, rotation_basis = _rotations(cfgs)
         strap_reach = _supply_pad_strap_reach(pair, pin_ports, sizes,
-                                              pad_connect_layers)
+                                              pad_connect_layers, rotations)
         # Without a measured current, one pair is the exploration baseline.
         # A same-run PSM plan may request more; it is never an input-side pad
         # assignment and it never changes the signal instances or their order.
