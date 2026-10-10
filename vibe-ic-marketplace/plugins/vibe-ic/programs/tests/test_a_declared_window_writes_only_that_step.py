@@ -216,6 +216,13 @@ def test_frontdoor_checkpoint_rc_answers_for_fresh_dispatched_work(
     assert captured['audit_verdict'] == 'NOT_MEASURED'
     if expected_rc == 0:
         assert captured['dispatched_verdict'] == 'PASS'
+        assert captured['verdict'] == 'NOT_MEASURED'
+        # The benchmark entry consumer still recognizes canonical entry,
+        # while this partial operation cannot become a whole-flow PASS.
+        guard = _load('vibe_ic_entry_guard')
+        report = tmp_path / 'frontdoor.json'
+        report.write_text(json.dumps(captured))
+        assert guard._is_orchestrator_report(report, tmp_path)
 
 
 def _guarded_by_bounded(root: ast.AST, target: str) -> bool:

@@ -2664,13 +2664,18 @@ def _main() -> int:
             window_reasons.append("Phase-2 child did not publish a fresh window report")
         summary = {
             "program": "vibe_ic_one_shot_runner", "bounded": True,
+            "phase": "vibe-ic", "project": str(project),
             **_delivery_route.report_label(project),
             "declared_window": p2_window.get("declared_window", {}),
-            "phases": [{"name": n, "verdict": v, "rc": rc} for n, v, rc in plan],
-            "dispatched_verdict": window_verdict, "verdict": window_verdict,
+            "phases": [{"name": n, "verdict": v, "rc": rc} for n, v, rc in
+                       [*plan, ("mixed_signal", "SKIPPED", 0)]],
+            "dispatched_verdict": window_verdict,
+            "verdict": "FAIL" if window_verdict == "FAIL" else "NOT_MEASURED",
             "verdict_reasons": window_reasons,
             "whole_flow_verdict": "NOT_MEASURED", "audit_verdict": "NOT_MEASURED",
             "audit_scope": "bounded; whole-flow audit not refreshed",
+            "completion_audit_axis": {"state": "NOT_MEASURED",
+                                      "reason": "bounded; whole-flow audit not refreshed"},
             "ai_judgements": p2_window.get("ai_judgements", {}),
             "bounded_disclosures": p2_window.get("bounded_disclosures", []),
             "not_refreshed_here": p2_window.get("not_refreshed_here", []),
