@@ -114,7 +114,8 @@ def _tool(calls):
         folder = Path(cmd[cmd.index('-o') + 1])
         views = {k: str(write(folder / ('b.' + k), k)) for k in ('odb', 'def', 'nl', 'sdc')}
         put(folder / 'state_out.json', views)
-        return SimpleNamespace(returncode=0, stdout='', stderr='')
+        return SimpleNamespace(returncode=0,
+                               stdout='tool fixture wrote state_out.json\n', stderr='')
     return fake
 
 

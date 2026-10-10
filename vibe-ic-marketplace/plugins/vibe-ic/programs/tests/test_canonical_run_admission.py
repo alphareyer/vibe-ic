@@ -197,6 +197,10 @@ def _load_runner(filename: str, module_name: str):
 def test_direct_phase_runners_refuse_before_expensive_dispatch(tmp_path, monkeypatch,
                                                                 capsys):
     """Integration seam: both bypassable CLIs obey a negative admission."""
+    import execution_policy as policy
+    # The CLIs bootstrap before admission. Restore that in-process metadata
+    # on teardown so a later caller does not inherit this fixture's project.
+    monkeypatch.setattr(policy, '_ordinary_runtime', None)
     project = _project(tmp_path / "proj")
     refused = cra.Admission(False, "DUPLICATE_NO_NEW_EVIDENCE", "x", {}, "control")
 
