@@ -39,11 +39,25 @@ RUNNER = PROGRAMS / "design_one_shot_runner.py"
 
 
 def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, PROGRAMS / f"{name}.py")
+    # Consumers import the canonical module during execution. Replacing its
+    # public name here disconnects their producer from fixtures collected
+    # earlier in the same pytest process.
+    fixture_name = f"_declared_window_{name}"
+    spec = importlib.util.spec_from_file_location(fixture_name, PROGRAMS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod          # by-path import must be self-consistent
+    sys.modules[fixture_name] = mod  # dataclass annotations need this identity
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_window_fixture_preserves_the_canonical_consumer_module():
+    import phase3_one_shot_runner as canonical
+
+    isolated = _load("phase3_one_shot_runner")
+    assert isolated is not canonical
+    assert sys.modules["phase3_one_shot_runner"] is canonical
+    import phase3_one_shot_runner as consumer
+    assert consumer is canonical
 
 
 def _main_node() -> ast.FunctionDef:

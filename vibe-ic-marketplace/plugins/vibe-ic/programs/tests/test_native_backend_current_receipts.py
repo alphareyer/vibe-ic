@@ -247,4 +247,3 @@ def test_worker_does_not_promote_entire_tree_to_producer_inputs(tmp_path, monkey
                        json.dumps({'required_gates': []}))
     worker.execute(inputs.parent, outputs, step_id='32', params={})
     assert seen['files'] == {}
-
