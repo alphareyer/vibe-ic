@@ -434,8 +434,9 @@ def test_every_verdict_spelling_a_real_run_uses_is_read(tmp_path, payload,
 
 # ── the deadlock, and the control that holds it shut ─────────────────────
 
+@pytest.mark.parametrize("with_input_plan", [False, True])
 def test_a_requirement_is_not_unmet_before_the_phase_that_measures_it(
-        tmp_path):
+        tmp_path, with_input_plan):
     """MEASURED: the phase-2 strict-structural audit invokes this gate, so a
     requirements arm that failed on "no DRC report" failed at a point in the
     flow where DRC CANNOT have run. Run 27 halted in phase 2 on exactly that,
@@ -446,19 +447,31 @@ def test_a_requirement_is_not_unmet_before_the_phase_that_measures_it(
     have measured it. Before that it is recorded, named, and not blocking."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
-    assert not (proj / "reports" / "phase3").exists()
+    if with_input_plan:
+        _report(proj, "phase3/pad_input_drive.json", {
+            "schema": "vibeic.pad_input_drive.v1", "applies": True,
+            "verdict": "NOT_MEASURED", "sdc_lines": [],
+        })
+    else:
+        assert not (proj / "reports" / "phase3").exists()
     rc, out = _run_gate(proj)
     assert rc == 0, out
     assert "not yet measurable" in out
     assert "REQUIRES" not in out
 
 
-def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path):
+@pytest.mark.parametrize("with_input_plan", [False, True])
+def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path, with_input_plan):
     """THE CONTROL. The arm is not toothless: declare that phase 3 ran, with
     no DRC report in it, and the same project FAILS naming the requirement."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
     _phase3_ran(proj)
+    if with_input_plan:
+        _report(proj, "phase3/pad_input_drive.json", {
+            "schema": "vibeic.pad_input_drive.v1", "applies": True,
+            "verdict": "NOT_MEASURED", "sdc_lines": [],
+        })
     rc, out = _run_gate(proj)
     assert rc == 1, out
     assert "the input REQUIRES DRC clean" in out

@@ -507,7 +507,7 @@ def _phase3_has_run(project: Path) -> bool:
         # search's `reports/audit` exclusion, keyed on the record's own
         # `program` because the path does not say it.
         records.extend(r for r in d.rglob("*.json")
-                       if not _is_audit_publication(r)
+                       if not _is_input_or_audit_record(r)
                        and _phase3_record_matches_inputs(r, current))
     if not records:
         return False
@@ -550,14 +550,17 @@ def _phase3_record_matches_inputs(path: Path, current: Optional[dict]) -> bool:
     return True
 
 
-def _is_audit_publication(path: Path) -> bool:
-    """Is this JSON the flow-compliance audit's own record?"""
+def _is_input_or_audit_record(path: Path) -> bool:
+    """Input settings and audit bookkeeping do not show a Phase3 tool ran."""
     try:
         payload = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
         return False
-    return isinstance(payload, dict) and \
+    return isinstance(payload, dict) and (
         payload.get("program") == "flow_compliance_check"
+        # Step7 publishes the pad-driving input while authoring its SDC.
+        # Its reports/phase3 location does not make it a signoff result.
+        or payload.get("schema") == "vibeic.pad_input_drive.v1")
 
 
 def _mtime(path: Path) -> float:
