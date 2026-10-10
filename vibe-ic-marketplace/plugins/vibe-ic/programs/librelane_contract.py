@@ -1464,12 +1464,19 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         # PDN ring; its selected PDK owns layers, widths, spacing and offsets.
         supplied = {pad.get('kind') for pad in plan.get('core_supply_pads', [])
                     if isinstance(pad, dict) and pad.get('master') and pad.get('terminal')
-                    and pad.get('port') == plan.get(
+                    and pad.get('grid_net', pad.get('port')) == plan.get(
                         'power_net' if pad.get('kind') == 'power' else 'ground_net')}
         if {'power', 'ground'} <= supplied:
             source = f'{CHIP_TOP_RECORD_REL}.power_pad_plan.core_supply_pads'
             _set(result, sources, 'PDN_CORE_RING', True, source)
             _set(result, sources, 'PDN_CORE_RING_CONNECT_TO_PADS', True, source)
+    # Resistive supply pads expose the bond as an external port while the
+    # core grid is an internal net. Native PDN must not add a second external
+    # core supply terminal: the pad's PDK resistor is the electrical boundary.
+    if any(pad.get('grid_net') and pad.get('grid_net') != pad.get('port')
+           for pad in plan.get('core_supply_pads', []) if isinstance(pad, dict)):
+        _set(result, sources, 'PDN_ENABLE_PINS', False,
+             f'{CHIP_TOP_RECORD_REL}.power_pad_plan.core_supply_pads[].grid_net')
     # Strap width/pitch: this design's own pre-route EM search (T103), measured
     # with PSM on its placed, clock-treed layout. Absent record -> absent keys.
     from _ppa.pdn_em_presweep import librelane_pdn_config

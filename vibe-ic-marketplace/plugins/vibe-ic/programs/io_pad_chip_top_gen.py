@@ -894,7 +894,7 @@ def _supply_pad_strap_reach(pair: Sequence[Dict[str, object]],
     undetermined = []
     for entry in pair:
         master = str(entry["master"])
-        net = entry.get("port")
+        net = entry.get("grid_net", entry.get("port"))
         size = sizes.get(master)
         pins = sorted(pin for pin, pin_net in dict(
             entry.get("supply_connections") or {}).items() if pin_net == net)
@@ -1403,7 +1403,7 @@ def require_bonded_ring_rails(plan: Dict[str, object]) -> None:
                         or resistor_path[:2] != [path["bond"], source]
                         or resistor_path[-1] != rail):
                     continue
-            elif not any(item.get("port") == rail for item in entries):
+            elif not any(item.get("grid_net", item.get("port")) == rail for item in entries):
                 continue
             bonded.add(rail)
             changed = True
@@ -1453,6 +1453,19 @@ def connect_bonded_ring_rails(
             if rail in roles and (not entry.get("is_ring_connector") or rail in connections):
                 connections[rail] = net
         entry["supply_connections"] = dict(sorted(connections.items()))
+    # A PDK series resistor separates the external bond from the core/ring
+    # rail. Putting its two terminals on one wrapper net shorts that resistor
+    # and makes the bond's metal look like an unconnected part of the core PDN.
+    # Keep the already resolved grid name; expose the PDK bond terminal as
+    # the external supply port. Hard-short connectors above still share nets.
+    for entry in supply_group:
+        bond = entry.get("terminal")
+        fed = (entry.get("derivation") or {}).get("fed_rail")
+        if entry.get("is_supply_pad") and bond and fed and bond != fed:
+            entry["grid_net"] = entry["supply_connections"][fed]
+            entry["port"] = str(bond)
+            entry["supply_connections"][bond] = str(bond)
+            plan["ring_net_bindings"][str(bond)] = str(bond)
     # Signal-pad PG pins must use these same bindings. Matching rails only by
     # nominal voltage loses the distinction between IO, quiet and switched
     # supplies and can disagree with adjacent supply/connector instances.
@@ -2157,8 +2170,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 buckets[(n * len(buckets)) // len(groups)].extend(group)
             ordered[side] = [item for n, signal in enumerate(signals)
                              for item in [*buckets[n], signal]] + buckets[-1]
-        supply_ports = [power_net, ground_net] + sorted(
-            str(entry["port"]) for entry in supply_group[2:] if entry.get("is_supply_pad"))
+        supply_ports = list(dict.fromkeys(
+            str(entry["port"]) for entry in supply_group if entry.get("is_supply_pad")))
         source_file = (Path(pdk_root) / str(pdk) / "SOURCES"
                        if pdk_root and pdk else None)
         plan.update({

@@ -956,6 +956,27 @@ def test_native_ring_connects_produced_core_supply_pair_without_registry_ring(tm
         assert not {"PDN_CORE_RING", "PDN_CORE_RING_CONNECT_TO_PADS"} & set(out)
 
 
+def test_resistive_supply_ports_do_not_become_core_grid_terminals(tmp_path):
+    p = _chip_design(tmp_path, pdk='sky130A')
+    put(p / 'reports/phase3/io_pad_chip_top.json', {
+        'verdict': 'WROTE', 'power_pad_plan': {
+            'power_net': 'VCORE', 'ground_net': 'GCORE',
+            'instances': ['u_power', 'u_ground'],
+            'core_supply_pads': [
+                {'kind': 'power', 'port': 'V_BOND', 'grid_net': 'VCORE',
+                 'master': 'pdk_power_pad', 'terminal': 'V_BOND'},
+                {'kind': 'ground', 'port': 'G_BOND', 'grid_net': 'GCORE',
+                 'master': 'pdk_ground_pad', 'terminal': 'G_BOND'},
+            ],
+        },
+    })
+    out = contract.emit_config(p, 'sky130A', p / 'cfg.json')
+    assert out['VDD_NETS'] == ['VCORE'] and out['GND_NETS'] == ['GCORE']
+    assert out['PDN_CORE_RING'] is True
+    assert out['PDN_CORE_RING_CONNECT_TO_PADS'] is True
+    assert out['PDN_ENABLE_PINS'] is False
+
+
 @pytest.mark.parametrize('numeric', [float, str], ids=['numbers', 'native_decimal_strings'])
 @pytest.mark.parametrize('with_ring_layer', [False, True], ids=['pad_layer', 'also_native_ring_layer'])
 def test_native_supply_ring_geometry_reserves_its_real_ring_and_pad_straps(numeric, with_ring_layer):

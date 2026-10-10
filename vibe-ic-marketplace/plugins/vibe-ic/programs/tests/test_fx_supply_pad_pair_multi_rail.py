@@ -522,3 +522,36 @@ def test_signal_pad_pg_pins_use_the_same_proved_ring_bindings():
     for expected in (".PAD(din)", ".VCCD(VPWR)", ".VCCHIB(VPWR)",
                      ".VSWITCH(VDDIO)", ".VDDIO(VDDIO)", ".VDDIO_Q(VDDIO_Q)"):
         assert expected in line
+
+
+def test_resistive_bond_and_core_rail_keep_distinct_electrical_nets():
+    pair, plan, _ = _resolve_implemented_ring()
+    lef, _, _, _, _ = _implemented_ring()
+    _, _, roles = _inputs(lef)
+    group = pair + plan['supplemental_supply_pads'] + plan['ring_connectors']
+    G.connect_bonded_ring_rails(group, plan, roles, 'VPWR', 'VGND')
+    for entry in group:
+        if not entry.get('is_supply_pad'):
+            continue
+        bond = entry['terminal']
+        fed = entry['derivation']['fed_rail']
+        assert entry['supply_connections'][bond] != entry['supply_connections'][fed]
+        assert entry['port'] == entry['supply_connections'][bond]
+        assert entry['grid_net'] == entry['supply_connections'][fed]
+    assert pair[0]['grid_net'] == 'VPWR'
+    assert pair[1]['grid_net'] == 'VGND'
+    # The consumer must still recognize actual scheduled bond reachability
+    # after the wrapper assigns distinct external and internal names.
+    G.require_bonded_ring_rails(plan)
+    chosen = {f'u_{i}': entry for i, entry in enumerate(group)}
+    ordered = {side: list(chosen) if side == 'S' else [] for side in G.SIDES}
+    ports = [entry['port'] for entry in group if entry.get('is_supply_pad')]
+    wrapper = G._emit_verilog('chip_top', 'core', ordered, chosen, [], ports)
+    assert 'inout VPWR' not in wrapper and 'inout VGND' not in wrapper
+    assert 'wire VPWR;' in wrapper and 'wire VGND;' in wrapper
+    for entry in group:
+        if entry.get('is_supply_pad'):
+            bond = entry['terminal']
+            fed = entry['derivation']['fed_rail']
+            assert f'.{bond}({entry["port"]})' in wrapper
+            assert f'.{fed}({entry["grid_net"]})' in wrapper
