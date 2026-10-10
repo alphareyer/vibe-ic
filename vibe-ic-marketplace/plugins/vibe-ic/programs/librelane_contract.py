@@ -3700,6 +3700,11 @@ def _sta_liberty_input_hashes(config: dict, project: Path,
                 libraries.update(v for v in group if isinstance(v, str))
     roots = [(project.resolve(), project.resolve()),
              *((Path(host).resolve(), Path(guest)) for host, guest in mounts)]
+    if _provider_route(project):
+        # Config resolution already projects guest paths onto the local PDK.
+        # Bind those same declared host roots as well as unprojected paths.
+        roots.extend((Path(host).resolve(), Path(host).resolve())
+                     for host, _ in mounts)
     roots.sort(key=lambda item: len(str(item[1])), reverse=True)
     result: dict[str, str | None] = {}
     for library in sorted(libraries):
@@ -3949,7 +3954,10 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                 _load(config), project, mounts or [])
             if not fingerprint['rcx_pdk_files'] or any(
                     value is None for value in fingerprint['rcx_pdk_files'].values()):
-                raise Refusal('LL_RCX_PDK_INPUT_UNREADABLE', str(config))
+                unreadable = [path for path, value in fingerprint['rcx_pdk_files'].items()
+                              if value is None]
+                raise Refusal('LL_RCX_PDK_INPUT_UNREADABLE',
+                              f'{config}: {unreadable or "no declared RCX inputs"}')
         if home:
             fingerprint['openroad_aliases'] = (capability or {}).get('openroad_aliases') or {}
         if step_id.startswith(PLUGIN_STEP_PREFIX):

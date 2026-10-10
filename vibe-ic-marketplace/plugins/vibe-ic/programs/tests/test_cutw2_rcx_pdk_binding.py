@@ -7,7 +7,8 @@ import _plugin_tree  # noqa: F401
 import librelane_contract as ll
 
 
-def setup_case(tmp_path, monkeypatch, *, mutate_during_run=False, missing=False):
+def setup_case(tmp_path, monkeypatch, *, mutate_during_run=False, missing=False,
+               local_inputs=False):
     project=tmp_path/'project';project.mkdir()
     pdks=tmp_path/'native-pdk';pdks.mkdir()
     rules=pdks/'rules.rcx';rules.write_text('4')
@@ -19,8 +20,9 @@ def setup_case(tmp_path, monkeypatch, *, mutate_during_run=False, missing=False)
         views[key]=str(path)
     state=project/'state.json';state.write_text(json.dumps(views))
     config=project/'rcx.json';config.write_text(json.dumps({'meta':{'step':'OpenROAD.RCX'},
-       'RCX_RULESETS':{'nom_*':'/pdk/rules.rcx'}}))
+       'RCX_RULESETS':{'nom_*':str(rules) if local_inputs else '/pdk/rules.rcx'}}))
     calls=[]
+    monkeypatch.setattr(ll,'_provider_route',lambda *a,**k:local_inputs)
     monkeypatch.setattr(ll,'image_capability',lambda *a,**k:{})
     monkeypatch.setattr(ll,'openroad_home',lambda *a,**k:None)
     def native_writes(argv,**kwargs):
@@ -38,8 +40,9 @@ def setup_case(tmp_path, monkeypatch, *, mutate_during_run=False, missing=False)
     return run,rules,calls
 
 
-def test_rule_bytes_change_the_native_rcx_result_instead_of_reusing_four_ohms(tmp_path,monkeypatch):
-    run,rules,calls=setup_case(tmp_path,monkeypatch)
+@pytest.mark.parametrize('local_inputs', [False, True])
+def test_rule_bytes_change_the_native_rcx_result_instead_of_reusing_four_ohms(tmp_path,monkeypatch,local_inputs):
+    run,rules,calls=setup_case(tmp_path,monkeypatch,local_inputs=local_inputs)
     first=run()[0];assert 'victim:2 4' in (first/'route.spef').read_text()
     rules.write_text('9')
     second=run()[0]
@@ -47,14 +50,30 @@ def test_rule_bytes_change_the_native_rcx_result_instead_of_reusing_four_ohms(tm
     assert 'victim:2 9' in (second/'route.spef').read_text()
 
 
-def test_pdk_changed_inside_native_run_is_not_receipted(tmp_path,monkeypatch):
-    run,rules,calls=setup_case(tmp_path,monkeypatch,mutate_during_run=True)
+@pytest.mark.parametrize('local_inputs', [False, True])
+def test_pdk_changed_inside_native_run_is_not_receipted(tmp_path,monkeypatch,local_inputs):
+    run,rules,calls=setup_case(tmp_path,monkeypatch,mutate_during_run=True,
+                               local_inputs=local_inputs)
     with pytest.raises(ll.Refusal,match='LL_RCX_PDK_CHANGED_DURING_RUN'):run()
     assert len(calls)==1
     assert not (calls[0]/'vibeic_receipt.json').exists()
 
 
-def test_unreadable_native_rule_bytes_are_refused_before_launch(tmp_path,monkeypatch):
-    run,rules,calls=setup_case(tmp_path,monkeypatch,missing=True)
+@pytest.mark.parametrize('local_inputs', [False, True])
+def test_unreadable_native_rule_bytes_are_refused_before_launch(tmp_path,monkeypatch,local_inputs):
+    run,rules,calls=setup_case(tmp_path,monkeypatch,missing=True,local_inputs=local_inputs)
     with pytest.raises(ll.Refusal,match='LL_RCX_PDK_INPUT_UNREADABLE'):run()
     assert calls==[]
+
+
+@pytest.mark.parametrize('local_route', [False, True])
+def test_projected_pdk_liberty_bytes_require_the_local_route(tmp_path,monkeypatch,local_route):
+    project=tmp_path/'project';project.mkdir()
+    pdks=tmp_path/'native-pdk';pdks.mkdir()
+    library=pdks/'cells.lib';library.write_text('library(neutral) {}')
+    monkeypatch.setattr(ll,'_provider_route',lambda *a,**k:local_route)
+    config={'CELL_LIBS':{'*':[str(library)]}}
+    hashes=ll._sta_liberty_input_hashes(config,project,[(pdks,'/pdk')])
+    assert hashes=={str(library):ll.digest(library) if local_route else None}
+    library.unlink()
+    assert ll._sta_liberty_input_hashes(config,project,[(pdks,'/pdk')])=={str(library):None}
