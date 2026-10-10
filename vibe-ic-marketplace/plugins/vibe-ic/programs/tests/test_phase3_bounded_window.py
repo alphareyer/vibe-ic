@@ -182,7 +182,7 @@ def test_every_canonical_phase3_step_is_accepted_from_yaml():
         assert p3._phase3_window_sites(sid, sid), sid
     assert p3._phase3_window_sites("18", "18") == ["default_pnr"]
     assert p3._phase3_window_sites("15.5ic", "15.5ic") == ["default_pnr"]
-    assert p3._phase3_window_sites("24", "24") == ["enclosing_canonicalize"]
+    assert p3._phase3_window_sites("24", "24") == ["default_backend"]
     assert p3._phase3_window_sites("37.4", "37.4") == [
         "signoff_metrics_aggregate"]
     assert p3._phase3_window_sites("37", "37") == ["gds"]

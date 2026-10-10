@@ -515,6 +515,30 @@ def test_dual_step_23_records_a_tool_fail_without_failing(tmp_path, monkeypatch)
     assert not failures and any('STAPostPNR: FAIL' in n for n in notes)
 
 
+@pytest.mark.parametrize('hold,expected', [(0.4, 'PASS'), (-0.1, 'FAIL')])
+def test_default_sta_keeps_native_quality_without_other_engine_qualification(
+        tmp_path, monkeypatch, hold, expected):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project = tmp_path / 'proj'
+    folder = _sta_folder(tmp_path, hold=hold)
+    monkeypatch.setattr(runner, '_librelane_signoff_run', lambda *args, **kwargs: {
+        'sta': folder, 'image': 'img', 'mounts': []})
+    monkeypatch.setattr(signoff, 'agreement', lambda *args, **kwargs:
+                        pytest.fail('Default launched another timing engine'))
+    monkeypatch.setattr(signoff, 'deck_agreement', lambda *args, **kwargs:
+                        pytest.fail('Default qualified another timing deck'))
+    notes, failures, written = [], [], []
+    runner._librelane_signoff_record(
+        project, 'unit', SimpleNamespace(name='unit'), 'direct', 'librelane',
+        project / 'phase3/stage3/extracted/spef_corners',
+        project / 'absent.rpt', notes, failures, written, qualify=False)
+    record = json.loads((project / 'reports/phase3/sta_postpnr_signoff.json').read_text())
+    assert record['judgment']['verdict'] == expected
+    assert bool(failures) == (expected == 'FAIL')
+    assert record['engine_agreement']['verdict'] == 'NOT_APPLICABLE'
+    assert record['deck_agreement']['verdict'] == 'NOT_APPLICABLE'
+
+
 def test_an_engine_disagreement_refuses_in_either_mode(tmp_path, monkeypatch):
     for mode in ('dual', 'librelane'):
         _, failures, _, _ = _record(tmp_path / mode, monkeypatch, 'direct', mode, engines='DISAGREE')

@@ -211,6 +211,79 @@ def test_default_partial_pnr_selects_rows_without_enclosing_run(first, last, mon
     assert runner._phase3_window_sites(first, last) == ['default_pnr']
 
 
+@pytest.mark.parametrize('first,last', [('23', '23'), ('24', '24'),
+                                      ('23', '30'), ('22', '24')])
+def test_default_signoff_selects_existing_producers_without_enclosing_run(
+        first, last, monkeypatch):
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    assert runner._phase3_window_sites(first, last) == ['default_backend']
+
+
+def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
+    assert runner._phase3_window_sites('23', '24') == ['enclosing_canonicalize']
+
+
+def test_default_signoff_window_runs_only_current_row_and_consumer(tmp_path, monkeypatch):
+    calls = install_transport(monkeypatch, tmp_path)
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(runner, '_phase3_window_enclosing', lambda *args, **kwargs:
+                        pytest.fail('Default launched an enclosing signoff session'))
+    monkeypatch.setattr(runner, '_phase3_window_clone', lambda *args:
+                        pytest.fail('Default copied its local project'))
+    monkeypatch.setattr(runner, '_phase3_window_full_gate_audit', lambda *args:
+                        pytest.fail('Default repeated its current consumer'))
+    args = SimpleNamespace(entry_step='23', exit_step='23', container='',
+                           die_um='auto', util=0.4)
+    selected = runner._phase3_window_sites('23', '23')
+    assert runner._run_phase3_window(tmp_path, 'unit', SimpleNamespace(name='unit'),
+                                    args, selected) == 0
+    assert calls == [('producer', '23'), ('consumer', '23')]
+    receipt = json.loads((tmp_path / 'reports/phase3/default_steps/23/backend_result.json').read_text())
+    assert receipt['step_id'] == '23' and receipt['verdict'] == 'PASS'
+
+
+def test_default_sta_publishes_the_selected_tool_without_a_second_sta(tmp_path, monkeypatch):
+    import librelane_signoff as signoff
+    pdk = SimpleNamespace(name='unit')
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, None, pdk, ''))
+    monkeypatch.setattr(runner, '_emit_spef_sta', lambda *args:
+                        pytest.fail('Default launched a second STA producer'))
+    monkeypatch.setattr(runner, '_PROV_SINK', tmp_path)
+    spef = tmp_path / 'phase3/stage3/extracted/unit.spef'
+    spef.parent.mkdir(parents=True)
+    spef.write_text('native parasitics\n')
+    monkeypatch.setattr(runner, '_librelane_handed_spefs', lambda *args: {'nom': spef})
+    sta = tmp_path / 'native_sta'
+    scene = sta / 'nom_tt'
+    scene.mkdir(parents=True)
+    native = scene / signoff.CORNER_REPORT
+    native.write_text('STA_BASIS: POST_ROUTE_SPEF\nworst slack 4.00\n')
+    (sta / 'state_out.json').write_text('{}')
+    calls = []
+
+    def selected(project, top, pdk, m22, m23, corner_dir, ocv, notes, failures,
+                 written, **kwargs):
+        calls.append(kwargs)
+        report = project / 'reports/phase3/sta_postpnr_signoff.json'
+        report.parent.mkdir(parents=True)
+        report.write_text(json.dumps({'sta_state': str(sta / 'state_out.json'),
+                                      'corners': {'nom_tt': {}},
+                                      'judgment': {'verdict': 'PASS'}}))
+        written.append(str(report))
+
+    monkeypatch.setattr(runner, '_librelane_signoff_record', selected)
+    result = producers.produce_signoff(tmp_path, {
+        'step_id': '23', 'top': 'unit', 'pdk_root': str(tmp_path),
+        'image_id': 'unit-image', 'execution_mode': 'default'})
+    assert result['verdict'] == 'PASS'
+    assert calls == [{'qualify': False}]
+    for rel in ('phase3/stage3/sta/post_route_timing.rpt',
+                'reports/phase3/sta_spef_based.rpt'):
+        assert native.read_text() in (tmp_path / rel).read_text()
+
+
 def install_transport(monkeypatch, project, *, failed_step=None):
     calls = []
     monkeypatch.setattr(runner, '_backend_parameter_values', lambda *args: {})

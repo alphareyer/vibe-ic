@@ -1197,12 +1197,33 @@ def produce_signoff(project, params):
         nominal = _require(spef)
         sta = project / 'phase3/stage3/sta'
         sta.mkdir(parents=True, exist_ok=True)
-        if not R._emit_spef_sta(project, top, pdk, container, nominal, sta / 'sta_spef_based.rpt', notes):
-            raise em.Refusal('BACKEND_STA_NATIVE_UNMEASURED', sid)
-        _copy(sta / 'sta_spef_based.rpt', sta / 'post_route_timing.rpt')
-        _copy(sta / 'sta_spef_based.rpt', rpt / 'sta_spef_based.rpt')
+        ordinary = params.get('execution_mode') == 'default'
+        if not ordinary:
+            if not R._emit_spef_sta(project, top, pdk, container, nominal, sta / 'sta_spef_based.rpt', notes):
+                raise em.Refusal('BACKEND_STA_NATIVE_UNMEASURED', sid)
+            _copy(sta / 'sta_spef_based.rpt', sta / 'post_route_timing.rpt')
+            _copy(sta / 'sta_spef_based.rpt', rpt / 'sta_spef_based.rpt')
         R._librelane_signoff_record(project, top, pdk, 'librelane', 'librelane',
-              extracted / 'spef_corners', sta / 'multi_corner_ocv_sta.rpt', notes, failures, written)
+              extracted / 'spef_corners', sta / 'multi_corner_ocv_sta.rpt', notes, failures, written,
+              **({'qualify': False} if ordinary else {}))
+        if ordinary:
+            import librelane_signoff as signoff
+            record = json.loads(_require(rpt / 'sta_postpnr_signoff.json').read_text())
+            native = Path(record['sta_state']).parent
+            reports = [_require(native / corner / signoff.CORNER_REPORT)
+                       for corner in record.get('corners', {})]
+            if not reports:
+                raise em.Refusal('BACKEND_STA_NATIVE_UNMEASURED', 'no selected STA corner report')
+            body = 'POST-ROUTE SPEF-BASED STA: LibreLane.OpenROAD.STAPostPNR\n'
+            body += '\n'.join(f'CORNER: {path.parent.name}\n' + path.read_text()
+                              for path in reports)
+            R._aa.write_text(sta / 'sta_spef_based.rpt', body)
+            _copy(sta / 'sta_spef_based.rpt', sta / 'post_route_timing.rpt')
+            _copy(sta / 'sta_spef_based.rpt', rpt / 'sta_spef_based.rpt')
+            R._log_surviving_artefact(
+                [str(sta / 'sta_spef_based.rpt'), str(sta / 'post_route_timing.rpt'),
+                 str(rpt / 'sta_spef_based.rpt')],
+                produced_by='LibreLane.OpenROAD.STAPostPNR', tool='openroad', exit_code=0)
         if failures:
             return {'verdict': 'FAIL', 'detail': '\n'.join(failures)}
     elif sid == '24':

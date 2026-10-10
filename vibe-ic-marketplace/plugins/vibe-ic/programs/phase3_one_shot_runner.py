@@ -67962,7 +67962,7 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
                               m22: str, m23: str, corner_dir: Path,
                               ocv_rpt: Path, notes: List[str],
                               signoff_failures: List[str],
-                              written: List[str]) -> None:
+                              written: List[str], *, qualify: bool = True) -> None:
     """Step 23 on STAPostPNR (librelane: the verdict; dual: a cross-check)
     and step 22's dual comparison.  Records `reports/phase3/
     sta_postpnr_signoff.json` and `rc_extraction_arms.json`."""
@@ -67987,13 +67987,17 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
             sta_folder = result["sta"]
             corners = _ls.corner_timing(sta_folder)
             judged = _ls.judge_timing(corners)
-            engines = _ls.agreement(project, result["image"], sta_folder,
+            engines = (_ls.agreement(project, result["image"], sta_folder,
                                     result["mounts"], arms / "23/engine_agreement.json")
+                       if qualify else {'verdict': 'NOT_APPLICABLE',
+                                        'reason': 'Default uses the selected native STA producer'})
             deck = (_ls.deck_agreement(ocv_rpt.read_text(errors="replace"), sta_folder,
                                        arms / "23/deck_agreement.json",
                                        spef_dir=corner_dir)
-                    if ocv_rpt.is_file() else
-                    {"verdict": "NOT_MEASURED", "reason": f"no {ocv_rpt.name}"})
+                    if qualify and ocv_rpt.is_file() else
+                    {"verdict": "NOT_MEASURED" if qualify else "NOT_APPLICABLE",
+                     "reason": f"no {ocv_rpt.name}" if qualify else
+                               'Default does not qualify another timing deck'})
             _aa.write_json(record, {
                 "step": "23", "mode": m23,
                 "spef_producer": ("librelane:OpenROAD.RCX" if m22 == "librelane"
@@ -68012,11 +68016,11 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
             written.append(str(record))
             # The dual is an agreement check: two engines, or the tool and
             # our deck, reading the same inputs must not disagree.
-            if engines["verdict"] != "AGREE":
+            if qualify and engines["verdict"] != "AGREE":
                 signoff_failures.append(
                     f"LL_STA_ARMS_DISAGREE: engine agreement {engines['verdict']} "
                     f"({engines.get('disagreeing_corners')})")
-            if deck["verdict"] == "DISAGREE":
+            if qualify and deck["verdict"] == "DISAGREE":
                 signoff_failures.append(
                     "LL_STA_ARMS_DISAGREE: the direct OCV deck and STAPostPNR "
                     "disagree on a shared corner")
@@ -76990,8 +76994,8 @@ def _phase3_flow_steps_naming(program: str,
 def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     """Select a real dispatch unit for every canonical backend step.
 
-    PnR's eight steps share an OpenROAD session. Other unsplit steps use the
-    full Phase-3 runner as their enclosing unit, isolated from the source tree.
+    Default runs supported native rows individually on the local project.
+    Ultra retains its existing enclosing sessions.
     """
     ids = _phase3_window_steps(entry, exit_)
     sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
@@ -77001,6 +77005,10 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     import execution_policy
     if set(ids).issubset(pnr_ids) and execution_policy.request()['mode'] == 'default':
         return ["default_pnr"]
+    if execution_policy.request()['mode'] == 'default':
+        from execution_provider_catalog import BACKEND_ROWS
+        if set(ids).issubset(set(BACKEND_ROWS) | {'16'}):
+            return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
         return ["enclosing_pnr"]
     if set(ids).issubset(_PHASE3_CANONICALIZER_IDS):
@@ -77857,7 +77865,8 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
     _views: Dict[str, Any] = {}
-    if not set(selected) & {"pnr", "default_pnr", "enclosing_pnr", "enclosing_phase3"}:
+    if not set(selected) & {"pnr", "default_pnr", "default_backend",
+                            "enclosing_pnr", "enclosing_phase3"}:
         # A window that routes again -- the `pnr` site, or a partial-PnR /
         # whole-phase window dispatched as `enclosing_*`, which runs step_pnr
         # in this process -- derives its views itself and must start from the
@@ -77910,12 +77919,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                     f"window refused unadmitted routed GDS: {error or basis}",
                     reason_class=_V.ReasonClass.UPSTREAM_FAILED))
                 break
-        if site == "default_pnr":
+        if site in ("default_pnr", "default_backend"):
             row = _default_pnr_rows(
                 project, top, pdk, args.container,
                 _phase3_window_steps(args.entry_step, args.exit_step),
                 die_um=args.die_um, util=args.util,
-                spare_density=getattr(args, 'spare_density', None))
+                spare_density=getattr(args, 'spare_density', None),
+                **({'report_name': 'canonicalize_artefacts'}
+                   if site == 'default_backend' else {}))
         elif site in ("enclosing_phase3", "enclosing_pnr",
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
@@ -78020,7 +78031,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     report["steps_view"] = _pl.emit_steps_view(
         project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
         only_steps=window_ids)
-    if selected == ['default_pnr']:
+    if selected in (['default_pnr'], ['default_backend']):
         # This driver already ran each row's unchanged canonical consumer.
         # Reuse that invocation's result; a stopped row never authorizes a
         # second audit of old files or gates belonging to unexecuted rows.
@@ -78050,7 +78061,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
         "why": ("each executed Default row's canonical consumer ran on the same project; "
                 "unexecuted rows remain NOT_MEASURED"
-                if selected == ['default_pnr'] else
+                if selected in (['default_pnr'], ['default_backend']) else
                 "all gate clauses of selected canonical steps ran on an isolated copy")}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
     out.write_text(json.dumps(report, indent=2) + "\n")
@@ -78169,7 +78180,7 @@ def _publish_in_progress_steps(project: Path, plan: List[StepResult]) -> None:
 
 def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                       step_ids: List[str], *, die_um: str, util: float,
-                      spare_density=None) -> StepResult:
+                      spare_density=None, report_name: str = 'pnr') -> StepResult:
     """Run existing native producers in canonical order on one local project.
 
     A row finishes and its unchanged canonical consumer runs before the next
@@ -78245,6 +78256,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                 }
                 result = producers.produce(project, {
                     **params, 'step_id': sid,
+                    'execution_mode': 'default',
                     'resolved_input_manifest': manifest,
                     'stop_on_producer_failure': True})
                 current = result.get('current_step_declared_producers')
@@ -78295,7 +78307,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                          _pl.pnr_dir(project) / f'{top}.def')
     failed = next((row for row in rows if row.status not in ('PASS', 'SKIP')), None)
     return StepResult(
-        'pnr', failed.status if failed else 'PASS', time.time() - t0,
+        report_name, failed.status if failed else 'PASS', time.time() - t0,
         (f'canonical step {failed.extras["step_id"]}: {failed.detail}' if failed
          else 'canonical native rows completed: ' + ', '.join(step_ids)),
         list(dict.fromkeys(outputs)),
