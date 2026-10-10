@@ -289,6 +289,72 @@ def test_chip_top_producer_precedes_sdc_and_die_resolution():
     assert dispatch.count("step_io_pad_chip_top_gen(project, container, pdk)") == 1
 
 
+def test_default_step15_direct_invocation_binds_backend_receipt_before_consumer(
+        tmp_path, monkeypatch):
+    """The direct Default Step-15 call owns one producer/consumer invocation.
+
+    This is intentionally a narrow seam test: no EDA process or full runner is
+    launched.  It proves the direct producer, current-step census, consumer,
+    and backend result happen in order; the final all-step refresh remains a
+    separate phase-3 tail operation.
+    """
+    events = []
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def fake_pnr(current_project, *_args, **_kwargs):
+        events.append("producer")
+        pnr = current_project / "phase3/stage3/pnr"
+        pnr.mkdir(parents=True, exist_ok=True)
+        (pnr / "floorplan.def").write_text("floorplan\n")
+        (pnr / "pdn.done").write_text("pdn\n")
+        return RUNNER.StepResult("pnr", "PASS", 0.0, "fixture")
+
+    def fake_declared(current_project, step_id):
+        events.append("declared")
+        report = current_project / "reports/phase2/gates/stage2_compliance.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text('{"verdict":"PASS"}\n')
+        return {
+            "schema": "vibeic/current-step-producer-census/1",
+            "scope": "current-step", "step_id": str(step_id),
+            "verdict": "PRODUCED", "population": 1, "executed": 1,
+            "already_produced_by_the_run": 0, "invalid_results": [],
+            "unexecutable": [],
+            "results": [{"rc": 0, "executed": True,
+                          "target_exists_after": True,
+                          "authorship": "producer"}],
+        }
+
+    def fake_consumer(_project, _row):
+        events.append("consumer")
+        return {"status": "PASS", "ledger": []}
+
+    import flow_declared_producer_run as declared
+    import execution_backend_worker as worker
+    monkeypatch.setattr(RUNNER, "step_pnr", fake_pnr)
+    monkeypatch.setattr(declared, "run_for_step", fake_declared)
+    monkeypatch.setattr(worker, "evaluate", fake_consumer)
+
+    row = RUNNER._default_step15_with_backend_receipt(
+        project, "chip_top", None, "fixture", "auto", 0.30)
+
+    assert events == ["producer", "declared", "consumer"]
+    assert row.status == "PASS"
+    receipt = json.loads((project / "backend_result.json").read_text())
+    assert receipt["schema"] == "vibeic/backend-result/2"
+    assert receipt["step_id"] == "15"
+    assert receipt["verdict"] == "PASS"
+    assert receipt["current_step_declared_producers"]["direct_producer"][
+        "producer"] == "phase3_one_shot_runner.step_pnr"
+    source = pathlib.Path(RUNNER.__file__).read_text()
+    main = source[source.index("def main("):]
+    assert '_recorded("pnr", _default_step15_with_backend_receipt)' in main
+    assert "flow_declared_producer_run.py" in main
+    assert main.index('_recorded("pnr", _default_step15_with_backend_receipt)') \
+        < main.index("flow_declared_producer_run.py")
+
+
 def _real_pdk(monkeypatch=None, **over):
     """A REAL `PdkConfig`, built from the runner's own dataclass.
 

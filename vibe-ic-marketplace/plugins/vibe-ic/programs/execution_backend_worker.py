@@ -365,6 +365,75 @@ def _binding(inputs: Path) -> dict:
     return {"inputs": files}
 
 
+def execute_current_step(project: Path, *, step_id: str,
+                         producer: Mapping[str, Any],
+                         binding: Mapping[str, Any] | None = None) -> dict:
+    """Consume a producer that already ran in the caller's canonical tree.
+
+    The normal worker copies an isolated input tree and owns the producer
+    invocation.  Default's phase runner owns the direct PnR invocation, so it
+    cannot call :func:`execute` without running PnR twice.  This seam keeps the
+    same authority -> consumer -> hash-bound result contract for that one
+    caller-owned producer invocation.
+    """
+    project = Path(project)
+    sid = str(step_id)
+    row = ROWS[sid]["canonical_row"]
+    binding = dict(binding or {
+        "step_id": sid,
+        "source_sha": "default-direct",
+        "required_gates": ("backend_canonical", "backend_native_substance"),
+    })
+    binding.setdefault("step_id", sid)
+    binding.setdefault("required_gates", (
+        "backend_canonical", "backend_native_substance"))
+    producer = dict(producer or {})
+    producer_verdict = producer.get("verdict", "NOT_MEASURED")
+    current = producer.get("current_step_declared_producers")
+    allowed, reason, authority_verdict = _current_step_producer_authority(
+        current, project=project)
+    if not allowed:
+        if producer_verdict != "FAIL":
+            producer_verdict = authority_verdict
+        gate_result = {"status": "NOT_MEASURED", "ledger": [{
+            "gate": "backend_consumer", "verdict": "NOT_MEASURED",
+            "reason": reason}]}
+    else:
+        try:
+            gate_result = evaluate(project, row)
+        except BaseException as exc:  # noqa: BLE001 — disclose consumer errors
+            gate_result = {"status": "NOT_MEASURED", "ledger": [{
+                "gate": "backend_consumer", "verdict": "NOT_MEASURED",
+                "reason": f"{type(exc).__name__}: {exc}"}]}
+    files, missing = resolve_contract(project, row.get("required_outputs", ()))
+    canonical_receipts = producer.get("canonical_receipts") or [{
+        "schema": "vibeic/backend-producer-receipt/1",
+        "producer": "default-canonical-producer",
+        "step_id": sid,
+        "verdict": producer_verdict,
+        "current_step_declared_producers": current,
+    }]
+    native_receipts = producer.get("native_receipts") or []
+    gate_status = gate_result.get("status", "NOT_MEASURED")
+    gate_states = states(binding, gate_result, producer_verdict)
+    verdict = ("FAIL" if producer_verdict == "FAIL" or gate_status == "FAIL" else
+               "PASS" if producer_verdict == "PASS" and gate_status == "PASS" and
+               canonical_receipts and not missing else "NOT_MEASURED")
+    result = {
+        "schema": "vibeic/backend-result/2", "step_id": sid,
+        "source_sha": binding.get("source_sha"), "binding": binding,
+        "producer_verdict": producer_verdict, "gates": gate_states,
+        "gate_ledger": gate_result.get("ledger", []), "outputs": files,
+        "missing_outputs": missing, "native_receipts": native_receipts,
+        "canonical_receipts": canonical_receipts, "verdict": verdict,
+        "detail": producer.get("detail", ""),
+        "current_step_declared_producers": current,
+    }
+    (project / "backend_result.json").write_text(
+        json.dumps(result, sort_keys=True, indent=2) + "\n")
+    return result
+
+
 def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     inputs, outputs = Path(inputs), Path(outputs)
     outputs.mkdir(parents=True, exist_ok=True)

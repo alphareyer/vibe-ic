@@ -78095,6 +78095,77 @@ def _backend_parameter_values(project: Path, pdk: Optional[PdkConfig]) -> Dict[s
             "pdk_root": str(pdk_root)}
 
 
+def _default_step15_with_backend_receipt(
+        project: Path, top: str, pdk: PdkConfig, container: str,
+        die_um: str, util: float, *, spare_density=None,
+        pad_ring_step=step_pad_ring_gen,
+        pad_ring_results: Optional[List[StepResult]] = None,
+        em_floor_for_resize: Optional[Dict[str, Any]] = None,
+        density_from_tool_default: bool = False) -> StepResult:
+    """Run Default's direct Step-15 producer and its current consumer once.
+
+    Default deliberately bypasses the Ultra Controller.  The direct PnR call
+    therefore owns the native producer invocation, while the backend worker's
+    current-step authority and consumer still need to run on that same tree
+    before the later all-step producer refresh.
+    """
+    import flow_declared_producer_run as _declared
+    import execution_backend_worker as _backend_worker
+
+    started_ns = time.time_ns()
+    row = step_pnr(
+        project, top, pdk, container, die_um, util,
+        spare_density=spare_density, pad_ring_step=pad_ring_step,
+        pad_ring_results=pad_ring_results,
+        em_floor_for_resize=em_floor_for_resize,
+        density_from_tool_default=density_from_tool_default)
+    try:
+        current = _declared.run_for_step(project, "15")
+    except BaseException as exc:  # noqa: BLE001 — receipt discloses the seam
+        current = {
+            "schema": "vibeic/current-step-producer-census/1",
+            "step_id": "15", "scope": "current-step", "verdict": "INCOMPLETE",
+            "population": 1, "executed": 0, "results": [],
+            "invalid_results": [{"rc": None, "error": f"{type(exc).__name__}: {exc}"}],
+            "unexecutable": [], "already_produced_by_the_run": 0,
+        }
+    if not isinstance(current, dict):
+        current = {
+            "schema": "vibeic/current-step-producer-census/1",
+            "step_id": "15", "scope": "current-step", "verdict": "INCOMPLETE",
+            "population": 1, "executed": 0, "results": [],
+            "invalid_results": [{"rc": None,
+                                  "error": "current producer returned no record"}],
+            "unexecutable": [], "already_produced_by_the_run": 0,
+        }
+    # Keep the direct PnR result visible beside the flow-declared producer
+    # census; the backend authority remains fail-closed on that census.
+    current["direct_producer"] = {
+        "producer": "phase3_one_shot_runner.step_pnr",
+        "started_ns": started_ns, "finished_ns": time.time_ns(),
+        "verdict": row.status,
+    }
+    producer = {
+        "verdict": row.status,
+        "detail": row.detail,
+        "current_step_declared_producers": current,
+    }
+    backend = _backend_worker.execute_current_step(
+        project, step_id="15", producer=producer,
+        binding={"step_id": "15", "source_sha": "default-direct",
+                 "required_gates": ("backend_canonical",
+                                     "backend_native_substance")})
+    extras = dict(row.extras or {})
+    extras["backend_result"] = str(project / "backend_result.json")
+    extras["backend_verdict"] = backend.get("verdict", "NOT_MEASURED")
+    row.extras = extras
+    if row.status == "PASS" and backend.get("verdict") != "PASS":
+        row.status = backend.get("verdict", "NOT_MEASURED")
+        row.detail = (row.detail + "; current backend consumer: " +
+                      str(backend.get("detail", ""))).strip("; ")
+    return row
+
+
 @_restores_the_container_env
 def main() -> int:
     p = argparse.ArgumentParser()
@@ -78728,7 +78799,7 @@ def main() -> int:
                 _pnr_dispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "pnr",
                     _preflight_refusal("pnr"),
-                    _recorded("pnr", step_pnr), project,
+                    _recorded("pnr", _default_step15_with_backend_receipt), project,
                     effective_top, pdk, args.container,
                     args.die_um, args.util,
                     spare_density=args.spare_density,
