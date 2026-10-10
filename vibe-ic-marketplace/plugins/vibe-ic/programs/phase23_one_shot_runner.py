@@ -19,7 +19,8 @@ Usage:
                   [--skip-phase2]                   # only run Phase 3
                   [--die-um 1500x1500]              # forwarded to phase 3
                   [--util 0.4]                      # forwarded to phase 3
-                  [--pdk auto|sky130A|<custom>]     # forwarded to phase 3
+                  [--pdk auto|sky130A|<custom>]     # forwarded to phase 2 + 3
+                  [--execution-mode default|ultra]  # forwarded to phase 2
 
 Aggregate report: <project>/reports/phase23_one_shot.json
 Exit: 0 PASS / PASS_WITH_WAIVERS, 1 FAIL, 2 IO error.
@@ -71,10 +72,11 @@ def _run_phase(name: str, runner: Path, args: list[str]
     supports_execution_policy = runner.name in policy_cli_children
     args = _execution.child_arguments(
         args, supports_execution_policy=supports_execution_policy)
-    cp = subprocess.run([sys.executable, str(runner), *args],
+    command = [sys.executable, str(runner), *args]
+    cp = subprocess.run(command,
                         pass_fds=(_execution.child_pass_fds()
                                   if supports_execution_policy else ()))
-    return cp.returncode, {}
+    return cp.returncode, {"argv": command}
 
 
 def _phase_verdict_tiers() -> "dict[str, tuple[str, ...]]":
@@ -282,17 +284,30 @@ def main() -> int:
 
     # ---- Phase 2 ----
     p2_summary: Dict[str, Any] = {}
+    p2_invocation: Dict[str, Any] = {}
     p2_rc = 0
     if not args.skip_phase2:
         p2_args = [str(project),
                    "--top-name", args.top_name,
                    "--container", args.container,
                    "--max-rtl-repair-retries", str(args.max_rtl_repair_retries)]
+        # Phase 2 needs the same selected PDK for constraints and synthesis.
+        # Omitted `auto` keeps the child's existing design-derived default.
+        if args.pdk != "auto":
+            p2_args += ["--pdk", args.pdk]
+        # Explicit Default alone creates no policy transport.  Preserve its
+        # CLI intent; `_run_phase` still validates inherited policy values.
+        if args.execution_mode is not None:
+            p2_args += ["--execution-mode", args.execution_mode]
+        # Phase 2 owns the lightweight DFT/LEC contract for this flag.
+        if args.skip_phase3:
+            p2_args.append("--skip-phase3")
         if args.skip_hardware:
             p2_args.append("--skip-hardware")
         if args.force_rtl_regen:
             p2_args.append("--force-rtl-regen")
-        p2_rc, _ = _run_phase("PHASE 2 (= 2a + 2b)", p2_runner, p2_args)
+        p2_rc, p2_invocation = _run_phase(
+            "PHASE 2 (= 2a + 2b)", p2_runner, p2_args)
         p2_json = _pl.report_path(project, "phase2_one_shot.json")
         if p2_json.is_file():
             try:
@@ -310,6 +325,7 @@ def main() -> int:
 
     # ---- Phase 3 ----
     p3_summary: Dict[str, Any] = {}
+    p3_invocation: Dict[str, Any] = {}
     p3_rc = 0
     if not args.skip_phase3:
         p3_args = [str(project),
@@ -320,7 +336,7 @@ def main() -> int:
                    "--pdk", args.pdk]
         if getattr(args, "allow_oss_pdk_fallback", False):
             p3_args.append("--allow-oss-pdk-fallback")
-        p3_rc, _ = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
+        p3_rc, p3_invocation = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
                               p3_runner, p3_args)
         p3_json = _pl.report_path(project, "phase3_one_shot.json")
         if p3_json.is_file():
@@ -339,11 +355,13 @@ def main() -> int:
         "duration_s": time.time() - t0,
         "phase2": {"ran": ran_p2,
                    "rc": p2_rc if ran_p2 else None,
+                   "invocation": p2_invocation if ran_p2 else None,
                    "verdict": p2_summary.get("verdict") if ran_p2 else "SKIPPED",
                    "report_path": (str(_pl.report_path(project, "phase2_one_shot.json"))
                                    if ran_p2 else None)},
         "phase3": {"ran": ran_p3,
                    "rc": p3_rc if ran_p3 else None,
+                   "invocation": p3_invocation if ran_p3 else None,
                    "verdict": p3_summary.get("verdict") if ran_p3 else "SKIPPED",
                    "report_path": (str(_pl.report_path(project, "phase3_one_shot.json"))
                                    if ran_p3 else None)},
