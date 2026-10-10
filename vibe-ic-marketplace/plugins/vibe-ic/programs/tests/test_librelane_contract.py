@@ -513,10 +513,13 @@ def test_synthesis_config_uses_selected_sources_and_lec_hooks(tmp_path):
     assert result['VERILOG_FILES'] == [str(package), str(block)]
     assert result['VERILOG_DEFINES'] == ['SIMULATION']
     assert result['USE_SLANG'] is True
+    assert result['SYNTH_SPLITNETS'] is False
     assert result['SYNTH_FSM_ENCFILE'] is True
     assert result['SYNTH_PRESERVE_FSM_REGISTERS'] == []
     assert 'VERILOG_FILES' in json.loads(
         (p / 'phase3/librelane/synth.provenance.json').read_text())
+    assert 'hilomap' in json.loads(
+        (p / 'phase3/librelane/synth.provenance.json').read_text())['SYNTH_SPLITNETS']
 
 
 def test_synthesis_config_refuses_external_or_missing_rtl(tmp_path):

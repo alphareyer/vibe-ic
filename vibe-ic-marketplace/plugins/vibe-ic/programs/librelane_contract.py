@@ -1439,10 +1439,26 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
             _set(result, sources, key, [plan[field]],
                  f'reports/phase3/io_pad_chip_top.json.power_pad_plan.{field}')
     if chip_top_record.is_file():
+        record = _load(chip_top_record)
         _set(result, sources, 'RSZ_DONT_TOUCH_LIST',
-             aux_tie_dont_touch(_load(chip_top_record)) or None,
+             aux_tie_dont_touch(record) or None,
              'reports/phase3/io_pad_chip_top.json.aux_pin_signal_connections'
              '[].{tie_instance,net}')
+        # Place every selected external bond, including supplemental supplies
+        # absent from the PDK's default terminal list. The native pad placer
+        # derives their geometry from the actual master pin; no DEF is edited.
+        if record.get('verdict') == 'WROTE':
+            placed = set(plan.get('instances') or [])
+            for side in ('SOUTH', 'EAST', 'NORTH', 'WEST'):
+                placed.update(result.get('PAD_' + side) or [])
+            terminals = {f"{pad['master']}/{pad['terminal']}"
+                         for instance, pad in (record.get('pad_instances') or {}).items()
+                         if instance in placed and pad.get('port')
+                         and pad.get('master') and pad.get('terminal')}
+            if terminals:
+                _set(result, sources, 'PAD_PLACE_IO_TERMINALS',
+                     sorted(terminals | set(result.get('PAD_PLACE_IO_TERMINALS') or [])),
+                     f'{CHIP_TOP_RECORD_REL}.pad_instances[].{{master,terminal,port}}')
     # Core ring + pad connection: the PDK registry's pad-connected ring, the
     # same declaration the direct deck's `add_pdn_ring` is built from.
     registry = Path(__file__).resolve().parent / 'pdk_registry.json'
@@ -1520,6 +1536,12 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
          'phase3_one_shot_runner.step_synth macro-aware frontend decision')
     _set(result, sources, 'USE_SLANG', use_slang,
          'phase3_one_shot_runner.step_synth frontend decision')
+    # LibreLane couples optional bus splitting to opt_clean -purge AFTER
+    # hilomap. Keep the final tie-cell mapping intact; OpenROAD reads bus nets
+    # directly. An explicit design setting remains visible to the recipe gate.
+    if 'SYNTH_SPLITNETS' not in result:
+        _set(result, sources, 'SYNTH_SPLITNETS', False,
+             'preserve final hilomap tie cells; native splitnets runs opt_clean -purge')
     sparse = sparse_fsm_detect.detect_paths(rtl_files)
     _set(result, sources, 'SYNTH_PRESERVE_FSM_REGISTERS', sparse['register_names'],
          'sparse_fsm_detect over selected design RTL')

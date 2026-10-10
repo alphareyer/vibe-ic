@@ -665,6 +665,22 @@ def test_supply_nets_and_pad_connected_ring_are_emitted_only_from_declarations(t
     assert not {'VDD_NETS', 'GND_NETS', 'PDN_CORE_RING', 'PDN_CORE_RING_CONNECT_TO_PADS'} & set(out)
 
 
+def test_pad_placement_consumes_selected_supplemental_supply_bonds(tmp_path):
+    p = _chip_design(tmp_path, pdk='sky130A')
+    put(p / 'reports/phase3/io_pad_chip_top.json', {
+        'verdict': 'WROTE', 'power_pad_plan': {'instances': ['u_aux']},
+        'pad_instances': {
+            'u_rst': {'master': 'signal_pad', 'terminal': 'PAD', 'port': 'rst'},
+            'u_aux': {'master': 'aux_supply_pad', 'terminal': 'BOND', 'port': 'AUX'},
+            'u_unused': {'master': 'unused_pad', 'terminal': 'PAD', 'port': 'unused'},
+        },
+    })
+    out = contract.emit_config(p, 'sky130A', p / 'cfg.json')
+    assert out['PAD_PLACE_IO_TERMINALS'] == ['aux_supply_pad/BOND', 'signal_pad/PAD']
+    source = json.loads((p / 'cfg.provenance.json').read_text())
+    assert 'pad_instances' in source['PAD_PLACE_IO_TERMINALS']
+
+
 @pytest.mark.parametrize('banner', ['', '[INFO] USER_ID: 1000\n[INFO] SKIPPING UI STARTUP\n'],
                          ids=['clean', 'startup_banner'])
 def test_pdn_cfg_is_the_images_script_plus_declared_connects(tmp_path, monkeypatch, banner):
