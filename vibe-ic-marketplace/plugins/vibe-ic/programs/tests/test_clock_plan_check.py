@@ -114,14 +114,14 @@ def test_pass_minimal_single_clock_shape(tmp_path, monkeypatch):
 
 
 def test_two_sdc_names_on_one_physical_clock_share_the_observed_root(tmp_path, monkeypatch):
-    """FPGA and silicon names may refer to one real input and CTS root."""
+    """Current ASIC constraint aliases may share one real input and CTS root."""
     project = tmp_path / "aliases"
     _write_sdc(project,
                "create_clock -name core_clk -period 20 [get_ports clk_in]\n")
     _write_sdc(project,
                "create_clock -name prototype_clk -period 20 "
                "[get_ports clk_in]\n",
-               "phase2/stage1/fpga/top.sdc")
+               "input/constraints/aliases.sdc")
     _write_plan(project, {"clocks": [
         {"name": "core_clk", "period_ns": 20, "source": "clk_in"},
         {"name": "prototype_clk", "period_ns": 20, "source": "clk_in"},
@@ -168,18 +168,18 @@ def test_a_different_clock_source_still_requires_its_own_root(tmp_path):
 
 
 def test_unbraced_silicon_port_and_braced_fpga_alias_are_one_clock(tmp_path, monkeypatch):
-    """The shape a gf180 DIE run writes (subservient IC path, v4 tree): the
-    silicon SDC names the port without braces, the FPGA SDC names the same
-    port braced under the port's own name, and LibreLane CTS reports the one
-    root. Reading `[get_ports i_clk]` as `i_clk]` made the FPGA alias look like
-    a second, missing clock (LIBRELANE_CLOCK_MISSING on a single-clock die)."""
+    """Preserve the historical braced/unbraced alias regression on current
+    ASIC inputs. The extra alias is explicitly declared in input/constraints;
+    a separate FPGA prototype deck no longer supplies the ASIC clock plan.
+    Reading `[get_ports i_clk]` as `i_clk]` made the alias look like a second,
+    missing clock (LIBRELANE_CLOCK_MISSING on a single-clock die)."""
     project = tmp_path / "die"
     _write_sdc(project,
                "create_clock -name clk -period 20.0 [get_ports i_clk]\n",
                "phase2/stage2/constraints/top.asic.sdc")
     _write_sdc(project,
                "create_clock -name i_clk -period 20 [get_ports {i_clk}]\n",
-               "phase2/stage1/fpga/top.sdc")
+               "input/constraints/aliases.sdc")
     _write_plan(project, {"clocks": [
         {"name": "clk", "period_ns": 20, "source": "i_clk"},
         {"name": "i_clk", "period_ns": 20, "source": "i_clk"},

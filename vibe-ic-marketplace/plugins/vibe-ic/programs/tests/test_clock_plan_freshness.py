@@ -222,19 +222,18 @@ def test_the_checker_cannot_call_stale_what_the_producer_calls_fresh(tmp_path):
     The checker used a curated directory list (`_find_sdc_files`) and the
     producer a project-wide `rglob`. On the tracked corpus those two views
     disagree on the file set for 9 of the 26 SDC-bearing roots. Build a project
-    in that shape — an SDC in `input/constraints/` that the curated list does
-    NOT reach once `phase3/stage3/pnr` is populated — record the plan the way
-    the producer would, and require both sides to agree.
+    in that shape — an SDC in `input/constraints/` beside a canonical PnR
+    constraint — and require both sides to include it and agree.
     """
     proj = _project(tmp_path)
     _write(proj / "input/constraints/extra.sdc",
            "create_clock -name clk2 -period 8.0 [get_ports clk2]\n")
     curated = {str(p.relative_to(proj)) for p in C._find_sdc_files(proj)}
-    assert "input/constraints/extra.sdc" not in curated, (
-        "fixture does not reproduce the divergence: the curated list already "
-        "reaches the extra SDC")
+    assert "input/constraints/extra.sdc" in curated
+    assert curated == {
+        str(p.relative_to(proj)) for p in PL.clock_plan_input_sdcs(proj)}
 
-    # The plan as the producer writes it: derived from EVERY *.sdc.
+    # The plan records the same current ASIC SDC set the consumer checks.
     plan = _plan(derived_from=PL.clock_plan_sdc_digests(proj))
     _write(proj / "phase3/stage3/cts/clock_plan.json", json.dumps(plan))
 
@@ -247,12 +246,15 @@ def test_the_checker_cannot_call_stale_what_the_producer_calls_fresh(tmp_path):
 
 
 def test_the_shared_definition_is_the_producers_historical_set(tmp_path):
-    """Adopting the shared helper must not move a clock into or out of any
-    plan: its SET is exactly `rglob('*.sdc')`, only the order is canonical."""
+    """Keep user/legacy ASIC inputs while excluding unrelated tool decks."""
     proj = _project(tmp_path)
     _write(proj / "input/constraints/extra.sdc", _SDC)
     _write(proj / "steps/7_constraints/top.sdc", _SDC)
-    assert set(PL.clock_plan_input_sdcs(proj)) == set(proj.rglob("*.sdc"))
+    _write(proj / "phase3/librelane/attempts/old/top.sdc", _SDC)
+    assert set(PL.clock_plan_input_sdcs(proj)) == {
+        proj / _SDC_REL,
+        proj / "input/constraints/extra.sdc",
+        proj / "steps/7_constraints/top.sdc"}
 
 
 # ===========================================================================
@@ -468,3 +470,56 @@ def test_an_unreadable_sdc_is_not_called_stale(tmp_path):
         assert out == [_SDC_REL], out
     finally:
         Path.read_bytes = real_read
+
+
+def test_native_asic_inputs_exclude_quartus_and_historical_tool_decks(tmp_path):
+    proj = _project(tmp_path)
+    included = [_SDC_REL, "phase2/stage2/constraints/top.asic.sdc",
+                "input/constraints/aux.sdc", "steps/7_constraints/extra.sdc",
+                "constraints/user.sdc"]
+    for rel in included[1:]:
+        _write(proj / rel, _SDC)
+    excluded = ["phase2/stage1/fpga/top.sdc",
+                "phase2/.phase2_held/constraints/top.sdc",
+                "phase3/librelane/02-yosys-synthesis/synthesis.abc.sdc",
+                "phase3/librelane/attempts/old/15-floorplan/top.sdc",
+                "phase3/stage3/pnr/old/constraint.sdc"]
+    for rel in excluded:
+        _write(proj / rel, "derive_pll_clocks\n" + _SDC)
+    expected = {proj / rel for rel in included}
+    assert set(PL.clock_plan_input_sdcs(proj)) == expected
+    assert set(C._find_sdc_files(proj)) == expected
+    assert set(PL.clock_plan_sdc_digests(proj)) == set(included)
+
+
+def test_fpga_and_old_attempts_cannot_add_an_asic_clock_domain(
+        tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    _write(proj / "phase2/stage1/fpga/top.sdc",
+           "derive_pll_clocks\n"
+           "create_clock -name fpga_only -period 2 [get_ports fpga_clk]\n")
+    _write(proj / "phase3/librelane/attempts/old/15-floorplan/top.sdc",
+           "create_clock -name old_clock -period 3 [get_ports old_clk]\n")
+    current_fixture(monkeypatch, proj, _SDC)
+    result, doc = _run_gate(proj, tmp_path / "o.json")
+    assert result.returncode == 0, doc
+    assert doc["verdict"] == "PASS"
+    assert doc["sdc_files_checked"] == [_SDC_REL]
+
+
+def test_user_asic_aux_clock_must_still_be_covered(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    _write(proj / "input/constraints/aux.sdc",
+           "create_clock -name aux -period 8 [get_ports aux_clk]\n")
+    current_fixture(monkeypatch, proj, _SDC)
+    result, doc = _run_gate(proj, tmp_path / "o.json")
+    assert result.returncode == 1
+    assert "SDC_CLOCK_DROPPED" in [f["rule"] for f in doc["findings"]]
+    assert "input/constraints/aux.sdc" in doc["sdc_files_checked"]
+
+
+def test_only_fpga_constraints_do_not_supply_an_asic_clock(tmp_path):
+    proj = tmp_path / "only_fpga"
+    _write(proj / "phase2/stage1/fpga/top.sdc", _SDC)
+    assert PL.clock_plan_input_sdcs(proj) == []
+    assert C._find_sdc_files(proj) == []

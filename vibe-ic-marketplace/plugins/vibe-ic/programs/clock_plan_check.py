@@ -32,8 +32,8 @@ clock-plan artefact:
          fact, NOT a fabricated chip-specific threshold.)
        - a source pin or port (a non-empty net/port/pin string). A clock with no
          source object => FAIL.
-  5. If an SDC exists (phase3/.../constraints, the pnr dir, the phase2 fpga
-     constraints, or any ``*.sdc`` under the project), parse every
+  5. For the current ASIC SDCs resolved by the shared clock-plan input list,
+     parse every
      ``create_clock`` in it and verify each constrained clock NAME appears in
      the plan. A dropped clock (in SDC but missing from the plan) => FAIL. This
      is the real backend failure this gate guards: a multi-clock design whose
@@ -81,18 +81,6 @@ _PLAN_CANDIDATES = [
     "phase3/stage3/cts/clock_plan.json",
     "phase3/stage3/clock_plan.json",
     "cts/clock_plan.json",
-]
-
-# Where SDC constraints might live, in priority order. Anything matching
-# *.sdc under the project is also swept as a last resort so a dropped-clock
-# check still fires even on a non-canonical layout.
-_SDC_DIR_CANDIDATES = [
-    "phase3/stage3/constraints",
-    "phase3/stage3/cts/constraints",
-    "phase3/stage3/pnr",
-    "phase2/stage2/constraints",
-    "phase2/stage1/fpga",
-    "constraints",
 ]
 
 # create_clock <...> -period <val> <...>  with an optional -name <val>.
@@ -315,18 +303,7 @@ def _stale_inputs(project: Path, plan):
 
 
 def _find_sdc_files(project: Path):
-    seen = []
-    for rel in _SDC_DIR_CANDIDATES:
-        d = project / rel
-        if d.is_dir():
-            for f in sorted(d.glob("*.sdc")):
-                if f not in seen:
-                    seen.append(f)
-    # Last-resort: any *.sdc anywhere under the project (deterministic order).
-    if not seen:
-        for f in sorted(project.rglob("*.sdc")):
-            seen.append(f)
-    return seen
+    return _pl.clock_plan_input_sdcs(project)
 
 
 def _sdc_clock_names(sdc_files):

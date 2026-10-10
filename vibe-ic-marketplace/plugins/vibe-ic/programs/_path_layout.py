@@ -455,33 +455,26 @@ def cts_dir(project: Path) -> Path:
 # producer had just written from a file the checker never looked at. The two
 # helpers below are that one definition, and both sides call them.
 #
-# The SET is deliberately identical to the producer's historical `rglob` sweep
-# (every `*.sdc` under the project); only the ORDER is canonicalised, so
-# adopting it moves no clock into or out of any plan. `clock_plan_check`'s
-# SEPARATE dropped-clock view (`_find_sdc_files`, a curated directory list) is
-# a different question — "which constraints must the plan account for" — and is
-# deliberately left alone: over the tracked corpus the two views disagree on
-# the file set for 9 of the 26 SDC-bearing roots and on the harvested
-# create_clock names for 4, and the extra files the wide sweep reaches are
-# backup/held trees (`phase2/.phase2_held/...`) and un-expanded Tcl (a
-# `-name $clk_name`), which must not become rc-bearing.
+# Only current ASIC constraint locations belong to this input contract.
+# Sweeping the project also read Quartus FPGA commands, synthesis-only decks
+# and old LibreLane attempts into OpenROAD's ASIC clock plan. The producer,
+# freshness check and dropped-clock check all use this same resolved list.
+# User constraint directories remain additive, including auxiliary clocks;
+# no project-wide fallback admits tool outputs or held/archived constraints.
 
 SDC_PRIORITY_DIRS = (
     "phase3/stage3/constraints",
     "phase3/stage3/cts/constraints",
     "phase3/stage3/pnr",
     "phase2/stage2/constraints",
-    "phase2/stage1/fpga",
+    "input/constraints",
+    "steps/7_constraints",
     "constraints",
 )
 
 
 def clock_plan_input_sdcs(project: Path):
-    """Every `*.sdc` under `project`, canonical-constraint directories first.
-
-    Stable, deterministic order; no file is excluded, so this is exactly the
-    set the clock-plan producer has always harvested.
-    """
+    """Current ASIC SDCs in stable order, shared by producer and consumer."""
     seen = []
     for rel in SDC_PRIORITY_DIRS:
         d = project / rel
@@ -490,9 +483,6 @@ def clock_plan_input_sdcs(project: Path):
         for f in sorted(d.glob("*.sdc")):
             if f not in seen:
                 seen.append(f)
-    for f in sorted(project.rglob("*.sdc")):
-        if f not in seen:
-            seen.append(f)
     return seen
 
 
