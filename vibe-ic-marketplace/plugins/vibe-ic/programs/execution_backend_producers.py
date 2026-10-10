@@ -1186,6 +1186,10 @@ def produce_signoff(project, params):
         # Current fivegap binding/finite-C/non-alias guards are inherited here.
         R._librelane_rcx_publish(project, top, pdk, spef,
                     extracted / 'spef_corners', rpt / 'librelane_rcx_handoff.json', refresh=True)
+        handed = R._librelane_handed_spefs(rpt / 'librelane_rcx_handoff.json')
+        R._log_surviving_artefact(
+            [str(spef), *(str(path) for path in handed.values())],
+            produced_by='LibreLane.OpenROAD.RCX', tool='openroad', exit_code=0)
     elif sid == '23':
         corners = R._librelane_handed_spefs(rpt / 'librelane_rcx_handoff.json')
         if not corners:

@@ -150,6 +150,38 @@ def test_hold_retry_uses_the_cts_producer_state_after_a_previous_hold_run(tmp_pa
         producers._predecessor_state(tmp_path, 'post_cts.def')
 
 
+def test_rcx_publishes_its_current_native_spefs_for_the_existing_provenance_consumer(
+        tmp_path, monkeypatch):
+    import provenance_check
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, None, None, ''))
+    monkeypatch.setattr(runner, '_PROV_SINK', tmp_path)
+    handed = {}
+
+    def rcx(project, top, pdk, nominal, corner_dir, receipt, *, refresh):
+        assert refresh is True
+        paths = [nominal] + [corner_dir / f'{top}.{corner}.spef'
+                             for corner in ('min', 'nom', 'max')]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('*SPEF "IEEE 1481-1998"\n*DESIGN "unit"\n'
+                            '*D_NET net1 0.1\n*CAP\n1 net1:1 0.1\n*END\n')
+        handed.update(zip(('min', 'nom', 'max'), paths[1:]))
+
+    monkeypatch.setattr(runner, '_librelane_rcx_publish', rcx)
+    monkeypatch.setattr(runner, '_librelane_handed_spefs', lambda *args: handed)
+    result = producers.produce_signoff(tmp_path, {
+        'step_id': '22', 'top': 'unit', 'image_id': 'fixture',
+        'pdk_root': str(tmp_path)})
+    assert result['verdict'] == 'PASS'
+    for path in [tmp_path / 'phase3/stage3/extracted/unit.spef', *handed.values()]:
+        report = tmp_path / 'provenance_gate.json'
+        assert provenance_check.main([
+            str(tmp_path), '--output', str(path.relative_to(tmp_path)),
+            '--tool', 'openroad', '--require-measured', '--json', str(report)]) == 0
+        assert json.loads(report.read_text())['checks'][0]['status'] == 'PASS'
+
+
 @pytest.mark.parametrize('code,expected', [
     ('LL_STEP_FAILED', 'FAIL'), ('LL_FLOW_GATES_UNRESOLVED', 'NOT_MEASURED')])
 def test_native_tool_refusal_is_recorded_at_the_actual_default_row(
