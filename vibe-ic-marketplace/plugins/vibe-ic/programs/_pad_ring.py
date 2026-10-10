@@ -892,6 +892,82 @@ def bond_fed_rails(subckts: Dict[str, Tuple[List[str], List[List[str]]]],
                          "through a series resistor")
 
 
+def bond_resistor_paths(subckts, cell: str, bond: str) -> Dict[str, List[str]]:
+    """Cell-port paths through resistors in the cell or its immediate base.
+
+    This also sees PAD -> primary rail -> quiet rail in a supply-pad base.
+    Capacitors, transistor channels and unknown subcircuits are not edges.
+    Internal base nodes are scoped to the instance, so two unrelated nodes
+    with the same spelling cannot manufacture a path.
+    """
+    from collections import deque
+    if cell not in subckts:
+        return {}
+    ports, body = subckts[cell]
+    if bond not in ports:
+        return {}
+    graph = {}
+
+    def add_resistors(lines, mapping):
+        for line in lines:
+            if len(line) < 3 or line[0][:1].lower() != "r":
+                continue
+            a, b = mapping(line[1]), mapping(line[2])
+            graph.setdefault(a, set()).add(b)
+            graph.setdefault(b, set()).add(a)
+
+    add_resistors(body, lambda node: node)
+    for line in body:
+        if not line or line[0][:1].lower() != "x":
+            continue
+        nodes = [x for x in line[1:] if "=" not in x]
+        if len(nodes) < 2 or nodes[-1] not in subckts:
+            continue
+        base_ports, base_body = subckts[nodes[-1]]
+        if len(base_ports) != len(nodes) - 1:
+            continue
+        conn = dict(zip(base_ports, nodes[:-1]))
+        add_resistors(base_body, lambda node: conn.get(node, line[0] + "/" + node))
+    paths = {bond: [bond]}
+    pending = deque([bond])
+    while pending:
+        node = pending.popleft()
+        for other in sorted(graph.get(node, ())):
+            if other not in paths:
+                paths[other] = paths[node] + [other]
+                pending.append(other)
+    return {port: paths[port] for port in ports if port != bond and port in paths}
+
+
+def parse_verilog_rail_bridges(text: str) -> Dict[str, List[Tuple[str, str]]]:
+    """Identity connections of a PDK model made only of inouts and assigns.
+
+    An expression, conditional or active device model is not a connector.
+    The caller still verifies these terminals against the selected IO LEF
+    and Liberty voltages and must instantiate the declared connector.
+    """
+    import _hdl_code_text as hct
+    code = hct.strip_hdl_comments_and_strings(text)
+    out = {}
+    for module in _V_MODULE_RE.finditer(code):
+        body = re.sub(r"^\s*\([^;]*\)\s*;", "", module.group(2), count=1)
+        inouts = set()
+        def declaration(match):
+            inouts.update(x.strip() for x in match.group(1).split(","))
+            return ""
+        body = re.sub(r"\binout\s+([A-Za-z_][\w\s,]*)\s*;", declaration, body)
+        pairs = []
+        def connection(match):
+            pairs.append((match.group(1), match.group(2)))
+            return ""
+        body = re.sub(r"\bassign\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*;",
+                      connection, body)
+        if not body.strip() and pairs and all(a in inouts and b in inouts
+                                             for a, b in pairs):
+            out[module.group(1)] = pairs
+    return out
+
+
 # ── BUSSED PORTS of the IO library's own Verilog ──────────────────────────
 # A LEF lists a bus bit by bit (`DM[0]`, `DM[1]`, ...) and says nothing about
 # which end is the MSB; a named connection cannot select one bit. The IO

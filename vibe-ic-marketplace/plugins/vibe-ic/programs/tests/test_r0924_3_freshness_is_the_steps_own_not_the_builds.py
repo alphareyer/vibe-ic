@@ -1700,3 +1700,56 @@ def test_the_engine_env_is_compared_by_its_bytes(tmp_path, monkeypatch):
     (fork / "engine.rb").write_text("v2\n")
     assert sr.digest_of(sr.rederive(record, tmp_path)[0]) != base, (
         "the fork engine's contents changed and nothing noticed")
+
+
+def test_shared_launched_dependency_is_analysed_once(tmp_path, monkeypatch):
+    root = tmp_path / "programs"
+    root.mkdir()
+    for name in ("first", "second"):
+        (root / f"{name}.py").write_text("import shared\n")
+    (root / "shared.py").write_text('ENGINE = "recipe.tcl"\n')
+    (root / "recipe.tcl").write_text("puts first_recipe\n")
+    recorder = sr.Recorder(root)
+    recorder._launched.update(["first.py", "second.py"])
+    calls = []
+    original = sr._engine_assets
+    def measured(path, *args, **kwargs):
+        calls.append(Path(path).name)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(sr, "_engine_assets", measured)
+    record, error = recorder._launched_digests()
+    assert not error
+    assert set(record) == {"launched:first.py", "launched:second.py",
+                           "launched:shared.py", "launched:recipe.tcl"}
+    assert calls.count("shared.py") == 1
+    # The next collection still reads current files and current directory
+    # members; an analysis cache must not hide an edited engine or new import.
+    (root / "extra.py").write_text("VALUE = 2\n")
+    (root / "shared.py").write_text('import extra\nENGINE = "recipe.tcl"\n')
+    (root / "recipe.tcl").write_text("puts second_recipe\n")
+    after, error = recorder._launched_digests()
+    assert not error and "launched:extra.py" in after
+    assert after["launched:recipe.tcl"] != record["launched:recipe.tcl"]
+    assert after["launched:shared.py"] != record["launched:shared.py"]
+
+
+def test_repeated_declaration_reads_do_not_reparse_unchanged_source(tmp_path, monkeypatch):
+    root = tmp_path / "programs"
+    root.mkdir()
+    emitter = root / "emitter.py"
+    emitter.write_text('"""Historical ghost.rb is not an engine."""\n'
+                       'ENGINE = "first.tcl"\n')
+    (root / "first.tcl").write_text("puts first\n")
+    (root / "second.tcl").write_text("puts second\n")
+    original = sr.ast.parse
+    calls = []
+    def measured(source, *args, **kwargs):
+        calls.append(source)
+        return original(source, *args, **kwargs)
+    monkeypatch.setattr(sr.ast, "parse", measured)
+    for _ in range(3):
+        assert sr._engine_assets(emitter, root) == [root / "first.tcl"]
+        assert sr._static_imports(emitter, root) == [emitter]
+    emitter.write_text('ENGINE = "second.tcl"\n')
+    assert sr._engine_assets(emitter, root) == [root / "second.tcl"]
+    assert len(calls) <= 2

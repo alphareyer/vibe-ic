@@ -369,3 +369,156 @@ def test_the_not_prose_claim_for_the_liberty_supply_view_is_falsifiable():
     view = PR.parse_liberty_supply_view(lib)
     assert view["voltage_map"] == {"VA": 1.8}
     assert view["cells"]["c"]["pins"]["P"] == {"direction": "inout"}
+
+
+def _implemented_ring(*, quiet_resistor=True):
+    macros = dict(SKY_MACROS)
+    feeds = dict(SKY_FEEDS)
+    for rail, use, kind in (("VDDA", "POWER", "P"), ("VSSA", "GROUND", "G")):
+        m = f"lib__{rail.lower()}_clamped_pad"
+        macros[m] = _sky_cell(rail + "_PAD", use)
+        feeds[m] = (rail + "_PAD", rail, kind)
+    text = _sky_netlist(feeds)
+    # The real HVC cells feed their quiet rail through a second metal
+    # resistor: PAD -> primary ring rail -> quiet ring rail.
+    for master, primary, quiet in (
+            ("lib__vddio_hvc_clamped_pad", "VDDIO", "VDDIO_Q"),
+            ("lib__vssio_hvc_clamped_pad", "VSSIO", "VSSIO_Q")):
+        bond, _, kind = feeds[master]
+        child = "quiet_" + kind
+        device = "R" if quiet_resistor else "C"
+        text = text.replace(f"X0 {primary} {bond} ISOL base_{kind}",
+                            f"X0 {primary} {bond} {quiet} {child}")
+        text += (f".SUBCKT {child} CORE PAD QUIET\n"
+                 f"RI PAD CORE metal_res w=1 l=1\n"
+                 f"{device}Q CORE QUIET metal_res w=1 l=1\n.ENDS\n")
+    connector = "lib__bridge"
+    lef = _lef(macros) + _lef({connector: {r: "POWER" for r in
+                         ("VCCD", "VCCHIB", "VDDIO", "VSWITCH")}}).replace(
+                             "CLASS PAD POWER", "CLASS PAD AREAIO")
+    model = ("module lib__bridge(VCCHIB,VCCD,VSWITCH,VDDIO);\n"
+             "inout VCCHIB,VCCD,VSWITCH,VDDIO;\n"
+             "assign VCCHIB = VCCD; assign VSWITCH = VDDIO;\nendmodule\n")
+    plan = {"supply_masters": ["lib__vdda_clamped_pad", "lib__vssa_clamped_pad"],
+            "connector_masters": [connector]}
+    return lef, _sky_liberty(feeds), text, model, plan
+
+
+def _resolve_implemented_ring(*, quiet_resistor=True, edit=None):
+    lef, lib, spice, model, choices = _implemented_ring(
+        quiet_resistor=quiet_resistor)
+    if edit:
+        choices, model = edit(choices, model)
+    classes, sizes, roles = _inputs(lef)
+    return G.resolve_supply_pad_pair(
+        classes, sizes, roles, "lib__", "VPWR", "VGND", {}, SKY_TERMINALS,
+        liberty_texts=[lib], netlist_texts=[spice], core_liberty_text=SKY_CORE,
+        ring_implementation=choices, verilog_texts=[model])
+
+
+def test_implementation_masters_do_not_replace_the_pdk_core_pair():
+    pair, plan, _ = _resolve_implemented_ring()
+    assert {x["master"] for x in pair} == {
+        "lib__vccd_lvc_clamped_pad", "lib__vssd_lvc_clamped_pad"}
+    extras = {x["master"] for x in plan["supplemental_supply_pads"]}
+    assert {"lib__vdda_clamped_pad", "lib__vssa_clamped_pad"} <= extras
+    assert "lib__vccd_hvc_pad" not in extras
+    assert all(x["derivation"]["candidates_from"].startswith("engineering implementation")
+               for x in plan["supplemental_supply_pads"]
+               if x["master"] in {"lib__vdda_clamped_pad", "lib__vssa_clamped_pad"})
+
+
+def test_real_resistor_and_declared_connector_paths_close_the_ring():
+    pair, plan, _ = _resolve_implemented_ring()
+    G.require_bonded_ring_rails(plan)
+    assert not plan["ring_rails_without_bond"]
+    assert plan["ring_rail_bond_paths"]["VDDIO_Q"]["resistor_path"] == [
+        "VDDIO_PAD", "VDDIO", "VDDIO_Q"]
+    assert plan["ring_rail_bond_paths"]["VCCHIB"]["connector_master"] == "lib__bridge"
+    group = pair + plan["supplemental_supply_pads"] + plan["ring_connectors"]
+    roles = _inputs(_implemented_ring()[0])[2]
+    G.connect_bonded_ring_rails(group, plan, roles, "VPWR", "VGND")
+    chosen = {f"u_{i}": x for i, x in enumerate(group)}
+    ordered = {s: list(chosen) if s == "S" else [] for s in G.SIDES}
+    supply_ports = ["VPWR", "VGND"] + [str(x["port"]) for x in
+                                                       plan["supplemental_supply_pads"]]
+    wrapper = G._emit_verilog("chip_top", "core", ordered, chosen, [], supply_ports)
+    assert "lib__bridge" in wrapper and ".VCCHIB(VPWR)" in wrapper
+    assert "wire VCCHIB;" not in wrapper and "inout VCCHIB" not in wrapper
+    assert "wire VDDIO_Q;" in wrapper
+
+
+def test_capacitors_do_not_supply_quiet_rails():
+    _, plan, _ = _resolve_implemented_ring(quiet_resistor=False)
+    with pytest.raises(G.Refusal) as exc:
+        G.require_bonded_ring_rails(plan)
+    assert exc.value.rule == "RING_RAIL_BOND_UNDECLARED"
+    assert "VDDIO_Q" in exc.value.message and "VSSIO_Q" in exc.value.message
+
+
+def test_connector_must_be_declared_and_instantiated():
+    _, plan, _ = _resolve_implemented_ring(
+        edit=lambda choices, model: ({**choices, "connector_masters": []}, model))
+    with pytest.raises(G.Refusal) as exc:
+        G.require_bonded_ring_rails(plan)
+    assert "VCCHIB" in exc.value.message and "VSWITCH" in exc.value.message
+    _, plan, _ = _resolve_implemented_ring()
+    plan["ring_connectors"] = []
+    with pytest.raises(G.Refusal) as exc:
+        G.require_bonded_ring_rails(plan)
+    assert "VCCHIB" in exc.value.message
+
+
+def test_active_connector_expression_does_not_prove_a_rail_short():
+    with pytest.raises(G.Refusal) as exc:
+        _resolve_implemented_ring(edit=lambda choices, model: (
+            choices, model.replace("VCCHIB = VCCD", "VCCHIB = VCCD & VDDIO")))
+    assert "passive connector model" in exc.value.message
+
+
+def test_unselected_auxiliary_supply_master_remains_unbonded():
+    _, plan, _ = _resolve_implemented_ring(
+        edit=lambda choices, model: ({**choices, "supply_masters": []}, model))
+    with pytest.raises(G.Refusal) as exc:
+        G.require_bonded_ring_rails(plan)
+    assert "VDDA" in exc.value.message and "VSSA" in exc.value.message
+
+
+def test_pdk_connector_shorts_use_one_net_and_quiet_rails_stay_separate():
+    pair, plan, _ = _resolve_implemented_ring()
+    G.require_bonded_ring_rails(plan)
+    group = pair + plan["supplemental_supply_pads"] + plan["ring_connectors"]
+    roles = _inputs(_implemented_ring()[0])[2]
+    G.connect_bonded_ring_rails(group, plan, roles, "VPWR", "VGND")
+    for entry in group:
+        pins = entry["supply_connections"]
+        if "VCCHIB" in pins:
+            assert pins["VCCHIB"] == pins["VCCD"] == "VPWR"
+        if "VSWITCH" in pins:
+            assert pins["VSWITCH"] == pins["VDDIO"] == "VDDIO"
+        if "VDDIO_Q" in pins:
+            assert pins["VDDIO_Q"] != pins["VDDIO"]
+
+
+def test_signal_pad_pg_pins_use_the_same_proved_ring_bindings():
+    pair, plan, _ = _resolve_implemented_ring()
+    G.require_bonded_ring_rails(plan)
+    group = pair + plan["supplemental_supply_pads"] + plan["ring_connectors"]
+    roles = _inputs(_implemented_ring()[0])[2]
+    roles["lib__signal"] = {rail: ("INOUT", "POWER" if rail in RING_P else "GROUND")
+                             for rail in RING_P + RING_G}
+    signal = {"port": "din", "master": "lib__signal", "terminal": "PAD"}
+    G.connect_bonded_ring_rails(group, plan, roles, "VPWR", "VGND", signal_pads=[signal])
+    assert signal["power_connections"] == {
+        "VCCD": "VPWR", "VCCHIB": "VPWR", "VDDA": "VDDA",
+        "VDDIO": "VDDIO", "VDDIO_Q": "VDDIO_Q", "VSWITCH": "VDDIO",
+        "VSSA": "VSSA", "VSSD": "VGND", "VSSIO": "VSSIO", "VSSIO_Q": "VSSIO_Q"}
+    chosen = {"u_signal": signal, **{f"u_{i}": x for i, x in enumerate(group)}}
+    ordered = {s: list(chosen) if s == "S" else [] for s in G.SIDES}
+    supplies = ["VPWR", "VGND"] + [str(x["port"]) for x in plan["supplemental_supply_pads"]]
+    wrapper = G._emit_verilog("chip_top", "core", ordered, chosen,
+                              [{"name": "din", "direction": "input"}], supplies)
+    line = next(x for x in wrapper.splitlines() if "lib__signal u_signal" in x)
+    for expected in (".PAD(din)", ".VCCD(VPWR)", ".VCCHIB(VPWR)",
+                     ".VSWITCH(VDDIO)", ".VDDIO(VDDIO)", ".VDDIO_Q(VDDIO_Q)"):
+        assert expected in line

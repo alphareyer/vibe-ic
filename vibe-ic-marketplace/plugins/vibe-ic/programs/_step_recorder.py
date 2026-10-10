@@ -55,6 +55,7 @@ import re
 import subprocess
 import sys
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -134,6 +135,38 @@ def _engine_marker(name: str) -> str:
     return _sha(marker.encode("utf-8"))
 
 
+@lru_cache(maxsize=2048)
+def _source_declarations(source: str):
+    """Immutable dependency names from these exact source bytes.
+
+    Parsing and walking the same large runner for every launched script was
+    dominating receipt production. Only source declarations are reused here:
+    file discovery, current file digests and engine environment stay live.
+    An edited source has a different key, even at the same path.
+    """
+    tree = ast.parse(source)
+    nodes = tuple(ast.walk(tree))
+    docstrings = set()
+    for node in nodes:
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                    and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    assets = set()
+    imports = []
+    for node in nodes:
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings and _ASSET_RE.fullmatch(node.value)):
+            assets.add(node.value)
+        if isinstance(node, ast.Import):
+            imports.extend(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            imports.append(node.module)
+    return tuple(imports), tuple(sorted(assets))
+
+
 def _engine_assets(path: Path, root: Path) -> List[Path]:
     """Files a launched program NAMES for another tool to execute.
 
@@ -146,23 +179,9 @@ def _engine_assets(path: Path, root: Path) -> List[Path]:
     uses underscores."""
     out: List[Path] = []
     try:
-        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        _imports, names = _source_declarations(Path(path).read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeError):
         return out
-    # Only executable string literals name engines. A docstring may mention
-    # a test fixture or historical file without ever handing it to a tool.
-    docstrings = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                             ast.AsyncFunctionDef)) and node.body:
-            first = node.body[0]
-            if isinstance(first, ast.Expr) and isinstance(first.value,
-                                                         ast.Constant) and \
-                    isinstance(first.value.value, str):
-                docstrings.add(id(first.value))
-    names = {node.value for node in ast.walk(tree)
-             if isinstance(node, ast.Constant) and isinstance(node.value, str)
-             and id(node) not in docstrings and _ASSET_RE.fullmatch(node.value)}
     roots: List[Path] = [Path(path).parent, Path(root)]
     env = os.environ.get("VIBEIC_KLAYOUT_TOOLS")
     if env:
@@ -204,20 +223,14 @@ def _static_imports(path: Path, root: Path, seen=None) -> List[Path]:
     seen.add(rp)
     out.append(path)
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names, _assets = _source_declarations(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return out
-    for node in ast.walk(tree):
-        names: List[str] = []
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            names = [node.module]
-        for dotted in names:
-            cand = Path(root).joinpath(*dotted.split("."))
-            for q in (cand.with_suffix(".py"), cand / "__init__.py"):
-                if q.is_file():
-                    out.extend(_static_imports(q, root, seen))
+    for dotted in names:
+        cand = Path(root).joinpath(*dotted.split("."))
+        for q in (cand.with_suffix(".py"), cand / "__init__.py"):
+            if q.is_file():
+                out.extend(_static_imports(q, root, seen))
     return out
 
 
@@ -370,6 +383,7 @@ class Recorder:
         the rule the review asked for."""
         root = Path(self._root[:-1])
         out: Dict[str, Dict[str, str]] = {}
+        seen = set()
         for tok in sorted(self._launched):
             path = self._resolve_script(tok)
             if path is None:
@@ -381,7 +395,7 @@ class Recorder:
                                 f"could not be read, so what this step ran "
                                 f"out of process cannot be established")
                 continue
-            reach = _static_imports(path, root)
+            reach = _static_imports(path, root, seen)
             for q in list(reach):
                 reach.extend(a for a in _engine_assets(q, root)
                              if a not in reach)
