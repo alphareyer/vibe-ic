@@ -494,10 +494,17 @@ def test_backend_checkpoint_closure_rejects_missing_or_traversal_step7_path(tmp_
 def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
     project = tmp_path / "project"
     constraint = "phase2/stage2/constraints/subservient.asic.sdc"
+    timing_report = "phase3/stage3/sta/pre_pnr_timing.rpt"
     for rel in (
         "phase2/stage2/synth/netlist.v",
         "provenance.jsonl",
         "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
+        "phase3/stage3/pnr/constraint.sdc",
+        "reports/phase2/sdc_check.json",
+        "reports/lec.json",
+        "reports/lec.rpt",
+        "reports/analog/stage_analog_compliance.json",
+        timing_report,
         "phase2/stage2/constraints/asic_sdc.json",
         constraint,
         "reports/phase2/cdc/netlist.json",
@@ -508,6 +515,14 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"path": constraint}) if rel.endswith("asic_sdc.json")
                           else rel + "\n")
+
+    # This control isolates the optional stage-1 closure. Supply Step 15's
+    # required upstream handoff without claiming a measured timing verdict.
+    summary = project / "reports/phase3/sta/pre_pnr_summary.json"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text(json.dumps({"subject": {"items": [{
+        "path": timing_report, "sha256": em.digest(project / timing_report),
+    }]}}))
 
     contract = set(backend_project_input_contract(project, "15"))
 
