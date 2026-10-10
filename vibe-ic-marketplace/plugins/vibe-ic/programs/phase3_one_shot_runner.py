@@ -78120,6 +78120,23 @@ def _backend_parameter_values(project: Path, pdk: Optional[PdkConfig]) -> Dict[s
             "pdk_root": str(pdk_root)}
 
 
+def _publish_in_progress_steps(project: Path, plan: List[StepResult]) -> None:
+    """Publish this invocation's steps before a consumer reads their record."""
+    import _impl_outcomes as _io_pre
+    import _cited_artefacts as _ca
+
+    record = {
+        "program": "phase3_one_shot_runner",
+        "record": "in-progress (steps only; the full record is written "
+                  "at the end of this run)",
+        **_io_pre.report_fields(project),
+        "steps": [asdict(s) for s in plan],
+    }
+    record["cited_artefacts"] = _ca.bind(project, record["steps"])
+    record["cited_artefacts"].pop(_ca.AUDIT_REL, None)
+    _aa.write_json(project / _ca.REPORT_REL, record)
+
+
 def _default_step15_with_backend_receipt(
         project: Path, top: str, pdk: PdkConfig, container: str,
         die_um: str, util: float, *, spare_density=None,
@@ -78144,6 +78161,20 @@ def _default_step15_with_backend_receipt(
         pad_ring_results=pad_ring_results,
         em_floor_for_resize=em_floor_for_resize,
         density_from_tool_default=density_from_tool_default)
+    if row.status == "PASS":
+        # A resumed run has changed the native outputs. Interim compliance
+        # must read this producer's current record, not recheck the previous
+        # invocation's Phase-3 citations against the newly produced files.
+        _publish_in_progress_steps(project, [row])
+        # The Step-15 consumer requires pdn.done. Publish the existing
+        # route-derived products before asking that consumer; waiting for its
+        # PASS before publication creates a producer/consumer dependency cycle.
+        # This producer retains NOT_MEASURED for absent PDN evidence and does
+        # not replace the consumer's independent verdict.
+        canonical = _canonicalize_postpnr_prerequisites(
+            project, top, pdk, container)
+        row.output_files = list(dict.fromkeys(
+            list(row.output_files or []) + list(canonical.output_files or [])))
     try:
         current = _declared.run_for_step(project, "15")
     except BaseException as exc:  # noqa: BLE001 — receipt discloses the seam
@@ -79491,19 +79522,7 @@ def main() -> int:
     # A steps-only record is published here so the summary can only ever
     # quote THIS run; the full record still overwrites it at the end.
     try:
-        import _impl_outcomes as _io_pre
-        import _cited_artefacts as _ca
-        _pre = project / "reports" / "orchestrator" / "phase3_one_shot.json"
-        _pre_record = {"program": "phase3_one_shot_runner",
-             "record": "in-progress (steps only; the full record is written "
-                       "at the end of this run)",
-             # llv1 W14: the summary emitted next echoes the implementation
-             # flow from THIS record (ORGANIC #399). {} by default.
-             **_io_pre.report_fields(project),
-             "steps": [asdict(s) for s in plan]}
-        _pre_record["cited_artefacts"] = _ca.bind(project, _pre_record["steps"])
-        _pre_record["cited_artefacts"].pop(_ca.AUDIT_REL, None)
-        _aa.write_json(_pre, _pre_record)
+        _publish_in_progress_steps(project, plan)
     except Exception as _pre_exc:      # best-effort; never crash finalize
         print(f"[WARN] pre-summary step record non-fatal: {_pre_exc}",
               file=sys.stderr)

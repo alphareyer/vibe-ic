@@ -98,6 +98,84 @@ def _routed_project(root: Path) -> tuple[Path, Path]:
     return root, route
 
 
+def test_default_step15_publishes_current_route_before_its_consumer(
+        tmp_path, monkeypatch):
+    import execution_backend_worker as backend
+    import flow_declared_producer_run as declared
+
+    project, route = _routed_project(tmp_path / "project")
+    pdk = _pdk(project)
+    import _cited_artefacts as cited
+    previous = project / cited.REPORT_REL
+    previous.parent.mkdir(parents=True)
+    previous.write_text(json.dumps({
+        "cited_artefacts": {str(route.relative_to(project)): "0" * 64},
+    }))
+    assert cited.check(project, json.loads(previous.read_text()))[0] == "NOT_MEASURED"
+
+    def extract(_project, _top, _pdk, _container, output, _notes):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(SPEF)
+        return True
+
+    monkeypatch.setattr(R, "_emit_spef", extract)
+    monkeypatch.setattr(R, "step_pnr", lambda *a, **k:
+                        R.StepResult("pnr", "PASS", detail="route produced",
+                                     output_files=[str(route)]))
+    seen = []
+
+    def census(_project, step_id):
+        current = json.loads(previous.read_text())
+        assert current["record"].startswith("in-progress")
+        assert cited.check(project, current)[0] == "PASS"
+        pdn = (R._pl.pnr_dir(project) / "pdn.done").read_text()
+        assert f"measured_def_sha256: {R._sha256_file(route)}" in pdn
+        # A missing insertion measurement stays unmeasured; publication
+        # supplies the real consumer's input rather than inventing a PASS.
+        assert "PDN status: NOT MEASURED" in pdn
+        seen.append("producer census")
+        return {"verdict": "PRODUCED", "step_id": step_id}
+
+    def consumer(_project, **kwargs):
+        assert seen == ["producer census"]
+        basis = json.loads((project / "reports/phase3/postpnr_canonical_basis.json")
+                           .read_text())
+        assert basis["routed_def_sha256"] == R._sha256_file(route)
+        seen.append("consumer")
+        return {"verdict": "PASS"}
+
+    monkeypatch.setattr(declared, "run_for_step", census)
+    monkeypatch.setattr(backend, "execute_current_step", consumer)
+    row = R._default_step15_with_backend_receipt(
+        project, TOP, pdk, "", NEW_DIE, NEW_UTIL)
+    assert row.status == "PASS"
+    assert seen == ["producer census", "consumer"]
+
+
+def test_default_step15_failed_route_never_publishes_success_outputs(
+        tmp_path, monkeypatch):
+    import execution_backend_worker as backend
+    import flow_declared_producer_run as declared
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(R, "step_pnr", lambda *a, **k:
+                        R.StepResult("pnr", "FAIL", detail="route refused"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("failed route must not publish canonical outputs")
+
+    monkeypatch.setattr(R, "_canonicalize_postpnr_prerequisites", forbidden)
+    monkeypatch.setattr(declared, "run_for_step", lambda *a, **k:
+                        {"verdict": "INCOMPLETE"})
+    monkeypatch.setattr(backend, "execute_current_step", lambda *a, **k:
+                        {"verdict": "FAIL"})
+    row = R._default_step15_with_backend_receipt(
+        project, TOP, _pdk(project), "", NEW_DIE, NEW_UTIL)
+    assert row.status == "FAIL"
+    assert not (R._pl.pnr_dir(project) / "pdn.done").exists()
+
+
 def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
         tmp_path, monkeypatch):
     project, route = _routed_project(tmp_path)
