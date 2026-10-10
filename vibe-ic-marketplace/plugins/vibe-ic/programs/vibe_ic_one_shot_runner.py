@@ -1725,7 +1725,7 @@ def _main() -> int:
     if route_refusal:
         print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
         return 2
-    if 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
+    if (args.execution_mode == 'ultra' or args.route_authority_only) and 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
         from execution_modes import Refusal
         raise Refusal('REQUEST_CAPABILITY_REQUIRED', 'enter through the canonical CLI')
     execution_policy_value = _configure_execution_policy(args)
@@ -3083,8 +3083,14 @@ if __name__ == "__main__":
         entry.add_argument('project', type=Path)
         entry.add_argument('--route', choices=('ic', 'ip'))
         entry.add_argument('--execution-mode', choices=('default', 'ultra'), default='default')
+        entry.add_argument('--route-authority-only', action='store_true')
         entry.add_argument('--receipt-channel-fd', type=int)
         selected, _ = entry.parse_known_args()
+        # Default is one local driver calling the existing phase runners in
+        # order. It needs no candidate issuer, capability socket, isolated
+        # interpreter, or source snapshot before the first producer can run.
+        if selected.execution_mode == 'default' and not selected.route_authority_only:
+            sys.exit(main())
         if not selected.project.is_dir():
             print(f'ERROR: not a directory: {selected.project.resolve()}', file=sys.stderr)
             sys.exit(2)

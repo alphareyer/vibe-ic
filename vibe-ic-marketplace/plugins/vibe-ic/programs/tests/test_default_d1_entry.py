@@ -83,6 +83,7 @@ def test_canonical_default_frontdoor_produces_d1_and_waits_for_expert(tmp_path):
     assert disclosure["step_id"] == "D1"
     assert disclosure["controller_qualification"] == "NOT_MEASURED"
     assert disclosure["mode"] == "default"
+    assert disclosure["execution"] == "single-local-driver"
     assert "NO_REGISTERED_PROVIDER" not in json.dumps(phase1)
     assert not list((project / "reports/execution").glob("*/D1/adoption.json"))
 

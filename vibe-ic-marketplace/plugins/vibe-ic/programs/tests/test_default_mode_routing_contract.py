@@ -5,6 +5,32 @@ import execution_modes as em
 import execution_policy as policy
 
 
+def test_default_bootstrap_needs_no_candidate_authority(tmp_path, monkeypatch):
+    import execution_authority
+
+    monkeypatch.delenv(policy.ENV, raising=False)
+    monkeypatch.delenv(policy._CAPABILITY_FD_ENV, raising=False)
+    monkeypatch.setattr(policy, '_ordinary_runtime', None)
+
+    def candidate_transport(*args, **kwargs):
+        raise AssertionError('local Default entered candidate transport')
+
+    monkeypatch.setattr(execution_authority, 'consume', candidate_transport)
+    monkeypatch.setattr(em.Registry, '__init__', candidate_transport)
+    monkeypatch.setattr(em.Controller, '__init__', candidate_transport)
+    runtime = policy.bootstrap(tmp_path, parameters={'top': 'unit'}, phase1_only=True)
+    assert runtime['project'] == tmp_path.resolve()
+    assert runtime['parameters'] == {'top': 'unit'}
+    assert runtime['policy']['mode'] == 'default'
+    assert 'controller' not in runtime and 'registry' not in runtime
+    for row in em.load_portfolio()['steps']:
+        assert policy.dispatch_fixed_step(tmp_path, row['id']) is None
+    assert policy.dispatch_ordinary_site(
+        tmp_path, 'phase1_one_shot_runner', 'doc_extract', candidate_transport) is None
+    assert policy.phase1_producer_disclosure(tmp_path)['execution'] == 'single-local-driver'
+    assert not (tmp_path / 'reports/execution').exists()
+
+
 def test_default_mode_covers_every_canonical_row_without_controller(tmp_path, monkeypatch):
     portfolio = em.load_portfolio()
     flow_sha, requirements = em._canonical_flow_requirements()

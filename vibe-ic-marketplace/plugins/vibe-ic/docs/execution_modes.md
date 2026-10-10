@@ -6,17 +6,21 @@ canonical flow rows:
 * **Default mode** is program-first. The caller owns the one canonical producer
   for the row and its declared gates. The policy seam returns to that caller;
   it does not run a candidate arm, wait for an AI choice, or adopt a receipt.
+  One local driver runs all phases in the same project directory. The normal
+  Default CLI starts directly, without an execution-authority supervisor,
+  capability socket, copied worker project, or candidate source snapshot.
   Step 9 input preparation and Step 15 pre-layout publication are typed
   producer preparation and still do not call `Controller.run` or `adopt`.
 * **Ultra mode** is the qualification path. It may run the registered candidate
   arms through `Controller`, preserve isolated receipts, and let AI adopt an
   eligible result. Ultra evidence never changes the Default producer contract.
 
-The same resolved dependency manifest is used for preparation, preflight,
-worker launch, and downstream consumption. A missing input is reported before a
-native tool starts; a producer receipt and its consumer gate remain separate
-proof layers. This routing completion does not claim that an EDA tool is
-installed on every host or that either benchmark IC has passed.
+Default uses each canonical producer's declared inputs, native outputs and
+existing quality gates in place. A failed design gate still stops progression;
+removing candidate transport does not turn a failed or unmeasured IC into PASS.
+Ultra uses the same resolved dependency manifest for copied input preparation,
+worker preflight and downstream consumption. This routing completion does not
+claim that either benchmark IC has passed.
 
 The public portfolio is `programs/data/execution_modes_portfolio.json`. It imports
 the final source/policy inventory bound to main

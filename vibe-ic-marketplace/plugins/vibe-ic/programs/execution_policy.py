@@ -455,10 +455,17 @@ def bootstrap(project: Path, *, parameters: dict | None = None,
               phase1_only: bool = False):
     global _ordinary_runtime
     value = request()
-    # The capability FD is the authority boundary; a caller-authored default
-    # environment must never construct a production registry.
+    # A local Default run needs only its project and mode. Its existing
+    # producers write directly into that project and retain their own gates.
+    # Candidate authority and Registry construction belong to Ultra.
     if value['mode'] == 'default' and _CAPABILITY_FD_ENV not in os.environ:
-        return None
+        project = Path(project).resolve(strict=True)
+        _ordinary_runtime = dict(
+            identity=(str(project), value['request_digest'], None, bool(phase1_only)),
+            project=project, policy=value, route={},
+            parameters=dict(parameters or {}), contexts={}, bindings={}, runs={},
+            phase1_only=bool(phase1_only))
+        return _ordinary_runtime
     from execution_authority import consume
     issued = consume()
     project = Path(project).resolve(strict=True)
@@ -1187,6 +1194,14 @@ def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
     if (runtime.get('phase1_only') is True and runtime['policy']['mode'] == 'default'
             and runner == 'phase1_one_shot_runner' and site == 'doc_extract'
             and span == ('D1',)):
+        if _CAPABILITY_FD_ENV not in os.environ and not runtime['route']:
+            if Path(project).resolve() != runtime['project']:
+                raise Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
+            runtime['canonical_phase1_producer'] = dict(
+                runner=runner, site=site, step_id='D1', mode='default',
+                execution='single-local-driver',
+                controller_qualification='NOT_MEASURED')
+            return None
         # This exact Default site keeps its established producer and expert
         # handoff. It does not assert a qualified D1 Controller adapter.
         from execution_authority import consume
