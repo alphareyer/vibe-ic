@@ -115,7 +115,7 @@ def _apply_universal(gd: Path, is_spi: bool = False) -> None:
             # its own signaling_summary gets a generic digital-protocol summary,
             # not SPI's clock-polarity/phase wording.
             d.setdefault("signaling_summary",
-                "Digital protocol block; signaling is on the named external pins per the protocol specification.")
+                "Digital block; signaling is on the named external pins per the input specification.")
         _write(p, d)
     # L10 test cases
     p = gd / "L10_TEST_CASES.json"
@@ -172,7 +172,7 @@ def _apply_universal(gd: Path, is_spi: bool = False) -> None:
         d.setdefault("notes",
             "No OTP / fuse / configuration-ROM content in the serial-peripheral protocol block guide. All configuration is via the run-time register file."
             if is_spi else
-            "No OTP / fuse / configuration-ROM content in the spec. All configuration is via the run-time register file.")
+            "No OTP / fuse / configuration-ROM content in the spec.")
         _write(p, d)
     # L13 presence comes from source-backed calibration, not protocol class.
     p = gd / "L13_LAB_CALIBRATION.json"
@@ -276,6 +276,12 @@ def _apply_universal(gd: Path, is_spi: bool = False) -> None:
         if q.is_file():
             d = _read(q)
             f = d.get("fields") or {}
+            if ld_name == "L19_CONSTRAINTS_PDK.json":
+                target = f.get("clock_target")
+                if isinstance(target, dict) and target.get("status") == "DECLARED":
+                    # A clock already extracted by the canonical producer is
+                    # a timing constraint, even before an SDC file exists.
+                    f["constraints_present"] = True
             contradicted = any(k in f and f[k] != v
                                for k, v in payload.items() if k != "notes")
             gated_note = payload.get("notes") if presence_key else None

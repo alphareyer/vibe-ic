@@ -27,6 +27,7 @@ record -- and withholds it when the sibling `*_present` field says otherwise.
 from pathlib import Path
 import json
 import sys
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -85,6 +86,30 @@ def test_empty_l19_still_gets_its_explanatory_note(tmp_path):
     assert f["constraints_present"] is False
     assert _denies_constraints(f.get("notes") or ""), (
         "an empty L19 should still explain why it is empty")
+
+
+@pytest.mark.parametrize("is_spi", [False, True])
+def test_declared_clock_target_is_a_present_constraint(tmp_path, is_spi):
+    """The real Default input declares a clock; no staged SDC is required."""
+    target = {"status": "DECLARED", "period_ns": 100.0,
+              "evidence": "input/docs/design.md: Clock period: 100 ns"}
+    gd = _mk(tmp_path, "L19_CONSTRAINTS_PDK.json", {"clock_target": target})
+    _apply_universal(gd, is_spi=is_spi)
+    f = _fields(gd, "L19_CONSTRAINTS_PDK.json")
+    assert f["clock_target"] == target
+    assert f["constraints_present"] is True
+    assert not _denies_constraints(f.get("notes") or "")
+
+
+@pytest.mark.parametrize("status", ["NOT_STATED", "NOT_DETERMINED", "CONFLICT"])
+def test_unresolved_clock_target_does_not_declare_constraints(tmp_path, status):
+    target = {"status": status, "period_ns": None}
+    gd = _mk(tmp_path, "L19_CONSTRAINTS_PDK.json", {"clock_target": target})
+    _apply_universal(gd)
+    f = _fields(gd, "L19_CONSTRAINTS_PDK.json")
+    assert f["clock_target"] == target
+    assert f["constraints_present"] is False
+    assert _denies_constraints(f.get("notes") or "")
 
 
 def test_populated_l20_and_l23_are_covered_by_the_same_rule(tmp_path):

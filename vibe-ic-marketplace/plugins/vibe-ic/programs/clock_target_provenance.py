@@ -292,7 +292,10 @@ def _declared_pdk_table(project: Path, library: str, pdk: str):
         return None
     return {"period_ns": float(rep["period_ns"]),
             "cite": f"{rep.get('source')}:{rep.get('line')}",
-            "row": str(rep.get("note", ""))[:200]}
+            # L19 makes the embedded source citation project-relative. Keep
+            # it intact here; truncating first cuts long temporary paths and
+            # discards the filename/line before that consumer can read them.
+            "row": str(rep.get("note", ""))}
 
 
 def resolve(project: Path, *, pdk: str = "", library: str = "",
