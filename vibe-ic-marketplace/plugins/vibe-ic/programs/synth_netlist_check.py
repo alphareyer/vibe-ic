@@ -914,9 +914,6 @@ def _native_inputs_match_current_rtl(netlist_path: Path,
             if any(cfg.get(raw) not in (sha, f"sha256:{sha}")
                    for raw, sha in wanted.items()):
                 continue
-            if not any(value in (digest, f"sha256:{digest}")
-                       for value in states.values()):
-                continue
             receipt = fp.with_name("vibeic_receipt.json")
             try:
                 rdoc = json.loads(receipt.read_text())
@@ -927,6 +924,9 @@ def _native_inputs_match_current_rtl(netlist_path: Path,
                     value in (digest, f"sha256:{digest}")
                     for value in rsha.values()):
                 continue
+            # Depending on the LibreLane step, ``state_files`` may name only
+            # the prior state input; the receipt is the native producer's
+            # authoritative output digest in that case.
             return True
     except (OSError, IndexError, ValueError, TypeError):
         return False
