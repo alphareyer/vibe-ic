@@ -383,9 +383,12 @@ def _native_recipe_commands(text: str) -> List[Tuple[str, str]]:
         # A command journal may retain the same GNU framing used by the runner
         # logs.  Reuse the canonical parser so apostrophes in paths cannot
         # silently truncate the body.
-        match = re.search(r"--\s*Running command\s*`(.+?)'[ \t]*--[ \t]*$",
-                          line)
-        command = match.group(1).strip() if match else line
+        # This is Yosys's command banner, not a sentence containing a tool
+        # name. A surrounding description must never become execution proof.
+        prefix, suffix = "-- Running command `", "' --"
+        command = (line[len(prefix):-len(suffix)].strip()
+                   if line.startswith(prefix) and line.endswith(suffix)
+                   else line)
         try:
             tokens = shlex.split(command)
         except ValueError:

@@ -58921,60 +58921,6 @@ def _clock_plan_stale_inputs(project: Path, existing_plan,
     return sorted(set(changed) | set(added))
 
 
-def _clock_plan_lef_paths(project: Path, pdk: PdkConfig) -> List[str]:
-    """Return the exact de-duplicated LEF load set for Step 16.
-
-    The producer records every entry as ``pdk_lef_N``.  Reuse must compare
-    against this same complete set; checking only ``pdk_lef_0`` and
-    ``pdk_lef_1`` would silently accept a newly-added macro/IO LEF.
-    """
-    lefs = list(dict.fromkeys([
-        str(pdk.tech_lef), str(pdk.cell_lef),
-        *(str(path) for path in (getattr(pdk, "macro_lefs", []) or [])),
-    ]))
-    if _chip_path_requests_pad_ring(project):
-        from _pad_ring import discover_io_lefs
-        root, tree = _padring_pdk_root_and_tree(pdk, None)
-        io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
-        if not io_lefs:
-            raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
-        lefs = list(dict.fromkeys([*lefs, *io_lefs]))
-    return lefs
-
-
-def _clock_plan_receipt_lef_refusal(project: Path, record: Any,
-                                    pdk: Optional[PdkConfig]) -> str:
-    """Refuse reuse when the receipt's complete LEF set differs from PDK."""
-    if pdk is None:
-        return "CURRENT_PDK_CONTEXT_MISSING"
-    if not isinstance(record, dict) or record.get("pdk") != pdk.name:
-        return ("CURRENT_PDK_CHANGED: recorded="
-                f"{record.get('pdk') if isinstance(record, dict) else None} "
-                f"expected={getattr(pdk, 'name', None)}")
-    try:
-        expected = [Path(path).resolve() for path in
-                    _clock_plan_lef_paths(project, pdk)]
-    except (OSError, ValueError, TypeError) as exc:
-        return f"CURRENT_PDK_LEF_SET_UNAVAILABLE: {exc}"
-    inputs = record.get("inputs") if isinstance(record, dict) else None
-    if not isinstance(inputs, dict):
-        return "CURRENT_INPUTS_MISSING"
-    rows = []
-    for role, row in inputs.items():
-        if not re.fullmatch(r"pdk_lef_\d+", str(role)):
-            continue
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-            return f"CURRENT_PDK_LEF_ROW_INVALID: {role}"
-        rows.append((int(str(role).rsplit("_", 1)[1]),
-                     Path(row["path"]).resolve()))
-    actual = [path for _, path in sorted(rows)]
-    if actual != expected:
-        return ("CURRENT_PDK_LEF_SET_CHANGED: recorded="
-                f"{[str(path) for path in actual]} expected="
-                f"{[str(path) for path in expected]}")
-    return ""
-
-
 def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
                     pnr_out: Path, notes: List[str],
                     *, pdk: Optional[PdkConfig] = None) -> Optional[str]:
@@ -59037,8 +58983,11 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
             # place until the late flow audit.
             try:
                 import _physical_current as _pc
-                refusal = _clock_plan_receipt_lef_refusal(
-                    project, existing.get("current"), pdk)
+                io_context = (_padring_pdk_root_and_tree(pdk, None)
+                              if pdk is not None and
+                              _chip_path_requests_pad_ring(project) else None)
+                refusal = _pc.clock_plan_receipt_lef_refusal(
+                    existing.get("current"), pdk, io_context=io_context)
                 required_inputs = ["floorplan", "recipe", "sdc_0"]
                 if pdk is None:
                     # Direct legacy callers do not carry the resolved PDK;
@@ -59046,7 +58995,8 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
                     # passes pdk and checks the complete dynamic LEF set.
                     required_inputs.extend(("pdk_lef_0", "pdk_lef_1"))
                 else:
-                    expected_lefs = _clock_plan_lef_paths(project, pdk)
+                    expected_lefs = _pc.clock_plan_lef_paths(
+                        pdk, io_context=io_context)
                     required_inputs.extend(
                         f"pdk_lef_{i}" for i in range(len(expected_lefs)))
                 if not refusal:
@@ -59124,7 +59074,10 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         # immutable and supports both shapes without weakening the LEF set.
         import copy
         pdk_for_run = copy.copy(pdk)
-        pdk_for_run.macro_lefs = _clock_plan_lef_paths(project, pdk)[2:]
+        io_context = (_padring_pdk_root_and_tree(pdk, None)
+                      if _chip_path_requests_pad_ring(project) else None)
+        pdk_for_run.macro_lefs = _pc.clock_plan_lef_paths(
+            pdk, io_context=io_context)[2:]
         pdk = pdk_for_run
         floorplan = _pl.pnr_dir(project) / "floorplan.def"
         return _pc.clock_plan(project, clock_plan, floorplan, sdc_paths, pdk)

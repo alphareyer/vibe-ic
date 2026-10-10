@@ -29,6 +29,19 @@ def _write(tmp_path, body, name="synth.ys"):
     return str(p)
 
 
+def test_pyosys_identity_accepts_native_banner_but_not_descriptive_prose():
+    from yosys_tiecell_recipe_order_check import _native_pyosys_wrapper
+
+    command = ("yosys -y /tools/synthesize.py -- --config-in config.json "
+               "--extra-in extra.json --output build")
+    banner = f"-- Running command `{command}' --"
+    for journal in (command, banner, f"  {banner}  "):
+        assert _native_pyosys_wrapper(journal)["command"] == command
+    for prose in (f"not {banner}", f"example: {banner}",
+                  f"the command was not run: {command}"):
+        assert _native_pyosys_wrapper(prose) is None
+
+
 # ---- the correct v0.1.98 recipe (PASS) ------------------------------------
 _GOOD = """read_verilog -defer rtl/top.v
 hierarchy -top top

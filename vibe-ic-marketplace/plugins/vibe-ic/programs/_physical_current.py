@@ -139,6 +139,59 @@ def run_native(project, tool, args, log):
     return rc, {"rc": rc, "argv": argv}
 
 
+def clock_plan_lef_paths(pdk, *, io_context=None):
+    """Return the exact de-duplicated LEF load set for Step 16.
+
+    The producer records every entry as ``pdk_lef_N``.  Reuse must compare
+    against this same complete set; checking only ``pdk_lef_0`` and
+    ``pdk_lef_1`` would silently accept a newly-added macro/IO LEF.
+    """
+    lefs = list(dict.fromkeys([
+        str(pdk.tech_lef), str(pdk.cell_lef),
+        *(str(path) for path in (getattr(pdk, "macro_lefs", []) or [])),
+    ]))
+    if io_context is not None:
+        from _pad_ring import discover_io_lefs
+        root, tree = io_context
+        io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
+        if not io_lefs:
+            raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
+        lefs = list(dict.fromkeys([*lefs, *io_lefs]))
+    return lefs
+
+
+def clock_plan_receipt_lef_refusal(record, pdk, *, io_context=None):
+    """Refuse reuse when the receipt's complete LEF set differs from PDK."""
+    if pdk is None:
+        return "CURRENT_PDK_CONTEXT_MISSING"
+    if not isinstance(record, dict) or record.get("pdk") != pdk.name:
+        return ("CURRENT_PDK_CHANGED: recorded="
+                f"{record.get('pdk') if isinstance(record, dict) else None} "
+                f"expected={getattr(pdk, 'name', None)}")
+    try:
+        expected = [Path(path).resolve() for path in
+                    clock_plan_lef_paths(pdk, io_context=io_context)]
+    except (OSError, ValueError, TypeError) as exc:
+        return f"CURRENT_PDK_LEF_SET_UNAVAILABLE: {exc}"
+    inputs = record.get("inputs") if isinstance(record, dict) else None
+    if not isinstance(inputs, dict):
+        return "CURRENT_INPUTS_MISSING"
+    rows = []
+    for role, row in inputs.items():
+        if not re.fullmatch(r"pdk_lef_\d+", str(role)):
+            continue
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            return f"CURRENT_PDK_LEF_ROW_INVALID: {role}"
+        rows.append((int(str(role).rsplit("_", 1)[1]),
+                     Path(row["path"]).resolve()))
+    actual = [path for _, path in sorted(rows)]
+    if actual != expected:
+        return ("CURRENT_PDK_LEF_SET_CHANGED: recorded="
+                f"{[str(path) for path in actual]} expected="
+                f"{[str(path) for path in expected]}")
+    return ""
+
+
 def clock_plan(project, plan, floorplan, sdcs, pdk):
     """OpenROAD reads the current floorplan and evaluates the declared SDC."""
     from _atomic_artefact import write_json
@@ -151,8 +204,9 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
         inputs[f"sdc_{i}"] = entry(project, path)
     if not sdcs:
         raise ValueError("CLOCK_PLAN_SDC_MISSING")
-    lefs = list(dict.fromkeys([pdk.tech_lef, pdk.cell_lef,
-                               *(getattr(pdk, "macro_lefs", []) or [])]))
+    # The runner already supplied any required IO views in macro_lefs. Use
+    # the same normalized load set that validates reuse of this measurement.
+    lefs = clock_plan_lef_paths(pdk)
     for i, path in enumerate(lefs):
         inputs[f"pdk_lef_{i}"] = entry(project, path, external=True)
     plan.parent.mkdir(parents=True, exist_ok=True)
