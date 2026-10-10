@@ -2645,6 +2645,42 @@ def _main() -> int:
         return next((rc or 2 for name, _, rc in reversed(plan)
                      if name == "phase3"), 2)
 
+    if _p3_skip_by_exit and "phase2" in reports:
+        # A front-end checkpoint operation ends at the requested cut too.
+        # Its child already checked the dispatched steps and their AI reviews.
+        # Do not ask a later whole-flow audit to decide this operation's rc.
+        p2_window = reports["phase2"]
+        fresh_window = bool(
+            p2_window.get("declared_window")
+            and _pl.published_here(
+                _phase_report_path(project, "phase2_one_shot.json"),
+                _phase_started["phase2"]))
+        window_rows = [(n, v, rc) for n, v, rc in plan if v != "SKIPPED"]
+        window_verdict, window_reasons = _roll_up(
+            window_rows, audit_axis={"state": "NOT_APPLICABLE",
+                                    "reason": "bounded operation; whole-flow audit not refreshed"})
+        if not fresh_window and window_verdict != "FAIL":
+            window_verdict = "NOT_MEASURED"
+            window_reasons.append("Phase-2 child did not publish a fresh window report")
+        summary = {
+            "program": "vibe_ic_one_shot_runner", "bounded": True,
+            **_delivery_route.report_label(project),
+            "declared_window": p2_window.get("declared_window", {}),
+            "phases": [{"name": n, "verdict": v, "rc": rc} for n, v, rc in plan],
+            "dispatched_verdict": window_verdict, "verdict": window_verdict,
+            "verdict_reasons": window_reasons,
+            "whole_flow_verdict": "NOT_MEASURED", "audit_verdict": "NOT_MEASURED",
+            "audit_scope": "bounded; whole-flow audit not refreshed",
+            "ai_judgements": p2_window.get("ai_judgements", {}),
+            "bounded_disclosures": p2_window.get("bounded_disclosures", []),
+            "not_refreshed_here": p2_window.get("not_refreshed_here", []),
+        }
+        out = _pl.report_path(project, "vibe_ic_one_shot.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _write_runner_summary(out, summary, project)
+        lock.release()
+        return 0 if window_verdict in ("PASS", "PASS_WITH_WAIVERS") else 1
+
     if _p3_window_ran:
         # A physical window ends here.  Mixed-signal merge, PDK finalisation
         # and the front-door whole-flow tail consume outputs beyond the cut.

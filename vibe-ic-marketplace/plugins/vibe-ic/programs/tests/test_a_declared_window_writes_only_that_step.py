@@ -171,6 +171,53 @@ def _dotted(call: ast.Call) -> str:
     return ""
 
 
+@pytest.mark.parametrize("child_verdict,child_rc,fresh,expected_rc", [
+    ("PASS", 0, True, 0),
+    ("FAIL", 1, True, 1),
+    ("NOT_MEASURED", 1, True, 1),
+    ("PASS", 0, False, 1),
+    ("PASS", 1, True, 1),
+])
+def test_frontdoor_checkpoint_rc_answers_for_fresh_dispatched_work(
+        tmp_path, child_verdict, child_rc, fresh, expected_rc):
+    """Drive the actual front-door return branch, including failure controls."""
+    from types import SimpleNamespace
+    runner = PROGRAMS / "vibe_ic_one_shot_runner.py"
+    main = called_main(ast.parse(runner.read_text()))
+    branch = next((n for n in main.body if isinstance(n, ast.If)
+                   and ast.unparse(n.test) == "_p3_skip_by_exit and 'phase2' in reports"), None)
+    assert branch is not None, "front door still lets whole-flow state fail a checkpoint operation"
+    captured = {}
+    frontdoor = _load("vibe_ic_one_shot_runner")
+    env = {
+        '_p3_skip_by_exit': True, 'project': tmp_path,
+        'reports': {'phase2': {'declared_window': {
+            'entry_step': '11', 'exit_step': '13',
+            'dispatched_step_ids': ['11', '12', '13']},
+            'verdict': child_verdict, 'ai_judgements': {}}},
+        'plan': [('phase1', 'SKIPPED', 0), ('phase2', child_verdict, child_rc),
+                 ('analog', 'SKIPPED', 0), ('phase3', 'SKIPPED', 0)],
+        '_phase_started': {'phase2': 1.0}, '_roll_up': frontdoor._roll_up,
+        '_phase_report_path': lambda *_: tmp_path / 'phase2.json',
+        '_pl': SimpleNamespace(published_here=lambda *_: fresh,
+                               report_path=lambda *_: tmp_path / 'frontdoor.json'),
+        '_delivery_route': SimpleNamespace(report_label=lambda *_: {'route': 'ic'}),
+        '_write_runner_summary': lambda _out, summary, _project: captured.update(summary),
+        'lock': SimpleNamespace(release=lambda: None),
+    }
+    function = ast.FunctionDef(name='operation', args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[branch], decorator_list=[])
+    tree = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    exec(compile(tree, str(runner), 'exec'), env)
+    assert env['operation']() == expected_rc
+    assert captured['bounded'] is True
+    assert captured['whole_flow_verdict'] == 'NOT_MEASURED'
+    assert captured['audit_verdict'] == 'NOT_MEASURED'
+    if expected_rc == 0:
+        assert captured['dispatched_verdict'] == 'PASS'
+
+
 def _guarded_by_bounded(root: ast.AST, target: str) -> bool:
     """Is EVERY call to `target` inside `root` reached only through a test that
     reads `_bounded`? Walks If nodes rather than trusting indentation."""
