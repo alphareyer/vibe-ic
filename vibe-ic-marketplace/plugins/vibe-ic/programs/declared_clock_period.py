@@ -469,8 +469,56 @@ def declared_io_delay_fraction(docs: Sequence[Path]) -> Dict[str, object]:
     return rep
 
 
+def declared_common_io_delay_ns(docs: Sequence[Path]) -> Dict[str, object]:
+    """Read an explicit absolute budget for both input and output delays.
+
+    A direction is never inferred from the other direction. The existing
+    common-delay SDC author can consume a combined declaration or an equal
+    input/output pair; incompatible declarations are reported for refusal.
+    """
+    pattern = re.compile(
+        r"\b(?P<direction>input\s+delay|output\s+delay|i/o\s*delay)"
+        r"\s*(?::|=|\bis\b)\s*"
+        r"(?P<value>[+-]?\d+(?:\.\d+)?)\s*"
+        r"(?P<unit>ps|ns|us|µs|μs|ms|s)\b", re.IGNORECASE)
+    scale = {'ps': 0.001, 'ns': 1.0, 'us': 1000.0, 'µs': 1000.0,
+             'μs': 1000.0, 'ms': 1e6, 's': 1e9}
+    values = {'input': [], 'output': []}
+    citations = []
+    denied = []
+    for path in docs:
+        try:
+            text = _strip_doc_comments(path.read_text(errors='ignore'))
+        except OSError:
+            continue
+        for match in pattern.finditer(text):
+            lo, hi = _sentence_scope(text, match.start(), match.end(),
+                                     before=_IO_WINDOW, after=_IO_WINDOW)
+            citation = f'{path}:{text.count(chr(10), 0, match.start()) + 1}'
+            if _is_denied(text[lo:hi]):
+                denied.append(citation)
+                continue
+            value = float(match['value']) * scale[match['unit'].lower()]
+            direction = match['direction'].lower()
+            sides = ('input', 'output') if direction.startswith('i/o') else (
+                'input' if direction.startswith('input') else 'output',)
+            for side in sides:
+                values[side].append(value)
+            citations.append(citation)
+    distinct = {round(value, 12) for side in values.values() for value in side}
+    complete = all(values.values())
+    return {
+        'delay_ns': next(iter(distinct)) if complete and len(distinct) == 1 else None,
+        'declared': bool(citations),
+        'ambiguous': len(distinct) > 1,
+        'complete': complete,
+        'denied': denied,
+        'note': 'absolute I/O budget at ' + '; '.join(dict.fromkeys(citations)),
+    }
+
+
 def docs_in(docs_dir: Path) -> List[Path]:
-    """Read supported plain-text constraint docs, preserving L9 before L1.
+    """Read layer constraints and general design inputs, L9 before L1.
 
     Phase 1 accepts both Markdown and UTF-8 text, case-insensitively. A table
     in either form must reach the same PDK-keyed consumer; ignoring text can
@@ -478,9 +526,15 @@ def docs_in(docs_dir: Path) -> List[Path]:
     """
     if not docs_dir.is_dir():
         return []
-    return [doc for prefix in ("L9_", "L1_")
-            for doc in sorted(docs_dir.glob(prefix + "*"))
-            if doc.is_file() and doc.suffix.lower() in (".md", ".txt")]
+    plain = [doc for doc in sorted(docs_dir.iterdir())
+             if doc.is_file() and doc.suffix.lower() in (".md", ".txt")]
+    layered = [doc for prefix in ('L9_', 'L1_') for doc in plain
+               if doc.name.startswith(prefix)]
+    # The front door also accepts an ordinary design.md / description.txt.
+    # Its explicit constraints are input regardless of its filename. Named
+    # non-constraint layers retain their own scope (e.g. L2 background).
+    general = [doc for doc in plain if not re.match(r'^L\d+(?:_|\b)', doc.stem)]
+    return layered + general
 
 
 def library_name_from_liberty(liberty_path: str) -> str:

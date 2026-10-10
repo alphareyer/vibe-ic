@@ -4246,8 +4246,7 @@ def io_delay_contract(declared_ns: Optional[float], plugin_ns: float,
 
 
 def _declared_io_delay_ns(project: Path, clk_period_ns: float) -> tuple:
-    """(io_delay_ns, disclosure) for a design that declares its I/O delay as a
-    FRACTION of its own clock period, else (None, "").
+    """(io_delay_ns, disclosure) for a declared absolute or relative I/O budget.
 
     The auto-SDC has always emitted a fixed `2` for both I/O delays. That
     number satisfies a "20 % of the period" declaration at exactly one period
@@ -4262,10 +4261,23 @@ def _declared_io_delay_ns(project: Path, clk_period_ns: float) -> tuple:
     """
     try:
         import declared_clock_period as _dcp
-        rep = _dcp.declared_io_delay_fraction(
-            _dcp.docs_in(project / "input" / "docs"))
+        docs = _dcp.docs_in(project / "input" / "docs")
+        rep = _dcp.declared_io_delay_fraction(docs)
+        absolute = _dcp.declared_common_io_delay_ns(docs)
     except Exception:
         return (None, "")
+    if absolute['ambiguous']:
+        raise ValueError('IO_DELAY_DECLARATION_CONFLICT: ' + absolute['note'])
+    if absolute['declared'] and not absolute['complete']:
+        raise ValueError('IO_DELAY_DIRECTION_INCOMPLETE: ' + absolute['note'])
+    if absolute['delay_ns'] is not None:
+        ns = float(absolute['delay_ns'])
+        if rep.get('fraction') is not None and clk_period_ns:
+            relative_ns = float(rep['fraction']) * float(clk_period_ns)
+            if not math.isclose(ns, relative_ns, rel_tol=1e-9, abs_tol=1e-12):
+                raise ValueError('IO_DELAY_DECLARATION_CONFLICT: absolute and relative budgets disagree')
+        return (ns, '# VIBEIC_DECLARED_IO_DELAY: ' + absolute['note'] +
+                f'; {ns:g} ns for both input and output delay\n')
     frac = rep.get("fraction")
     if frac and not clk_period_ns:
         # The design DID declare a fraction; what is missing is the period to
