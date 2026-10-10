@@ -74,6 +74,40 @@ def test_a_low_voltage_library_reads_the_LV_rule(monkeypatch):
     assert "DF.13_LV/DF.14_LV" in why
 
 
+def test_magic_deck_reads_both_actual_latchup_rules(monkeypatch):
+    monkeypatch.setattr(R, "_pdk_dir_of", lambda pdk: "/foss/pdks/sky130A")
+    deck = (' "N-diff distance to P-tap must be < 15.0um (LU.2)"\n'
+            ' "P-diff distance to N-tap must be < 15.0um (LU.3)"\n')
+    monkeypatch.setattr(R, "_read_pdk_text", lambda path, container=None:
+                        deck if path.endswith("magic/sky130A.tech") else "")
+    D, why = R.deck_tap_max_distance_um(_pdk(name="sky130A"))
+    assert D == 15.0
+    assert why == "libs.tech/magic/sky130A.tech: LU.2/LU.3"
+
+
+def test_magic_pair_keeps_the_stricter_distance(monkeypatch):
+    monkeypatch.setattr(R, "_pdk_dir_of", lambda pdk: "/foss/pdks/sky130A")
+    deck = (' "N-diff distance to P-tap must be < 15.0um (LU.2)"\n'
+            ' "P-diff distance to N-tap must be < 12.0um (LU.3)"\n')
+    monkeypatch.setattr(R, "_read_pdk_text", lambda path, container=None:
+                        deck if path.endswith("magic/sky130A.tech") else "")
+    assert R.deck_tap_max_distance_um(_pdk(name="sky130A"))[0] == 12.0
+
+
+def test_partial_or_unrelated_magic_rule_is_not_a_declaration(monkeypatch):
+    monkeypatch.setattr(R, "_pdk_dir_of", lambda pdk: "/foss/pdks/sky130A")
+    for deck in (
+        ' "N-diff distance to P-tap must be < 15.0um (LU.2)"\n',
+        ' "N-diff distance to P-tap in deep nwell.must be < 15.0um (LU.2.1)"\n'
+        ' "P-diff distance to N-tap must be < 15.0um (LU.3)"\n',
+        ' "N-diff distance to P-tap must be < 0um (LU.2)"\n'
+        ' "P-diff distance to N-tap must be < 15.0um (LU.3)"\n',
+    ):
+        monkeypatch.setattr(R, "_read_pdk_text", lambda path, container=None, d=deck:
+                            d if path.endswith("magic/sky130A.tech") else "")
+        assert R.deck_tap_max_distance_um(_pdk(name="sky130A"))[0] is None
+
+
 def test_an_undetermined_class_reads_the_stricter(monkeypatch):
     """A coverage rule may not fail open."""
     _patch(monkeypatch, volts=None)

@@ -5425,6 +5425,10 @@ _DECK_TAP_RULE_RELS = (
 _DECK_TAP_RULE_RE = re.compile(
     r"#\s*Rule\s+(DF\.1[34]_(?:LV|MV))\s*:[^\n]*?is\s+([0-9]+(?:\.[0-9]+)?)\s*um",
     re.I)
+_MAGIC_TAP_RULE_RE = re.compile(
+    r'^\s*"(N-diff distance to P-tap|P-diff distance to N-tap) '
+    r'must be <\s*([0-9]+(?:\.[0-9]+)?)um\s*\((LU\.[23])\)"\s*$',
+    re.M)
 #: Above this nominal supply the medium-voltage rules are the ones that fire.
 _MV_VOLTAGE_FLOOR_V = 2.5
 
@@ -5460,8 +5464,8 @@ def deck_tap_max_distance_um(pdk: "PdkConfig", container: Optional[str] = None
                              ) -> "Tuple[Optional[float], str]":
     """(D, source) — the max tap distance the PDK's DRC deck REQUIRES.
 
-    Returns the value of the DF.13/DF.14 pair for the voltage class of the
-    cells this design actually uses, named with the rules it came from.
+    Reads the installed deck: GF180's voltage-qualified DF.13/DF.14 pair,
+    or Magic's complete N-diff/P-tap and P-diff/N-tap LU.2/LU.3 pair.
     """
     root = _pdk_dir_of(pdk)
     if not root:
@@ -5473,9 +5477,21 @@ def deck_tap_max_distance_um(pdk: "PdkConfig", container: Optional[str] = None
         if text:
             rel_used = rel
             break
+    if not _DECK_TAP_RULE_RE.search(text):
+        magic_rel = f"libs.tech/magic/{Path(root.rstrip('/')).name}.tech"
+        magic_text = _read_pdk_text(f"{root.rstrip('/')}/{magic_rel}", container) or ""
+        magic_rules = {}
+        for kind, number, rule in _MAGIC_TAP_RULE_RE.findall(magic_text):
+            expected = "LU.2" if kind.startswith("N-diff") else "LU.3"
+            value = float(number)
+            if rule == expected and math.isfinite(value) and value > 0:
+                magic_rules[rule] = min(value, magic_rules.get(rule, value))
+        if set(magic_rules) == {"LU.2", "LU.3"}:
+            return min(magic_rules.values()), f"{magic_rel}: LU.2/LU.3"
     if not text:
         return None, ("no DRC rule deck found at "
-                      + " or ".join(_DECK_TAP_RULE_RELS))
+                      + " or ".join(_DECK_TAP_RULE_RELS)
+                      + f"; no complete LU.2/LU.3 pair in {magic_rel}")
     found: Dict[str, float] = {}
     for rule, value in _DECK_TAP_RULE_RE.findall(text):
         try:
@@ -78170,6 +78186,8 @@ def _default_step15_with_backend_receipt(
     row.extras = extras
     if row.status == "PASS" and backend.get("verdict") != "PASS":
         row.status = backend.get("verdict", "NOT_MEASURED")
+        if row.status == "NOT_MEASURED":
+            row.reason_class = _V.ReasonClass.UPSTREAM_REFUSED
         row.detail = (row.detail + "; current backend consumer: " +
                       str(backend.get("detail", ""))).strip("; ")
     return row

@@ -639,6 +639,7 @@ def _producer_target_has_content(path: Path) -> bool:
 
 def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
     """Bind reuse to source and exact input bytes, independent of wall-clock run id."""
+    project = project.resolve()
     excluded = {REPORT_REL, *(row["target"] for row in clauses)}
     files = {}
     for path in sorted(project.rglob("*")):
@@ -646,7 +647,20 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
         if relative in excluded:
             continue
         if path.is_symlink():
-            raise ValueError("producer input is a symlink: " + relative)
+            # Future steps publish their output aliases before producing the
+            # files. Like an absent regular output, that alias contributes no
+            # current input bytes; the owning step checks it when it is due.
+            if not path.exists():
+                continue
+            # The canonical step layout publishes local aliases of the same
+            # project's phase outputs. Hash the real input once, rather than
+            # refusing an alias emitted by our own runner.
+            path = path.resolve(strict=True)
+            if not path.is_relative_to(project):
+                raise ValueError("producer input symlink leaves project: " + relative)
+            relative = path.relative_to(project).as_posix()
+            if relative in excluded:
+                continue
         if path.is_file():
             # The audit can leave gate reports beside the producer's real
             # inputs.  Including those bytes makes a later audit rewrite the
@@ -665,11 +679,15 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
             elif not _is_run_owned_evidence(project, path, for_input=True):
                 continue
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-    source = subprocess.check_output(
-        ["git", "-C", str(PROGRAMS_DIR), "rev-parse", "HEAD"], text=True).strip()
     source_files = {str(path): _target_digest(path) for path in
                     [Path(__file__), FLOW_YAML, *
                      (PROGRAMS_DIR / (row["program"] + ".py") for row in clauses)]}
+    if any(digest is None for digest in source_files.values()):
+        raise ValueError("producer source has no readable current content")
+    # Installed plugin packages contain source files, not repository metadata.
+    # These exact bytes also detect a source edit before it is committed.
+    source = "sha256:" + hashlib.sha256(
+        json.dumps(source_files, sort_keys=True).encode()).hexdigest()
     return {"source_sha": source, "source_files": source_files, "files": files,
             "clauses": clauses}
 

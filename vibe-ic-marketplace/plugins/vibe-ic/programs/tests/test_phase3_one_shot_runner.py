@@ -355,6 +355,31 @@ def test_default_step15_direct_invocation_binds_backend_receipt_before_consumer(
         < main.index("flow_declared_producer_run.py")
 
 
+def test_default_step15_consumer_refusal_survives_headline_rollup(tmp_path, monkeypatch):
+    import flow_declared_producer_run as declared
+    import execution_backend_worker as worker
+
+    def native(project, *_args, **_kwargs):
+        pnr = project / "phase3/stage3/pnr"
+        pnr.mkdir(parents=True)
+        (pnr / "floorplan.def").write_text("floorplan\n")
+        (pnr / "pdn.done").write_text("pdn\n")
+        return RUNNER.StepResult("pnr", "PASS", 0.0, "native completed")
+
+    def refused(*_args, **_kwargs):
+        raise ValueError("current producer input missing")
+
+    monkeypatch.setattr(RUNNER, "step_pnr", native)
+    monkeypatch.setattr(declared, "run_for_step", refused)
+    monkeypatch.setattr(worker, "evaluate", lambda *_args, **_kwargs:
+                        pytest.fail("refused producer cannot authorize consumer"))
+    row = RUNNER._default_step15_with_backend_receipt(
+        tmp_path, "chip_top", None, "fixture", "auto", 0.30)
+    assert row.status == "NOT_MEASURED"
+    assert row.reason_class == RUNNER._V.ReasonClass.UPSTREAM_REFUSED
+    assert RUNNER._aggregate_verdict([row]) != "PASS"
+
+
 def _real_pdk(monkeypatch=None, **over):
     """A REAL `PdkConfig`, built from the runner's own dataclass.
 

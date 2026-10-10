@@ -135,6 +135,70 @@ def test_audit_role_gate_output_is_excluded_but_producer_role_survives(tmp_path)
     assert "reports/analog/a1_spec_produced.json" in identity["files"]
 
 
+def test_canonical_local_input_alias_binds_actual_phase_output(tmp_path):
+    target = tmp_path / "phase1/generated_docs/L1_DATASHEET.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"spec": "first"}\n')
+    alias = tmp_path / "steps/phase1/D1/L1_DATASHEET.json"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(target)
+    first = declared._current_input_identity(tmp_path, [])
+    assert "phase1/generated_docs/L1_DATASHEET.json" in first["files"]
+    assert "steps/phase1/D1/L1_DATASHEET.json" not in first["files"]
+    target.write_text('{"spec": "changed"}\n')
+    second = declared._current_input_identity(tmp_path, [])
+    assert first != second
+
+
+def test_local_alias_cannot_bind_a_file_outside_this_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "other.json"
+    outside.write_text('{}\n')
+    (project / "alias.json").symlink_to(outside)
+    with pytest.raises(ValueError, match="leaves project"):
+        declared._current_input_identity(project, [])
+
+
+def test_installed_package_input_identity_uses_actual_source_bytes(tmp_path, monkeypatch):
+    source = tmp_path / "installed_programs"
+    source.mkdir()
+    writer = source / "stage2_compliance.py"
+    writer.write_text("print('first source')\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(declared, "PROGRAMS_DIR", source)
+    monkeypatch.setattr(declared.subprocess, "check_output", lambda *_a, **_k:
+                        pytest.fail("installed package has no Git metadata"))
+    clauses = [{"program": "stage2_compliance", "target": "report.json"}]
+    first = declared._current_input_identity(project, clauses)
+    assert first["source_sha"].startswith("sha256:")
+    writer.write_text("print('changed source')\n")
+    second = declared._current_input_identity(project, clauses)
+    assert first["source_sha"] != second["source_sha"]
+
+
+def test_future_output_alias_does_not_block_current_step_producer(tmp_path, monkeypatch):
+    clause = _reuse_clause()
+    (tmp_path / "native.def").write_text("current native output\n")
+    future = tmp_path / "steps/phase3/future/corner_test_vectors.json"
+    future.parent.mkdir(parents=True)
+    future.symlink_to(tmp_path / "phase3/stage4/foundry_handoff/corner_test_vectors.json")
+
+    def producer(project, row, timeout):
+        (project / row["target"]).write_text(json.dumps(_producer_report()))
+        return {**row, "rc": 0, "executed": True,
+                "target_exists_after": True, "authorship": "producer"}
+
+    monkeypatch.setattr(declared, "declared_producer_clauses", lambda: [clause])
+    monkeypatch.setattr(declared, "_run_one", producer)
+    result = declared.run_for_step(tmp_path, "15")
+    assert result["verdict"] == "PRODUCED"
+    assert result["executed"] == 1
+    assert not result["invalid_results"]
+    assert not future.exists()
+
+
 def test_backend_producer_orders_current_declared_outputs_before_consumer(
         tmp_path, monkeypatch):
     events = []
