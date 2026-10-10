@@ -4,6 +4,7 @@ import json
 import shutil
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import _plugin_tree  # noqa: F401
@@ -40,6 +41,33 @@ def test_direct_step8_keeps_existing_worker(tmp_path, monkeypatch):
                         calls.append(a) or {'status': 'ADOPTED'})
     assert D.step_sdc_validation(tmp_path).status == 'PASS'
     assert calls == [(tmp_path, '8')]
+
+
+@pytest.mark.parametrize('present', [True, False])
+def test_default_direct_step8_runs_canonical_checks_without_controller(tmp_path, monkeypatch, present):
+    if present:
+        project(tmp_path)
+    put(tmp_path / 'phase3/librelane_switch.json', {'steps': {'8': 'direct'}})
+    monkeypatch.setattr(E, '_ordinary_runtime', {'policy': {'mode': 'default'}})
+    monkeypatch.setattr(E, 'dispatch_fixed_step', lambda *_a, **_k:
+                        pytest.fail('Default direct Step 8 dispatched a Controller'))
+    row = D.step_sdc_validation(tmp_path)
+    assert row.status == ('PASS' if present else 'FAIL'), row.detail
+    report = tmp_path / 'reports/phase2/sdc_check.json'
+    assert report.is_file()
+    assert str(report) in row.output_files
+    assert 'deferred_until' not in row.extras
+
+
+def test_default_direct_step8_refuses_rc_zero_without_fresh_output(tmp_path, monkeypatch):
+    put(tmp_path / 'phase3/librelane_switch.json', {'steps': {'8': 'direct'}})
+    put(tmp_path / 'reports/phase2/sdc_check.json', {'stale': 'PASS'})
+    monkeypatch.setattr(E, '_ordinary_runtime', {'policy': {'mode': 'default'}})
+    monkeypatch.setattr(D, '_run', lambda *_a, **_k: (0, '', ''))
+    row = D.step_sdc_validation(tmp_path)
+    assert row.status == 'FAIL'
+    assert 'SDC_CHECK_OUTPUT_ABSENT' in row.detail
+    assert row.output_files == []
 
 
 def project(tmp_path):
@@ -180,3 +208,84 @@ def test_postcheck_is_wired_only_after_passing_prelayout():
                ast.unparse(n.test) == "_pls.status == 'PASS'"]
     assert any('step_sdc_validation_post_prelayout(project, effective_top)' in
                ast.unparse(n) for n in guarded)
+
+
+@pytest.mark.parametrize('producer_status', ['PASS', 'FAIL', 'NOT_MEASURED'])
+@pytest.mark.parametrize('synth_status', ['PASS', 'NOT_MEASURED'])
+def test_phase2_finishes_deferred_step8_before_its_audit(
+        tmp_path, monkeypatch, producer_status, synth_status):
+    # A Phase-2 audit reads the real Step-8 gate before Phase 3 can start.
+    # Tool file writes are substituted; the Step-8 consumers remain real.
+    import sdc_syntax_check as syntax
+    gate, _deck, _netlist = project(tmp_path)
+    gate.unlink()
+    assert not syntax.audit(str(tmp_path)).passed
+    early = D.step_sdc_validation(tmp_path)
+    synth = D.StepResult('yosys_synth', synth_status, 0, 'mapped producer',
+                         output_files=[str(_netlist)], extras={'synth_top': 'top'},
+                         reason_class='inconclusive' if synth_status == 'NOT_MEASURED' else '')
+    plan = [early, synth]
+    calls = []
+
+    def native(current, top, pdk, container):
+        calls.append(('native', current, top))
+        if producer_status == 'PASS':
+            LP.judge_sdc(current / 'phase3/librelane/prelayout/design_sdc',
+                         {'PNR_SDC_FILE': str(_deck)}, _deck, gate)
+        return D.StepResult('prelayout_signoff', producer_status, 0, 'tool edge',
+                            reason_class='tool_absent' if producer_status == 'NOT_MEASURED' else '')
+
+    monkeypatch.setattr(P, 'step_prelayout_signoff', native)
+    monkeypatch.setattr(D, '_phase2_pdk_config', lambda *_: object())
+    tree = ast.parse(Path(D.__file__).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    blocks = [n for n in main.body if isinstance(n, ast.If) and
+              any(isinstance(call, ast.Call) and
+                  isinstance(call.func, ast.Name) and
+                  call.func.id == 'step_sdc_validation_post_prelayout'
+                  for call in ast.walk(n))]
+    assert len(blocks) == 1, 'Phase 2 audits Step 8 before its native producer runs'
+    block = blocks[0]
+    audit = next(n for n in ast.walk(main) if isinstance(n, ast.Call) and
+                 isinstance(n.func, ast.Name) and n.func.id == '_audit_after_declared_producers')
+    assert synth is plan[-1]
+    synth_audit = next(n for n in ast.walk(main) if isinstance(n, ast.Call) and
+                       isinstance(n.func, ast.Name) and n.func.id == 'step_synth_log_audit')
+    assert synth_audit.lineno < block.lineno
+    assert block.lineno < audit.lineno
+    env = dict(vars(D), project=tmp_path, plan=plan, _synth_row=synth,
+               args=SimpleNamespace(pdk='gf180mcuD', container='unused'),
+               _execution=SimpleNamespace(_ordinary_runtime={'policy': {'mode': 'default'}}))
+    exec(compile(ast.Module(body=[block], type_ignores=[]), '<phase2-handoff>', 'exec'), env)
+    assert calls == [('native', tmp_path, 'top')]
+    if producer_status == 'PASS':
+        assert plan[-1].name == 'sdc_validation'
+        assert plan[-1].status == 'PASS', plan[-1].detail
+        assert syntax.audit(str(tmp_path)).passed
+        assert D._aggregate_verdict(plan) == synth_status
+    else:
+        assert not gate.exists()
+        assert not syntax.audit(str(tmp_path)).passed
+        assert D._aggregate_verdict(plan) == producer_status
+
+
+@pytest.mark.parametrize('mode,synth_status', [('default', 'NOT_APPLICABLE'), ('ultra', 'PASS')])
+def test_phase2_handoff_preserves_checkpoint_and_ultra_paths(tmp_path, monkeypatch, mode, synth_status):
+    tree = ast.parse(Path(D.__file__).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    block = next(n for n in main.body if isinstance(n, ast.If) and
+                 any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and
+                     c.func.id == 'step_sdc_validation_post_prelayout' for c in ast.walk(n)))
+    synth = D.StepResult('yosys_synth', synth_status, 0, 'checkpoint',
+                         extras={'synth_top': 'top'},
+                         declared_by='--entry-step 11' if synth_status == 'NOT_APPLICABLE' else '')
+    early = D.StepResult('sdc_validation', 'NOT_MEASURED', 0, 'deferred',
+                         extras={'deferred_until': 'post_prelayout'}, reason_class='upstream_failed')
+    plan = [early, synth]
+    monkeypatch.setattr(P, 'step_prelayout_signoff', lambda *_:
+                        pytest.fail('upstream checkpoint or Ultra native path was dispatched again'))
+    env = dict(vars(D), project=tmp_path, plan=plan, _synth_row=synth,
+               args=SimpleNamespace(pdk='gf180mcuD', container='unused'),
+               _execution=SimpleNamespace(_ordinary_runtime={'policy': {'mode': mode}}))
+    exec(compile(ast.Module(body=[block], type_ignores=[]), '<phase2-handoff>', 'exec'), env)
+    assert plan == [early, synth]

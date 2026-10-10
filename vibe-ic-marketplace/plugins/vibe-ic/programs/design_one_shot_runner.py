@@ -18671,6 +18671,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                 project, synth_top, pdk, container,
                 _fallback_handoff=_step9_handoff)
             row.name = "yosys_synth"
+            row.extras['synth_top'] = synth_top
             return row
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("yosys_synth", "FAIL", time.time() - t0, str(exc))
@@ -19580,13 +19581,37 @@ def step_sdc_validation(project: Path) -> StepResult:
     mode = _llc.selected_mode(project, '8')
     import execution_policy as _execution
     _runtime = _execution._ordinary_runtime
-    # Default's Step-8 consumer is evaluated after the canonical pre-layout
+    # Default's LibreLane Step-8 consumer runs after the canonical pre-layout
     # producer has emitted the mapped netlist and current gate receipt.  The
     # early phase-2 row remains an explicit deferred observation; it must not
     # call the generic frontend Controller merely because the direct tool
     # switch has no pre-synth consumer yet.
     if (_runtime is not None and
             _runtime.get('policy', {}).get('mode') == 'default'):
+        if mode == 'direct':
+            # Direct SDC checks need no mapped netlist or tool-arm context.
+            outputs = []
+            checks = (
+                ('sdc_syntax_check', project / 'reports/phase2/sdc_check.json', []),
+                ('sdc_validator_check', project / 'reports/sdc_validator.json',
+                 ['--l8', str(project / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json')]),
+            )
+            for name, report, extra in checks:
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.unlink(missing_ok=True)
+                rc, out, err = _run([sys.executable, str(PROGRAMS_DIR / (name + '.py')),
+                                     str(project), *extra, '--json', str(report)])
+                if rc == 0 and (not report.is_file() or not report.stat().st_size):
+                    return StepResult('sdc_validation', 'FAIL', 0.0,
+                                      f'SDC_CHECK_OUTPUT_ABSENT: {name}', outputs)
+                if report.is_file():
+                    outputs.append(str(report))
+                if rc:
+                    return StepResult('sdc_validation', 'NOT_MEASURED' if rc == 2 else 'FAIL',
+                                      0.0, f'{name} rc={rc}: {(out + err)[-500:]}', outputs,
+                                      reason_class=_V.ReasonClass.INPUT_ABSENT if rc == 2 else '')
+            return StepResult('sdc_validation', 'PASS', 0.0,
+                              'canonical direct SDC checks passed', outputs, extras={'mode': mode})
         return StepResult('sdc_validation', 'NOT_MEASURED', 0.0,
                           'SDC_VALIDATION_DEFERRED: Default canonical '
                           'prelayout producer must emit the mapped netlist '
@@ -26490,7 +26515,29 @@ def main() -> int:
     # and left no usable log" are different facts, and only the step's own
     # verdict can tell them apart. ADVISORY — the status is always "ADVISORY",
     # which `_aggregate_verdict` enumerates as green.
-    plan.append(step_synth_log_audit(project, plan[-1]))
+    _synth_row = plan[-1]
+    plan.append(step_synth_log_audit(project, _synth_row))
+
+    # Phase 2's audit consumes Step 8. Finish its deferred native check here,
+    # when the mapped netlist exists, so it cannot block the Phase 3 producer
+    # that previously was the only caller. Reuse the existing canonical tool.
+    if (_execution._ordinary_runtime is not None
+            and _execution._ordinary_runtime.get('policy', {}).get('mode') == 'default'
+            and _synth_row.status in ('PASS', 'NOT_MEASURED')
+            and _synth_row.output_files
+            and _synth_row.extras.get('synth_top')
+            and any(s.name == 'sdc_validation' and
+                    s.extras.get('deferred_until') == 'post_prelayout' for s in plan)):
+        import phase3_one_shot_runner as _p3
+        import librelane_contract as _sdc_ll
+        if _sdc_ll.selected_mode(project, '8') in ('librelane', 'dual'):
+            _prelayout_top = _synth_row.extras['synth_top']
+            _pls = _p3.step_prelayout_signoff(
+                project, _prelayout_top, _phase2_pdk_config(project, args.pdk),
+                args.container)
+            plan.append(_pls)
+            if _pls.status == 'PASS':
+                plan.append(step_sdc_validation_post_prelayout(project, _prelayout_top))
 
     # Step 4b — QSF / SDC auto-gen (Wave 72). Runs even when --skip-hardware
     # so the QSF/SDC artefacts are present for downstream lints/audits.
