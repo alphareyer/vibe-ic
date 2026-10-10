@@ -1458,6 +1458,18 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         if ring.get('connect_to_pad_layers'):
             _set(result, sources, 'PDN_CORE_RING_CONNECT_TO_PADS', True,
                  f'programs/pdk_registry.json.pdks[name={pdk}].pdn_ring.connect_to_pad_layers')
+    elif has_pads and plan.get('instances'):
+        # A produced core supply pair also needs a core-to-pad connection when
+        # the registry has no custom ring geometry. Use the existing native
+        # PDN ring; its selected PDK owns layers, widths, spacing and offsets.
+        supplied = {pad.get('kind') for pad in plan.get('core_supply_pads', [])
+                    if isinstance(pad, dict) and pad.get('master') and pad.get('terminal')
+                    and pad.get('port') == plan.get(
+                        'power_net' if pad.get('kind') == 'power' else 'ground_net')}
+        if {'power', 'ground'} <= supplied:
+            source = f'{CHIP_TOP_RECORD_REL}.power_pad_plan.core_supply_pads'
+            _set(result, sources, 'PDN_CORE_RING', True, source)
+            _set(result, sources, 'PDN_CORE_RING_CONNECT_TO_PADS', True, source)
     # Strap width/pitch: this design's own pre-route EM search (T103), measured
     # with PSM on its placed, clock-treed layout. Absent record -> absent keys.
     from _ppa.pdn_em_presweep import librelane_pdn_config

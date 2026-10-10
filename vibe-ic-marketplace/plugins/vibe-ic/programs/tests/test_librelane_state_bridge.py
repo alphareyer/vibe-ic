@@ -927,3 +927,30 @@ def test_an_unrunnable_tcl_probe_adds_no_alias_and_is_not_a_capability_verdict(m
         returncode=1 if 'bash' in cmd else 0, stdout='', stderr=''))
     cap = contract.image_capability('stubbed')
     assert cap['openroad_aliases'] == {} and cap['tcl_probe'].startswith('NOT_MEASURED')
+
+
+@pytest.mark.parametrize("scheduled", [True, False], ids=["actual_core_supply_pair", "no_supply_instances"])
+def test_native_ring_connects_produced_core_supply_pair_without_registry_ring(tmp_path, scheduled):
+    p = _chip_design(tmp_path, pdk="sky130A")
+    put(p / "reports/phase3/io_pad_chip_top.json", {
+        "verdict": "WROTE",
+        "power_pad_plan": {
+            "power_net": "VCORE", "ground_net": "GCORE",
+            "core_supply_pads": [
+                {"kind": "power", "port": "VCORE", "master": "pdk_power_pad", "terminal": "V_BOND"},
+                {"kind": "ground", "port": "GCORE", "master": "pdk_ground_pad", "terminal": "G_BOND"},
+            ],
+            "instances": ["u_supply_power", "u_supply_ground"] if scheduled else [],
+        },
+    })
+    out = contract.emit_config(p, "sky130A", p / "cfg.json")
+    src = json.loads((p / "cfg.provenance.json").read_text())
+    if scheduled:
+        assert out.get("PDN_CORE_RING") is True
+        assert out.get("PDN_CORE_RING_CONNECT_TO_PADS") is True
+        assert "power_pad_plan.core_supply_pads" in src["PDN_CORE_RING"]
+        # Native PDK/runtime owns legal layers, widths, spacing and offsets.
+        assert not {"PDN_CORE_RING_CONNECT_TO_PAD_LAYERS", "PDN_CORE_RING_HWIDTH",
+                    "PDN_CORE_RING_HOFFSET"} & set(out)
+    else:
+        assert not {"PDN_CORE_RING", "PDN_CORE_RING_CONNECT_TO_PADS"} & set(out)
