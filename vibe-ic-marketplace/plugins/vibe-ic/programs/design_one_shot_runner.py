@@ -26823,7 +26823,10 @@ def main() -> int:
     summary.update(_io.report_fields(project))
     _io.demote_verdict(summary)    # a step the flow did not do: never PASS
     import ai_signed_judgement as _ai_judgement
-    summary["ai_judgements"] = _ai_judgement.pending(project, ("1", "4", "5"))
+    _ai_steps = ("1", "4", "5")
+    if _bounded:
+        _ai_steps = tuple(s for s in _ai_steps if s in _window_step_ids())
+    summary["ai_judgements"] = _ai_judgement.pending(project, _ai_steps)
     _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
     if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
         summary["verdict"] = "NOT_MEASURED"

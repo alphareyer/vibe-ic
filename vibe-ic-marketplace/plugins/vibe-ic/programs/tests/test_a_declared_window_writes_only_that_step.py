@@ -126,6 +126,42 @@ def test_resume_does_not_repeat_upstream_synthesis(entry, exit_site, expected):
         assert 'upstream' in row.detail
 
 
+@pytest.mark.parametrize("window,queried,verdict", [
+    (None, ("1", "4", "5"), "NOT_MEASURED"),
+    ({"11", "12", "13"}, (), "PASS"),
+    ({"4"}, ("4",), "NOT_MEASURED"),
+    ({"1", "2", "3"}, ("1",), "NOT_MEASURED"),
+])
+def test_ai_review_is_required_for_the_dispatched_window(window, queried, verdict):
+    """Earlier pending reviews cannot demote a different bounded operation.
+
+    Whole-flow and in-window pending reviews remain mandatory.
+    """
+    from types import SimpleNamespace
+    nodes = []
+    for node in _main_node().body:
+        text = ast.unparse(node)
+        if (isinstance(node, ast.Assign) and text.startswith('_ai_steps =')
+                or isinstance(node, ast.If) and '_ai_steps = tuple' in text
+                or isinstance(node, ast.Assign) and "summary['ai_judgements'] =" in text
+                or isinstance(node, ast.Expr) and '_ai_judgement.demote_runner_rows' in text
+                or isinstance(node, ast.If) and text.startswith("if summary['ai_judgements'] and")):
+            nodes.append(node)
+    seen = []
+    def pending(_project, steps):
+        seen.append(steps)
+        return [{'step_id': s, 'status': 'AWAITING_SIGNED_JUDGEMENT'} for s in steps]
+    env = {'project': Path('/supplied/checkpoint'), '_bounded': window is not None,
+           '_window_step_ids': lambda: window,
+           '_ai_judgement': SimpleNamespace(pending=pending,
+               demote_runner_rows=lambda *_: None),
+           'summary': {'steps': [], 'verdict': 'PASS'}}
+    tree = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
+    exec(compile(tree, str(RUNNER), 'exec'), env)
+    assert seen == [queried]
+    assert env['summary']['verdict'] == verdict
+
+
 def _dotted(call: ast.Call) -> str:
     f = call.func
     if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
