@@ -25543,13 +25543,13 @@ def main() -> int:
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)
 
     project = args.project.resolve()
+    if not project.is_dir():
+        print(f"ERROR: not a directory: {project}", file=sys.stderr)
+        return 2
     _bootstrap_execution_policy(
         _execution, project, top=args.top_name, container=args.container,
         ic_class=getattr(args, 'ic_class', None),
         skip_analog=bool(args.skip_analog), pdk_name=args.pdk)
-    if not project.is_dir():
-        print(f"ERROR: not a directory: {project}", file=sys.stderr)
-        return 2
     # Capture the dispatch context before any phase producer publishes a
     # report. Every write below passes this same value explicitly; a fresh
     # early refusal report therefore cannot become an unbound witness merely

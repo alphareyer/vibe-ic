@@ -77,6 +77,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import _docker_memory as _dmem  # noqa: E402
 
 __all__ = [
     "run_in_container",
@@ -227,8 +228,9 @@ def _unguarded_exec_argv(container: str, *rest: str,
         if opts[index] not in allowed or index + 1 >= len(opts):
             raise ValueError("unsupported fresh-probe option")
         index += 2
-    argv = ["docker", "run", "--rm", "--init", "--memory", str(memory),
-            "--memory-swap", str(memory), "--label", "vibeic.a4.probe=1"]
+    argv = ["docker", "run", "--rm", "--init",
+            *_dmem.docker_memory_flags({"VIBEIC_DOCKER_MEMORY": str(memory)}),
+            "--label", "vibeic.a4.probe=1"]
     for mount in selected.get("Mounts", []):
         if mount.get("Type") != "bind":
             raise ValueError("fresh probe requires explicit bind mounts")
