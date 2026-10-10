@@ -49,7 +49,7 @@ def test_default_bootstrap_is_observationally_inert(tmp_path, monkeypatch):
 
 
 def test_canonical_default_bootstrap_reaches_producer_receipt_and_consumer(
-        tmp_path):
+        tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
     issued = R.real_entry('IC', 'default', project)
@@ -64,13 +64,30 @@ def test_canonical_default_bootstrap_reaches_producer_receipt_and_consumer(
     l8.parent.mkdir(parents=True)
     l8.write_text('{"clocks":{"clk":{"period_ns":10}}}\n')
 
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default called a candidate Controller')
+
+    monkeypatch.setattr(em.Controller, 'run', forbidden)
+    monkeypatch.setattr(em.Controller, 'adopt', forbidden)
     runtime = policy.bootstrap(project, parameters={'skip_analog': True})
     assert runtime is not None
     assert runtime['policy']['mode_label'] == 'default-mode'
     import design_one_shot_runner as design
+    syntax_report = project / 'reports/phase2/sdc_check.json'
+    validator_report = project / 'reports/sdc_validator.json'
+    assert not syntax_report.exists() and not validator_report.exists()
     consumed = design.step_sdc_validation(project)
-    assert consumed.status == 'NOT_MEASURED', consumed
-    assert consumed.extras['deferred_until'] == 'post_prelayout'
+    assert consumed.status == 'PASS', consumed
+    assert consumed.extras['mode'] == 'direct'
+    assert set(consumed.output_files) == {str(syntax_report), str(validator_report)}
+    syntax = json.loads(syntax_report.read_text())
+    assert syntax['passed'] is True
+    assert syntax['invoked_as'] == 'producer'
+    assert syntax['summary']['files_checked'] == 1
+    validator = json.loads(validator_report.read_text())
+    assert validator['verdict'] == 'PASS'
+    assert validator['sdc_files_checked'] == [str(constraints / 'top.sdc')]
+    assert validator['l8'] == str(l8)
     assert not runtime['runs']
 
 
