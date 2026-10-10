@@ -1773,8 +1773,6 @@ def _main() -> int:
         print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
         lock.release()
         return 2
-    from execution_authority import consume
-    execution_route = consume()['route']
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and
