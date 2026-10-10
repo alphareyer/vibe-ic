@@ -3413,8 +3413,10 @@ Path(output, "flow_gates.json").write_text(json.dumps({
                         'reports/phase3/floorplan_rectangles.json'):
                     raise Refusal('LL_DECLARED_CORE_PAD_PDN_CLEARANCE',
                                   f"{floor['CORE_AREA']} needs {geometry['core_inset_um']} um inset")
+                internal = internal_supply_grid_sources(_load(record_path))
                 recipe = emit_pdn_cfg(image, pdk, root / 'pdn_cfg.tcl',
-                                      docker=docker, native_connects=connects)
+                                      docker=docker, native_connects=connects,
+                                      **({'internal_supply_sources': internal} if internal else {}))
                 for path in configs.values():
                     snapshot = _load(path)
                     if 'CORE_AREA' in snapshot:
@@ -3485,8 +3487,80 @@ def _extract_pdn_payload(stdout: str) -> str:
     return records[0]
 
 
+def internal_supply_grid_sources(record: dict) -> list[list[str]]:
+    """Actual scheduled resistor-fed core grids, with their external bond."""
+    if record.get('verdict') != 'WROTE':
+        return []
+    plan = record.get('power_pad_plan') or {}
+    rows = []
+    for instance, pad in (record.get('pad_instances') or {}).items():
+        kind = pad.get('kind')
+        grid = plan.get('power_net' if kind == 'power' else 'ground_net')
+        bond, fed = pad.get('terminal'), (pad.get('derivation') or {}).get('fed_rail')
+        connections = pad.get('supply_connections') or {}
+        if (kind in ('power', 'ground') and pad.get('is_supply_pad')
+                and instance in (plan.get('instances') or [])
+                and pad.get('grid_net') == grid and grid and bond and fed and bond != fed
+                and connections.get(fed) == grid
+                and connections.get(bond) == pad.get('port') != grid
+                and any(p.get('kind') == kind and p.get('master') == pad.get('master')
+                        and p.get('terminal') == bond for p in plan.get('core_supply_pads', []))):
+            rows.append([str(instance), str(pad['master']), str(fed), str(bond),
+                         str(pad['port']), str(grid)])
+    return sorted(rows)
+
+
+def internal_supply_grid_check_tcl(rows: list[list[str]]) -> str:
+    """Use native internal-net connectivity checking after proving its source.
+
+    A resistor separates a chip bond from the core grid: a BTerm on that grid
+    would bypass the resistor. Check the actual ODB source connection first,
+    then keep native checking of every grid shape and instance connection.
+    """
+    def word(value: str) -> str:
+        return '"' + ''.join('\\' + c if c in '\\"$[]' else c for c in value) + '"'
+    sources = ' '.join('[list ' + ' '.join(map(word, row)) + ']' for row in rows)
+    nets = ' '.join(word(net) for net in sorted({row[-1] for row in rows}))
+    return f'''
+# Internal supply grids proved by the chip-top producer's PDK resistor model.
+set block [ord::get_db_block]
+foreach source [list {sources}] {{
+    lassign $source instance master fed bond port grid
+    set inst [$block findInst $instance]
+    set external [$block findBTerm $port]
+    if {{$inst eq "NULL" || $external eq "NULL"}} {{
+        error "Internal supply source is absent: $instance / $port"
+    }}
+    set inner [$inst findITerm $fed]
+    set outer [$inst findITerm $bond]
+    if {{$inner eq "NULL" || $outer eq "NULL"}} {{
+        error "Internal supply source pins are absent: $instance"
+    }}
+    set core_net [$inner getNet]
+    set bond_net [$outer getNet]
+    if {{$core_net eq "NULL" || $bond_net eq "NULL" ||
+        $core_net eq $bond_net || [$external getNet] ne $bond_net ||
+        [[$inst getMaster] getName] ne $master || [$core_net getName] ne $grid ||
+        [llength [$core_net getBTerms]] != 0}} {{
+        error "Internal supply source does not match the producer: $instance"
+    }}
+}}
+set ::vibeic_internal_supply_grids [list {nets}]
+rename check_power_grid ::vibeic_native_check_power_grid
+proc check_power_grid {{args}} {{
+    set index [lsearch -exact $args -net]
+    set net [lindex $args [expr {{$index + 1}}]]
+    if {{[lsearch -exact $::vibeic_internal_supply_grids $net] >= 0}} {{
+        lappend args -dont_require_terminals
+    }}
+    return [::vibeic_native_check_power_grid {{*}}$args]
+}}
+'''
+
+
 def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker',
-                 native_connects: list[list[str]] | None = None) -> Path | None:
+                 native_connects: list[list[str]] | None = None,
+                 internal_supply_sources: list[list[str]] | None = None) -> Path | None:
     """The image's own PDN script plus the PDK registry's pad-facing connects.
 
     LibreLane has no variable for an extra ``add_pdn_connect``; its default
@@ -3506,7 +3580,8 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker',
                 if isinstance(pair, list) and len(pair) == 2]
     if native_connects:
         connects = sorted({tuple(pair) for pair in connects + native_connects})
-    if not ((ring.get('connect_to_pad_layers') and connects) or native_connects):
+    if not ((ring.get('connect_to_pad_layers') and connects) or native_connects
+            or internal_supply_sources):
         return None
     script = ('import json,os,librelane;print(json.dumps({' + repr(_PDN_PAYLOAD_KEY) +
               ':open(os.path.join(os.path.dirname(librelane.__file__),'
@@ -3529,7 +3604,8 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker',
     suffix = [f'# vibe-ic: {basis}',
               *[f'add_pdn_connect -grid stdcell_grid -layers {{{a} {b}}}' for a, b in connects]]
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(native + separator + '\n'.join(suffix) + '\n')
+    checking = internal_supply_grid_check_tcl(internal_supply_sources) if internal_supply_sources else ''
+    output.write_text(native + separator + '\n'.join(suffix) + '\n' + checking)
     return output
 
 

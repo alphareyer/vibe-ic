@@ -977,6 +977,38 @@ def test_resistive_supply_ports_do_not_become_core_grid_terminals(tmp_path):
     assert out['PDN_ENABLE_PINS'] is False
 
 
+@pytest.mark.parametrize('scheduled', [True, False])
+@pytest.mark.parametrize('resistive', [True, False])
+def test_internal_grid_check_uses_the_scheduled_resistor_pad(scheduled, resistive):
+    pad = {'kind': 'power', 'is_supply_pad': True, 'master': 'pdk_power_pad',
+           'terminal': 'V_BOND', 'port': 'V_BOND' if resistive else 'VCORE',
+           'grid_net': 'VCORE', 'derivation': {'fed_rail': 'V_FED'},
+           'supply_connections': {'V_FED': 'VCORE',
+                                  'V_BOND': 'V_BOND' if resistive else 'VCORE'}}
+    record = {'verdict': 'WROTE', 'pad_instances': {'u_power': pad},
+              'power_pad_plan': {'power_net': 'VCORE', 'core_supply_pads': [pad],
+                                 'instances': ['u_power'] if scheduled else []}}
+    assert contract.internal_supply_grid_sources(record) == (
+        [['u_power', 'pdk_power_pad', 'V_FED', 'V_BOND', 'V_BOND', 'VCORE']]
+        if scheduled and resistive else [])
+
+
+def test_internal_grid_recipe_preserves_native_pdn_and_connectivity(tmp_path, monkeypatch):
+    native = 'add_pdn_connect -grid stdcell_grid -layers {met4 met5}\n'
+    monkeypatch.setattr(contract.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=0, stdout=json.dumps({contract._PDN_PAYLOAD_KEY: native}), stderr=''))
+    row = ['u_power', 'pdk_power_pad', 'V_FED', 'V_BOND', 'V_BOND', 'VCORE']
+    out = contract.emit_pdn_cfg('img', 'sky130A', tmp_path / 'pdn.tcl',
+                                internal_supply_sources=[row])
+    text = out.read_text()
+    assert text.startswith(native)
+    assert 'findInst $instance' in text and 'findBTerm $port' in text
+    assert '$core_net eq $bond_net' in text
+    assert 'set ::vibeic_internal_supply_grids [list "VCORE"]' in text
+    assert 'lappend args -dont_require_terminals' in text
+    assert 'return [::vibeic_native_check_power_grid {*}$args]' in text
+
+
 @pytest.mark.parametrize('numeric', [float, str], ids=['numbers', 'native_decimal_strings'])
 @pytest.mark.parametrize('with_ring_layer', [False, True], ids=['pad_layer', 'also_native_ring_layer'])
 def test_native_supply_ring_geometry_reserves_its_real_ring_and_pad_straps(numeric, with_ring_layer):
