@@ -6761,11 +6761,11 @@ _BULLET_KV_PARAM_CONNECTIVES = {
 # v1.6.238 — for #101 field-agent round-2 feedback. Split-anchor for
 # multi-KV-on-single-line bullets like
 # `- Vin: 3.6 V, Vout: 3.3 V, Iload: 2 mA quiescent + 5 mA peak`.
-# Splits on `,\s+` only when the next fragment starts with a
+# Splits on comma, sentence or semicolon boundaries only when the next fragment starts with a
 # capital-letter param phrase + KV separator — otherwise it would
 # fragment normal English commas inside a value/cond phrase.
 _BULLET_KV_FRAGMENT_SPLIT = re.compile(
-    r",\s+(?=[A-Za-z][\w ~\-/()²³µΩ°.]*?[:=])")
+    r"[,.;][ \t]+(?=[A-Za-z][\w ~\-/()²³µΩ°]*?[:=])")
 
 # v1.6.238 — for #101 field-agent round-2 feedback. AsciiDoc italic
 # wrapper `_text_` / `*text*` and subscript `name~sub~` strip-pass.
@@ -7389,7 +7389,7 @@ def _extract_bullet_kv_specs(text: str) -> List[Dict[str, Any]]:
 
     v1.6.238 (#101 field-agent round-2): line-level preprocessing
     strips AsciiDoc italic / subscript markers, and the line is
-    additionally split on `, ` boundaries that introduce a new
+    additionally split on comma, sentence or semicolon boundaries that introduce a new
     `param[:=]` pair so multi-KV-on-single-bullet shapes
     (`- Vin: 3.6 V, Vout: 3.3 V, Iload: 2 mA`) emit one entry per
     KV instead of one.

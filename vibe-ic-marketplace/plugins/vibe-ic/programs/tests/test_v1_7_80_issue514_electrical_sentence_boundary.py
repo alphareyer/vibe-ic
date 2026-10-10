@@ -146,11 +146,14 @@ def test_byte_qualifier_prose_mints_no_electrical_spec():
         "a byte-qualifier sentence is not an electrical specification")
 
 
-def test_real_electrical_prose_still_mints_specs():
+@pytest.mark.parametrize("doc", [
+    "- Core supply: 1.8 V nominal\n- Quiescent current: 26 mA typical\n",
+    "Clock period: 100 ns. Core supply: 1.8 V nominal. Quiescent current: 26 mA typical.\n",
+    "Clock period: 100 ns; Core supply: 1.8 V nominal; Quiescent current: 26 mA typical.\n",
+])
+def test_real_electrical_prose_still_mints_specs(doc):
     """The opposing pressure. Tightening Direction 1 must not silence
     the extractor on documents that really do carry measurements."""
-    doc = ("- Core supply: 1.8 V nominal\n"
-           "- Quiescent current: 26 mA typical\n")
     specs = _elec(doc)
     got = {(s["name"], s["unit"]) for s in specs}
     assert ("Core supply", "V") in got
