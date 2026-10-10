@@ -20,6 +20,8 @@ def dispatch_site(project: Path, block: dict, step_name: str) -> dict | None:
     if step is None or policy._ordinary_runtime is None:
         return None
     runtime = policy._ordinary_runtime
+    if runtime.get('policy', {}).get('mode') == 'default':
+        return None
     if Path(project).resolve() != runtime['project']:
         raise em.Refusal('ORDINARY_PROJECT_UNBOUND', str(project))
     # The fixed row consumes the whole current declaration. A per-block caller

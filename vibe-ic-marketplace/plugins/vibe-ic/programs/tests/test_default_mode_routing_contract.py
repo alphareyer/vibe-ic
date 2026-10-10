@@ -30,6 +30,15 @@ def test_default_bootstrap_needs_no_candidate_authority(tmp_path, monkeypatch):
     assert policy.phase1_producer_disclosure(tmp_path)['execution'] == 'single-local-driver'
     assert not (tmp_path / 'reports/execution').exists()
 
+    # The analog caller must also reach its canonical producer without
+    # consulting an Ultra declaration or attempting candidate dispatch.
+    import execution_analog_caller as analog
+    import execution_adapters_analog as adapters
+    monkeypatch.setattr(adapters, '_blocks', candidate_transport)
+    monkeypatch.setattr(policy, 'dispatch_fixed_step', candidate_transport)
+    for site in analog.STEPS:
+        assert analog.dispatch_site(tmp_path, {'name': 'unit'}, site) is None
+
 
 def test_default_mode_covers_every_canonical_row_without_controller(tmp_path, monkeypatch):
     portfolio = em.load_portfolio()

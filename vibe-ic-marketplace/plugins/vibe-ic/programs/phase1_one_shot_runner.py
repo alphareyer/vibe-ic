@@ -1770,11 +1770,11 @@ def main() -> int:
     args, extras = p.parse_known_args()
     _execution.configure(args)
     project = args.project.resolve()
-    _execution.bootstrap(project, parameters={"ic_name": args.ic_name,
-        "skip_analog": bool(args.skip_analog)}, phase1_only=True)
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    _execution.bootstrap(project, parameters={"ic_name": args.ic_name,
+        "skip_analog": bool(args.skip_analog)}, phase1_only=True)
     _RUN.update(project=project, second_track_only=bool(args.second_track_only),
                 knobs={"ic_name": args.ic_name, "pdk": _pdk_of_this_run(extras),
                        "mode": "docs" if args.mode in ("auto", "docs")

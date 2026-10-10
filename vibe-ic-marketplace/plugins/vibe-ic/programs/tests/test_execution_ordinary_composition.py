@@ -34,12 +34,17 @@ def test_default_bootstrap_is_observationally_inert(tmp_path, monkeypatch):
         raise AssertionError('Default constructed a provider registry')
     for module,name in ((frontend,'register_factories'),(backend,'register_backend_adapters'),(release,'register_release_adapters')):
         monkeypatch.setattr(module,name,trap)
-    assert policy.bootstrap(tmp_path) is None
+    runtime = policy.bootstrap(tmp_path)
+    assert runtime['project'] == tmp_path.resolve()
+    assert runtime['policy']['mode'] == 'default'
+    assert 'controller' not in runtime and 'registry' not in runtime
     assert policy.dispatch_fixed_step(tmp_path,'8') is None
     import phase3_one_shot_runner as phase3
     for name in ('prepnr', 'pnr', 'canonicalize_artefacts', 'digital_hardmacro_gen'):
         assert phase3._ordinary_phase3_row(tmp_path,name) is None
-    assert policy._ordinary_runtime is None
+    assert policy._ordinary_runtime is runtime
+    assert not runtime['contexts'] and not runtime['bindings'] and not runtime['runs']
+    assert list(tmp_path.iterdir()) == []
     assert dict(__import__('os').environ)==before
 
 

@@ -318,7 +318,18 @@ def test_measured_fail_precedes_missing_sibling_and_missing_outputs_stay_nm(tmp_
 
 def test_default_bootstrap_still_returns_without_front_registry(monkeypatch, tmp_path):
     monkeypatch.delenv(policy.ENV, raising=False)
-    assert policy.bootstrap(tmp_path) is None
+    monkeypatch.delenv(policy._CAPABILITY_FD_ENV, raising=False)
+    monkeypatch.setattr(policy, '_ordinary_runtime', None)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default constructed an Ultra registry')
+    monkeypatch.setattr(em, 'Registry', forbidden)
+    monkeypatch.setattr(em, 'Controller', forbidden)
+    runtime = policy.bootstrap(tmp_path)
+    assert runtime['project'] == tmp_path.resolve()
+    assert runtime['policy']['mode'] == 'default'
+    assert 'controller' not in runtime and 'registry' not in runtime
+    assert runtime['contexts'] == runtime['bindings'] == runtime['runs'] == {}
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_validator_refuses_other_block_replay_and_edited_output(tmp_path):
