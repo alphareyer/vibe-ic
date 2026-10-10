@@ -17,7 +17,7 @@ import _path_layout as _pl
 
 # CR-3: the two L9 knobs have separate units and separate consumers.
 # FP_CORE_UTIL is a percentage for core area; PL_TARGET_DENSITY is a fraction
-# for global placement. Only adjacent numeric key/value rows are accepted.
+# for global placement. The keys have independent input declarations.
 _L9_PL_DENSITY_RE = re.compile(
     r"PL_TARGET_DENSITY`?\s*\|\s*\*{0,2}\s*(0?\.\d+|\d+(?:\.\d+)?)\s*\*{0,2}\s*\|",
     re.IGNORECASE)
@@ -84,6 +84,9 @@ _L9_FP_CORE_UTIL_RE = re.compile(
     r"FP_CORE_UTIL`?\s*\|\s*\*{0,2}\s*(\d+(?:\.\d+)?)\s*"
     r"(?:[-–~]|\bto\b)?\s*(?:\d+(?:\.\d+)?)?\s*%?[^|\n]*\|",
     re.IGNORECASE)
+_INPUT_CORE_UTIL_RE = re.compile(
+    r"\b(?:target\s+)?core\s+utilization\s*[:=]\s*(\d+(?:\.\d+)?)\s*%",
+    re.IGNORECASE)
 def _l9_declared_floorplan_knob(project: Path, pdk: str,
                                 key: str) -> Optional[float]:
     """Read one L9 floorplan knob without transferring it to the other knob."""
@@ -116,6 +119,15 @@ def _l9_declared_floorplan_knob(project: Path, pdk: str,
                 for v in md_table_column_numbers(txt, key, _rk):
                     if 0.0 < v <= maximum:
                         return v / scale
+    if key == "FP_CORE_UTIL":
+        # Ordinary input documents need not use an L9 filename. Reuse the
+        # established design-input reader; this percentage never sets density.
+        import floorplan_contract as _fpc
+        for _rel, _path, text in _fpc._iter_input_files(project):
+            for match in _INPUT_CORE_UTIL_RE.finditer(text):
+                value = float(match.group(1))
+                if 0.0 < value <= 100.0:
+                    return value / 100.0
     return None
 
 
@@ -147,7 +159,10 @@ def _flow_default_core_util(project: Path) -> Tuple[Optional[float], str]:
         code = ("from librelane.steps.openroad import Floorplan; "
                 "print(next(v.default for v in Floorplan.config_vars "
                 "if v.name == 'FP_CORE_UTIL'))")
-        run = subprocess.run(_cex.docker_exec_argv(container, "python3", "-c", code),
+        argv = ([sys.executable, "-c", code]
+                if _cex.local_exec_mode("floorplan_knobs")
+                else _cex.docker_exec_argv(container, "python3", "-c", code))
+        run = subprocess.run(argv,
                              capture_output=True, text=True, timeout=60)
         if run.returncode != 0:
             return None, f"NOT_READ: {source}; container query failed"

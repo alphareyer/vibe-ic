@@ -42,7 +42,8 @@ def test_knobs_are_independent_on_two_designs(tmp_path, name, core, density):
     assert p3._l9_declared_place_density(only_density) == pytest.approx(density)
 
 
-def test_pinned_image_default_is_read_at_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize("local", [False, True])
+def test_pinned_image_default_is_read_at_runtime(tmp_path, monkeypatch, local):
     project = tmp_path / "project"
     reports = project / "reports"
     reports.mkdir(parents=True)
@@ -55,12 +56,13 @@ def test_pinned_image_default_is_read_at_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(p3._cex, "docker_exec_argv",
                         lambda container, *rest: ["docker", "exec", container, *rest])
+    monkeypatch.setattr(p3._cex, "local_exec_mode", lambda _tag: local)
     monkeypatch.setattr(p3.subprocess, "run", run)
     value, source = p3._flow_default_core_util(project)
     assert value == pytest.approx(0.37)
     assert "pinned image" in source and "FP_CORE_UTIL" in source
     assert len(seen) == 1
-    assert "pinned-eda" in seen[0][0]
+    assert ("pinned-eda" in seen[0][0]) is (not local)
     assert "Floorplan.config_vars" in " ".join(seen[0][0])
 
 
@@ -79,6 +81,16 @@ def test_wrong_pinned_image_is_disclosed_not_read(tmp_path, monkeypatch):
         raise p3._cex.ContainerImageMismatch("image identity differs")
 
     monkeypatch.setattr(p3._cex, "docker_exec_argv", refuse)
+    monkeypatch.setattr(p3._cex, "local_exec_mode", lambda _tag: False)
     value, source = p3._flow_default_core_util(tmp_path)
     assert value is None
     assert source.startswith("NOT_READ:")
+
+
+def test_generic_document_core_utilization_is_not_placement_density(tmp_path):
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "design.md").write_text(
+        "Core supply: 1.8 V. Target core utilization: 40%.\n")
+    assert fp._l9_declared_die_util(tmp_path) == pytest.approx(0.4)
+    assert fp._l9_declared_place_density(tmp_path) is None
