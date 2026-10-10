@@ -94,6 +94,17 @@ proc _mk {i} {
     set t [lindex $::terms @I]
     switch -- $method {
       getName   { return [lindex $t 2] }
+      getSigType { return [lindex $t 7] }
+      getWire { return NULL }
+      isSpecial { return 1 }
+      getITerms {
+        set out {}; set j 0
+        foreach term $::terms {
+          if {[lindex $term 2] eq [lindex $t 2]} { lappend out ::IT_$j }
+          incr j
+        }
+        return $out
+      }
       getSWires { if {[lindex $t 8]} { return [list ::SW_@I] } ; return {} }
       getBTerms {
         set out {}; set j 0
@@ -192,18 +203,29 @@ proc ::BLK {method args} {
   switch -- $method {
     getInsts   { return $::instcmds }
     getDieArea { return ::DIE }
+    getNets {
+      set out {}; set seen {}; set j 0
+      foreach t $::terms {
+        set name [lindex $t 2]
+        if {[lsearch -exact $seen $name] < 0} {
+          lappend seen $name; lappend out ::NT_$j
+        }
+        incr j
+      }
+      return $out
+    }
   }
   return NULL
 }
 """
 
 
-def _drive(terms, bonds=()):
+def _drive(terms, bonds=(), *, block=None):
     if tclsh is None:                                    # pragma: no cover
         pytest.skip("tclsh not installed")
     rows = " ".join("{%s}" % " ".join(str(f) for f in t) for t in terms)
     bond_rows = " ".join("{%s}" % " ".join(str(f) for f in b) for b in bonds)
-    script = (_HARNESS % {"terms": rows, "bonds": bond_rows}) + _block()
+    script = (_HARNESS % {"terms": rows, "bonds": bond_rows}) + (block if block is not None else _block())
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "pg.tcl"
         p.write_text(script)
@@ -340,3 +362,30 @@ def test_a_contacted_supply_bond_does_not_rescue_a_distant_same_net_terminal():
     assert "PG_BOND_CONTACT_OK: 1 terminal(s)" in out
     assert "PG_ABUTMENT_NOT_CONNECTED" in out
     assert "distant/VDD" in out
+
+
+@needs_tclsh
+@pytest.mark.parametrize('bond,connected', [
+    (["external", "VDD", 0, 0, 100, 100, "M1", "POWER", 1], True),
+    (["external", "OTHER", 0, 0, 100, 100, "M1", "POWER", 1], False),
+    (["external", "VDD", 0, 0, 100, 100, "M2", "POWER", 1], False),
+    (["external", "VDD", 101, 0, 200, 100, "M1", "POWER", 1], False),
+    (["external", "VDD", 0, 0, 100, 100, "M1", "POWER", 0], False),
+])
+def test_cleanup_uses_full_terminal_contact_for_a_wireless_supply(bond,connected):
+    r = _drive([_PAD_A], [bond], block=R._pg_net_cleanup_tcl())
+    out = r.stdout + r.stderr
+    assert ("PG_CLEANUP_ABUTTED_SUPPLY: VDD" in out) is connected, out
+    assert ("PG_CLEANUP_UNROUTED_SUPPLY: VDD" not in out) is connected, out
+    assert "setSigType" not in R._pg_net_cleanup_tcl()
+
+
+@needs_tclsh
+@pytest.mark.parametrize('remote,connected', [(False,True),(True,False)])
+def test_cleanup_requires_every_ring_terminal_to_join_the_same_component(remote,connected):
+    c = ["padC", "VDD", "VDD", 1000 if remote else 200, 0,
+         1100 if remote else 300, 100, "POWER", 0]
+    r = _drive([_PAD_A,_PAD_B,c], block=R._pg_net_cleanup_tcl())
+    out = r.stdout + r.stderr
+    assert ("PG_CLEANUP_ABUTTED_SUPPLY: VDD" in out) is connected, out
+    assert ("PG_CLEANUP_UNROUTED_SUPPLY: VDD" not in out) is connected, out

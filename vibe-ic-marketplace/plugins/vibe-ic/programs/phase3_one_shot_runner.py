@@ -24951,12 +24951,19 @@ def _pg_net_cleanup_tcl() -> str:
     Real power/ground nets are SPECIAL (declared in SPECIALNETS) and are never
     touched. On a healthy design that already routes there are no such nets, so
     this pass is a no-op. General, chip-AGNOSTIC, NONFATAL-guarded."""
-    return (
+    return _routing_integrity_check_tcl("PG_SUPPLY", supply_only=True) + (
         "if {[catch {\n"
         "  set _blk [ord::get_db_block]\n"
         "  set _pgdel 0; set _pgsig 0\n"
         "  foreach _net [$_blk getNets] {\n"
         "    set _st [$_net getSigType]\n"
+        "    if {($_st eq \"POWER\" || $_st eq \"GROUND\") && "
+        "$::_vic_routing_integrity_complete && "
+        "[lsearch -exact $_abna [$_net getName]] >= 0} {\n"
+        "      puts \"PG_CLEANUP_ABUTTED_SUPPLY: [$_net getName] ($_st) "
+        "iterms=[llength [$_net getITerms]] bterms=[llength [$_net getBTerms]]\"\n"
+        "      continue\n"
+        "    }\n"
         "    if {($_st eq \"POWER\" || $_st eq \"GROUND\") && ![$_net isSpecial]} {\n"
         "      if {[llength [$_net getITerms]] == 0 && "
         "[llength [$_net getBTerms]] == 0} {\n"
@@ -27032,6 +27039,7 @@ def _terminal_contact_helpers_tcl() -> str:
 def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
                                  membership_path: Optional[str] = None,
                                  stage: Optional[str] = None,
+                                 supply_only: bool = False,
                                  ) -> str:
     """v1.8.43 — POST-REROUTE routing-integrity CHECK. Emits
     ``<PFX>_UNROUTED_NETS: <n> <up to 12 names>``.
@@ -27106,6 +27114,11 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
     unchanged, including the `SHIP_UNROUTED_NETS:` line the promotion gate
     parses."""
     _st = f"stage={stage} " if stage else ""
+    _net_filter = (
+        "    if {$_st ne \"POWER\" && $_st ne \"GROUND\"} { continue }\n"
+        "    if {[llength [$_net getSWires]]} { continue }\n"
+        if supply_only else
+        "    if {$_st eq \"POWER\" || $_st eq \"GROUND\"} { continue }\n")
     return _terminal_contact_helpers_tcl() + (
         "proc _vibeic_uf_find {_arr _x} {\n"
         "  upvar 1 $_arr _a\n"
@@ -27118,7 +27131,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
         "  set _unra {}; set _abna {}\n"
         "  foreach _net [[ord::get_db_block] getNets] {\n"
         "    set _st [$_net getSigType]\n"
-        "    if {$_st eq \"POWER\" || $_st eq \"GROUND\"} { continue }\n"
+        + _net_filter +
         "    set _terms {}\n"
         "    foreach _t [$_net getITerms] { lappend _terms [list I $_t] }\n"
         "    foreach _t [$_net getBTerms] { lappend _terms [list B $_t] }\n"
