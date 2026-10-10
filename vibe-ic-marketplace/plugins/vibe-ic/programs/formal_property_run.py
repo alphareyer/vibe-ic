@@ -2484,6 +2484,10 @@ def run(project: Path, harness: Optional[Path] = None,
     image the flow is designed for: inside vibeic-eda `sby` IS on PATH, so "it
     will just fail to launch" launched a real proof.
     """
+    # The canonical runner also supplies its image name when it is already
+    # inside that image. Probe and execute the installed toolchain there.
+    if container and _ce.local_exec_mode("formal_property_run"):
+        container = None
     formal_dir = _pl.formal_dir(project)
     formal_dir.mkdir(parents=True, exist_ok=True)
     _clear_program_receipt(formal_dir)

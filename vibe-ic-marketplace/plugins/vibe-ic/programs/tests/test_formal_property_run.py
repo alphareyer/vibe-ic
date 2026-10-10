@@ -39,6 +39,44 @@ _SPM_SBY = FPR.emit_sby(["spm.v"], "formal_spm.sv", "formal_spm",
                         safety_depth=20, bmc_depth=12)
 
 
+def test_named_default_container_uses_local_formal_tools(tmp_path, monkeypatch):
+    """The normal runner supplies a container name even inside the EDA image.
+
+    Probe and proof must both use the ambient toolchain, while preserving a
+    measured failure. Transcripts are fixture data; no tool is invoked here.
+    """
+    formal_dir = FPR._pl.formal_dir(tmp_path)
+    formal_dir.mkdir(parents=True)
+    sby = formal_dir / "formal_spm_formal.sby"
+    sby.write_text(_SPM_SBY)
+    (formal_dir / "spm.v").write_text("module spm; endmodule\n")
+    (formal_dir / "formal_spm.sv").write_text(
+        "module formal_spm; always @* assert (1); endmodule\n")
+    monkeypatch.setattr(FPR._ce, "local_exec_mode", lambda _tag: True)
+    seen = []
+
+    def probe(container):
+        seen.append(("probe", container))
+        assert container is None, "local tools were probed through Docker"
+        return {"abc": True, "_env_reachable": True}
+
+    monkeypatch.setattr(FPR, "detect_engines", probe)
+    for transcript, expected in [
+        (_REAL_SPM_LOG, "PASS"),
+        (_FAIL_LOG.replace("t_bmc", "formal_spm_formal_bmc"), "FAIL"),
+    ]:
+        def proof(_sby, _dir, container, _timeout, **_kwargs):
+            seen.append(("proof", container))
+            assert container is None, "local proof was launched through Docker"
+            return transcript
+
+        monkeypatch.setattr(FPR, "_run_sby", proof)
+        result = FPR.run(tmp_path, sby=sby, container="vibeic-eda")
+        assert result["verdict"] == expected
+        assert result["all_proved"] is (expected == "PASS")
+    assert seen == [("probe", None), ("proof", None)] * 2
+
+
 # ── bound_kind ─────────────────────────────────────────────────────────────
 def test_bound_kind_strength():
     assert FPR.bound_kind("prove", "PASS") == "unbounded"
