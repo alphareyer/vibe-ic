@@ -1044,6 +1044,12 @@ def produce_pnr(project, params):
                             params['die_um'], params['util'])
         if prep.status != 'PASS':
             return {'verdict': prep.status, 'detail': prep.detail}
+        # Preparation can refresh the chip wrapper.  Resolve Step 7's deck
+        # and its physical pad derivation now, before the native floorplan
+        # reads constraint.sdc; a previous run's file is not this row's input.
+        from _ppa import timing
+        current_sdc = timing.asic_sdc_for_pnr(R, project, top, pdk, container)
+        timing.publish_pnr_sdc(current_sdc, project / PNR)
         if R._chip_path_requests_pad_ring(project):
             # The accepted ring-pinned producer retains its tap coverage,
             # master free-run exclusion, pad connection and PDN semantics.

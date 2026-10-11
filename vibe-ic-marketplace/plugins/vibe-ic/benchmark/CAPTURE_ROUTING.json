@@ -250,7 +250,8 @@
       "bucket_B_skill_file": "skills/sta-review/SKILL.md",
       "bucket_A_related": [
         "programs/_ppa/timing.py",
-        "programs/sdc_environment.py"
+        "programs/sdc_environment.py",
+        "programs/execution_backend_producers.py"
       ]
     },
     "phase3.sta.architectural_residual": {

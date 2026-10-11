@@ -1698,6 +1698,24 @@ def read_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any
     return dict(rec, text=deck), ""
 
 
+def publish_pnr_sdc(record: Dict[str, Any], out_dir: Path) -> Path:
+    """Publish the exact current deck and its existing provenance contract
+    for both Default's bounded producer and the legacy PNR entry point."""
+    import _atomic_artefact as atomic
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sdc = out_dir / "constraint.sdc"
+    sdc.write_text(record["text"])
+    atomic.write_json(out_dir / "constraint_sdc_provenance.json", {
+        "schema": "vibe-ic/pnr-sdc-provenance/1",
+        "step7_sdc": record["path"],
+        "step7_sha256": record["step7_sha256"],
+        "step7_deck_sha256": record["deck_sha256"],
+        "deck_sha256": _sha256_text(record["text"]),
+        "regenerated_by_step7_producer": record["regenerated"],
+        "pnr_time_derivation": record["derivation"]})
+    return sdc
+
+
 def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
                      container: str) -> Dict[str, Any]:
     """The SDC `step_pnr` loads: step 7's file, plus the named PnR-time

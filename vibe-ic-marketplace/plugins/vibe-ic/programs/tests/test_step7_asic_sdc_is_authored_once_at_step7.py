@@ -654,6 +654,37 @@ def test_the_prepnr_seam_reads_step7s_deck_through_its_reader(
     assert "changed after step 7" in why
 
 
+def test_default_floorplan_reads_this_step7_deck_at_native_boundary(tmp_path, monkeypatch):
+    """Default's actual producer must pass the current deck to its native
+    floorplan consumer, even when a previous PNR constraint file exists."""
+    import execution_backend_producers as producers
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    T.emit_step7_asic_sdc(R, proj, TOP, pdk, '')
+    pnr = proj / producers.PNR
+    pnr.mkdir(parents=True)
+    (pnr / 'constraint.sdc').write_text('create_clock -period 99 [get_ports clk]\n')
+    monkeypatch.setattr(producers, '_parameters', lambda *a: (R, SimpleNamespace(), pdk, ''))
+    monkeypatch.setattr(R, 'step_prepnr', lambda *a: R.StepResult('prepnr', 'PASS', 0, 'ready'))
+    monkeypatch.setattr(R, '_chip_path_requests_pad_ring', lambda *a: True)
+    seen = []
+
+    def native_consumer(project, *args, **kwargs):
+        sdc = (pnr / 'constraint.sdc').read_text()
+        assert '-period 25' in sdc and '-period 99' not in sdc, sdc
+        provenance = json.loads((pnr / 'constraint_sdc_provenance.json').read_text())
+        assert provenance['step7_sha256'] == _record(proj)['sha256']
+        assert provenance['deck_sha256'] == hashlib.sha256(sdc.encode()).hexdigest()
+        seen.append(sdc)
+        return R.StepResult('pnr', 'PASS', 0, 'native consumer used current SDC'), {}
+
+    monkeypatch.setattr(R, '_prepare_librelane_floorplan_for_route', native_consumer)
+    monkeypatch.setattr(producers, '_publish_step15_bounded_state', lambda *a: None)
+    result = producers.produce_pnr(proj, {'step_id': '15', 'top': TOP,
+                                       'die_um': 100, 'util': 0.4})
+    assert result['verdict'] == 'PASS' and len(seen) == 1
+
+
 def _mode_library(name, cell, pin_limit, arcs):
     return f'''library ({name}) {{
       delay_model : table_lookup;
