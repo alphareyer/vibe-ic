@@ -641,9 +641,10 @@ def _rotations(configs: Sequence[Path]) -> Tuple[Dict[str, str], Dict[str, str]]
 #: this program cannot map gets a refusal instead of a guess.
 _AUX_SECTION_RE = re.compile(
     r"(?ims)^#{1,6}[^\n]*pad[^\n]*auxiliary[^\n]*$(?P<body>.*?)(?=^#{1,6}\s|\Z)")
+_AUX_PIN_REF = r"[A-Za-z_]\w*(?:\[\d+\])?"
 _AUX_ENTRY_RE = re.compile(
     r"(?m)^\s*[-*|]?\s*(?P<port>[A-Za-z_][\w$]*(?:\[\d+\])?)\s*[:|]\s*"
-    r"(?P<pins>(?:[A-Za-z_]\w*\s*=\s*[01]\s*,?\s*)+)")
+    rf"(?P<pins>(?:{_AUX_PIN_REF}\s*=\s*[01](?!\d)\s*,?\s*)+)")
 
 
 def declared_aux_levels(sources: Sequence[Path]
@@ -659,7 +660,7 @@ def declared_aux_levels(sources: Sequence[Path]
             for e in _AUX_ENTRY_RE.finditer(sec.group("body")):
                 levels = dict(
                     (m.group(1), int(m.group(2))) for m in
-                    re.finditer(r"([A-Za-z_]\w*)\s*=\s*([01])",
+                    re.finditer(rf"({_AUX_PIN_REF})\s*=\s*([01])(?!\d)",
                                 e.group("pins")))
                 if levels:
                     out.setdefault(e.group("port"), {}).update(levels)

@@ -46,6 +46,33 @@ import io_pad_chip_top_gen as PAD  # noqa: E402
 GEN = PROGRAMS / "io_pad_chip_top_gen.py"
 ASSIGN = PROGRAMS / "pad_assignment_gen.py"
 
+
+def test_declared_bus_controls_reach_the_pad_faces_without_zero_defaulting(tmp_path):
+    doc = tmp_path / 'interface.md'
+    doc.write_text('# Pad Auxiliary Controls\n'
+                   'data[0]: ENABLE=1, MODE[0]=0, MODE[1]=1, MODE[2]=1\n')
+    levels = PAD.declared_aux_levels([doc])
+    pins = {
+        'BOND': {'direction': 'inout', 'is_pad': True,
+                 'function': 'CORE', 'three_state': 'OE'},
+        'CORE': {'direction': 'input'}, 'OE': {'direction': 'input'},
+        'ENABLE': {'direction': 'input'},
+        **{f'MODE[{bit}]': {'direction': 'input'} for bit in range(3)},
+    }
+    faces = PAD.PR.pad_cell_faces(pins, 'output', levels.get('data[0]'))
+    assert not faces.refused
+    assert [faces.ties[f'MODE[{bit}]'] for bit in (2, 1, 0)] == [1, 1, 0]
+    assert faces.ties['ENABLE'] == 1 and faces.ties['OE'] == 0
+    assert all(faces.reasons[f'MODE[{bit}]'] == 'declared by the design'
+               for bit in range(3))
+
+
+@pytest.mark.parametrize('value', ['2', '10', '-1'])
+def test_aux_bus_boolean_declaration_does_not_accept_a_partial_number(tmp_path, value):
+    doc = tmp_path / 'interface.md'
+    doc.write_text(f'# Pad Auxiliary Controls\ndata: MODE[1]={value}\n')
+    assert PAD.declared_aux_levels([doc]) == {}
+
 #: The five variables that were owed because nothing instantiated a pad.
 INSTANCE_NAMED_VARS = ("PAD_SOUTH", "PAD_EAST", "PAD_NORTH", "PAD_WEST",
                        "SIGNAL_MAP")
