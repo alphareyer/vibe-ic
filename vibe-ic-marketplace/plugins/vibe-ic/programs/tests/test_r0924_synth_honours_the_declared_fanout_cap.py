@@ -38,6 +38,7 @@ import ast
 import json
 import sys
 from pathlib import Path
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 if str(PROGRAMS) not in sys.path:
@@ -144,6 +145,23 @@ def test_an_unreadable_container_record_is_named_not_swallowed(tmp_path):
     cap, _why, unread = R._flow_default_max_fanout_read(project, "gf180mcuD")
     assert cap is None
     assert "NOT READ" in unread and "names no container" in unread, unread
+
+
+@pytest.mark.parametrize("container", ["", "legacy-name"])
+def test_local_flow_fanout_defaults_read_the_current_runtime(tmp_path, monkeypatch, container):
+    project = _proj(tmp_path)
+    record = project / "reports/container_image.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"container": container}))
+    defaults = tmp_path / "pdk_compat.py"
+    defaults.write_text('if new["PDK"].startswith("gf180mcu"):\n'
+                        '    x["MAX_FANOUT_CONSTRAINT"] = 10\n')
+    monkeypatch.setattr(R, "_FLOW_PDK_DEFAULTS_PATH", str(defaults))
+    monkeypatch.setattr(R._cex, "no_container_route", lambda: True)
+    cap, why, unread = R._flow_default_max_fanout_read(project, "gf180mcuD")
+    assert cap == 10 and unread == ""
+    assert str(defaults) in why
+    assert R._flow_default_max_fanout(project, "gf180mcuD") == (cap, why)
 
 
 def test_the_unread_reason_propagates_out_of_the_resolver(tmp_path,

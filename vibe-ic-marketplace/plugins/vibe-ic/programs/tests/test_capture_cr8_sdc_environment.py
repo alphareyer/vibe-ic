@@ -100,6 +100,28 @@ def test_missing_local_pdk_files_are_named_and_not_fabricated(tmp_path, monkeypa
         f"NOT_READ: pinned PDK config {root}/libs.tech/librelane/quartz_sc/config.tcl"]
 
 
+@pytest.mark.parametrize("declared,expected", [(None, 10), (4, 4)])
+def test_local_synthesis_and_sdc_use_the_library_config_fanout(
+        tmp_path, monkeypatch, declared, expected):
+    root = tmp_path / "pdk/family"
+    configs = root / "libs.tech/librelane"
+    (configs / "quartz_sc").mkdir(parents=True)
+    (configs / "config.tcl").write_text(_BASE)
+    (configs / "quartz_sc/config.tcl").write_text(
+        _CELL + "set ::env(MAX_FANOUT_CONSTRAINT) 10\n")
+    if declared is not None:
+        docs = tmp_path / "input/docs"
+        docs.mkdir(parents=True)
+        (docs / "L9_constraints.md").write_text(
+            f"| SYNTH_MAX_FANOUT | {declared} |\n")
+    monkeypatch.setattr(p3._cex, "no_container_route", lambda: True)
+    liberty = str(root / "libs.ref/quartz_sc/lib/slow.lib")
+    cap, source, unread = p3._synth_max_fanout(tmp_path, "family", liberty, "")
+    assert cap == expected and unread == []
+    assert ("MAX_FANOUT_CONSTRAINT" in source if declared is None
+            else "L9 declares" in source)
+
+
 def test_design_docs_override_pdk_then_liberty(tmp_path, monkeypatch):
     assert env is not None
     docs = tmp_path / "input" / "docs"

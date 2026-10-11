@@ -22,6 +22,8 @@ _SDC_ENV_KEYS = {
     "set_max_capacitance": "MAX_CAPACITANCE_CONSTRAINT",
 }
 _SDC_ENV_NUMERIC = frozenset(_SDC_ENV_KEYS) - {"set_driving_cell"}
+_PDK_KEYS = {**_SDC_ENV_KEYS, "set_max_fanout": "MAX_FANOUT_CONSTRAINT"}
+_PDK_NUMERIC = _SDC_ENV_NUMERIC | {"set_max_fanout"}
 
 
 def _sdc_environment_design_values(project: Path) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
@@ -100,11 +102,11 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
             if not found:
                 continue
             key, raw = found.groups()
-            name = next((name for name, var in _SDC_ENV_KEYS.items() if var == key), None)
+            name = next((name for name, var in _PDK_KEYS.items() if var == key), None)
             if name is None:
                 continue
             raw = raw.strip('"').replace("$::env(STD_CELL_LIBRARY)", library)
-            if name in _SDC_ENV_NUMERIC:
+            if name in _PDK_NUMERIC:
                 try:
                     number = float(raw)
                 except ValueError:

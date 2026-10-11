@@ -20408,12 +20408,18 @@ def _flow_default_max_fanout_read(project: Path, pdk: str):
                               f"records no container image, so the flow's "
                               f"shipped PDK defaults could not be consulted")
         container = str(json.loads(rec_path.read_text()).get("container") or "")
-        if not container:
+        local = _cex.no_container_route()
+        if not container and not local:
             return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ: the run's "
                               f"container record names no container")
-        out = subprocess.run(
-            _cex.docker_exec_argv(container, "cat", _FLOW_PDK_DEFAULTS_PATH),
-            capture_output=True, text=True, timeout=60)
+        if local:
+            out = subprocess.CompletedProcess(
+                ["cat", _FLOW_PDK_DEFAULTS_PATH], 0,
+                Path(_FLOW_PDK_DEFAULTS_PATH).read_text(), "")
+        else:
+            out = subprocess.run(
+                _cex.docker_exec_argv(container, "cat", _FLOW_PDK_DEFAULTS_PATH),
+                capture_output=True, text=True, timeout=60)
         if out.returncode != 0 or not (out.stdout or "").strip():
             return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ in "
                               f"{container} (rc={out.returncode}), so the "
@@ -20514,6 +20520,19 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
         if staged and not fo:
             return staged, staged_src, unread
         return int(fo), fo_note, unread
+    if liberty_path and _cex.no_container_route():
+        # The native runtime has already loaded this library's PDK config.
+        # Its cap must reach the same synthesis/SDC ladder before a generic
+        # family fallback; a design declaration above still takes precedence.
+        import sdc_environment as _sdc_env
+        values, missing_pdk = _sdc_env._sdc_environment_pdk_values(
+            liberty_path, container, _to_container_path)
+        value = values.get("set_max_fanout")
+        if value is not None:
+            number = float(value[0])
+            if number.is_integer() and number > 0:
+                return int(number), value[1], unread
+        unread.extend(missing_pdk)
     cap, why, why_unread = _flow_default_max_fanout_read(project, pdk_name)
     if why_unread:
         unread.append(why_unread)
@@ -20537,20 +20556,8 @@ def _flow_default_max_fanout(project: Path, pdk: str):
     this run's own ``reports/container_image.json``. Never fabricates: any
     failure (no record, container down, file absent, no family match) returns
     ``(None, "")`` and the SDC stays byte-identical to before."""
-    try:
-        rec = json.loads(
-            (project / "reports" / "container_image.json").read_text())
-        container = str(rec.get("container") or "")
-        if not container:
-            return None, ""
-        out = subprocess.run(
-            _cex.docker_exec_argv(container, "cat", _FLOW_PDK_DEFAULTS_PATH),
-            capture_output=True, text=True, timeout=60)
-        if out.returncode != 0:
-            return None, ""
-        return parse_flow_pdk_max_fanout(out.stdout, pdk)
-    except Exception:                                        # noqa: BLE001
-        return None, ""
+    cap, evidence, _unread = _flow_default_max_fanout_read(project, pdk)
+    return cap, evidence
 
 
 _LAST_FANOUT_SOURCE: Dict[str, str] = {}
