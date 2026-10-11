@@ -60,11 +60,29 @@ def _evidence(item: dict, errors: list[str], label: str) -> str:
     return path.read_text(errors="replace")
 
 
-def _sdc_values(body: str, command: str) -> list[float]:
+def _sdc_values(body: str, command: str, *, include_ports: bool = True,
+                only_port: str | None = None) -> list[float]:
     # Tcl is not a line-oriented format.  A conflicting later assignment must
     # never be hidden by reading only the first matching line.
-    return [float(m.group(1)) for m in re.finditer(
-        rf"(?m)^\s*{re.escape(command)}\s+({_NUM})(?=\s|$)", body)]
+    # IO port constraints have their own domain. They are not the core
+    # defaults the stage receipt and the core declaration must agree on.
+    values = []
+    for match in re.finditer(
+            rf"(?m)^\s*{re.escape(command)}\s+({_NUM})(?=\s|$)([^\n;]*)", body):
+        target = match.group(2).strip()
+        if only_port is not None:
+            listed = re.fullmatch(r"\[get_ports\s+\[list\s+((?:\{[^{}]+\}\s*)+)\]\]", target)
+            literal = re.fullmatch(r"\[get_ports\s+\{([^{}]+)\}\]", target)
+            names = (re.findall(r"\{([^{}]+)\}", listed[1]) if listed else
+                     [literal[1]] if literal else
+                     ["*"] if target == "[get_ports *]" else [])
+            if only_port not in names and "*" not in names:
+                continue
+        elif not include_ports and re.search(
+                r"\[(?:get_ports|all_inputs|all_outputs)\b", target):
+            continue
+        values.append(float(match.group(1)))
+    return values
 
 
 def parse_check_types(body: str, *, scene: str, mode: str,
@@ -127,7 +145,7 @@ def _balanced_block(text: str, start: int) -> str:
 
 
 def _liberty_limits(body: str) -> dict:
-    """Take pin attributes before nested timing groups and library defaults."""
+    """Read direct pin attributes in any order, excluding nested groups."""
     # PDK Liberty writers commonly split a unit declaration with a Tcl-style
     # backslash/newline (the linked gf180 IO library does exactly this).
     body = re.sub(r"\\\s*\n\s*", " ", body)
@@ -161,8 +179,18 @@ def _liberty_limits(body: str) -> dict:
         pins = {}
         for pin in re.finditer(r'\bpin\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', cell_body):
             pin_body = _balanced_block(cell_body, pin.start())
-            # Pin-level attributes occur before nested timing/power tables.
-            direct = pin_body.split("timing (")[0].split("internal_power (")[0]
+            # Liberty permits pin attributes after timing/power tables. Keep
+            # every direct attribute while discarding child-group bodies.
+            direct_chars = []
+            depth = 0
+            for char in pin_body:
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                elif depth == 0:
+                    direct_chars.append(char)
+            direct = "".join(direct_chars)
             pins[pin.group(1).strip()] = {
                 kind: scaled(direct, kind)
                 for kind in KINDS}
@@ -444,6 +472,13 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
     explicit = declared.get({"max_slew": "slew_ns",
                              "max_capacitance": "cap_pf",
                              "max_fanout": "fanout"}[kind])
+    if (kind == "max_slew" and declared.get("core_scoped_slew") and
+            lib_name != scene.get("liberty")):
+        # This SDC binds the declared slew to core masters, not to every
+        # linked library. Keep actual port constraints on their named net;
+        # other IO/macro pins retain their own linked Liberty limit.
+        port = row["pin"] if is_port else row.get("net")
+        explicit = (declared.get("port_slew_limits") or {}).get(port)
     if kind == "max_capacitance" and row.get("cell_class") == "IO":
         explicit = declared.get("io_cap_pf")
     if kind == "max_fanout" and row["net_class"] == "clock":
@@ -768,7 +803,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         provenance = project / "phase3/librelane_pdk_root.provenance.json"
         try:
             root_doc = json.loads(provenance.read_text())
-            pdk_root = Path(root_doc["path"]).resolve() / str(identity.get("pdk") or "")
+            pdk_root = (Path(root_doc["path"]) / str(identity.get("pdk") or "")).resolve()
             pdk_source = Path(str((current.get("sources") or {}).get(
                 "pdk_config", {}).get("path") or "")).resolve()
             if not pdk_root.is_dir() or not pdk_source.is_relative_to(pdk_root):
@@ -785,7 +820,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     for field, command in (("fanout", "set_max_fanout"),
                            ("slew_ns", "set_max_transition"),
                            ("cap_pf", "set_max_capacitance")):
-        values = _sdc_values(sdc_text, command)
+        values = _sdc_values(sdc_text, command, include_ports=False)
         if not values:
             fails.append(f"sign-off SDC {command} absent")
         elif any(v != declared.get(field) for v in values):
@@ -933,7 +968,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             for field, command in (("fanout", "set_max_fanout"),
                                    ("slew_ns", "set_max_transition"),
                                    ("cap_pf", "set_max_capacitance")):
-                values = _sdc_values(snapshot, command)
+                values = _sdc_values(snapshot, command, include_ports=False)
                 if not values or any(value != applied.get(field) for value in values):
                     fails.append(f"{name}: {command} snapshot != applied value")
             if not _positive_number(stage.get("fanout_check_limit")):
@@ -968,6 +1003,20 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             missing.append(f"scene identity missing, repeated or unexpected: {name}")
             continue
         scene_names.add(name)
+        from drv_signoff_census import _core_only_kinds
+        core_cells = set((libs.get(scene.get("liberty")) or {}).get(
+            "limits", {}).get("cells", {}))
+        scoped_declared = dict(declared)
+        scoped_declared["core_scoped_slew"] = "max_slew" in _core_only_kinds(
+            sdc_text, core_cells, ignore_port_limits=True)
+        scoped_declared["port_slew_limits"] = {}
+        if scoped_declared["core_scoped_slew"]:
+            for pin, meta in scene_pins.items():
+                if not isinstance(meta, dict) or meta.get("cell_class") != "port":
+                    continue
+                port_limits = _sdc_values(sdc_text, "set_max_transition", only_port=pin)
+                if port_limits:
+                    scoped_declared["port_slew_limits"][pin] = min(port_limits)
         if not scene.get("fresh_process") or not scene.get("postroute"):
             missing.append(f"{name}: fresh post-route STA process not proven")
         if scene.get("unannotated_nets") != 0:
@@ -988,7 +1037,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         if not isinstance(excluded, list) or any(
                 not isinstance(p, dict) or not p.get("pin") or
                 p.get("reason") not in ("constant", "disabled", "ideal",
-                                        "lef_pg_no_liberty_arc", "unconnected_no_net",
+                                        "lef_pg_no_liberty_arc", "lef_physical_no_liberty_arc",
+                                        "no_applicable_limit",
+                                        "unconnected_no_net",
                                         "unproven") or
                 ("excluded_kinds" in p and
                  (not isinstance(p["excluded_kinds"], list) or
@@ -1007,7 +1058,8 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         for item in excluded or []:
             if not isinstance(item, dict) or not item.get("pin"):
                 continue
-            if item.get("reason") in ("lef_pg_no_liberty_arc", "unconnected_no_net"):
+            if item.get("reason") in ("lef_pg_no_liberty_arc", "lef_physical_no_liberty_arc",
+                                      "no_applicable_limit", "unconnected_no_net"):
                 continue
             if item.get("reason") == "unproven":
                 missing.append(f"{name}: omitted pin {item['pin']} has no exclusion proof")
@@ -1026,7 +1078,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                        "direction": direction, "measured": measured,
                        "excluded_reason": item.get("reason")}
                 if not _annotate_limits(row, kind, scene, libs, scene_pins,
-                                        declared, missing):
+                                        scoped_declared, missing):
                     continue
                 row["limit"] = row["effective_limit"]
                 row["slack"] = row["effective_limit"] - measured
@@ -1110,11 +1162,11 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             if not isinstance(linked_item, dict):
                 missing.append(f"{name}: linked Liberty record malformed")
                 continue
-            linked_header = (libs.get(linked_item.get("name")) or {}).get("header")
-            if (not isinstance(expected_pvt, dict) or
-                    any((linked_header or {}).get(k) != expected_pvt.get(k)
-                        for k in ("nom_process", "nom_voltage", "nom_temperature"))):
-                missing.append(f"{name}: {linked_item.get('name')} linked Liberty PVT mismatch")
+        # The core library defines this scene's PVT. IO and supply libraries
+        # have their own nominal headers; some passive supply models use the
+        # same header in every corner. Their identities are checked against
+        # the frozen full per-scene library set above and the frozen input
+        # hashes, rather than against another library's nominal header.
         if scene.get("command") != _COMMAND:
             missing.append(f"{name}: required OpenSTA report_check_types command absent")
         report = _evidence(scene.get("report") or {}, missing, name + " violator report")
@@ -1163,7 +1215,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     from drv_signoff_census import derive as derive_census
                     census = derive_census(census_paths[0].parent,
                                            scene.get("linked_liberties") or [], all_rows,
-                                           scene.get("linked_lefs"), allow_unproven=True)
+                                           scene.get("linked_lefs"), allow_unproven=True,
+                                           signoff_sdc=Path(sdc["path"]),
+                                           core_liberty=scene.get("liberty"))
                     if (scene_pins != census["pins"] or
                             scene.get("excluded_pins") != census["excluded"] or
                             scene.get("clock_network_pins") != census["clock_network_pins"] or
@@ -1233,7 +1287,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 if kind == "max_slew" and row["direction"] not in ("rise", "fall"):
                     missing.append(f"{name}: slew rise/fall absent for {row['pin']}")
                 if not _annotate_limits(row, kind, scene, libs, scene_pins,
-                                        declared, missing):
+                                        scoped_declared, missing):
                     continue
                 effective = row["effective_limit"]
                 tolerance = max(1e-6, abs(effective) * 1e-6)

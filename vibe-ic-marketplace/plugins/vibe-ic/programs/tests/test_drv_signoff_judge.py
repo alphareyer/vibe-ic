@@ -404,6 +404,33 @@ def test_all_limits_report_cannot_hide_a_named_violator(tmp_path):
                for n in result["not_measured"])
 
 
+@pytest.mark.parametrize('core_target', ['[current_design]', '[$_vibeic_core_cell cell]'])
+def test_core_sdc_limits_keep_io_port_slew_independent(tmp_path, core_target):
+    bundle = _bundle(tmp_path)
+    body = ('foreach _vibeic_core_cell [get_lib_cells */logic] {\n'
+            f' set_max_fanout 4 {core_target}\n'
+            f' set_max_transition 3 {core_target}\n'
+            f' set_max_capacitance 0.2 {core_target}\n'
+            '}\nset_max_transition 25 [get_ports [list {a}]]\n')
+    source = _file(tmp_path, 'signoff_sdc', body)
+    bundle['current']['sources']['signoff_sdc'] = source
+    bundle['frozen']['sources']['signoff_sdc'] = source['sha256']
+    for stage in bundle['stages']:
+        if stage['name'] != 'synth':
+            stage['sdc_snapshot'] = _file(tmp_path, stage['name'] + '.sdc', body)
+    result = drv.judge(bundle)
+    assert result['verdict'] == 'PASS', result
+    # A conflicting core assignment must still fail. Only port targets have
+    # their independent IO constraints; they cannot hide a changed core limit.
+    source = _file(tmp_path, 'signoff_sdc', body +
+                   f'set_max_transition 5 {core_target}\n')
+    bundle['current']['sources']['signoff_sdc'] = source
+    bundle['frozen']['sources']['signoff_sdc'] = source['sha256']
+    result = drv.judge(bundle)
+    assert result['verdict'] == 'FAIL'
+    assert any('set_max_transition != declared' in f for f in result['failures'])
+
+
 def test_signoff_sdc_ten_against_declared_four_fails_even_if_report_clean(tmp_path):
     bundle = _bundle(tmp_path)
     source = _file(tmp_path, "signoff_sdc",
@@ -536,6 +563,53 @@ def test_clock_waiver_needs_signed_limits_preceding_run(tmp_path, monkeypatch):
     assert drv.judge(bundle)["verdict"] == "FAIL"
 
 
+@pytest.mark.parametrize("fault", [None, "own_temperature", "changed_liberty",
+                                   "wrong_corner", "core_voltage",
+                                   "core_process", "core_temperature"])
+def test_linked_io_pvt_uses_its_frozen_library_identity(tmp_path, fault):
+    bundle = _bundle(tmp_path)
+    header = {"nom_process": 1, "nom_voltage": 3.3,
+              "nom_temperature": 100 if fault == "own_temperature" else 25}
+    io = _file(tmp_path, "io.lib", "library (io) {\n"
+               ' time_unit : "1ns"; capacitive_load_unit (1, pf);\n' + "\n".join(
+        f" {key} : {value};" for key, value in header.items()) + "\n}\n")
+    bundle["current"]["liberties"].append({"name": "io", **io})
+    bundle["frozen"]["liberties"]["io"] = io["sha256"]
+    bundle["frozen"]["scene_liberties"]["typ_nom"].append("io")
+    bundle["current"]["scene_liberties"]["typ_nom"].append("io")
+    bundle["scenes"][0]["linked_liberties"].append({"name": "io", **io})
+    if fault == "changed_liberty":
+        path = Path(io["path"])
+        path.write_text(path.read_text().replace("nom_voltage : 3.3", "nom_voltage : 3.0"))
+    elif fault == "wrong_corner":
+        bundle["scenes"][0]["linked_liberties"][-1]["sha256"] = "d" * 64
+    elif fault in ("core_voltage", "core_process", "core_temperature"):
+        original, replacement = {
+            "core_voltage": ("nom_voltage : 5", "nom_voltage : 4.5"),
+            "core_process": ("nom_process : 1", "nom_process : 2"),
+            "core_temperature": ("nom_temperature : 25", "nom_temperature : 125"),
+        }[fault]
+        core = bundle["current"]["liberties"][0]
+        updated = _file(tmp_path, "library.lib", Path(core["path"]).read_text().replace(
+            original, replacement))
+        core.update(updated)
+        bundle["frozen"]["liberties"]["std"] = updated["sha256"]
+        bundle["scenes"][0]["linked_liberties"][0].update(updated)
+    _refresh_scripts(bundle, tmp_path)
+    result = drv.judge(bundle)
+    if fault in (None, "own_temperature"):
+        assert result["verdict"] == "PASS", result["not_measured"]
+    elif fault == "changed_liberty":
+        assert result["verdict"] == "FAIL"
+        assert any("linked Liberty" in message for message in result["failures"])
+    elif fault == "wrong_corner":
+        assert result["verdict"] == "NOT_MEASURED"
+        assert any("frozen full Liberty set" in message for message in result["not_measured"])
+    else:
+        assert result["verdict"] == "NOT_MEASURED"
+        assert any("Liberty PVT header mismatch" in message for message in result["not_measured"])
+
+
 def test_io_default_fanout_one_catches_three_below_design_four(tmp_path):
     bundle = _bundle(tmp_path)
     io = _file(tmp_path, "io.lib", '''library (io) {
@@ -561,6 +635,66 @@ def test_io_default_fanout_one_catches_three_below_design_four(tmp_path):
     assert result["findings"][0]["failed_tier"] == "T1_LIBERTY_FANOUT"
 
 
+@pytest.mark.parametrize("fault", [None, "liberty", "core", "global",
+                                   "unknown_scope", "port", "unmatched_port"])
+def test_core_scoped_slew_does_not_replace_io_or_port_limits(tmp_path, fault):
+    bundle = _bundle(tmp_path)
+    io = _file(tmp_path, "io.lib", '''library (io) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ nom_process : 1; nom_voltage : 5; nom_temperature : 25;
+ default_max_transition : 25; default_max_capacitance : 999;
+ cell (pad) { pad_cell : true; pin (Y) { direction : output; } }
+}''')
+    bundle["current"]["liberties"].append({"name": "io", **io})
+    bundle["frozen"]["liberties"]["io"] = io["sha256"]
+    bundle["frozen"]["scene_liberties"]["typ_nom"].append("io")
+    bundle["current"]["scene_liberties"]["typ_nom"].append("io")
+    bundle["scenes"][0]["linked_liberties"].append({"name": "io", **io})
+    master = "unknown" if fault == "unknown_scope" else "logic"
+    port = "other" if fault == "unmatched_port" else "u/Y"
+    sdc = ("set_max_fanout 4 [current_design]\n"
+           "set_max_capacitance 0.2 [current_design]\n"
+           f"set_max_transition 25 [get_ports [list {{{port}}}]]\n"
+           f"foreach _vibeic_core_master [list {{{master}}}] {{\n"
+           "  foreach _vibeic_core_cell [get_lib_cells -quiet */$_vibeic_core_master] {\n"
+           "    set_max_transition 3 [$_vibeic_core_cell cell]\n"
+           "  }\n}\n")
+    if fault == "global":
+        sdc += "set_max_transition 3 [current_design]\n"
+    ref = _file(tmp_path, "signoff_sdc", sdc)
+    bundle["current"]["sources"]["signoff_sdc"] = ref
+    bundle["frozen"]["sources"]["signoff_sdc"] = ref["sha256"]
+    for stage in bundle["stages"]:
+        if "sdc_snapshot" in stage:
+            stage["sdc_snapshot"] = _file(tmp_path, stage["name"] + ".sdc", sdc)
+    bundle["pins"]["u/Y"].update(net_class="IO", cell_class="IO", cell="pad",
+                                    cell_pin="Y", liberty="io", driver_cell="pad")
+    value = 30 if fault == "liberty" else 4
+    limit = 3 if fault in ("core", "global") else 25
+    _violate(bundle, tmp_path, "max_slew", value=value, limit=limit,
+             net_class="IO", cell_class="IO")
+    if value <= limit:
+        scene = bundle["scenes"][0]
+        scene["counters"]["max_slew"] = 0
+        scene["counter_report"] = _file(tmp_path, "counter.log", "".join(
+            f"DRV_COUNTER {kind} {scene['counters'][kind]}\n" for kind in drv.KINDS))
+    if fault == "core":
+        bundle["pins"]["u/Y"].update(net_class="data", cell_class="std", cell="logic",
+                                        cell_pin="Y", liberty="std", driver_cell="logic")
+    elif fault in ("port", "unmatched_port"):
+        _port_row(bundle, port_to_pad=False)
+    result = drv.judge(bundle)
+    if fault in (None, "port"):
+        assert result["verdict"] == "PASS", result["failures"] + result["not_measured"]
+    elif fault == "unmatched_port":
+        assert result["verdict"] == "NOT_MEASURED"
+    else:
+        assert result["verdict"] == "FAIL"
+        if fault == "liberty":
+            assert result["findings"][0]["failed_tier"] == "T1_LIBERTY"
+            assert result["findings"][0]["waivable"] is False
+
+
 def test_std_cell_cap_margin_on_io_is_disclosed_separately(tmp_path):
     bundle = _bundle(tmp_path)
     io = _file(tmp_path, "io.lib", '''library (io) {
@@ -584,6 +718,26 @@ def test_std_cell_cap_margin_on_io_is_disclosed_separately(tmp_path):
     assert result["verdict"] == "PASS"
     assert result["io_margin_disclosures"][0]["failed_tier"] == (
         "IO_STD_CELL_MARGIN_DISCLOSURE")
+
+
+def test_librelane_capture_plan_preserves_io_library_inventory(tmp_path, monkeypatch):
+    import drv_capture_plan as plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    root = tmp_path / "installed"
+    io = _file(root, "synthetic/libs.ref/io/lib/io_typ.lib",
+               'library (io) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+               'nom_process : 1; nom_voltage : 3.3; '
+               'nom_temperature : 25; }')
+    env = project / "phase3/librelane/32-cand01/04-openroad-stapostpnr/nom_typ/_env_sta.tcl"
+    env.write_text(env.read_text() +
+                   f'set ::env(PAD_LIBS) "{io["path"]}"\n')
+    final_state = _step32_report(project, adopted)
+    result = plan.build(project, final_state=final_state)
+    assert result["frozen"]["pvt"]["typ_nom"]["nom_voltage"] == 5
+    assert all(scene["liberty"] == "std_typ" and
+               [item["name"] for item in scene["linked_liberties"]] == ["std_typ", "io_typ"]
+               for scene in result["scenes"])
+    assert result["frozen"]["liberties"]["io_typ"] == io["sha256"]
 
 
 @pytest.mark.parametrize("kind,value,limit", [
@@ -636,6 +790,53 @@ def test_linked_io_liberty_continued_cap_unit_and_default_fanout():
 }''')
     assert limits["defaults"]["max_fanout"] == 1
     assert limits["defaults"]["max_capacitance"] == 999
+
+
+@pytest.mark.parametrize("group", ["internal_power", "timing"])
+def test_liberty_limits_after_nested_groups_are_pin_attributes(group):
+    limits = drv._liberty_limits('''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (logic) { pin (Y) {
+  ''' + group + ''' () {
+   nested () { max_capacitance : 0.000001; max_transition : 0.000001; }
+  }
+  max_capacitance : 0.071421; max_transition : 1.490347;
+  max_fanout : 2; fanout_load : 1;
+ } }
+}''')
+    pin = limits["cells"]["logic"]["Y"]
+    assert pin["max_capacitance"] == .071421
+    assert pin["max_slew"] == 1.490347
+    assert pin["max_fanout"] == 2
+    assert pin["fanout_load"] == 1
+
+
+@pytest.mark.parametrize("measured,expected", [(.06, "PASS"), (.08, "FAIL")])
+def test_post_table_liberty_limit_is_used_by_actual_judge(tmp_path, measured, expected):
+    bundle = _bundle(tmp_path)
+    lib = _file(tmp_path, "library.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ nom_process : 1; nom_voltage : 5; nom_temperature : 25;
+ default_max_transition : 20; default_max_capacitance : 20;
+ cell (logic) { pin (Y) {
+  internal_power () { fall_power (table) { values ("0.001"); } }
+  max_transition : 20; max_capacitance : 0.071421;
+ } }
+}''')
+    bundle["current"]["liberties"] = [{"name": "std", **lib}]
+    bundle["frozen"]["liberties"]["std"] = lib["sha256"]
+    bundle["scenes"][0]["linked_liberties"] = [{"name": "std", **lib}]
+    _violate(bundle, tmp_path, "max_capacitance", value=measured, limit=.071421)
+    if measured <= .071421:
+        scene = bundle["scenes"][0]
+        scene["counters"]["max_capacitance"] = 0
+        scene["counter_report"] = _file(tmp_path, "counter.log", "".join(
+            f"DRV_COUNTER {kind} {scene['counters'][kind]}\n" for kind in drv.KINDS))
+    result = drv.judge(bundle)
+    assert result["verdict"] == expected, result["failures"] + result["not_measured"]
+    if expected == "FAIL":
+        assert result["findings"][0]["failed_tier"] == "T1_LIBERTY"
+        assert result["findings"][0]["waivable"] is False
 
 
 def test_negated_table_title_cannot_be_a_measurement():
@@ -811,6 +1012,10 @@ def test_direct_capture_plan_uses_its_ran_decks_and_linked_lef(tmp_path, monkeyp
     lib = _file(root, "synthetic/libs.ref/lib/lib/std_typ.lib",
                 'library (std) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
                 'nom_voltage : 5; nom_temperature : 25; }')
+    io = _file(root, "synthetic/libs.ref/io/lib/io_typ.lib",
+               'library (io) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+               'nom_process : 1; nom_voltage : 3.3; '
+               'nom_temperature : 25; }')
     lef = _file(root, "synthetic/libs.ref/lib/lef/std.lef",
                 "MACRO std\n PIN A\n USE SIGNAL ;\n END A\nEND std\n")
     _file(root, "synthetic/libs.tech/librelane/lib/config.tcl",
@@ -837,6 +1042,7 @@ def test_direct_capture_plan_uses_its_ran_decks_and_linked_lef(tmp_path, monkeyp
         spef = _file(project, f"phase3/stage3/extracted/top.{rc}.spef",
                      f"*SPEF {rc}\n")
         deck = (f"read_liberty /original/synthetic/libs.ref/lib/lib/std_typ.lib\n"
+                "read_liberty /original/synthetic/libs.ref/io/lib/io_typ.lib\n"
                 f"read_verilog {netlist['path']}\n"
                 "link_design top\n"
                 f"read_sdc {sdc['path']}\n"
@@ -850,6 +1056,10 @@ def test_direct_capture_plan_uses_its_ran_decks_and_linked_lef(tmp_path, monkeyp
     assert result["frozen"]["values"]["io_delay_ns"] == 4.8
     assert all(s["linked_lefs"][0]["sha256"] == lef["sha256"]
                for s in result["scenes"])
+    assert all(scene["liberty"] == "std_typ" and
+               [item["name"] for item in scene["linked_liberties"]] == ["std_typ", "io_typ"]
+               for scene in result["scenes"])
+    assert result["frozen"]["liberties"]["io_typ"] == io["sha256"]
 
 
 def test_scene_linked_liberty_is_the_hard_slew_limit(tmp_path):
@@ -1145,6 +1355,14 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
     _install_test_freeze(bundle, tmp_path, monkeypatch)
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "PASS", result
+    # CIEL exposes the installed PDK name as a symlink to its version directory.
+    # The same config bytes and frozen evidence still belong to that PDK.
+    versioned = root / "versions" / "installed-version" / "synthetic"
+    versioned.parent.mkdir(parents=True)
+    (root / "synthetic").rename(versioned)
+    (root / "synthetic").symlink_to(versioned, target_is_directory=True)
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "PASS", result
     scene["pin_census_report"] = {}
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "NOT_MEASURED"
@@ -1170,6 +1388,142 @@ def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
     assert derive(folder, [{"name": "io", **lib}], rows)["pins"]["u/Y"]["cell_class"] == "IO"
     lib = _file(tmp_path, "pad.lib", body.replace("pad_cell : true;", ""))
     assert derive(folder, [{"name": "io", **lib}], rows)["pins"]["u/Y"]["cell_class"] == "std"
+
+
+@pytest.mark.parametrize('lef_class', ['ENDCAP TOPRIGHT', 'PAD SPACER',
+                                      'PAD POWER', 'PAD AREAIO'])
+def test_census_keeps_physical_io_pins_without_inventing_liberty(tmp_path, lef_class):
+    from drv_signoff_census import derive
+    folder = tmp_path / 'tool'
+    _file(folder, 'pin_census.tsv',
+          'u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n'
+          'corner/BUS\tpin\tunknown\t0\tcorner\tphysical\tBUS\tbus\tinput\t0\t0\t0\tX\t0\n')
+    _file(folder, 'net_census.rpt',
+          'Net n\n Total capacitance: 0.1\n Number of drivers: 1\n'
+          ' Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n'
+          'Net bus\n Total capacitance: 0\n Number of drivers: 0\n'
+          ' Number of loads: 0\n Number of pins: 0\n\n')
+    _file(folder, 'disabled_edges.rpt', '')
+    lib = _file(tmp_path, 'logic.lib', '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (logic) { pin (Y) { direction : output; } }
+}''')
+    supply_pins = ((' PIN VDD\n DIRECTION INOUT ;\n USE POWER ;\n END VDD\n'
+                    ' PIN VSS\n DIRECTION INOUT ;\n USE GROUND ;\n END VSS\n')
+                   if lef_class in ('PAD POWER', 'PAD AREAIO') else '')
+    lef_text = ('MACRO physical\n CLASS ' + lef_class + ' ;\n PIN BUS\n'
+                ' DIRECTION INOUT ;\n USE SIGNAL ;\n END BUS\n' + supply_pins +
+                'END physical\n')
+    lef = _file(tmp_path, 'physical.lef', lef_text)
+    rows = drv.parse_check_types(_report(fanout=2), scene='typ_nom',
+                                 mode='functional', violators_only=False)
+    result = derive(folder, [{'name': 'std', **lib}], rows, [lef])
+    assert set(result['pins']) == {'u/Y', 'corner/BUS'}
+    assert result['pins']['u/Y']['cell_class'] == 'std'
+    assert result['pins']['corner/BUS']['cell_class'] == 'physical'
+    assert result['pins']['corner/BUS']['liberty'] is None
+    assert result['population'] == {'max_slew': 1, 'max_capacitance': 1, 'max_fanout': 1}
+    assert result['unproven'] == []
+    assert result['excluded'][0]['pin'] == 'corner/BUS'
+    assert result['excluded'][0]['reason'] == 'lef_physical_no_liberty_arc'
+    assert result['excluded'][0]['excluded_kinds'] == ['max_slew']
+    if supply_pins:
+        # AREAIO also describes real drivers: supply typing and no control
+        # inputs distinguish the passive rail connector used by this case.
+        Path(lef['path']).write_text(lef_text.replace('END physical',
+            ' PIN CTRL\n DIRECTION INPUT ;\n USE SIGNAL ;\n END CTRL\nEND physical'))
+        with pytest.raises(ValueError, match='lacks unique linked Liberty pin'):
+            derive(folder, [{'name': 'std', **lib}], rows, [lef])
+        Path(lef['path']).write_text(lef_text.replace('USE POWER', 'USE SIGNAL')
+                                           .replace('USE GROUND', 'USE SIGNAL'))
+        with pytest.raises(ValueError, match='lacks unique linked Liberty pin'):
+            derive(folder, [{'name': 'std', **lib}], rows, [lef])
+    # An unmodeled logic cell must remain a missing model, even without a driver.
+    Path(lef['path']).write_text(lef_text.replace(lef_class, 'CORE'))
+    with pytest.raises(ValueError, match='lacks unique linked Liberty pin'):
+        derive(folder, [{'name': 'std', **lib}], rows, [lef])
+    Path(lef['path']).write_text(lef_text)
+    raw = (folder / 'pin_census.tsv').read_text()
+    (folder / 'pin_census.tsv').write_text(raw.replace('corner/BUS\tpin\tunknown\t0',
+                                                     'corner/BUS\tpin\tunknown\t1'))
+    with pytest.raises(ValueError, match='lacks unique linked Liberty pin'):
+        derive(folder, [{'name': 'std', **lib}], rows, [lef])
+
+
+def test_physical_load_keeps_native_unit_fanout_weight(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / 'tool'
+    _file(folder, 'pin_census.tsv',
+          'u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0\t0\t0\t0\t0\n'
+          'spacer/BUS\tpin\tunknown\t0\tspacer\tphysical\tBUS\tn\tinput\t0\t0\t0\tX\t0\n')
+    _file(folder, 'net_census.rpt',
+          'Net n\n Total capacitance: 0.1\n Number of drivers: 1\n'
+          ' Number of loads: 1\n Number of pins: 2\n\nDriver pins\n u/Y output (logic)\n\n'
+          'Load pins\n spacer/BUS unknown (physical)\n\n')
+    _file(folder, 'disabled_edges.rpt', '')
+    lib = _file(tmp_path, 'logic.lib', '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf); default_fanout_load : 5;
+ cell (logic) { pin (Y) { direction : output; } }
+}''')
+    lef = _file(tmp_path, 'physical.lef',
+                'MACRO physical\n CLASS PAD SPACER ;\n PIN BUS\n'
+                ' DIRECTION INOUT ;\n USE SIGNAL ;\n END BUS\nEND physical\n')
+    result = derive(folder, [{'name': 'std', **lib}],
+                    {kind: [] for kind in drv.KINDS}, [lef])
+    row = next(p for p in result['excluded'] if p['pin'] == 'u/Y')
+    # CheckFanouts::fanoutLoad adds one for a physical load with no Liberty
+    # port; neither zero nor the driver's library default is its weight.
+    assert row['fanout'] == 1
+    assert row['cap_pf'] == .1
+    assert result['driver_pins'] == ['u/Y']
+    assert set(result['pins']) == {'u/Y', 'spacer/BUS'}
+
+
+def test_core_only_constraints_record_unbounded_io_checks_without_hiding_core(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / 'tool'
+    _file(folder, 'pin_census.tsv',
+          'u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n'
+          'pad/Y\tpin\toutput\t1\tpad\tio\tY\tout\tinput\t0.1\t0.1\t0\tX\t0\n')
+    _file(folder, 'net_census.rpt',
+          'Net n\n Total capacitance: 0.1\n Number of drivers: 1\n'
+          ' Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n'
+          'Net out\n Total capacitance: 0.1\n Number of drivers: 1\n'
+          ' Number of loads: 0\n Number of pins: 1\n\nDriver pins\n pad/Y output (io)\n\n')
+    _file(folder, 'disabled_edges.rpt', '')
+    core = _file(tmp_path, 'core.lib', '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (logic) { pin (Y) { direction : output; } }
+}''')
+    io = _file(tmp_path, 'io.lib', '''library (io) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (io) { pad_cell : true; pin (Y) { direction : output; max_transition : 3; } }
+}''')
+    body = ('foreach _vibeic_core_master [list {logic}] {\n'
+            ' foreach _vibeic_core_cell [get_lib_cells -quiet */$_vibeic_core_master] {\n'
+            '  set_max_fanout 4 [$_vibeic_core_cell cell]\n'
+            '  set_max_capacitance 0.2 [$_vibeic_core_cell cell]\n'
+            '  set_max_transition 3 [$_vibeic_core_cell cell]\n }\n}\n')
+    sdc = Path(_file(tmp_path, 'signoff.sdc', body)['path'])
+    rows = drv.parse_check_types(_report(), scene='typ_nom', mode='functional',
+                                 violators_only=False)
+    rows['max_slew'] += drv.parse_check_types(_report().replace('u/Y', 'pad/Y'),
+                         scene='typ_nom', mode='functional', violators_only=False)['max_slew']
+    libs = [{'name': 'std', **core}, {'name': 'io', **io}]
+    result = derive(folder, libs, rows, signoff_sdc=sdc, core_liberty='std')
+    assert result['unproven'] == []
+    assert result['population'] == {'max_slew': 2, 'max_capacitance': 1, 'max_fanout': 1}
+    assert result['driver_pins'] == ['pad/Y', 'u/Y']
+    assert result['excluded'][0]['reason'] == 'no_applicable_limit'
+    assert set(result['excluded'][0]['excluded_kinds']) == {'max_fanout', 'max_capacitance'}
+    # A global limit makes the absent IO row a real omission again.
+    sdc.write_text(body + 'set_max_fanout 4 [current_design]\n')
+    with pytest.raises(ValueError, match='omitted driver pad/Y'):
+        derive(folder, libs, rows, signoff_sdc=sdc, core_liberty='std')
+    sdc.write_text(body)
+    rows['max_fanout'] = []
+    with pytest.raises(ValueError, match='omitted driver u/Y'):
+        derive(folder, libs, rows, signoff_sdc=sdc, core_liberty='std')
 
 
 def test_unreported_unexcluded_driver_blocks_census(tmp_path):
