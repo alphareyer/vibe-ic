@@ -224,6 +224,13 @@ def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
     assert runner._phase3_window_sites('23', '24') == ['enclosing_canonicalize']
 
 
+def test_default_retains_the_existing_individual_layout_release_producers(monkeypatch):
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    assert runner._phase3_window_sites('37', '37') == ['gds']
+    assert runner._phase3_window_sites('31', '31') == ['drc', 'lvs']
+    assert runner._phase3_window_sites('37.3', '37.3') == ['gds_xor']
+
+
 def test_default_signoff_window_runs_only_current_row_and_consumer(tmp_path, monkeypatch):
     calls = install_transport(monkeypatch, tmp_path)
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
