@@ -207,6 +207,13 @@ def _integrator_value(body: str, *keys: str) -> float | None:
 def _installed_image_digest(image: str) -> str | None:
     """Read the actual local image identity; a bundle cannot assert its own pin."""
     try:
+        import _container_exec as _ce
+        if _ce.no_container_route():
+            import librelane_contract as _ll
+            try:
+                return _ll.local_image_attestation(image)["image_id"]
+            except _ll.Refusal:
+                return None
         process = subprocess.run(
             ["docker", "image", "inspect", image, "--format", "{{json .}}"],
             capture_output=True, text=True, check=False, timeout=15)
