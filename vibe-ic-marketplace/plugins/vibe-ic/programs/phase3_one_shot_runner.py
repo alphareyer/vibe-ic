@@ -58037,14 +58037,16 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     if refusal:
         return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
                           refusal, reason_class=_V.ReasonClass.INPUT_ABSENT)
-    # Step 32 or a later route promotion may have changed routed.def since
-    # the post-PnR publication. Refresh the five route-only outputs by digest
-    # before the broader prestream pass; equal bytes leave them untouched.
-    _canonicalize_postpnr_prerequisites(project, top, pdk, container)
+    import execution_policy
+    ordinary = execution_policy.request()['mode'] == 'default'
+    # Default's completed rows already own these artifacts. The legacy
+    # publisher also rewrites Step 15's native PDN checkpoint and Step 7's
+    # SDC, so it must not run ahead of Default's current row consumer.
+    if not ordinary:
+        _canonicalize_postpnr_prerequisites(project, top, pdk, container)
     evidence = step_canonicalize_artefacts(
         project, top, pdk, container, prestream=True)
-    import execution_policy
-    if execution_policy.request()['mode'] == 'default' and evidence.status != 'PASS':
+    if ordinary and evidence.status != 'PASS':
         # Default has already run the failing row's selected producer and
         # consumer. Do not run later measurements or turn a measured FAIL
         # into an unmeasured enclosing-row result.

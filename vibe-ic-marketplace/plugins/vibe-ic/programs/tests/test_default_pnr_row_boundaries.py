@@ -436,6 +436,7 @@ def test_full_default_prestream_stops_on_the_actual_failed_row(
     def forbidden(*args, **kwargs):
         pytest.fail('a later producer ran after the Default row stopped')
 
+    monkeypatch.setattr(runner, '_canonicalize_postpnr_prerequisites', forbidden)
     monkeypatch.setattr(runner._pl, 'sta_dir', forbidden)
     monkeypatch.setattr(runner._pr, 'run', forbidden)
     result = runner.step_prestream_gate(
