@@ -186,6 +186,12 @@
       "bucket_A_program": "programs/flow_compliance_check.py",
       "bucket_B_skill_file": "skills/checkpoint-gate/SKILL.md"
     },
+    "phase3.io_pad_operating_mode": {
+      "description": "Digital IO operating controls and voltage-domain tie outputs produced for the chip wrapper at step 15.5ic. Capture documented PDK operating profiles in the wrapper producer, not in a geometry checker.",
+      "bucket_A_program": "programs/io_pad_chip_top_gen.py",
+      "bucket_A_related": ["programs/_pad_ring.py", "programs/librelane_contract.py"],
+      "bucket_B_skill_file": "skills/synth-doctor/SKILL.md"
+    },
     "phase3.pad_ring": {
       "description": "Pad-ring site resolution, per-side fit and abutment for the self-tape-out path (flow step 15.5ic). Routed to the step's GATE: flow/phase1_phase2_phase3.yaml declares 15.5ic's verdict as `program_exit_zero: pad_ring_check`, so a rule recovered here belongs in the checker; the producer and the shared helper are named as related. Added because the step had no routing entry at all, so a capture taken here fell through to default_routing, whose bucket_A_program is null.",
       "bucket_A_program": "programs/pad_ring_check.py",

@@ -1078,7 +1078,8 @@ class PadFaces:
 def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
                    port_direction: str,
                    declared: Optional[Dict[str, int]] = None, *,
-                   core_power_pins: Optional[Sequence[str]] = None) -> PadFaces:
+                   core_power_pins: Optional[Sequence[str]] = None,
+                   master: str = "") -> PadFaces:
     """Resolve one pad master against one port direction.
 
     THE RULE, and every clause of it is read out of the Liberty above:
@@ -1101,9 +1102,9 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
 
     Every remaining SIGNAL INPUT is an AUXILIARY pin — a pull enable, a slew
     or drive select. `declared` is the DESIGN's own answer for those, by pin
-    name; a pin the design does not answer is tied to 0 and RECORDED in
-    `reasons`, because a chip whose pulls nobody chose is a chip whose pulls
-    somebody must be able to see.
+    name. A supported PDK's documented digital operating profile supplies
+    otherwise undeclared controls; generic, unknown auxiliaries remain tied
+    to zero and disclosed. Explicit design declarations take precedence.
     """
     declared = dict(declared or {})
     terminals = [p for p, r in pins.items()
@@ -1199,6 +1200,31 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
             f"a bidirectional port must declare which way it faces before a "
             f"pad's enable can be tied"))
 
+    # The GPIO Liberty omits these controls from its Boolean function even
+    # though DM=000, ENABLE_H=0 or HLD_H_N=0 disables/holds the real cell.
+    # Use the PDK's normal digital mode, not a zero-default on essential
+    # operating controls. No design name or timing threshold is involved.
+    # Authority: sky130_fd_io user guide, Tables 102, 104, 108 and 110.
+    # https://skywater-pdk.readthedocs.io/en/main/contents/libraries/
+    # sky130_fd_io/docs/user_guide.html
+    profile: Dict[str, int] = {}
+    if master == "sky130_ef_io__gpiov2_pad":
+        profile = {
+            "ENABLE_H": 1, "HLD_H_N": 1, "ENABLE_VDDIO": 1,
+            "ENABLE_VSWITCH_H": 1, "ENABLE_INP_H": 0,
+            "ENABLE_VDDA_H": 0, "ANALOG_EN": 0, "ANALOG_SEL": 0,
+            "ANALOG_POL": 0, "IB_MODE_SEL": 0, "VTRIP_SEL": 0,
+            "HLD_OVR": 0, "SLOW": 0,
+            "INP_DIS": int(direction.startswith("out")),
+            "DM[2]": int(direction.startswith("out")),
+            "DM[1]": int(direction.startswith("out")),
+            "DM[0]": int(direction.startswith("in")),
+        }
+        if any(p not in pins or pins[p].get("direction") != "input"
+               for p in profile):
+            return PadFaces(refused=(
+                f"{master} does not carry the documented digital operating "
+                "control interface; no operating profile can be applied"))
     for pin, rec in pins.items():
         if pin in (terminal, core_pin) or pin in ties:
             continue
@@ -1207,6 +1233,13 @@ def pad_cell_faces(pins: Dict[str, Dict[str, Optional[str]]],
         if pin in declared:
             ties[pin] = int(bool(declared[pin]))
             reasons[pin] = "declared by the design"
+            continue
+        if pin in profile:
+            ties[pin] = profile[pin]
+            reasons[pin] = (f"PDK operating profile: {master} normal digital "
+                            f"{direction} mode, sky130_fd_io user guide "
+                            "Tables 102/104/108/110; explicit design controls "
+                            "take precedence")
             continue
         ties[pin] = 0
         reasons[pin] = ("DEFAULTED: the design declares nothing for this "

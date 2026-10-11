@@ -1298,7 +1298,12 @@ def aux_tie_dont_touch(chip_top_record: dict[str, Any]) -> list[str]:
         if len(values) != 2 or not all(isinstance(v, str) and v for v in values):
             raise Refusal('LL_AUX_TIE_RECORD_INVALID',
                           f'aux_pin_signal_connections[{index}] names no tie_instance/net')
-        names.extend(v for v in values if v not in names)
+        # A constant output built into the pad is already that pad instance.
+        # Protect its control net, not the whole GPIO: freezing the GPIO also
+        # prevents repair_design from inserting a buffer on its core data
+        # input (RSZ-3006). Separate core tie cells retain both protections.
+        protected = values[1:] if values[0] == row.get('instance') else values
+        names.extend(v for v in protected if v not in names)
     return names
 
 

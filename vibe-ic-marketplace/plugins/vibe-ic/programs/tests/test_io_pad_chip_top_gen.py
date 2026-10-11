@@ -211,6 +211,94 @@ def _record(proj: Path) -> dict:
         (proj / "reports" / "phase3" / "io_pad_chip_top.json").read_text())
 
 
+def _digital_gpio_pdk(root: Path) -> Path:
+    """A documented GPIO interface, without copying the PDK or its layout."""
+    master = "sky130_ef_io__gpiov2_pad"
+    macros = (_macro(master, "PAD INOUT", pins=[("PAD", "SIGNAL")])
+              + _macro("sky130_ef_io__fill", "PAD SPACER", 1, 100)
+              + _macro("sky130_ef_io__cor", "ENDCAP BOTTOMLEFT", 40, 40))
+    _pdk(root, macros=macros, terminals=f"{master}/PAD")
+    io = root / "testpdk/libs.ref/sky130_ef_io"
+    (root / "testpdk/libs.ref/testlib_io").rename(io)
+    cfg = root / "testpdk/libs.tech/someflow/testlib_io/config.tcl"
+    cfg.write_text(cfg.read_text().replace('$::env(PAD_CELL_LIBRARY)', 'sky130_ef_io'))
+    lib = io / "lib"
+    lib.mkdir()
+    controls = ["OE_N", "INP_DIS", "ENABLE_H", "HLD_H_N",
+                "ENABLE_VDDIO", "ENABLE_VSWITCH_H", "ENABLE_INP_H",
+                "ENABLE_VDDA_H", "SLOW", "IB_MODE_SEL", "VTRIP_SEL",
+                "ANALOG_EN", "ANALOG_SEL", "ANALOG_POL", "HLD_OVR",
+                "DM[0]", "DM[1]", "DM[2]"]
+    hv = {"ENABLE_H", "HLD_H_N", "ENABLE_VSWITCH_H", "ENABLE_INP_H"}
+    pins = ['pin("PAD") { direction: inout; is_pad: true; '
+            'function: "OUT"; three_state: "OE_N"; }',
+            'pin("OUT") { direction: input; related_power_pin: "VCCD"; }',
+            'pin("IN") { direction: output; function: "!INP_DIS * PAD"; '
+            'related_power_pin: "VCCD"; }']
+    for control in controls:
+        pins.append(f'pin("{control}") {{ direction: input; '
+                    f'related_power_pin: "{"VDDIO" if control in hv else "VCCD"}"; }}')
+    for name, value in [("TIE_HI_ESD", 1), ("TIE_LO_ESD", 0)]:
+        pins.append(f'pin("{name}") {{ direction: output; function: "{value}"; '
+                    'related_power_pin: "VDDIO"; }')
+    # The parser reads line-oriented Liberty attributes, as the real PDK does.
+    text = 'cell("' + master + '") {\n' + '\n'.join(pins) + '\n}\n'
+    text = text.replace('{ ', '{\n').replace('; ', ';\n').replace(' }', '\n}')
+    (lib / "gpio.lib").write_text(text)
+    verilog = io / "verilog"
+    verilog.mkdir()
+    (verilog / "gpio.v").write_text(
+        f'module {master}(input [2:0] DM); endmodule\n')
+    return root
+
+
+def test_digital_gpio_defaults_operate_instead_of_disabling_the_chip(tmp_path):
+    proj = _project(tmp_path)
+    res = _run(GEN, proj, _digital_gpio_pdk(tmp_path / "pdk"), (
+        "--tie-high-cell", "TIEHI", "--tie-high-pin", "Y",
+        "--tie-low-cell", "TIELO", "--tie-low-pin", "Y"))
+    assert res.returncode == 0, res.stdout + res.stderr
+    record = _record(proj)
+    pads = [p for p in record["pad_instances"].values() if p.get("core_pin")]
+    assert len(pads) == 5
+    for pad in pads:
+        t = pad["ties"]
+        # PDK operating truth table: enable=0 or DM=000 disables digital IO;
+        # hold=0 freezes data. These are functional requirements, not tuning.
+        assert t["ENABLE_H"] == t["HLD_H_N"] == 1
+        assert t["ENABLE_VDDIO"] == t["ENABLE_VSWITCH_H"] == 1
+        dm = sum(t[f"DM[{bit}]"] << bit for bit in range(3))
+        assert dm == (6 if pad["direction"] == "output" else 1)
+        assert t["INP_DIS"] == int(pad["direction"] == "output")
+        assert t["OE_N"] == int(pad["direction"] == "input")
+        assert pad["tie_reasons"]["ENABLE_H"].startswith("PDK operating profile:")
+    rows = record["aux_pin_signal_connections"]
+    text = (proj / record["chip_top_verilog"]).read_text()
+    for inst, pad in record["pad_instances"].items():
+        if not pad.get("core_pin"):
+            continue
+        high = [r for r in rows if r["instance"] == inst and
+                r["pin"] in {"ENABLE_H", "HLD_H_N", "ENABLE_VSWITCH_H"}]
+        assert len(high) == 3
+        assert all(r["tie_instance"] == inst and r["tie_pin"] == "TIE_HI_ESD"
+                   for r in high)
+        assert len({r["net"] for r in high}) == 1
+        assert f'.TIE_HI_ESD({high[0]["net"]})' in text
+
+
+def test_declared_gpio_aux_controls_take_precedence_over_the_profile(tmp_path):
+    proj = _project(tmp_path, doc=DOC +
+                    '\n# Pad Auxiliary Controls\nq: SLOW=1, DM[0]=1\n')
+    res = _run(GEN, proj, _digital_gpio_pdk(tmp_path / "pdk"), (
+        "--tie-high-cell", "TIEHI", "--tie-high-pin", "Y",
+        "--tie-low-cell", "TIELO", "--tie-low-pin", "Y"))
+    assert res.returncode == 0, res.stdout + res.stderr
+    q = next(p for p in _record(proj)["pad_instances"].values() if p["port"] == "q")
+    assert q["ties"]["SLOW"] == q["ties"]["DM[0]"] == 1
+    assert q["tie_reasons"]["SLOW"] == "declared by the design"
+    assert q["ties"]["DM[2]"] == q["ties"]["DM[1]"] == 1
+
+
 def _owed(report: Path) -> list:
     """The variables `pad_assignment_gen` says are still owed.
 
