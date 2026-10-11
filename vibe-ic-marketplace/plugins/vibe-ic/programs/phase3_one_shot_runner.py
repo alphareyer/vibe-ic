@@ -44466,6 +44466,28 @@ def _work_lives_in_container(container: Optional[str]):
 def _die_finishing(project: Path, top: str, pdk: PdkConfig,
                      gds_path: Path,
                      container: Optional[str] = None) -> Tuple[bool, str]:
+    """Run the existing Step-26.5ic producer, preserving its two-item ABI."""
+    result = _die_finishing_record(project, top, pdk, gds_path, container)
+    return result.extras['completed'], result.detail
+
+
+@_spf.retained_step('26.5ic', canonical_acceptance=True)
+def _die_finishing_record(project: Path, top: str, pdk: PdkConfig,
+                          gds_path: Path,
+                          container: Optional[str] = None) -> StepResult:
+    t0 = time.time()
+    completed, detail, status = _die_finishing_native(project, top, pdk, gds_path, container)
+    # A nonfatal refusal remains unmeasured; a measured native FAIL stays FAIL.
+    # Only completion reaches the
+    # unchanged die_finishing_check; a truthy tuple is never accepted as PASS.
+    return StepResult('die_finishing', status,
+                      time.time() - t0, detail, extras={'completed': completed},
+                      reason_class='not_executed' if status == 'NOT_MEASURED' else '')
+
+
+def _die_finishing_native(project: Path, top: str, pdk: PdkConfig,
+                          gds_path: Path,
+                          container: Optional[str] = None) -> Tuple[bool, str, str]:
     """Step 26.5ic — die finishing: the PDK's OWN seal ring on the streamed GDS.
 
     Delegates to the `die_finishing_gen` plugin program, which locates the PDK's
@@ -44487,14 +44509,14 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
     PDK that ships no generator is a named skip, never a silent "sealed".
     """
     if not gds_path.is_file():
-        return False, "no GDS to seal"
+        return False, "no GDS to seal", 'NOT_MEASURED'
     prog = Path(__file__).resolve().parent / "die_finishing_gen.py"
     if not prog.is_file():
-        return False, "die_finishing_gen program not found"
+        return False, "die_finishing_gen program not found", 'NOT_MEASURED'
     pdk_dir = _pdk_dir_of(pdk)
     if not pdk_dir:
         return False, ("cannot locate the PDK directory from the tech LEF — "
-                       "no seal-ring generator was looked for")
+                       "no seal-ring generator was looked for"), 'NOT_MEASURED'
     argv = [sys.executable, str(prog), str(project),
             "--gds", str(gds_path), "--in-place",
             "--pdk-root", str(Path(pdk_dir).parent),
@@ -44566,7 +44588,7 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
         # `subprocess.TimeoutExpired` was in this tuple and can no longer be
         # raised here: the call is progress-supervised and reports a stall as
         # an rc. Leaving it would be dead code that still reads as coverage.
-        return False, f"die finishing NONFATAL: {exc}"
+        return False, f"die finishing NONFATAL: {exc}", 'NOT_MEASURED'
     if cp.returncode != 0:
         # rc 2 is the program's NAMED disclosed skip (this PDK ships no
         # generator); rc 1 is a real failure with its reason in the report.
@@ -44575,13 +44597,14 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
         why = next((ln for ln in reversed(tail)
                     if ln.startswith(("VACUOUS_PASS:", "die_finishing_gen:"))),
                    (tail[-1] if tail else f"rc={cp.returncode}"))
-        return False, f"die finishing did NOT complete: {why[:300]}"
+        return False, f"die finishing did NOT complete: {why[:300]}", (
+            'FAIL' if cp.returncode == 1 else 'NOT_MEASURED')
     if _ll_m265 == "dual" and _ll_seal.get("tool"):
         _librelane_sealring_xor(project, pdk, gds_path)
     if _ll_m265 == "librelane" and _ll_seal.get("tool"):
         return True, ("PDK seal ring inserted by LibreLane KLayout.SealRing and "
-                      "verified around the die")
-    return True, "PDK seal ring inserted and verified around the die"
+                      "verified around the die"), 'PASS'
+    return True, "PDK seal ring inserted and verified around the die", 'PASS'
 
 
 def _die_density_fill(project: Path, top: str, pdk: PdkConfig,
@@ -78435,74 +78458,75 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
         # before the row's producer changes their files. The completed rows
         # of this invocation, including actual output paths, remain visible.
         _publish_in_progress_steps(project, rows)
-        try:
-            if sid in ('16', '35'):
-                if sid == '16':
-                    notes: List[str] = []
-                    clock_path = _pl.cts_dir(project) / 'clock_plan.json'
-                    produced = emit_clock_plan(
-                        project, clock_path, _pl.pnr_dir(project) / 'floorplan.def',
-                        _pl.pnr_dir(project), notes, pdk=pdk)
-                    result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
-                              'detail': '; '.join(notes)}
+        with step_versions.active_steps(project, [attempt]):
+            try:
+                if sid in ('16', '35'):
+                    if sid == '16':
+                        notes: List[str] = []
+                        clock_path = _pl.cts_dir(project) / 'clock_plan.json'
+                        produced = emit_clock_plan(
+                            project, clock_path, _pl.pnr_dir(project) / 'floorplan.def',
+                            _pl.pnr_dir(project), notes, pdk=pdk)
+                        result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
+                                  'detail': '; '.join(notes)}
+                    else:
+                        # DFM is an existing program-first report producer. It
+                        # runs after current fill and before stream-out, without
+                        # constructing a release candidate or another scheduler.
+                        current = producers._run_current_step_declared_producers(project, sid)
+                        produced, detail, verdict = producers._current_step_producer_authority(
+                            current, project=project)
+                        result = {'verdict': verdict, 'detail': detail,
+                                  'current_step_declared_producers': current}
+                    gate = (backend_gates.evaluate(project, row_def)
+                            if sid == '16' or produced else
+                            {'status': result['verdict'], 'ledger': []})
+                    files, missing_outputs = worker.resolve_contract(
+                        project, row_def.get('required_outputs', ()))
+                    status = ('FAIL' if gate['status'] == 'FAIL' or result['verdict'] == 'FAIL' else
+                              'PASS' if produced and gate['status'] == 'PASS'
+                              and not missing_outputs else 'NOT_MEASURED')
+                    receipt = {**result, 'step_id': sid, 'verdict': status,
+                               'outputs': files, 'missing_outputs': missing_outputs,
+                               'gate_ledger': gate['ledger'],
+                               'canonical_step_result': gate.get('step')}
                 else:
-                    # DFM is an existing program-first report producer. It
-                    # runs after current fill and before stream-out, without
-                    # constructing a release candidate or another scheduler.
-                    current = producers._run_current_step_declared_producers(project, sid)
-                    produced, detail, verdict = producers._current_step_producer_authority(
-                        current, project=project)
-                    result = {'verdict': verdict, 'detail': detail,
-                              'current_step_declared_producers': current}
-                gate = (backend_gates.evaluate(project, row_def)
-                        if sid == '16' or produced else
-                        {'status': result['verdict'], 'ledger': []})
-                files, missing_outputs = worker.resolve_contract(
-                    project, row_def.get('required_outputs', ()))
-                status = ('FAIL' if gate['status'] == 'FAIL' or result['verdict'] == 'FAIL' else
-                          'PASS' if produced and gate['status'] == 'PASS'
-                          and not missing_outputs else 'NOT_MEASURED')
-                receipt = {**result, 'step_id': sid, 'verdict': status,
-                           'outputs': files, 'missing_outputs': missing_outputs,
-                           'gate_ledger': gate['ledger'],
-                           'canonical_step_result': gate.get('step')}
-            else:
-                result = producers.produce(project, {
-                    **params, 'step_id': sid,
-                    'execution_mode': 'default',
-                    'resolved_input_manifest': manifest,
-                    'stop_on_producer_failure': True})
-                current = result.get('current_step_declared_producers')
-                if isinstance(current, dict):
-                    current['direct_producer'] = {
-                        'producer': 'execution_backend_producers.produce',
-                        'started_ns': int(started * 1_000_000_000),
-                        'finished_ns': time.time_ns(),
-                        'verdict': result.get('verdict', 'NOT_MEASURED')}
-                receipt = worker.execute_current_step(
-                    project, step_id=sid, producer=result)
-                status = receipt['verdict']
-                files = (receipt['outputs'] if result.get('verdict') == 'PASS'
-                         else {})
-        except (modes.Refusal, ll.Refusal, OSError, ValueError, TypeError) as exc:
-            status = ('FAIL' if isinstance(exc, ll.Refusal)
-                      and exc.code == 'LL_STEP_FAILED' else 'NOT_MEASURED')
-            receipt = {'step_id': sid, 'verdict': status,
-                       'detail': f'{type(exc).__name__}: {exc}', 'outputs': {}}
-            files = {}
-        except BaseException as exc:
-            # Preserve partial native output before propagating an unexpected
-            # error or interruption. It never replaces a completed PASS.
-            step_versions.finish_step(
-                project, attempt, verdict='INTERRUPTED',
-                result={'step_id': sid, 'detail': f'{type(exc).__name__}: {exc}'})
-            raise
-        receipt_path = project / f'reports/phase3/default_steps/{sid}/backend_result.json'
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        _aa.write_json(receipt_path, receipt)
-        version = step_versions.finish_step(
-            project, attempt, verdict=status, result=receipt,
-            canonical_pass=(status == 'PASS'))
+                    result = producers.produce(project, {
+                        **params, 'step_id': sid,
+                        'execution_mode': 'default',
+                        'resolved_input_manifest': manifest,
+                        'stop_on_producer_failure': True})
+                    current = result.get('current_step_declared_producers')
+                    if isinstance(current, dict):
+                        current['direct_producer'] = {
+                            'producer': 'execution_backend_producers.produce',
+                            'started_ns': int(started * 1_000_000_000),
+                            'finished_ns': time.time_ns(),
+                            'verdict': result.get('verdict', 'NOT_MEASURED')}
+                    receipt = worker.execute_current_step(
+                        project, step_id=sid, producer=result)
+                    status = receipt['verdict']
+                    files = (receipt['outputs'] if result.get('verdict') == 'PASS'
+                             else {})
+            except (modes.Refusal, ll.Refusal, OSError, ValueError, TypeError) as exc:
+                status = ('FAIL' if isinstance(exc, ll.Refusal)
+                          and exc.code == 'LL_STEP_FAILED' else 'NOT_MEASURED')
+                receipt = {'step_id': sid, 'verdict': status,
+                           'detail': f'{type(exc).__name__}: {exc}', 'outputs': {}}
+                files = {}
+            except BaseException as exc:
+                # Preserve partial native output before propagating an unexpected
+                # error or interruption. It never replaces a completed PASS.
+                step_versions.finish_step(
+                    project, attempt, verdict='INTERRUPTED',
+                    result={'step_id': sid, 'detail': f'{type(exc).__name__}: {exc}'})
+                raise
+            receipt_path = project / f'reports/phase3/default_steps/{sid}/backend_result.json'
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            _aa.write_json(receipt_path, receipt)
+            version = step_versions.finish_step(
+                project, attempt, verdict=status, result=receipt,
+                canonical_pass=(status == 'PASS'))
         if version['capture_errors']:
             raise OSError('step output version could not be retained: ' +
                           '; '.join(version['capture_errors']))
