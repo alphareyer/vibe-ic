@@ -401,9 +401,10 @@ def test_full_default_prestream_uses_the_existing_canonical_row_driver(tmp_path,
         tmp_path, 'unit', SimpleNamespace(name='unit'), '', prestream=True)
     # Read the actual shipped YAML order, including the IC finishing row.
     # That row already has a GDS writer owner and is completed at stream-out.
-    expected = [sid for sid in runner._phase3_window_steps('23', '28')
+    expected = [sid for sid in runner._phase3_window_steps('23', '35')
                 if sid != '26.5ic']
-    assert captured == expected == ['23', '24', '25', '26', '27', '28']
+    assert captured == expected == ['23', '24', '25', '26', '27', '28',
+                                   '29', '30', '33', '34', '35']
     assert result.status == 'FAIL' and result.detail == 'canonical step 23'
 
 
@@ -448,6 +449,119 @@ def test_full_default_prestream_stops_on_the_actual_failed_row(
     assert receipt['verdict'] == status
     assert receipt['layout_digest'] == 'current-layout'
     assert receipt['evidence']['extras']['canonical_steps'][0]['extras']['step_id'] == '23'
+
+
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
+def test_full_default_main_stops_before_streaming_after_prestream_refusal(
+        tmp_path, monkeypatch, status):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, _plan, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    transport = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+
+    def failed_gate(proj, top, pdk, container):
+        digest, error = runner._layout_basis(proj, top, pdk, container)
+        assert not error
+        return runner.StepResult('prestream_gate', status, 0,
+            'canonical step 23: selected STA refused',
+            extras={'layout_digest': digest, 'failed_gates': ['default_step_23']},
+            reason_class=runner._V.ReasonClass.INPUT_ABSENT if status == 'NOT_MEASURED' else '')
+
+    monkeypatch.setattr(runner, 'step_prestream_gate', failed_gate)
+    assert runner.main() != 0
+    assert 'pnr' in transport.called
+    assert 'gds' not in transport.called
+    assert 'lvs' not in transport.called
+    rows = _plan(project)
+    assert rows['prestream_gate']['status'] == status
+    for name in ('gds', 'drc', 'lvs', 'canonicalize_artefacts'):
+        assert rows[name]['status'] == 'NOT_MEASURED'
+
+
+def test_default_fill_and_dfm_use_the_existing_row_driver(monkeypatch):
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    assert runner._phase3_window_sites('34', '35') == ['default_backend']
+
+
+def test_default_main_stops_after_failed_repair_even_when_a_route_remains(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, _plan, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    transport = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+    monkeypatch.setattr(runner, '_librelane_postroute_repair_mode', lambda *a: 'librelane')
+    monkeypatch.setattr(runner, 'step_postroute_repair_librelane', lambda *a:
+                        runner.StepResult('postroute_repair_librelane', 'FAIL', 0,
+                                          'selected repair measured a remaining violation'))
+    # Native transport supplied a retained, usable route. Its presence does
+    # not make the producer's measured quality failure a PASS.
+    monkeypatch.setattr(runner, '_step32_stream_refusal', lambda *a: '')
+    later = []
+    original_gate = runner.step_prestream_gate
+
+    def subsequent_gate(*args, **kwargs):
+        later.append('prestream')
+        return original_gate(*args, **kwargs)
+
+    monkeypatch.setattr(runner, 'step_prestream_gate', subsequent_gate)
+    runner.main()
+    assert later == []
+    assert 'gds' not in transport.called
+    rows = _plan(project)
+    assert rows['postroute_repair_librelane']['status'] == 'FAIL'
+    assert rows['gds']['status'] == 'NOT_MEASURED'
+
+
+def test_default_dfm_produces_its_report_before_its_canonical_consumer(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *args: {})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *args: [])
+    report = tmp_path / 'reports/phase3/dfm_screen.json'
+
+    def program(project, sid):
+        calls.append(('producer', sid))
+        assert project == tmp_path and sid == '35'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text('{"verdict":"PASS"}\n')
+        return {'verdict': 'PRODUCED'}
+
+    def consumer(project, row):
+        calls.append(('consumer', str(row['id'])))
+        assert report.is_file()
+        return {'status': 'PASS', 'ledger': []}
+
+    monkeypatch.setattr(producers, '_run_current_step_declared_producers', program)
+    monkeypatch.setattr(producers, '_current_step_producer_authority',
+                        lambda *args, **kwargs: (True, '', 'PASS'))
+    monkeypatch.setattr(gates, 'evaluate', consumer)
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', ['35'])
+    assert result.status == 'PASS'
+    assert calls == [('producer', '35'), ('consumer', '35')]
+
+
+@pytest.mark.parametrize('mode,extra_sta', [('default', False), ('ultra', True)])
+def test_default_power_uses_its_current_power_producer_without_restarting_sta(
+        tmp_path, monkeypatch, mode, extra_sta):
+    calls = []
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, None, SimpleNamespace(name='unit'), ''))
+    monkeypatch.setattr(runner, '_librelane_signoff_record',
+                        lambda *args, **kwargs: calls.append('sta'))
+    monkeypatch.setattr(runner, '_step33_tool_arm',
+                        lambda *args, **kwargs: calls.append('power'))
+    result = producers.produce_signoff(tmp_path, {
+        'step_id': '33', 'top': 'unit', 'image_id': 'fixture',
+        'pdk_root': str(tmp_path), 'execution_mode': mode})
+    assert calls == (['sta', 'power'] if extra_sta else ['power'])
+    assert result['verdict'] == 'PASS'
 
 
 def test_default_native_refusal_does_not_run_report_producers(tmp_path, monkeypatch):

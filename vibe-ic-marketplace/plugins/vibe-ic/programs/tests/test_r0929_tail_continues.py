@@ -1,4 +1,8 @@
-"""R-0929-TAIL-CONTINUES — a measured sign-off FAIL does not stop stream-out.
+"""Legacy diagnostic tail: measure a failed route without admitting release.
+
+The single-project Default path now stops at the failed canonical row.
+These controls retain the existing Ultra diagnostic tail's assertions;
+test_default_pnr_row_boundaries exercises the Default stopping path.
 
 MEASURED (IC_BLOCKER_AUDIT 2026-09-29, spm #2; subservient IC run
 `subic_ic_20260928` on 8hd-3, read-only): `_chain_ok` in `main()` was
@@ -36,6 +40,19 @@ from test_phase3_postpnr_disclosure_and_gds_guard import (
 )
 
 FLOW = Path(R.__file__).resolve().parent.parent / "flow" / "phase1_phase2_phase3.yaml"
+
+
+@pytest.fixture(autouse=True)
+def diagnostic_transport_mode(monkeypatch):
+    """Exercise legacy native transport; candidate scheduling is out of scope."""
+    import execution_policy
+    original = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original(), mode='ultra'))
+    monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
+                        lambda *a, **k: R.step_pnr(*a, **k))
 
 
 def _stage_fill(monkeypatch, project, d):

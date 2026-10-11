@@ -1296,9 +1296,10 @@ def produce_signoff(project, params):
     elif sid == '33':
         # Run OpenSTA's native report_power on the selected current SPEFs.
         # The report reader below consumes the newly issued STA state.
-        R._librelane_signoff_record(project, top, pdk, 'librelane', 'librelane',
-              extracted / 'spef_corners', project / 'phase3/stage3/sta/multi_corner_ocv_sta.rpt',
-              notes, failures, written)
+        if params.get('execution_mode') != 'default':
+            R._librelane_signoff_record(project, top, pdk, 'librelane', 'librelane',
+                  extracted / 'spef_corners', project / 'phase3/stage3/sta/multi_corner_ocv_sta.rpt',
+                  notes, failures, written)
         R._step33_tool_arm(project, top, pdk, 'librelane', rpt / 'power.rpt', False, written, notes)
     elif sid == '34':
         if not R._emit_metal_fill(project, top, pdk, container, pnr / 'filled.def', notes):

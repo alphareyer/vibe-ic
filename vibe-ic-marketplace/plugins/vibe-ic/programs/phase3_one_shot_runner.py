@@ -62611,7 +62611,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # Full Default uses the same row producers as a bounded continuation.
         # Step 32 has run before this site. The existing GDS producer owns
         # 26.5ic's stream finishing, so that writer stays at stream-out.
-        rows = [sid for sid in _phase3_window_steps('23', '28')
+        rows = [sid for sid in _phase3_window_steps('23', '35')
                 if sid != '26.5ic']
         return _default_pnr_rows(
             project, top, pdk, container, rows,
@@ -77043,7 +77043,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
         return ["default_pnr"]
     if execution_policy.request()['mode'] == 'default':
         from execution_provider_catalog import BACKEND_ROWS
-        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids
+        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'35'}
         if set(ids).issubset(native_ids):
             return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
@@ -78267,18 +78267,30 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
         # of this invocation, including actual output paths, remain visible.
         _publish_in_progress_steps(project, rows)
         try:
-            if sid == '16':
-                notes: List[str] = []
-                clock_path = _pl.cts_dir(project) / 'clock_plan.json'
-                produced = emit_clock_plan(
-                    project, clock_path, _pl.pnr_dir(project) / 'floorplan.def',
-                    _pl.pnr_dir(project), notes, pdk=pdk)
-                result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
-                          'detail': '; '.join(notes)}
-                gate = backend_gates.evaluate(project, row_def)
+            if sid in ('16', '35'):
+                if sid == '16':
+                    notes: List[str] = []
+                    clock_path = _pl.cts_dir(project) / 'clock_plan.json'
+                    produced = emit_clock_plan(
+                        project, clock_path, _pl.pnr_dir(project) / 'floorplan.def',
+                        _pl.pnr_dir(project), notes, pdk=pdk)
+                    result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
+                              'detail': '; '.join(notes)}
+                else:
+                    # DFM is an existing program-first report producer. It
+                    # runs after current fill and before stream-out, without
+                    # constructing a release candidate or another scheduler.
+                    current = producers._run_current_step_declared_producers(project, sid)
+                    produced, detail, verdict = producers._current_step_producer_authority(
+                        current, project=project)
+                    result = {'verdict': verdict, 'detail': detail,
+                              'current_step_declared_producers': current}
+                gate = (backend_gates.evaluate(project, row_def)
+                        if sid == '16' or produced else
+                        {'status': result['verdict'], 'ledger': []})
                 files, missing_outputs = worker.resolve_contract(
                     project, row_def.get('required_outputs', ()))
-                status = ('FAIL' if gate['status'] == 'FAIL' else
+                status = ('FAIL' if gate['status'] == 'FAIL' or result['verdict'] == 'FAIL' else
                           'PASS' if produced and gate['status'] == 'PASS'
                           and not missing_outputs else 'NOT_MEASURED')
                 receipt = {**result, 'step_id': sid, 'verdict': status,
@@ -79255,6 +79267,11 @@ def main() -> int:
             _measurement_only = "; ".join(
                 f"step 32 ({r.name} {r.status}): {r.detail[:200]}"
                 for r in _step32_nonpass)
+            if _execution.request()['mode'] == 'default':
+                _prestream_refusal = _measurement_only
+                _chain_ok = False
+                plan.append(_upstream_signoff_not_measured(
+                    'gds', _prestream_refusal))
         if _chain_ok:
             _prestream = step_prestream_gate(
                 project, effective_top, pdk, args.container)
@@ -79279,8 +79296,13 @@ def main() -> int:
                 # and keeps the run FAIL. The route is still streamed and every
                 # tail step measured on it, unless the route itself is absent
                 # or unidentified. That stream is never admitted for delivery.
-                _stream_block = _ga.stream_refusal(
-                    project, _prestream.extras.get("layout_digest", ""))
+                # The local Default path stops at its actual failing row.
+                # The existing Ultra diagnostic tail remains measurement-only.
+                _stream_block = (
+                    "Default canonical row did not pass"
+                    if _execution.request()['mode'] == 'default' else
+                    _ga.stream_refusal(
+                        project, _prestream.extras.get("layout_digest", "")))
                 if _stream_block:
                     _prestream_refusal = f"{_prestream_failure}; {_stream_block}"
                     _chain_ok = False
