@@ -488,14 +488,14 @@ def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monk
     assert TD.requests_pad_ring(proj) is True
     pdk = S7._pdk(monkeypatch)
     # step 7: no pad ring yet -> no drive can be resolved
-    S7._step7(proj, pdk)
+    T.emit_step7_asic_sdc(p3, proj, S7.TOP, pdk, "some-container")
     assert _record(proj)["verdict"] == "NOT_MEASURED"
     step7_deck = (proj / S7._record(proj)["path"]).read_text()
     assert "NOT_MEASURED: OFFCHIP_INPUT_DRIVE" in step7_deck
     # step_pnr's pad-ring producer writes its record (the IO views it linked)
     _io_record(proj, [_io_lib(tmp_path, "ss")])
     got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
-    assert got["regenerated"] and "io_pad_chip_top.json" in got["regenerated"]
+    assert got["regenerated"] and "@io_pad_record" in got["regenerated"]
     rec = _record(proj)
     assert rec["verdict"] == "PDK_IO_TIER"
     assert all(ln in got["text"].splitlines() for ln in rec["sdc_lines"])
@@ -528,6 +528,7 @@ def test_step7_with_a_staged_sdc_on_a_die_resolves_and_rewrites_the_record(tmp_p
     deck sets no drive, so it gets the IO bracket, and a stale record from an
     earlier auto-SDC run is replaced."""
     S7 = _step7_fixtures()
+    from _ppa import timing as T
     proj = S7._project(tmp_path)
     marker = proj / TD.SELF_TAPEOUT_REL
     marker.parent.mkdir(parents=True)
@@ -538,9 +539,36 @@ def test_step7_with_a_staged_sdc_on_a_die_resolves_and_rewrites_the_record(tmp_p
     _io_record(proj, [_io_lib(tmp_path, "ss")])
     stale = proj / _REPORT
     stale.write_text(json.dumps({"verdict": "DECLARED", "sdc_lines": ["x"]}))
-    S7._step7(proj, S7._pdk(monkeypatch))
+    T.emit_step7_asic_sdc(p3, proj, S7.TOP, S7._pdk(monkeypatch), "some-container")
     rec = _record(proj)
     assert rec["verdict"] == "PDK_IO_TIER"
     deck = (proj / S7._record(proj)["path"]).read_text().splitlines()
     assert all(ln in deck for ln in rec["sdc_lines"])
     assert S7._record(proj)["pad_input_drive"] == "PDK_IO_TIER"
+
+
+def test_unselected_supply_views_do_not_block_the_instantiated_input_pad(tmp_path):
+    import sdc_environment as SE
+    project = _die(tmp_path)
+    signal = _io_lib(tmp_path, 'tt')
+    supply = tmp_path / 'pdk' / 'quartz_supply.lib'
+    supply.write_text('library (supply) { time_unit : "1ns"; cell (supply_pad) { '
+                      'pin (BOND) { is_pad : true; direction : inout; max_transition : 1; } } }')
+    _io_record(project, [supply, signal])
+    path = project / SE.IO_PAD_RECORD
+    doc = json.loads(path.read_text())
+    doc['pad_instances'] = {'u_in': {'master': 'quartz_io__in', 'direction': 'input'},
+                           'u_supply': {'master': 'supply_pad', 'direction': 'inout',
+                                        'port': 'VDD', 'terminal': 'BOND', 'kind': 'power'}}
+    path.write_text(json.dumps(doc))
+    bracket, basis = SE._pdk_io_input_transition(project)
+    assert bracket is not None, basis.get('why')
+    assert bracket['common_min_ns'] == 0.08
+    assert bracket['common_max_ns'] == 1.0
+    assert [v['liberty'] for v in basis['views']] == [str(signal)]
+    # An unmodelled instantiated input must still refuse, even with another
+    # perfectly characterised library available.
+    doc['pad_instances']['u_in']['master'] = 'missing_input_pad'
+    path.write_text(json.dumps(doc))
+    bracket, basis = SE._pdk_io_input_transition(project)
+    assert bracket is None and 'missing_input_pad' in basis['why']

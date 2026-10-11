@@ -189,7 +189,10 @@
     "phase3.io_pad_operating_mode": {
       "description": "Digital IO operating controls and voltage-domain tie outputs produced for the chip wrapper at step 15.5ic. Capture documented PDK operating profiles in the wrapper producer, not in a geometry checker.",
       "bucket_A_program": "programs/io_pad_chip_top_gen.py",
-      "bucket_A_related": ["programs/_pad_ring.py", "programs/librelane_contract.py"],
+      "bucket_A_related": [
+        "programs/_pad_ring.py",
+        "programs/librelane_contract.py"
+      ],
       "bucket_B_skill_file": "skills/synth-doctor/SKILL.md"
     },
     "phase3.pad_ring": {
@@ -244,7 +247,12 @@
     },
     "phase3.sta": {
       "bucket_A_program": "programs/phase3_one_shot_runner.py",
-      "bucket_B_skill_file": "skills/sta-review/SKILL.md"
+      "bucket_B_skill_file": "skills/sta-review/SKILL.md",
+      "bucket_A_related": [
+        "programs/_ppa/timing.py",
+        "programs/sdc_environment.py",
+        "programs/execution_backend_producers.py"
+      ]
     },
     "phase3.sta.architectural_residual": {
       "description": "A Phase-3 sign-off setup violation that exceeds every physical remedy's upper bound (re-buffering + a perfectly balanced clock). Distinct from phase3.sta, which routes the timing report to the STA runner and the sta-review skill — both PHYSICAL remedies. This finding is a RE-AUTHORING request: placement and routing cannot remove a combinational depth the architecture implies, so it routes to step 1 (Spec-to-RTL). One-sided: it fires only when the residual is proven, and never certifies the converse. vibe-ic#2081.",
