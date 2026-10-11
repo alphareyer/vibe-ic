@@ -232,13 +232,21 @@ def test_a_replaced_signoff_promotion_is_not_credited_with_the_pnr_count(tmp_pat
     assert 'signoff_spef_repair PROMOTED' in doc['measured_on']
 
 
+def _bind_kept_route_handoff(project, out, input_def):
+    """The real handoff binds the exported DEF as well as its report."""
+    route = R._pl.pnr_dir(project) / 'routed.def'
+    put(route, Path(out['views'].get('def', input_def)).read_text())
+    return put(project / 'reports/phase3/librelane_route_handoff.json', {
+        'postroute_repair': out['record'],
+        'views': {'def': {'dest_sha256': contract.digest(route)}}})
+
+
 def test_an_in_chain_refusal_stays_bound_and_is_not_repaired_twice(tmp_path, monkeypatch):
     """The receipt binds producer and decision separately; step 32 runs once."""
     import test_pad_connected_pdn_ring as ring_fixture
     project, out, _ = _after_route(tmp_path, monkeypatch, measured=False)
     assert out['record']['report_sha256'] == contract.digest(project / prr.REPORT_REL)
-    put(project / 'reports/phase3/librelane_route_handoff.json',
-        {'postroute_repair': out['record']})
+    _bind_kept_route_handoff(project, out, tmp_path / 'route.def')
     report, why = R._postroute_repair_in_chain(project)
     assert report is not None, why
     pnr = R._pl.pnr_dir(project)
@@ -278,8 +286,7 @@ def test_after_direct_route_refusal_does_not_claim_the_discarded_slack(tmp_path,
 
 def test_a_tampered_promotion_decision_is_not_read_as_the_chain(tmp_path, monkeypatch):
     project, out, _ = _after_route(tmp_path, monkeypatch, measured=False)
-    put(project / 'reports/phase3/librelane_route_handoff.json',
-        {'postroute_repair': out['record']})
+    _bind_kept_route_handoff(project, out, tmp_path / 'route.def')
     sidecar = project / R._POSTROUTE_PROMOTION_DECISION_REL
     decision = json.loads(sidecar.read_text())
     decision['reason'] = 'unbound replacement'

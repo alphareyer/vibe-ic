@@ -46964,7 +46964,8 @@ def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]],
     receipt = project / "reports/phase3/librelane_route_handoff.json"
     report = project / _llprr.REPORT_REL
     try:
-        rec = (json.loads(receipt.read_text()).get("postroute_repair") or {})
+        handoff = json.loads(receipt.read_text())
+        rec = (handoff.get("postroute_repair") or {})
     except (OSError, ValueError) as exc:
         return None, f"{receipt.name} is unreadable ({type(exc).__name__})"
     if not rec:
@@ -46998,6 +46999,18 @@ def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]],
         # The producer report stays byte-for-byte intact. This copy combines
         # its facts with the runner's separately bound promotion decision.
         doc = {**doc, "promotion_refused": decision["reason"]}
+    # A valid OLD handoff/report pair is not evidence for a newly published
+    # Default route. The backend publishes routed.def without rewriting the
+    # legacy chain receipt; compare its recorded output hash to the actual
+    # route before reusing that chain's timing result. Reading the mutable
+    # state path instead would accept a path overwritten after measurement.
+    current_route = _pl.pnr_dir(project) / "routed.def"
+    route_binding = (handoff.get("views") or {}).get("def") or {}
+    bound_route_sha256 = route_binding.get("dest_sha256")
+    if not bound_route_sha256 or not current_route.is_file():
+        return None, "the chain receipt does not bind a present current route"
+    if _ll.digest(current_route) != bound_route_sha256:
+        return None, "the current route differs from the step-21 chain's measured route"
     return doc, "the step-21 chain's own step-32 report"
 
 

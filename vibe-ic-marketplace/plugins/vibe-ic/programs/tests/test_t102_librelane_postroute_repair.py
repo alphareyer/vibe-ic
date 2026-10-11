@@ -1708,7 +1708,8 @@ def test_the_runner_records_the_in_chain_repair_without_repairing_twice(tmp_path
         'candidates': [{'candidate': '32-cand01',
                         'repair_metrics': {'vibeic__prr__unrouted__added': 0}}]})
     put(project / 'reports/phase3/librelane_route_handoff.json',
-        {'postroute_repair': {'report_sha256': contract.digest(report)}})
+        {'postroute_repair': {'report_sha256': contract.digest(report)},
+         'views': {'def': {'dest_sha256': contract.digest(pnr / 'routed.def')}}})
     monkeypatch.setattr(prr, 'run', lambda *a, **k: pytest.fail('repaired twice'))
     pdk = ring_fixture._pdk(tmp_path, ring=None)
     result = runner.step_postroute_repair_librelane(project, 'dut', pdk, 'unused')
@@ -1822,6 +1823,36 @@ def test_every_geometry_step_reads_the_routes_tech_lef(tmp_path, monkeypatch):
         prr._prepare(project, image='img', pdk='pdk', pdk_root=tmp_path, sdc=sdc,
                      derate=(0.95, 1.05), pg_rules_tcl=None, refill_tcl=None, docker='docker')
     assert exc.value.code == 'LL_ROUTE_TECH_LEF_UNBOUND'
+
+
+@pytest.mark.parametrize('changed', [False, True], ids=['same-route', 'new-route'])
+def test_chain_reuse_requires_the_current_route_not_just_an_old_report_hash(tmp_path, changed):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project = tmp_path / 'proj'
+    put(project / 'phase3/librelane_switch.json',
+        {'steps': {'21': 'librelane', '32': 'librelane'}})
+    route = write(project / 'phase3/stage3/pnr/routed.def',
+                  'DESIGN top ;\n# first route\nEND DESIGN\n')
+    old_hash = contract.digest(route)
+    old_state = put(project / 'old/state_out.json', {'def': str(route)})
+    report = put(project / prr.REPORT_REL,
+                 {'site': 'after_route', 'verdict': 'FAIL',
+                  'route_state': str(old_state), 'adopted_state': str(old_state),
+                  'code': 'OLD_ROUTE_DRV', 'reason': 'old measured route failed'})
+    put(project / 'reports/phase3/librelane_route_handoff.json', {
+        'views': {'def': {'dest_sha256': old_hash}},
+        'postroute_repair': {'report_sha256': contract.digest(report)}})
+    if changed:
+        # The mutable state still names this path, and the old report/hash
+        # pair is valid. Neither proves this newly published route was measured.
+        route.write_text('DESIGN top ;\n# new placement and routing\nEND DESIGN\n')
+    reused, why = runner._postroute_repair_in_chain(project)
+    if changed:
+        assert reused is None, 'the consumer returned results for the old route'
+        assert 'current route' in why
+    else:
+        assert reused is not None, why
+        assert reused['verdict'] == 'FAIL' and reused['code'] == 'OLD_ROUTE_DRV'
 
 
 def test_a_repair_not_found_in_the_chain_says_so_and_why(tmp_path, monkeypatch, capsys):
