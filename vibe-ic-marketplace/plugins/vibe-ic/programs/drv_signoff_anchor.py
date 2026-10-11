@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _docker_memory  # noqa: E402
+import librelane_contract as _ll  # noqa: E402
 
 
 _IMAGE_PROBE = r'''
@@ -39,10 +40,10 @@ def image_pdk_anchor(image: str, pdk: str, library: str) -> dict:
                for value in (pdk, library)):
         raise ValueError("PDK/library identity invalid")
     # The same memory ceiling as every other container this plugin creates.
-    process = subprocess.run(
-        ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", image, "--skip", "python3", "-c",
-         _IMAGE_PROBE, pdk, library],
-        capture_output=True, text=True, check=False, timeout=90)
+    process = _ll.run_container(
+        ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", "none",
+         image, "--skip", "python3", "-c", _IMAGE_PROBE, pdk, library],
+        probe_deadline_s=90)
     if process.returncode:
         raise ValueError("installed PDK config probe failed: " + process.stderr[-300:])
     try:

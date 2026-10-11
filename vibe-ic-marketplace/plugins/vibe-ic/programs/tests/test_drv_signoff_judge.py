@@ -34,6 +34,20 @@ def _file(root: Path, name: str, body: str) -> dict:
     return {"path": str(path), "sha256": hashlib.sha256(body.encode()).hexdigest()}
 
 
+def _capture_rcx_fixture(plan, root):
+    """Capture fixtures include the RCX producer's existing input/output record."""
+    scene = plan["scenes"][0]
+    scene["spef"] = _file(root, "rcx/nom/top.nom.spef",
+                          Path(scene["spef"]["path"]).read_text())
+    layout = plan["identity"]["artifacts"]["def"]
+    _file(root, "rcx/COMMANDS", "openroad -exit native-rcx.tcl\n")
+    _file(root, "rcx/vibeic_receipt.json", json.dumps({
+        "input": {"step": "OpenROAD.RCX",
+                  "image": plan["identity"]["tool_image"],
+                  "state_files": {layout["path"]: layout["sha256"]}},
+        "sha256": {"nom/top.nom.spef": scene["spef"]["sha256"]}}))
+
+
 def _report(*, fanout=1, fanout_limit=4, cap=.1, cap_limit=.2,
             slew=.1, slew_limit=3, violators=False) -> str:
     parts = []
@@ -907,6 +921,7 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
     import subprocess
     import drv_signoff_capture as capture
     plan = _bundle(tmp_path)
+    _capture_rcx_fixture(plan, tmp_path)
     plan["top"] = "top"
     scene = plan["scenes"][0]
     scene["population"] = {kind: 0 for kind in drv.KINDS}
@@ -949,6 +964,7 @@ def test_capture_replaces_plan_pin_classes_with_opensta_and_liberty(tmp_path, mo
     import subprocess
     import drv_signoff_capture as capture
     plan = _bundle(tmp_path)
+    _capture_rcx_fixture(plan, tmp_path)
     plan["top"] = "top"
     plan["pins"]["u/Y"]["cell_class"] = "IO"
     plan["scenes"][0]["clock_network_pins"] = ["u/Y"]

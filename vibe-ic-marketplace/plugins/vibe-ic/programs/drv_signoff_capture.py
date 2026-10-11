@@ -22,6 +22,8 @@ import _eda_image  # noqa: E402
 import _docker_memory  # noqa: E402
 import _docker_watchdog  # noqa: E402
 import _watchdog  # noqa: E402
+import _container_exec as _ce  # noqa: E402
+import librelane_contract as _ll  # noqa: E402
 from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 from drv_signoff_census import derive as derive_census  # noqa: E402
 from drv_signoff_annotation import derive as derive_annotation  # noqa: E402
@@ -106,11 +108,21 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
             pass
         return None
 
-    result = _watchdog.run_supervised(
-        argv, log_path=raw, output_progress=False,
-        cpu_probe=_docker_watchdog.ephemeral_container_cpu_probe(name),
-        kill=_docker_watchdog.ephemeral_container_reap(name),
-        popen_factory=launch, abort_probe=output_limit)
+    if _ce.no_container_route():
+        # The enclosing fresh EDA image already supplies the runtime. Use
+        # the same attested LOCAL runner as the native LibreLane producers.
+        local_argv = ["docker", "run", *_docker_memory.docker_memory_flags(),
+                      "--rm", "--network", "none", *mounts, image, "--skip",
+                      "bash", "-c", f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
+        done = _ll.run_container(local_argv, supervised=True, log=raw)
+        outcome, rc, err = "natural", done.returncode, done.stderr or ""
+    else:
+        result = _watchdog.run_supervised(
+            argv, log_path=raw, output_progress=False,
+            cpu_probe=_docker_watchdog.ephemeral_container_cpu_probe(name),
+            kill=_docker_watchdog.ephemeral_container_reap(name),
+            popen_factory=launch, abort_probe=output_limit)
+        outcome, rc, err = result.outcome, result.rc, result.err
     try:
         size = raw.stat().st_size
         if size >= _MAX_TOOL_LOG_BYTES:
@@ -126,11 +138,11 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
     except OSError as exc:
         raise RuntimeError(
             f"NOT_MEASURED: OpenSTA raw log unavailable; raw={raw}; {exc}") from exc
-    if result.outcome != "natural" or result.rc or tool_error:
+    if outcome != "natural" or rc or tool_error:
         raise RuntimeError(
             f"NOT_MEASURED: fresh OpenSTA stopped/over-limit "
-            f"outcome={result.outcome} rc={result.rc} tool_error={tool_error}; raw={raw}; "
-            f"watchdog={result.err[-500:]}; tool={body[-1000:]}")
+            f"outcome={outcome} rc={rc} tool_error={tool_error}; raw={raw}; "
+            f"watchdog={err[-500:]}; tool={body[-1000:]}")
     return body
 
 
@@ -345,11 +357,13 @@ def openroad_identity(image: str, *, run=None) -> dict:
     `commit` is the `-g<hash>` of the version every build reports; builds that
     disagree, a version with no commit, or no build at all leave it None with
     the reason, never a guess."""
-    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm",
+    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", "none",
             image, "--skip", "bash", "-c", _OPENROAD_PROBE]
-    run = run or subprocess.run
     try:
-        done = run(argv, capture_output=True, text=True, timeout=300)
+        if run is None and _ce.no_container_route():
+            done = _ll.run_container(argv, probe_deadline_s=300)
+        else:
+            done = (run or subprocess.run)(argv, capture_output=True, text=True, timeout=300)
         text = (done.stdout or "") + (done.stderr or "")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"commit": None, "reason": f"OpenROAD version probe failed: {exc}"}
@@ -382,17 +396,24 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     bundle = {k: plan[k] for k in ("identity", "frozen", "current", "stages",
                                   "pins")}
     bundle["identity"] = dict(bundle["identity"])
-    image_info = subprocess.run(
-        ["docker", "image", "inspect", image, "--format", "{{json .}}"],
-        capture_output=True, text=True, check=False)
+    image_info = None
     try:
-        image_doc = json.loads(image_info.stdout)
+        if _ce.no_container_route():
+            attestation = _ll.local_image_attestation(image)
+            inspected = json.loads(Path(attestation["attestation_path"]).read_text())
+            image_doc = next(item for item in inspected["image_inspect"]
+                             if item["Id"] == attestation["image_id"])
+        else:
+            image_info = subprocess.run(
+                ["docker", "image", "inspect", image, "--format", "{{json .}}"],
+                capture_output=True, text=True, check=False)
+            image_doc = json.loads(image_info.stdout)
         digest = image_doc["Id"]
         version = (image_doc.get("Config") or {}).get("Labels", {}).get(
             "org.opencontainers.image.version")
     except (ValueError, TypeError, KeyError, AttributeError):
         digest, version = None, None
-    if image_info.returncode or not str(digest).startswith("sha256:"):
+    if (image_info is not None and image_info.returncode) or not str(digest).startswith("sha256:"):
         raise ValueError("pinned OpenSTA image identity unavailable")
     expected_id = bundle["identity"].get("source_tool_image_id")
     if expected_id and digest != expected_id:
