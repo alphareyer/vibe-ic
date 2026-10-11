@@ -201,6 +201,11 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
     (project / "phase2" / "stage2" / "synth").mkdir(parents=True)
     (project / "phase2" / "stage2" / "synth" /
      "post_dft_netlist.v").write_text("netlist")
+    # The route must actually run before this test can exercise invalidation.
+    constraints = project / "phase2/stage2/constraints"
+    constraints.mkdir(parents=True)
+    (constraints / "top.sdc").write_text(
+        "create_clock -name clk -period 10 [get_ports clk]\n")
 
     def route(project_, top, pdk, container, **kwargs):
         out = project_ / "phase3" / "pnr" / f"{top}.def"
@@ -233,6 +238,12 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
 def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, monkeypatch):
     from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
+    # This fixture exercises the existing direct KLayout recipe publisher.
+    # Select that tool explicitly, rather than asking the synthetic test PDK
+    # to provide a LibreLane fill handoff it has never produced.
+    switch = project / "phase3/librelane_switch.json"
+    switch.parent.mkdir(parents=True)
+    switch.write_text(json.dumps({"steps": {"34": "direct", "37": "direct"}}))
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "realgds")
     pnr = project / "phase3" / "stage3" / "pnr"
     pnr.mkdir(parents=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import phase3_one_shot_runner as R
@@ -15,6 +16,50 @@ from test_phase3_postpnr_disclosure_and_gds_guard import (
 SPEF = ('*SPEF "IEEE 1481-1998"\n*DESIGN "chip_top"\n'
         + ''.join(f'*D_NET net_{i} 0.1\n*CAP\n1 net_{i} 0.1\n*END\n'
                   for i in range(30)))
+
+
+def _clock_inputs_and_native_model(project, monkeypatch):
+    """Supply Step 16's real input contract; model only the native tool edge.
+
+    The emitter, receipt and read-only consumer remain real. This is a
+    publication regression test, not evidence of native IC sign-off.
+    """
+    import _physical_current as current
+    pdk = _pdk(project)
+    declared = project / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json"
+    declared.parent.mkdir(parents=True, exist_ok=True)
+    declared.write_text(json.dumps({"fields": {"pdk_target": pdk.name}}))
+    floor = R._pl.pnr_dir(project) / "floorplan.def"
+    floor.write_text(f"VERSION 5.8 ;\nDESIGN {TOP} ;\nEND DESIGN\n")
+    monkeypatch.setattr(R, "_detect_pdk", lambda *_a, **_k: pdk)
+    # The DIE fixture requires IO views too. Keep their actual discovery and
+    # digest binding; model just the synthetic PDK's distribution-root lookup.
+    pdk_root = Path(pdk.tech_lef).parent
+    io = pdk_root / pdk.name / "libs.ref/fixture_io/lef/pad.lef"
+    io.parent.mkdir(parents=True, exist_ok=True)
+    io.write_text("MACRO input_pad\n  CLASS PAD INPUT ;\nEND input_pad\n")
+    monkeypatch.setattr(R, "_padring_pdk_root_and_tree",
+                        lambda *_a, **_k: (pdk_root, pdk.name))
+    # The extractor in this publication test is the direct producer below.
+    switch = project / "phase3/librelane_switch.json"
+    settings = json.loads(switch.read_text()) if switch.is_file() else {}
+    settings.setdefault("steps", {})["22"] = "direct"
+    switch.write_text(json.dumps(settings))
+
+    def native(_project, tool, args, log):
+        assert tool == "openroad"
+        recipe = Path(args[-1]).read_text()
+        decks = re.findall(r"(?m)^read_sdc \{([^}]+)\}$", recipe)
+        clocks = R._build_clock_records_from_sdcs(
+            [Path(deck).read_text() for deck in decks])
+        lines = [f"CLOCK_PLAN_PDK {pdk.name}"]
+        lines.extend(f"CLOCK_PLAN_NATIVE {c['name']}|{c['period_ns']}|{c['source']}"
+                     for c in clocks.values())
+        lines.append("CLOCK_PLAN_DONE")
+        Path(log).write_text("\n".join(lines) + "\n")
+        return 0, {"rc": 0, "argv": [tool, *args]}
+
+    monkeypatch.setattr(current, "run_native", native)
 
 
 def _step32_failed_project(tmp_path: Path, monkeypatch, *, stale_sdc=False) -> Path:
@@ -46,6 +91,7 @@ def _step32_failed_project(tmp_path: Path, monkeypatch, *, stale_sdc=False) -> P
                  project / "reports/phase2/gates/spef_extraction.json"):
         path.unlink(missing_ok=True)
     _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    _clock_inputs_and_native_model(project, monkeypatch)
     original_pnr = R.step_pnr
 
     def route(*args, **kwargs):
@@ -199,6 +245,7 @@ def test_default_step15_failed_route_never_publishes_success_outputs(
 def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
         tmp_path, monkeypatch):
     project, route = _routed_project(tmp_path)
+    _clock_inputs_and_native_model(project, monkeypatch)
     emitted = []
 
     def extract(_project, _top, _pdk, _container, output, _notes):
