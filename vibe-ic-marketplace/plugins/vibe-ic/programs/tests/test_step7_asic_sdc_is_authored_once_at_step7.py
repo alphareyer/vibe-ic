@@ -718,15 +718,16 @@ def _mode_arc(when, slew):
     }}'''
 
 
+@pytest.mark.parametrize('consumer', ['openroad', 'sta'])
 @pytest.mark.parametrize('mode,core_slew,user_limit', [
     ('0', 0.5, None), ('1', 0.5, None), ('m', 0.5, None),
     ('0', 2.0, None), ('0', 0.5, 1.0)],
     ids=['fixed-normal','fixed-slow','dynamic-mode','core-still-fails','user-ceiling-still-fails'])
 def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
-        tmp_path, monkeypatch, mode, core_slew, user_limit):
+        tmp_path, monkeypatch, mode, core_slew, user_limit, consumer):
     import shutil
     import subprocess
-    tool = shutil.which('openroad')
+    tool = shutil.which(consumer)
     assert tool, 'this native consumer test requires the EDA image'
     proj = _project(tmp_path)
     core_lib = tmp_path / 'core.lib'
@@ -774,14 +775,18 @@ def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
                    + macros + 'END LIBRARY\n')
     script = tmp_path / 'scene.tcl'
     exported = tmp_path / 'scene-export.sdc'
-    script.write_text(f'read_lef {{{lef}}}\nread_liberty {{{core_lib}}}\nread_liberty {{{io_lib}}}\n'
+    physical_setup = f'read_lef {{{lef}}}\n' if consumer == 'openroad' else ''
+    physical_edit = ('odb::dbInst_create [ord::get_db_block] [[ord::get_db] findMaster core_buf] extra\n'
+                     if consumer == 'openroad' else '')
+    script.write_text('set sta_report_default_digits 6\n' + physical_setup
+                      + f'read_liberty {{{core_lib}}}\nread_liberty {{{io_lib}}}\n'
                       f'read_verilog {{{nl}}}\nlink_design {TOP}\n'
                       f'if {{[catch {{read_sdc {{{sdc}}}}} why]}} {{puts "SCENE_ERROR $why"; exit 1}}\n'
                       'puts SCENE_CHECK_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
                       'puts SCENE_CHECK_END\n'
                       'report_edges -from [get_pins u_io/A] -to [get_pins u_io/Y]\n'
-                      'odb::dbInst_create [ord::get_db_block] [[ord::get_db] findMaster core_buf] extra\n'
-                      f'write_sdc {{{exported}}}\nread_sdc {{{exported}}}\n'
+                      + physical_edit
+                      + f'write_sdc {{{exported}}}\nread_sdc {{{exported}}}\n'
                       'puts SCENE_ROUNDTRIP_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
                       'puts SCENE_ROUNDTRIP_END\nexit\n')
     run = subprocess.run([tool, '-no_init', '-exit', str(script)], capture_output=True, text=True)

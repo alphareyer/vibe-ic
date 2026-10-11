@@ -439,16 +439,18 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
              for p in pads.values() if core_scale and p.get("port")
              and (p.get("master"), p.get("terminal")) in limits}
     complete = bool(core_scale) and all(p.get("port") in ports for p in pads.values())
-    selector = "^(" + "|".join(re.escape(n) for n in sorted(pads)) + ")$"
+    # Both OpenROAD and the SDK's standalone OpenSTA resolve exact instance
+    # names. Their regexp selectors differ; use the producer's actual names.
+    selector = " ".join("{" + n + "}" for n in sorted(pads))
     # Edge objects cannot survive OpenDB edits: keep them only while the
     # immutable timing report runs, then remove those temporary constraints.
     # Preserve the procedure in native SDC exports for the next fixed row.
-    scope = f"set ::vibeic_scene_pads {{{selector}}}\n" + r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
+    scope = f"set ::vibeic_scene_pads [list {selector}]\n" + r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
   rename ::report_check_types ::vibeic_native_report_check_types
   proc ::report_check_types {args} {
     report_worst_slack -max > /dev/null
     set removed {}
-    foreach edge [concat {*}[get_timing_edges -of_objects [get_cells -regexp $::vibeic_scene_pads]]] {
+    foreach edge [concat {*}[get_timing_edges -of_objects [get_cells $::vibeic_scene_pads]]] {
       if {[$edge is_disabled_constant] && [$edge cond] ne "" && ![$edge is_disabled_constraint]} {
         set_disable_timing $edge
         lappend removed $edge
