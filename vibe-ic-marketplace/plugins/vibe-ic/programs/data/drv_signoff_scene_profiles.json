@@ -6,5 +6,26 @@
       "ff_n40C_5v50": {"nom_voltage": 5.5, "nom_temperature": -40}
     },
     "rc_corners": ["min", "nom", "max"]
+  },
+  "sky130A": {
+    "pvt": {
+      "ss_100C_1v60": {
+        "nom_voltage": 1.6,
+        "nom_temperature": 100.0
+      },
+      "tt_025C_1v80": {
+        "nom_voltage": 1.8,
+        "nom_temperature": 25.0
+      },
+      "ff_n40C_1v95": {
+        "nom_voltage": 1.95,
+        "nom_temperature": -40.0
+      }
+    },
+    "rc_corners": [
+      "min",
+      "nom",
+      "max"
+    ]
   }
 }
