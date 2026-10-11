@@ -1633,11 +1633,13 @@ def _emit_verilog(top: str, core: str,
     if faced:
         lines.append("")
 
-    for _endpoint, tie in sorted(used_ties.items()):
-        lines.append("    wire %s;" % tie["net"])
+    for net in sorted({str(tie["net"]) for tie in used_ties.values()}):
+        lines.append("    wire %s;" % net)
     if used_ties:
         lines.append("")
         for _endpoint, tie in sorted(used_ties.items()):
+            if tie.get("source") == "pad":
+                continue  # The driver is already the selected pad instance.
             lines.append("    %s %s (.%s(%s));"
                          % (tie["master"], tie["instance"], tie["pin"],
                             tie["net"]))
@@ -1660,6 +1662,10 @@ def _emit_verilog(top: str, core: str,
             # regular VDD/VSS NETS that neither PDN nor detailed routing
             # completed.  A PDK tie-cell output is an ordinary routed signal.
             pairs.extend(sorted(auxiliary_signals.get(inst, {}).items()))
+            pairs.extend(sorted({(str(tie["pin"]), str(tie["net"]))
+                                 for tie in used_ties.values()
+                                 if tie.get("source") == "pad"
+                                 and tie["instance"] == inst}))
             conn = _named_connections(inst, str(rec["master"]), pairs,
                                       bus_ports)
             lines.append("    %s %s (%s);"
@@ -1687,8 +1693,8 @@ def _auxiliary_pin_signal_connections(
     """Resolve every IO control onto an ordinary tie-driven signal net.
 
     ``pad_cell_faces`` owns the Boolean decision.  This helper owns its
-    physical representation.  Each used Boolean level requires a concrete
-    standard-cell master and output pin derived from the active Liberty.  Each
+    physical representation. A pad's own constant output drives controls in
+    its IO voltage domain; remaining controls use the active core tie cell. Each
     control gets its own tie-cell driver/net: that is the smallest bounded
     legal topology (fanout one), lets placement co-locate the driver with the
     pad load, and avoids asking the resizer to construct a chip-spanning tree
@@ -1711,7 +1717,21 @@ def _auxiliary_pin_signal_connections(
     occupied_instances = set(chosen)
     occupied_nets = {str(rec.get("port") or "") for rec in chosen.values()}
     resolved: Dict[str, Dict[str, str]] = {}
+    local_nets: Dict[Tuple[str, str], str] = {}
     for index, (inst, control_pin, level) in enumerate(endpoints):
+        local_pin = (chosen[inst].get("local_tie_sources") or {}).get(control_pin)
+        if local_pin:
+            driver = (inst, str(local_pin))
+            net = local_nets.setdefault(driver, f"_vibeic_aux_tie_{index:04d}")
+            if net in occupied_nets:
+                raise Refusal("AUXILIARY_PAD_TIE_NAME_COLLISION",
+                              f"reserved local tie net {net} collides with a port")
+            used[(inst, control_pin)] = {
+                "level": level, "master": chosen[inst]["master"],
+                "pin": str(local_pin), "instance": inst, "net": net,
+                "source": "pad"}
+            resolved.setdefault(inst, {})[control_pin] = net
+            continue
         raw = tie_cells.get(level) or {}
         master = str(raw.get("master") or "")
         tie_pin = str(raw.get("pin") or "")
@@ -1742,6 +1762,33 @@ def _auxiliary_pin_signal_connections(
                      "instance": instance, "net": net}
         resolved.setdefault(inst, {})[control_pin] = net
     return resolved, used
+
+
+def _local_pad_tie_sources(pins, ties, power_connections):
+    """Constant outputs with the control's own Liberty power domain.
+
+    A core tie-high at 1.8 V cannot drive a 3.3 V IO control. The pad's
+    TIE_HI_ESD/TIE_LO_ESD are ordinary routable signal outputs. Compare actual
+    connected rails as well as pin identities (VSWITCH may share VDDIO).
+    """
+    result = {}
+    for control, level in ties.items():
+        rail = pins[control].get("related_power_pin")
+        if not rail:
+            continue
+        candidates = []
+        for name, rec in pins.items():
+            other_rail = rec.get("related_power_pin")
+            same_domain = bool(other_rail and (other_rail == rail or
+                               (power_connections.get(rail) and
+                                power_connections.get(rail) ==
+                                power_connections.get(other_rail))))
+            if (rec.get("direction") == "output" and same_domain
+                    and rec.get("function") == str(int(level))):
+                candidates.append(name)
+        if len(candidates) == 1:
+            result[control] = candidates[0]
+    return result
 
 
 def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
@@ -2228,6 +2275,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                                  if net == (rec.get('power_pad_plan') or {}).get('power_net'))
         faces = PR.pad_cell_faces(lib_cells[master], str(rc["direction"]),
                                   declared_aux.get(str(rc["port"])),
+                                  master=master,
                                   **({'core_power_pins': core_power_pins}
                                      if core_power_pins else {}))
         if faces.refused:
@@ -2237,6 +2285,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         rc["core_pin"] = faces.core_pin
         rc["ties"] = dict(faces.ties)
         rc["tie_reasons"] = dict(faces.reasons)
+        rc["local_tie_sources"] = _local_pad_tie_sources(
+            lib_cells[master], faces.ties, rc.get("power_connections") or {})
         for pin, level in sorted(faces.ties.items()):
             entry = {"instance": inst, "port": rc["port"], "pin": pin,
                      "level": level, "reason": faces.reasons.get(pin, "")}
@@ -2265,7 +2315,11 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         for pin, net in sorted(pins.items())
     ]
     rec["aux_tie_cells"] = [
-        dict(tie) for _endpoint, tie in sorted(used_ties.items())]
+        dict(tie) for _endpoint, tie in sorted(used_ties.items())
+        if tie.get("source") != "pad"]
+    rec["aux_pad_local_tie_sources"] = [
+        dict(tie) for _endpoint, tie in sorted(used_ties.items())
+        if tie.get("source") == "pad"]
     if used_ties:
         liberty_path = Path(str(tie_liberty or ""))
         rec["aux_tie_cell_provenance"] = {
