@@ -396,9 +396,10 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
     """A generated pad wrapper's static timing mode and native IO pin limits.
 
     OpenSTA excludes constant-disabled arcs from path search, but its delay
-    calculator still includes conditional arcs in the output slew. Mark only
-    those already-disabled conditional edges for this analysis. Active and
-    unknown-mode edges remain. No user timing exception or limit is changed.
+    calculator still includes conditional arcs in the output slew. Apply only
+    those already-disabled conditional edges while reporting, then restore
+    them before any database edit or export. Active and unknown-mode edges
+    remain. No user timing exception or limit is changed.
     """
     import json
     import hashlib
@@ -439,20 +440,43 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
              and (p.get("master"), p.get("terminal")) in limits}
     complete = bool(core_scale) and all(p.get("port") in ports for p in pads.values())
     selector = "^(" + "|".join(re.escape(n) for n in sorted(pads)) + ")$"
-    tcl = '\n'.join([
-        '# Static pad mode from the actual linked netlist; no active timing path disabled.',
-        f'set _vibeic_mode_pads [get_cells -regexp {{{selector}}}]',
-        'if {[llength $_vibeic_mode_pads]} {',
-        '  report_worst_slack -max > /dev/null',
-        '  set _vibeic_mode_edges 0',
-        '  foreach _edge [concat {*}[get_timing_edges -of_objects $_vibeic_mode_pads]] {',
-        '    if {[$_edge is_disabled_constant] && [$_edge cond] ne ""} {',
-        '      set_disable_timing $_edge',
-        '      incr _vibeic_mode_edges',
-        '    }',
-        '  }',
-        '  puts "VIBEIC_PAD_STATIC_MODE $_vibeic_mode_edges already-disabled conditional edges"',
-        '}', ''])
+    # Edge objects cannot survive OpenDB edits: keep them only while the
+    # immutable timing report runs, then remove those temporary constraints.
+    # Preserve the procedure in native SDC exports for the next fixed row.
+    scope = f"set ::vibeic_scene_pads {{{selector}}}\n" + r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
+  rename ::report_check_types ::vibeic_native_report_check_types
+  proc ::report_check_types {args} {
+    report_worst_slack -max > /dev/null
+    set removed {}
+    foreach edge [concat {*}[get_timing_edges -of_objects [get_cells -regexp $::vibeic_scene_pads]]] {
+      if {[$edge is_disabled_constant] && [$edge cond] ne "" && ![$edge is_disabled_constraint]} {
+        set_disable_timing $edge
+        lappend removed $edge
+      }
+    }
+    try {
+      puts "VIBEIC_PAD_STATIC_MODE [llength $removed] already-disabled conditional edges"
+      uplevel 1 [linsert $args 0 ::vibeic_native_report_check_types]
+    } finally {
+      foreach edge $removed {unset_disable_timing $edge}
+    }
+  }
+}
+if {[llength [info commands ::vibeic_native_write_sdc]] == 0} {
+  rename ::write_sdc ::vibeic_native_write_sdc
+  proc ::write_sdc {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_native_write_sdc]
+    set handle [open [lindex $args end] a]
+    try {
+      puts $handle "set ::vibeic_scene_sdc [list $::vibeic_scene_sdc]"
+      puts $handle $::vibeic_scene_sdc
+    } finally {
+      close $handle
+    }
+  }
+}
+'''
+    tcl = "set ::vibeic_scene_sdc {" + scope + "}\n" + scope
     return {"tcl": tcl, "port_slew_limits": ports if complete else {},
             "liberty_sha256": sources, "complete_pin_limits": complete}
 

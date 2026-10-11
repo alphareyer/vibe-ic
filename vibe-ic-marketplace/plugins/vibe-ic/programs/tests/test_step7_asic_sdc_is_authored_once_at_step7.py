@@ -773,12 +773,17 @@ def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
                    ' PITCH 0.5 ;\n WIDTH 0.2 ;\n SPACING 0.3 ;\nEND Metal1\n'
                    + macros + 'END LIBRARY\n')
     script = tmp_path / 'scene.tcl'
+    exported = tmp_path / 'scene-export.sdc'
     script.write_text(f'read_lef {{{lef}}}\nread_liberty {{{core_lib}}}\nread_liberty {{{io_lib}}}\n'
                       f'read_verilog {{{nl}}}\nlink_design {TOP}\n'
                       f'if {{[catch {{read_sdc {{{sdc}}}}} why]}} {{puts "SCENE_ERROR $why"; exit 1}}\n'
                       'puts SCENE_CHECK_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
                       'puts SCENE_CHECK_END\n'
-                      'report_edges -from [get_pins u_io/A] -to [get_pins u_io/Y]\nexit\n')
+                      'report_edges -from [get_pins u_io/A] -to [get_pins u_io/Y]\n'
+                      'odb::dbInst_create [ord::get_db_block] [[ord::get_db] findMaster core_buf] extra\n'
+                      f'write_sdc {{{exported}}}\nread_sdc {{{exported}}}\n'
+                      'puts SCENE_ROUNDTRIP_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
+                      'puts SCENE_ROUNDTRIP_END\nexit\n')
     run = subprocess.run([tool, '-no_init', '-exit', str(script)], capture_output=True, text=True)
     output = run.stdout + run.stderr
     assert run.returncode == 0 and 'SCENE_CHECK_END' in output and 'SCENE_ERROR' not in output, output
@@ -787,6 +792,13 @@ def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
         assert 'VIOLATED' not in checked, checked
     else:
         assert 'VIOLATED' in checked, checked
+    assert 'SCENE_ROUNDTRIP_END' in output, output
+    edges = output.split('SCENE_CHECK_END', 1)[1].split('SCENE_ROUNDTRIP_BEGIN', 1)[0]
+    assert 'Disabled by constraint' not in edges, output
+    roundtrip = output.split('SCENE_ROUNDTRIP_BEGIN', 1)[1].split('SCENE_ROUNDTRIP_END', 1)[0]
+    assert ('VIOLATED' in roundtrip) == ('VIOLATED' in checked), output
+    assert 'set_disable_timing' not in '\n'.join(
+        line for line in exported.read_text().splitlines() if not line.startswith(' ')), exported.read_text()
     if core_slew > 1.5:
         assert 'u_core/Y' in checked and '2.000000' in checked
     if user_limit:

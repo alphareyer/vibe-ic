@@ -1779,7 +1779,7 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
             if native_pad_limits:
                 out["text"] += "\n# Core cells retain their native Liberty slew limits; IO ports use their pad pin limits.\n"
                 for port, limit in sorted(pad_limits.items()):
-                    out["text"] += f"set_max_transition {limit:g} [get_ports -regexp {{^{re.escape(port)}$}}]\n"
+                    out["text"] += f"set_max_transition {limit:g} [get_ports [list {{{port}}}]]\n"
                 der["pad_pin_slew_limits"] = pad_limits
                 der["pad_liberty_sha256"] = pad_scene["liberty_sha256"]
             der.update(applied=True)
