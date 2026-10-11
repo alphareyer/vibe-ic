@@ -63,6 +63,65 @@ def test_pinned_pdk_values_emit_six_sourced_lines(tmp_path, monkeypatch, library
     assert "set_load 0.0915 [all_outputs]" in text
 
 
+@pytest.mark.parametrize("container", ["", "legacy-name"])
+def test_local_pdk_values_use_the_current_image_files(tmp_path, monkeypatch, container):
+    library = "quartz_sc"
+    root = tmp_path / "pdk/family"
+    configs = root / "libs.tech/librelane"
+    (configs / library).mkdir(parents=True)
+    (configs / "config.tcl").write_text(_BASE)
+    (configs / library / "config.tcl").write_text(_CELL)
+    liberty = str(root / "libs.ref" / library / "lib/slow.lib")
+    monkeypatch.setattr(env._cex, "no_container_route", lambda: True)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("LOCAL PDK reads must not launch Docker")
+
+    monkeypatch.setattr(env._cex, "docker_exec_argv", forbidden)
+    values, unread = env._sdc_environment_values(
+        tmp_path, liberty, container, None, None)
+    assert not unread
+    assert set(values) == set(env._SDC_ENV_KEYS)
+    assert values["set_max_transition"][0] == "2.7"
+    assert values["set_max_capacitance"][0] == "0.18"
+    assert values["set_driving_cell"][0] == "quartz_sc__inv_2/Z"
+    assert all(source.startswith("pinned PDK default ")
+               for _, source in values.values())
+
+
+def test_missing_local_pdk_files_are_named_and_not_fabricated(tmp_path, monkeypatch):
+    root = tmp_path / "pdk/family"
+    liberty = str(root / "libs.ref/quartz_sc/lib/slow.lib")
+    monkeypatch.setattr(env._cex, "no_container_route", lambda: True)
+    values, unread = env._sdc_environment_pdk_values(liberty, "")
+    assert values == {}
+    assert unread == [
+        f"NOT_READ: pinned PDK config {root}/libs.tech/librelane/config.tcl",
+        f"NOT_READ: pinned PDK config {root}/libs.tech/librelane/quartz_sc/config.tcl"]
+
+
+@pytest.mark.parametrize("declared,expected", [(None, 10), (4, 4)])
+def test_local_synthesis_and_sdc_use_the_library_config_fanout(
+        tmp_path, monkeypatch, declared, expected):
+    root = tmp_path / "pdk/family"
+    configs = root / "libs.tech/librelane"
+    (configs / "quartz_sc").mkdir(parents=True)
+    (configs / "config.tcl").write_text(_BASE)
+    (configs / "quartz_sc/config.tcl").write_text(
+        _CELL + "set ::env(MAX_FANOUT_CONSTRAINT) 10\n")
+    if declared is not None:
+        docs = tmp_path / "input/docs"
+        docs.mkdir(parents=True)
+        (docs / "L9_constraints.md").write_text(
+            f"| SYNTH_MAX_FANOUT | {declared} |\n")
+    monkeypatch.setattr(p3._cex, "no_container_route", lambda: True)
+    liberty = str(root / "libs.ref/quartz_sc/lib/slow.lib")
+    cap, source, unread = p3._synth_max_fanout(tmp_path, "family", liberty, "")
+    assert cap == expected and unread == []
+    assert ("MAX_FANOUT_CONSTRAINT" in source if declared is None
+            else "L9 declares" in source)
+
+
 def test_design_docs_override_pdk_then_liberty(tmp_path, monkeypatch):
     assert env is not None
     docs = tmp_path / "input" / "docs"
