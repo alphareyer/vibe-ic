@@ -782,8 +782,10 @@ def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
                       + f'read_liberty {{{core_lib}}}\nread_liberty {{{io_lib}}}\n'
                       f'read_verilog {{{nl}}}\nlink_design {TOP}\n'
                       f'if {{[catch {{read_sdc {{{sdc}}}}} why]}} {{puts "SCENE_ERROR $why"; exit 1}}\n'
+                      'puts "SCENE_COUNT_BEFORE [sta::max_slew_violation_count]"\n'
                       'puts SCENE_CHECK_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
                       'puts SCENE_CHECK_END\n'
+                      'puts "SCENE_COUNT_AFTER [sta::max_slew_violation_count]"\n'
                       'report_edges -from [get_pins u_io/A] -to [get_pins u_io/Y]\n'
                       + physical_edit
                       + f'write_sdc {{{exported}}}\nread_sdc {{{exported}}}\n'
@@ -795,8 +797,12 @@ def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
     checked = output.split('SCENE_CHECK_BEGIN', 1)[1].split('SCENE_CHECK_END', 1)[0]
     if mode == '0' and core_slew == 0.5 and user_limit is None:
         assert 'VIOLATED' not in checked, checked
+        assert 'SCENE_COUNT_BEFORE 0' in output and 'SCENE_COUNT_AFTER 0' in output, output
     else:
         assert 'VIOLATED' in checked, checked
+        before_count = int(output.split('SCENE_COUNT_BEFORE ', 1)[1].splitlines()[0])
+        after_count = int(output.split('SCENE_COUNT_AFTER ', 1)[1].splitlines()[0])
+        assert before_count > 0 and after_count > 0, output
     assert 'SCENE_ROUNDTRIP_END' in output, output
     edges = output.split('SCENE_CHECK_END', 1)[1].split('SCENE_ROUNDTRIP_BEGIN', 1)[0]
     assert 'Disabled by constraint' not in edges, output

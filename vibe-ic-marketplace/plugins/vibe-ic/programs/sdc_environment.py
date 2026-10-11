@@ -397,7 +397,7 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
 
     OpenSTA excludes constant-disabled arcs from path search, but its delay
     calculator still includes conditional arcs in the output slew. Apply only
-    those already-disabled conditional edges while reporting, then restore
+    those already-disabled conditional edges for reports and counts, then restore
     them before any database edit or export. Active and unknown-mode edges
     remain. No user timing exception or limit is changed.
     """
@@ -443,11 +443,12 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
     # names. Their regexp selectors differ; use the producer's actual names.
     selector = " ".join("{" + n + "}" for n in sorted(pads))
     # Edge objects cannot survive OpenDB edits: keep them only while the
-    # immutable timing report runs, then remove those temporary constraints.
+    # immutable timing measurement runs, then remove those temporary constraints.
     # Preserve the procedure in native SDC exports for the next fixed row.
     scope = f"set ::vibeic_scene_pads [list {selector}]\n" + r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
   rename ::report_check_types ::vibeic_native_report_check_types
-  proc ::report_check_types {args} {
+  rename ::sta::max_slew_violation_count ::vibeic_native_max_slew_violation_count
+  proc ::vibeic_with_pad_mode {command args} {
     report_worst_slack -max > /dev/null
     set removed {}
     foreach edge [concat {*}[get_timing_edges -of_objects [get_cells $::vibeic_scene_pads]]] {
@@ -458,10 +459,16 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
     }
     try {
       puts "VIBEIC_PAD_STATIC_MODE [llength $removed] already-disabled conditional edges"
-      uplevel 1 [linsert $args 0 ::vibeic_native_report_check_types]
+      uplevel 1 [linsert $args 0 $command]
     } finally {
       foreach edge $removed {unset_disable_timing $edge}
     }
+  }
+  proc ::report_check_types {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_report_check_types]
+  }
+  proc ::sta::max_slew_violation_count {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_max_slew_violation_count]
   }
 }
 if {[llength [info commands ::vibeic_native_write_sdc]] == 0} {
