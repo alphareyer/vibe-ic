@@ -519,6 +519,36 @@ def test_default_main_stops_after_failed_repair_even_when_a_route_remains(tmp_pa
     assert rows['gds']['status'] == 'NOT_MEASURED'
 
 
+def test_default_main_preserves_completed_inputs_before_repair(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+    monkeypatch.setattr(runner, '_librelane_postroute_repair_mode', lambda *a: 'librelane')
+    pnr = runner._pl.pnr_dir(project)
+    pdn = pnr / 'pdn.done'
+    pdn.write_text('{"state":"native-step15-checkpoint"}\n')
+    sdc = pnr / 'constraint.sdc'
+    before = {p: p.read_bytes() for p in (pdn, sdc)}
+
+    def repair(*args):
+        assert {p: p.read_bytes() for p in before} == before
+        return runner.StepResult('postroute_repair_librelane', 'FAIL', 0,
+                                 'retained route failed its native repair check')
+
+    def legacy_rewriter(*args):
+        pytest.fail('Default re-entered the legacy publisher for completed rows')
+
+    monkeypatch.setattr(runner, 'step_postroute_repair_librelane', repair)
+    monkeypatch.setattr(runner, '_canonicalize_postpnr_prerequisites', legacy_rewriter)
+    runner.main()
+    assert {p: p.read_bytes() for p in before} == before
+
+
 def test_default_dfm_produces_its_report_before_its_canonical_consumer(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(runner, '_backend_parameter_values', lambda *args: {})

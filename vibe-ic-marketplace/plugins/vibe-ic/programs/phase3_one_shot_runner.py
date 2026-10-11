@@ -79131,7 +79131,7 @@ def main() -> int:
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed
 
-        if _pnr_step_passed:
+        if _pnr_step_passed and _execution.request()['mode'] != 'default':
             # Steps 7/8/15/16/22 consume only the routed design. Publish
             # them before the independently blocking Step 32 repair. Their
             # typed receipt reports absence honestly and does not grant

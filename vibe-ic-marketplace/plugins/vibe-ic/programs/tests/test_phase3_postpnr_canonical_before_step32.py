@@ -18,6 +18,16 @@ SPEF = ('*SPEF "IEEE 1481-1998"\n*DESIGN "chip_top"\n'
 
 
 def _step32_failed_project(tmp_path: Path, monkeypatch, *, stale_sdc=False) -> Path:
+    # This fixture exercises the legacy enclosing publisher. Default's
+    # canonical rows already produced these inputs before entering repair.
+    import execution_policy
+    original = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original(), mode='ultra'))
+    monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
+                        lambda *a, **k: R.step_pnr(*a, **k))
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     pnr = R._pl.pnr_dir(project)
     canonical_sdc = R._pl.constraints_dir(project) / f"{TOP}.sdc"
