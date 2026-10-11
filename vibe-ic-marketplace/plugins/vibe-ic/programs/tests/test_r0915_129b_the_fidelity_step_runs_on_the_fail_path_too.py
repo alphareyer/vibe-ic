@@ -269,6 +269,11 @@ def test_the_layout_producer_gets_the_container_by_its_own_flag_name():
     # which a new branch in the loop (the foundry_handoff admission) pushed
     # the flag out of (T109c)
     body = src[i:src.index("return rows", i)]
+    # The actual loop retains this helper call before it invalidates the old
+    # output. Follow that reachable producer body, retaining both flag checks.
+    if '_run_pre_audit_producer' in body:
+        import inspect
+        body += inspect.getsource(R._run_pre_audit_producer)
     assert '("--container", container)' in body
     assert body.index("_PDK_AWARE_SIGNOFF_GATES") < body.index(
         "_KLAYOUT_CONTAINER_SIGNOFF_GATES"), "both branches must remain present"
@@ -355,8 +360,45 @@ def test_the_flow_clause_judges_the_receipt_instead_of_re_running_the_xor():
 def test_the_judge_reads_the_receipt_and_writes_nothing(tmp_path):
     """PRODUCER WRITES, GATE READS — asserted on the bytes."""
     import hashlib
+    import json
+    import _physical_current as current
     import gds_xor_check as G
     out = _receipt(tmp_path)
+    # A positive read-only consumer fixture includes the current subjects
+    # and instrument transcript; a historical zero alone is not accepted.
+    files = {
+        "shipped": ("phase3/stage4/gds/chip_top.gds", "synthetic shipped bytes"),
+        "reference": ("reports/phase3/reference.gds", "synthetic reference bytes"),
+        "def": ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n"),
+        "technology": ("reports/phase3/technology_units.json", '{"pdk":"sky130A"}'),
+        "recipe": ("reports/phase3/xor.rb", "synthetic instrument recipe\n"),
+        "log": ("reports/phase3/xor.log", "XOR_TOOL klayout\n"
+                "XOR_TOP shipped=chip_top reference=chip_top\n"
+                + "".join(f"XOR_LAYER {layer}/0 0\n" for layer in range(1, 47))
+                + "XOR_DONE\n"),
+    }
+    entries = {}
+    for role, (relative, text) in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        entries[role] = current.entry(tmp_path, path)
+    doc = json.loads(out.read_text())
+    doc["current"] = current.build(
+        tmp_path, "37.3", "stage4", "chip_top", "sky130A", "klayout",
+        {role: entry for role, entry in entries.items() if role != "log"},
+        {"log": entries["log"]}, {"rc": 0, "argv": ["klayout", "synthetic-fixture"]})
+    doc["finishing_layer_differences"] = []
+    doc["shipped_sha256_live"] = entries["shipped"]["sha256"]
+    lvs = tmp_path / G.LVS_VERDICT_REL
+    lvs.parent.mkdir(parents=True, exist_ok=True)
+    lvs.write_text(json.dumps({
+        "status": "PASS", "finding": "synthetic consumer fixture",
+        "layout_source": {"kind": "gds", "path": entries["shipped"]["path"],
+                          "sha256": entries["shipped"]["sha256"],
+                          "extracted_sha256": entries["shipped"]["sha256"]}}))
+    doc["connectivity"] = G.gds_connectivity(tmp_path, entries["shipped"]["sha256"])
+    out.write_text(json.dumps(doc))
     before = hashlib.sha256(out.read_bytes()).hexdigest()
     rc, line, _ = G.judge_receipt(tmp_path, "reports/phase3/gds_xor.json")
     assert rc == 0, line
