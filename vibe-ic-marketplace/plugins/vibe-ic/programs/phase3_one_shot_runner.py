@@ -58043,6 +58043,30 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     _canonicalize_postpnr_prerequisites(project, top, pdk, container)
     evidence = step_canonicalize_artefacts(
         project, top, pdk, container, prestream=True)
+    import execution_policy
+    if execution_policy.request()['mode'] == 'default' and evidence.status != 'PASS':
+        # Default has already run the failing row's selected producer and
+        # consumer. Do not run later measurements or turn a measured FAIL
+        # into an unmeasured enclosing-row result.
+        canonical = evidence.extras.get('canonical_steps', [])
+        failed = [r['name'] for r in canonical
+                  if r['status'] not in ('PASS', 'SKIP')]
+        out = _pl.reports_phase3_dir(project) / 'prestream_gate.json'
+        out.parent.mkdir(parents=True, exist_ok=True)
+        receipt = {'layout_digest': digest, 'basis': 'DEF/netlist/SDC/PDK',
+                   'verdict': evidence.status,
+                   'failed_gates': failed if evidence.status == 'FAIL' else [],
+                   'unmeasured_gates': failed if evidence.status != 'FAIL' else [],
+                   'gates': canonical, 'evidence': asdict(evidence)}
+        _aa.write_json(out, receipt)
+        return StepResult(
+            'prestream_gate', evidence.status, time.time() - t0,
+            evidence.detail, list(evidence.output_files or []) + [str(out)],
+            extras={'layout_digest': digest,
+                    'failed_gates': receipt['failed_gates'],
+                    'unmeasured_gates': receipt['unmeasured_gates'],
+                    'canonical_steps': canonical},
+            reason_class=evidence.reason_class)
     mcf_producer_error = ""
     # The MCF producer normally sits later in canonicalisation. Its input is
     # the routed SPEF, so run it now and spend the existing one-pass SI repair
@@ -62580,6 +62604,16 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     dispatched = _ordinary_phase3_row(project, 'canonicalize_artefacts')
     if dispatched is not None:
         return dispatched
+    import execution_policy
+    if prestream and execution_policy.request()['mode'] == 'default':
+        # Full Default uses the same row producers as a bounded continuation.
+        # Step 32 has run before this site. The existing GDS producer owns
+        # 26.5ic's stream finishing, so that writer stays at stream-out.
+        rows = [sid for sid in _phase3_window_steps('23', '28')
+                if sid != '26.5ic']
+        return _default_pnr_rows(
+            project, top, pdk, container, rows,
+            report_name='prestream_evidence')
     t0 = time.time()
     written: List[str] = []
     notes: List[str] = []
@@ -78180,7 +78214,8 @@ def _publish_in_progress_steps(project: Path, plan: List[StepResult]) -> None:
 
 
 def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
-                      step_ids: List[str], *, die_um: str, util: float,
+                      step_ids: List[str], *, die_um: Optional[str] = None,
+                      util: Optional[float] = None,
                       spare_density=None, report_name: str = 'pnr') -> StepResult:
     """Run existing native producers in canonical order on one local project.
 

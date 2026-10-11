@@ -380,6 +380,75 @@ def test_single_default_driver_routes_the_full_existing_pnr_order(tmp_path, monk
     assert result.status == 'FAIL' and result.detail == 'canonical step 19'
 
 
+def test_full_default_prestream_uses_the_existing_canonical_row_driver(tmp_path, monkeypatch):
+    captured = []
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(runner, '_ordinary_phase3_row', lambda *args: None)
+
+    def drive(project, top, pdk, container, step_ids, **kwargs):
+        assert project == tmp_path
+        assert kwargs['report_name'] == 'prestream_evidence'
+        captured.extend(step_ids)
+        return runner.StepResult('prestream_evidence', 'FAIL', 0, 'canonical step 23')
+
+    monkeypatch.setattr(runner, '_default_pnr_rows', drive)
+
+    def old_enclosing_path(*args, **kwargs):
+        pytest.fail('Default reached the old enclosing signoff producer')
+
+    monkeypatch.setattr(runner._pl, 'sta_dir', old_enclosing_path)
+    result = runner.step_canonicalize_artefacts(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', prestream=True)
+    # Read the actual shipped YAML order, including the IC finishing row.
+    # That row already has a GDS writer owner and is completed at stream-out.
+    expected = [sid for sid in runner._phase3_window_steps('23', '28')
+                if sid != '26.5ic']
+    assert captured == expected == ['23', '24', '25', '26', '27', '28']
+    assert result.status == 'FAIL' and result.detail == 'canonical step 23'
+
+
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
+def test_full_default_prestream_stops_on_the_actual_failed_row(
+        tmp_path, monkeypatch, status):
+    calls = []
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(runner, '_ordinary_phase3_row', lambda *args: None)
+    monkeypatch.setattr(runner, '_backend_parameter_values',
+                        lambda *args: {'image_id': 'fixture', 'pdk_root': str(tmp_path)})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *args: [])
+    monkeypatch.setattr(runner, '_dedupe_shipped_netlist_ports', lambda *args: {})
+    monkeypatch.setattr(runner, '_layout_basis', lambda *args: ('current-layout', ''))
+    monkeypatch.setattr(runner, '_canonicalize_postpnr_prerequisites', lambda *args: None)
+
+    def native(project, params):
+        calls.append(('producer', params['step_id']))
+        assert project == tmp_path and params['execution_mode'] == 'default'
+        return {'verdict': status, 'detail': 'actual selected-tool refusal'}
+
+    def consume(project, *, step_id, producer):
+        calls.append(('consumer', step_id))
+        return dict(producer, outputs={}, canonical_step_result={
+            'status': status, 'reasons': ['actual selected-tool refusal']})
+
+    monkeypatch.setattr(producers, 'produce', native)
+    monkeypatch.setattr(worker, 'execute_current_step', consume)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('a later producer ran after the Default row stopped')
+
+    monkeypatch.setattr(runner._pl, 'sta_dir', forbidden)
+    monkeypatch.setattr(runner._pr, 'run', forbidden)
+    result = runner.step_prestream_gate(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '')
+    assert calls == [('producer', '23'), ('consumer', '23')]
+    assert result.status == status
+    assert 'canonical step 23' in result.detail
+    receipt = json.loads((tmp_path / 'reports/phase3/prestream_gate.json').read_text())
+    assert receipt['verdict'] == status
+    assert receipt['layout_digest'] == 'current-layout'
+    assert receipt['evidence']['extras']['canonical_steps'][0]['extras']['step_id'] == '23'
+
+
 def test_default_native_refusal_does_not_run_report_producers(tmp_path, monkeypatch):
     monkeypatch.setattr(producers, 'produce_pnr', lambda *args:
                         {'verdict': 'NOT_MEASURED', 'detail': 'SDC_SEAM_PENDING'})
