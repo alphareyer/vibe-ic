@@ -2,8 +2,7 @@
 """spare_cell_coverage_check.py — Design-for-ECO READINESS gate (Step 18).
 
 Reads the spare-cell insertion plan emitted by phase3_one_shot_runner
-(`phase3/stage3/pnr/spare_cells.json`) — step 18's other declared output
-and this gate's ONLY input — and confirms the project carries a usable
+(`phase3/stage3/pnr/spare_cells.json`) and confirms the project carries a usable
 spare-cell ECO budget:
 
   PASS iff ALL of:
@@ -17,7 +16,9 @@ spare-cell ECO budget:
        (`prove_inputs_tied`).
 
 Emits a JSON verdict and exits 0 (PASS) / 1 (FAIL) / 2 (IO/arg error).
-chip-AGNOSTIC: reads only the generic spare_cells.json schema.
+With --post-spare-def, the canonical Step-18 consumer also reconciles the
+recorded instances and tieoffs against the actual post_spare.def checkpoint.
+chip-AGNOSTIC: reads the generic spare_cells.json schema and standard DEF.
 
 DECLARING PRODUCER of `reports/spare_cell_coverage.json`. This program
 writes that path and NOTHING ELSE MAY. It also does not READ it: the
@@ -258,8 +259,54 @@ def _carried_measurements(plan: dict) -> Dict[str, Any]:
     return carried
 
 
+def inserted_def_evidence(plan: dict, def_path: Path) -> dict:
+    """Reconcile this insertion's actual DEF with its recorded cells and tieoffs."""
+    import phase3_one_shot_runner as runner
+    try:
+        text = def_path.read_text()
+    except OSError as exc:
+        return {'verdict': 'FAIL', 'reasons': [f'post-spare DEF unavailable: {exc}']}
+    components = dict(runner._def_components_from_text(text))
+    reasons = []
+    instances = [row for row in plan.get('instances', []) if isinstance(row, dict)]
+    if len(instances) != plan.get('count'):
+        reasons.append('recorded spare count differs from the enumerated instance population')
+    for row in instances:
+        name, expected = row.get('name'), row.get('cell')
+        if name not in components:
+            reasons.append(f'post-spare DEF does not instantiate {name}')
+        elif not expected or components[name] != expected:
+            reasons.append(f'post-spare DEF master differs for {name}: '
+                           f'{components[name]} vs recorded {expected}')
+    # Reuse the runner's DEF grammar reader: terminal tuples precede the
+    # routing options, and wildcard members are not instance connections.
+    connections = {}
+    try:
+        net_members = runner._def_net_members(text)
+    except ValueError as exc:
+        net_members = {}
+        reasons.append(f'post-spare DEF connectivity unavailable: {exc}')
+    for net, members in net_members.items():
+        for member in members:
+            if member in connections and connections[member] != net:
+                reasons.append(f'post-spare DEF assigns {member[0]}/{member[1]} '
+                               'to more than one net')
+            connections[member] = net
+    pins = (plan.get('tie_off') or {}).get('inputs') or []
+    for row in pins:
+        if not isinstance(row, dict):
+            continue
+        key = (row.get('inst'), row.get('pin'))
+        if not row.get('net') or connections.get(key) != row.get('net'):
+            reasons.append(f'post-spare DEF tieoff differs or is absent for {key[0]}/{key[1]}')
+    return {'verdict': 'FAIL' if reasons else 'PASS', 'reasons': reasons,
+            'components': len(components), 'spares_checked': len(instances),
+            'tieoff_pins_checked': len(pins)}
+
+
 def audit(project: Path,
-          target_density: float = _DEFAULT_TARGET_DENSITY) -> dict:
+          target_density: float = _DEFAULT_TARGET_DENSITY, *,
+          post_spare_def: bool = False) -> dict:
     spare_json = _resolve_input(project)
     if not spare_json.is_file():
         return {
@@ -286,13 +333,22 @@ def audit(project: Path,
         "version": "1.2.0",
         "project_dir": str(project),
         "spare_cells_json": str(spare_json),
-        # `inputs` is exhaustive: this gate reads spare_cells.json and
-        # nothing else. The removed `coverage_summary_json` key named
+        # The legacy pure-plan mode reads only spare_cells.json. Canonical
+        # insertion adds the current DEF below. Neither mode reads this
+        # program's own output. The removed `coverage_summary_json` key named
         # this program's OWN output as an input, which is what let a
         # previous verdict feed the next one.
         "inputs": [str(spare_json)],
     })
     result.update(_carried_measurements(plan))
+    if post_spare_def:
+        def_path = project / 'phase3/stage3/pnr/post_spare.def'
+        measured = inserted_def_evidence(plan, def_path)
+        result['inserted_def'] = measured
+        result['inputs'].append(str(def_path))
+        if measured['verdict'] != 'PASS':
+            result['verdict'] = 'FAIL'
+            result['reasons'].extend(measured['reasons'])
     # `status` mirrors `verdict` so consumers reading the documented
     # coverage schema (benchmark_verify_report Pillar 6 expects a
     # top-level "status": "PASS") see a PASS. Both kept for compat.
@@ -308,6 +364,8 @@ def main(argv: Optional[list] = None) -> int:
                     default=_DEFAULT_TARGET_DENSITY,
                     help="Minimum acceptable spare density (default 0.02)")
     ap.add_argument("--json", default=None, help="JSON report output path")
+    ap.add_argument("--post-spare-def", action='store_true',
+                    help="Verify inserted cells and tieoff pins in the current Step-18 DEF")
     args = ap.parse_args(argv)
 
     project = Path(args.project_dir)
@@ -315,7 +373,7 @@ def main(argv: Optional[list] = None) -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
-    report = audit(project, args.target_density)
+    report = audit(project, args.target_density, post_spare_def=args.post_spare_def)
     out = json.dumps(report, indent=2, ensure_ascii=False)
     # Canonical output: reports/spare_cell_coverage.json (Pillar 6 reads
     # this literal path), in addition to any explicit --json path. This
