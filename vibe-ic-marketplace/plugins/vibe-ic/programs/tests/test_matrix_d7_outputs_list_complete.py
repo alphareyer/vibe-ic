@@ -3142,6 +3142,74 @@ def _detected(src: str) -> set:
     return {"/".join(t) for t in G._collect_writes(_ast.parse(src))}
 
 
+def test_delegated_writer_binds_the_callers_path_and_excludes_readers(monkeypatch):
+    import ast
+    helper = ast.parse('''
+def produce(project, target):
+    from _atomic_artefact import write_json
+    write_json(target, {"measured": True})
+def inspect(project, source):
+    return source.read_text()
+''')
+    monkeypatch.setattr(G, '_tree', lambda name: helper if name == 'native_helper' else None)
+    detected = _detected('''
+import native_helper as helper
+def main(project):
+    target = project / "reports" / "actual.json"
+    helper.produce(project, target)
+    helper.inspect(project, project / "reports" / "input_only.json")
+''')
+    assert 'reports/actual.json' in detected
+    assert 'reports/input_only.json' not in detected
+
+
+def test_bare_imported_atomic_writer_does_not_treat_content_as_destination():
+    detected = _detected('''
+from _atomic_artefact import write_json
+def produce(project):
+    write_json(project / "reports" / "actual.json",
+               project / "reports" / "content_only.json")
+''')
+    assert 'reports/actual.json' in detected
+    assert 'reports/content_only.json' not in detected
+
+
+def test_bare_writer_does_not_borrow_a_readers_same_named_local():
+    detected = _detected('''
+from _atomic_artefact import write_json
+def reader(project):
+    path = project / "input" / "config" / "readonly.json"
+    return path.read_text()
+def writer(project):
+    path = project / "reports" / "actual.json"
+    write_json(path, {})
+''')
+    assert 'reports/actual.json' in detected
+    assert 'input/config/readonly.json' not in detected
+
+
+def test_delegate_keeps_forwarded_parameters_without_borrowing_reader_locals(monkeypatch):
+    import ast
+    helper = ast.parse('''
+def produce(project, destination):
+    from _atomic_artefact import write_json
+    write_json(destination, {})
+''')
+    monkeypatch.setattr(G, '_tree', lambda name: helper if name == 'native_helper' else None)
+    detected = _detected('''
+import native_helper as helper
+def reader(project):
+    path = project / "input" / "config" / "readonly.json"
+    return path.read_text()
+def forward(project, path):
+    helper.produce(project, path)
+def main(project):
+    forward(project, project / "reports" / "actual.json")
+''')
+    assert 'reports/actual.json' in detected
+    assert 'input/config/readonly.json' not in detected
+
+
 def test_d7_the_write_detector_sees_an_atomic_write(monkeypatch):
     """A program converted to an atomic writer must still read as a WRITE.
 
