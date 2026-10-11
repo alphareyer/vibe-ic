@@ -1632,6 +1632,36 @@ def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkey
     assert options["log_path"] == script.with_suffix(".tool.log")
 
 
+@pytest.mark.parametrize("tool_error", [False, True])
+def test_local_opensta_preserves_returned_output_and_rejects_tool_errors(
+        tmp_path, monkeypatch, tool_error):
+    import subprocess
+    import drv_signoff_capture as capture
+    script = tmp_path / "measure.tcl"
+    script.write_text("puts ready\n")
+    output = "OpenSTA 3.1 aaaaaaaaaa\n"
+    if tool_error:
+        output += "Error: required timing input unavailable\n"
+    seen = []
+
+    def local(argv, **kw):
+        seen.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(capture._ce, "no_container_route", lambda: True)
+    monkeypatch.setattr(capture._ll, "run_container", local)
+    if tool_error:
+        with pytest.raises(RuntimeError, match="tool_error=True"):
+            capture._run_fresh(script, {tmp_path}, image="test:image")
+    else:
+        assert "OpenSTA" in capture._run_fresh(script, {tmp_path}, image="test:image")
+    assert script.with_suffix(".tool.log").read_text() == output
+    argv, options = seen[0]
+    assert "--name" not in argv and "--cidfile" not in argv
+    assert argv[argv.index("test:image") + 1] == "--skip"
+    assert options["supervised"] is True
+
+
 def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch):
     import subprocess
     from types import SimpleNamespace

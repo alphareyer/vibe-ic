@@ -115,6 +115,9 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
                       "--rm", "--network", "none", *mounts, image, "--skip",
                       "bash", "-c", f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
         done = _ll.run_container(local_argv, supervised=True, log=raw)
+        # run_container returns normal output; its log argument only salvages
+        # interrupted runs. Persist the native transcript for this consumer.
+        raw.write_text((done.stdout or "") + (done.stderr or ""))
         outcome, rc, err = "natural", done.returncode, done.stderr or ""
     else:
         result = _watchdog.run_supervised(
