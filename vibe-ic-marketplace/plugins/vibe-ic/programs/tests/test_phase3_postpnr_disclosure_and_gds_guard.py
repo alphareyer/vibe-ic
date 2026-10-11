@@ -519,8 +519,9 @@ def test_an_appended_repair_row_does_not_disable_the_guard(tmp_path,
 # ---------------------------------------------------------------------------
 # MIGRATED by R-0929-TAIL-CONTINUES (root, IC expert, 2026-09-29). This case
 # asserted that a FAILING repair row stops the GDS. The ruling reverses that: a
-# measured Step-32 FAIL is recorded FAIL and keeps the run FAIL, but stream-out
-# and the tail are still measured on the route it leaves. The case keeps both of
+# measured Step-32 FAIL is recorded FAIL and keeps the run FAIL, but the legacy
+# Ultra diagnostic tail still measures the route it leaves. Default stops at
+# the failed row, as covered by test_default_pnr_row_boundaries. The case keeps both of
 # its observations -- the FAIL row survives, and the run does not exit 0 -- and
 # the stopping direction is kept where the ruling keeps it (a Step-32 row that
 # leaves NO route): `test_r0929_tail_continues.py::test_step32_that_left_no_route_*`.
@@ -531,6 +532,16 @@ def test_a_failing_repair_row_is_kept_and_the_gds_is_still_measured(
         tmp_path, monkeypatch, producer):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    # Exercise the existing diagnostic transport, with its original assertions.
+    # Tool-candidate scheduling is outside this native transport's scope.
+    import execution_policy
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, "request",
+                        lambda: dict(original_request(), mode="ultra"))
+    monkeypatch.setattr(execution_policy, "bootstrap", lambda *a, **k: None)
+    monkeypatch.setattr(execution_policy, "_ordinary_runtime", None)
+    monkeypatch.setattr(R, "_default_step15_with_backend_receipt",
+                        lambda *a, **k: R.step_pnr(*a, **k))
     row = _repair_producer(monkeypatch, project, producer, "FAIL", "repair blew up")
     rc = R.main()
 
