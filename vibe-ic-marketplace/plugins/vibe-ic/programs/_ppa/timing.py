@@ -1714,6 +1714,9 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
     out["regenerated"] = regenerated
     out["derivation"] = None
     supplies = rt._producer_supply_ports_for_drv(project)
+    import sdc_environment as environment
+    pad_scene = environment.pad_operating_scene(
+        project, str(pdk.liberty), container, rt._to_container_path)
     if supplies:
         # ONLY the DRV block's SCOPE changes: the block step 7 rendered is
         # re-rendered from the SAME recorded arguments with the proven supply
@@ -1743,15 +1746,32 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
             der.update(applied=False, reason="step 7's DRV block is not "
                        "present exactly once in its deck; left as authored")
         else:
+            # A core Liberty default constrains its own cells, not unrelated
+            # IO voltage-domain cells. Their native pin limits stay unchanged.
+            # Explicit design/PDK-config ceilings still apply design-wide.
+            pad_limits = pad_scene.get("port_slew_limits") or {}
+            native_pad_limits = (bool(pad_limits) and
+                                 str(blk.get("slew_source") or "").startswith("liberty default "))
             new_blk = rt._drv_constraints_sdc_block(
-                blk["slew_ns"], blk["cap_pf"], blk["note"],
+                None if native_pad_limits else blk["slew_ns"], blk["cap_pf"], blk["note"],
                 max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
                 supply_ports=supplies, slew_source=blk.get("slew_source") or "",
                 cap_source=blk.get("cap_source") or "")
             out["text"] = out["text"].replace(base_blk, new_blk, 1)
+            if native_pad_limits:
+                out["text"] += "\n# Core cells retain their native Liberty slew limits; IO ports use their pad pin limits.\n"
+                for port, limit in sorted(pad_limits.items()):
+                    out["text"] += f"set_max_transition {limit:g} [get_ports -regexp {{^{re.escape(port)}$}}]\n"
+                der["pad_pin_slew_limits"] = pad_limits
+                der["pad_liberty_sha256"] = pad_scene["liberty_sha256"]
             der.update(applied=True)
         der["deck_sha256"] = _sha256_text(out["text"])
         out["derivation"] = der
+    if pad_scene:
+        out["text"] += "\n" + pad_scene["tcl"]
+        if out["derivation"] is not None:
+            out["derivation"]["deck_sha256"] = _sha256_text(out["text"])
+            out["derivation"]["static_pad_mode"] = "actual netlist constant-disabled conditional edges"
     return out
 
 if __name__ == "__main__":                                   # pragma: no cover

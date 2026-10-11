@@ -652,3 +652,115 @@ def test_the_prepnr_seam_reads_step7s_deck_through_its_reader(
     assert path is None
     assert why.startswith("SDC_SEAM_PENDING: fxport step-7 reader:")
     assert "changed after step 7" in why
+
+
+def _mode_library(name, cell, pin_limit, arcs):
+    return f'''library ({name}) {{
+      delay_model : table_lookup;
+      time_unit : "1ns";
+      voltage_unit : "1V";
+      current_unit : "1mA";
+      capacitive_load_unit (1,pf);
+      nom_process : 1; nom_temperature : 25; nom_voltage : 1.8;
+      default_max_transition : {pin_limit};
+      lu_table_template (tiny) {{ variable_1 : input_net_transition;
+        variable_2 : total_output_net_capacitance;
+        index_1 ("0.01, 1"); index_2 ("0.01, 1"); }}
+      cell ({cell}) {{ area : 1;
+        pin (A) {{ direction : input; capacitance : 0.01; }}
+        pin (MODE) {{ direction : input; capacitance : 0.001; }}
+        pin (Y) {{ direction : output; function : "A";
+          is_pad : true; max_transition : {pin_limit};
+          {arcs}
+        }}
+      }}
+    }}'''
+
+
+def _mode_arc(when, slew):
+    return f'''timing () {{ related_pin : "A"; timing_type : combinational;
+      timing_sense : positive_unate; {('when : "' + when + '";') if when else ''}
+      cell_rise (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+      cell_fall (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+      rise_transition (tiny) {{ values ("{slew}, {slew}", "{slew}, {slew}"); }}
+      fall_transition (tiny) {{ values ("{slew}, {slew}", "{slew}, {slew}"); }}
+    }}'''
+
+
+@pytest.mark.parametrize('mode,core_slew,user_limit', [
+    ('0', 0.5, None), ('1', 0.5, None), ('m', 0.5, None),
+    ('0', 2.0, None), ('0', 0.5, 1.0)],
+    ids=['fixed-normal','fixed-slow','dynamic-mode','core-still-fails','user-ceiling-still-fails'])
+def test_pad_operating_scene_preserves_actual_mode_and_each_domain_limit(
+        tmp_path, monkeypatch, mode, core_slew, user_limit):
+    import shutil
+    import subprocess
+    tool = shutil.which('openroad')
+    assert tool, 'this native consumer test requires the EDA image'
+    proj = _project(tmp_path)
+    core_lib = tmp_path / 'core.lib'
+    core_lib.write_text(_mode_library('core_lib', 'core_buf', 1.5, _mode_arc('', core_slew)))
+    io_lib = tmp_path / 'io.lib'
+    io_lib.write_text(_mode_library('io_lib', 'io_pad', 25,
+                    _mode_arc('!MODE', 1.87) + _mode_arc('MODE', 225.75)))
+    pdk = _pdk(monkeypatch, drv={'max_transition_ns': 1.5,
+                               'slew_source': str(core_lib) + ':default_max_transition'})
+    pdk.liberty = core_lib
+    monkeypatch.setattr(R, '_sdc_environment_pdk_values', lambda *a, **k: ({}, []))
+    if user_limit:
+        (proj / 'input/constraints').mkdir(parents=True)
+        (proj / 'input/constraints/clock.sdc').write_text(
+            f'create_clock -period 25 [get_ports clk]\nset_max_transition {user_limit} [current_design]\n')
+    # Phase-2 authoring precedes the physical pad producer.
+    T.emit_step7_asic_sdc(R, proj, TOP, pdk, '')
+    path = _pad_record(proj)
+    doc = json.loads(path.read_text())
+    doc.update(io_library_liberty=[str(io_lib)],
+               pad_instances={'u_io': {'port': 'y', 'master': 'io_pad',
+                                       'terminal': 'Y', 'direction': 'output'},
+                              'u_supply': {'port': 'VDD', 'master': 'supply_pad',
+                                           'terminal': 'BOND', 'direction': 'inout', 'kind': 'power'}})
+    path.write_text(json.dumps(doc))
+    derived = T.asic_sdc_for_pnr(R, proj, TOP, pdk, '')
+    sdc = tmp_path / 'scene.sdc'
+    sdc.write_text(derived['text'])
+    nl = tmp_path / 'scene.v'
+    mode_connection = "1'b" + mode if mode in ('0', '1') else 'm'
+    nl.write_text(f'module {TOP}(input a,input m,input clk,output y,inout VDD,inout VSS); '
+                  f'wire n; core_buf u_core(.A(a),.MODE(1\'b0),.Y(n)); '
+                  f'io_pad u_io(.A(n),.MODE({mode_connection}),.Y(y)); endmodule\n')
+    lef = tmp_path / 'scene.lef'
+    macros = ''
+    for cell in ('core_buf', 'io_pad'):
+        pins = ''.join(f'PIN {pin}\n DIRECTION {direction} ;\n USE SIGNAL ;\n'
+                       f' PORT\n LAYER Metal1 ;\n RECT 0.1 0.1 0.2 0.2 ;\n END\n END {pin}\n'
+                       for pin, direction in [('A', 'INPUT'), ('MODE', 'INPUT'), ('Y', 'OUTPUT')])
+        macros += f'MACRO {cell}\n CLASS CORE ;\n ORIGIN 0 0 ;\n SIZE 1 BY 1 ;\n{pins}END {cell}\n'
+    lef.write_text('VERSION 5.8 ;\nBUSBITCHARS "[]" ;\nDIVIDERCHAR "/" ;\n'
+                   'UNITS\n DATABASE MICRONS 1000 ;\nEND UNITS\n'
+                   'LAYER Metal1\n TYPE ROUTING ;\n DIRECTION HORIZONTAL ;\n'
+                   ' PITCH 0.5 ;\n WIDTH 0.2 ;\n SPACING 0.3 ;\nEND Metal1\n'
+                   + macros + 'END LIBRARY\n')
+    script = tmp_path / 'scene.tcl'
+    script.write_text(f'read_lef {{{lef}}}\nread_liberty {{{core_lib}}}\nread_liberty {{{io_lib}}}\n'
+                      f'read_verilog {{{nl}}}\nlink_design {TOP}\n'
+                      f'if {{[catch {{read_sdc {{{sdc}}}}} why]}} {{puts "SCENE_ERROR $why"; exit 1}}\n'
+                      'puts SCENE_CHECK_BEGIN\nreport_check_types -max_slew -violators -digits 6\n'
+                      'puts SCENE_CHECK_END\n'
+                      'report_edges -from [get_pins u_io/A] -to [get_pins u_io/Y]\nexit\n')
+    run = subprocess.run([tool, '-no_init', '-exit', str(script)], capture_output=True, text=True)
+    output = run.stdout + run.stderr
+    assert run.returncode == 0 and 'SCENE_CHECK_END' in output and 'SCENE_ERROR' not in output, output
+    checked = output.split('SCENE_CHECK_BEGIN', 1)[1].split('SCENE_CHECK_END', 1)[0]
+    if mode == '0' and core_slew == 0.5 and user_limit is None:
+        assert 'VIOLATED' not in checked, checked
+    else:
+        assert 'VIOLATED' in checked, checked
+    if core_slew > 1.5:
+        assert 'u_core/Y' in checked and '2.000000' in checked
+    if user_limit:
+        assert 'set_max_transition 1.0 [current_design]' in derived['text']
+    # A normal-mode active edge still exists: no from/to blanket suppression.
+    if mode == '0':
+        normal = output.split('Condition: !MODE', 1)[-1].split('Condition:', 1)[0]
+        assert 'Disabled by constraint' not in normal, output

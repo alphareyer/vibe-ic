@@ -212,7 +212,7 @@ def _index_values(body: str, n: int) -> Optional[List[float]]:
     return vals or None
 
 
-def _io_pad_view(text: str) -> Dict[str, object]:
+def _io_pad_view(text: str, masters: Optional[set[str]] = None) -> Dict[str, object]:
     """The off-chip input-edge bracket one IO Liberty view characterises.
 
     For every bond-pad pin that receives an off-chip signal (``is_pad : true``,
@@ -243,7 +243,11 @@ def _io_pad_view(text: str) -> Dict[str, object]:
                       _liberty_blocks(text, "lu_table_template")}
     lib_default = re.search(r"\bdefault_max_transition\s*:\s*([0-9.eE+-]+)", text)
     pins: List[Dict[str, object]] = []
+    selected_cells = 0
     for cell, cell_body in _liberty_blocks(text, "cell"):
+        if masters is not None and cell not in masters:
+            continue
+        selected_cells += 1
         cell_pins = _liberty_blocks(cell_body, "pin")
         for pin, pin_body in cell_pins:
             own = _own_attrs(pin_body)
@@ -281,6 +285,7 @@ def _io_pad_view(text: str) -> Dict[str, object]:
                 view["pins_without_fast_index"] = int(view["pins_without_fast_index"]) + 1
             pins.append({"pin": f"{cell}/{pin}", "slow_ns": slow, "fast_ns": fast})
     view["pins"] = pins
+    view["selected_cells_present"] = bool(selected_cells)
     slows = [float(x["slow_ns"]) for x in pins]
     fasts = [float(x["fast_ns"]) for x in pins if x["fast_ns"] is not None]
     if not pins:
@@ -316,6 +321,13 @@ def _read_pdk_file(path: str, container: str,
         return None, ""
 
 
+def _signal_pad_instances(record: Dict[str, object]) -> Dict[str, object]:
+    """The producer marks supply/connector records with ``kind``; they are
+    not off-chip signal inputs or output timing paths."""
+    return {name: pad for name, pad in (record.get("pad_instances") or {}).items()
+            if not pad.get("kind")}
+
+
 def _pdk_io_input_transition(project: Path, container: str = "",
                              to_container_path: Optional[Callable[[str, str], str]] = None
                              ) -> Tuple[Optional[Dict[str, object]], Dict[str, object]]:
@@ -332,25 +344,36 @@ def _pdk_io_input_transition(project: Path, container: str = "",
     rec_path = Path(project) / IO_PAD_RECORD
     try:
         raw = rec_path.read_bytes()
-        libs = json.loads(raw).get("io_library_liberty")
+        record = json.loads(raw)
+        libs = record.get("io_library_liberty")
         basis["record_sha256"] = hashlib.sha256(raw).hexdigest()
     except (OSError, ValueError, AttributeError):
-        libs = None
+        libs, record = None, {}
     if not isinstance(libs, list) or not any(isinstance(x, str) for x in libs):
         basis["why"] = (f"no IO Liberty recorded by the pad-ring producer "
                         f"({IO_PAD_RECORD} absent or without io_library_liberty)")
         return None, basis
     views: List[Dict[str, object]] = []
+    masters = {p["master"] for p in _signal_pad_instances(record).values()
+               if p.get("direction") in ("input", "inout") and p.get("master")}
+    if masters:
+        basis["input_pad_masters"] = sorted(masters)
     for lib in sorted(str(x) for x in libs if isinstance(x, str)):
         text, where = _read_pdk_file(lib, container, to_container_path)
         if text is None:
             views.append({"liberty": lib, "why": "NOT_READ"})
             continue
-        view = _io_pad_view(text)
+        view = _io_pad_view(text, masters or None)
+        if masters and not view.get("selected_cells_present", True):
+            continue  # This view models no input pad instantiated by the producer.
         view.update(liberty=lib, read_from=where,
                     sha256=hashlib.sha256(text.encode()).hexdigest())
         views.append(view)
     basis["views"] = views
+    covered = {p["pin"].split("/", 1)[0] for v in views for p in v.get("pins", [])}
+    if not views or masters - covered:
+        basis["why"] = "no characterised IO input view for " + ", ".join(sorted(masters - covered))
+        return None, basis
     bad = [f"{v['liberty']}: {v['why']}" for v in views if v.get("why")]
     if bad:
         basis["why"] = "IO Liberty " + "; ".join(bad)
@@ -366,6 +389,72 @@ def _pdk_io_input_transition(project: Path, container: str = "",
         basis["why"] = "the linked IO views' characterised ranges do not overlap"
         return None, basis
     return bracket, basis
+
+
+def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
+                        to_container_path=None) -> Dict[str, object]:
+    """A generated pad wrapper's static timing mode and native IO pin limits.
+
+    OpenSTA excludes constant-disabled arcs from path search, but its delay
+    calculator still includes conditional arcs in the output slew. Mark only
+    those already-disabled conditional edges for this analysis. Active and
+    unknown-mode edges remain. No user timing exception or limit is changed.
+    """
+    import json
+    import hashlib
+    try:
+        record = json.loads((Path(project) / IO_PAD_RECORD).read_text())
+    except (OSError, ValueError):
+        return {}
+    pads = _signal_pad_instances(record)
+    if record.get("verdict") != "WROTE" or not pads:
+        return {}
+    selected = {p["master"] for p in pads.values() if p.get("master")}
+    limits: Dict[Tuple[str, str], List[float]] = {}
+    sources = {}
+    for path in record.get("io_library_liberty") or []:
+        text, _ = _read_pdk_file(path, container, to_container_path)
+        if text is None:
+            continue
+        unit = re.search(r'\btime_unit\s*:\s*"\s*([0-9]+\s*[pnu]s)"', text)
+        scale = _LIB_TIME_UNIT_NS.get(unit.group(1).replace(" ", "") if unit else "1ns")
+        if scale is None:
+            continue
+        found = False
+        for cell, body in _liberty_blocks(text, "cell"):
+            if cell not in selected:
+                continue
+            for pin, pin_body in _liberty_blocks(body, "pin"):
+                value = re.search(r'\bmax_transition\s*:\s*([0-9.eE+-]+)', _own_attrs(pin_body))
+                if value:
+                    limits.setdefault((cell, pin), []).append(float(value.group(1)) * scale)
+                    found = True
+        if found:
+            sources[path] = hashlib.sha256(text.encode()).hexdigest()
+    core_text, _ = _read_pdk_file(core_liberty, container, to_container_path)
+    unit = re.search(r'\btime_unit\s*:\s*"\s*([0-9]+\s*[pnu]s)"', core_text or "")
+    core_scale = _LIB_TIME_UNIT_NS.get(unit.group(1).replace(" ", "")) if unit else None
+    ports = {p["port"]: min(limits[(p["master"], p["terminal"])]) / core_scale
+             for p in pads.values() if core_scale and p.get("port")
+             and (p.get("master"), p.get("terminal")) in limits}
+    complete = bool(core_scale) and all(p.get("port") in ports for p in pads.values())
+    selector = "^(" + "|".join(re.escape(n) for n in sorted(pads)) + ")$"
+    tcl = '\n'.join([
+        '# Static pad mode from the actual linked netlist; no active timing path disabled.',
+        f'set _vibeic_mode_pads [get_cells -regexp {{{selector}}}]',
+        'if {[llength $_vibeic_mode_pads]} {',
+        '  report_worst_slack -max > /dev/null',
+        '  set _vibeic_mode_edges 0',
+        '  foreach _edge [concat {*}[get_timing_edges -of_objects $_vibeic_mode_pads]] {',
+        '    if {[$_edge is_disabled_constant] && [$_edge cond] ne ""} {',
+        '      set_disable_timing $_edge',
+        '      incr _vibeic_mode_edges',
+        '    }',
+        '  }',
+        '  puts "VIBEIC_PAD_STATIC_MODE $_vibeic_mode_edges already-disabled conditional edges"',
+        '}', ''])
+    return {"tcl": tcl, "port_slew_limits": ports if complete else {},
+            "liberty_sha256": sources, "complete_pin_limits": complete}
 
 
 def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]],
