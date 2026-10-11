@@ -73,7 +73,8 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
     unread: List[str] = []
     path = str(liberty_path or "")
     match = re.search(r"^(.*)/libs\.ref/([^/]+)/lib/", path)
-    if not match or not container:
+    local = _cex.no_container_route()
+    if not match or (not container and not local):
         return values, ["NOT_READ: pinned PDK SDC config path or container identity"]
     pdk_root, library = match.groups()
     root = f"{pdk_root}/libs.tech/librelane"
@@ -81,16 +82,20 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
         config_c = (to_container_path(config, container)
                     if to_container_path is not None else config)
         try:
-            run = subprocess.run(_cex.docker_exec_argv(container, "cat", config_c),
-                                 capture_output=True, text=True, timeout=60)
+            if local:
+                body = Path(config_c).read_text(errors="replace")
+            else:
+                run = subprocess.run(_cex.docker_exec_argv(container, "cat", config_c),
+                                     capture_output=True, text=True, timeout=60)
+                if run.returncode != 0:
+                    unread.append(f"NOT_READ: pinned PDK config {config_c}")
+                    continue
+                body = run.stdout
         except (OSError, subprocess.TimeoutExpired,
                 _cex.ContainerImageMismatch):
             unread.append(f"NOT_READ: pinned PDK config {config_c}")
             continue
-        if run.returncode != 0:
-            unread.append(f"NOT_READ: pinned PDK config {config_c}")
-            continue
-        for line in run.stdout.splitlines():
+        for line in body.splitlines():
             found = re.match(r"\s*set\s+::env\(([A-Z_]+)\)\s+(\"[^\"]*\"|\S+)", line)
             if not found:
                 continue
