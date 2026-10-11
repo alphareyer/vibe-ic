@@ -87,6 +87,19 @@ def test_no_declared_tie_means_no_dont_touch_list(tmp_path, record):
     assert "RSZ_DONT_TOUCH_LIST" not in result
 
 
+def test_pad_local_tie_protects_its_net_without_freezing_the_entire_pad(tmp_path):
+    rows = _AUX + [{"instance": "u_pad_q", "pin": "ENABLE_H",
+                    "net": "_local_tie_hi", "tie_instance": "u_pad_q",
+                    "tie_master": "GPIO", "tie_pin": "TIE_HI_ESD"}]
+    p = _design(tmp_path, {"verdict": "WROTE", "aux_pin_signal_connections": rows})
+    result = contract.emit_config(p, "processA", p / "phase3/librelane/config.json")
+    protected = result["RSZ_DONT_TOUCH_LIST"]
+    assert "_local_tie_hi" in protected
+    assert "u_pad_q" not in protected
+    assert all(row[key] in protected for row in _AUX
+               for key in ("tie_instance", "net"))
+
+
 @pytest.mark.parametrize("rows", [
     "not-a-list",
     [{"instance": "u_pad_a", "pin": "PD", "net": "_aux_tie_0"}],
