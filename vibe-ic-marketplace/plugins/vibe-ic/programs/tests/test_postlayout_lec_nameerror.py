@@ -251,6 +251,17 @@ def _canonicalize_project(tmp_path: Path) -> Path:
 def _quiet_canonicalize(monkeypatch):
     """Stub every OTHER emitter in step_canonicalize_artefacts so the test
     isolates the post-layout-LEC branch."""
+    # This fixture exercises the legacy broad publisher on a partial layout.
+    # Default requires completed row checkpoints; its final evidence and LEC
+    # failure propagation are covered by test_default_pnr_row_boundaries.
+    import execution_policy
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, "request",
+                        lambda: dict(original_request(), mode="ultra"))
+    monkeypatch.setattr(execution_policy, "_ordinary_runtime", None)
+    # SPICE correlation has its own native tests; this partial fixture only
+    # measures whether the post-layout LEC producer's exception is propagated.
+    monkeypatch.setattr(R, "_step30_tool_arm", lambda *a, **k: True)
     for name in ("_emit_power_report",
                  "_emit_antenna_report", "_emit_si_crosstalk_report",
                  "_emit_metal_fill", "_emit_erc_report",

@@ -91,10 +91,13 @@ class TestGuardIsWiredIn:
     def test_existence_only_guard_is_gone(self):
         """The regression itself: the copy must not be gated on absence
         alone, or a resumed run ships an unverified artefact again."""
-        assert "if not canon_gds.is_file():\n" not in _SRC
+        assert "if not canon_gds.is_file():\n" not in inspect.getsource(R._publish_canonical_gds_alias)
 
     def test_step_consults_the_shared_helper(self):
         """Emitter and checker share one decision site — no mirrored copy
         of the mtime comparison inside the step body."""
-        assert "_canonical_gds_is_stale(primary_gds, canon_gds)" in _SRC
-        assert "not canon_gds.is_file() or _stale" in _SRC
+        alias_source = inspect.getsource(R._publish_canonical_gds_alias)
+        assert "_canonical_gds_is_stale(primary_gds, canon_gds)" in alias_source
+        assert "not canon_gds.is_file() or _stale" in alias_source
+        assert "_publish_canonical_gds_alias(project, top, written, notes)" in _SRC
+        assert "_publish_canonical_gds_alias(project, top, written, notes)" in inspect.getsource(R._default_poststream_evidence)

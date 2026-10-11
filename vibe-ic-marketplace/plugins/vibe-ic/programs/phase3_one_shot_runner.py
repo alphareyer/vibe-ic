@@ -62575,6 +62575,165 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                                              if status == "NOT_MEASURED" else ""))
 
 
+def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
+                                 container: str, *, prepv: bool) -> StepResult:
+    """Retain completed Default rows; produce the remaining final evidence."""
+    t0 = time.time()
+    name = "prefill_evidence" if prepv else "canonicalize_artefacts"
+    pnr = _pl.pnr_dir(project)
+    rpt = _pl.reports_phase3_dir(project)
+    routed = pnr / "routed.def"
+    missing = [str(p) for p in (routed, pnr / f"{top}.gds") if not p.is_file()]
+    if missing:
+        return StepResult(name, "NOT_MEASURED", time.time() - t0,
+                          "final layout inputs absent: " + ", ".join(missing),
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    rpt.mkdir(parents=True, exist_ok=True)
+    written: List[str] = []
+    notes: List[str] = []
+    unmeasured: List[str] = []
+    failures: List[str] = []
+    _publish_canonical_gds_alias(project, top, written, notes)
+    if prepv:
+        # Step 34 already produced fill before stream-out. ERC reads this
+        # final stream before the existing independent DRC/LVS readers run.
+        erc = rpt / "erc.rpt"
+        if _signoff_regen(erc, routed, pnr / f"{top}.gds"):
+            try:
+                if _emit_erc_report(project, top, pdk, container, erc, notes):
+                    written.extend(str(p) for p in (erc, rpt / "erc.json") if p.is_file())
+                else:
+                    unmeasured.append("final ERC producer did not complete")
+            except Exception as exc:
+                failures.append(f"final ERC producer failed: {exc}")
+    else:
+        # These proofs consume the final layout. They have no earlier Default
+        # producer to repeat: post-layout LEC, GDS density, aging and thermal.
+        lec = rpt / "lec_post_layout.json"
+        if _signoff_regen(lec, routed, pnr / f"{top}_pnr.v"):
+            try:
+                _emit_lec_post_layout(project, top, pdk, container, lec,
+                                      rpt / "lec_post_layout.rpt", notes)
+                if not lec.is_file():
+                    unmeasured.append("post-layout LEC produced no report")
+                else:
+                    written.append(str(lec))
+            except Exception as exc:
+                failures.append(f"post-layout LEC producer failed: {exc}")
+        refusal = _lec_post_layout_refusal(project)
+        if refusal:
+            failures.append(refusal)
+        final_emitters = (
+            ("GDS density", rpt / "metal_density.json", lambda:
+             _emit_metal_density_report(project, top, pdk, container,
+                                        rpt / "metal_density.json", notes)),
+            ("aging STA", rpt / "aging_sta.json", lambda:
+             _emit_aging_sta_report(project, top, pdk, container,
+                                    rpt / "aging_sta.rpt", rpt / "aging_sta.json", notes)),
+            ("thermal screen", rpt / "thermal_screen.json", lambda:
+             _emit_thermal_screen(project, top, pdk, container,
+                                  rpt / "thermal_screen.json", notes)),
+        )
+        for label, output, emit in final_emitters:
+            # The density emitter owns its GDS freshness; the other two read
+            # the retained route and the current power/STA reports.
+            if label != "GDS density" and not _signoff_regen(
+                    output, routed, pnr / "constraint.sdc",
+                    _pl.extracted_dir(project) / f"{top}.spef",
+                    rpt / "power.rpt", _pl.sta_dir(project) / "sta_spef_based.rpt"):
+                continue
+            try:
+                if emit() and output.is_file():
+                    written.append(str(output))
+                else:
+                    unmeasured.append(f"{label} producer did not complete")
+            except Exception as exc:
+                failures.append(f"{label} producer failed: {exc}")
+        # Recompose the existing PERC report after the new thermal evidence.
+        # This aggregates current reports; it does not rerun RCX/STA/IR/EM.
+        try:
+            if not _emit_perc_equivalent(project, top, pdk, container, notes):
+                unmeasured.append("final PERC aggregation did not complete")
+            run_at_speed_atpg_producers(project, written, notes)
+        except Exception as exc:
+            failures.append(f"final reliability producer failed: {exc}")
+    status = "FAIL" if failures else "NOT_MEASURED" if unmeasured else "PASS"
+    detail = "; ".join(failures + unmeasured + notes) or "current final-layout evidence produced"
+    return StepResult(name, status, time.time() - t0, detail, written,
+                      reason_class=_V.ReasonClass.INPUT_ABSENT if status == "NOT_MEASURED" else "")
+
+
+def _publish_canonical_gds_alias(project: Path, top: str,
+                                 written: List[str], notes: List[str]) -> None:
+    """Publish only the current stream's byte alias and existing provenance."""
+    pnr_out = _pl.pnr_dir(project)
+    gds_out = _pl.gds_dir(project)
+    gds_out.mkdir(parents=True, exist_ok=True)
+    primary_gds = pnr_out / f"{top}.gds"
+    # --- Step 37: GDS canonical alias (REAL FILE, NOT SYMLINK — rule #1)
+    if primary_gds.is_file():
+        canon_gds = gds_out / f"{top}.gds"
+        # The guard used to be `if not canon_gds.is_file()` — existence
+        # ONLY. On any resume / re-run / warm-started tree that already
+        # carried a stage4 GDS, the copy was skipped and the SHIPPED
+        # deliverable stayed whatever was there before, while the layout
+        # that DRC and LVS had just signed off went only to
+        # phase3/stage3/pnr/. The deliverable then had no relationship to
+        # the verified artefact.
+        #
+        # Measured on the fleet: one archived run kept a 3,067,904-byte
+        # stage4 GDS (page-aligned truncation, ZERO ENDLIB record, 13 of
+        # 18 layers, ~8% of the elements) from an earlier attempt while
+        # the same run's fresh stream-out was 21,511,808 bytes. Every
+        # size-based gate passed the truncated file.
+        #
+        # Refresh whenever the stream-out this run produced is newer than
+        # the staged copy. This program is the ONLY writer of
+        # phase3/stage4/gds/<top>.gds (every other reference is a
+        # reader), so refreshing cannot clobber another producer's
+        # intentional artefact — it can only move the deliverable onto
+        # the layout this run actually verified.
+        _stale = _canonical_gds_is_stale(primary_gds, canon_gds)
+        if not canon_gds.is_file() or _stale:
+            # Use binary copy so KLayout sees a real GDS, not a symlink.
+            _t_canon_copy = time.time()
+            _primary_sha = _file_sha256(primary_gds)
+            with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            written.append(str(canon_gds))
+            # Re-stamp provenance so the declared hash matches the file that
+            # was JUST written. Both provenance writers above ran BEFORE this
+            # copy, so neither could describe (or refresh) it — see
+            # _step37_restamp_canon_gds_provenance.
+            _step37_restamp_canon_gds_provenance(
+                project, top, canon_gds,
+                writer=("canonicalize_artefacts", _t_canon_copy, primary_gds,
+                        _primary_sha))
+            if _stale:
+                notes.append(
+                    "canonical GDS refreshed: the staged "
+                    "phase3/stage4/gds copy predated this run's "
+                    "stream-out and would have shipped an artefact that "
+                    "DRC/LVS never saw")
+        # Step 37's deliverable must carry a provenance record describing the
+        # bytes that SHIP, on EVERY path through this block — not only the one
+        # where the copy just happened. The re-stamp above is inside the copy
+        # branch, so a run that skipped the copy (alias present and not stale)
+        # left whatever hash was already declared; and the pnr stream-out is
+        # only ever declared from inside the DRC-alias emit branch above, which
+        # does not fire when reports/phase3/drc_signoff.rpt already exists.
+        # Measured on the real run: the shipped stage4 GDS declared the hash of
+        # a file written 10 minutes earlier, and phase3/stage3/pnr/<top>.gds —
+        # the layout DRC and LVS actually verified — had no record at all.
+        # Re-hashes; never copies an older digest (#365).
+        _step37_declare_streamout_gds_provenance(project, top)
+
+
+
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                 container: str, *, prestream: bool = False,
                                 prepv: bool = False) -> StepResult:
@@ -62616,6 +62775,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         return _default_pnr_rows(
             project, top, pdk, container, rows,
             report_name='prestream_evidence')
+    if execution_policy.request()['mode'] == 'default':
+        return _default_poststream_evidence(project, top, pdk, container, prepv=prepv)
     t0 = time.time()
     written: List[str] = []
     notes: List[str] = []
@@ -64994,67 +65155,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 "#693: declared sign-off DRC report in provenance.jsonl "
                 f"at emit time: {_drc_prov_declared}")
 
-    # --- Step 37: GDS canonical alias (REAL FILE, NOT SYMLINK — rule #1)
-    if primary_gds.is_file():
-        canon_gds = gds_out / f"{top}.gds"
-        # The guard used to be `if not canon_gds.is_file()` — existence
-        # ONLY. On any resume / re-run / warm-started tree that already
-        # carried a stage4 GDS, the copy was skipped and the SHIPPED
-        # deliverable stayed whatever was there before, while the layout
-        # that DRC and LVS had just signed off went only to
-        # phase3/stage3/pnr/. The deliverable then had no relationship to
-        # the verified artefact.
-        #
-        # Measured on the fleet: one archived run kept a 3,067,904-byte
-        # stage4 GDS (page-aligned truncation, ZERO ENDLIB record, 13 of
-        # 18 layers, ~8% of the elements) from an earlier attempt while
-        # the same run's fresh stream-out was 21,511,808 bytes. Every
-        # size-based gate passed the truncated file.
-        #
-        # Refresh whenever the stream-out this run produced is newer than
-        # the staged copy. This program is the ONLY writer of
-        # phase3/stage4/gds/<top>.gds (every other reference is a
-        # reader), so refreshing cannot clobber another producer's
-        # intentional artefact — it can only move the deliverable onto
-        # the layout this run actually verified.
-        _stale = _canonical_gds_is_stale(primary_gds, canon_gds)
-        if not canon_gds.is_file() or _stale:
-            # Use binary copy so KLayout sees a real GDS, not a symlink.
-            _t_canon_copy = time.time()
-            _primary_sha = _file_sha256(primary_gds)
-            with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
-                while True:
-                    chunk = src.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-            written.append(str(canon_gds))
-            # Re-stamp provenance so the declared hash matches the file that
-            # was JUST written. Both provenance writers above ran BEFORE this
-            # copy, so neither could describe (or refresh) it — see
-            # _step37_restamp_canon_gds_provenance.
-            _step37_restamp_canon_gds_provenance(
-                project, top, canon_gds,
-                writer=("canonicalize_artefacts", _t_canon_copy, primary_gds,
-                        _primary_sha))
-            if _stale:
-                notes.append(
-                    "canonical GDS refreshed: the staged "
-                    "phase3/stage4/gds copy predated this run's "
-                    "stream-out and would have shipped an artefact that "
-                    "DRC/LVS never saw")
-        # Step 37's deliverable must carry a provenance record describing the
-        # bytes that SHIP, on EVERY path through this block — not only the one
-        # where the copy just happened. The re-stamp above is inside the copy
-        # branch, so a run that skipped the copy (alias present and not stale)
-        # left whatever hash was already declared; and the pnr stream-out is
-        # only ever declared from inside the DRC-alias emit branch above, which
-        # does not fire when reports/phase3/drc_signoff.rpt already exists.
-        # Measured on the real run: the shipped stage4 GDS declared the hash of
-        # a file written 10 minutes earlier, and phase3/stage3/pnr/<top>.gds —
-        # the layout DRC and LVS actually verified — had no record at all.
-        # Re-hashes; never copies an older digest (#365).
-        _step37_declare_streamout_gds_provenance(project, top)
+    _publish_canonical_gds_alias(project, top, written, notes)
 
     # --- Step 39: FPGA on_board_pass.json schema alignment --------------
     # The fpga_on_board_attestation_check requires:
@@ -79462,17 +79563,28 @@ def main() -> int:
         else:
             # Both readers consume the same immutable stream. Their engines
             # write disjoint report paths; collect in canonical row order.
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                drc_job = pool.submit(
-                    _spf.gate, project, "phase3_one_shot_runner", "drc",
+            if _execution.request()['mode'] == 'default':
+                plan.append(_spf.gate(
+                    project, "phase3_one_shot_runner", "drc",
                     _preflight_refusal("drc"), step_drc, project,
-                    effective_top, pdk, args.container)
-                lvs_job = pool.submit(
-                    _spf.gate, project, "phase3_one_shot_runner", "lvs",
+                    effective_top, pdk, args.container))
+                plan.append(_spf.gate(
+                    project, "phase3_one_shot_runner", "lvs",
                     _preflight_refusal("lvs"), step_lvs, project,
                     effective_top, pdk, args.container,
-                    upstream_pnr=_pnr_result)
-                plan.extend((drc_job.result(), lvs_job.result()))
+                    upstream_pnr=_pnr_result))
+            else:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    drc_job = pool.submit(
+                        _spf.gate, project, "phase3_one_shot_runner", "drc",
+                        _preflight_refusal("drc"), step_drc, project,
+                        effective_top, pdk, args.container)
+                    lvs_job = pool.submit(
+                        _spf.gate, project, "phase3_one_shot_runner", "lvs",
+                        _preflight_refusal("lvs"), step_lvs, project,
+                        effective_top, pdk, args.container,
+                        upstream_pnr=_pnr_result)
+                    plan.extend((drc_job.result(), lvs_job.result()))
             for row in plan[-2:]:
                 row.extras["layout_digest"] = _frozen_digest
 
@@ -79485,10 +79597,15 @@ def main() -> int:
 
     # v1.6.36 — stage runner outputs at canonical flow-YAML paths.
     # Closes the runner-vs-flow drift waivers from the v10634 benchmark.
-    plan.append(_upstream_signoff_not_measured("canonicalize_artefacts",
-                 _layout_refusal) if _layout_refusal else
-                step_canonicalize_artefacts(
-                    project, effective_top, pdk, args.container))
+    _canonical_row = (_upstream_signoff_not_measured("canonicalize_artefacts",
+                      _layout_refusal) if _layout_refusal else
+                     step_canonicalize_artefacts(
+                         project, effective_top, pdk, args.container))
+    plan.append(_canonical_row)
+    if (not _layout_refusal and _execution.request()['mode'] == 'default'
+            and _canonical_row.status != "PASS"):
+        _layout_refusal = (f"Default final-layout evidence {_canonical_row.status}: "
+                           f"{_canonical_row.detail}")
     if _frozen_digest and not _layout_refusal:
         _after_canon, _after_error = _shipped_layout_digest(
             project, effective_top)
@@ -79517,11 +79634,15 @@ def main() -> int:
         # metrics writer with si_final.
         independent = [spec for spec in _FINAL_LAYOUT_GATES
                        if spec[0] not in ("em_authority_final", "si_mcf_final")]
-        with ThreadPoolExecutor(max_workers=len(independent)) as pool:
-            jobs = {spec[0]: pool.submit(
-                _run_declared_signoff_gate, project, *spec)
-                for spec in independent}
-            finished = {name: job.result() for name, job in jobs.items()}
+        if _execution.request()['mode'] == 'default':
+            finished = {spec[0]: _run_declared_signoff_gate(project, *spec)
+                        for spec in independent}
+        else:
+            with ThreadPoolExecutor(max_workers=len(independent)) as pool:
+                jobs = {spec[0]: pool.submit(
+                    _run_declared_signoff_gate, project, *spec)
+                    for spec in independent}
+                finished = {name: job.result() for name, job in jobs.items()}
         em_spec = next(spec for spec in _FINAL_LAYOUT_GATES
                        if spec[0] == "em_authority_final")
         finished[em_spec[0]] = _run_declared_signoff_gate(project, *em_spec)
@@ -79564,19 +79685,24 @@ def main() -> int:
     # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        # XOR reads the shipped GDS and its retained pre-finishing boundary.
-        # It writes only its own receipt, so it may run alongside final STA,
-        # EM and tapeout precheck without racing a layout writer. A refused
-        # layout must not start XOR, but shares the same sign-off call site.
-        xor_job = (pool.submit(run_pre_audit_producers, project,
-                               args.container, only_names=("gds_xor",))
-                   if not _layout_refusal else None)
+    if _execution.request()['mode'] == 'default':
         plan.extend(step_declared_signoff_gates(
             project, pdk.name, args.container,
             upstream_refusal=_layout_refusal))
-        if xor_job is not None:
-            _xor_rows = xor_job.result()
+        if not _layout_refusal:
+            _xor_rows = run_pre_audit_producers(
+                project, args.container, only_names=("gds_xor",))
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # Ultra retains the existing independent diagnostic readers.
+            xor_job = (pool.submit(run_pre_audit_producers, project,
+                                   args.container, only_names=("gds_xor",))
+                       if not _layout_refusal else None)
+            plan.extend(step_declared_signoff_gates(
+                project, pdk.name, args.container,
+                upstream_refusal=_layout_refusal))
+            if xor_job is not None:
+                _xor_rows = xor_job.result()
     # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
     # declare their own gate as their only producer, so without this the only
     # writer of their documents is the audit's own clause and the audit refuses

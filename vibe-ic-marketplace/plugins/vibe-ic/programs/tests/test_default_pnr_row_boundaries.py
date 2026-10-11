@@ -482,6 +482,142 @@ def test_full_default_main_stops_before_streaming_after_prestream_refusal(
         assert rows[name]['status'] == 'NOT_MEASURED'
 
 
+@pytest.mark.parametrize('prepv', [True, False])
+@pytest.mark.parametrize('failed_evidence', [False, True])
+def test_default_poststream_keeps_completed_rows_and_runs_final_evidence(
+        tmp_path, monkeypatch, prepv, failed_evidence):
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+    pnr = runner._pl.pnr_dir(tmp_path)
+    rpt = runner._pl.reports_phase3_dir(tmp_path)
+    pnr.mkdir(parents=True)
+    rpt.mkdir(parents=True)
+    inputs = {
+        pnr / 'unit.def': b'CURRENT ROUTED DEF\n',
+        pnr / 'routed.def': b'CURRENT ROUTED DEF\n',
+        pnr / 'pdn.done': b'ACTUAL STEP 15 PDN\n',
+        pnr / 'constraint.sdc': b'CURRENT SDC\n',
+        runner._pl.extracted_dir(tmp_path) / 'unit.spef': b'ACTUAL STEP 22 SPEF\n',
+        runner._pl.cts_dir(tmp_path) / 'clock_plan.json': b'ACTUAL STEP 16 PLAN\n',
+        pnr / 'filled.def': b'ACTUAL STEP 34 FILL\n',
+        pnr / 'unit.gds': b'CURRENT STREAM\n',
+        runner._pl.constraints_dir(tmp_path) / 'pvt_matrix.json': b'{}\n',
+    }
+    for path, body in inputs.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    calls = []
+
+    def repeated(*a, **k):
+        pytest.fail('post-stream restarted a completed canonical row')
+
+    for name in ('_librelane_signoff_modes', '_librelane_rcx_publish',
+                 '_librelane_signoff_record', '_emit_metal_fill',
+                 'emit_clock_plan', '_step29_tool_arm', '_step30_tool_arm',
+                 '_step33_tool_arm'):
+        monkeypatch.setattr(runner, name, repeated)
+
+    def erc(project, top, pdk, container, out, notes):
+        calls.append('erc')
+        if prepv and failed_evidence:
+            return False
+        out.write_text('CURRENT ERC\n')
+        return True
+
+    def lec(project, top, pdk, container, out, report, notes):
+        calls.append('lec')
+        out.write_text(json.dumps({
+            'verdict': 'NON_EQUIVALENT' if failed_evidence else 'PROVEN_EQUIVALENT',
+            'total_points': 1, 'proven_points': 0 if failed_evidence else 1,
+            'unproven_points': 0, 'non_equivalent_points': int(failed_evidence),
+            'equivalent': not failed_evidence,
+        }))
+        return 'NON_EQUIVALENT' if failed_evidence else 'PROVEN_EQUIVALENT'
+
+    def final_report(name):
+        def emit(project, top, pdk, container, out, *args):
+            calls.append(name)
+            target = args[0] if name == 'aging' else out
+            target.write_text('{"verdict":"PASS"}\n')
+            return True
+        return emit
+
+    monkeypatch.setattr(runner, '_emit_erc_report', erc)
+    monkeypatch.setattr(runner, '_emit_lec_post_layout', lec)
+    for name, emitter in (('density', '_emit_metal_density_report'),
+                          ('aging', '_emit_aging_sta_report'),
+                          ('thermal', '_emit_thermal_screen')):
+        monkeypatch.setattr(runner, emitter, final_report(name))
+    monkeypatch.setattr(runner, '_emit_perc_equivalent',
+                        lambda *a: calls.append('perc') or True)
+    monkeypatch.setattr(runner, 'run_at_speed_atpg_producers',
+                        lambda *a: calls.append('atpg'))
+    result = runner.step_canonicalize_artefacts(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', prepv=prepv)
+    assert calls == (['erc'] if prepv else ['lec', 'density', 'aging', 'thermal', 'perc', 'atpg'])
+    expected = ('NOT_MEASURED' if prepv else 'FAIL') if failed_evidence else 'PASS'
+    assert result.status == expected, result.detail
+    for path, body in inputs.items():
+        assert path.read_bytes() == body, path
+    assert (runner._pl.gds_dir(tmp_path) / 'unit.gds').read_bytes() == inputs[pnr / 'unit.gds']
+
+
+def test_default_main_runs_final_readers_sequentially(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    transport = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+    native_gds = runner.step_gds
+
+    def stream(*args, **kwargs):
+        result = native_gds(*args, **kwargs)
+        (runner._pl.pnr_dir(project) / 'filled.def').write_text('CURRENT FILLED LAYOUT\n')
+        return result
+
+    def concurrent(*args, **kwargs):
+        pytest.fail('single-machine Default started a concurrent executor')
+
+    monkeypatch.setattr(runner, 'step_gds', stream)
+    monkeypatch.setattr(runner, 'ThreadPoolExecutor', concurrent)
+    runner.main()
+    assert transport.called.index('drc') < transport.called.index('lvs')
+
+
+def test_default_main_stops_release_producers_after_final_evidence_failure(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, _plan, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    transport = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='default'))
+
+    def canonical(proj, top, pdk, container, **kwargs):
+        if kwargs.get('prepv'):
+            (runner._pl.pnr_dir(proj) / 'filled.def').write_text('CURRENT FILLED LAYOUT\n')
+            alias = runner._pl.gds_dir(proj) / f'{top}.gds'
+            alias.parent.mkdir(parents=True, exist_ok=True)
+            alias.write_bytes((runner._pl.pnr_dir(proj) / f'{top}.gds').read_bytes())
+            return runner.StepResult('prefill_evidence', 'PASS', 0, 'current final stream')
+        return runner.StepResult('canonicalize_artefacts', 'FAIL', 0,
+                                 'post-layout LEC NON_EQUIVALENT')
+
+    releases = []
+    monkeypatch.setattr(runner, 'step_canonicalize_artefacts', canonical)
+    monkeypatch.setattr(runner, 'run_pre_audit_producers',
+                        lambda *a, **k: releases.append(k) or [])
+    assert runner.main() != 0
+    assert 'gds' in transport.called and 'lvs' in transport.called
+    assert _plan(project)['canonicalize_artefacts']['status'] == 'FAIL'
+    assert releases == []
+
+
 def test_default_fill_and_dfm_use_the_existing_row_driver(monkeypatch):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
     assert runner._phase3_window_sites('34', '35') == ['default_backend']

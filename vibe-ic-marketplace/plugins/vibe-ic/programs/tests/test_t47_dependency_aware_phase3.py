@@ -23,6 +23,18 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
          verify_xor_parallel: bool = False):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    if verify_parallel or verify_xor_parallel:
+        # Parallel diagnostic readers are retained on the Ultra transport.
+        # Default's same-project readers run sequentially; the dedicated
+        # Default control rejects every concurrent executor in main().
+        import execution_policy
+        original_request = execution_policy.request
+        monkeypatch.setattr(execution_policy, 'request',
+                            lambda: dict(original_request(), mode='ultra'))
+        monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+        monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+        monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
+                            lambda *a, **k: R.step_pnr(*a, **k))
     pnr = R._pl.pnr_dir(project)
     (pnr / "constraint.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
 
