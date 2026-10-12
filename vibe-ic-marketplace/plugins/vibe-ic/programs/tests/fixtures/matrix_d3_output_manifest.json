@@ -502,8 +502,17 @@
    }
   },
   "FS1": {
-   "verdict": "NA_NO_REQUIRED_OUTPUTS",
-   "entries": {}
+   "verdict": "ENFORCED",
+   "entries": {
+    "reports/phase2/safety/fmeda_coverage.json": {
+     "status": "UNPROVEN",
+     "note": "The canonical native runner now produces this report before acceptance. Controlled ECC regression exercises the actual producer and complete consumer; published whole-IC corpus evidence remains unproven."
+    },
+    "reports/phase2/safety/fmeda_coverage_gate.json": {
+     "status": "UNPROVEN",
+     "note": "The canonical native runner now produces this report before acceptance. Controlled ECC regression exercises the actual producer and complete consumer; published whole-IC corpus evidence remains unproven."
+    }
+   }
   },
   "DT1": {
    "verdict": "ENFORCED",
