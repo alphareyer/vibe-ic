@@ -28,6 +28,16 @@ from pathlib import Path
 
 
 _ACTIVE_LOCAL_CALLS = set()
+_ACTIVE_LOCAL_ENV = 'VIBEIC_LOCAL_ACTIVE_STEP_FOLDERS'
+
+
+def _active_local_calls():
+    """A sequential runner's child programs inherit its unfinished call stack."""
+    try:
+        inherited = json.loads(os.environ.get(_ACTIVE_LOCAL_ENV, '[]'))
+    except ValueError:
+        inherited = []
+    return _ACTIVE_LOCAL_CALLS | {folder for folder in inherited if isinstance(folder, str)}
 
 
 @contextmanager
@@ -42,10 +52,16 @@ def active_steps(project: Path, attempts):
                for a in attempts}
     added = folders - _ACTIVE_LOCAL_CALLS
     _ACTIVE_LOCAL_CALLS.update(added)
+    previous = os.environ.get(_ACTIVE_LOCAL_ENV)
+    os.environ[_ACTIVE_LOCAL_ENV] = json.dumps(sorted(_active_local_calls()))
     try:
         yield
     finally:
         _ACTIVE_LOCAL_CALLS.difference_update(added)
+        if previous is None:
+            os.environ.pop(_ACTIVE_LOCAL_ENV, None)
+        else:
+            os.environ[_ACTIVE_LOCAL_ENV] = previous
 from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,8 +78,11 @@ def _safe_id(sid: str) -> str:
 
 
 def _sha(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _version_folder(steps_root: Path, phase: str, stage: str,
@@ -149,8 +168,9 @@ def _versions_root(project: Path) -> Path:
 def _recover_unfinished(project: Path) -> None:
     """Close the previous local invocation before ANY next producer writes."""
     steps_root = _versions_root(project)
+    active = _active_local_calls()
     for journal in steps_root.glob('*/*/*/attempt.json'):
-        if str(journal.parent.resolve()) in _ACTIVE_LOCAL_CALLS:
+        if str(journal.parent.resolve()) in active:
             continue
         if (journal.parent / 'outputs.json').exists():
             continue
