@@ -31,31 +31,24 @@ reports are step 23's. Both are phase-3, which is the whole reason the P0
 umbrella must not treat this gate's phase-2 self-skip as an upstream
 failure — see `_GATE_SUBJECT_PRODUCED_BY['spice_correlation_check']`.
 
-Self-skips when:
-  - No extracted parasitics (SPEF) exist (step 22 not reached)
-  - No STA results exist (step 23 not reached)
+Early audit boundary:
+  - Before step 22 is reachable (no routed.def from step 21) and before any
+    current Step-30 receipt exists, return rc 2 / NOT_MEASURED with the shared
+    ASKED_BEFORE_PRODUCER classification. The gate remains invoked in P0.
+  - Once routed.def or a Step-30 result exists, validate the current executed
+    Step-30 correlation. Missing, stale, malformed or failing evidence blocks;
+    an absent SPEF is not an excuse for a producer that was already reachable.
 
 Usage:
     python3 spice_correlation_check.py <project_dir>
     python3 spice_correlation_check.py <project_dir> --json reports/gates/spice_correlation.json
 
 Exit codes:
-    0 = PASS: SPEF + STA both exist and the SPICE evidence correlates with
-        the timing model
-    1 = FAIL (correlation mismatch or missing analog SPICE)
-    2 = VACUOUS: nothing was examined — the design has not reached step 22
-        (no SPEF) or step 23 (no STA), so there is no post-layout timing to
-        correlate against. #521: both used to be rc 0, on 197 of the 200
-        tracked project roots. Note that the DIFFERENT case — SPEF and STA
-        both present but no SPICE run at all — is deliberately NOT vacuous:
-        it sets `skipped: False` and FAILs NO_SPICE_VERIFICATION, and that is
-        unchanged here FOR A DESIGN THAT COULD HAVE RUN SPICE. The one
-        exception is a registry-matched IC class that declares
-        `analog_applicable=false`: such a design has no transistor-level deck
-        to correlate at all, so the missing deck is a DESIGN-DECLARED N/A and
-        lands on the vacuous tier with reason `analog_not_applicable_for_class`
-        (see `_analog_not_applicable_for_class`). Also rc 2 for an IO / parse
-        error.
+    0 = PASS: the current executed Step-30 evidence validates and correlates.
+    1 = FAIL: correlation fails or current producer evidence is unbound.
+    2 = NOT_MEASURED: this audit preceded the declared Phase3 producer; never
+        whole-flow or Step-30 PASS. Also used for CLI input errors.
+
 """
 from __future__ import annotations
 
@@ -3434,6 +3427,25 @@ def run_audit(project: Path, run_spice: bool = True,
     """BLOCKING Step-30 consumption of current executed path correlation."""
     import path_spice_tool as pst
     result = AuditResult()
+    # P0 also invokes this consumer before Phase3. Use the existing owning
+    # producer predicate, rather than treating a future receipt as a defect.
+    # An attempted/refused producer or an old copied result must still fail
+    # current validation, even when it delivered no valid route or receipt.
+    reports = _pl.reports_dir(project) / 'phase3'
+    products = [reports / 'spice_correlation.current.json', reports / 'spice_path_tool.json']
+    products.extend((_pl.spice_dir(project) if kind == 'spice' else reports) / name
+                    for kind, name in _DECLARED_CORRELATION_NAMES)
+    if not any(path.exists() for path in products):
+        from flow_compliance_check import _asked_before_producer
+        early = _asked_before_producer(result.program, project)
+        if early is not None:
+            result.summary = {'skipped': True, 'pass': False,
+                              'measurement': 'NOT_MEASURED',
+                              'current_binding': 'NOT_YET_PRODUCED',
+                              'reason': 'asked_before_producer',
+                              'reason_class': 'ASKED_BEFORE_PRODUCER',
+                              'asked_before_producer': early}
+            return result
     try:
         doc = pst.validate_current_step30(project)
         verdict = doc.get('verdict')
