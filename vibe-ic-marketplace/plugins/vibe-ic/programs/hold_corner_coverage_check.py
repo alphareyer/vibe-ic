@@ -294,6 +294,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _gate_authorship as _ga  # noqa: E402
 import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
 from librelane_contract import Refusal  # noqa: E402
 
@@ -1068,7 +1069,8 @@ def main(argv=None) -> int:
     if args.json:
         outp = Path(args.json)
         outp.parent.mkdir(parents=True, exist_ok=True)
-        outp.write_text(json.dumps(report, indent=2) + "\n")
+        report["program"] = _TOOL
+        outp.write_text(json.dumps(_ga.stamp(report), indent=2) + "\n")
     print(f"=== {_TOOL} === verdict: {verdict}")
     if rc == 2:
         # The flow reads rc=2 as the disclosed-skip tier; print the sentinel so
