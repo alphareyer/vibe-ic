@@ -466,7 +466,7 @@ def test_a_step_folder_resumes_only_under_the_root_it_was_run_with(tmp_path, mon
         runs.append(cmd[cmd.index("--pdk-root") + 1])
         folder = Path(cmd[cmd.index("-o") + 1])
         (folder / "state_out.json").write_text(json.dumps({}))
-        return ll.subprocess.CompletedProcess(cmd, 0, "", "")
+        return ll.subprocess.CompletedProcess(cmd, 0, "fixture native step completed\n", "")
 
     monkeypatch.setattr(ll, "image_capability", lambda *a, **k: {})
     monkeypatch.setattr(ll, "openroad_home", lambda *a, **k: None)
