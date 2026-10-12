@@ -770,6 +770,7 @@ PINNED_OUTPUT_MEMBERS = frozenset({
     ('23', 'reports/phase3/sta/hold_corner_coverage.json'),
     ('23', 'reports/phase3/sta/assumed_clock_disclosure.json'),
     ('23', 'reports/phase3/clock_target_record_agreement.json'),
+    ('23', 'reports/phase3/achievable_fmax.json'),
     ('23', 'reports/phase3/sta/post_route_signoff_corner.json'),
     ('23', 'reports/phase3/sta/post_route_summary.json'),
     ('23', 'reports/phase3/sta/sta_corner_record_completeness.json'),
@@ -1440,7 +1441,8 @@ def test_output_entries_classify_into_the_four_kinds():
     # Step 7 records every native corner set (+1 FILE).
     # M1 independently requires the native-produced LVS evidence (+1 FILE).
     # Step23 executes and owns three existing hold/clock report writers (+3 FILE).
-    assert seen[F.FILE] == 162, (seen, REDERIVE)
+    # One FILE added against e1c961d6ac: Step23 current achieved-period output.
+    assert seen[F.FILE] == 163, (seen, REDERIVE)
     assert seen[F.GLOB] == 30, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief

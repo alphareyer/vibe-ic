@@ -1002,6 +1002,10 @@
     "reports/phase3/clock_target_record_agreement.json": {
      "status": "UNPROVEN",
      "note": "The canonical per-step producer now declares this current verdict report. Controlled component fixtures verify production and failure rejection; published whole-IC production is not claimed."
+    },
+    "reports/phase3/achievable_fmax.json": {
+     "status": "UNPROVEN",
+     "note": "Default now calls the existing selected-arm achieved-period writer before consumption. Controlled current-corner fixtures prove the seam; published native whole-IC evidence remains unproven."
     }
    }
   },
