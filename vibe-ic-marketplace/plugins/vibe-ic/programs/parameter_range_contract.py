@@ -12,36 +12,47 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _prose_polarity import is_denied, sentence_scope
-from _specrtl_common import strip_comments
+from _specrtl_common import strip_comments, _PARAM_ASSIGN
 
 _MINIMUM = re.compile(
     r"\b(?:parameter\s+)?([A-Za-z_]\w*)\s*(?:>=|≥)\s*(\d+)\b", re.I)
 
 
-def minimums(text: str) -> dict[str, int]:
+def minimums(text: str, *, declared_parameters=()) -> dict[str, int]:
     answer: dict[str, int] = {}
     try:
         data = json.loads(text)
     except (TypeError, ValueError):
         data = None
-    lines = text.splitlines() if data is None else []
-    def collect(node, parent=""):
+    lines = [(line, None) for line in text.splitlines()] if data is None else []
+    def collect(node, parent="", names=frozenset()):
         if isinstance(node, str):
-            lines.extend(node.splitlines())
+            lines.extend((line, names) for line in node.splitlines())
         elif isinstance(node, list):
             for child in node:
-                collect(child, parent)
+                collect(child, parent, names)
         elif isinstance(node, dict):
+            if parent in ("parameters", "parameter_ranges"):
+                name = node.get("name")
+                if isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name):
+                    names = frozenset((name.lower(),))
             if parent == "parameter_ranges":
                 name, low = node.get("name"), node.get("min")
-                if isinstance(name, str) and type(low) is int and low >= 0:
+                if (isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name)
+                        and type(low) is int and low >= 0):
                     answer[name.lower()] = max(low, answer.get(name.lower(), low))
             for key, child in node.items():
-                collect(child, key)
+                collect(child, key, names)
     if data is not None:
-        collect(data)
-    for line in lines:
+        collect(data, names=frozenset(name.lower() for name in declared_parameters))
+    for line, names in lines:
         for match in _MINIMUM.finditer(line):
+            # Bare inequalities in integration/signoff prose describe physical
+            # acceptance. In JSON they become RTL ranges only inside the named
+            # parameter contract, or with an explicit "parameter" declaration.
+            if (names is not None and match.group(1).lower() not in names
+                    and not re.match(r"parameter\s+", match.group(), re.I)):
+                continue
             lo, hi = sentence_scope(line, match.start(), match.end(),
                                     before=len(line), after=len(line))
             if is_denied(line[lo:hi]) is not None:
@@ -62,6 +73,13 @@ def _module_region(rtl: str, top: str | None) -> str:
         end = re.search(r"\bendmodule\b", rtl[match.end():])
         return rtl[match.end():match.end() + end.start()] if end else ""
     return ""
+
+
+def rtl_parameter_names(rtl: str, top: str) -> frozenset[str]:
+    """Use the checked module's parameter declarations, never its neighbors."""
+    clean = re.sub(r'"(?:\\.|[^"\\])*"', '""', strip_comments(rtl))
+    return frozenset(match.group(1).lower() for match in
+                     _PARAM_ASSIGN.finditer(_module_region(clean, top)))
 
 
 def _branch_body(region: str, begin_end: int) -> str | None:
