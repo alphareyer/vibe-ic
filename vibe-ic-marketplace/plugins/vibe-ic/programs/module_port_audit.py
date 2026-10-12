@@ -190,6 +190,16 @@ def split_top_level(text: str, separator: str = ',') -> List[str]:
     return parts
 
 
+def _attribute_start(src: str, pos: int) -> bool:
+    """An event wildcard ``@(*)`` is not a SystemVerilog attribute."""
+    if not src.startswith('(*', pos):
+        return False
+    previous = pos - 1
+    while previous >= 0 and src[previous].isspace():
+        previous -= 1
+    return previous < 0 or src[previous] != '@'
+
+
 def lexical_mask(src: str, *, attributes: bool = False) -> str:
     """Blank comments and strings without moving any source offset.
 
@@ -215,7 +225,7 @@ def lexical_mask(src: str, *, attributes: bool = False) -> str:
             if i >= len(src):
                 raise ValueError('unterminated_string')
             i += 1
-        elif attributes and src.startswith('(*', i):
+        elif attributes and _attribute_start(src, i):
             end = lexical_mask(src[i + 2:]).find('*)')
             if end < 0:
                 raise ValueError('unterminated_attribute')
@@ -273,7 +283,7 @@ def mask_attributes_only(src: str) -> str:
             else:
                 i += 1
             continue
-        if state == 'code' and src.startswith('(*', i):
+        if state == 'code' and _attribute_start(src, i):
             start = i
             i += 2
             depth = 1
@@ -769,6 +779,29 @@ def parse_instantiations(body: str, file_path: str, base_line: int) -> List[Modu
 
     for stmt_text, stmt_start_line in statements:
         cleaned = stmt_text.strip()
+        # Block closers carry no semicolon. The collector consequently keeps
+        # them at the front of the next module-level instance statement.
+        # Remove only closing keywords, never an opening/conditional prefix;
+        # a generate/procedural branch is not proved active by this parser.
+        closers = re.match(
+            r'(?:(?:endgenerate|endcase|endfunction|endtask|end)\b'
+            r'(?:\s*:\s*[A-Za-z_]\w*)?\s*)+', cleaned)
+        if closers:
+            stmt_start_line += cleaned[:closers.end()].count('\n')
+            cleaned = cleaned[closers.end():]
+
+        # A generate block's first instance shares a statement with its
+        # opening condition/begin label. Discover the syntax, without claiming
+        # the branch active; runtime lint keeps this scope unresolved.
+        if re.match(r'(?:generate|if|else|for|case|begin)\b', cleaned):
+            openings = list(re.finditer(r'\bbegin\b(?:\s*:\s*[A-Za-z_]\w*)?', cleaned))
+            if openings:
+                prefix = openings[-1].end()
+                stmt_start_line += cleaned[:prefix].count('\n')
+                tail = cleaned[prefix:]
+                leading = len(tail) - len(tail.lstrip())
+                stmt_start_line += tail[:leading].count('\n')
+                cleaned = tail.lstrip()
 
         # Match module_name
         m_mod = re.match(r'(\w+)\s*', cleaned)
