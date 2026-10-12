@@ -34,9 +34,9 @@ program that really writes ``top_lvs.json`` (proved by RUNNING it against a
 faked toolchain, never by grepping source), and the orchestrator must dispatch
 one of those declared producers.  Any producer name satisfies them.
 
-The direction-1 guards pin what must NOT move: M1 still FAILs on a merged GDS
-with no / non-PASS top-level LVS, M1's ``required_outputs`` gains nothing, and
-a digital-only run dispatches no mixed-signal merge at all.
+The direction-1 guards pin M1's refusal of missing/non-PASS top-level LVS,
+its required merge and LVS evidence, and the exclusion of the advisory run
+record. A digital-only run dispatches no mixed-signal merge at all.
 
 chip-AGNOSTIC: synthetic fixtures + a monkeypatched container.
 """
@@ -67,6 +67,24 @@ def _m1_step() -> dict:
         if st.get("id") == "M1":
             return st
     raise AssertionError("step M1 not found in the flow yaml")
+
+
+def _prior_phases_succeed(monkeypatch, orchestrator):
+    """This fixed M1 caller test controls prior-phase admission/transport.
+    Their completion guards are independently tested; M1's guard stays real.
+    """
+    from types import SimpleNamespace
+    monkeypatch.setattr(orchestrator._canonical_admission, "admit_span",
+                        lambda *a, **k: SimpleNamespace(admitted=True,
+                                                       identity_sha256="a" * 64))
+    monkeypatch.setattr(orchestrator._canonical_admission, "child_env",
+                        lambda identity, env: env)
+    original = orchestrator._row_verdict
+    def prior(project, report, rc, started, phase):
+        if phase in ("analog", "phase2", "phase3"):
+            return ("PASS" if rc == 0 else "FAIL"), "controlled prior phase"
+        return original(project, report, rc, started, phase)
+    monkeypatch.setattr(orchestrator, "_row_verdict", prior)
 
 
 def _gate_commands(gate) -> list[str]:
@@ -197,6 +215,7 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
     assert producers, "no declared producer to dispatch (see sibling test)"
 
     import vibe_ic_one_shot_runner as ORCH
+    _prior_phases_succeed(monkeypatch, ORCH)
 
     proj = tmp_path / "orch"
     (proj / "phase3/analog").mkdir(parents=True)
@@ -237,6 +256,7 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     gate.  A producer failure must be recorded, not turned into a digital
     sign-off failure — the same contract the A-track already has."""
     import vibe_ic_one_shot_runner as ORCH
+    _prior_phases_succeed(monkeypatch, ORCH)
 
     proj = tmp_path / "orch_fail"
     (proj / "phase3/analog").mkdir(parents=True)
@@ -252,7 +272,9 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
 
     producers = _declared_producers_of_top_lvs(tmp_path, monkeypatch)
 
+    dispatched = []
     def _record(label, runner, args, env=None):
+        dispatched.append(Path(runner).stem)
         return 1 if Path(runner).stem in producers else 0
 
     monkeypatch.setattr(ORCH, "_run_phase", _record)
@@ -269,9 +291,10 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     assert "mixed_signal" in phases, (
         f"no mixed-signal phase in the run record: {sorted(phases)}")
     assert phases["mixed_signal"]["rc"] == 1, "producer failure not recorded"
-    assert rep["verdict"] != "FAIL", (
-        "a mixed-signal merge failure dragged the digital verdict to FAIL; it "
-        "must be recorded and left to the M1 gate, like the A-track")
+    assert phases["phase3"]["verdict"] == "PASS", phases["phase3"]
+    assert rep["verdict"] == "FAIL", "Default whole-flow acceptance must refuse M1 failure"
+    assert "mixed_signal_power_domain_run" not in dispatched, "failed M1 must not dispatch M2"
+    assert phases["mixed_signal_M2"]["verdict"] == "NOT_MEASURED", "blocked M2 must not become PASS"
 
 
 # ── direction-1 guards: what must NOT change ───────────────────────────────
@@ -290,14 +313,12 @@ def test_every_program_m1_declares_is_invoked_by_m1(tmp_path):
 
 
 def test_m1_required_outputs_stay_the_two_design_artefacts():
-    """Guards against paying for the wiring with a manufactured MISSING, and
-    against declaring the producer's own run record: top_lvs_run.json exists
-    even on the producer's honest rc=2 skip, so declaring it would let the
-    gate's own side effect satisfy M1's artefact check."""
-    assert _m1_step().get("required_outputs") == [
-        "phase3/mixed_signal/top_merged.gds",
-        "reports/analog/mixed_signal/merge.json",
-    ]
+    """Keep the two merge artefacts and independently require the consumed
+    LVS evidence. The advisory run record cannot satisfy that requirement."""
+    required = set(_m1_step().get("required_outputs", []))
+    assert {"phase3/mixed_signal/top_merged.gds",
+            "reports/analog/mixed_signal/merge.json", _TOP_LVS_REL} <= required
+    assert "reports/analog/mixed_signal/top_lvs_run.json" not in _m1_step()["required_outputs"]
 
 
 def test_m1_still_fails_on_a_merged_gds_with_no_top_level_lvs(tmp_path):
