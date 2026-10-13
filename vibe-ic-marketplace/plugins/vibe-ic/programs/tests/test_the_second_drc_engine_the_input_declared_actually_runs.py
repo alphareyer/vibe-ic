@@ -410,11 +410,14 @@ def test_the_receipt_the_engine_check_reads_is_produced_end_to_end(tmp_path):
     --signoff` -> `_report_engine` == 'magic'. This is the whole point of the
     change, and nothing in `_report_engine` is relaxed to get there."""
     proj = tmp_path / "p"
+    from test_a_magic_receipt_binds_to_the_layout_it_read import (
+        _bind_current_drc_fixture, _gds_bytes)
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "phase3" / "stage3" / "pnr").mkdir(parents=True)
-    (proj / "phase3" / "stage3" / "pnr" / "chip_top.gds").write_bytes(b"GDS\0")
+    (proj / "phase3" / "stage3" / "pnr" / "chip_top.gds").write_bytes(_gds_bytes("chip_top"))
     rel = R._MAGIC_SIGNOFF_DRC_REL
     (proj / rel).write_text(_CLEAN_RPT + _DECK_RULES)
+    _bind_current_drc_fixture(proj)
     row = R._audit_magic_signoff_drc(proj)
     assert row["status"] == "PRODUCED", row
     payload = json.loads((proj / R._MAGIC_SIGNOFF_DRC_JSON_REL).read_text())

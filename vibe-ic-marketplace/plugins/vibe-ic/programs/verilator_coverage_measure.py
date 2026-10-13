@@ -1292,9 +1292,26 @@ def _professional_measure_testbenches(project: Path) -> List[str]:
     suite. No previous JUnit is used for discovery; the instrumented simulation
     must establish its own result.
     """
+    declared = None
+    try:
+        record = json.loads((project / 'reports/phase2/gates/professional_tb.json').read_text())
+        if (isinstance(record, dict) and isinstance(record.get('files'), list)
+                and 'verification_plan.json' in record['files']):
+            import professional_tb_check as _ptc  # noqa: PLC0415
+            declared = _ptc._resolve_bundle_dir(project, record.get('out_dir'))
+    except (OSError, ValueError, TypeError):
+        pass
     candidates = []
     for bundle in sorted((project / "phase2/stage1/sim_professional").glob("*")):
         if not bundle.is_dir() or bundle.name.startswith("."):
+            continue
+        # This tree also holds unit-adapter/helper workdirs. Makefile/JUnit
+        # alone is not a professional generator declaration. Retain damaged
+        # generated bundles so their missing/incomplete plan still refuses.
+        generated = ('verification_plan.json', f'tb_{bundle.name}.py',
+                     f'{bundle.name}_coverage_model.json', f'{bundle.name}_assertions.sva',
+                     'professional_tb_refusal.json')
+        if bundle != declared and not any((bundle / name).is_file() for name in generated):
             continue
         candidates.append(str(bundle / f"tb_{bundle.name}.py"))
     return candidates

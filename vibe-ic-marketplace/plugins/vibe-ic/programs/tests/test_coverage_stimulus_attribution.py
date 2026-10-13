@@ -428,3 +428,110 @@ def test_native_professional_rerun_refuses_failed_skipped_and_zero_test_controls
         'consumer_command': checked.args, 'consumer_rc': checked.returncode,
         'consumer_stdout': checked.stdout, 'consumer_stderr': checked.stderr,
     }, indent=2) + '\n')
+
+
+def _selection_project(root, state):
+    """Authored SOURCE_CONTROL inputs, using the real professional generator.
+
+    The unit adapter's prior JUnit is discovery input only, never measurement
+    evidence. Its role is independent of the generator's Python bundle.
+    """
+    import professional_tb_gen as gen
+    docs = root / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'top_module': 'sensor_core', 'top_ports': [
+            {'name': 'sample', 'dir': 'input', 'width': 1},
+            {'name': 'result', 'dir': 'output', 'width': 1},
+            {'name': 'ck4', 'dir': 'input', 'width': 1}],
+        'clock_domains': [{'name': 'ck4', 'source_pin': 'ck4'}]}))
+    (docs / 'L8_TIMING_WAVEFORM.json').write_text(json.dumps({
+        'clocks': [{'name': 'ck4', 'source_pin': 'ck4', 'period_ns': 10}]}))
+    rtl = root / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    (rtl / 'sensor_core.v').write_text(
+        'module sensor_core(input sample, input ck4, output reg result);\n'
+        'always @(posedge ck4) begin\n'
+        "if (sample) result <= 1'b1; else result <= 1'b0;\n"
+        'end\nendmodule\n')
+    bundle = root / 'phase2/stage1/sim_professional/sensor_core'
+    bundle.mkdir(parents=True)
+    if state != 'unfilled':
+        (bundle / 'expert_reference_tb.py').write_text(_COCOTB_SCOREBOARD)
+    generated = gen.generate(root)
+    assert generated['status'] == 'PASS'  # Generation, not native execution.
+    if state == 'missing':
+        (bundle / 'verification_plan.json').unlink()
+    elif state == 'invalid':
+        (bundle / 'verification_plan.json').write_text('{invalid JSON')
+    elif state == 'declared_missing':
+        report = root / 'reports/phase2/gates/professional_tb.json'
+        report.parent.mkdir(parents=True)
+        report.write_text(json.dumps(generated))
+        for name in generated['files']:
+            (bundle / name).unlink()
+        (bundle / 'expert_reference_tb.py').unlink()
+    for name in ('l10_unit_tb', 'support_cache'):
+        work = bundle.parent / name
+        work.mkdir()
+        (work / 'Makefile').write_text('# Unit/helper execution workdir\n')
+        (work / 'results.xml').write_text('<testsuite tests="1" failures="0" errors="0"/>')
+    return root, bundle
+
+
+@pytest.mark.parametrize('state,refusal', [
+    ('unfilled', 'PROFESSIONAL_COVERAGE_PLAN_INCOMPLETE'),
+    ('missing', 'PROFESSIONAL_COVERAGE_PLAN_INVALID'),
+    ('invalid', 'PROFESSIONAL_COVERAGE_PLAN_INVALID'),
+    ('declared_missing', 'PROFESSIONAL_COVERAGE_PLAN_INVALID'),
+    ('filled', None),
+])
+def test_only_generator_bundles_reach_the_strict_coverage_consumer(tmp_path, state, refusal):
+    """Public directory shape -> actual selector -> instrumenter -> checker."""
+    import hashlib
+    project, bundle = _selection_project(tmp_path, state)
+    before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+              for name in ('l10_unit_tb', 'support_cache')
+              for p in (bundle.parent / name).iterdir()}
+    input_hashes = {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(project.rglob('*')) if p.is_file()}
+    candidates = V._professional_measure_testbenches(project)
+    sources, selected = V.discover_measure_testbenches(project)
+    out = project / 'coverage.json'
+    measured = subprocess.run([
+        sys.executable, str(PROGRAMS / 'verilator_coverage_measure.py'), 'measure-tb',
+        '--project', str(project), '--out', str(out), '--build-jobs', '1'],
+        text=True, capture_output=True)
+    checked = subprocess.run([
+        sys.executable, str(PROGRAMS / 'verilator_coverage_measure.py'), 'check',
+        '--coverage-json', str(out)], text=True, capture_output=True)
+    payload = json.loads(out.read_text())
+    receipt = {'state': state, 'input_role': 'SOURCE_CONTROL',
+               'input_hashes': input_hashes,
+               'candidates': candidates, 'selected': selected, 'sources': sources,
+               'producer_rc': measured.returncode, 'producer_stdout': measured.stdout,
+               'producer_stderr': measured.stderr, 'consumer_rc': checked.returncode,
+               'consumer_stdout': checked.stdout, 'consumer_stderr': checked.stderr,
+               'payload': payload}
+    (project / 'selection_receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    tb = str(bundle / 'tb_sensor_core.py')
+    assert candidates == selected == [tb], receipt
+    assert {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+            for name in ('l10_unit_tb', 'support_cache')
+            for p in (bundle.parent / name).iterdir()} == before
+    if refusal:
+        assert measured.returncode == checked.returncode == 1, receipt
+        assert payload['measurement_status'] == 'NOT_MEASURED', receipt
+        assert refusal in payload['reason'], receipt
+        assert 'l10_unit_tb' not in payload['reason'], receipt
+        assert not list(project.glob('**/coverage_cocotb_execution.json'))
+    else:
+        assert measured.returncode == checked.returncode == 0, receipt
+        dat = Path(payload['coverage_dat'])
+        execution = json.loads((dat.parent / 'coverage_cocotb_execution.json').read_text())
+        assert execution['measurement_status'] == 'MEASURED', execution
+        assert execution['test_denominator']['tests'] == execution['test_denominator']['passed'] == 1
+        assert execution['test_denominator']['skipped'] == 0
+        assert execution['observed_functional_input_toggles']['sample'] > 0
+        assert payload['line_union_cross_check']['agree'] is True
+        assert V.scope_totals(V.parse_coverage_dat(str(dat)), sources)['totals'] == payload['totals']

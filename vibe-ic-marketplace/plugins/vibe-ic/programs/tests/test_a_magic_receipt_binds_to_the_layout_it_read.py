@@ -290,6 +290,47 @@ def test_the_absence_is_disclosed_in_a_sidecar_never_in_the_transcript(tmp_path)
 
 # ── the two paths, end to end, through the real audit ─────────────────────
 
+def _bind_current_drc_fixture(proj):
+    """SOURCE_CONTROL context through the real current publisher/reader.
+
+    These receipt unit fixtures predate the required Step31 current record.
+    Their controlled ledger is not native physical verification evidence.
+    """
+    from types import SimpleNamespace
+    import _physical_current as current
+
+    def put(rel, data):
+        path = proj / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+    tech = put("input/pdk/current.tech.lef", b"SOURCE_CONTROL tech LEF\n")
+    cell = put("input/pdk/current.cell.lef", b"SOURCE_CONTROL cell LEF\n")
+    deck = put("input/pdk/current.deck", b"SOURCE_CONTROL rule deck\n")
+    put("reports/phase3/technology_units.json", b'{"pdk":"open_fixture"}\n')
+    put("phase3/stage3/pnr/chip_top.def", b"DESIGN chip_top ;\nEND DESIGN\n")
+    put("phase3/stage3/pnr/chip_top_pnr.v", b"module chip_top(); endmodule\n")
+    report = proj / R._MAGIC_SIGNOFF_DRC_REL
+    native = put("phase3/reports/drc.rpt", report.read_bytes())
+    put("reports/phase3/drc_signoff.rpt", report.read_bytes())
+    log = put("phase3/reports/drc.log", b"SOURCE_CONTROL native transport\n")
+    pdk = SimpleNamespace(name="open_fixture", tech_lef=tech, cell_lef=cell, drc_deck=deck)
+    def producer():
+        outputs = {str(path.relative_to(proj)): "sha256:" + current.digest(path)
+                   for path in (native, log)}
+        gds = proj / "phase3/stage3/pnr/chip_top.gds"
+        entry = {"record": "invocation", "tool": "magic", "measured": True,
+                 "exit_code": 0, "command": "SOURCE_CONTROL magic transport",
+                 "scope": "SOURCE_CONTROL", "outputs": outputs,
+                 "inputs": {str(gds.relative_to(proj)): "sha256:" + current.digest(gds)}}
+        with (proj / "provenance.jsonl").open("a") as stream:
+            stream.write(json.dumps(entry) + "\n")
+        return R.StepResult("drc", "PASS", 0, "SOURCE_CONTROL current context")
+    row = current.direct_half(proj, "chip_top", pdk, "drc", producer)
+    assert row.status == "PASS", row
+    assert current.read_direct_half(proj, "drc")["verdict"] == "CURRENT"
+
+
 def _project(tmp_path, report_text, mutate_after_digest=False):
     proj = tmp_path / "p"
     (proj / "reports" / "phase3").mkdir(parents=True)
@@ -317,6 +358,7 @@ def _project(tmp_path, report_text, mutate_after_digest=False):
         with rpt.open("a") as fh:
             fh.write("DECK_RULE: appended after the digest was taken\n")
     (proj / "provenance.jsonl").write_text(json.dumps(entry) + "\n")
+    _bind_current_drc_fixture(proj)
     return proj
 
 

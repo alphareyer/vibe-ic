@@ -52427,11 +52427,15 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
 
 
 def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
-                     direct: Callable[[], StepResult]) -> Optional[StepResult]:
+                     direct: Callable[[], StepResult], *,
+                     current_direct: Optional[Callable[[], StepResult]] = None
+                     ) -> Optional[StepResult]:
     """Step 31's producer switch (``phase3/librelane_switch.json`` "31").
 
-    ``direct`` (the default, and every absent switch): None, and the caller's
-    own direct body runs unchanged.  ``librelane``: the tool's verdict is the
+    ``direct`` (the default, and every absent switch): bind the native body
+    before auditing its current subject. ``current_direct`` may defer that
+    audit; the original ``direct`` callback still owns the dual arm.
+    ``librelane``: the tool's verdict is the
     step's.  ``dual``: the direct half (``direct()``) stays canonical, the tool
     half is measured beside it, and for verification "better" is not the lower
     count -- BOTH must be clean, so the row is the worse of the two and a
@@ -52444,7 +52448,12 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
         import _physical_current as _pc
-        return _pc.direct_half(project, top, pdk, half, direct)
+        row = _pc.direct_half(project, top, pdk, half, current_direct or direct)
+        if current_direct is not None and half == "drc" and "magic_signoff_drc" in row.extras:
+            # The existing audit consumes this invocation's current subject.
+            # direct_half publishes it only after the native producer returns.
+            row.extras["magic_signoff_drc_audit"] = _audit_magic_signoff_drc(project)
+        return row
     t0 = time.time()
     vacuous = _vacuous_on_unrouted(project, half, t0)
     if vacuous is not None:
@@ -52475,11 +52484,13 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
 
 def step_drc(project: Path, top: str, pdk: PdkConfig,
              container: str, candidate: bool = False, *,
-             _direct: bool = False) -> StepResult:
+             _direct: bool = False, _defer_magic_audit: bool = False) -> StepResult:
     # Step 31's producer switch (mig105); ``_direct`` is the dual arm's re-entry.
     if not candidate and not _direct:
         _routed = _step31_dispatch(project, top, pdk, "drc", lambda: step_drc(
-            project, top, pdk, container, candidate, _direct=True))
+            project, top, pdk, container, candidate, _direct=True),
+            current_direct=lambda: step_drc(project, top, pdk, container, candidate,
+                                           _direct=True, _defer_magic_audit=True))
         if _routed is not None:
             return _routed
     t0 = time.time()
@@ -53037,8 +53048,8 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             _mrow = _run_magic_signoff_drc(
                 project, top, physical_top, pdk, container, gds)
             extras["magic_signoff_drc"] = _mrow
-            extras["magic_signoff_drc_audit"] = _audit_magic_signoff_drc(
-                project)
+            if not _defer_magic_audit:
+                extras["magic_signoff_drc_audit"] = _audit_magic_signoff_drc(project)
             if _mrow.get("status") == "FAIL" and status == "PASS":
                 # THE INPUT ASKED FOR BOTH DECKS AND BOTH DECKS DECIDE. A
                 # design the second engine finds violations in is not DRC
