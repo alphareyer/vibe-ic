@@ -862,7 +862,9 @@ def _write_json(path: Optional[str], report: dict) -> None:
         out = Path(path)
         if out.parent and str(out.parent) not in ("", "."):
             out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(report, indent=2) + "\n")
+        from _gate_authorship import stamp
+        out.write_text(json.dumps(stamp(
+            dict(report, program=GATE, writer_program=GATE)), indent=2) + "\n")
     except OSError as e:
         print(f"warning: could not write JSON to {path}: {e}",
               file=sys.stderr)

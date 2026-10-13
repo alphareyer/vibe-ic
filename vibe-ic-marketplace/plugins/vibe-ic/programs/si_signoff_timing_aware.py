@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -128,7 +129,7 @@ TIMING_JSON_SHAPE = {
 # but additionally recovers per-net-pair coupling + the driver pin per net so
 # we can build switching windows). IEEE-1481. Pure + deterministic.
 # ===========================================================================
-def parse_spef(text: str) -> dict:
+def parse_spef(text: str, *, topology: bool = False) -> dict:
     """Parse an IEEE-1481 SPEF into the structures the SI scorer needs.
 
     Returns a dict with:
@@ -167,6 +168,10 @@ def parse_spef(text: str) -> dict:
     net_load_pins: Dict[str, List[str]] = {}
     node_net: Dict[str, str] = {}        # node token -> owning D_NET id
     c_unit_pf = 1.0
+    r_unit_ohm = 1.0
+    units_seen = set()
+    node_caps = []
+    resistors = []
 
     delimiter = ":"
     section: Optional[str] = None
@@ -202,9 +207,21 @@ def parse_spef(text: str) -> dict:
                 except ValueError:
                     scale = 1.0
                 unit = toks[2].upper()
+                if topology and (unit not in {"PF", "FF", "F", "NF"} or not math.isfinite(scale) or scale <= 0):
+                    raise ValueError("unsupported native SPEF capacitance unit")
                 # convert the named unit to pF
                 per = {"PF": 1.0, "FF": 1e-3, "F": 1e12, "NF": 1e3}.get(unit, 1.0)
                 c_unit_pf = scale * per
+                units_seen.add("C")
+            continue
+        if topology and s.startswith("*R_UNIT"):
+            toks = s.split()
+            if len(toks) != 3 or toks[2].upper() not in {"OHM", "KOHM"}:
+                raise ValueError("unsupported native SPEF resistance unit")
+            r_unit_ohm = float(toks[1]) * (1000 if toks[2].upper() == "KOHM" else 1)
+            if not math.isfinite(r_unit_ohm) or r_unit_ohm <= 0:
+                raise ValueError("unsupported native SPEF resistance scale")
+            units_seen.add("R")
             continue
         if s.startswith("*NAME_MAP"):
             section = "name_map"
@@ -284,7 +301,11 @@ def parse_spef(text: str) -> dict:
                 try:
                     val = float(toks[-1])
                 except ValueError:
+                    if topology:
+                        raise ValueError("unsupported native SPEF capacitance value")
                     continue
+                if topology and (not math.isfinite(val) or val < 0):
+                    raise ValueError("invalid native SPEF capacitance")
                 nodes = toks[1:-1]
                 if len(nodes) == 1:
                     # ground cap on a node OF cur_net -> credit cur_net.
@@ -292,6 +313,8 @@ def parse_spef(text: str) -> dict:
                     if cur_net:
                         node_net[nodes[0]] = cur_net
                     cg[n] = cg.get(n, 0.0) + val
+                    if topology:
+                        node_caps.append((nodes[0], val))
                 elif len(nodes) == 2:
                     # one node is ON cur_net (the victim side of this D_NET),
                     # the other belongs to a different D_NET. Record cur_net
@@ -300,6 +323,16 @@ def parse_spef(text: str) -> dict:
                         node_net.setdefault(nodes[0], cur_net)
                     raw_pairs.append((nodes[0], nodes[1], val))
             continue
+        if topology and section == "res" and cur_net is not None:
+            toks = s.split()
+            if len(toks) != 4 or not toks[0].isdigit():
+                raise ValueError("unsupported native SPEF resistor record")
+            value = float(toks[3])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid native SPEF resistance")
+            resistors.append((toks[1], toks[2], value))
+            for node in toks[1:3]:
+                node_net.setdefault(node, cur_net)
 
     # ----- pass 2: attribute coupling pairs to real D_NETs via node_net -----
     def _resolve(node: str) -> str:
@@ -334,7 +367,7 @@ def parse_spef(text: str) -> dict:
             key = frozenset((ra, rb))
             pair_cc[key] = pair_cc.get(key, 0.0) + val
 
-    return {
+    result = {
         "name_map": name_map,
         "cg": cg,
         "cc": cc,
@@ -352,6 +385,17 @@ def parse_spef(text: str) -> dict:
         "c_unit_pf": c_unit_pf,
         "delimiter": delimiter,
     }
+    if topology:
+        if units_seen != {"C", "R"}:
+            raise ValueError("explicit native SPEF capacitance/resistance units required")
+        # Retain actual node topology; the existing reciprocal CAP handling is
+        # shared with the advisory scorer. No analytical capacitance is added.
+        result["topology"] = {
+            "resistors": [(a, b, r * r_unit_ohm) for a, b, r in resistors],
+            "ground_caps": [(node, c * c_unit_pf * 1e-12) for node, c in node_caps],
+            "coupling_caps": [(a, b, c * c_unit_pf * 1e-12) for (a, b), c in seen_nodepairs.items()],
+        }
+    return result
 
 
 def _map_pin(pin_tok: str, name_map: Dict[str, str], delimiter: str) -> str:

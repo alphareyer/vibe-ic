@@ -53,8 +53,16 @@ def local(project, rel):
 
 def contract(project, top):
     data = api().read(local(project, CONTRACT))
+    # This is derived material, never a caller admission flag.
+    data.pop("_current", None)
     if data.get("schema") != INPUT_SCHEMA or data.get("top") != top:
         raise api().Refusal("WRONG_DESIGN", "native input contract schema/top mismatch")
+    if data.get("scope") == "current_post_layout_interface":
+        from _mixed_signal_current import resolve
+        try:
+            return resolve(project, data)
+        except (api().Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+            raise api().Refusal("CURRENT_INTERFACE_NOT_SUPPORTED", str(exc)) from exc
     if data.get("scope") != "declared_model_component":
         raise api().Refusal("UNSUPPORTED_MODEL_SCOPE", "supported scope is declared_model_component; no physical certification")
     return data
@@ -71,6 +79,8 @@ def input_paths(project, top):
         paths.update(si.get("liberties", []))
     from _mixed_signal_receiver_noise import input_paths as receiver_inputs
     paths.update(receiver_inputs(project, data))
+    if "_current" in data:
+        paths.update(data["_current"]["inputs"])
     for rel in paths:
         local(project, rel)
     return paths
@@ -112,7 +122,7 @@ def tb(data, row, feedback, token):
     names = [data["top"], *(d[k] for k in ("clock", "reset_n", "drive", "sense", "response"))]
     if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", n) for n in names) or len(set(names[1:])) != 5:
         raise api().Refusal("UNSUPPORTED_INTERFACE", "five distinct scalar wrapper ports required")
-    return f'''`timescale 1ns/1ps
+    text = f'''`timescale 1ns/1ps
 module m3_sampled_tb;
   reg clk=0, reset_n=0, sense=0;
   wire drive, response;
@@ -134,6 +144,13 @@ module m3_sampled_tb;
   end
 endmodule
 '''
+    if "_current" in data:
+        # The physical sense port is an observed output. Inject the actual
+        # SPICE samples at that net in the digital blackbox transport.
+        text = text.replace("reg clk=0, reset_n=0, sense=0;", "reg clk=0, reset_n=0, sensed=0;\n  wire sense;")
+        text = text.replace('    $readmemb(', '    force dut.' + d["sense"] + ' = sensed;\n    $readmemb(')
+        text = text.replace("sense=feedback[k]", "sensed=feedback[k]")
+    return text
 
 
 OBS = re.compile(r"M3OBS k=(\d+) t=([0-9.]+) drive=([01xz]) sense=([01xz]) response=([01xz])")
@@ -153,6 +170,9 @@ def observations(path, token, cycles):
 
 
 def deck(project, data, row, drive, wave):
+    if "_current" in data:
+        from _mixed_signal_current import deck as current_deck
+        return current_deck(project, data, row, drive, wave)
     period, step, _, cycles = settings(row)
     a = data["analog"]
     for k in ("drive_low_v", "drive_high_v", "drive_transition_ns", "adc_low_v", "adc_high_v"):
@@ -260,9 +280,15 @@ def grade(project, data, row, work, token):
         value = measured[c["native_metric"]]
         ok = ("min" not in c or value >= c["min"]) and ("max" not in c or value <= c["max"])
         criteria.append({**c, "measured": value, "verdict": "PASS" if ok else "FAIL"})
-    return {"id": row["id"], "status": "PASS" if all(c["verdict"] == "PASS" for c in criteria) else "FAIL",
+    result = {"id": row["id"], "status": "PASS" if all(c["verdict"] == "PASS" for c in criteria) else "FAIL",
             "criteria": criteria, "sample_count": len(selected), "metrics": measured,
-            "scope": "declared_model_component"}
+            "scope": data["scope"]}
+    if "_current" in data:
+        from _mixed_signal_current import measure
+        result["interface_si"] = measure(project, data, row, work, token)
+        if result["interface_si"]["verdict"] == "FAIL":
+            result["status"] = "FAIL"
+    return result
 
 
 def limit_address_space():
@@ -403,6 +429,9 @@ def blend_receiver_noise(result, measured):
 
 
 def interface_si(project, data, root, engine):
+    if "_current" in data:
+        from _mixed_signal_current import blend
+        return blend(project, data, root, interface_timing(project, data, root, engine))
     from _mixed_signal_receiver_noise import declaration, run
     spec = declaration(project, data)  # preflight also happens before any execution in inputs()
     if spec is None:
@@ -504,6 +533,8 @@ def produce(project, top, container):
     m3 = api()
     data = contract(project, top)
     before = m3.inputs(project, top)
+    if "_current" in data and any(value is None for value in before.values()):
+        raise m3.Refusal("CURRENT_INTERFACE_NOT_SUPPORTED", "canonical current inputs remain absent")
     rows = m3.plan(project)
     ids = [row.get("id") for row in rows]
     if not rows or any(not isinstance(i, str) or not re.fullmatch(r"[\w-]+", i) or i == "si" for i in ids) or len(set(ids)) != len(ids):
@@ -552,7 +583,8 @@ def produce(project, top, container):
     artifacts = [p for p in root.rglob("*") if p.is_file()]
     outputs = {str(p.relative_to(project)): m3.digest(p) for p in artifacts}
     outputs.update({rel: m3.digest(project / rel) for rel in m3.OUTPUTS.values()})
-    overall = "FAIL" if "FAIL" in (verdict, si["verdict"]) else "NOT_MEASURED"
+    overall = "FAIL" if "FAIL" in (verdict, si["verdict"]) else (
+        "PASS" if "_current" in data and verdict == si["verdict"] == "PASS" else "NOT_MEASURED")
     record = {"program": m3.PROGRAM, "schema": SCHEMA, **m3.subject(project, top),
               "scope": data["scope"], "full_design_verified": False, "verdict": overall,
               "inputs": before, "outputs": outputs, "execution": engine.execution,
@@ -617,7 +649,8 @@ def verify(project, record, kind):
                 record.get("tool_versions", {}).get(name) != log.read_text().strip() or
                 not log.read_text().strip()):
             raise m3.Refusal("MISSING_TOOL_VERSION", name)
-    if kind == "cosim":
+    if kind == "cosim" or "_current" in data:
+        cosim_actual = actual if kind == "cosim" else m3.read(project / m3.COSIM)
         native = []
         for row in rows:
             work = root / row["id"]
@@ -629,7 +662,7 @@ def verify(project, record, kind):
                 (["vvp", str(work / "drive.vvp")], "measurement", "drive.log", project, []),
                 (["/usr/bin/time", "-f", "%M", "-o", str(work / "ngspice.rss"),
                   "ngspice", "-q", "-b", str(work / "scenario.sp")], "measurement", "ngspice.log", work,
-                 ["wave.txt", "ngspice.rss"]),
+                 ["wave.txt", "ngspice.rss", *(["coupling.txt", "spectrum.txt", "integrated.txt"] if "_current" in data else [])]),
                 (["iverilog", "-g2012", "-s", "m3_sampled_tb", "-o", str(work / "response.vvp"),
                   *sources, str(work / "response_tb.v")], "compile", "compile-response.log", project, ["response.vvp"]),
                 (["vvp", str(work / "response.vvp")], "measurement", "response.log", project, []),
@@ -662,12 +695,13 @@ def verify(project, record, kind):
                     raise m3.Refusal("CONTRADICTS_NATIVE_OUTPUT", "instrument differs from current contract")
             native.append(grade(project, data, row, work, record["run_id"]))
         passed = all(r["status"] == "PASS" for r in native)
-        if (actual.get("scenarios") != native or actual.get("verdict") != ("PASS" if passed else "FAIL")
-                or actual.get("all_scenarios_passed") is not passed):
+        if (cosim_actual.get("scenarios") != native or cosim_actual.get("verdict") != ("PASS" if passed else "FAIL")
+                or cosim_actual.get("all_scenarios_passed") is not passed):
             raise m3.Refusal("CONTRADICTS_NATIVE_OUTPUT", "scenario measurements/limits differ")
-        if any(r["status"] != "PASS" for r in native):
+        if kind == "cosim" and any(r["status"] != "PASS" for r in native):
             raise m3.Refusal("FAILED_MEASUREMENT", "native component measurement failed")
-        return record
+        if kind == "cosim":
+            return record
     from _mixed_signal_receiver_noise import declaration as noise_declaration, verify as verify_noise
     noise_spec = noise_declaration(project, data)
     if actual.get("verdict") == "FAIL" and noise_spec is None:
@@ -697,6 +731,9 @@ def verify(project, record, kind):
     if noise_spec is not None:
         measured = verify_noise(project, data, root, record)
         derived = blend_receiver_noise(derived, measured)
+    if "_current" in data and derived is not None:
+        from _mixed_signal_current import blend
+        derived = blend(project, data, root / "si", derived)
     if derived is not None:
         if any(actual.get(k) != v for k, v in derived.items()):
             raise m3.Refusal("CONTRADICTS_NATIVE_OUTPUT", "SI report differs from current STA/SPEF")

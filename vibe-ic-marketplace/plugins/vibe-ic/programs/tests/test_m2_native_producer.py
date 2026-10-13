@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _route_fixture import stage_mixed_source_control
 from programs.tests.test_execution_receipt_chain import real_entry, isolated_transport  # noqa: F401
 import yaml
 
@@ -52,6 +53,7 @@ def test_fixed_runner_reaches_producer_and_existing_gate(tmp_path, monkeypatch):
 
     def bounded(label, program, args, env=None):
         calls.append(Path(program).stem)
+        stage_mixed_source_control(project, Path(program).stem, args)
         if Path(program).stem == "mixed_signal_power_domain_run":
             return invoke(project, "--top", "boundary", "--container", "host",
                           "--json", args[args.index("--json") + 1])
@@ -183,6 +185,7 @@ def test_fixed_runner_never_admits_absent_measurement(tmp_path, monkeypatch, fau
     def bounded(label, program, args, env=None):
         name = Path(program).stem
         calls.append(name)
+        stage_mixed_source_control(project, Path(program).stem, args)
         if name == "mixed_signal_top_lvs_run" and fault == "m1_failed":
             return 1
         if name == "mixed_signal_power_domain_run" and fault == "malformed_report":
@@ -198,9 +201,14 @@ def test_fixed_runner_never_admits_absent_measurement(tmp_path, monkeypatch, fau
     runner.main()
     rep = json.loads((project / "reports/orchestrator/vibe_ic_one_shot.json").read_text())
     row = next(p for p in rep["phases"] if p["name"] == "mixed_signal_M2")
-    assert row["verdict"] == ("NOT_READY" if fault == "m1_failed" else "FAIL")
+    assert row["verdict"] == ("NOT_MEASURED" if fault == "m1_failed" else "FAIL")
     assert row["rc"] != 0
     assert calls.count("mixed_signal_power_domain_run") == (0 if fault == "m1_failed" else 1)
+    assert row["rc"] == (2 if fault == "m1_failed" else 1)
+    assert calls.count("mixed_signal_m3_run") == 0
+    assert calls.count("mixed_signal_cosim_check") == 0
+    assert calls.count("mixed_signal_interface_si_check") == 0
+    assert calls.count("mixed_signal_signoff_run") == 0
 
 
 def m2_gate(project):

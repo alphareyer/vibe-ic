@@ -135,9 +135,9 @@ def samples(path, header):
     return result
 
 
-def derive(project, spec, work, token):
+def derive(project, spec, work, token, *, log_name="noise.log"):
     n = native()
-    log = (work / "noise.log").read_text()
+    log = (work / log_name).read_text()
     if (f'M3NOISE_RUN {token} {spec["id"]} {spec["model_sha256"]}' not in log or
             f'M3NOISE_DONE {token} {spec["id"]}' not in log or
             re.search(r"(?mi)^\s*(?:Error(?:\s|:)|Warning:.*(?:no.*noise|unknown))", log)):

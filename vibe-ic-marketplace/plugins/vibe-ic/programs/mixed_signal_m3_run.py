@@ -276,6 +276,15 @@ def main(argv=None):
         audit_output(project, args.json, report, protected)
     except (Refusal, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"[{PROGRAM}] {getattr(exc, 'rule', 'INVALID_EVIDENCE')}: {exc}", file=sys.stderr)
+        if not args.check_only and getattr(exc, "rule", "") == "CURRENT_INTERFACE_NOT_SUPPORTED":
+            report = {"program": PROGRAM, "verdict": "NOT_MEASURED", "scope": "current_post_layout_interface",
+                      "full_design_verified": False, "rule": exc.rule, "reason": str(exc)}
+            try:
+                audit_output(project, args.json, report, (*OUTPUTS.values(), RECEIPT))
+            except (Refusal, OSError, ValueError) as output_exc:
+                print(f"[{PROGRAM}] {getattr(output_exc, 'rule', 'INVALID_EVIDENCE')}: {output_exc}", file=sys.stderr)
+                return 1
+            return 2
         return 1
     return rc
 

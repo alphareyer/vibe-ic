@@ -38,6 +38,9 @@ from typing import List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _vacuous_exit as _vx  # noqa: E402
+import _gate_authorship as _ga  # noqa: E402
+
+PROGRAM = "yosys_script_template_check"
 
 
 def _strip_comments(lines: List[str]) -> List[str]:
@@ -385,9 +388,10 @@ def main(argv: list[str] | None = None) -> int:
             from pathlib import Path as _Path
             out = _Path(args.json)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(_json.dumps(
-                {"verdict": "PASS" if code == 0 else "FAIL",
-                 "ys_file": args.ys_file, "messages": msgs},
+            out.write_text(_json.dumps(_ga.stamp(
+                {"program": PROGRAM, "writer_program": PROGRAM,
+                 "verdict": "PASS" if code == 0 else "FAIL",
+                 "ys_file": args.ys_file, "messages": msgs}),
                 indent=2) + "\n")
         return code
 
@@ -404,7 +408,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             out = _Path(args.json)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(_json.dumps(tool, indent=2) + "\n")
+            out.write_text(_json.dumps(_ga.stamp(
+                {"program": PROGRAM, **tool, "writer_program": PROGRAM}),
+                indent=2) + "\n")
         print(f"{tool['verdict']}: LibreLane synthesis product; " + "; ".join(tool['findings']))
         return 0 if tool['verdict'] == 'PASS' else 1
     ys_globs = ["phase2/stage2/synth/*.ys", "phase2/stage2/synth/**/*.ys",
@@ -446,7 +452,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             out = _Path(args.json)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(_json.dumps(report, indent=2) + "\n")
+            out.write_text(_json.dumps(_ga.stamp(
+                dict(report, program=PROGRAM, writer_program=PROGRAM)),
+                indent=2) + "\n")
         stream = sys.stderr if rc else sys.stdout
         print(f"{verdict}: {reason_text}", file=stream)
         for m in report["messages"]:
@@ -540,7 +548,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         out = _Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_json.dumps(report, indent=2) + "\n")
+        out.write_text(_json.dumps(_ga.stamp(
+            dict(report, program=PROGRAM, writer_program=PROGRAM)),
+            indent=2) + "\n")
     for f in findings:
         prefix = "ok" if f["verdict"] == "PASS" else "FAIL"
         for m in f["messages"]:

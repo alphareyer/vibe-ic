@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _route_fixture import stage_mixed_source_control
 import yaml
 import flow_compliance_check as flow
 from _hostpaths import require_repo
@@ -275,6 +276,7 @@ def test_fixed_runner_stops_after_genuine_unmeasured_m3(tmp_path, monkeypatch):
     def bounded(label, program, args, env=None):
         name = Path(program).stem
         calls.append(name)
+        stage_mixed_source_control(project, Path(program).stem, args)
         if name in real:
             # Native M2 runs unchanged; M3 performs honest unmeasured production.
             args = list(args)
@@ -292,8 +294,10 @@ def test_fixed_runner_stops_after_genuine_unmeasured_m3(tmp_path, monkeypatch):
     report = json.loads((project / "reports/orchestrator/vibe_ic_one_shot.json").read_text())
     phases = {row["name"]: row for row in report["phases"]}
     assert phases["mixed_signal_M2"]["verdict"] == "PASS"
-    assert phases["mixed_signal_M3"]["verdict"] == "NOT_READY"
-    assert phases["mixed_signal_M4"]["verdict"] == "NOT_READY"
+    assert phases["mixed_signal_M3"]["verdict"] == "NOT_MEASURED"
+    assert phases["mixed_signal_M4"]["verdict"] == "NOT_MEASURED"
+    assert phases["mixed_signal_M3"]["rc"] == phases["mixed_signal_M4"]["rc"] == 2
+    assert calls.count("mixed_signal_signoff_run") == 0
     assert calls.count("mixed_signal_m3_run") == 1
     assert calls.count("mixed_signal_cosim_check") == 1
     assert calls.count("mixed_signal_interface_si_check") == 1
@@ -320,6 +324,7 @@ def test_fixed_runner_cannot_borrow_m3_readiness(tmp_path, monkeypatch, fault):
     def bounded(label, program, args, env=None):
         name = Path(program).stem
         calls.append(name)
+        stage_mixed_source_control(project, Path(program).stem, args)
         if name == "mixed_signal_power_domain_run":
             if fault == "m2_failed":
                 return 1
@@ -344,8 +349,14 @@ def test_fixed_runner_cannot_borrow_m3_readiness(tmp_path, monkeypatch, fault):
     assert phases["mixed_signal_M2"]["verdict"] == ("FAIL" if fault == "m2_failed" else "PASS")
     if fault != "m2_failed":
         assert m2.verify(project)["tool"]["exit_code"] == 0
-    assert phases["mixed_signal_M3"]["verdict"] == ("NOT_READY" if fault == "m2_failed" else "FAIL")
-    assert phases["mixed_signal_M4"]["verdict"] == "NOT_READY"
+    assert phases["mixed_signal_M3"]["verdict"] == ("NOT_MEASURED" if fault == "m2_failed" else "FAIL")
+    assert phases["mixed_signal_M4"]["verdict"] == "NOT_MEASURED"
+    assert phases["mixed_signal_M4"]["rc"] == 2
+    assert phases["mixed_signal_M3"]["rc"] == (2 if fault == "m2_failed" else 1)
+    assert calls.count("mixed_signal_m3_run") == (0 if fault == "m2_failed" else 1)
+    assert calls.count("mixed_signal_cosim_check") == (0 if fault == "m2_failed" else 1)
+    assert calls.count("mixed_signal_interface_si_check") == (0 if fault == "m2_failed" else 1)
+    assert calls.count("mixed_signal_signoff_run") == 0
     assert "mixed_signal_signoff_run" not in calls
     if fault == "m2_failed":
         assert "mixed_signal_m3_run" not in calls
