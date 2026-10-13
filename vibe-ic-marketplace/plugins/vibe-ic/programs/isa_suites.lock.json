@@ -51,7 +51,11 @@
     "ecall",
     "ebreak"
    ],
-   "trap_dependent_reason": "ECALL and EBREAK raise an environment-call / breakpoint exception; with no trap target (no Zicsr, hence no mtvec) their effect is not architecturally observable, and the RISC-V unprivileged spec allows the base count to be taken as 38 in that case"
+   "trap_dependent_reason": "ECALL and EBREAK remain mandatory RV32I semantics independently of CSR. Missing precise-trap observation is named NOT_MEASURED, never an excluded obligation.",
+   "flow_system_programs": [
+    "ecall",
+    "ebreak"
+   ]
   },
   "Zifencei": {
    "xlen": 32,

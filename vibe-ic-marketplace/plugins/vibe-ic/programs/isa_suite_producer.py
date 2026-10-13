@@ -58,10 +58,10 @@ WHAT IT DOES, step by step (each step is a refusal, never a default):
                same RTL at MEMSIZE=<n> (parameter only); delivered-size subset
                at memsize <m>".
 
-THE DENOMINATOR is derived, never a constant for a chip (owner ruling
-2026-09-28, 3): the base ISA's instruction enumeration from the lock, minus the
-trap-dependent instructions (ECALL, EBREAK) exactly when the declaration shows
-no trap support (no Zicsr, so no trap target). They are named in the record.
+THE DENOMINATOR is the base ISA's instruction enumeration from the lock.
+ECALL and EBREAK remain mandatory independently of optional CSR support.
+Unavailable trap observation leaves named obligations NOT_MEASURED; it never
+subtracts them from the required instruction population.
 
 chip-AGNOSTIC: the design facts come from `declaration.json`, the generated L
 docs and the staged RTL's own port list; the suites from the lock. No chip,
@@ -659,6 +659,58 @@ def gen_env(facts: Dict[str, Any]) -> Dict[str, str]:
             "link_ref.ld": _ld(SPIKE_DRAM_BASE)}
 
 
+def system_program_source(instruction: str) -> str:
+    """Two finite, flow-owned machine-environment trap challenges.
+
+    This is an exact ISA mnemonic API, not a prose or assembly-input parser.
+    The existing SRAM/tohost environment observes the cause, faulting PC,
+    exactly one handler entry and continuation at the following instruction.
+    """
+    if instruction not in ("ecall", "ebreak"):
+        raise ValueError("no flow-owned SYSTEM challenge for this instruction")
+    cause = {"ecall": 11, "ebreak": 3}[instruction]
+    return f"""/* Flow-owned {instruction}: machine trap environment; no upstream-suite claim. */
+#include "riscv_test.h"
+RVTEST_RV32U
+RVTEST_CODE_BEGIN
+  li gp, 0
+  la t0, system_handler
+  csrw mtvec, t0
+  j system_site
+  .balign 4
+system_site:
+  {instruction}
+system_resume:
+  li t0, 1
+  bne gp, t0, missing_or_repeated_trap
+  RVTEST_PASS
+  .balign 4
+system_handler:
+  csrr t0, mcause
+  li t1, {cause}
+  bne t0, t1, wrong_cause
+  csrr t0, mepc
+  la t1, system_site
+  bne t0, t1, wrong_pc
+  addi gp, gp, 1
+  addi t0, t0, 4
+  csrw mepc, t0
+  mret
+wrong_cause:
+  li gp, 2
+  RVTEST_FAIL
+wrong_pc:
+  li gp, 3
+  RVTEST_FAIL
+missing_or_repeated_trap:
+  li gp, 4
+  RVTEST_FAIL
+RVTEST_DATA_BEGIN
+  .word 0
+RVTEST_DATA_END
+"""
+
+
 def gen_tb(facts: Dict[str, Any]) -> str:
     """A testbench that owns a plain byte SRAM (no zero mask), powers it up to
     `+init=<hex byte>`, loads `+hex=`, releases reset and watches the SRAM
@@ -706,7 +758,7 @@ module isa_tb;
     .{p['rdata']}(rdata),
     .{p['ren']}(ren));
   integer i, cyc, th, sb, se, fd, iv, settle;
-  reg [1023:0] hexfile, sigfile;
+  string hexfile, sigfile;
   reg seen;
   initial begin
     if (!$value$plusargs("init=%h", iv)) iv = 0;
@@ -753,7 +805,8 @@ _TB_HANG_RE = re.compile(r"^ISA_TB HANG cycles=(?P<cyc>\d+)", re.M)
 
 def objdump_guard(disassembly: str, *, allow_compressed: bool,
                   size_bytes: Optional[int] = None,
-                  program_area: Optional[int] = None) -> List[str]:
+                  program_area: Optional[int] = None,
+                  system_obligation: Optional[str] = None) -> List[str]:
     """Every reason this image is not a program of the declared ISA.
 
     A 16-bit parcel on a core that declares no C is the measured trap: without
@@ -776,7 +829,14 @@ def objdump_guard(disassembly: str, *, allow_compressed: bool,
         if len(m.group("hex")) == 4 or mn.startswith("c."):
             n16 += 1
         if mn.startswith("csr") or mn in _SYSTEM_MNEMONICS:
-            sysn[mn] = sysn.get(mn, 0) + 1
+            allowed = system_obligation in ("ecall", "ebreak") and \
+                mn in (system_obligation, "mret")
+            if system_obligation in ("ecall", "ebreak") and mn in ("csrrw", "csrrs"):
+                args = disassembly[m.end():].splitlines()[0].strip().split(",")
+                csr = args[1].strip().lower() if len(args) >= 2 else ""
+                allowed = csr in ("mtvec", "mcause", "mepc", "0x305", "0x342", "0x341")
+            if not allowed:
+                sysn[mn] = sysn.get(mn, 0) + 1
     if n16 and not allow_compressed:
         out.append(f"{n16} 16-bit instruction(s) on a core that declares no C")
     if sysn:
@@ -937,7 +997,18 @@ def inside(job_path: Path) -> int:
         d = work / "build" / pid
         d.mkdir(parents=True, exist_ok=True)
         r: Dict[str, Any] = {}
-        common = [TOOLS["gcc"], f"-march={march}", "-mabi=ilp32", "-static",
+        program_march = march
+        system = prog.get("system_obligation")
+        if system:
+            expected = sha256_bytes(system_program_source(system).encode())
+            if (prog.get("source_sha256") != expected or
+                    sha256_bytes(Path(prog["src"]).read_bytes()) != expected):
+                res["programs"][pid] = {"build": {"ok": False, "log": "flow-owned SYSTEM source differs"}}
+                _save()
+                continue
+            if "zicsr" not in program_march.split("_"):
+                program_march += "_zicsr"
+        common = [TOOLS["gcc"], f"-march={program_march}", "-mabi=ilp32", "-static",
                   "-mno-relax", "-nostdlib", "-nostartfiles", "-mcmodel=medany",
                   f"-I{env}"] + [f"-I{x}" for x in prog["include_dirs"]]
         if prog["judge"] == "signature":
@@ -974,6 +1045,8 @@ def inside(job_path: Path) -> int:
                       "ref_size": None if end_ref is None
                       else end_ref - SPIKE_DRAM_BASE,
                       "disassembly": str(d / "dut.dis")}
+        if system:
+            r["build"]["source_sha256"] = prog["source_sha256"]
         sig = d / "ref.sig"
         argv = [TOOLS["spike"], f"--isa={job['spike_isa']}",
                 f"--instructions={SPIKE_INSTRUCTION_CAP}"]
@@ -1072,14 +1145,9 @@ def instruction_total(lock: Dict[str, Any], facts: Dict[str, Any]
     """(total, excluded instructions, why) for the base ISA unit."""
     unit = (lock.get("isa_units") or {}).get("I") or {}
     instrs = list(unit.get("instructions") or [])
-    if facts.get("trap_support"):
-        return len(instrs), [], (f"{len(instrs)}: the design declares trap "
-                                 f"support ({facts.get('trap_support_why')})")
-    excl = [i for i in unit.get("trap_dependent") or [] if i in instrs]
-    return len(instrs) - len(excl), excl, (
-        f"{len(instrs) - len(excl)} = {len(instrs)} RV32I instructions minus "
-        f"{', '.join(excl)}: {facts.get('trap_support_why')}. "
-        + str(unit.get("trap_dependent_reason") or ""))
+    return len(instrs), [], (f"{len(instrs)} required base-ISA instructions; "
+                            f"ECALL/EBREAK are mandatory independently of CSR: "
+                            f"{facts.get('trap_support_why')}")
 
 
 def _arms(project: Path, rtl_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -1237,6 +1305,20 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
     progs = [dict(p, suite=sname)
              for sname, s in (lock.get("suites") or {}).items()
              for p in s.get("programs") or [] if p.get("unit") in wanted_units]
+    # The upstream lock still describes its own unchanged public files. The
+    # additional producer-owned challenges are separate, source-bound inputs.
+    if "I" in wanted_units:
+        for instruction in (lock.get("isa_units", {}).get("I", {}).get("flow_system_programs") or []):
+            source = system_program_source(instruction)
+            item = {"id": "flow-I-" + instruction, "suite": "flow-owned-system",
+                    "unit": "I", "instruction": instruction, "role": "primary",
+                    "judge": "tohost", "system_obligation": instruction,
+                    "source_sha256": sha256_bytes(source.encode())}
+            if not facts.get("trap_support"):
+                item["not_measured_reason"] = (
+                    f"mandatory {instruction}: no declared machine trap environment; "
+                    "precise requested trap is not observed, not excluded")
+            progs.append(item)
     if not progs:
         return _refuse(f"the lock holds no program for units {wanted_units}")
     work = Path(work_root) if work_root else Path(tempfile.mkdtemp(prefix="vibeic_isa_"))
@@ -1244,7 +1326,7 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
     try:
         roots: Dict[str, Path] = {}
         acq: List[str] = []
-        for sname in sorted({p["suite"] for p in progs}):
+        for sname in sorted({p["suite"] for p in progs if not p.get("system_obligation")}):
             root, awhy = acquire(sname, lock["suites"][sname],
                                  work / "suites", fetch=fetch)
             acq.append(awhy)
@@ -1257,6 +1339,14 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
         env.mkdir(exist_ok=True)
         for fname, text in gen_env(facts).items():
             (env / fname).write_text(text)
+        for p in progs:
+            if p.get("system_obligation"):
+                path = env / (p["id"] + ".S")
+                path.write_text(system_program_source(p["system_obligation"]))
+                p["src"] = str(path)
+        receipt["flow_owned_programs"] = [{key: p[key] for key in
+            ("id", "instruction", "source_sha256", "system_obligation")}
+            for p in progs if p.get("system_obligation")]
         (env / "isa_tb.v").write_text(gen_tb(facts))
         rtl_dir = project / "phase2" / "stage1" / "rtl"
         arms, disclosures = _arms(project, rtl_dir)
@@ -1291,14 +1381,17 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
             "init_patterns": list(init_patterns), "arms": arms,
             "programs": [{
                 "id": p["id"], "judge": p["judge"],
-                "src": str(roots[p["suite"]] / p["path"]),
+                "src": p["src"] if p.get("system_obligation") else str(roots[p["suite"]] / p["path"]),
                 "include_dirs": [str(roots[p["suite"]] / x) for x in
-                                 lock["suites"][p["suite"]].get("include_dirs") or []],
-            } for p in progs],
+                                 lock["suites"][p["suite"]].get("include_dirs") or []]
+                                 if not p.get("system_obligation") else [],
+                **({"system_obligation": p["system_obligation"],
+                    "source_sha256": p["source_sha256"]} if p.get("system_obligation") else {}),
+            } for p in progs if not p.get("not_measured_reason")],
         }
         receipt["reference"] = (f"spike --isa={job['spike_isa']} (Zicsr only "
-                                f"for the reference's own boot ROM; the guard "
-                                f"refuses any CSR in a program)")
+                                "for the reference boot ROM and the exact flow-owned "
+                                "machine-trap challenges; general/unknown CSR programs remain refused)")
         job_path = work / "job.json"
         _aa.write_json(job_path, job)
         rc, transcript = (executor or docker_executor)(job_path, work)
@@ -1343,6 +1436,13 @@ def judge_all(progs: List[Dict[str, Any]], results: Dict[str, Any],
                                  "role": p["role"], "judge": p["judge"],
                                  "size": b.get("size"), "arms": {}}
         per[pid] = entry
+        if p.get("not_measured_reason"):
+            entry["pre"] = (NOT_MEASURED, p["not_measured_reason"])
+            continue
+        system = p.get("system_obligation")
+        if system and b.get("source_sha256") != p.get("source_sha256"):
+            entry["pre"] = (NOT_MEASURED, "flow-owned SYSTEM execution has no matching source binding")
+            continue
         bad_tools = [f"{name} rc {b.get(name)}" for name in
                      ("objdump_rc", "nm_rc", "nm_ref_rc", "objcopy_rc")
                      if b.get(name) != 0]
@@ -1365,7 +1465,8 @@ def judge_all(progs: List[Dict[str, Any]], results: Dict[str, Any],
         try:
             viol = objdump_guard(dis, allow_compressed=facts.get("has_c", False),
                                  size_bytes=b.get("size"),
-                                 program_area=(full or 0) - facts["rf_reserved_bytes"])
+                                 program_area=(full or 0) - facts["rf_reserved_bytes"],
+                                 system_obligation=system)
         except Exception as exc:  # noqa: BLE001 — Uncalibrated may not judge
             entry["pre"] = (NOT_MEASURED, f"uncalibrated: {exc}")
             continue

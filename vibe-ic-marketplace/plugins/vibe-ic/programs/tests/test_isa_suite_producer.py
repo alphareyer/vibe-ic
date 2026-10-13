@@ -465,12 +465,12 @@ def test_a_set_is_pass_only_when_every_member_passes():
     assert I.fold([]) == I.NOT_MEASURED
 
 
-# ── 5. the denominator is derived from the declaration ────────────────────
+# ── 5. mandatory enumeration; legacy IDs retained for contract migration ──
 
 def test_no_trap_support_excludes_ecall_and_ebreak_by_name(tmp_path):
     facts, _ = I.design_facts(_project(tmp_path))
     total, excl, why = I.instruction_total(_lock(), facts)
-    assert (total, excl) == (2, ["ecall", "ebreak"])
+    assert (total, excl) == (4, [])
     assert "no Zicsr" in why
 
 
@@ -484,7 +484,7 @@ def test_a_trap_capable_core_is_judged_on_every_instruction(tmp_path):
 def test_the_shipped_lock_gives_38_without_traps_and_40_with():
     lock = I.load_lock()
     assert I.instruction_total(lock, {"trap_support": False})[:2] == (
-        38, ["ecall", "ebreak"])
+        40, [])
     assert I.instruction_total(lock, {"trap_support": True})[:2] == (40, [])
 
 
@@ -520,11 +520,11 @@ def test_a_passing_suite_writes_pass_rows_and_the_coverage_line(tmp_path):
     assert rec["cases"]["base_isa"].get("delivered", {"verdict": "PASS"})["verdict"] == "PASS"
     assert rows["fence_ext"]["verdict"] == "PASS"
     cov = rec["cases"]["base_isa"]["coverage"]
-    assert cov == {"covered": 1, "total": 2, "excluded": ["ecall", "ebreak"],
-                   "uncovered": ["sub"]}
+    assert cov == {"covered": 1, "total": 4, "excluded": [],
+                   "uncovered": ["sub", "ecall", "ebreak"]}
     text = (p / I.TRANSCRIPT_REL.format(case="base_isa")).read_text()
-    assert I.coverage_line(1, 2) in text
-    assert "excluded from the instruction total: ecall, ebreak" in text
+    assert I.coverage_line(1, 4) in text
+    assert "excluded from the instruction total: none" in text
     assert "(parameter only); delivered-size subset at memsize 1024" in text
     assert (p / I.RECEIPT_REL).is_file()
 
@@ -546,7 +546,7 @@ def test_full_parameter_pass_does_not_publish_delivered_l10_pass(tmp_path):
     assert "delivered" in row["detail"] and "4096" in row["detail"]
     transcript = (p / I.TRANSCRIPT_REL.format(case="base_isa")).read_text()
     assert "CORE ISA (parameter only) PASS" in transcript
-    assert I.coverage_line(0, 2) in transcript
+    assert I.coverage_line(0, 4) in transcript
 
     import testbench_gen as TB
     import _l10_execution as X
@@ -959,7 +959,7 @@ def test_core_parameters_with_csr_decides_trap_support(tmp_path):
     assert I.instruction_total(_lock(), facts)[:2] == (4, [])
     facts, _ = I.design_facts(_project(
         tmp_path / "b", core_parameters={"WITH_CSR": 0}))
-    assert I.instruction_total(_lock(), facts)[:2] == (2, ["ecall", "ebreak"])
+    assert I.instruction_total(_lock(), facts)[:2] == (4, [])
 
 
 def test_the_isa_transcript_never_overwrites_the_scaffold_run_log(
@@ -972,6 +972,261 @@ def test_the_isa_transcript_never_overwrites_the_scaffold_run_log(
     assert (case / "isa_suite.log").is_file()
     assert "CORE ISA" in (case / "isa_suite.log").read_text()
     assert "CORE ISA" not in (case / "run.log").read_text()
+
+
+# Issue3107: exact public planning INPUT and real flow-owned trap programs.
+# This mini RTL is a self-authored byte-SRAM machine-environment component,
+# sufficient for the generated challenges, not a claimed full RV32I CPU.
+_SYSTEM_RTL = r"""module soc_top #(parameter memsize = 1024,
+  parameter aw = $clog2(memsize), parameter READ_LATENCY = 1, parameter FAULT = 0)
+ (input wire clk_i, input wire rst_i,
+  output wire [aw-1:0] o_m_waddr, output wire [7:0] o_m_wdata,
+  output wire o_m_wen, output wire [aw-1:0] o_m_raddr,
+  input wire [7:0] i_m_rdata, output wire o_m_ren, output wire o_led);
+ reg [31:0] regs[0:31];
+ reg [31:0] pc, instr, mtvec, mepc, mcause, store_addr, store_data;
+ reg [1:0] lane;
+ reg [2:0] state;
+ reg [31:0] value, oldcsr;
+ integer k;
+ wire [6:0] opcode = instr[6:0];
+ wire [4:0] rd = instr[11:7], rs1 = instr[19:15], rs2 = instr[24:20];
+ wire [2:0] funct3 = instr[14:12];
+ wire [31:0] imm_i = {{20{instr[31]}}, instr[31:20]};
+ wire [31:0] imm_s = {{20{instr[31]}}, instr[31:25], instr[11:7]};
+ wire [31:0] imm_b = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+ wire [31:0] imm_j = {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+ assign o_m_ren = state == 0;
+ assign o_m_raddr = pc + lane;
+ assign o_m_wen = state == 3;
+ assign o_m_waddr = store_addr + lane;
+ assign o_m_wdata = store_data >> (lane*8);
+ assign o_led = 1'b0;
+ always @(posedge clk_i) begin
+  if (rst_i) begin
+   pc <= 0; lane <= 0; state <= 0; instr <= 0;
+   mtvec <= 0; mepc <= 0; mcause <= 0;
+   for (k=0;k<32;k=k+1) regs[k] <= 0;
+  end else begin
+   regs[0] <= 0;
+   case (state)
+    0: state <= READ_LATENCY==2 ? 4 : 1;
+    4: state <= 1;
+    1: begin
+     instr[lane*8 +: 8] <= i_m_rdata;
+     if (lane == 3) begin lane <= 0; state <= 2; end
+     else begin lane <= lane+1; state <= 0; end
+    end
+    2: begin
+     pc <= pc+4; state <= 0;
+     case (opcode)
+      7'h13: if (rd!=0) begin
+       if (funct3==0) regs[rd] <= regs[rs1]+imm_i;
+       if (funct3==1) regs[rd] <= regs[rs1]<<instr[24:20];
+       if (funct3==6) regs[rd] <= regs[rs1]|imm_i;
+      end
+      7'h17: if (rd!=0) regs[rd] <= pc+{instr[31:12],12'b0};
+      7'h37: if (rd!=0) regs[rd] <= {instr[31:12],12'b0};
+      7'h6f: begin if (rd!=0) regs[rd] <= pc+4; pc <= pc+imm_j; end
+      7'h67: begin if (rd!=0) regs[rd] <= pc+4; pc <= (regs[rs1]+imm_i)&32'hfffffffe; end
+      7'h63: begin
+       if ((funct3==0 && regs[rs1]==regs[rs2]) ||
+           (funct3==1 && regs[rs1]!=regs[rs2])) pc <= pc+imm_b;
+      end
+      7'h23: begin store_addr <= regs[rs1]+imm_s; store_data <= regs[rs2];
+       lane <= 0; state <= 3; end
+      7'h0f: begin end
+      7'h73: begin
+       if (instr == 32'h00000073 || instr == 32'h00100073) begin
+        if (FAULT!=3) begin
+         mepc <= pc+(FAULT==2 ? 4 : 0);
+         mcause <= FAULT==1 ? 7 : (instr==32'h00000073 ? 11 : 3);
+         pc <= mtvec;
+        end
+       end else if (instr==32'h30200073) pc <= mepc;
+       else begin
+        case (instr[31:20])
+         12'h305: oldcsr=mtvec;
+         12'h341: oldcsr=mepc;
+         12'h342: oldcsr=mcause;
+         default: oldcsr=0;
+        endcase
+        if (rd!=0) regs[rd] <= oldcsr;
+        value = funct3==1 ? regs[rs1] : oldcsr|regs[rs1];
+        if (funct3==1 || (funct3==2 && rs1!=0)) begin
+         case (instr[31:20])
+          12'h305: mtvec <= value;
+          12'h341: mepc <= value;
+          12'h342: mcause <= value;
+         endcase
+        end
+       end
+      end
+     endcase
+    end
+    3: begin
+     if (lane==3) begin lane<=0;state<=0;end
+     else lane<=lane+1;
+    end
+   endcase
+  end
+ end
+endmodule
+"""
+_SMOKE_ASM = b"""#include "riscv_test.h"
+RVTEST_RV32U
+RVTEST_CODE_BEGIN
+ li t2,13
+ addi t3,t2,7
+ li t4,20
+ bne t3,t4,failed
+ RVTEST_PASS
+failed:
+ li gp,1
+ RVTEST_FAIL
+RVTEST_DATA_BEGIN
+ .word 0
+RVTEST_DATA_END
+"""
+
+
+def _system_lock():
+    files={'src/smoke.S':_SMOKE_ASM}
+    tar=_tarball(files)
+    lock={'isa_units':{'I':{'instructions':['addi','ecall','ebreak'],
+                              'flow_system_programs':['ecall','ebreak']}},
+          'suites':{'neutral':{'commit':'f'*40,'root':ROOT,
+                    'tarball_url':'https://example.invalid/neutral-system.tar.gz',
+                    'tarball_sha256':_sha(tar),'include_dirs':[],
+                    'files':{name:_sha(data) for name,data in files.items()},
+                    'programs':[{'id':'neutral-addi','path':'src/smoke.S','unit':'I',
+                                 'instruction':'addi','judge':'tohost','role':'primary'}]}}}
+    return lock,tar
+
+
+@pytest.mark.parametrize('declaration', [
+ {'isa_extensions':['I','Zifencei'],'WITH_CSR':0},
+ {'isa_extensions':['I','Zifencei'],'WITH_CSR':1},
+ {'isa_extensions':['I','Zicsr'],'WITH_CSR':0},
+ {'isa_extensions':['I'],'core_parameters':{'WITH_CSR':0}},
+])
+def test_mandatory_system_obligations_do_not_depend_on_optional_csr(declaration):
+    traps,why=I.trap_support(declaration)
+    total,excluded,reason=I.instruction_total(I.load_lock(),
+                    {'trap_support':traps,'trap_support_why':why})
+    assert (total,excluded)==(40,[]), (total,excluded,reason)
+
+
+@pytest.mark.parametrize('fault,want', [(0,I.PASS),(1,I.FAIL),(2,I.FAIL),(3,I.FAIL)])
+@pytest.mark.parametrize('latency',[1,2])
+def test_flow_owned_system_programs_measure_precise_traps_native(tmp_path,monkeypatch,fault,want,latency):
+    import _l10_execution as X
+    missing=[name for name in [*I.TOOLS.values(),'iverilog','vvp'] if shutil.which(name) is None]
+    assert not missing, 'NOT_VERIFIED: pinned native tool(s) unavailable: '+str(missing)
+    p=_project(tmp_path,units=('I',),WITH_CSR=1,rf_storage='registers',
+               sram_interface_protocol=f'sdp8_waddr_raddr_wen_ren_sync{latency}r')
+    rtl=p/'phase2/stage1/rtl/soc_top.v'
+    rtl.write_text(_SYSTEM_RTL.replace('parameter FAULT = 0',f'parameter FAULT = {fault}')
+                             .replace('parameter READ_LATENCY = 1',f'parameter READ_LATENCY = {latency}'))
+    row={'name':'system_component','kind':'functional_vector',
+         'stimulus':'RV32I SYSTEM ECALL and EBREAK precise-trap component checks',
+         'expected':'PASS'}
+    l10=p/'phase1/generated_docs/L10_TEST_CASES.json'
+    l10.write_text(json.dumps({'test_cases':[row]}))
+    lock,tar=_system_lock()
+    monkeypatch.setattr(I,'CYCLE_CAP',10000)
+    def actual_inside(job,work):
+        return I.inside(job), 'Actual existing native inside job in pinned outer image'
+    rec=I.produce(p,lock=lock,pol=ALLOW,fetch=lambda _u:tar,executor=actual_inside,
+                  work_root=tmp_path/'native_job',keep_work=True)
+    (tmp_path/'native_summary.json').write_text(json.dumps(rec,indent=2))
+    assert rec['refusal'] is None, rec
+    assert {'flow-I-ecall','flow-I-ebreak'} <= set(rec['programs']), rec['programs']
+    for instruction in ['ecall','ebreak']:
+        prog=rec['programs']['flow-I-'+instruction]
+        assert not prog.get('pre'), prog
+        assert prog['arms']['staged_delivered']['state']==want, prog
+        if fault:
+            assert all(x['why']==f'self-check failed at test {fault+1}'
+                       for x in prog['arms']['staged_delivered']['by_init'])
+    assert rec['cases']['system_component']['verdict']==want
+    # Replay the same emitted TB/actual assembled images with the other
+    # supported simulator, at the declared latency and delivered memory.
+    # This is extra component evidence, not a replacement execution receipt.
+    import subprocess
+    work=tmp_path/'native_job'
+    binary=work/'icarus.vvp'
+    ccargv=['iverilog','-g2012','-s','isa_tb','-o',str(binary),
+            str(work/'env/isa_tb.v'),str(rtl)]
+    cc=subprocess.run(ccargv,capture_output=True,text=True,timeout=30)
+    assert cc.returncode==0,cc.stdout+cc.stderr
+    results=json.loads((work/'results.json').read_text())
+    for pid in ['neutral-addi','flow-I-ecall','flow-I-ebreak']:
+        expected=1 if pid=='neutral-addi' or not fault else {1:5,2:7,3:9}[fault]
+        for init in ['ff','a5']:
+            observed=results['sims'][pid]['staged_delivered'][init]
+            assert I.parse_tb_transcript(observed['transcript'])['tohost']==expected
+    icarus=[]
+    for pid in ['neutral-addi','flow-I-ecall','flow-I-ebreak']:
+        b=results['programs'][pid]['build']
+        for init in ['ff','a5']:
+            argv=['vvp',str(binary),f'+hex={work / "build" / pid / "dut.hex"}',
+                  f'+tohost={b["tohost"]}',f'+init={init}']
+            run=subprocess.run(argv,capture_output=True,text=True,timeout=30)
+            assert run.returncode==0,run.stdout+run.stderr
+            state,why=I.judge_tohost(results['programs'][pid]['ref']['rc'],
+                                   I.parse_tb_transcript(run.stdout))
+            assert state==(I.PASS if pid=='neutral-addi' else want),(pid,state,why)
+            expected=1 if pid=='neutral-addi' or not fault else {1:5,2:7,3:9}[fault]
+            assert I.parse_tb_transcript(run.stdout)['tohost']==expected
+            icarus.append({'program':pid,'init':init,'argv':argv,'rc':run.returncode,
+                           'stdout':run.stdout,'stderr':run.stderr,'judged_state':state})
+    (work/'icarus_results.json').write_text(json.dumps({'compile_argv':ccargv,
+                  'compile_rc':cc.returncode,'binary_sha256':_sha(binary.read_bytes()),
+                  'latency':latency,'fault':fault,'runs':icarus},indent=2))
+    X.write_record(p,l10,rec['rows'],producer='issue3107_actual_native_source_control',
+                   isa_receipt=p/I.RECEIPT_REL)
+    credit,refusal=X.isa_conformance_credit(p,'system_component',row)
+    if fault:
+        assert credit is None and 'failing' in refusal, (credit,refusal)
+    else:
+        assert refusal is None and credit['instructions']['covered']==3, (credit,refusal)
+        assert credit['instructions']['total']==3
+        # The receipt, native tools and component source are current; a stale
+        # receipt from this actual run still cannot credit changed RTL.
+        rtl.write_text(rtl.read_text()+'\n// changed source after execution\n')
+        assert X.isa_conformance_credit(p,'system_component',row)[0] is None
+
+
+def test_missing_trap_environment_keeps_named_unmeasured_primary_obligations(tmp_path):
+    p=_project(tmp_path,units=('I',),WITH_CSR=0)
+    lock,tar=_system_lock()
+    rec=I.produce(p,lock=lock,pol=ALLOW,fetch=lambda _u:tar,
+                 executor=_fake_executor({'neutral-addi':(None,0,HALT,None)}))
+    assert rec['instruction_total']['total']==3
+    assert rec['instruction_total']['excluded']==[]
+    assert {'flow-I-ecall','flow-I-ebreak'} <= set(rec['programs']), rec['programs']
+    for instruction in ['ecall','ebreak']:
+        prog=rec['programs']['flow-I-'+instruction]
+        assert prog['pre'][0]==I.NOT_MEASURED
+        assert 'mandatory '+instruction in prog['pre'][1]
+    assert rec['cases']['base_isa']['verdict']==I.NOT_MEASURED
+    assert rec['rows'][0]['verdict']=='NOT_EXECUTED'
+    assert rec['cases']['base_isa']['coverage']['uncovered']==['ecall','ebreak']
+
+
+def test_flow_system_privileged_instructions_do_not_admit_general_or_unknown_csr():
+    import inspect
+    dis='   0: 30529073 csrrw zero,mtvec,t0\n   4: 00000073 ecall\n   8: 30200073 mret\n'
+    assert I.objdump_guard(dis,allow_compressed=False)
+    # The finite generated-program API is the only narrowed environment.
+    if 'system_obligation' not in inspect.signature(I.objdump_guard).parameters:
+        assert not I.objdump_guard(dis,allow_compressed=False), 'SOURCE_DECLINED: legitimate finite SYSTEM environment'
+    assert not I.objdump_guard(dis,allow_compressed=False,system_obligation='ecall')
+    bad=dis+'   c: 34029073 csrrw zero,mscratch,t0\n'
+    assert I.objdump_guard(bad,allow_compressed=False,system_obligation='ecall')
+    assert I.objdump_guard(dis,allow_compressed=False,system_obligation='ebreak')
+
 
 
 @pytest.mark.parametrize("latency,wrong_address", [

@@ -444,3 +444,116 @@ def test_step37_rechecks_topped_gds_before_selection(tmp_path, monkeypatch):
         step37.run(project, 'image', root, 'processA', routed, netlist, sdc,
                    project / 'mutated_canonical.gds')
     assert not (project / 'mutated_canonical.gds').exists()
+
+
+@pytest.mark.parametrize('case', [
+    'measured-in-window', 'measured-below-window', 'unresolved-deck-layer',
+])
+def test_native_die_density_emitter_reaches_the_existing_consumer(
+        tmp_path, monkeypatch, case):
+    """#3098: actual KLayout emitter I/O, beyond the synthetic report mocks.
+
+    The outer docker launch and authored rule map are SOURCE_CONTROL. The
+    generated GDS, emitter CLI, ratio reader, publisher and threshold judge
+    execute their real bodies in this test's pinned image.
+    """
+    import hashlib
+    import os
+    import subprocess
+    import klayout.db as k
+    import die_density_ratio_emit as emitter
+    import metal_layer_density_check as checker
+
+    project = tmp_path / 'native-project'
+    project.mkdir()
+    root, cfg = _pdk(tmp_path)
+    if case == 'unresolved-deck-layer':
+        deck = root / 'processA/tech/density.drc'
+        deck.write_text(deck.read_text().replace(
+            'extract_single_layer_from_design.call(:poly2_dummy, 50, 4)', ''))
+    layout = k.Layout()
+    layout.dbu = .001
+    top = layout.create_cell('top')
+    top.shapes(layout.layer(99, 0)).insert(k.Box(0, 0, 100000, 100000))
+    metal1 = layout.layer(61, 0)
+    # Independent rectangle-union areas: 3000/10000=.30, or 1000/10000=.10.
+    boxes = ([k.Box(0, 0, 40000, 50000), k.Box(20000, 0, 60000, 50000)]
+             if case != 'measured-below-window' else
+             [k.Box(0, 0, 10000, 50000), k.Box(5000, 0, 20000, 50000)])
+    for box in boxes:
+        top.shapes(metal1).insert(box)
+    top.shapes(layout.layer(62, 0)).insert(k.Box(0, 0, 40000, 100000))
+    top.shapes(layout.layer(50, 0)).insert(k.Box(0, 0, 20000, 100000))
+    gds = project / 'neutral.gds'
+    layout.write(str(gds))
+    before = hashlib.sha256(gds.read_bytes()).hexdigest()
+    calls = []
+
+    def real_emitter_transport(cmd, **_kwargs):
+        # Run the exact emitter argv in the already pinned test container;
+        # no nested Docker, fabricated report or mocked native result.
+        argv = cmd[cmd.index('--skip') + 1:]
+        assert Path(argv[1]).resolve() == Path(emitter.__file__).resolve()
+        done = subprocess.run(argv, capture_output=True, text=True)
+        calls.append({'requested_argv': cmd, 'executed_argv': argv,
+                      'returncode': done.returncode,
+                      'stdout': done.stdout, 'stderr': done.stderr})
+        return done
+
+    monkeypatch.setattr(fill, 'run_container', real_emitter_transport)
+    refusal = None
+    ratios = None
+    try:
+        ratios = fill.measure_density_ratios(
+            project, os.environ['VIBEIC_EDA_IMAGE'], root, 'processA', gds, cfg,
+            '37-native-density')
+    except Refusal as exc:
+        refusal = str(exc)
+    report = project / 'phase3/librelane/37-native-density/density_ratios.json'
+    measured = json.loads(report.read_text())
+    published = fill.publish_metal_density(project, ratios, gds, 'processA') if ratios else None
+    consumer_rc = None
+    consumer = None
+    if published:
+        consumer_path = project / 'density-consumer.json'
+        _, layer_map, tech_lef, deck = fill._density_source(root, 'processA', cfg)
+        derived = build_metal_fill_config(layer_map, tech_lef, deck)
+        floor = derived['_derivation']['density_floor_pct'] / 100
+        # The authored deck states a 30% minimum. Supply that real rule plus
+        # the consumer's disclosed generic ceiling; an unproved null ceiling
+        # correctly stays UNCHECKED and is not a positive or threshold result.
+        windows = _put(project / 'density-windows.json', {
+            row['name']: [floor, None] for row in derived['layers']})
+        consumer_rc = checker.main([str(published), '--windows', str(windows),
+                                    '--default-max', str(checker._DEFAULT_MAX),
+                                    '--json', str(consumer_path)])
+        consumer = json.loads(consumer_path.read_text())
+    values = {'case': case, 'scope': 'native neutral density emitter; launch/map SOURCE_CONTROL',
+              'gds_sha256': before, 'calls': calls, 'report': measured,
+              'ratios': ratios, 'refusal': refusal, 'published': str(published) if published else None,
+              'consumer_rc': consumer_rc, 'consumer': consumer}
+    (project / 'actual-density-values.json').write_text(json.dumps(values, indent=2) + '\n')
+    assert hashlib.sha256(gds.read_bytes()).hexdigest() == before, values
+    assert len(calls) == 1, values
+    assert measured['layers']['M1.4']['ratio'] == (
+        .1 if case == 'measured-below-window' else .3), values
+    assert measured['layers']['M2.4']['ratio'] == .4, values
+    if case == 'unresolved-deck-layer':
+        assert calls[0]['returncode'] == 2, values
+        assert measured['status'] == 'NOT_MEASURED', values
+        assert measured['layers']['PL.8']['status'] == 'NOT_MEASURED', values
+        assert refusal and 'LL_DENSITY_RATIOS_NOT_MEASURED' in refusal, values
+        assert published is None and consumer is None, values
+    else:
+        assert calls[0]['returncode'] == 0 and refusal is None, values
+        assert measured['status'] == 'MEASURED', values
+        assert measured['layers']['PL.8']['ratio'] == .2, values
+        assert ratios['subject_sha256'] == before, values
+        assert json.loads(published.read_text())['gds_sha256'] == before, values
+        assert consumer_rc == (1 if case == 'measured-below-window' else 0), values
+        assert consumer['verdict'] == ('FAIL' if case == 'measured-below-window' else 'PASS'), values
+        assert consumer['per_layer']['metal1']['status'] == (
+            'FAIL' if case == 'measured-below-window' else 'PASS'), values
+        assert consumer['per_layer']['metal2']['status'] == 'PASS', values
+        assert consumer.get('unchecked_layers', []) == [], values
+        assert 'max=generic-default' in consumer['per_layer']['metal1']['window_source'], values
