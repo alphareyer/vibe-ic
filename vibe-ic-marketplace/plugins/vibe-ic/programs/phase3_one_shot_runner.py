@@ -78765,6 +78765,31 @@ def _publish_final_layout_receipts(project: Path, receipt, plan):
     return 0
 
 
+def _default_prelayout_rejection(project: Path, started_at: float) -> Optional[StepResult]:
+    """Read this call's completed prelayout consumers before the next producer."""
+    import execution_policy
+    if execution_policy.request()['mode'] != 'default':
+        return None
+    import step_output_collector as versions
+    rejected = [row for row in versions.current_acceptance(project, started_at)
+                if str(row['id']) in ('7', '8', '10') and row['status'] not in
+                ('PASS', 'PASS_WITH_WAIVERS', 'NOT_APPLICABLE')]
+    if not rejected:
+        return None
+    row = next((row for row in rejected if row['status'] == 'FAIL'), rejected[0])
+    consumer = (row['result'].get('canonical_consumer')
+                or row['result'].get('canonical_step_result') or {})
+    step = consumer.get('step') or consumer
+    status = 'FAIL' if row['status'] == 'FAIL' else 'NOT_MEASURED'
+    return StepResult(
+        'canonical_prelayout_acceptance', status, 0.0,
+        f"canonical step {row['id']} was not accepted: " +
+        '; '.join(map(str, step.get('reasons') or [row['status']])),
+        extras={'step_id': str(row['id']), 'output_version': row['folder']},
+        reason_class=(step.get('reason_class') or _V.ReasonClass.UPSTREAM_REFUSED
+                      if status == 'NOT_MEASURED' else ''))
+
+
 @_restores_the_container_env
 def main() -> int:
     p = argparse.ArgumentParser()
@@ -79349,16 +79374,23 @@ def main() -> int:
             # though nothing they need is post-layout. Located-by-name like the
             # rows above, so it cannot shift any downstream plan[-1] decision.
             # No-op (SKIP) unless the design stages >=2 corner libs.
+            _prelayout_started = time.time()
             _pls = step_prelayout_signoff(
                 project, effective_top, pdk, args.container)
             plan.append(_pls)
             print(f"[prelayout] {_pls.status:5s} {_pls.name}: {_pls.detail}",
                   flush=True)
-            if _pls.status == "PASS":
+            _prelayout_rejection = _default_prelayout_rejection(
+                project, _prelayout_started)
+            if _pls.status == "PASS" and _prelayout_rejection is None:
                 from design_one_shot_runner import step_sdc_validation_post_prelayout
                 import librelane_contract as _sdc_ll
                 if _sdc_ll.selected_mode(project, "8") in ("librelane", "dual"):
                     plan.append(step_sdc_validation_post_prelayout(project, effective_top))
+                    _prelayout_rejection = _default_prelayout_rejection(
+                        project, _prelayout_started)
+            if _prelayout_rejection is not None:
+                plan.append(_prelayout_rejection)
             # ORGANIC #593 — geometry-aware cache: a DEF that exists may
             # only be reused when the requested --die-um/--util match the
             # cached run's geometry (pnr_args.json). A congestion-recovery
@@ -79373,12 +79405,20 @@ def main() -> int:
             # where a 0-byte antenna report inherited from the cached run is
             # removed: on this path `step_pnr` never runs, so #2157's sweep,
             # which lives inside its approach loop, is never reached.
-            _pnr_cache = _cached_stage_decision(
-                project, _pnr_out, def_existing, kind="pnr",
-                top=effective_top, die_um=args.die_um, util=args.util,
-                pdk=pdk, container=args.container, args=args)
-            _cache_msg = _pnr_cache.reason
-            if _pnr_cache.accept:
+            _pnr_cache = None
+            if _prelayout_rejection is None:
+                _pnr_cache = _cached_stage_decision(
+                    project, _pnr_out, def_existing, kind="pnr",
+                    top=effective_top, die_um=args.die_um, util=args.util,
+                    pdk=pdk, container=args.container, args=args)
+            _cache_msg = _pnr_cache.reason if _pnr_cache is not None else ''
+            if _prelayout_rejection is not None:
+                plan.append(StepResult(
+                    'pnr', 'NOT_MEASURED', 0.0,
+                    'Step 15 not dispatched: ' + _prelayout_rejection.detail,
+                    extras={'upstream_step': _prelayout_rejection.extras['step_id']},
+                    reason_class=_V.ReasonClass.UPSTREAM_REFUSED))
+            elif _pnr_cache.accept:
                 plan.append(StepResult(
                     "pnr", "PASS", 0.0,
                     f"DEF already present: {def_existing.name} (skipped "

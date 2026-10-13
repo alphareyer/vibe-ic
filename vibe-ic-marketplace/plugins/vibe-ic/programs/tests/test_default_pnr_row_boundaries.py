@@ -11,6 +11,139 @@ import execution_backend_gates as gates
 import execution_policy
 
 
+def _prebackend_consumer_control(tmp_path, monkeypatch, outcomes, *, mode='default'):
+    """Drive actual main/retention; only native transport and gate outcomes are controlled."""
+    import design_one_shot_runner as design
+    import step_preflight as preflight
+    import step_output_collector as versions
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode=mode))
+    if mode == 'ultra':
+        monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+        monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    monkeypatch.setattr(runner, 'run_step11_dft_after_synth', lambda *a: [])
+    monkeypatch.setattr(runner, 'run_step13_lec_on_pnr_input', lambda *a: [])
+    monkeypatch.setattr(runner, 'run_pre_audit_producers', lambda *a, **k: [])
+    monkeypatch.setattr(runner, '_ordinary_phase3_row', lambda *a, **k: None)
+    monkeypatch.setattr(runner, '_publish_final_layout_receipts', lambda *a: 0)
+    monkeypatch.setattr(runner, '_complete_physical_verification',
+                        lambda *a: runner.StepResult('physical_verification', 'NOT_MEASURED', 0,
+                                                    'no native physical verification in this control',
+                                                    reason_class=runner._V.ReasonClass.NOT_EXECUTED))
+
+    rel = 'phase3/stage3/sta/pre_pnr_timing.rpt'
+    output = project / rel
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b'prior prelayout output')
+    earlier = versions.begin_step(project, '10')
+    prior_record = versions.finish_step(project, earlier, verdict='FAIL', result={
+        'canonical_consumer': {'status': 'FAIL', 'step': {'id': '10', 'status': 'FAIL',
+                              'reasons': ['previous invocation only']}, 'ledger': []}})
+    calls, native_rows = [], []
+
+    def consume(proj, row):
+        sid = str(row['id'])
+        assert sid in ('7', '8', '10'), sid
+        calls.append(('consumer', sid))
+        status = outcomes.get(sid, 'PASS')
+        return {'status': status, 'step': {'id': sid, 'status': status,
+                'reasons': [f'current Step {sid} control: {status}']}, 'ledger': []}
+
+    monkeypatch.setattr(gates, 'evaluate', consume)
+    monkeypatch.setattr(gates, 'contracts', lambda *a: {})
+
+    @preflight.retained_steps(('7', '10'), canonical_acceptance=True)
+    def prelayout(proj, *args):
+        calls.append(('producer', '7/10'))
+        output.write_bytes(b'current prelayout output')
+        row = runner.StepResult('prelayout_signoff', 'PASS', 0, 'native control completed', [str(output)])
+        native_rows.append(row)
+        return row
+
+    @preflight.retained_step('8', canonical_acceptance=True)
+    def postcheck(proj, *args):
+        calls.append(('producer', '8'))
+        row = runner.StepResult('sdc_validation', 'PASS', 0, 'native postcheck control completed')
+        native_rows.append(row)
+        return row
+
+    def next_producer(*args, **kwargs):
+        calls.append(('producer', '15'))
+        return runner.StepResult('pnr', 'NOT_MEASURED', 0,
+            'Step 15 invocation counted; no native PnR executed',
+            reason_class=runner._V.ReasonClass.NOT_EXECUTED)
+
+    monkeypatch.setattr(runner, 'step_prelayout_signoff', prelayout)
+    monkeypatch.setattr(design, 'step_sdc_validation_post_prelayout', postcheck)
+    import librelane_contract
+    monkeypatch.setattr(librelane_contract, 'selected_mode',
+                        lambda project, step_id: 'dual' if str(step_id) == '8' else 'direct')
+    monkeypatch.setattr(runner, '_default_step15_with_backend_receipt', next_producer)
+    runner.main()
+    count = calls.count(('producer', '15'))
+    print(f'prebackend-control mode={mode} outcomes={outcomes} next_producer_invocations={count}')
+    assert all(row.status == 'PASS' for row in native_rows), 'preserve original component results'
+    assert output.read_bytes() == b'current prelayout output'
+    assert (project / 'steps' / prior_record['folder'] / 'outputs.json').is_file()
+    return project, calls, versions, rel
+
+
+@pytest.mark.parametrize('sid', ['7', '8', '10'])
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
+def test_default_main_stops_before_step15_after_complete_prelayout_rejection(
+        tmp_path, monkeypatch, sid, status):
+    project, calls, versions, rel = _prebackend_consumer_control(
+        tmp_path, monkeypatch, {sid: status})
+    records = {row['id']: row for row in versions.current_acceptance(project, 0)}
+    assert records[sid]['status'] == status
+    assert not records[sid]['canonical_pass']
+    assert calls.count(('consumer', sid)) == 1, 'never rerun the rejected consumer'
+    assert calls.count(('producer', '15')) == 0, 'complete rejection must prevent native Step 15'
+    if sid in ('7', '10'):
+        assert calls.count(('producer', '8')) == 0, 'reject before the next prebackend producer'
+    folder = project / 'steps' / records['10']['folder']
+    prior = json.loads((folder / 'before/outputs.json').read_text())['outputs']
+    row = next(item for item in prior if item['rel'] == rel)
+    assert (folder / 'before' / row['snapshot']).read_bytes() == b'prior prelayout output'
+
+
+@pytest.mark.parametrize('status', ['PASS', 'PASS_WITH_WAIVERS', 'NOT_APPLICABLE'])
+def test_default_main_advances_after_accepted_prelayout_despite_prior_failure(
+        tmp_path, monkeypatch, status):
+    project, calls, versions, _ = _prebackend_consumer_control(
+        tmp_path, monkeypatch, {sid: status for sid in ('7', '8', '10')})
+    assert calls.count(('producer', '15')) == 1
+    assert calls == [('producer', '7/10'), ('consumer', '7'), ('consumer', '10'),
+                     ('producer', '8'), ('consumer', '8'), ('producer', '15')]
+    assert all(row['status'] == status for row in versions.current_acceptance(project, 0))
+
+
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
+def test_default_main_prelayout_rejection_keeps_measured_fail_precedence(
+        tmp_path, monkeypatch, status):
+    project, calls, _, _ = _prebackend_consumer_control(
+        tmp_path, monkeypatch, {'7': status, '10': 'FAIL'})
+    assert calls.count(('producer', '15')) == 0
+    summary = json.loads(runner._pl.report_path(project, 'phase3_one_shot.json').read_text())
+    assert summary['steps_verdict'] == 'FAIL'
+    rejection = next(row for row in summary['steps'] if row['name'] == 'canonical_prelayout_acceptance')
+    assert rejection['status'] == 'FAIL' and rejection['extras']['step_id'] in ('7', '10')
+
+
+@pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
+def test_ultra_keeps_existing_prelayout_component_behavior(tmp_path, monkeypatch, status):
+    _, calls, _, _ = _prebackend_consumer_control(
+        tmp_path, monkeypatch, {'8': status}, mode='ultra')
+    assert calls.count(('producer', '15')) == 1
+    assert not any(kind == 'consumer' for kind, _ in calls)
+
+
 def test_default_floorplan_records_synthesis_under_the_current_sdc_before_native_pnr(tmp_path, monkeypatch):
     import drv_stage_receipts as stages
     from _ppa import timing
