@@ -1092,3 +1092,129 @@ def test_relative_root_retains_native_handoff_refusals(
         bind_selected_interface(root, content)
     assert reason in str(refusal.value), str(refusal.value)
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+def _public_byte8_split_project(tmp_path, monkeypatch):
+    """Literal public interface shape; existing SOURCE_CONTROL handoff publisher.
+
+    Only fixture input construction is specialized. Native synthesis is not
+    executed or claimed; the current publisher/binding/consumers are real.
+    """
+    import sys
+    original = _selected_project
+    rtl = """module core(input clk, input rst, input [7:0] i_sram_rdata,
+ output [9:0] o_sram_raddr, output [9:0] o_sram_waddr,
+ output [7:0] o_sram_wdata, output o_sram_we);
+endmodule
+"""
+    def selected(parent):
+        project = original(parent)
+        doc = project / "input/docs/L3_external_interface.md"
+        doc.write_text("""# L3 — External interface
+The external SRAM protocol and pin realization are delegated to the selected declaration.
+| Signal | Width | Direction | Description |
+|---|---|---|---|
+| `o_sram_addr` | 10 | output | address (typical) |
+| `o_sram_wdata` | 8 | output | write byte |
+| `i_sram_rdata` | 8 | input | read byte |
+| `o_sram_we` | 1 | output | write enable |
+""")
+        spec = {"top_module": "core", "top_ports": [
+            _p("clk", "input", False), _p("rst", "input", False),
+            _p("o_sram_addr", "output", False, 10),
+            _p("o_sram_wdata", "output", False, 8),
+            _p("i_sram_rdata", "input", False, 8),
+            _p("o_sram_we", "output", False),
+        ]}
+        (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(json.dumps(spec))
+        (project / "phase2/stage2/synth/core_synth.v").write_text(rtl)
+        (project / "phase2/stage1/rtl/SOURCE_MANIFEST.json").write_text(json.dumps({
+            "reused_ip": True, "renamed_interfaces": [{"l9": ["o_sram_addr"],
+                "rtl": ["o_sram_raddr", "o_sram_waddr"]}]}))
+        (project / "plugin_output/declaration.json").write_text(json.dumps({
+            "top_module": "core",
+            "sram_interface_protocol": "sdp8_raddr_waddr_wdata_rdata_we_sync0r",
+            "sram_interface": {"read_address": "o_sram_raddr", "write_address": "o_sram_waddr",
+                "read_data": "i_sram_rdata", "write_data": "o_sram_wdata",
+                "write_enable": "o_sram_we", "read_latency_cycles": 0}}))
+        return project
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_selected_project", selected)
+    monkeypatch.setattr(module, "STAGED_TOP", rtl)
+    monkeypatch.setattr(module, "NETLIST", rtl)
+    return _selected_native_handoff_project(tmp_path)
+
+
+@pytest.mark.parametrize("consumer", ["scaffold", "shared_parser", "spec_default", "spec_explicit"])
+@pytest.mark.parametrize("control", ["current", "no_delegation", "required_source", "forged_binding",
+    "wrong_width", "wrong_direction", "missing_target", "no_mapping", "stale_handoff", "missing_handoff"])
+def test_public_byte8_split_interface_reaches_current_consumers(tmp_path, monkeypatch, consumer, control):
+    import copy
+    import hashlib
+    import subprocess
+    import phase2_scaffold_gen as scaffold
+    from _specrtl_common import extract_spec_contract
+    project = _public_byte8_split_project(tmp_path, monkeypatch)
+    path = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    bound = json.loads(path.read_text())
+    assert bound["selected_interface_binding"]["document_examples_not_implemented"] == ["o_sram_addr"]
+    if control == "no_delegation":
+        (project / "plugin_output/declaration.json").write_text(json.dumps({"top_module": "core"}))
+    elif control == "forged_binding":
+        doc = project / "input/docs/L3_external_interface.md"
+        doc.write_text(doc.read_text().replace("address (typical)",
+            "address; mandatory fixed name; MUST implement o_sram_addr"))
+        bound["selected_interface_binding"]["selected_source_sha256"] = "0" * 64
+    elif control in {"required_source", "wrong_width", "wrong_direction"}:
+        for port in bound["ports"]:
+            if control == "required_source" and port["name"] == "o_sram_addr": port["required"] = True
+            if control == "wrong_width" and port["name"] == "o_sram_raddr": port["width"] = 9
+            if control == "wrong_direction" and port["name"] == "o_sram_raddr": port["direction"] = "input"
+    elif control in {"missing_target", "no_mapping"}:
+        mf = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+        mapping = [] if control == "no_mapping" else [{"l9": ["o_sram_addr"], "rtl": ["absent_sram_addr"]}]
+        mf.write_text(json.dumps({"reused_ip": True, "renamed_interfaces": mapping}))
+    elif control == "stale_handoff":
+        raw = project / "phase3/librelane/02-yosys-synthesis/core.nl.v"
+        raw.write_text(raw.read_text() + "// current native-source bytes changed\n")
+    elif control == "missing_handoff":
+        (project / "phase3/librelane/02-yosys-synthesis/vibeic_receipt.json").unlink()
+    if control in {"required_source", "wrong_width", "wrong_direction"}:
+        # Keep rosters consistent so the named electrical/mandatory guard runs.
+        for key in ("top_ports", "top_module_pins"):
+            if key in bound: bound[key] = copy.deepcopy(bound["ports"])
+    path.write_text(json.dumps(bound))
+    before = path.read_bytes()
+    result = {"scope": "actual selected-interface consumers; synthesis ancestor SOURCE_CONTROL, not native EDA/IC",
+        "consumer": consumer, "control": control, "l9_before_sha256": hashlib.sha256(before).hexdigest()}
+    if consumer.startswith("spec_"):
+        report = project / "actual-conformance.json"
+        argv = [sys.executable, str(PROGRAMS / "spec_conformance_check.py"), "--spec", str(path),
+            "--rtl-dir", str(project / "phase2/stage2/synth"), "--json", str(report)]
+        if consumer == "spec_explicit": argv.extend(["--top", "core"])
+        observed = subprocess.run(argv, capture_output=True, text=True)
+        result.update(argv=argv, rc=observed.returncode, stdout=observed.stdout,
+            stderr=observed.stderr, findings=json.loads(report.read_text()))
+        accepted = observed.returncode == 0
+    else:
+        try:
+            if consumer == "scaffold":
+                rows = scaffold.derive_signals({"channels": [{"name": "o_sram_addr", "direction": "output", "width": 10}]},
+                    bound, project=project)
+            else:
+                rows = [vars(port) for port in extract_spec_contract(path.read_text(), is_json=True, project=project).ports]
+            result["ports"] = rows
+            accepted = "o_sram_addr" not in {row["name"] for row in rows}
+        except (ValueError, KeyError) as error:
+            result["refusal"] = str(error)
+            accepted = False
+    result.update(accepted=accepted, l9_after_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    (project / "actual-public-split-values.json").write_text(json.dumps(result, indent=2) + "\n")
+    assert accepted == (control == "current"), result
+    assert path.read_bytes() == before
+    if control == "current" and not consumer.startswith("spec_"):
+        rows = {row["name"]: row for row in result["ports"]}
+        assert set(rows) == {"clk", "rst", "o_sram_raddr", "o_sram_waddr", "o_sram_wdata", "i_sram_rdata", "o_sram_we"}
+        assert rows["o_sram_raddr"]["width"] == rows["o_sram_waddr"]["width"] == 10
+        assert rows["o_sram_wdata"]["width"] == rows["i_sram_rdata"]["width"] == 8
+

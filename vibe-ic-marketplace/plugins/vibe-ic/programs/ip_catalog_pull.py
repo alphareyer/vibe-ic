@@ -1467,7 +1467,7 @@ def catalog_local_corrections(matches: List[CatalogMatch]) -> List[Path]:
     return paths
 
 
-def _measure_catalog_glue_context(support, parent_rtl, current_rtl, authored,
+def _measure_catalog_glue_context(project, support, parent_rtl, current_rtl, authored,
                                   patch, challenge, profile):
     """Repeat the catalog's actual component challenge on its full glue context.
 
@@ -1482,6 +1482,45 @@ def _measure_catalog_glue_context(support, parent_rtl, current_rtl, authored,
         raise ValueError("catalog native challenge population is incomplete")
     positive = len(positive_names)
     top = cases[0]["compile_argv"][cases[0]["compile_argv"].index("-s") + 1]
+    import _container_exec as ce
+    import container_image_provenance as cip
+    import design_one_shot_runner as runner
+    import librelane_contract as lc
+    from _docker_memory import docker_memory_flags
+    declared = runner._declared_container_image(project, "")
+    local = ce.no_container_route()
+    def actual_image_id(reference):
+        try:
+            return (lc.local_image_attestation(reference)["image_id"] if local
+                    else cip._resolve_image_id(reference))
+        except lc.Refusal as exc:
+            raise ValueError(str(exc)) from exc
+    try:
+        image = declared["declared_image_ref"] or lc.resolve_image(project, record=False)
+    except lc.Refusal as exc:
+        raise ValueError(str(exc)) from exc
+    image_id = actual_image_id(image)
+    if not image_id:
+        raise ValueError("selected catalog native image is not locally inspectable")
+    required = declared["require_image"]
+    required_id = (image_id if required == image else actual_image_id(required)) if required else None
+    if ((declared["declared_image_id"] and declared["declared_image_id"] != image_id) or
+            (required and required_id != image_id)):
+        raise ValueError("selected catalog native image differs from the run's image identity")
+
+    def run_native(argv, work):
+        command = ["docker", "run", "--rm", "--network", "none",
+                   *([] if local else ["--cpus", "2"]), *docker_memory_flags(),
+                   "-v", f"{project.resolve()}:{project.resolve()}",
+                   "--workdir", str(work.resolve()), image, "--skip", *argv]
+        try:
+            result = lc.run_container(command, probe_deadline_s=30)
+        except lc.Refusal as exc:
+            raise ValueError(str(exc)) from exc
+        return result, {"image_ref": str(image), "image_id": image_id,
+                        "route": "attested_local" if local else "docker_run",
+                        "cwd": work.relative_to(project).as_posix()}
+
     receipts = {}
     for arm in ("parent_red", "candidate_green"):
         work = support / ("native_" + arm)
@@ -1517,14 +1556,15 @@ def _measure_catalog_glue_context(support, parent_rtl, current_rtl, authored,
             argv = ["iverilog", "-g2012", "-I", ".", "-s", top,
                     *[f"-P{top}.{key}={value}" for key, value in params.items()],
                     "-o", binary, "../" + challenge.name, *sources]
-            cc = subprocess.run(argv, cwd=work, capture_output=True, text=True, timeout=30)
+            cc, compile_execution = run_native(argv, work)
             row = {"case": case, "compile_argv": argv, "compile_rc": cc.returncode,
-                   "compile_stdout": cc.stdout, "compile_stderr": cc.stderr}
+                   "compile_stdout": cc.stdout, "compile_stderr": cc.stderr,
+                   "compile_execution": compile_execution}
             if cc.returncode == 0:
-                run = subprocess.run(["vvp", binary], cwd=work, capture_output=True,
-                                     text=True, timeout=30)
+                run, native_execution = run_native(["vvp", binary], work)
                 row.update(native_argv=["vvp", binary], native_rc=run.returncode,
                            stdout=run.stdout, stderr=run.stderr,
+                           native_execution=native_execution,
                            compiled_vvp_sha256=_sha256_file(work / binary))
             rows.append(row)
         compile_rc = int(any(row["compile_rc"] != 0 for row in rows))
@@ -1612,7 +1652,7 @@ def adopt_catalog_local_correction(project: Path, matches: List[CatalogMatch],
                 if (receipt["rtl"] != inventory or receipt["tb_sha256"] != _sha256_file(challenge) or
                         {row["name"]: row["rc"] for row in receipt["results"]} != {"compile": 0, "run": want}):
                     raise ValueError("sealed catalog challenge does not bind its original inventory/outcome")
-            measured = _measure_catalog_glue_context(support, parent / "phase2/stage1/rtl",
+            measured = _measure_catalog_glue_context(project, support, parent / "phase2/stage1/rtl",
                                                      project / "phase2/stage1/rtl", authored,
                                                      _local_json(_local_ref(project, copy_source("patch"))),
                                                      challenge, profile)

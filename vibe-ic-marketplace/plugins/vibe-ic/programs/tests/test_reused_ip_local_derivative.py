@@ -859,3 +859,122 @@ def test_published52_producer_republishes_manifest_through_current_consumer(tmp_
     assert emitted['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:' + _h(mf)
     assert repeated['status'] == pull.PIN_VERIFIED, receipt
     assert receipt['history_preserved'] and receipt['repeat_idempotent'], receipt
+
+
+@pytest.mark.parametrize('order', ['glue_then_derivative', 'derivative_then_glue'])
+def test_catalog_glue_remeasurement_uses_selected_eda_image(public_mapper_project,
+                                                          monkeypatch, order):
+    """SOURCE_CONTROL public ancestry; real selected-image native challenge.
+
+    The external host driver removes only compiler discovery, retaining Docker
+    and Git. In-image qualification uses the existing host-CID attested route.
+    Neither route substitutes a successful tool result or a sealed certificate.
+    """
+    import os
+    import librelane_contract as lc
+    import _container_exec as ce
+    import provenance_output_hash_completeness_check as provenance
+    project, match, registered = public_mapper_project
+    image = os.environ['VIBEIC_EDA_IMAGE']
+    image_id = (lc.local_image_attestation(image)['image_id'] if ce.no_container_route()
+                else os.environ['VIBEIC_TEST_IMAGE_ID'])
+    _json(project / 'reports/container_image.json', {
+        'image_ref': image, 'image_id': image_id, 'require_image': image})
+    # Explicit run selection must win over a different resolver fallback.
+    monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', 'registry.invalid/unselected:latest')
+    calls = []
+    original_run = lc.run_container
+    def actual_run(argv, **kwargs):
+        result = original_run(argv, **kwargs)
+        calls.append({'argv': argv, 'actual_argv': result.args, 'rc': result.returncode})
+        return result
+    monkeypatch.setattr(lc, 'run_container', actual_run)
+    host_missing = os.environ.get('VIBEIC_TEST_HOST_CATALOG_TRANSPORT') == '1'
+    if host_missing:
+        tools = project.parent / 'host_tools'
+        tools.mkdir()
+        for name in ('docker', 'git', 'sh'):
+            executable = shutil.which(name)
+            assert executable, name
+            (tools / name).symlink_to(executable)
+        monkeypatch.setenv('PATH', str(tools))
+        assert shutil.which('iverilog') is None and shutil.which('vvp') is None
+    pull.pull_all_catalog_matches(project, [match], official_only=True,
+                                  apply_corrections=order == 'derivative_then_glue')
+    previous = (project / 'provenance.jsonl').read_bytes()
+    first_manifest = json.loads((project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json').read_text())
+    native_inputs = {'rtl': pull._local_inventory(project / 'phase2/stage1/rtl'),
+                     'catalog_data': {p.name: _h(p) for p in sorted(
+                         (registered / 'local_derivatives').iterdir()) if p.is_file()},
+                     'input_doc': _h(project / 'input/docs/L2_FRS.md'),
+                     'authored_glue': hashlib.sha256(
+                         "module top_wrapper; wire declared_glue = 1'b0; endmodule\n".encode()).hexdigest()}
+    glue = _publish_mapper_glue(project, match)
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    mf = project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    manifest = json.loads(mf.read_text())
+    state, reason = pull.verify_existing_reused_pins_outcome(project, [match], manifest)
+    p0, findings, _ = provenance.audit_counted(project)
+    native_receipts = {}
+    if manifest.get('local_derivative'):
+        record = json.loads((project / manifest['local_derivative']['path']).read_text())
+        native_receipts = {key: json.loads((project / record['proof'][key]['path']).read_text())
+                           for key in ('parent_red', 'candidate_green')}
+    observed = {'scope': 'SOURCE_CONTROL ancestors; native component only, not whole CPU/IC',
+                'order': order, 'host_compilers_absent': host_missing,
+                'selected_image': image, 'selected_image_id': image_id,
+                'input_material': native_inputs,
+                'publisher': glue, 'ordinary_consumer': result.status,
+                'ordinary_detail': result.detail, 'pin_consumer': state, 'pin_reason': reason,
+                'p0': p0, 'p0_findings': [(f.rule, f.detail) for f in findings],
+                'native_calls': calls, 'native_receipts': native_receipts,
+                'history_preserved': (project / 'provenance.jsonl').read_bytes().startswith(previous)}
+    _json(project / 'transport_observed.json', observed)
+    assert glue['status'] == pull.PIN_VERIFIED, observed
+    assert result.status == 'PASS_WITH_WAIVERS' and state == pull.PIN_VERIFIED, observed
+    assert p0 == 'PASS' and observed['history_preserved'], observed
+    assert len(calls) == 48, observed
+    for key, want in [('parent_red', 1), ('candidate_green', 0)]:
+        receipt = native_receipts[key]
+        assert {r['name']: r['rc'] for r in receipt['results']} == {'compile': 0, 'run': want}
+        rows = receipt['native_measurements']['case_rows']
+        positive = len(receipt['positive_cases'])
+        assert all(r['compile_rc'] == 0 for r in rows)
+        assert all(r['native_rc'] == 1 for r in rows[positive:])
+        assert all(r['compile_execution']['image_id'] == r['native_execution']['image_id'] == image_id
+                   for r in rows)
+        assert all('top_wrapper.v' in r['compile_argv'] and
+                   r['compile_argv'][r['compile_argv'].index('-o') + 2].startswith('../')
+                   for r in rows)
+    if order == 'derivative_then_glue':
+        assert manifest['local_derivative'] != first_manifest['local_derivative']
+        assert (project / first_manifest['local_derivative']['path']).is_file()
+    before = _authored_metadata_bytes(project)
+    again = pull.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])
+    assert again['already_current'] and _authored_metadata_bytes(project) == before
+    assert len(calls) == 48
+
+
+def test_catalog_glue_remeasurement_refuses_changed_selected_image_identity(
+        public_mapper_project, monkeypatch):
+    import os
+    import librelane_contract as lc
+    project, match, _ = public_mapper_project
+    pull.pull_all_catalog_matches(project, [match], official_only=True)
+    _json(project / 'reports/container_image.json', {
+        'image_ref': os.environ['VIBEIC_EDA_IMAGE'],
+        'image_id': 'sha256:' + '12' * 32, 'require_image': os.environ['VIBEIC_EDA_IMAGE']})
+    calls = []
+    original_run = lc.run_container
+    def actual_run(argv, **kwargs):
+        calls.append(argv)
+        return original_run(argv, **kwargs)
+    monkeypatch.setattr(lc, 'run_container', actual_run)
+    before = _authored_metadata_bytes(project)
+    glue = _publish_mapper_glue(project, match)
+    observed = {'publisher': glue, 'native_calls': calls,
+                'metadata_unchanged': _authored_metadata_bytes(project) == before}
+    _json(project / 'transport_identity_observed.json', observed)
+    assert glue['status'] != pull.PIN_VERIFIED, observed
+    assert 'image identity' in glue['reason'], observed
+    assert not calls and observed['metadata_unchanged'], observed
