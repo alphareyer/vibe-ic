@@ -74,9 +74,14 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+
+# Keep sibling imports available when this helper is loaded by absolute path.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 
@@ -131,8 +136,8 @@ def _digest_pairs(pairs: Sequence[Tuple[str, str]]) -> str:
 def load_steps(flow_yaml: Path) -> List[Dict[str, Any]]:
     """The flow's steps, or [] when the flow cannot be read (-> fail closed)."""
     try:
-        import yaml  # noqa: PLC0415 — optional at import time, required here
-        doc = yaml.safe_load(Path(flow_yaml).read_text(encoding="utf-8"))
+        import _flow_yaml  # noqa: PLC0415 — optional at import time, required here
+        doc = _flow_yaml.load(Path(flow_yaml), encoding="utf-8")
     except Exception:  # noqa: BLE001 — unreadable flow must not raise here
         return []
     steps = (doc or {}).get("steps") or []

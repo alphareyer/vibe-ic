@@ -169,9 +169,9 @@ def _is_bare_container(step: dict) -> bool:
 
 def _load_flow(flow_yaml: Path = FLOW_YAML) -> Tuple[dict, List[dict]]:
     """Return (top_level_doc, [real step dicts in yaml order])."""
-    import yaml  # available — flow_compliance_check.py uses it
+    import _flow_yaml
 
-    doc = yaml.safe_load(flow_yaml.read_text(encoding="utf-8"))
+    doc = _flow_yaml.load(flow_yaml, encoding="utf-8")
     if not isinstance(doc, dict):
         doc = {}
     steps = [s for s in _iter_steps(doc) if not _is_bare_container(s)]

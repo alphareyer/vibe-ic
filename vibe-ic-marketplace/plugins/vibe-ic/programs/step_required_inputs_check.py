@@ -125,7 +125,8 @@ LEDGER_REL = "reports/write_ledger.json"
 # --------------------------------------------------------------------------- #
 def load_flow(flow_def: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     try:
-        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+        import _flow_yaml
+        doc = _flow_yaml.load(flow_def, encoding="utf-8")
     except (OSError, yaml.YAMLError) as exc:
         return [], f"flow unreadable: {exc}"
     steps = (doc or {}).get("steps") or []
