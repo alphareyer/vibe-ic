@@ -798,3 +798,83 @@ def test_claim_scope_shipped_cli(tmp_path, label):
     assert doc["summary"]["claims_pass"] is claims, (label, doc)
     assert {f.split(" ", 1)[0] for f in doc["failures"]} == (
         _MISSING_SUCCESS_PROVENANCE if claims else set()), (label, doc)
+
+
+# Reopened #3081, public comment 2026-10-13T16:53:52Z. These
+# prompt-derived neutral reports do not claim to reproduce an unpublished
+# reporter matrix. Each uses the real API, CLI and flow subprocess consumer.
+_REOPENED_PREDICATE_CASES = {
+    "repaired-reports": (
+        "Hardware failed, after the unit was repaired reports PASS.", True),
+    "wake-reports": (
+        "Hardware failed, in the wake of the last run reports PASS.", True),
+    "no-longer-reports": ("Hardware no longer reports PASS.", False),
+    "awaiting-yet-reports": (
+        "Hardware awaiting review yet reports PASS.", True),
+    "while-reports": (
+        "Hardware failed, while the test ran reports PASS.", True),
+    "when-reports": (
+        "Hardware failed, when it ran reports PASS.", True),
+    "restored-reports": (
+        "Hardware failed, restored then reports PASS.", True),
+    "earlier-not-fail": (
+        "Hardware did not fail; Hardware then reports PASS.", True),
+    "other-testing-subject": (
+        "Hardware is not PASS, the testing reports PASS.", False),
+    "other-controller-subject": (
+        "Hardware is not PASS, the power controller reports PASS.", False),
+    "pending-expert": ("Hardware awaiting expert PASS.", False),
+    "denied-predicate": ("Hardware is *not* PASS.", False),
+    "coordinated-controller-subject": (
+        "Hardware is not PASS, while the power controller has completed and reports PASS.",
+        False),
+}
+
+
+@pytest.mark.parametrize("label", _REOPENED_PREDICATE_CASES)
+def test_reopened_hardware_predicate_actual_consumers(tmp_path, label):
+    sys.path.insert(0, str(PROG.parent))
+    import result_md_audit_provenance_check as chk
+    import flow_compliance_check as flow
+    sentence, claims = _REOPENED_PREDICATE_CASES[label]
+    body = "STATUS: FAIL\n" + sentence + "\n"
+    (tmp_path / "RESULT.md").write_text(body)
+    failures, warnings, summary = chk.inspect(tmp_path)
+    argv = [sys.executable, str(PROG), str(tmp_path),
+            "--json", str(tmp_path / "cli.json")]
+    actual = subprocess.run(argv, capture_output=True, text=True)
+    cli = json.loads((tmp_path / "cli.json").read_text())
+    previous_ledger = list(flow._GATE_LEDGER)
+    flow._GATE_LEDGER.clear()
+    try:
+        passed, output = flow._check_program_exit_zero(
+            tmp_path, "result_md_audit_provenance_check . --json flow.json")
+        ledger = [dict(row) for row in flow._GATE_LEDGER]
+    finally:
+        flow._GATE_LEDGER[:] = previous_ledger
+    flow_doc = json.loads((tmp_path / "flow.json").read_text())
+    values = {
+        "label": label, "result_body": body, "expected_claims_pass": claims,
+        "api": {"summary": summary, "failures": failures,
+                "warnings": warnings},
+        "cli": {"argv": argv, "returncode": actual.returncode,
+                "stdout": actual.stdout, "stderr": actual.stderr,
+                "report": cli},
+        "flow": {"passed": passed, "output": output,
+                 "ledger": ledger, "report": flow_doc},
+    }
+    (tmp_path / "actual-consumer-values.json").write_text(
+        json.dumps(values, indent=2) + "\n")
+    expected_findings = _MISSING_SUCCESS_PROVENANCE if claims else set()
+    assert summary["claims_pass"] is claims, values
+    assert {f.split(" ", 1)[0] for f in failures} == expected_findings, values
+    assert warnings == [], values
+    assert actual.returncode == (1 if claims else 0), values
+    assert cli["summary"]["claims_pass"] is claims, values
+    assert {f.split(" ", 1)[0] for f in cli["failures"]} == expected_findings, values
+    assert passed is (not claims), values
+    assert len(ledger) == 1, values
+    assert ledger[0]["exit_code"] == (1 if claims else 0), values
+    assert ledger[0]["verdict"] == ("FAIL" if claims else "PASS"), values
+    assert flow_doc["summary"]["claims_pass"] is claims, values
+    assert {f.split(" ", 1)[0] for f in flow_doc["failures"]} == expected_findings, values

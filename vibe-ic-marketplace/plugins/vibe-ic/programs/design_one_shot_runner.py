@@ -8490,6 +8490,7 @@ def _step_rtl_gen_bound(
 
         if versioned_matches:
             from ip_catalog_pull import (pull_all_catalog_matches as _pull_versioned,
+                                         adopt_catalog_local_correction as _adopt_correction,
                                          verify_existing_reused_pins_outcome as _verify_pins,
                                          PIN_VERIFIED as _PIN_OK,
                                          PIN_UNAVAILABLE as _PIN_UNAVAILABLE)
@@ -8528,6 +8529,11 @@ def _step_rtl_gen_bound(
                     pull_audit.update(reuse_kind="LOCAL_DERIVATIVE",
                                       source_admission=_pin_why,
                                       local_derivative=existing["local_derivative"])
+                else:
+                    correction = _adopt_correction(project, versioned_matches)
+                    if correction.get("kind") != "OFFICIAL":
+                        pull_audit.update(catalog_correction=correction,
+                                          reuse_kind="LOCAL_DERIVATIVE")
             else:
                 pull_audit = _pull_versioned(
                     project, versioned_matches, official_only=True)
@@ -8538,6 +8544,14 @@ def _step_rtl_gen_bound(
                             pull_audit.get("ip_catalog_used", []), sort_keys=True),
                         extras={"ip_fetch": pull_audit,
                                 "ip_fetch_refusals": fetch_refusals})
+            correction = pull_audit.get("catalog_correction")
+            if correction and correction["status"] != _PIN_OK:
+                return StepResult(
+                    "rtl_gen", "NOT_MEASURED" if correction["status"] == _PIN_UNAVAILABLE else "FAIL",
+                    time.time() - t0, "IP_REUSE_LOCAL_CORRECTION_UNVERIFIED: " + correction["reason"],
+                    reason_class=(_V.ReasonClass.UPSTREAM_REFUSED.value
+                                  if correction["status"] == _PIN_UNAVAILABLE else None),
+                    extras={"ip_fetch": pull_audit})
             lessons_hint, hint_extras = _stage_author_knowledge_digests(project)
             skill_hint, catalog_sk_extras = _stage_fallback_skill(
                 project, "catalog-glue-author")

@@ -972,3 +972,112 @@ def test_the_isa_transcript_never_overwrites_the_scaffold_run_log(
     assert (case / "isa_suite.log").is_file()
     assert "CORE ISA" in (case / "isa_suite.log").read_text()
     assert "CORE ISA" not in (case / "run.log").read_text()
+
+
+@pytest.mark.parametrize("latency,wrong_address", [
+    (0, False), (1, False), (2, False), (0, True),
+], ids=["async0", "sync1", "pipeline2", "wrong-address"])
+def test_native_sram_read_latency_from_generated_parent(
+        tmp_path, latency, wrong_address):
+    """Public #3108's SRAM contract, not an ISA-suite qualification.
+
+    Declaration/ports, renderer, Icarus and strict transcript/tohost judge are
+    real. Reference rc0 is a SOURCE_CONTROL input to that existing judge; no
+    instruction-suite acquisition, reference emulator or owner RTL is used.
+    """
+    import subprocess
+    project = _project(
+        tmp_path, units=("I",), memsize_bytes=16, rf_storage="flops",
+        sram_interface_protocol=(
+            "sdp8_raddr_waddr_wdata_rdata_we_sync" + str(latency) + "r"))
+    address = 2 if wrong_address else 1
+    rtl = f"""`timescale 1ns/1ps
+module soc_top #(parameter memsize=16, parameter aw=$clog2(memsize)) (
+  input wire clk_i, input wire rst_i,
+  output wire [aw-1:0] o_m_waddr, output wire [7:0] o_m_wdata,
+  output wire o_m_wen, output wire [aw-1:0] o_m_raddr,
+  input wire [7:0] i_m_rdata, output wire o_m_ren, output wire o_led);
+  reg [aw-1:0] address=0;
+  reg write_enable=0;
+  integer beat;
+  assign o_m_waddr=8;
+  assign o_m_wdata=1;
+  assign o_m_wen=write_enable;
+  assign o_m_raddr=address;
+  assign o_m_ren=1;
+  assign o_led=0;
+  initial begin
+    wait (rst_i === 1'b0);
+    #1;
+    if (i_m_rdata !== 8'h19) begin
+      $display("INITIAL_VALUE_FAIL actual=%02x expected=19", i_m_rdata);
+      $fatal(1);
+    end
+    #1 address={address};
+    #1;
+    if ({latency} == 0) begin
+      if (i_m_rdata !== 8'ha6) begin
+        $display("ASYNC0_VALUE_FAIL actual=%02x expected=a6 at=%0t", i_m_rdata, $time);
+        $fatal(1);
+      end
+    end else begin
+      if (i_m_rdata !== 8'h19) begin
+        $display("CLOCKED_READ_DID_NOT_HOLD actual=%02x expected=19", i_m_rdata);
+        $fatal(1);
+      end
+      for (beat=1; beat<={latency}; beat=beat+1) begin
+        @(posedge clk_i); #1;
+        if (beat < {latency} && i_m_rdata !== 8'h19) begin
+          $display("PIPELINE_READ_EARLY actual=%02x expected=19", i_m_rdata);
+          $fatal(1);
+        end
+        if (beat == {latency} && i_m_rdata !== 8'ha6) begin
+          $display("CLOCKED_READ_VALUE_FAIL actual=%02x expected=a6", i_m_rdata);
+          $fatal(1);
+        end
+      end
+    end
+    $display("SRAM_READ_VALUE_PASS latency={latency} initial=19 next=%02x", i_m_rdata);
+    @(negedge clk_i); write_enable=1;
+    @(posedge clk_i); #1 write_enable=0;
+  end
+endmodule
+"""
+    dut = project / "phase2/stage1/rtl/soc_top.v"
+    dut.write_text(rtl)
+    facts, why = I.design_facts(project)
+    assert facts is not None, why
+    assert facts["sram"]["read_latency"] == latency
+    work = tmp_path / "native"
+    work.mkdir()
+    parent = work / "isa_tb.v"
+    parent.write_text(I.gen_tb(facts))
+    memory = bytes([0x19, 0xa6] + [0] * 14)
+    (work / "memory.hex").write_text("\n".join(f"{b:02x}" for b in memory) + "\n")
+    compile_argv = ["iverilog", "-g2012", "-s", "isa_tb", "-o", "sim",
+                    str(parent), str(dut)]
+    compiled = subprocess.run(compile_argv, cwd=work, capture_output=True, text=True)
+    assert compiled.returncode == 0, (compiled.stdout, compiled.stderr)
+    sim_argv = ["vvp", "sim", "+hex=memory.hex", "+tohost=8"]
+    simulated = subprocess.run(sim_argv, cwd=work, capture_output=True, text=True)
+    parsed = I.parse_tb_transcript(simulated.stdout)
+    verdict, reason = I.judge_tohost(0, parsed)
+    values = {
+        "scope": "native SRAM renderer component; reference rc SOURCE_CONTROL",
+        "latency": latency, "wrong_address": wrong_address,
+        "facts": facts, "memory_sha256": _sha(memory),
+        "dut_sha256": _sha(dut.read_bytes()), "parent_sha256": _sha(parent.read_bytes()),
+        "compile": {"argv": compile_argv, "returncode": compiled.returncode,
+                    "stdout": compiled.stdout, "stderr": compiled.stderr},
+        "simulation": {"argv": sim_argv, "returncode": simulated.returncode,
+                       "stdout": simulated.stdout, "stderr": simulated.stderr},
+        "strict_consumer": {"parsed": parsed, "verdict": verdict, "reason": reason},
+    }
+    (work / "native-values.json").write_text(json.dumps(values, indent=2) + "\n")
+    assert simulated.returncode == (1 if wrong_address else 0), values
+    assert verdict == (I.FAIL if wrong_address else I.PASS), values
+    if wrong_address:
+        assert "ASYNC0_VALUE_FAIL" in simulated.stdout, values
+    else:
+        assert f"SRAM_READ_VALUE_PASS latency={latency}" in simulated.stdout, values
+        assert parsed["tohost"] == 1, values

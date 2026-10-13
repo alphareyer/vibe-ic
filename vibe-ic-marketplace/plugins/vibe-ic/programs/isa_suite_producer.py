@@ -677,6 +677,10 @@ def gen_tb(facts: Dict[str, Any]) -> str:
          f"  end",
          f"  always @* rdata = rpipe[{lat - 1}];"]) if lat > 1 else (
         "  always @(posedge clk) if (ren) rdata <= mem[raddr % MEMSIZE];")
+    if lat == 0:
+        # An enabled zero-latency read follows address/memory changes without
+        # a clock edge. Keep the existing read-enable hold and clocked writes.
+        read_pipe = "  always @* if (ren) rdata = mem[raddr % MEMSIZE];"
     return f"""// Flow-authored ISA-suite testbench (isa_suite_producer). No harness copied.
 `timescale 1ns/1ps
 module isa_tb;

@@ -545,8 +545,10 @@ def pull_catalog_ip(match: CatalogMatch,
                 None if mirror_audit is None
                 else mirror_audit.get("license_check", {}).get("match")),
             "files_pulled": len(files_copied),
-            "file_license_evidence": [{"dest": f['dest'], **f['license_evidence']}
-                                      for f in files_copied],
+            "file_license_evidence": [
+                {**f['license_evidence'], "dest": _rel(f['dest']),
+                 "path": _rel(f['license_evidence']['path'])}
+                for f in files_copied],
             "file_license_refusals": file_license_refusals,
             "outputs": outputs_map,
             "outputs_sha256": sorted(f["sha256"] for f in files_copied),
@@ -730,8 +732,20 @@ def _git_clone_to_cache(match: CatalogMatch, *,
 def pull_all_catalog_matches(project: Path,
                               matches: List[CatalogMatch],
                               *, official_only: bool = False,
-                              cache_root: Optional[Path] = None) -> Dict[str, Any]:
+                              cache_root: Optional[Path] = None,
+                              apply_corrections: bool = True) -> Dict[str, Any]:
     """Pull every matching IP, return aggregated audit + update declaration.json."""
+    corrections = catalog_local_corrections(matches) if apply_corrections else []
+    if corrections:
+        # A local correction always preserves an independently fetched official
+        # parent. Mirrors never establish that parent identity.
+        official_only = True
+        if (project / "phase2/stage1/rtl/SOURCE_MANIFEST.json").is_file():
+            outcome = adopt_catalog_local_correction(project, matches, corrections)
+            prior = _local_json(project / "plugin_output/declaration.json")
+            return {**prior, "n_ips_pulled": len(matches) if outcome["status"] == PIN_VERIFIED else 0,
+                    "catalog_correction": outcome, "reuse_kind": "LOCAL_DERIVATIVE",
+                    "status": "ALREADY_FETCHED"}
     audits: List[Dict[str, Any]] = []
     for m in matches:
         audit = (pull_catalog_ip(m, project, official_only=True,
@@ -827,6 +841,11 @@ def pull_all_catalog_matches(project: Path,
         mf.setdefault("generated_by", "ip_catalog_pull")
         manifest_path.write_text(json.dumps(mf, indent=2))
 
+    if corrections and aggregated["n_ips_pulled"] == len(matches):
+        outcome = adopt_catalog_local_correction(project, matches, corrections)
+        aggregated.update(catalog_correction=outcome, reuse_kind="LOCAL_DERIVATIVE")
+        existing.update(aggregated)
+        decl_path.write_text(json.dumps(existing, indent=2))
     return aggregated
 
 
@@ -949,7 +968,8 @@ def verify_existing_official_pins_outcome(project: Path,
         # the initial pull's cache would accept unreachable or rewritten tags
         # solely because their old checkout still matches the local receipts.
         audit = pull_all_catalog_matches(reference, matches, official_only=True,
-                                         cache_root=reference / "canonical")
+                                         cache_root=reference / "canonical",
+                                         apply_corrections=False)
 
         def _scrub(text: Any) -> str:
             # The reference pull runs in a throw-away directory; its path in a
@@ -1068,8 +1088,7 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
     mf_path = _local_path(project, "phase2/stage1/rtl/SOURCE_MANIFEST.json")
     manifest = _local_json(mf_path)
     if manifest.get("reused_ip") is not True or \
-            manifest.get("generated_by") != "ip_catalog_pull" or \
-            "local_derivative" in manifest:
+            manifest.get("generated_by") != "ip_catalog_pull":
         raise ValueError("authored glue requires an official catalog parent")
     official = {}
     for pin in manifest.get("source_pins") or []:
@@ -1091,7 +1110,11 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
             raise ValueError("authored glue overlaps official or repeated source")
         authored[name] = _sha256_file(_local_path(
             project, "phase2/stage1/rtl/" + name))
-    before = {**official, **authored}
+    reused = official
+    if "local_derivative" in manifest:
+        current = _local_json(_local_ref(project, manifest["local_derivative"]))
+        reused = {name: current["current_inventory"][name] for name in official}
+    before = {**reused, **authored}
     if _local_inventory(project / "phase2/stage1/rtl") != before:
         raise ValueError("undeclared or changed staged inventory")
     decl_path = project / "plugin_output/declaration.json"
@@ -1111,7 +1134,24 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
             if not isinstance(event, dict):
                 raise ValueError("invalid existing producer provenance")
             events.append(event)
-    state, why = verify_existing_official_pins_outcome(project, matches, manifest)
+    rows = [{"path": name, "sha256": authored[name]} for name in sorted(authored)]
+    inputs = {"phase2/stage1/rtl/" + name: "sha256:" + digest
+              for name, digest in authored.items()}
+    already = (manifest.get("ai_authored_files") == rows and
+               declaration.get("ai_authored_files") == sorted(authored) and any(
+                   event.get("event") == "ip_catalog_authored_glue_inventory" and
+                   event.get("exit_code") == 0 and event.get("ai_authored_files") == rows and
+                   event.get("inputs") == inputs for event in events))
+    derivative = "local_derivative" in manifest
+    if derivative and not already:
+        outcome = adopt_catalog_local_correction(project, matches, authored_rows=rows)
+        if outcome["status"] != PIN_VERIFIED:
+            return outcome
+        manifest = _local_json(mf_path)
+        metadata_before = {path: path.read_bytes() if path.is_file() else None
+                           for path in (mf_path, decl_path, provenance_path)}
+    state, why = (verify_existing_reused_pins_outcome(project, matches, manifest)
+                  if derivative else verify_existing_official_pins_outcome(project, matches, manifest))
     if state != PIN_VERIFIED:
         return {"status": state, "reason": why, "kind": "AUTHORED_GLUE_INVENTORY"}
     # Refuse bytes changed during independent source reproduction.
@@ -1123,14 +1163,7 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
                 (path.exists() and not path.is_file()) or \
                 (path.read_bytes() if path.is_file() else None) != data:
             raise ValueError("source metadata changed before authored publication")
-    rows = [{"path": name, "sha256": authored[name]} for name in sorted(authored)]
-    inputs = {"phase2/stage1/rtl/" + name: "sha256:" + digest
-              for name, digest in authored.items()}
-    if manifest.get("ai_authored_files") == rows and \
-            declaration.get("ai_authored_files") == sorted(authored) and any(
-                event.get("event") == "ip_catalog_authored_glue_inventory" and
-                event.get("exit_code") == 0 and event.get("ai_authored_files") == rows and
-                event.get("inputs") == inputs for event in events):
+    if already:
         return {"status": PIN_VERIFIED, "kind": "AUTHORED_GLUE_INVENTORY",
                 "already_current": True, "outputs": {}}
     manifest["ai_authored_files"] = rows
@@ -1310,11 +1343,23 @@ def verify_existing_reused_pins_outcome(project: Path, matches: List[CatalogMatc
 
 
 def apply_local_derivative(project: Path, matches: List[CatalogMatch],
-                           ref: Dict[str, Any]) -> Dict[str, Any]:
+                           ref: Dict[str, Any], *, authored_rows=None) -> Dict[str, Any]:
     """Existing pull producer stages only the finite replay, retaining parent data."""
     try:
         mf_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
         manifest = _local_json(mf_path)
+        if "local_derivative" in manifest and manifest["local_derivative"] != ref:
+            successor = _local_json(_local_ref(project, ref))
+            old = _local_json(_local_ref(project, manifest["local_derivative"]))
+            if (authored_rows is None or
+                    successor.get("previous_local_derivative") != manifest["local_derivative"] or
+                    _local_ref(project, old["patch"]).read_bytes() !=
+                    _local_ref(project, successor["patch"]).read_bytes()):
+                raise ValueError("another local derivative is already declared")
+            # Only the typed glue publisher may extend this exact patch's
+            # context, using new actual full-inventory native measurements.
+            manifest = {k: v for k, v in manifest.items() if k != "local_derivative"}
+            manifest["ai_authored_files"] = authored_rows
         if "local_derivative" in manifest:
             if manifest["local_derivative"] != ref:
                 raise ValueError("another local derivative is already declared")
@@ -1387,6 +1432,192 @@ def apply_local_derivative(project: Path, matches: List[CatalogMatch],
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return {"status": PIN_MISMATCH, "kind": "LOCAL_DERIVATIVE",
                 "reason": "LOCAL_DERIVATIVE_REFUSED: " + str(exc)}
+
+
+def catalog_local_corrections(matches: List[CatalogMatch]) -> List[Path]:
+    """Catalog-owned correction data; upstream errata retain their old meaning."""
+    from _flow_yaml import load
+    paths = []
+    for match in matches:
+        manifest = Path(match.manifest_path)
+        if not manifest.is_file():
+            continue
+        data = load(manifest)
+        correction = data.get("local_derivative")
+        if correction:
+            path = (manifest.parent / correction).resolve()
+            if not path.is_relative_to(manifest.parent.resolve()):
+                raise ValueError("catalog local correction is outside its entry")
+            paths.append(path)
+    return paths
+
+
+def _measure_catalog_glue_context(support, parent_rtl, current_rtl, authored,
+                                  patch, challenge, profile):
+    """Repeat the catalog's actual component challenge on its full glue context.
+
+    The original sealed certificate is retained. These are new native receipts,
+    with relative arguments that remain bound when a held Step1 is published.
+    """
+    cases = profile["native_measurements"]["case_rows"]
+    positive_names = profile["positive_cases"]
+    negative_names = profile["negative_cases"]
+    if (not positive_names or not negative_names or
+            [row["case"]["name"] for row in cases] != positive_names + negative_names):
+        raise ValueError("catalog native challenge population is incomplete")
+    positive = len(positive_names)
+    top = cases[0]["compile_argv"][cases[0]["compile_argv"].index("-s") + 1]
+    receipts = {}
+    for arm in ("parent_red", "candidate_green"):
+        work = support / ("native_" + arm)
+        shutil.copytree(parent_rtl, work)
+        (work / "SOURCE_MANIFEST.json").unlink()
+        for name in authored:
+            shutil.copy2(current_rtl / name, work / name)
+        if arm == "candidate_green":
+            for row in patch["files"]:
+                path = work / row["path"]
+                data = path.read_bytes()
+                if _sha256_file(path) != row["sha256_before"]:
+                    raise ValueError("native context differs from the exact patch parent")
+                for edit in row["edits"]:
+                    old = edit["before"].encode()
+                    if not old or data.count(old) != 1:
+                        raise ValueError("native context patch is ambiguous")
+                    data = data.replace(old, edit["after"].encode(), 1)
+                if hashlib.sha256(data).hexdigest() != row["sha256_after"]:
+                    raise ValueError("native context patch digest differs")
+                path.write_bytes(data)
+        inventory = _local_inventory(work)
+        sources = sorted(name for name in inventory if Path(name).suffix in (".v", ".sv"))
+        rows = []
+        generated = work / "native_outputs"
+        generated.mkdir()
+        for index, original in enumerate(cases):
+            case = original["case"]
+            params = {key: value for key, value in case.items() if key != "name"}
+            if not params or any(type(value) is not int for value in params.values()):
+                raise ValueError("catalog native challenge parameters are not numeric")
+            binary = f"native_outputs/case{index}.vvp"
+            argv = ["iverilog", "-g2012", "-I", ".", "-s", top,
+                    *[f"-P{top}.{key}={value}" for key, value in params.items()],
+                    "-o", binary, "../" + challenge.name, *sources]
+            cc = subprocess.run(argv, cwd=work, capture_output=True, text=True, timeout=30)
+            row = {"case": case, "compile_argv": argv, "compile_rc": cc.returncode,
+                   "compile_stdout": cc.stdout, "compile_stderr": cc.stderr}
+            if cc.returncode == 0:
+                run = subprocess.run(["vvp", binary], cwd=work, capture_output=True,
+                                     text=True, timeout=30)
+                row.update(native_argv=["vvp", binary], native_rc=run.returncode,
+                           stdout=run.stdout, stderr=run.stderr,
+                           compiled_vvp_sha256=_sha256_file(work / binary))
+            rows.append(row)
+        compile_rc = int(any(row["compile_rc"] != 0 for row in rows))
+        run_rc = int(any(row.get("native_rc") != 0 for row in rows[:positive]))
+        receipt = {"scope": "Actual full-inventory component challenge with authored glue; no whole CPU/IC verdict",
+                   "results": [{"name": "compile", "rc": compile_rc}, {"name": "run", "rc": run_rc}],
+                   "tb_sha256": _sha256_file(challenge), "rtl": inventory,
+                   "native_measurements": {"case_rows": rows, "terminal": True},
+                   "positive_cases": positive_names, "negative_cases": negative_names}
+        target = support / (arm + "-glue.json")
+        target.write_text(json.dumps(receipt, indent=2) + "\n")
+        receipts[arm] = target
+        if compile_rc or any(row.get("native_rc") != 1 for row in rows[positive:]):
+            raise ValueError("native full-context compile or negative challenge is incomplete")
+    return receipts
+
+
+def adopt_catalog_local_correction(project: Path, matches: List[CatalogMatch],
+                                   corrections: Optional[List[Path]] = None, *,
+                                   authored_rows=None) -> Dict[str, Any]:
+    """Publish the existing LOCAL_DERIVATIVE contract from sealed catalog data.
+
+    Native evidence is a component source challenge on the declared exact
+    inventory. It never supplies this project's functional or physical verdict.
+    Existing choice, history and independent official-parent checks still belong
+    to apply_local_derivative and verify_existing_reused_pins_outcome.
+    """
+    try:
+        corrections = catalog_local_corrections(matches) if corrections is None else corrections
+        if not corrections:
+            return {"status": PIN_VERIFIED, "kind": "OFFICIAL"}
+        manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+        manifest = _local_json(manifest_path)
+        previous_ref = manifest.get("local_derivative")
+        if previous_ref and authored_rows is None:
+            return apply_local_derivative(project, matches, manifest["local_derivative"])
+        if len(corrections) != 1:
+            return {"status": PIN_UNAVAILABLE, "reason": "combined catalog correction evidence is not measured"}
+        recipe_path = corrections[0]
+        recipe = _local_json(recipe_path)
+        official = {Path(name).name: digest for pin in manifest["source_pins"]
+                    for name, digest in pin["files_sha256"].items()}
+        authored = {row["path"]: row["sha256"] for row in
+                    (authored_rows if authored_rows is not None else manifest.get("ai_authored_files") or [])}
+        support = project / ("catalog_local_derivative_" + str(time.time_ns()))
+        # Never overwrite a prior attempt or a caller's local choices.
+        support.mkdir(exist_ok=False)
+        if previous_ref:
+            previous = _local_json(_local_ref(project, previous_ref))
+            parent = _local_path(project, previous["parent_project"], directory=True)
+        else:
+            parent = support / "parent"
+            parent_rtl = parent / "phase2/stage1/rtl"
+            parent_rtl.mkdir(parents=True)
+            for name in official:
+                shutil.copy2(_local_path(project, "phase2/stage1/rtl/" + name), parent_rtl / name)
+            parent_manifest = {key: value for key, value in manifest.items()
+                               if key not in ("local_derivative", "ai_authored_files")}
+            (parent_rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(parent_manifest, indent=2) + "\n")
+            shutil.copy2(project / "provenance.jsonl", parent / "provenance.jsonl")
+        def ref(path):
+            return {"path": path.relative_to(project).as_posix(), "sha256": _sha256_file(path)}
+        def copy_source(name):
+            source = (recipe_path.parent / recipe[name]).resolve()
+            if not source.is_relative_to(recipe_path.parent.resolve()):
+                raise ValueError("catalog correction data is outside its recipe")
+            target = support / source.name
+            shutil.copy2(source, target)
+            return ref(target)
+        from ip_catalog_query import versioned_reuse_evidence
+        obligations = []
+        for path in sorted((project / "input").rglob("*")):
+            if path.is_file() and path.suffix in (".md", ".txt", ".json"):
+                for line in path.read_text().splitlines():
+                    if any(versioned_reuse_evidence({"_full_text": line}, match)[0]
+                           for match in matches):
+                        obligations.append({**ref(path), "quote": line})
+        proof = {key: copy_source(key) for key in ("challenge", "parent_red", "candidate_green")}
+        if authored:
+            challenge = _local_ref(project, proof["challenge"])
+            profile = _local_json(_local_ref(project, proof["candidate_green"]))
+            for key, inventory, want in (("parent_red", official, 1),
+                                          ("candidate_green", recipe["current_inventory"], 0)):
+                receipt = _local_json(_local_ref(project, proof[key]))
+                if (receipt["rtl"] != inventory or receipt["tb_sha256"] != _sha256_file(challenge) or
+                        {row["name"]: row["rc"] for row in receipt["results"]} != {"compile": 0, "run": want}):
+                    raise ValueError("sealed catalog challenge does not bind its original inventory/outcome")
+            measured = _measure_catalog_glue_context(support, parent / "phase2/stage1/rtl",
+                                                     project / "phase2/stage1/rtl", authored,
+                                                     _local_json(_local_ref(project, copy_source("patch"))),
+                                                     challenge, profile)
+            proof.update({key: ref(path) for key, path in measured.items()})
+        record = {"schema": LOCAL_DERIVATIVE_SCHEMA, "kind": "LOCAL_DERIVATIVE",
+                  "parent_project": str(parent.relative_to(project)),
+                  "parent_manifest": ref(parent / "phase2/stage1/rtl/SOURCE_MANIFEST.json"),
+                  "parent_provenance": ref(parent / "provenance.jsonl"),
+                  "patch": copy_source("patch"), "current_inventory": {**recipe["current_inventory"], **authored},
+                  "local_provenance": recipe["local_provenance"],
+                  "input_obligations": obligations,
+                  "proof": proof}
+        if previous_ref:
+            record["previous_local_derivative"] = previous_ref
+        path = support / "record.json"
+        path.write_text(json.dumps(record, indent=2) + "\n")
+        return apply_local_derivative(project, matches, ref(path), authored_rows=authored_rows)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError,
+            subprocess.TimeoutExpired) as exc:
+        return {"status": PIN_UNAVAILABLE, "reason": "catalog local correction is not admitted: " + str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1490,6 +1721,10 @@ def main(argv: List[str]) -> int:
 
     print()
     aggregated = pull_all_catalog_matches(project, matches)
+    correction = aggregated.get("catalog_correction")
+    if correction and correction["status"] != PIN_VERIFIED:
+        print(json.dumps(correction, indent=2))
+        return 1
     print(f"=== pull complete ===")
     print(f"  pulled: {aggregated['n_ips_pulled']}  "
           f"rejected: {aggregated['n_ips_rejected']}  "

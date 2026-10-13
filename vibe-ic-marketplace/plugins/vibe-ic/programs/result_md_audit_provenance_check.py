@@ -73,7 +73,7 @@ import fmeda_fault_injection_coverage as _fmeda  # noqa: E402
 # The AUDITOR's own in-progress files are declared in ONE place (R-0915-168); a freshness judge
 # must ask that declaration rather than carry its own suffix list. See `_is_flow_output`.
 import _path_layout as _pl_shapes  # noqa: E402
-from _prose_polarity import NEGATION_RE, sentence_scope  # noqa: E402
+from _prose_polarity import DENIAL_RETIRED_RE, NEGATION_RE, sentence_scope  # noqa: E402
 
 WAIVER_KEY = "result_md_audit_provenance_intentional"
 WAIVER_MIN_LEN = 40
@@ -168,6 +168,7 @@ _HARDWARE_PENDING_SUFFIX_RE = re.compile(
     r"^[\s*_`]*(?:(?:is|was|remains)\s+)?(?:still\s+)?"
     r"(?:pending|await(?:ing|s)?|not\s+(?:yet\s+)?verified)\b", re.IGNORECASE)
 _OTHER_CELL_SUBJECT_RE = re.compile(r"\b(?:formal|synthesis)\b", re.IGNORECASE)
+_HARDWARE_REPORT_RE = re.compile(r"\breports?[\s*_`]*$", re.IGNORECASE)
 
 
 def _immediately_denied(prefix: str) -> bool:
@@ -175,7 +176,42 @@ def _immediately_denied(prefix: str) -> bool:
     return any(re.fullmatch(r"[\s*_`]*(?:yet[\s*_`]+)?"
                             r"(?:(?:a|an|the)[\s*_`]+)?",
                             prefix[denial.end():], re.IGNORECASE)
-               for denial in NEGATION_RE.finditer(prefix))
+               for pattern in (NEGATION_RE, DENIAL_RETIRED_RE)
+               for denial in pattern.finditer(prefix))
+
+
+def _hardware_report_prefix(prefix: str) -> Optional[str]:
+    """Bind a reporting predicate to hardware, or reject its new subject.
+
+    A later predicate can retain the hardware subject after a completed
+    temporal clause. An explicit subject such as ``the controller reports``
+    is a separate assertion. Pending/denied qualifiers apply to the current
+    predicate, rather than retracting a later ``yet reports PASS`` assertion.
+    """
+    parts = re.split(r",|\b(?:but|yet)\b", prefix, flags=re.IGNORECASE)
+    current = parts[-1].strip(" *_`")
+    if len(parts) == 1:
+        # A subordinate reporting subject must also stay separate when the
+        # writer omits a comma before while/when.
+        subordinate = re.search(r"\b(?:while|when)\b", current, re.IGNORECASE)
+        if subordinate:
+            current = current[subordinate.start():]
+        else:
+            return prefix
+    if not current or re.fullmatch(
+            r"(?:(?:subsequently|then|now|again|still|repaired|restored)\s*)+",
+            current, re.IGNORECASE):
+        return current
+    if re.match(r"in\s+the\s+wake\s+of\b", current, re.IGNORECASE):
+        return current
+    if re.match(r"(?:after|while|when)\b", current, re.IGNORECASE) and re.search(
+            r"\b(?:was|were|had|has|ran|ended|finished|completed)\b",
+            current, re.IGNORECASE) and not re.search(
+                r"\band$", current, re.IGNORECASE):
+        # In "while the controller has completed and reports", both
+        # coordinated predicates still belong to the controller.
+        return current
+    return None
 
 
 def _hardware_claims_pass(text: str) -> bool:
@@ -198,15 +234,20 @@ def _hardware_claims_pass(text: str) -> bool:
             continue
         clause = text[hardware.start():hi]
         for success in _HARDWARE_PASS_RE.finditer(clause):
-            if success.start("pass") - len(hardware.group()) > 40:
-                break
             prefix = clause[:success.start("pass")]
+            if "|" in prefix and _OTHER_CELL_SUBJECT_RE.search(
+                    prefix.rsplit("|", 1)[1]):
+                continue
+            reports = _HARDWARE_REPORT_RE.search(prefix)
+            if reports:
+                prefix = _hardware_report_prefix(prefix[:reports.start()])
+                if prefix is None:
+                    continue
+            elif success.start("pass") - len(hardware.group()) > 40:
+                continue
             if _immediately_denied(prefix) or _HARDWARE_PENDING_RE.search(prefix):
                 continue
             if _HARDWARE_PENDING_SUFFIX_RE.match(clause[success.end("pass"):]):
-                continue
-            if "|" in prefix and _OTHER_CELL_SUBJECT_RE.search(
-                    prefix.rsplit("|", 1)[1]):
                 continue
             return True
     return False

@@ -482,3 +482,239 @@ def test_unavailable_parent_cannot_hide_proven_current_drift(tmp_path, monkeypat
     result = runner.step_rtl_gen(project, 'processor_cpu')
     assert result.status == 'FAIL'
     assert 'current full inventory drift' in result.detail
+
+
+# Public #3096 fixture: only the verbatim neutral direct-module TB and public
+# source are used. Local git transport supplies controlled official ancestors;
+# native Icarus executes the real mapper. This is not a whole CPU/IC proof.
+@pytest.fixture
+def public_mapper_project(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import yaml
+    plugin = Path(pull.__file__).resolve().parent.parent
+    catalog = plugin / 'ip-catalog/cpu/serv'
+    public = os.environ.get('VIBEIC_TEST_PUBLIC_SERV_REPO')
+    upstream = tmp_path / 'serv'
+    if public:
+        shutil.copytree(public, upstream)
+    else:
+        subprocess.run(['git', 'clone', '-q', 'https://github.com/olofk/serv',
+                        str(upstream)], check=True, timeout=120)
+    # A local source transport fixture with genuine pinned public git objects.
+    # Its origin is disclosed as local; it does not pretend to refetch GitHub.
+    manifest = yaml.safe_load((catalog / 'manifest.yaml').read_text())
+    manifest['canonical_url'] = str(upstream)
+    manifest['local_derivative'] = 'local_derivatives/wb_read_owner.json'
+    manifest['_category'] = 'cpu'
+    registered = tmp_path / 'catalog/serv'
+    registered.mkdir(parents=True)
+    shutil.copytree(catalog / 'local_derivatives', registered / 'local_derivatives')
+    manifest['_manifest_path'] = str(registered / 'manifest.yaml')
+    (registered / 'manifest.yaml').write_text(yaml.safe_dump(manifest))
+    match = query._manifest_to_match(manifest, 'declared public source component', 1.0)
+    monkeypatch.setattr(query, 'query_catalog', lambda *a, **kw: [match])
+    monkeypatch.setattr(pull, 'query_catalog', lambda *a, **kw: [match])
+    monkeypatch.setattr(pull, 'CACHE_ROOT', tmp_path / 'cache')
+    project = _project(tmp_path, 'Reuse SERV from neutral:serv:servile:1.4.0.')
+    path = project / 'input/docs/L2_FRS.md'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('Reuse SERV from neutral:serv:servile:1.4.0.\n'
+                    'Shared byte SRAM registers its address for one clock edge; '
+                    'read return is asynchronous. RF priority may pause WB bytes.\n')
+    return project, match, registered
+
+
+def _mapper_native(project, registered, name, parameters):
+    import subprocess
+    work = project / 'mapper_native' / name
+    work.mkdir(parents=True)
+    tb = registered / 'local_derivatives/mapper_direct_tb.sv'
+    mapper = project / 'phase2/stage1/rtl/servile_rf_mem_if.v'
+    binary = work / 'challenge.vvp'
+    argv = ['iverilog', '-g2012', '-s', 'mapper_direct_tb',
+            *[f'-Pmapper_direct_tb.{key}={value}' for key, value in parameters.items()],
+            '-o', str(binary), str(tb), str(mapper)]
+    cc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    assert cc.returncode == 0, cc.stdout + cc.stderr
+    run = subprocess.run(['vvp', str(binary)], capture_output=True, text=True, timeout=30)
+    _json(work / 'observed.json', {'compile_argv': argv, 'compile_rc': cc.returncode,
+                                 'native_rc': run.returncode, 'stdout': run.stdout,
+                                 'stderr': run.stderr, 'tb_sha256': _h(tb),
+                                 'mapper_sha256': _h(mapper), 'vvp_sha256': _h(binary)})
+    return run
+
+
+@pytest.mark.parametrize('case,parameters,want', [
+    *[(f'case{i}', {'CASE_ID': i, 'RF_REGS': 36}, 0) for i in range(8)],
+    ('rf32_contiguous', {'CASE_ID': 0, 'RF_REGS': 32}, 0),
+    ('rf32_x0', {'CASE_ID': 7, 'RF_REGS': 32}, 0),
+    ('corrupt_return', {'CASE_ID': 0, 'RF_REGS': 36, 'CORRUPT_RETURN': 1}, 1),
+    ('suppress_pause', {'CASE_ID': 1, 'RF_REGS': 36, 'SUPPRESS_PAUSE': 1}, 1),
+])
+def test_catalog_mapper_preserves_public_byte_sram_contract(public_mapper_project,
+                                                           case, parameters, want):
+    project, match, registered = public_mapper_project
+    # The actual unchanged public challenge runs on the producer's output;
+    # old source produces the four wrong words rather than a missing-API error.
+    audit = pull.pull_all_catalog_matches(project, [match], official_only=True)
+    run = _mapper_native(project, registered, case, parameters)
+    assert run.returncode == want, run.stdout + run.stderr
+    if want == 0:
+        assert 'MAPPER_DIRECT_PASS' in run.stdout
+    elif case == 'corrupt_return':
+        assert 'WHOLE_WORD_VALUE' in run.stdout
+    else:
+        assert 'CHALLENGE_NOT_TRIGGERED' in run.stdout
+
+
+def test_registered_mapper_reaches_ordinary_step1_and_strict_consumer(public_mapper_project):
+    project, match, registered = public_mapper_project
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    run = _mapper_native(project, registered, 'current_component', {'CASE_ID': 4, 'RF_REGS': 36})
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    assert result.extras['ip_fetch']['reuse_kind'] == 'LOCAL_DERIVATIVE'
+    manifest = json.loads((project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json').read_text())
+    record = json.loads((project / manifest['local_derivative']['path']).read_text())
+    assert len(record['current_inventory']) == 22
+    event = json.loads((project / 'provenance.jsonl').read_text().splitlines()[-1])
+    assert event['official_unmodified_files'] == 21
+    assert event['locally_adapted_reused_files'] == 1
+    assert pull.verify_existing_reused_pins_outcome(project, [match], manifest)[0] == pull.PIN_VERIFIED
+    assert pull.verify_existing_official_pins_outcome(project, [match], manifest)[0] == pull.PIN_MISMATCH
+
+
+def test_registered_mapper_repeat_preserves_current_choice_and_parent_history(public_mapper_project):
+    project, match, registered = public_mapper_project
+    first = pull.pull_all_catalog_matches(project, [match], official_only=True)
+    run = _mapper_native(project, registered, 'first', {'CASE_ID': 1, 'RF_REGS': 36})
+    assert run.returncode == 0, run.stdout + run.stderr
+    mf = project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    before_manifest = mf.read_bytes()
+    before_history = (project / 'provenance.jsonl').read_bytes()
+    before_inventory = {p.name: p.read_bytes() for p in mf.parent.iterdir()}
+    # The ordinary CLI reaches the same current derivative producer; it must
+    # preserve the source choice and history already measured above.
+    assert pull.main([str(project)]) == 0
+    again = pull.pull_all_catalog_matches(project, [match], official_only=True)
+    assert again['catalog_correction']['status'] == pull.PIN_VERIFIED
+    assert mf.read_bytes() == before_manifest
+    assert (project / 'provenance.jsonl').read_bytes() == before_history
+    assert {p.name: p.read_bytes() for p in mf.parent.iterdir()} == before_inventory
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    assert mf.read_bytes() == before_manifest
+    assert (project / 'provenance.jsonl').read_bytes() == before_history
+
+
+@pytest.mark.parametrize('mutation', ['missing_green', 'wrong_inventory', 'failed_native'])
+def test_registered_mapper_missing_or_failed_proof_cannot_admit(public_mapper_project, mutation):
+    project, match, registered = public_mapper_project
+    data = registered / 'local_derivatives'
+    if mutation == 'missing_green':
+        (data / 'candidate-green.json').unlink()
+    elif mutation == 'wrong_inventory':
+        recipe = json.loads((data / 'wb_read_owner.json').read_text())
+        recipe['current_inventory'].pop('serv_alu.v')
+        _json(data / 'wb_read_owner.json', recipe)
+    else:
+        receipt = json.loads((data / 'candidate-green.json').read_text())
+        receipt['results'][1]['rc'] = 1
+        _json(data / 'candidate-green.json', receipt)
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status in ('FAIL', 'NOT_MEASURED'), result.detail
+    # A failing held Step1 may roll back the complete new source transaction.
+    # If it publishes a deferred official parent, it must stay unmodified.
+    mapper = project / 'phase2/stage1/rtl/servile_rf_mem_if.v'
+    if mapper.is_file():
+        assert _h(mapper) == '6829a9a568b00df2c4905b35a916c14dd747538ad1091c3852ebf43cfded408d'
+    else:
+        assert not (project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json').exists()
+
+
+def test_registered_mapper_current_drift_stays_measured_failure(public_mapper_project):
+    project, match, registered = public_mapper_project
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    mapper = project / 'phase2/stage1/rtl/servile_rf_mem_if.v'
+    mapper.write_text(mapper.read_text() + '\n// undeclared current source drift\n')
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'FAIL', result.detail
+
+
+
+def _publish_mapper_glue(project, match):
+    path = project / 'phase2/stage1/rtl/top_wrapper.v'
+    path.write_text('module top_wrapper; wire declared_glue = 1\'b0; endmodule\n')
+    try:
+        return pull.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])
+    except ValueError as exc:
+        # A refusal from the owning source API is the observed counterexample,
+        # not a fixture setup error or a missing-new-method exception.
+        return {'status': pull.PIN_MISMATCH, 'reason': str(exc)}
+
+
+def test_registered_mapper_accepts_previously_published_official_glue(public_mapper_project):
+    import inspect
+    project, match, registered = public_mapper_project
+    optional = ({'apply_corrections': False}
+                if 'apply_corrections' in inspect.signature(pull.pull_all_catalog_matches).parameters else {})
+    pull.pull_all_catalog_matches(project, [match], official_only=True, **optional)
+    glue = _publish_mapper_glue(project, match)
+    assert glue['status'] == pull.PIN_VERIFIED, glue
+    previous = (project / 'provenance.jsonl').read_bytes()
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    assert result.extras['ip_fetch'].get('reuse_kind') == 'LOCAL_DERIVATIVE'
+    assert (project / 'provenance.jsonl').read_bytes().startswith(previous)
+    manifest = json.loads((project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json').read_text())
+    record = json.loads((project / manifest['local_derivative']['path']).read_text())
+    assert len(record['current_inventory']) == 23
+    assert len(pull._local_inventory(project / record['parent_project'] / 'phase2/stage1/rtl')) == 22
+    assert pull.verify_existing_reused_pins_outcome(project, [match], manifest)[0] == pull.PIN_VERIFIED
+    run = _mapper_native(project, registered, 'prior_glue', {'CASE_ID': 4, 'RF_REGS': 36})
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_registered_mapper_publishes_glue_after_automatic_correction(public_mapper_project):
+    project, match, registered = public_mapper_project
+    pull.pull_all_catalog_matches(project, [match], official_only=True)
+    mf = project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    first_manifest = json.loads(mf.read_text())
+    first_record = first_manifest.get('local_derivative')
+    previous = (project / 'provenance.jsonl').read_bytes()
+    glue = _publish_mapper_glue(project, match)
+    assert glue['status'] == pull.PIN_VERIFIED, glue
+    manifest = json.loads(mf.read_text())
+    assert manifest.get('local_derivative') and manifest['local_derivative'] != first_record
+    assert (project / first_record['path']).is_file()
+    assert (project / 'provenance.jsonl').read_bytes().startswith(previous)
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    assert result.status == 'PASS_WITH_WAIVERS', result.detail
+    record = json.loads((project / manifest['local_derivative']['path']).read_text())
+    assert len(record['current_inventory']) == 23
+    for name in ['parent_red', 'candidate_green']:
+        receipt = json.loads((project / record['proof'][name]['path']).read_text())
+        assert receipt['rtl']['top_wrapper.v'] == _h(mf.parent / 'top_wrapper.v')
+        assert all('top_wrapper.v' in r['compile_argv'] for r in receipt['native_measurements']['case_rows'])
+    before = _authored_metadata_bytes(project)
+    again = pull.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])
+    assert again['already_current'] and _authored_metadata_bytes(project) == before
+    run = _mapper_native(project, registered, 'after_glue', {'CASE_ID': 2, 'RF_REGS': 36})
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize('mutation', ['undeclared_extra', 'changed_reused'])
+def test_registered_mapper_glue_cannot_hide_other_source_drift(public_mapper_project, mutation):
+    project, match, registered = public_mapper_project
+    pull.pull_all_catalog_matches(project, [match], official_only=True)
+    rtl = project / 'phase2/stage1/rtl'
+    if mutation == 'undeclared_extra':
+        (rtl / 'unnamed_extra.v').write_text('module unnamed_extra; endmodule\n')
+    else:
+        (rtl / 'serv_alu.v').write_text((rtl / 'serv_alu.v').read_text() + '\n// drift\n')
+    before = _authored_metadata_bytes(project)
+    result = _publish_mapper_glue(project, match)
+    assert result['status'] != pull.PIN_VERIFIED
+    assert _authored_metadata_bytes(project) == before
