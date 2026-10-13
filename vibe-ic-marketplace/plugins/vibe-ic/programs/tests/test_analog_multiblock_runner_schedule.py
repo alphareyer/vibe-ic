@@ -21,8 +21,9 @@ from programs.tests import test_execution_receipt_chain as live
 @pytest.fixture(autouse=True)
 def isolated_execution(monkeypatch):
     saved_runtime = policy._ordinary_runtime
-    for name in (policy.ENV, policy._CAPABILITY_FD_ENV,
-                 'VIBEIC_EXECUTION_AUTH_SOCKET'):
+    names = (policy.ENV, policy._CAPABILITY_FD_ENV, 'VIBEIC_EXECUTION_AUTH_SOCKET')
+    saved_environment = {name: os.environ.get(name) for name in names}
+    for name in names:
         monkeypatch.delenv(name, raising=False)
     policy._ordinary_runtime = None
     yield
@@ -37,6 +38,12 @@ def isolated_execution(monkeypatch):
             pass
     live._launchers.clear()
     policy._ordinary_runtime = saved_runtime
+    # Close this fixture's issuer transport without leaking its closed FD.
+    for name, value in saved_environment.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def _source_regions():
@@ -60,7 +67,8 @@ def test_two_block_schedule_is_ultra_step_major_and_default_block_major():
                      '"A6"', '"A7"', '"A8"', '"A9"')
     positions = [default.index(step) for step in default_steps]
     assert positions == sorted(positions)
-    assert default.count('for blk in blocks:') == 1
+    # Default contract migration: each complete row now owns all blocks.
+    assert default.count('for blk in blocks:') == 9
     # A one-element declared list follows the same loops; no second runner or
     # special multi-block-only state is introduced.
     assert 'for blk in blocks:' in ultra
@@ -81,8 +89,17 @@ def _run_main_schedule(tmp_path, blocks, mode, monkeypatch):
     # their bounded step_for_block producer spy.
     def gate(project, runner_name, site, refusal_factory, fn, *args, **kwargs):
         kwargs.pop('_preflight_note', None)
+        canonical_acceptance = kwargs.pop('_preflight_canonical_acceptance', False)
+        if mode == 'default':
+            return runner._spf.retained_call(project, site, fn, *args,
+                                             canonical_acceptance=canonical_acceptance, **kwargs)
         return fn(*args, **kwargs)
     monkeypatch.setattr(runner._spf, 'gate', gate)
+    if mode == 'default':
+        import execution_backend_gates as gates
+        monkeypatch.setattr(gates, 'evaluate', lambda p, row: {
+            'status': 'PASS', 'step': {'id': row['id'], 'status': 'PASS'}, 'ledger': []})
+        monkeypatch.setattr(gates, 'contracts', lambda *a: {})
     bootstrap_order = []
     def bootstrap(p, **kwargs):
         bootstrap_order.append((p / 'phase3/analog/analog_block_list.json').is_file())
@@ -120,9 +137,9 @@ def _run_main_schedule(tmp_path, blocks, mode, monkeypatch):
                        for b in blocks}
             a8_observations.append(present)
             assert all(present.values()), (name, present, events)
-        return runner.StepResult(step_name, name, 'NOT_MEASURED', 0.0,
+        return runner.StepResult(step_name, name, 'PASS' if mode == 'default' else 'NOT_MEASURED', 0.0,
                                  'source-only step producer fixture',
-                                 reason_class='not_executed')
+                                 reason_class='' if mode == 'default' else 'not_executed')
     monkeypatch.setattr(runner, 'step_for_block', producer)
     monkeypatch.setattr(runner, '_a9_cosim', lambda *a, **k: {'tier': 'NOT_MEASURED'})
 
@@ -160,8 +177,11 @@ def test_runner_main_default_two_block_order_and_ultra_one_block(tmp_path,
     _, rc, events, observations, _ = _run_main_schedule(
         tmp_path / 'default', blocks, 'default', monkeypatch)
     assert rc == 1
-    assert [step for _, step in events] == [step for _ in blocks
-                                             for step in runner._AI_STEP_NAMES]
+    # Deliberate Default contract migration, with exact block identities.
+    assert events == [(block['name'], step) for step in runner._AI_STEP_NAMES for block in blocks]
+    assert len(events) == len(blocks) * len(runner._AI_STEP_NAMES)
+    assert all(events.count((block['name'], step)) == 1
+               for step in runner._AI_STEP_NAMES for block in blocks)
     assert observations == []
 
     solo = [{'name': 'solo', 'type': 'amplifier'}]

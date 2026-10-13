@@ -12,13 +12,11 @@ Cases:
                            reports/analog_one_shot.json verdict=SKIP.
   2. POSITIVE_FAIL_MISSING_PROJECT — non-existent project dir → exit 2.
   3. PASS_WITH_WAIVERS_ONE_BLOCK — one block declared and nothing else staged
-                                     → 9 steps emitted, verdict FAIL / rc 1.
-                                     Since the `required_inputs` pre-flight was
-                                     wired into this runner, A1-A7 are BLOCKED
-                                     (refused for want of input, NEVER RAN) and
-                                     name the artefact they were owed; A8/A9
-                                     declare no inputs and still WAIVE. The
-                                     verdict and exit code are unchanged.
+                                     → A1 refused, no later producers.
+                                     The full-population row has no complete
+                                     consumer. It reports NOT_MEASURED / rc1
+                                     with the original required-input reason;
+                                     A2-A9 are not fabricated as rows.
   4. INTEGRATION_REPORT_SHAPE — phase=analog, blocks list, steps list.
   5. SKIP_VIA_L5_NO_ANALOG — L5_ADI_SPEC.json#no_analog=true → SKIP.
   6. EDGE_BLOCKS_FILTER — `--blocks <name>` selects subset of declared blocks.
@@ -110,66 +108,58 @@ def _a_step_names(body):
 def _project_row_names(body):
     """Every row that is NOT one of the nine per-block A-steps.
 
-    These are the project-level rows — today exactly one, the vibe-ic#2080
-    block-list schema gate. Returned as a set so a second one arriving
+    These are the project-level rows: the block-list schema gate, plus
+    the explicit canonical refusal when a complete row was not accepted. Returned as a set so a second one arriving
     unannounced fails the assertions above rather than moving a total nobody
     reads.
     """
     return {s["name"] for s in body["steps"] if s["name"] not in _A_STEPS}
 
 
-def test_pass_with_waivers_one_block(tmp_path):
+def test_pass_with_waivers_one_block(tmp_path, monkeypatch):
+    # Contract migration: an unmet full-population A1 has no later producers.
+    from types import SimpleNamespace
+    import execution_policy
+    import analog_one_shot_runner as AOSR
     project = tmp_path / "proj"
     project.mkdir(parents=True, exist_ok=True)
-    _write_block_list(project, [
-        {"name": "tst_bandgap", "type": "bandgap"},
-    ])
-    cp = _run([str(project)])
-    body = json.loads(
-        (project / "reports" / "phase3" / "analog_one_shot.json").read_text())
+    _write_block_list(project, [{"name": "tst_bandgap", "type": "bandgap"}])
+    native_calls = []
+    def forbidden(*args, **kwargs):
+        native_calls.append(args)
+        print('ANALOG_A1_VALUE ' + json.dumps({'native_count': len(native_calls),
+                                              'rc': None, 'case': 'unmet-A1-native-trap'}))
+        raise AssertionError('unmet A1 launched a native successor')
+    monkeypatch.setattr(AOSR, 'step_for_block', forbidden)
+    monkeypatch.setattr(AOSR, '_a9_cosim', forbidden)
+    for name in (execution_policy.ENV, execution_policy._CAPABILITY_FD_ENV,
+                 'VIBEIC_EXECUTION_AUTH_SOCKET'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    monkeypatch.setattr(sys, 'argv', [str(PROG), str(project)])
+    cp = SimpleNamespace(returncode=AOSR.main())
+    body = json.loads((project / "reports" / "phase3" / "analog_one_shot.json").read_text())
+    print('ANALOG_A1_VALUE ' + json.dumps({'native_count': len(native_calls), 'rc': cp.returncode,
+                                          'case': 'unmet-A1-native-trap', 'report': body}))
     assert "tst_bandgap" in body["blocks"]
-    # 9 A* steps × 1 block, PLUS the project-level block-list schema row
-    # (vibe-ic#2080). Counted by MEMBERSHIP rather than as one total: the
-    # A1-A9 population and the project-level population are different
-    # questions, and a single `len(...) == 9` could not tell "an A-step
-    # disappeared" from "a project-level row was added". Both are pinned, so
-    # either change fails here by name.
-    assert _a_step_names(body) == _A_STEPS
-    assert _project_row_names(body) == {"block_list_schema"}
-    # The top-level verdict and the exit code are UNCHANGED by the
-    # `required_inputs` pre-flight: FAIL / rc 1, exactly as before.
+    assert _a_step_names(body) == {"A1_spec_extract"}
+    assert _project_row_names(body) == {"block_list_schema", "canonical_analog_acceptance"}
     assert body["verdict"] == "NOT_MEASURED"
     assert cp.returncode == 1
+    assert native_calls == []
     step_status = {s["name"]: s["status"] for s in body["steps"]}
-
-    # WHAT CHANGED IS THE ATTRIBUTION, and that is the point.
-    #
-    # This fixture declares a block and stages NOTHING else — no L-docs, no
-    # spec, no netlist, no layout. It used to be recorded as `A6_block_pv:
-    # FAIL — no parseable LVS result`, with A1/A7 WAIVED. That charges the
-    # absence to A6, a step that never had a layout to verify, and it left the
-    # ROOT cause (Phase 1 produced no L1/L5 at all, so A1 could not start)
-    # invisible behind seven downstream symptoms.
-    #
-    # With the pre-flight wired, every step of the chain is BLOCKED and NAMES
-    # the artefact it was owed and the step that owed it, so a reader is
-    # pointed at the first absence instead of the last symptom. `BLOCKED` is in
-    # `_aggregate_verdict._FAIL_STATUSES`, so nothing became greener: the
-    # distinction preserved here is exactly `step_preflight`'s —
-    #   BLOCKED = refused for want of input, NEVER RAN
-    #   FAIL    = ran and did not pass
-    for name in ("A1_spec_extract", "A2_topology_select", "A3_netlist_gen",
-                 "A4_corner_sweep", "A5_layout", "A6_block_pv",
-                 "A7_post_layout_resim"):
-        assert step_status[name] == "NOT_MEASURED", (
-            f"{name} should be refused for want of input, not run")
+    assert step_status["A1_spec_extract"] == "NOT_MEASURED"
+    for name in ("A2_topology_select", "A3_netlist_gen", "A4_corner_sweep",
+                 "A5_layout", "A6_block_pv", "A7_post_layout_resim"):
+        assert name not in step_status, f"{name} must not be fabricated after unmet A1"
     a1 = next(s for s in body["steps"] if s["name"] == "A1_spec_extract")
     assert "L5_ADI_SPEC.json" in a1["detail"] and "owed by step D1" in a1["detail"]
     assert a1["extras"]["finding"] == "REQUIRED_INPUT_ABSENT"
-    # A8/A9 declare NO required_inputs in the flow, so nothing can be charged
-    # to them and they still run and WAIVE on their own evidence.
     for name in ("A8_hardmacro_gen", "A9_hw_verify"):
-        assert step_status[name] == "PASS_WITH_WAIVERS"
+        assert name not in step_status, f"{name} is unexecuted, not a waiver"
+    assert body['halted_at'] == 'A1'
+    assert body['a9_cosim']['rc'] is None
+    assert body['a9_cosim']['tier'] == 'NOT_MEASURED'
 
 
 def test_integration_report_shape(tmp_path):
@@ -217,6 +207,8 @@ def test_edge_blocks_filter(tmp_path):
     # the project-level one.
     assert _a_step_names(body) == _A_STEPS
     assert _project_row_names(body) == {"block_list_schema"}
+    declaration = json.loads((project / "phase3/analog/analog_block_list.json").read_text())
+    assert {b["name"] for b in declaration["blocks"]} == {"tst_bandgap", "tst_ldo", "tst_pll"}
 
 
 # ---------------------------------------------------------------------------

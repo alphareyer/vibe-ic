@@ -350,7 +350,14 @@ def test_real_analog_main_reaches_each_complete_consumer_without_leaking_control
         tmp_path, monkeypatch):
     from test_step_preflight_analog_phase1 import _analog_project
     project = _analog_project(tmp_path, with_l5=True)
-    seen = reject_consumer(monkeypatch)
+    # Contract migration: accepted intermediates preserve complete wiring;
+    # terminal refusals are exercised by the independent actual-main controls.
+    seen = []
+    def accept(project, row):
+        seen.append(str(row['id']))
+        return {'status': 'PASS', 'step': {'id': row['id'], 'status': 'PASS'}, 'ledger': []}
+    monkeypatch.setattr(gates, 'evaluate', accept)
+    monkeypatch.setattr(gates, 'contracts', lambda *a: {})
     def ready(project, runner, site, **kwargs):
         return preflight.Decision(runner=runner, site=site, flow_steps=[site],
                                   allow=True, verdict='READY')
@@ -370,8 +377,8 @@ def test_real_analog_main_reaches_each_complete_consumer_without_leaking_control
     assert seen == [f'A{i}' for i in range(1, 9)]
     for sid in seen:
         record = saved(project, sid)[1]
-        assert record['status'] == 'FAIL' and not record['canonical_pass']
-        assert versions.latest_pass(project, sid) is None
+        assert record['status'] == 'PASS' and record['canonical_pass']
+        assert versions.latest_pass(project, sid)['folder'] == record['folder']
     # A9 is complete only at the once-per-chip cosim call after all blocks.
     assert saved(project, 'A9')[1]['status'] == 'NOT_MEASURED'
 
@@ -382,3 +389,152 @@ def test_ultra_complete_leaf_keeps_existing_behavior_without_default_history(tmp
     monkeypatch.setattr(phase1, '_run_expert_track', lambda *a: 0)
     assert phase1.run_phase1_second_track(tmp_path, 0) == 0
     assert not seen and not (tmp_path / 'steps/index.json').exists()
+
+
+_ANALOG_ROW_CASES = [
+    *[pytest.param(n, status, 'refusal', id=f'{n}block-A3-{status}')
+      for n in (1, 2) for status in ('FAIL', 'NOT_MEASURED')],
+    *[pytest.param(n, status, 'accepted', id=f'{n}block-accepted-{status}')
+      for n in (1, 2) for status in ('PASS', 'PASS_WITH_WAIVERS', 'NOT_APPLICABLE')],
+    *[pytest.param(n, 'PASS', mode, id=f'{n}block-{mode}')
+      for n in (1, 2) for mode in ('previous', 'partial_fail', 'native_fail', 'last_gap')],
+    pytest.param(2, 'PASS', 'fail_then_gap', id='2block-native-FAIL-before-gap'),
+    pytest.param(2, 'PASS', 'subset', id='subset-existing-declaration'),
+    pytest.param(2, 'PASS', 'subset_fallback', id='subset-L5-fallback-declaration'),
+    *[pytest.param(1, status, mode, id=f'A9-{mode}-{status}')
+      for mode, status in (('cosim_1', 'FAIL'), ('cosim_2', 'NOT_MEASURED'),
+                           ('a9_refusal', 'FAIL'), ('a9_refusal', 'NOT_MEASURED'))],
+]
+
+
+@pytest.mark.parametrize('block_count,status,case', _ANALOG_ROW_CASES)
+def test_default_analog_whole_row_acceptance_controls_next_native_call(
+        tmp_path, monkeypatch, block_count, status, case):
+    """Actual main/retained consumer transport; no analog measurement claim."""
+    import time
+    import ai_signed_judgement
+    from test_step_preflight_analog_phase1 import _analog_project
+    project = _analog_project(tmp_path, with_l5=True)
+    declared = [{'name': f'block_{i}', 'type': 'neutral'} for i in range(block_count)]
+    declaration = project / 'phase3/analog/analog_block_list.json'
+    declaration.write_text(json.dumps({'blocks': declared, 'block_count': block_count}))
+    subset = case in ('subset', 'subset_fallback')
+    if case == 'subset_fallback':
+        declaration.unlink()
+        (project / 'phase1/generated_docs/L5_ADI_SPEC.json').write_text(
+            json.dumps({'analog_blocks': declared}))
+    selected = declared[:1] if subset else declared
+    previous = {}
+    for block in declared:
+        relative = f"phase3/analog/{block['name']}/{block['name']}.sp"
+        previous[relative] = f"* previous {block['name']}\n".encode()
+        write(project, relative, previous[relative])
+    if case == 'previous':
+        attempt = versions.begin_step(project, 'A3')
+        versions.finish_step(project, attempt, verdict='FAIL', result={
+            'canonical_consumer': {'status': 'FAIL', 'step': {'id': 'A3', 'status': 'FAIL'},
+                                   'ledger': []}})
+    calls, consumers, cosim_calls = [], [], []
+    def ready(project, runner, site, **kwargs):
+        return preflight.Decision(runner=runner, site=site, flow_steps=[site],
+                                  allow=True, verdict='READY')
+    monkeypatch.setattr(preflight, 'decide', ready)
+    monkeypatch.setattr(preflight, 'record', lambda *a, **k: None)
+    monkeypatch.setattr(gates, 'contracts', lambda *a: {})
+    monkeypatch.setattr(ai_signed_judgement, 'pending', lambda *a: {})
+    def native(project, block, name, args=None):
+        calls.append((block['name'], name))
+        if name == 'A3_netlist_gen':
+            write(project, f"phase3/analog/{block['name']}/{block['name']}.sp",
+                  f"* current {block['name']}\n".encode())
+        else:
+            write(project, f"reports/analog/current-{block['name']}-{name}.json", b'{"current":true}')
+        native_status = 'PASS'
+        if name == 'A3_netlist_gen':
+            if case in ('native_fail', 'fail_then_gap') and block == selected[0]:
+                native_status = 'FAIL'
+            if case in ('last_gap', 'fail_then_gap') and block == selected[-1]:
+                native_status = 'NOT_MEASURED'
+        return analog.StepResult(name, block['name'], native_status, 0.0, 'controlled native return',
+                                 reason_class='not_executed' if native_status == 'NOT_MEASURED' else '')
+    def consume(project, row):
+        sid = str(row['id'])
+        current = [name for name, step in calls if step == 'A3_netlist_gen']
+        complete = set(current) == {block['name'] for block in declared}
+        outcome = 'PASS'
+        if sid == 'A3':
+            outcome = status if complete and case == 'refusal' else status if complete and case == 'accepted' else (
+                'FAIL' if not complete and case in ('partial_fail', 'last_gap') else
+                'NOT_MEASURED' if not complete else 'PASS')
+        if sid == 'A9' and case == 'a9_refusal':
+            outcome = status
+        consumers.append({'id': sid, 'status': outcome, 'population': current[:],
+                          'complete_population': complete, 'producer_count': len(calls)})
+        return {'status': outcome, 'step': {'id': sid, 'status': outcome,
+                'reasons': ['controlled full-row outcome']}, 'ledger': [],
+                'population': current[:], 'complete_population': complete}
+    def cosim(argv, **kwargs):
+        if len(argv) < 2 or Path(argv[1]).name != 'analog_a9_cosim_emit.py':
+            return SimpleNamespace(returncode=0, stdout='unrelated summary transport', stderr='')
+        cosim_calls.append(list(argv))
+        rc = 1 if case == 'cosim_1' else 2 if case == 'cosim_2' else 0
+        return SimpleNamespace(returncode=rc, stdout='controlled once-per-chip cosim', stderr='')
+    monkeypatch.setattr(analog, 'step_for_block', native)
+    monkeypatch.setattr(gates, 'evaluate', consume)
+    monkeypatch.setattr(analog._pr, 'run', cosim)
+    argv = ['analog_one_shot_runner', str(project)]
+    if subset:
+        argv += ['--blocks', selected[0]['name']]
+    monkeypatch.setattr(sys, 'argv', argv)
+    started = time.time()
+    rc = analog.main()
+    report = json.loads(analog._pl.report_path(project, 'analog_one_shot.json').read_text())
+    current = versions.current_acceptance(project, started)
+    records = [json.loads(path.read_text()) for path in (project / 'steps').glob('*/*/*/outputs.json')]
+    records = [r for r in records if isinstance(r.get('result'), dict)]
+    actual_declaration = json.loads(declaration.read_text())['blocks']
+    value = {'case': case, 'block_count': block_count, 'consumer_status': status, 'rc': rc,
+             'verdict': report['verdict'], 'calls': calls, 'consumers': consumers,
+             'A4_native_count': sum(step == 'A4_corner_sweep' for _, step in calls),
+             'cosim_count': len(cosim_calls), 'a9_cosim': report['a9_cosim'],
+             'current_acceptance': [{'id': r['id'], 'status': r['status'], 'folder': r['folder'],
+                                     'producer_rows': r['result'].get('rows'),
+                                     'canonical_consumer': r['result'].get('canonical_consumer')}
+                                    for r in current],
+             'declared_names': [b['name'] for b in actual_declaration]}
+    print('ANALOG_BARRIER_VALUE ' + json.dumps(value, sort_keys=True))
+    # Native output history remains reachable after either stop or continuation.
+    for relative, content in previous.items():
+        copied = [folder / 'before' / item['snapshot']
+                  for folder in (project / 'steps').glob('*/*/*')
+                  for item in (json.loads((folder / 'before/outputs.json').read_text())['outputs']
+                               if (folder / 'before/outputs.json').is_file() else [])
+                  if item['rel'] == relative]
+        assert any(path.read_bytes() == content for path in copied), relative
+    assert {b['name'] for b in actual_declaration} == {b['name'] for b in declared}
+    stopped = case == 'refusal' or case in ('native_fail', 'fail_then_gap', 'last_gap')
+    if stopped:
+        assert value['A4_native_count'] == 0, value
+        assert len([step for _, step in calls if step == 'A3_netlist_gen']) == len(selected)
+        assert value['cosim_count'] == 0, value
+        assert (rc, report['verdict']) == (1, status if case == 'refusal' else 'NOT_MEASURED' if case == 'last_gap' else 'FAIL')
+    else:
+        assert calls == [(b['name'], step) for step in analog._AI_STEP_NAMES for b in selected], value
+        assert value['cosim_count'] == 1, value
+        expected = status if case in ('cosim_1', 'cosim_2', 'a9_refusal') else (
+            'NOT_MEASURED' if case == 'last_gap' else 'PASS')
+        assert (rc, report['verdict']) == (0 if expected == 'PASS' else 1, expected), value
+    assert len([r for r in records if r['result'].get('site') == 'A3']) == len(selected)
+    for record in records:
+        if record['result'].get('site') == 'A3' and record['result'].get('canonical_consumer'):
+            assert record['result']['rows'][0]['status'] == 'PASS'
+            assert record['status'] == record['result']['canonical_consumer']['status']
+    if case == 'last_gap':
+        assert not any(row['status'] == 'FAIL' for row in report['steps'])
+        terminal = saved(project, 'A3')[1]
+        assert terminal['status'] == 'NOT_MEASURED'
+        assert terminal['result']['canonical_consumer'] is None
+    if case == 'refusal':
+        row = next(r for r in current if r['id'] == 'A3')
+        assert row['result']['canonical_consumer']['complete_population']
+        assert row['status'] == status and not row['canonical_pass']

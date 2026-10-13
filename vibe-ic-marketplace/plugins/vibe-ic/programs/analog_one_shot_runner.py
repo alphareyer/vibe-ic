@@ -2695,6 +2695,34 @@ def _step_verdicts(plan):
 
 
 
+def _default_analog_rejection(project: Path, sid: str, started_at: float,
+                              complete_population: bool) -> Optional[StepResult]:
+    """Read a terminal full-row consumer before the next Default producer.
+
+    A bounded block request is component evidence. Earlier partial-block
+    consumers cannot decide a row whose terminal producer had no consumer.
+    """
+    import execution_policy
+    if execution_policy.request()['mode'] != 'default' or not complete_population:
+        return None
+    import step_output_collector
+    row = next((r for r in step_output_collector.current_acceptance(project, started_at)
+                if str(r['id']) == sid), None)
+    if row is not None and row['status'] in ('PASS', 'PASS_WITH_WAIVERS', 'NOT_APPLICABLE'):
+        return None
+    status = 'FAIL' if row is not None and row['status'] == 'FAIL' else 'NOT_MEASURED'
+    consumer = (row['result'].get('canonical_consumer') or {}) if row else {}
+    step = consumer.get('step') or {}
+    reasons = step.get('reasons') or [
+        row['status'] if row else 'no terminal complete consumer was recorded']
+    return StepResult(
+        'canonical_analog_acceptance', '', status, 0.0,
+        f"canonical step {sid} was not accepted: " + '; '.join(map(str, reasons)),
+        extras={'step_id': sid, 'output_version': row['folder'] if row else None,
+                'consumer_recorded': row is not None},
+        reason_class=(_V.ReasonClass.UPSTREAM_REFUSED.value if status == 'NOT_MEASURED' else ''))
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
@@ -2762,6 +2790,7 @@ def main() -> int:
     # `[]` or L5.no_analog=true) still SKIPs cleanly — this is the
     # legitimate pure-digital case.
     blocks, status = _load_block_list_with_status(project)
+    declared_blocks = list(blocks)
     if args.blocks:
         wanted = {b.strip() for b in args.blocks.split(",") if b.strip()}
         blocks = [b for b in blocks
@@ -2820,8 +2849,9 @@ def main() -> int:
         # one — A1 is what emits them. A materialisation that promised a path
         # it never looked for would be a fabricated record, and the gate is
         # right to report the absence instead.
+        materialized_blocks = declared_blocks if execution.request()['mode'] == 'default' else blocks
         block_list_path.write_text(
-            json.dumps({"blocks": blocks, "block_count": len(blocks)},
+            json.dumps({"blocks": materialized_blocks, "block_count": len(materialized_blocks)},
                        indent=2, ensure_ascii=False)
             + "\n", encoding="utf-8")
 
@@ -2832,6 +2862,9 @@ def main() -> int:
     execution.bootstrap(project, parameters={'analog_request': entry_request})
 
     plan: List[StepResult] = []
+    halted_at = None
+    complete_population = len(blocks) == len(declared_blocks)
+    a9_rows = []
     # No refusal is inherited from a previous run of this process.
     reset_env_refusals()
 
@@ -2839,6 +2872,16 @@ def main() -> int:
         plan.append(sr)
         print(f"  {sr.status:6} {sr.name:24} block={sr.block:16} "
               f"{_rsum.summary_detail(sr.detail, sr.status, width=60)}")
+
+    def _close_default_row(sid, started_at, rows):
+        # Preserve native measured FAIL even if a later block succeeds.
+        if any(row.status == 'FAIL' for row in rows):
+            return True
+        rejection = _default_analog_rejection(project, sid, started_at, complete_population)
+        if rejection is None:
+            return False
+        _dispatched(rejection)
+        return True
 
     if execution.request()['mode'] == 'ultra':
         # Every declared block must get its A1-A5 producer opportunity before
@@ -2910,62 +2953,138 @@ def main() -> int:
                 step_for_block, project, blk, "A9_hw_verify", args=args,
                 _preflight_note=_note))
     else:
-        # Default deliberately retains its released block-major A1-A9 order.
-        for blk in blocks:
-            _bname = blk.get("name") or blk.get("type") or "unknown"
-            _note = f"block={_bname}"
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A1",
-                _preflight_refusal("A1_spec_extract", _bname),
-                step_for_block, project, blk, "A1_spec_extract", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A2",
-                _preflight_refusal("A2_topology_select", _bname),
-                step_for_block, project, blk, "A2_topology_select", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A3",
-                _preflight_refusal("A3_netlist_gen", _bname),
-                step_for_block, project, blk, "A3_netlist_gen", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A4",
-                _preflight_refusal("A4_corner_sweep", _bname),
-                step_for_block, project, blk, "A4_corner_sweep", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A5",
-                _preflight_refusal("A5_layout", _bname),
-                step_for_block, project, blk, "A5_layout", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A6",
-                _preflight_refusal("A6_block_pv", _bname),
-                step_for_block, project, blk, "A6_block_pv", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A7",
-                _preflight_refusal("A7_post_layout_resim", _bname),
-                step_for_block, project, blk, "A7_post_layout_resim", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A8",
-                _preflight_refusal("A8_hardmacro_gen", _bname),
-                step_for_block, project, blk, "A8_hardmacro_gen", args=args,
-                _preflight_note=_note, _preflight_canonical_acceptance=True))
-            _dispatched(_spf.gate(
-                project, "analog_one_shot_runner", "A9",
-                _preflight_refusal("A9_hw_verify", _bname),
-                step_for_block, project, blk, "A9_hw_verify", args=args,
-                _preflight_note=_note))
+        # Default deliberately completes every declared block before advancing a row.
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A1",
+                    _preflight_refusal("A1_spec_extract", _bname),
+                    step_for_block, project, blk, "A1_spec_extract", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A1', _terminal_started, plan[row_begin:]):
+                halted_at = 'A1'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A2",
+                    _preflight_refusal("A2_topology_select", _bname),
+                    step_for_block, project, blk, "A2_topology_select", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A2', _terminal_started, plan[row_begin:]):
+                halted_at = 'A2'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A3",
+                    _preflight_refusal("A3_netlist_gen", _bname),
+                    step_for_block, project, blk, "A3_netlist_gen", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A3', _terminal_started, plan[row_begin:]):
+                halted_at = 'A3'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A4",
+                    _preflight_refusal("A4_corner_sweep", _bname),
+                    step_for_block, project, blk, "A4_corner_sweep", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A4', _terminal_started, plan[row_begin:]):
+                halted_at = 'A4'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A5",
+                    _preflight_refusal("A5_layout", _bname),
+                    step_for_block, project, blk, "A5_layout", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A5', _terminal_started, plan[row_begin:]):
+                halted_at = 'A5'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A6",
+                    _preflight_refusal("A6_block_pv", _bname),
+                    step_for_block, project, blk, "A6_block_pv", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A6', _terminal_started, plan[row_begin:]):
+                halted_at = 'A6'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A7",
+                    _preflight_refusal("A7_post_layout_resim", _bname),
+                    step_for_block, project, blk, "A7_post_layout_resim", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A7', _terminal_started, plan[row_begin:]):
+                halted_at = 'A7'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A8",
+                    _preflight_refusal("A8_hardmacro_gen", _bname),
+                    step_for_block, project, blk, "A8_hardmacro_gen", args=args,
+                    _preflight_note=_note, _preflight_canonical_acceptance=True))
+            if _close_default_row('A8', _terminal_started, plan[row_begin:]):
+                halted_at = 'A8'
+        if halted_at is None:
+            row_begin = len(plan)
+            for blk in blocks:
+                _terminal_started = time.time()
+                _bname = blk.get("name") or blk.get("type") or "unknown"
+                _note = f"block={_bname}"
+                _dispatched(_spf.gate(
+                    project, "analog_one_shot_runner", "A9",
+                    _preflight_refusal("A9_hw_verify", _bname),
+                    step_for_block, project, blk, "A9_hw_verify", args=args,
+                    _preflight_note=_note))
+            a9_rows = plan[row_begin:]
 
     # q5 — A9's co-simulation is CHIP-level: its scenarios cross blocks, so it
     # runs once, after every block's A1-A9, against the ids Phase 1 declared in
     # L22. Recorded beside the rows, not as one: the flow's A9 gate
     # (`mixed_signal_cosim_check`) owns that verdict, and a second row here
     # would roll the same fact up twice.
-    a9_cosim = _a9_cosim(project, args)
+    if halted_at is None:
+        cosim_started = time.time()
+        a9_cosim = _a9_cosim(project, args)
+        if execution.request()['mode'] == 'default':
+            if a9_cosim.get('rc') == 1 or _close_default_row('A9', cosim_started, a9_rows):
+                halted_at = 'A9'
+    else:
+        a9_cosim = {'rc': None, 'tier': 'NOT_MEASURED',
+                    'detail': f'not executed after canonical step {halted_at} was not accepted'}
 
     # vibe-ic#2080 — the master block list every A-gate above read, judged at
     # last by the gate written for it. AFTER the loop: A1 is what emits each
@@ -2975,6 +3094,12 @@ def main() -> int:
     _dispatched(step_block_list_schema(project))
 
     verdict = _aggregate_verdict(plan)
+    # A9's chip-level native return stays beside the rows, counted once.
+    if execution.request()['mode'] == 'default' and a9_cosim.get('rc') != 0:
+        if a9_cosim.get('rc') == 1:
+            verdict = 'FAIL'
+        elif verdict != 'FAIL':
+            verdict = 'NOT_MEASURED'
     # R-0915-85: the tier is a DISCLOSURE beside the verdict now, so the
     # reader asks for the disclosure rather than for a word that meant both.
     structure_only = [s for s in plan
@@ -2991,6 +3116,8 @@ def main() -> int:
         "structure_only_steps": [f"{s.block}/{s.name}" for s in structure_only],
     }
     summary["a9_cosim"] = a9_cosim
+    if execution.request()['mode'] == 'default':
+        summary['halted_at'] = halted_at
     import ai_signed_judgement as _ai_judgement
     summary["ai_judgements"] = _ai_judgement.pending(project, ("A1", "A2", "A9"))
     _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
