@@ -46,6 +46,156 @@ if str(PROG) not in sys.path:
 import l10_coverage_goal_classify as G           # noqa: E402
 import cpu_functional_oracle_waiver_check as W   # noqa: E402
 import _l10_execution as X                       # noqa: E402
+import l10_tb_conformance_check as C              # noqa: E402
+
+
+@pytest.mark.parametrize("scope", [
+    "same random run; informational, not a sign-off gate",
+    "\u540c random run;\u975e sign-off gate",
+])
+@pytest.mark.parametrize("totals,expected", [
+    ({"toggle": {"pct": 98.0}, "branch": {"pct": 100.0}}, "PASS"),
+    ({"toggle": {"pct": 90.0}, "branch": {"pct": 100.0}}, "FAIL"),
+    ({}, "NOT_MEASURED"),
+])
+def test_informational_dimensions_remain_visible_without_blocking_step4(
+        tmp_path, scope, totals, expected):
+    case = {"name": "toggle_branch_coverage", "kind": "functional_vector",
+            "stimulus": scope, "expected": ">=95%"}
+    project = _project(tmp_path, [case], totals=totals)
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    report = project / "goal.json"
+    assert W.main([str(project), "--json", str(report)]) == 0
+    goal = W._coverage_goal_summary(project)["rows"][0]
+    assert goal["verdict"] == expected
+    assert goal["enforcement"] == "ADVISORY"
+    assert goal["dimensions"] == ["toggle", "branch"]
+    # An explicit dimensional threshold is measured by coverage even when
+    # an earlier emitter typed it as a vector; scenario PASS rates are not.
+    assert G.execution_partition([case]) == ([], [case])
+    assert C.evaluate([case], "", "") == ([], 0, 0)
+
+
+@pytest.mark.parametrize("scope", [
+    "same random run; mandatory sign-off gate",
+    "same random run; not informational; mandatory sign-off gate",
+])
+@pytest.mark.parametrize("totals", [
+    {"toggle": {"pct": 90.0}, "branch": {"pct": 100.0}}, {},
+])
+@pytest.mark.parametrize("kind", ["coverage_goal", "functional_vector"])
+def test_mandatory_dimensions_missing_or_below_target_still_block_step4(
+        tmp_path, scope, totals, kind):
+    case = {"name": "toggle_branch_coverage", "kind": kind,
+            "stimulus": scope, "expected": ">=95%"}
+    project = _project(tmp_path, [case], totals=totals)
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    assert W.main([str(project)]) == 1
+    observed = W._coverage_goal_summary(project)["rows"][0]
+    assert observed["verdict"] == (G.FAIL if totals else G.NOT_MEASURED)
+    assert observed.get("enforcement", "BLOCKING") == "BLOCKING"
+    assert C.evaluate([case], "", "") == ([], 0, 0)
+
+
+def test_informational_goal_cannot_hide_a_separate_mandatory_failure(tmp_path):
+    optional = {"name": "toggle_coverage", "kind": "coverage_goal",
+                "stimulus": "same run; informational, not a sign-off gate",
+                "expected": ">=95%"}
+    mandatory = {"name": "required_branch", "kind": "coverage_goal",
+                 "coverage_scope": "branch coverage", "expected": "100%"}
+    project = _project(tmp_path, [optional, mandatory], totals={"branch": {"pct": 90}})
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    assert W.main([str(project)]) == 1
+
+
+def test_mandatory_row_intent_cannot_be_hidden_in_a_later_scope_field(tmp_path):
+    case = {"name": "toggle_coverage", "kind": "coverage_goal",
+            "coverage_scope": "toggle coverage; informational",
+            "stimulus": "mandatory sign-off gate", "expected": "95%"}
+    project = _project(tmp_path, [case], totals={"toggle": {"pct": 90}})
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    assert W.main([str(project)]) == 1
+
+
+def test_informational_coverage_cannot_remove_a_typed_transaction_execution():
+    case = {"kind": "functional_vector", "name": "transaction_success",
+            "stimulus": "drive and check the transactions; collect line coverage as informational",
+            "expected": "100% PASS"}
+    results, ok_count, fail_count = C.evaluate([case], "", "")
+    assert len(results) == 1
+    assert results[0]["status"] == X.NOT_EXECUTED
+    assert C.count_not_executed(results) == 1
+    assert (ok_count, fail_count) == (0, 0)
+    assert G.execution_partition([case]) == ([case], [])
+
+
+@pytest.mark.parametrize("qualification,expected_rc", [
+    ("informational, not required for sign-off", 0),
+    ("informational, not required for sign-off; branch coverage is mandatory", 1),
+])
+def test_negated_requirement_keeps_affirmative_mandatory_clause(
+        tmp_path, qualification, expected_rc):
+    case = {"name": "branch_coverage", "kind": "coverage_goal",
+            "coverage_scope": "branch coverage; " + qualification,
+            "expected": "95%"}
+    project = _project(tmp_path, [case], totals={"branch": {"pct": 90}})
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    assert W.main([str(project)]) == expected_rc
+    row = W._coverage_goal_summary(project)["rows"][0]
+    assert row["verdict"] == G.FAIL
+    assert row.get("enforcement", "BLOCKING") == ("BLOCKING" if expected_rc else "ADVISORY")
+
+
+def test_baseline_word_does_not_override_explicit_coverage_label(tmp_path):
+    case = {"name": "toggle_branch_coverage", "kind": "functional_vector",
+            "stimulus": "same baseline random run; informational, not a sign-off gate",
+            "expected": ">=95%"}
+    totals = {"line": {"pct": 99.0}, "toggle": {"pct": 98.0},
+              "branch": {"pct": 100.0}}
+    project = _project(tmp_path, [case], totals=totals)
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    step4_rc = W.main([str(project)])
+    goal = W._coverage_goal_summary(project)["rows"][0]
+    l10 = C.evaluate([case], "", "")
+    (project / "boundary-consumer-values.json").write_text(json.dumps(
+        {"input": case, "totals": totals, "step4_rc": step4_rc,
+         "coverage_goal": goal, "l10_results": l10[0]}))
+    assert goal["dimensions"] == ["toggle", "branch"]
+    assert goal["achieved_pct"] == 98.0
+    assert goal["verdict"] == G.PASS
+    assert step4_rc == 0
+    assert l10 == ([], 0, 0)
+    # An explicit multi-dimension scope keeps its existing ambiguous verdict.
+    ambiguous = dict(case, coverage_scope="line and toggle coverage")
+    assert G.measure_goal(ambiguous, totals)["verdict"] == G.NOT_MEASURED
+
+
+def test_deadline_word_cannot_remove_typed_scenario_execution(tmp_path):
+    case = {"name": "deadline_coverage", "kind": "functional_vector",
+            "stimulus": "Exercise deadline scenarios with bounded completion",
+            "expected": ">=95%"}
+    totals = {"line": {"pct": 99.0}}
+    project = _project(tmp_path, [case], totals=totals)
+    (project / "phase2/stage1/sim/results.xml").write_text(
+        "<verification><verdict>PASS</verdict></verification>\n")
+    step4_rc = W.main([str(project)])
+    goal = W._coverage_goal_summary(project)["rows"][0]
+    results, ok_count, fail_count = C.evaluate([case], "", "")
+    (project / "boundary-consumer-values.json").write_text(json.dumps(
+        {"input": case, "totals": totals, "step4_rc": step4_rc,
+         "coverage_goal": goal, "l10_results": results}))
+    assert goal["verdict"] == G.NOT_MEASURED
+    assert goal["dimensions"] == []
+    assert step4_rc == 1
+    assert len(results) == 1 and results[0]["status"] == X.NOT_EXECUTED
+    assert C.count_not_executed(results) == 1
+    assert (ok_count, fail_count) == (0, 0)
 
 # ── the design's own rows, transcribed (the corpus is not on main) ─────────
 VEC_KAV = {"name": "fips1804_sha256_abc", "kind": "known_answer_vector",

@@ -102,6 +102,43 @@ _FREQ_RE = re.compile(
 _CLOCK_CTX_RE = re.compile(
     r"\b(clock|clk|frequency|operating\s+frequency|f_?clk|runs?\s+at|"
     r"clocked\s+at|sample\s+rate|baud)\b", re.IGNORECASE)
+
+
+def _clock_reference_only(context: str) -> bool:
+    """An alternative/reference/example clause cannot select a clock target."""
+    if re.search(r"\b(?:must|shall|required)\b|\bselected\s+target\b", context, re.I):
+        return False
+    return bool(re.search(
+        r"\balternat(?:e|ive)(?:[- ]technology)?\b[^\n.;]{0,60}"
+        r"\b(?:librar(?:y|ies)|technology|target|reference|Fmax)\b"
+        r"|\breference\s+Fmax\b"
+        r"|\b(?:clock|target|frequency)\b[^\n.;]{0,40}\bexample\b"
+        r"|\bexample\b[^\n.;]{0,40}\b(?:clock|target|frequency|ns)\b",
+        context, re.I))
+
+
+def _clock_clause(text: str, match) -> str:
+    """A JSON clock field owns its clause, independently of neighboring fields."""
+    start, end = match.start(), match.end()
+    for field in re.finditer(
+            r'(?P<key>"(?:\\.|[^"\\])*")\s*:\s*'
+            r'(?P<value>"(?:\\.|[^"\\])*")', text):
+        if field.start("value") <= start < field.end("value"):
+            try:
+                value = field.group("value")
+                prefix = json.loads(value[:start - field.start("value")] + '"')
+                key = re.sub(r"[_-]+", " ", json.loads(field.group("key"))) + ": "
+                text = key + json.loads(value)
+                start = len(key) + len(prefix)
+                end = start + len(match.group())
+            except ValueError:
+                pass  # malformed quoted prose keeps the original clause scope
+            break
+    lo = max(text.rfind("\n", 0, start), text.rfind(";", 0, start),
+             text.rfind(". ", 0, start)) + 1
+    hi = min((pos for pos in (text.find("\n", end), text.find(";", end),
+                             text.find(". ", end)) if pos >= 0), default=len(text))
+    return text[lo:hi].strip()
 # A baud-rate hint — when present, the requirement notes the rate is a baud rate.
 _BAUD_RE = re.compile(r"\bbaud\b", re.IGNORECASE)
 
@@ -286,6 +323,11 @@ def extract(prompt_text: str) -> List[dict]:
         is_baud = bool(_BAUD_RE.search(text))
         seen_freq = set()
         for m in _FREQ_RE.finditer(text):
+            # Keep the source clause/row: the document's selected clock must
+            # not make numbers in an unrelated technology reference mandatory.
+            context = _clock_clause(text, m)
+            if _clock_reference_only(context):
+                continue
             val = _to_float(m.group(1))
             if val is None or val <= 0:
                 continue
@@ -299,7 +341,7 @@ def extract(prompt_text: str) -> List[dict]:
                 "kind": "clock_frequency",
                 "requirement": ("clock frequency: " + disp + baud_note
                                 + "; constraints / TB must honor this rate."),
-                "evidence": m.group(0).strip(),
+                "evidence": context,
                 "value": val,
                 "unit": unit,
                 "is_baud": is_baud,
@@ -421,6 +463,8 @@ def extract(prompt_text: str) -> List[dict]:
     _present = {(it["kind"], it.get("value"), it.get("unit")) for it in items}
     for ti in _table_items(text):
         if ti["kind"] == "clock_frequency" and not _CLOCK_CTX_RE.search(text):
+            continue
+        if ti["kind"] == "clock_frequency" and _clock_reference_only(ti["evidence"]):
             continue
         if ti["kind"] == "current_spec" and not _CURRENT_CTX_RE.search(text):
             continue

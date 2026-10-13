@@ -2889,8 +2889,9 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     if not solver.is_file():
         return None
     rtl_dir = _pl.rtl_dir(project)
-    if rtl_dir.is_dir() and (any(rtl_dir.rglob("*.v")) or
-                             any(rtl_dir.rglob("*.sv"))):
+    if rtl_dir.is_dir() and any(
+            path.is_file() and path.suffix.lower() in _rtl_prov.RTL_SUFFIXES
+            for path in rtl_dir.rglob("*")):
         return None  # author/generator guard — never overwrite existing RTL
     if _defer_to_supplied("serial_parallel_mul_synth", project):
         return None  # D6 — consume stages the design's own RTL instead
@@ -2912,7 +2913,10 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     if not written:
         return None
     declared = out.get("declaration_written")
-    return StepResult(
+    # The same contract producer runs again at Step 4. Complete its choices
+    # now, before the professional TB binds their bytes to measured evidence.
+    declaration = declaration_before_step4(project)
+    result = StepResult(
         "rtl_gen", "PASS", time.time() - t0,
         f"deterministic serial-parallel multiplier RTL (program-first; no LLM) "
         f"-> {Path(written).relative_to(project)}"
@@ -2921,7 +2925,25 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
         output_files=[written] + ([declared] if declared else []),
         extras={"deterministic_generator": "serial_parallel_mul_synth",
                 "program_first": True, "topology": "serial_parallel",
-                "spec": out.get("spec")})
+                "spec": out.get("spec"),
+                "declaration_before_simulation": declaration,
+                "rtl_provenance": _rtl_prov.GENERATED})
+    # Reuse the existing held-project ledger transaction. A successful serial
+    # dispatch must transfer a trusted session to step_rtl_gen's outer commit,
+    # including when that runner later adds aliases or repairs its own files.
+    binding = _PHASE1_ACTIVE_PROJECT_BINDING
+    own_binding = binding is None or binding.project != project
+    if own_binding:
+        binding = _Phase1ProjectBinding.open(project)
+    try:
+        _phase1_stamp_held_session(binding, generator="serial_parallel_mul_synth")
+        binding.require_current()
+        _phase1_replace_session_binding(binding.duplicate())
+        _claim_rtl_session(project)
+        return result
+    finally:
+        if own_binding:
+            binding.close()
 
 
 def _try_canonical_primitive_rtl(

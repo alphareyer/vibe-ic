@@ -1,6 +1,7 @@
 """Minimum legal elaboration values stated by the design input.
 
-Only explicit ``parameter NAME >= N`` / ``NAME ≥ N`` requirements are read.
+Explicit ``parameter NAME >= N`` / ``NAME ≥ N`` requirements are read; a named
+parameter-table row can also state its own minimum without repeating its name.
 No range is invented for a merely parameterized port. Denied prose is ignored.
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ from _specrtl_common import strip_comments, _PARAM_ASSIGN
 
 _MINIMUM = re.compile(
     r"\b(?:parameter\s+)?([A-Za-z_]\w*)\s*(?:>=|≥)\s*(\d+)\b", re.I)
+_ROW_MINIMUM = re.compile(r"(?:>=|≥)\s*(\d+)\b")
 
 
 def minimums(text: str, *, declared_parameters=()) -> dict[str, int]:
@@ -24,28 +26,29 @@ def minimums(text: str, *, declared_parameters=()) -> dict[str, int]:
         data = json.loads(text)
     except (TypeError, ValueError):
         data = None
-    lines = [(line, None) for line in text.splitlines()] if data is None else []
-    def collect(node, parent="", names=frozenset()):
+    lines = [(line, None, None) for line in text.splitlines()] if data is None else []
+    def collect(node, parent="", names=frozenset(), row_name=None):
         if isinstance(node, str):
-            lines.extend((line, names) for line in node.splitlines())
+            lines.extend((line, names, row_name) for line in node.splitlines())
         elif isinstance(node, list):
             for child in node:
-                collect(child, parent, names)
+                collect(child, parent, names, row_name)
         elif isinstance(node, dict):
             if parent in ("parameters", "parameter_ranges"):
                 name = node.get("name")
                 if isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name):
                     names = frozenset((name.lower(),))
+                    row_name = name.lower()
             if parent == "parameter_ranges":
                 name, low = node.get("name"), node.get("min")
                 if (isinstance(name, str) and re.fullmatch(r"[A-Za-z_]\w*", name)
                         and type(low) is int and low >= 0):
                     answer[name.lower()] = max(low, answer.get(name.lower(), low))
             for key, child in node.items():
-                collect(child, key, names)
+                collect(child, key, names, row_name)
     if data is not None:
         collect(data, names=frozenset(name.lower() for name in declared_parameters))
-    for line, names in lines:
+    for line, names, row_name in lines:
         for match in _MINIMUM.finditer(line):
             # Bare inequalities in integration/signoff prose describe physical
             # acceptance. In JSON they become RTL ranges only inside the named
@@ -59,6 +62,18 @@ def minimums(text: str, *, declared_parameters=()) -> dict[str, int]:
                 continue
             name, value = match.group(1), int(match.group(2))
             answer[name.lower()] = max(value, answer.get(name.lower(), value))
+        if row_name is not None:
+            for match in _ROW_MINIMUM.finditer(line):
+                # An explicit neighboring identifier owns its inequality;
+                # only an unnamed bound can inherit this parameter row's name.
+                if re.search(r"[A-Za-z_]\w*\s*$", line[:match.start()]):
+                    continue
+                lo, hi = sentence_scope(line, match.start(), match.end(),
+                                        before=len(line), after=len(line))
+                if is_denied(line[lo:hi]) is not None:
+                    continue
+                low = int(match.group(1))
+                answer[row_name] = max(low, answer.get(row_name, low))
     return answer
 
 

@@ -1101,6 +1101,51 @@ def _directionless_table_names(prompt: str) -> Set[str]:
     return names
 
 
+def _configuration_table_spans(prompt: str) -> List[Tuple[int, int]]:
+    """Locate tool-setting rows by their table role, independently of RTL names.
+
+    Keep occurrences outside these tables: a setting and a real port may share
+    an identifier. Explicit interface or direction columns remain evidence.
+    """
+    lines = prompt.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    spans = []
+    physical_config = False
+    interface_section = False
+    for i, line in enumerate(lines[:-1]):
+        heading = re.match(r"^\s*#{1,6}\s+(.+)", line)
+        if heading:
+            text = heading.group(1)
+            interface_section = bool(re.search(
+                r"\b(?:interface|ports?|pins?|i/o)\b", text, re.I))
+            physical_config = bool(
+                re.search(r"\b(?:pdn|tool|physical|floorplan|routing|synthesis)\b", text, re.I)
+                and re.search(r"\b(?:config(?:uration)?|settings?|options?)\b", text, re.I))
+        header = _split_md_row_local(line)
+        delimiter = _split_md_row_local(lines[i + 1])
+        if not header or len(header) != len(delimiter) or not _is_md_delim_local(delimiter):
+            continue
+        clean = [cell.strip().strip("*_` ") for cell in header]
+        if any(_DIR_HDR_RE.fullmatch(cell) or re.fullmatch(
+                r"(?:ports?|signals?|pins?)(?:\s+names?)?", cell, re.I)
+               for cell in clean):
+            continue
+        setting_header = re.fullmatch(
+            r"(?:settings?|options?|config(?:uration)?(?:\s+key)?|tool\s+parameters?)",
+            clean[0], re.I)
+        value_header = any(re.fullmatch(r"(?:value|default(?:\s+value)?|enabled)", cell, re.I)
+                           for cell in clean[1:])
+        if interface_section or not value_header or not (setting_header or physical_config):
+            continue
+        end = i + 2
+        while end < len(lines) and "|" in lines[end] and lines[end].strip():
+            end += 1
+        spans.append((offsets[i + 2], offsets[end]))
+    return spans
+
+
 def _table_ports(prompt: str) -> Dict[str, str]:
     """Markdown table rows: first backtick cell = name, a later cell carrying
     a direction word = direction. Returns name→direction (lower, '' if no
@@ -1133,12 +1178,16 @@ def _table_ports(prompt: str) -> Dict[str, str]:
     # Direction column) — a results / metadata table, never a port table. Mirrors
     # the shared `_parse_md_table_ports` Direction-column discipline.
     directionless = _directionless_table_names(prompt)
+    configuration_spans = _configuration_table_spans(prompt)
     # Split on the pipe so an inline single-line table (the acceptance shape)
     # and a true multi-row markdown table both work: scan windows of
     # ``name` | dir` regardless of line boundaries.
     for cell_m in re.finditer(r"`([A-Za-z_]\w*)`\s*\|\s*([A-Za-z]+)", prompt):
         name = cell_m.group(1)
         word = cell_m.group(2).lower()
+        if word not in ("input", "output", "inout") and any(
+                start <= cell_m.start() < end for start, end in configuration_spans):
+            continue
         # (FIR_0001) a candidate name equal (whole-token) to a reserved SV
         # type/direction keyword is a Type-column cell, not a port — skip it.
         # CASE-SENSITIVE (Step-2.7): the phantom is always the literal lowercase

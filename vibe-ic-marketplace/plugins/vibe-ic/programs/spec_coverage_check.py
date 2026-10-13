@@ -1725,6 +1725,23 @@ def _requirement_text(text: str) -> str:
                      for value in documents)
 
 
+def _modulo_unsigned_selection(text: str):
+    """An explicit unsigned choice for a stated equivalent modulo product."""
+    choice = re.search(
+        r'(?:\b(?:chosen|declared|selected)\s+interpretation\s*[:=]\s*'
+        r'|["\']integer_encoding["\']\s*:\s*["\'])(unsigned)\b', text, re.I)
+    equivalent = re.search(
+        r"\bsigned\s+(?:and|or)\s+unsigned\b[^\n]{0,120}\bidentical\b"
+        r"[^\n]{0,80}\bmodulo[- ]?2\s*\^\s*(?:[A-Za-z_]\w*|\d+)"
+        r"[^\n]{0,40}\b(?:product\s+)?bit\s+patterns\b", text, re.I)
+    if choice is None or equivalent is None:
+        return None
+    other = text[:equivalent.start()] + text[equivalent.end():]
+    if _mention_present_unnegated(other, r"\bsigned\b"):
+        return None  # an independent signed requirement still owns its obligation
+    return choice
+
+
 def extract_checklist(spec_text: str) -> List[ChecklistItem]:
     spec_text = _requirement_text(spec_text)
     items: List[ChecklistItem] = []
@@ -1873,6 +1890,10 @@ def extract_checklist(spec_text: str) -> List[ChecklistItem]:
         (_HANDSHAKE_RE, "handshake", "handshake / protocol timing"),
     ):
         mm = rx.search(spec_text)
+        if kind == "signedness":
+            selected = _modulo_unsigned_selection(spec_text)
+            if selected is not None:
+                mm = rx.search(selected.group(1))
         # #760: the overflow family gets a clause-scoped preventive guard (the
         # #743 negation guard is wired ONLY into _has_reset/_has_clock and this
         # loop bypassed it). A "prevent/avoid/sized to ... overflow" width-sizing
@@ -3315,6 +3336,7 @@ _LDOC_SCAFFOLD_KEYS = (
     "extraction_status",
     "emitted_by",
     "_generator",
+    "input_filename",
 )
 
 #: The status an L-doc skeleton declares when NOTHING has been extracted into it
@@ -3351,6 +3373,10 @@ def _ldoc_design_text(raw: str) -> str:
     status = doc.get("extraction_status")
     if isinstance(status, str) and status.strip() == _LDOC_UNEXTRACTED_STATUS:
         return ""                        # the doc declares it holds nothing
+    applicability = doc.get("status")
+    if isinstance(applicability, str) and applicability.strip().lower() in {
+            "not-applicable", "not_applicable", "not applicable", "n/a"}:
+        return ""                        # this typed layer declares no feature obligations
     return json.dumps(_strip_scaffold(doc), ensure_ascii=False)
 
 

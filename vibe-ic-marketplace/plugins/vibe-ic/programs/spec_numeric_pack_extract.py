@@ -271,6 +271,21 @@ def _is_log2_width_helper(text: str, match) -> bool:
     return True
 
 
+def _rounding_clause(text: str, match) -> str:
+    """A typed JSON value owns its qualifiers, independently of its neighbors."""
+    for field in re.finditer(
+            r'(?P<key>"(?:\\.|[^"\\])*")\s*:\s*'
+            r'(?P<value>"(?:\\.|[^"\\])*")', text):
+        if field.start("value") <= match.start() < field.end("value"):
+            try:
+                return json.loads(field.group("key")) + ": " + json.loads(field.group("value"))
+            except ValueError:
+                break  # malformed quoted prose keeps the original sentence scope
+    lo, hi = sentence_scope(text, match.start(), match.end(),
+                            extra_breaks=_LINE_END_BREAKS)
+    return text[lo:hi]
+
+
 def _first_not_retired(rx, text: str, *, skip_width_helper: bool = False):
     """Like `_first_live`, but RETIREMENT only -- not every negation.
 
@@ -293,9 +308,13 @@ def _first_not_retired(rx, text: str, *, skip_width_helper: bool = False):
     for m in rx.finditer(text):
         if skip_width_helper and _is_log2_width_helper(text, m):
             continue
-        lo, hi = sentence_scope(text, m.start(), m.end(),
-                                extra_breaks=_LINE_END_BREAKS)
-        if DENIAL_RETIRED_RE.search(text[lo:hi]):
+        clause = _rounding_clause(text, m)
+        if (skip_width_helper and re.search(r"\bdiagnostic\w*\b", clause, re.I)
+                and re.search(r"\b(?:area|power|upper\s+bound)\b", clause, re.I)
+                and not re.search(r"\b(?:rounding(?:[_ -]mode)?|round(?:s|ed)?|RUP)\b|ceil\s*\(",
+                                  clause, re.I)):
+            continue  # a metric ceiling is not an arithmetic rounding mode
+        if DENIAL_RETIRED_RE.search(clause):
             continue
         return m
     return None

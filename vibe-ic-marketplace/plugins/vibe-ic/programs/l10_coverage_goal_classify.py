@@ -173,6 +173,23 @@ def coverage_scope(case: dict) -> Tuple[Optional[str], str]:
     return text, key
 
 
+def goal_enforcement(case: dict) -> Tuple[str, str]:
+    """Preserve explicit row-local non-sign-off intent; default stays blocking."""
+    qualified = [(key, _text(case.get(key))) for key in _SCOPE_KEYS if _text(case.get(key))]
+    for key, text in qualified:
+        # A negated obligation cannot become an affirmative admission gate.
+        # Keep the rest of the row: another clause may explicitly be mandatory.
+        affirmative = re.sub(r"\bnot\s+(?:mandatory|required)\b", "", text, flags=re.I)
+        if re.search(r"\b(?:mandatory|required)\b|\bnot\s+informational\b", affirmative, re.I):
+            return "BLOCKING", f"{key} states mandatory intent"
+    for key, text in qualified:
+        if re.search(r"\binformational\b|\bnon[- ]blocking\b|"
+                     r"\b(?:non[- ]|not\s+(?:a\s+)?)sign[- ]off(?:\s+gate)?\b|"
+                     r"\u975e\s*sign[- ]off(?:\s+gate)?|\u8cc7\u8a0a\u6027", text, re.I):
+            return "ADVISORY", f"{key}={text!r} explicitly excludes sign-off admission"
+    return "BLOCKING", "the row states no non-sign-off qualification"
+
+
 def classify(case: dict) -> Tuple[str, str]:
     """`(population, evidence)` for ONE declared L10 row.
 
@@ -215,7 +232,10 @@ def execution_partition(cases: Sequence[dict]
 
     A row its producer TYPED as an executable kind (`functional_vector`, ...)
     stays in the execution population even when its expected half states a
-    percentage. `partition` still hands its percentage to the goal instrument
+    scenario pass percentage. A dimension-only coverage threshold can be
+    mislabeled by an earlier emitter: its explicit coverage label/scope and
+    non-PASS-rate criterion identify the coverage instrument instead.
+    `partition` still hands scenario percentages to the goal instrument
     (R-0915-131), so the row answers to BOTH authorities -- as it did before
     the populations were split -- and neither of them drops it. Delegating it
     too would let a typed vector with no execution evidence and no waiver
@@ -228,9 +248,25 @@ def execution_partition(cases: Sequence[dict]
             continue
         kind, _field = declared_kind(c)
         typed_executable = bool(kind) and kind not in _GOAL_KIND_TOKENS
-        delegated = classify(c)[0] == COVERAGE_GOAL and not typed_executable
+        dimensions, _source, _why = coverage_dimensions(c)
+        scope, _scope_source = coverage_scope(c)
+        name = _text(c.get("name") or c.get("id"))
+        dimension_only = (bool(dimensions) and not is_pass_rate_goal(c)
+                          and bool(re.search(r"(?<![a-z0-9])coverage(?![a-z0-9])",
+                                             name + " " + (scope or ""), re.I)))
+        delegated = classify(c)[0] == COVERAGE_GOAL and (
+            not typed_executable or dimension_only)
         (goals if delegated else vectors).append(c)
     return vectors, goals
+
+
+def _dimension_tokens(text: str) -> List[str]:
+    """Match the shared dimension vocabulary as words, including labels."""
+    normalized = re.sub(r"[\s_-]+", " ", text.lower())
+    return [dimension for dimension, words in DIMENSION_WORDS.items()
+            if any(re.search(r"(?<![a-z0-9])" + re.escape(word)
+                             + r"(?![a-z0-9])", normalized)
+                   for word in words)]
 
 
 def bind_scope(scope_text: Optional[str]) -> Tuple[Optional[str], str]:
@@ -243,9 +279,7 @@ def bind_scope(scope_text: Optional[str]) -> Tuple[Optional[str], str]:
     be manufacturing the verdict."""
     if not scope_text:
         return None, "the row names no scope to bind"
-    low = scope_text.lower()
-    hits = [dim for dim, words in DIMENSION_WORDS.items()
-            if any(w in low for w in words)]
+    hits = _dimension_tokens(scope_text)
     if not hits:
         return None, (f"the stated scope names no coverage dimension this "
                       f"run measures ({'/'.join(sorted(DIMENSION_WORDS))}): "
@@ -294,6 +328,27 @@ def is_pass_rate_goal(case: dict) -> bool:
     """True when the goal's expected half is a PASS-RATE (`N% PASS`)."""
     text, _key = _first(case, _EXPECTED_KEYS)
     return bool(text and _PASS_RATE_RE.search(text))
+
+
+def coverage_dimensions(case: dict) -> Tuple[List[str], str, str]:
+    """Dimensions explicitly named by the metric's scope or coverage label.
+
+    Shared by measurement and execution routing. Ambiguous multi-dimension
+    scopes retain their existing refusal; a label can bind several dimensions
+    only when the scope itself names none, and never supplies scenario data.
+    """
+    scope, scope_source = coverage_scope(case)
+    dimension, why = bind_scope(scope)
+    if dimension:
+        return [dimension], scope_source, why
+    scope_has_dimension = bool(_dimension_tokens(scope or ""))
+    name = _text(case.get("name") or case.get("id"))
+    if not scope_has_dimension and not is_pass_rate_goal(case):
+        if re.search(r"(?<![a-z0-9])coverage(?![a-z0-9])", name, re.I):
+            dimensions = _dimension_tokens(name)
+            if dimensions:
+                return dimensions, "name", "the coverage label names the measured dimensions"
+    return [], scope_source, why
 
 
 def _names(value: Any) -> List[str]:
@@ -419,18 +474,40 @@ def measure_goal(case: dict, totals: Any, rows: Optional[Sequence[dict]] = None,
     name = _text(case.get("name") or case.get("id"))
     scope, scope_cite = coverage_scope(case)
     stated, stated_cite = stated_acceptance_percentage(case)
+    enforcement, enforcement_cite = goal_enforcement(case)
     out: Dict[str, Any] = {
         "case": name, "population": COVERAGE_GOAL,
         "scope": scope, "scope_source": scope_cite,
         "stated_pct": stated, "stated_source": stated_cite,
         "dimension": None, "achieved_pct": None, "achieved_source": None,
+        "enforcement": enforcement, "enforcement_source": enforcement_cite,
     }
     if stated is None:
         out["verdict"] = NOT_MEASURED
         out["why"] = (f"case {name!r}: it is a coverage goal with no stated "
                       f"acceptance percentage ({stated_cite})")
         return out
-    dim, why = bind_scope(scope)
+    dimensions, dimension_source, why = coverage_dimensions(case)
+    dim = dimensions[0] if len(dimensions) == 1 else None
+    if dimensions:
+        out["dimension_source"] = dimension_source
+    out["dimensions"] = dimensions
+    if len(dimensions) > 1:
+        observations = []
+        for dimension in dimensions:
+            value, source = achieved_percentage(totals, dimension)
+            observations.append({"dimension": dimension, "achieved_pct": value,
+                                 "achieved_source": source,
+                                 "verdict": NOT_MEASURED if value is None else
+                                 PASS if value >= stated else FAIL})
+        states = [observation["verdict"] for observation in observations]
+        out.update(instrument=COVERAGE_DIMENSION, measurements=observations,
+                   verdict=FAIL if FAIL in states else NOT_MEASURED
+                   if NOT_MEASURED in states else PASS,
+                   why=f"case {name!r}: each named coverage dimension owes {stated:g}%")
+        if all(observation["achieved_pct"] is not None for observation in observations):
+            out["achieved_pct"] = min(observation["achieved_pct"] for observation in observations)
+        return out
     if dim is None and record is not None and is_pass_rate_goal(case):
         # The scope names scenarios, not a coverage dimension: the scenario
         # pass-rate instrument measures it from the cases bound to it.
@@ -482,7 +559,8 @@ def coverage_goal_refusal(summary: dict) -> Optional[str]:
 
     NOT_MEASURED is not a pass and FAIL is not a pass; both are named, with
     the scope quoted, so no goal is satisfied by being un-instrumented."""
-    bad = [r for r in summary.get("rows") or [] if r["verdict"] != PASS]
+    bad = [r for r in summary.get("rows") or []
+           if r.get("enforcement", "BLOCKING") != "ADVISORY" and r["verdict"] != PASS]
     if not bad:
         return None
     named = "; ".join(f"{r['case']} [{r['verdict']}] {r['why']}"

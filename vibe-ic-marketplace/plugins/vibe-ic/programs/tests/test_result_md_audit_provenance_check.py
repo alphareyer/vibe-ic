@@ -744,6 +744,26 @@ _CLAIM_SCOPE_CASES = {
     "table-component": (
         "STATUS: FAIL\n| Hardware | Synthesis PASS; no hardware measurement. |\n",
         False, 0),
+    # Reopened #3081: denials must not request success provenance.
+    "denied-hardware-subject": (
+        "STATUS: FAIL\nNo Hardware PASS is claimed.\n", False, 0),
+    "denied-hardware-predicate": (
+        "Hardware is *not* PASS.\n", False, 0),
+    "hardware-pass-not-yet-verified": (
+        "Hardware: PASS not yet verified.\n", False, 0),
+    "hardware-failed-then-passed": (
+        "Hardware initially failed, subsequently reports PASS.\n", True, 1),
+    "hardware-not-failed-then-passed": (
+        "Hardware did not fail, subsequently reports PASS.\n", True, 1),
+    "hardware-pass-not-rerun": (
+        "Hardware PASS, not rerun.\n", True, 1),
+    "hardware-denied-then-passed": (
+        "STATUS: FAIL\nHardware was not PASS yesterday, but reports PASS now.\n",
+        True, 1),
+    "hardware-not-yet-pass": (
+        "STATUS: FAIL\nHardware is not yet PASS.\n", False, 0),
+    "hardware-not-a-pass": (
+        "STATUS: FAIL\nHardware is not a PASS.\n", False, 0),
 }
 _MISSING_SUCCESS_PROVENANCE = {
     "RESULT_MD_MISSING_AUDIT_SHA",

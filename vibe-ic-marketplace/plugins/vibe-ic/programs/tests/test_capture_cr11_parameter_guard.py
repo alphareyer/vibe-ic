@@ -296,3 +296,48 @@ def test_nested_single_item_false_condition_cannot_guard_invalid_width(tmp_path,
     (rtl_dir / "counter_bank.sv").write_text(valid_block)
     assert has_elaboration_guard(valid_block, "WIDTH", 5, top="counter_bank")
     assert conformance.main(args) == 0
+
+
+@pytest.mark.parametrize("bound", ["≥ 4", ">= 4"])
+def test_named_parameter_row_binds_its_own_bare_minimum(bound):
+    row = {"parameters": [{"name": "size", "default": "32",
+            "type": f"典型應用為 8 / 16 / 32;設計上應支援 {bound} 的任意正整數",
+            "description": ""}]}
+    assert minimums(json.dumps(row, ensure_ascii=False),
+                    declared_parameters=("size",)) == {"size": 4}
+
+
+def test_named_parameter_row_still_ignores_neighbor_and_denied_minima():
+    row = {"parameters": [{"name": "WIDTH",
+            "description": "wire_count >= 9; no requirement that ≥ 7"}],
+           "integration": "hold ≥ 0; slack ≥ 0; ≥ 12"}
+    assert minimums(json.dumps(row), declared_parameters=("WIDTH",)) == {}
+
+
+def test_named_parameter_row_reaches_real_generator_and_guard_consumer(tmp_path, capsys):
+    project = _project(tmp_path, "named_range_cell", minimum=None)
+    l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    doc = json.loads(l9.read_text())
+    doc["parameters"] = [{"name": "WIDTH", "default": "32",
+                          "type": "設計上應支援 ≥ 4 的任意正整數"}]
+    l9.write_text(json.dumps(doc, ensure_ascii=False))
+    spec, why = synth.extract_serial_parallel_mul_spec(project, "digital_arithmetic_primitive")
+    assert spec is not None, why
+    assert spec["size_min"] == 4, spec
+    rtl_dir = project / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    source = rtl_dir / "named_range_cell.v"
+    rtl = synth.emit_rtl(spec)
+    source.write_text(rtl)
+    args = ["--spec", str(l9), "--rtl-dir", str(rtl_dir), "--top", "named_range_cell"]
+    assert conformance.main(args) == 0
+    capsys.readouterr()
+    source.write_text(rtl.replace("initial $fatal", "initial $display"))
+    assert conformance.main(args) == 1
+    assert "parameter-range-guard-missing" in capsys.readouterr().out
+    for width, accepted in ((4, True), (3, False)):
+        doc["top_ports"][2]["width_resolution"] = {
+            "identifier": "WIDTH", "parameter_default_int": width}
+        l9.write_text(json.dumps(doc, ensure_ascii=False))
+        result, reason = synth.extract_serial_parallel_mul_spec(project, "digital_arithmetic_primitive")
+        assert (result is not None) is accepted, (width, result, reason)

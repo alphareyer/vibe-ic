@@ -426,6 +426,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = {"verdict": "EMIT", "reason": reason, "top": spec["top"],
            "spec": spec}
     if a.emit:
+        decl_path = proj / "plugin_output" / "declaration.json"
+        declaration = plugin_declaration(spec)
+        if decl_path.exists():
+            try:
+                prior = json.loads(decl_path.read_text())
+            except (OSError, ValueError) as exc:
+                print(json.dumps({"verdict": "DEFER", "reason":
+                                  f"existing declaration is unreadable: {exc}"}))
+                return 2
+            if not isinstance(prior, dict):
+                print(json.dumps({"verdict": "DEFER", "reason":
+                                  "existing declaration is not an object"}))
+                return 2
+            expected = dict(declaration, size_param=spec["size_default"])
+            conflicts = [name for name, value in expected.items()
+                         if name in prior and (type(prior[name]) is not type(value)
+                                               or prior[name] != value)]
+            if conflicts:
+                print(json.dumps({"verdict": "DEFER", "reason":
+                                  "existing declaration conflicts with serial RTL: "
+                                  + ", ".join(conflicts)}))
+                return 2
+            # Compatible author choices outside this solver's four fields
+            # remain available to the contract producer and its consumers.
+            declaration = dict(prior, **declaration)
         rtl_dir = proj / "phase2" / "stage1" / "rtl"
         rtl_dir.mkdir(parents=True, exist_ok=True)
         rtl_path = rtl_dir / f"{spec['top']}.v"
@@ -437,9 +462,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # a state the spec never describes (RTL present, declaration absent).
         decl_dir = proj / "plugin_output"
         decl_dir.mkdir(parents=True, exist_ok=True)
-        decl_path = decl_dir / "declaration.json"
         decl_path.write_text(
-            json.dumps(plugin_declaration(spec), indent=2, sort_keys=True) + "\n")
+            json.dumps(declaration, indent=2, sort_keys=True) + "\n")
         out["declaration_written"] = str(decl_path)
     print(json.dumps(out))
     return 0

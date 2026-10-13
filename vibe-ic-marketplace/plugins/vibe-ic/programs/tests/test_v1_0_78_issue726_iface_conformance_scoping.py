@@ -48,6 +48,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 
 
+@pytest.mark.parametrize("option", ["FP_PDN_SKIPTRIM", "ROUTE_OPTIMIZE"])
+def test_physical_configuration_table_is_not_a_required_port(tmp_path, option):
+    prompt = ("## Interface ports\n"
+              "| Port | Direction |\n|---|---|\n"
+              "| `clk` | input |\n| `rst` | input |\n"
+              "| `x` | input |\n| `y` | input |\n| `p` | output |\n\n"
+              "## PDN configuration\n"
+              "| Setting | Value |\n|---|---|\n"
+              f"| `{option}` | true(skip trimming) |\n")
+    rtl = "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n"
+    result = _run_cli(tmp_path, rtl, prompt, strict=True)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "MISSING-PORT" not in result.stdout
+    assert option not in M._table_ports(prompt)
+
+
+@pytest.mark.parametrize("explicit_direction", [True, False])
+def test_config_table_cannot_hide_the_same_real_interface_identifier(
+        tmp_path, explicit_direction):
+    role = "Direction" if explicit_direction else "Description"
+    value = "output" if explicit_direction else "product signal"
+    prompt = ("## PDN configuration\n"
+              "| Setting | Value |\n|---|---|\n| `p` | true |\n\n"
+              f"## Interface ports\n| Port | {role} |\n|---|---|\n"
+              f"| `p` | {value} |\n")
+    result = _run_cli(tmp_path, "module neutral_core(input clk); endmodule\n",
+                      prompt, strict=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "MISSING-PORT" in result.stdout and "'p'" in result.stdout
+
+
+def test_positive_interface_role_overrides_setting_shaped_column_names(tmp_path):
+    prompt = ("## Interface ports\n"
+              "| Setting | Value |\n|---|---|\n| `p` | product signal |\n")
+    result = _run_cli(tmp_path, "module neutral_core(input clk); endmodule\n",
+                      prompt, strict=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "MISSING-PORT" in result.stdout and "'p'" in result.stdout
+
+
+def test_positive_port_header_overrides_physical_settings_heading(tmp_path):
+    prompt = ("## Floorplan settings\n"
+              "| Port | Default value |\n|---|---|\n| `p` | product signal |\n")
+    result = _run_cli(tmp_path, "module neutral_core(input clk); endmodule\n",
+                      prompt, strict=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "MISSING-PORT" in result.stdout and "'p'" in result.stdout
+
+
 def _run_cli(tmp_path, rtl, prompt, rid=None, strict=False, context=None):
     rp = tmp_path / "c.sv"
     pp = tmp_path / "p.txt"

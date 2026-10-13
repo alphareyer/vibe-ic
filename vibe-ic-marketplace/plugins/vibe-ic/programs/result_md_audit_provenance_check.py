@@ -73,7 +73,7 @@ import fmeda_fault_injection_coverage as _fmeda  # noqa: E402
 # The AUDITOR's own in-progress files are declared in ONE place (R-0915-168); a freshness judge
 # must ask that declaration rather than carry its own suffix list. See `_is_flow_output`.
 import _path_layout as _pl_shapes  # noqa: E402
-from _prose_polarity import sentence_scope  # noqa: E402
+from _prose_polarity import NEGATION_RE, sentence_scope  # noqa: E402
 
 WAIVER_KEY = "result_md_audit_provenance_intentional"
 WAIVER_MIN_LEN = 40
@@ -161,13 +161,21 @@ _CLAIMS_PASS_RE = re.compile(
 
 _HARDWARE_RE = re.compile(r"\bhardware\b", re.IGNORECASE)
 _HARDWARE_PASS_RE = re.compile(
-    r"\bhardware[^\n]{0,40}?(?P<pass>" + _PASS_CLAIM + ")", re.IGNORECASE)
+    r"(?P<pass>" + _PASS_CLAIM + ")", re.IGNORECASE)
 _HARDWARE_PENDING_RE = re.compile(
     r"\b(?:await(?:ing|s)?|pending|NOT_MEASURED)\b", re.IGNORECASE)
 _HARDWARE_PENDING_SUFFIX_RE = re.compile(
     r"^[\s*_`]*(?:(?:is|was|remains)\s+)?(?:still\s+)?"
-    r"(?:pending|await(?:ing|s)?)\b", re.IGNORECASE)
+    r"(?:pending|await(?:ing|s)?|not\s+(?:yet\s+)?verified)\b", re.IGNORECASE)
 _OTHER_CELL_SUBJECT_RE = re.compile(r"\b(?:formal|synthesis)\b", re.IGNORECASE)
+
+
+def _immediately_denied(prefix: str) -> bool:
+    """A denial touching the subject or PASS, with local predicate qualifiers."""
+    return any(re.fullmatch(r"[\s*_`]*(?:yet[\s*_`]+)?"
+                            r"(?:(?:a|an|the)[\s*_`]+)?",
+                            prefix[denial.end():], re.IGNORECASE)
+               for denial in NEGATION_RE.finditer(prefix))
 
 
 def _hardware_claims_pass(text: str) -> bool:
@@ -177,26 +185,30 @@ def _hardware_claims_pass(text: str) -> bool:
     owned by the shared scope helper. Table labels can name hardware while
     another cell discusses a formal/synthesis result; that component's PASS
     cannot carry the hardware label. A PASS explicitly stated as pending is
-    still incomplete. Other qualifiers after an actual PASS do not erase it,
-    nor does an earlier FAIL headline.
+    still incomplete, as is a PASS not yet verified. A directly denied subject
+    or PASS makes no success claim; a later positive PASS in the same clause
+    still does. Other qualifiers after an actual PASS do not erase it, nor does
+    an earlier FAIL headline.
     """
     for hardware in _HARDWARE_RE.finditer(text):
-        _, hi = sentence_scope(
-            text, hardware.start(), hardware.end(), before=0,
+        lo, hi = sentence_scope(
+            text, hardware.start(), hardware.end(),
             extra_breaks=("\n", ";"))
+        if _immediately_denied(text[lo:hardware.start()]):
+            continue
         clause = text[hardware.start():hi]
-        success = _HARDWARE_PASS_RE.search(clause)
-        if success is None:
-            continue
-        prefix = clause[:success.start("pass")]
-        if _HARDWARE_PENDING_RE.search(prefix):
-            continue
-        if _HARDWARE_PENDING_SUFFIX_RE.match(clause[success.end("pass"):]):
-            continue
-        if "|" in prefix and _OTHER_CELL_SUBJECT_RE.search(
-                prefix.rsplit("|", 1)[1]):
-            continue
-        return True
+        for success in _HARDWARE_PASS_RE.finditer(clause):
+            if success.start("pass") - len(hardware.group()) > 40:
+                break
+            prefix = clause[:success.start("pass")]
+            if _immediately_denied(prefix) or _HARDWARE_PENDING_RE.search(prefix):
+                continue
+            if _HARDWARE_PENDING_SUFFIX_RE.match(clause[success.end("pass"):]):
+                continue
+            if "|" in prefix and _OTHER_CELL_SUBJECT_RE.search(
+                    prefix.rsplit("|", 1)[1]):
+                continue
+            return True
     return False
 
 
