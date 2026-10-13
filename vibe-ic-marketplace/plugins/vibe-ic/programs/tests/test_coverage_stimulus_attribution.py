@@ -535,3 +535,173 @@ def test_only_generator_bundles_reach_the_strict_coverage_consumer(tmp_path, sta
         assert execution['observed_functional_input_toggles']['sample'] > 0
         assert payload['line_union_cross_check']['agree'] is True
         assert V.scope_totals(V.parse_coverage_dat(str(dat)), sources)['totals'] == payload['totals']
+
+
+def _public_selector_project(root, top):
+    """Real producer CLI, source/admission evidence only; never run the TB."""
+    docs = root / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'top_module': top, 'top_ports': [
+            {'name': 'sample', 'dir': 'input', 'width': 1},
+            {'name': 'result', 'dir': 'output', 'width': 1},
+            {'name': 'ck4', 'dir': 'input', 'width': 1}]}))
+    (docs / 'L8_TIMING_WAVEFORM.json').write_text(json.dumps({
+        'clocks': [{'name': 'ck4', 'source_pin': 'ck4', 'period_ns': 10}]}))
+    rtl = root / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    # A legitimate top may end in _tb; its RTL filename is not a testbench.
+    (rtl / 'native_logic.v').write_text(
+        f'module {top}(input sample, input ck4, output reg result);\n'
+        'always @(posedge ck4) result <= sample;\nendmodule\n')
+    bundle = root / 'phase2/stage1/sim_professional' / top
+    bundle.mkdir(parents=True)
+    (bundle / 'expert_reference_tb.py').write_text(_COCOTB_SCOREBOARD)
+    report = root / 'reports/phase2/gates/professional_tb.json'
+    report.parent.mkdir(parents=True)
+    produced = subprocess.run([
+        sys.executable, str(PROGRAMS / 'professional_tb_gen.py'), str(root),
+        '--json', str(report)], capture_output=True, text=True)
+    assert produced.returncode == 0, produced.stdout + produced.stderr
+    declaration = json.loads(report.read_text())
+    assert declaration['reference_model_tier'] == 'expert_filled', declaration
+    return bundle, report
+
+
+@pytest.mark.parametrize('control', [
+    'foreign_absolute', 'foreign_parent_relative', 'foreign_wrong_slot',
+    'broken_professional_artifact',
+])
+def test_selector_declaration_cannot_borrow_a_foreign_basename(tmp_path, control):
+    """Predeclared independent failures: exact source scope and broken link."""
+    from testbench_gen import UNIT_TB_RESULT_DIR
+    bundle, report = _public_selector_project(tmp_path, UNIT_TB_RESULT_DIR)
+    original = json.loads(report.read_text())
+    for path in bundle.iterdir():
+        path.unlink()
+    (bundle / 'results.xml').write_text('<testsuite tests="1"/>')
+    expected = []
+    if control == 'broken_professional_artifact':
+        report.rename(report.with_name('professional_tb.retained.json'))
+        tb = bundle / f'tb_{UNIT_TB_RESULT_DIR}.py'
+        tb.symlink_to('missing-native-tb.py')
+        expected = [str(tb)]
+    else:
+        foreign = tmp_path.parent / 'foreign-project' / control / UNIT_TB_RESULT_DIR
+        foreign.mkdir(parents=True)
+        raw = str(foreign)
+        if control == 'foreign_parent_relative':
+            raw = os.path.relpath(foreign, tmp_path)
+        elif control == 'foreign_wrong_slot':
+            foreign = tmp_path / 'different-subtree' / UNIT_TB_RESULT_DIR
+            foreign.mkdir(parents=True)
+            raw = str(foreign)
+        report.write_text(json.dumps({**original, 'out_dir': raw}))
+    observed = {
+        'professional': V._professional_measure_testbenches(tmp_path),
+        'single': V.discover_measure_inputs(tmp_path)[1],
+        'suite': V.discover_measure_testbenches(tmp_path)[1],
+    }
+    expected_selection = {'professional': expected,
+                          'single': expected[0] if expected else None,
+                          'suite': expected}
+    selection_matches = observed == expected_selection
+    assert selection_matches is True, observed
+    # A real refused invocation must stop before any simulator or coverage.dat.
+    out = tmp_path / 'refused-coverage.json'
+    consumed = subprocess.run([
+        sys.executable, str(PROGRAMS / 'verilator_coverage_measure.py'),
+        'measure-tb', '--project', str(tmp_path), '--out', str(out)],
+        text=True, capture_output=True)
+    assert consumed.returncode == 1, consumed.stdout + consumed.stderr
+    if expected:
+        payload = json.loads(out.read_text())
+        assert payload['measurement_status'] == 'NOT_MEASURED', payload
+        assert 'PROFESSIONAL_COVERAGE_PLAN_INVALID' in payload['reason'], payload
+    else:
+        assert 'no testbench found to instrument' in consumed.stderr
+        assert out.exists() is False
+    assert list(tmp_path.glob('**/coverage.dat')) == []
+    assert list(tmp_path.glob('**/coverage_cocotb_execution.json')) == []
+
+
+def test_public_professional_producer_keeps_healthy_bundle_admission(tmp_path):
+    bundle, report = _public_selector_project(tmp_path, 'selector_scope')
+    helper = bundle.parent / 'execution_helper'
+    helper.mkdir()
+    (helper / 'Makefile').write_text('# Execution-only helper\n')
+    (helper / 'results.xml').write_text('<testsuite tests="1"/>')
+    tb = bundle / 'tb_selector_scope.py'
+    assert V._professional_measure_testbenches(tmp_path) == [str(tb)]
+    assert V.discover_measure_inputs(tmp_path)[1] == str(tb)
+    assert V.discover_measure_testbenches(tmp_path)[1] == [str(tb)]
+    assert V._professional_bundle(tb)['reference_model_tier'] == 'expert_filled'
+    assert json.loads(report.read_text())['out_dir'] == str(bundle)
+    assert list(tmp_path.glob('**/coverage.dat')) == []
+
+
+@pytest.mark.parametrize('state', ['declared_missing', 'filled'])
+def test_copied_canonical_declaration_keeps_its_bundle_population(tmp_path, state):
+    """Actual producer -> copied INPUT -> selector/admission, without simulation.
+
+    A former absolute canonical slot still declares a damaged bundle. The
+    refusal must name that plan rather than silently losing its population.
+    """
+    import hashlib
+    import shutil
+    import professional_tb_gen as gen
+    seed, _bundle = _selection_project(tmp_path / 'original', state)
+    report = seed / 'reports/phase2/gates/professional_tb.json'
+    report.parent.mkdir(parents=True, exist_ok=True)
+    declaration = json.loads(report.read_text()) if report.exists() else gen.generate(seed)
+    declaration['out_dir'] = (
+        '/previous_location/neutral_project/phase2/stage1/sim_professional/sensor_core')
+    report.write_text(json.dumps(declaration))
+    seal = {str(p.relative_to(seed)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(seed.rglob('*')) if p.is_file()}
+    project = tmp_path / 'current'
+    shutil.copytree(seed, project)
+    assert {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(project.rglob('*')) if p.is_file()} == seal
+    tb = project / 'phase2/stage1/sim_professional/sensor_core/tb_sensor_core.py'
+    observed = {
+        'state': state, 'input_role': 'SOURCE_CONTROL', 'input_seal': seal,
+        'selectors': {'professional': V._professional_measure_testbenches(project),
+                      'single': V.discover_measure_inputs(project)[1],
+                      'suite': V.discover_measure_testbenches(project)[1]},
+    }
+    if state == 'declared_missing':
+        out = tmp_path / 'copied-coverage.json'
+        measured = subprocess.run([
+            sys.executable, str(PROGRAMS / 'verilator_coverage_measure.py'),
+            'measure-tb', '--project', str(project), '--out', str(out)],
+            text=True, capture_output=True)
+        checked = subprocess.run([
+            sys.executable, str(PROGRAMS / 'verilator_coverage_measure.py'),
+            'check', '--coverage-json', str(out)], text=True, capture_output=True)
+        observed['CLI'] = {
+            'producer_rc': measured.returncode, 'producer_stdout': measured.stdout,
+            'producer_stderr': measured.stderr, 'consumer_rc': checked.returncode,
+            'consumer_stdout': checked.stdout, 'consumer_stderr': checked.stderr,
+            'report_present': out.exists(),
+            'report': json.loads(out.read_text()) if out.exists() else None,
+        }
+    else:
+        observed['admission'] = V._professional_bundle(tb)['reference_model_tier']
+    observed['native_artifacts'] = [str(p.relative_to(project))
+                                  for pattern in ('**/coverage.dat',
+                                                  '**/coverage_cocotb_execution.json')
+                                  for p in project.glob(pattern)]
+    (tmp_path / 'copied_selection_observed.json').write_text(
+        json.dumps(observed, indent=2) + '\n')
+    assert observed['selectors'] == {
+        'professional': [str(tb)], 'single': str(tb), 'suite': [str(tb)]}, observed
+    assert observed['native_artifacts'] == [], observed
+    if state == 'declared_missing':
+        actual = observed['CLI']
+        assert actual['producer_rc'] == actual['consumer_rc'] == 1, observed
+        assert actual['report_present'] is True, observed
+        assert actual['report']['measurement_status'] == 'NOT_MEASURED', observed
+        assert 'PROFESSIONAL_COVERAGE_PLAN_INVALID' in actual['report']['reason'], observed
+    else:
+        assert observed['admission'] == 'expert_filled', observed

@@ -35,6 +35,7 @@ import librelane_contract as LC
 import _owner_declared as _OD  # noqa: E402 — tests/, the one attestation fixture
 
 PROGRAMS = Path(LC.__file__).resolve().parent
+FLOW_OUTPUT_CONDITIONS_PATH = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 #: The ruling, restated as the contract: under `--librelane` LibreLane
 #: produces the step except where the owner keeps vibe-ic's check.
 LAYER = {
@@ -61,7 +62,43 @@ DYNAMIC_SITES = {
     # obligation/finished_layout and precheck/state_metric callers use these steps.
     ("librelane_signoff_evidence.py", "tool_selected", "step"): ("26", "31", "34", "37"),
     ("phase3_one_shot_runner.py", "atpg_librelane_views", "step"): ("DT2", "DT3"),
+    ("flow_compliance_check.py", "_output_not_owed", "selection"): "OUTPUT_CONDITIONS",
 }
+
+
+def _output_condition_steps():
+    """The finite selection population owed by canonical output_conditions.
+
+    Missing or unknown context is unresolved, never an empty covered set.
+    """
+    import _flow_yaml
+    import yaml
+
+    try:
+        rows = _flow_yaml.load(FLOW_OUTPUT_CONDITIONS_PATH, encoding="utf-8")["steps"]
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            return None
+        declared = {str(row["id"]) for row in rows}
+        steps = set()
+        for row in rows:
+            conditions = row.get("output_conditions", {})
+            if not isinstance(conditions, dict):
+                return None
+            for condition in conditions.values():
+                if not isinstance(condition, dict):
+                    return None
+                if "librelane_step_mode" not in condition:
+                    continue
+                selection = condition["librelane_step_mode"]
+                if not isinstance(selection, dict):
+                    return None
+                step = selection.get("step")
+                if type(step) not in (str, int) or str(step) not in declared:
+                    return None
+                steps.add(str(step))
+        return tuple(sorted(steps)) or None
+    except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
+        return None
 
 
 def _tree(project: Path) -> dict:
@@ -221,6 +258,26 @@ def call_sites(root: Path = PROGRAMS, used: dict | None = None):
                                 steps = tuple(sorted({v[0] for v in table.values()}))
                             else:
                                 steps = source
+                    elif (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name)
+                          and arg.func.id == "str" and len(arg.args) == 1
+                          and not arg.keywords):
+                        selection = arg.args[0]
+                        if (isinstance(selection, ast.Call)
+                                and isinstance(selection.func, ast.Attribute)
+                                and isinstance(selection.func.value, ast.Name)
+                                and selection.func.attr == "get"
+                                and len(selection.args) == 1 and not selection.keywords
+                                and isinstance(selection.args[0], ast.Constant)
+                                and selection.args[0].value == "step"):
+                            enclosing = next(
+                                (p.name for p in reversed(parents)
+                                 if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef))),
+                                None)
+                            key = (path.name, enclosing, selection.func.value.id)
+                            if DYNAMIC_SITES.get(key) == "OUTPUT_CONDITIONS":
+                                if used is not None:
+                                    used[key] = used.get(key, 0) + 1
+                                steps = _output_condition_steps()
                 sites.append((str(rel), node.lineno, steps))
             for child in ast.iter_child_nodes(node):
                 walk(child, parents + [node])
@@ -531,3 +588,38 @@ def test_a_second_call_inside_the_listed_function_is_counted_twice(tmp_path):
     call_sites(root, used)
     assert used != {key: 1 for key in DYNAMIC_SITES}
     assert used[("phase3_one_shot_runner.py", "atpg_librelane_views", "step")] == 2
+
+
+# A wrapped dynamic argument must still name one finite, registered source.
+_OUTPUT_CONDITION_BODY = (
+    "from librelane_contract import selected_mode\n"
+    "def _output_not_owed(project, selection):\n"
+    "    return selected_mode(project, str(selection.get('step')))\n")
+
+
+def test_an_unlisted_output_condition_site_remains_unresolved(tmp_path):
+    root = _scratch_named(tmp_path, "flow_compliance_check.py", (
+        _OUTPUT_CONDITION_BODY.replace("_output_not_owed", "a_new_output_condition")))
+    used: dict = {}
+    assert call_sites(root, used) == [("flow_compliance_check.py", 3, None)]
+    assert used == {}
+
+
+def test_output_condition_context_cannot_resolve_a_missing_or_unknown_step(
+        tmp_path, monkeypatch):
+    root = _scratch_named(tmp_path, "flow_compliance_check.py", _OUTPUT_CONDITION_BODY)
+    flow = tmp_path / "flow.yaml"
+    monkeypatch.setitem(globals(), "FLOW_OUTPUT_CONDITIONS_PATH", flow)
+    contexts = (
+        None,                        # absent canonical context
+        "[malformed",               # unreadable canonical context
+        "steps: []\n",               # no finite population
+        "steps:\n- id: '23'\n  output_conditions:\n    record:\n"
+        "      librelane_step_mode: {}\n",  # missing selection step
+        "steps:\n- id: '23'\n  output_conditions:\n    record:\n"
+        "      librelane_step_mode: {step: UNKNOWN}\n",
+    )
+    for context in contexts:
+        if context is not None:
+            flow.write_text(context)
+        assert call_sites(root) == [("flow_compliance_check.py", 3, None)], context

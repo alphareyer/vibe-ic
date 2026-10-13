@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 #: Magic's own message when it resolves a cell by searching its cell path
 #: (`DBCellRead`, magic 8.3): the cell was NOT defined by any LEF/DEF read.
-_READ_FROM_PATH = re.compile(r"^Cell (\S+) read from path (\S+)\s*$", re.M)
+_READ_FROM_PATH = re.compile(r"^Cell (\S+) read from path (\S[^\r\n]*?)\s*$", re.M)
 _COMPONENT = re.compile(r"^\s*-\s+\S+\s+(\S+)")
 
 

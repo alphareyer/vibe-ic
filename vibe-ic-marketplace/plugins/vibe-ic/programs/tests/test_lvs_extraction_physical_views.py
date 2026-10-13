@@ -217,3 +217,73 @@ def test_an_extraction_of_library_layouts_never_reaches_netgen(tmp_path, monkeyp
 def test_an_abstract_extraction_reaches_netgen(tmp_path, monkeypatch):
     _res, calls, _ = _extract(tmp_path, monkeypatch, "")
     assert calls[-1] == "netgen"
+
+
+@pytest.mark.parametrize("control,directory,placed", [
+    ("plain", "library_plain", "neutral_master"),
+    ("space_path", "library root", "neutral_master"),
+    ("unplaced", "library root", "other_master"),
+])
+def test_native_magic_library_log_reaches_current_extraction_refusal(
+        tmp_path, monkeypatch, control, directory, placed):
+    """Real Magic log/parser component; runner tool transport is SOURCE_CONTROL.
+
+    Built-in scmos and authored MAG geometry supply no PDK/PV/signoff credit.
+    The DEF is the helper's authored population, not a native DEF-read claim.
+    """
+    import hashlib
+    import subprocess
+    import sys
+    import lvs_layout_view_census as census
+    library = tmp_path / directory
+    library.mkdir()
+    work = tmp_path / "native_work"
+    work.mkdir()
+    mag = library / "neutral_master.mag"
+    mag.write_text("magic\ntech scmos\ntimestamp 0\n<< metal1 >>\n"
+                   "rect 0 0 10 10\n<< end >>\n")
+    rcfile = tmp_path / "empty.magicrc"
+    rcfile.write_text("")
+    script = ("tech load scmos\nload " + json.dumps(str(mag)) +
+              "\nselect top cell\nextract all\nputs {OWN_TOY_LOAD_END}\nquit -noprompt\n")
+    (tmp_path / "native.tcl").write_text(script)
+    argv = ["magic", "-dnull", "-noconsole", "-rcfile", str(rcfile)]
+    native = subprocess.run(argv, input=script, cwd=work, text=True,
+                            capture_output=True, timeout=30)
+    log = native.stdout + native.stderr
+    (tmp_path / "magic.stdout").write_text(native.stdout)
+    (tmp_path / "magic.stderr").write_text(native.stderr)
+    (tmp_path / "magic.log").write_text(log)
+    # The existing owning runner fixture now consumes this actual log and its
+    # declared current population. Its native Magic/netgen transport stays
+    # controlled; no successful netgen/PV measurement is invented.
+    def_text = ("VERSION 5.8 ;\nDESIGN top ;\nCOMPONENTS 1 ;\n"
+                f"- u0 {placed} + PLACED ( 0 0 ) N ;\nEND COMPONENTS\n"
+                "PINS 1 ;\n- a + NET a ;\nEND PINS\nNETS 1 ;\n"
+                "- a + ROUTED met1 ;\nEND NETS\nEND DESIGN\n")
+    monkeypatch.setattr(sys.modules[__name__], "_DEF", def_text)
+    parsed = census.masters_read_from_library(log, census.def_component_masters(def_text))
+    result, calls, project = _extract(tmp_path, monkeypatch, log)
+    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
+    ext = library / "neutral_master.ext"
+    observed = {"control": control, "scope": "native Magic log/parser; runner SOURCE_CONTROL, not PV",
+                "native_argv": argv, "native_rc": native.returncode,
+                "mag_sha256": hashlib.sha256(mag.read_bytes()).hexdigest(),
+                "DEF_sha256": hashlib.sha256(def_text.encode()).hexdigest(),
+                "log_sha256": hashlib.sha256(log.encode()).hexdigest(),
+                "ext_present": ext.is_file(),
+                "actual_read_lines": [line for line in log.splitlines() if "read from path" in line],
+                "census": parsed, "step_status": result.status,
+                "next_netgen_count": calls.count("netgen"), "current_verdict": verdict}
+    (tmp_path / "native_census_observed.json").write_text(json.dumps(observed, indent=2) + "\n")
+    assert native.returncode == 0 and ext.is_file(), observed
+    assert f"Cell neutral_master read from path {library}" in log, observed
+    if control == "unplaced":
+        assert parsed == {}, observed
+        assert calls.count("netgen") == 1, observed
+    else:
+        assert parsed == {"neutral_master": str(library)}, observed
+        assert result.status == "NOT_MEASURED", observed
+        assert result.extras["finding"] == "LVS_EXTRACTION_VIEW_NOT_ABSTRACT", observed
+        assert calls.count("netgen") == 0, observed
+        assert verdict["status"] != "PASS", observed

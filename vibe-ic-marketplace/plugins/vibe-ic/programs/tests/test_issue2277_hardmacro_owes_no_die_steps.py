@@ -239,18 +239,97 @@ def test_the_new_channel_adopted_exactly_one_entry():
                     f"document {e['path']} (R-0915-141)")
 
 
-def test_an_entry_without_a_producer_command_is_NOT_adopted():
-    """Silence is not a dispatch instruction. Guessing a producer's argv is how a
-    declared output gets written by something nobody asked for."""
+def _explicit_gate_commands_for_entry(step, entry):
+    """Match the existing gate channel to this entry's own program and output.
+
+    Use the collector's command parser, without consulting its adopted rows.
+    A command for another program or target does not speak for this entry.
+    """
+    program, target = entry.get("program"), entry.get("path")
+    if (program not in (step.get("programs") or [])
+            or target not in (step.get("required_outputs") or [])):
+        return []
+    matching = []
+    for command, _tier in P._iter_command_specs(step.get("gate") or {}):
+        parts = command.split()
+        output = P._JSON_RE.search(command)
+        if parts and parts[0] == program and output and output.group(1) == target:
+            matching.append(command)
+    return matching
+
+
+def _silent_entries(doc):
+    """An entry is silent only when both declaration channels are absent."""
+    return [(str(st["id"]), e["program"], e.get("path"))
+            for st in doc["steps"]
+            for e in (st.get("program_outputs") or [])
+            if isinstance(e, dict) and not e.get("producer_command")
+            and not _explicit_gate_commands_for_entry(st, e)]
+
+
+def _neutral_output_step():
+    return {"id": "NEUTRAL", "programs": ["fixture_producer"],
+            "required_outputs": ["reports/neutral.json", "reports/sibling.json"],
+            "program_outputs": [{"program": "fixture_producer",
+                                 "path": "reports/neutral.json"}]}
+
+
+def test_an_entry_without_a_producer_command_is_NOT_adopted(tmp_path):
+    """Silence in BOTH channels is not a dispatch instruction. Guessing a
+    producer's argv writes an output nobody asked for. FS1 is not silent:
+    its explicit gate command already names its program and required output.
+    """
     doc = yaml.safe_load(_FLOW.read_text(encoding="utf-8"))
-    silent = [(str(st["id"]), e["program"], e.get("path"))
-              for st in doc["steps"]
-              for e in (st.get("program_outputs") or [])
-              if isinstance(e, dict) and not e.get("producer_command")]
+    doc["steps"].append(_neutral_output_step())
+    flow = tmp_path / "with_silent_entry.yaml"
+    flow.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    silent = _silent_entries(doc)
     assert silent, "the control needs at least one silent entry to be real"
-    adopted = {(c["step"], c["program"], c["target"]) for c in _clauses()}
+    adopted = {(c["step"], c["program"], c["target"])
+               for c in P.declared_producer_clauses(flow)}
     for row in silent:
         assert row not in adopted, row
+
+
+def test_the_current_FS1_gate_channel_binds_its_own_output():
+    step = _steps()["FS1"]
+    entries = [e for e in step["program_outputs"]
+               if e["program"] == "fmeda_fault_injection_coverage"]
+    assert len(entries) == 1, entries
+    entry = entries[0]
+    assert not entry.get("producer_command")
+    assert entry["path"] == "reports/phase2/safety/fmeda_coverage.json"
+    commands = _explicit_gate_commands_for_entry(step, entry)
+    assert len(commands) == 1, commands
+    rows = [c for c in _clauses()
+            if (c["step"], c["program"], c["target"])
+            == ("FS1", entry["program"], entry["path"])]
+    assert len(rows) == 1, rows
+    assert rows[0]["command"] == commands[0]
+    assert _silent_entries({"steps": [step]}) == []
+
+
+def test_a_neutral_entry_without_either_command_channel_is_refused(tmp_path):
+    step = _neutral_output_step()
+    flow = tmp_path / "silent.yaml"
+    flow.write_text(yaml.safe_dump({"steps": [step]}), encoding="utf-8")
+    assert _silent_entries({"steps": [step]}) == [
+        ("NEUTRAL", "fixture_producer", "reports/neutral.json")]
+    assert P.declared_producer_clauses(flow) == []
+
+
+@pytest.mark.parametrize("command", [
+    "other_producer . --json reports/neutral.json",
+    "fixture_producer . --json reports/undeclared.json",
+    "fixture_producer . --json reports/sibling.json",
+    "fixture_producer .",
+])
+def test_a_gate_command_for_another_binding_does_not_unsilence_the_entry(command):
+    step = _neutral_output_step()
+    step["gate"] = {"all_of": [{"program_exit_zero": command}]}
+    assert _explicit_gate_commands_for_entry(step, step["program_outputs"][0]) == []
+    assert _silent_entries({"steps": [step]}) == [
+        ("NEUTRAL", "fixture_producer", "reports/neutral.json")]
 
 
 def test_the_declared_command_must_BE_the_program_the_entry_names(tmp_path):

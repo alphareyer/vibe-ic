@@ -706,13 +706,6 @@
   "14": {
    "verdict": "ENFORCED",
    "entries": {
-    "phase2/stage2/synth/netlist.v": {
-     "status": "PRODUCED_BY_RUN",
-     "run": "benchmark-data/ic/spm/v1.10.18_sky130A",
-     "alternative": "phase2/stage2/synth/netlist.v",
-     "path": "phase2/stage2/synth/netlist.v",
-     "size_bytes": 48041
-    },
     "reports/analog/stage_analog_compliance.json": {
      "status": "PRODUCED_BY_RUN",
      "run": "benchmark-data/ic/spm/v1.14.88_gf180mcuD",
@@ -943,6 +936,10 @@
   "23": {
    "verdict": "ENFORCED",
    "entries": {
+    "reports/phase3/sta_postpnr_signoff.json": {
+     "status": "UNPROVEN",
+     "note": "Declaration registration only (SOURCE_ONLY). Output production and campaign evidence were not measured for this entry; no run, size or artifact hash is claimed. Dimension 3 must resolve production evidence independently."
+    },
     "phase3/stage3/sta/post_route_timing.rpt": {
      "status": "PRODUCED_BY_RUN",
      "run": "benchmark-data/ic/spm/v1.14.88_gf180mcuD",
