@@ -113,7 +113,111 @@ def _declared_signoff_outputs() -> set:
             if len(elts) >= 3 and isinstance(elts[2], ast.Constant) \
                     and isinstance(elts[2].value, str):
                 out.add(elts[2].value)
-    return out
+    # Keep an absent table a refusal; delegated writes must not mask its loss.
+    return out | _delegated_signoff_outputs() if out else out
+
+
+def _delegated_signoff_outputs() -> set:
+    """Follow the sign-off dispatch's local capture owner to actual writes.
+
+    This is a bounded source oracle, not execution/sign-off evidence. Only a
+    call carrying the dispatch's project into the existing capture owner is
+    followed. Paths come from that owner's current AST, never an output list.
+    Unreadable source, unresolved paths and disconnected writers yield nothing.
+    """
+    import ast
+
+    def parse(source):
+        try:
+            return ast.parse(source)
+        except SyntaxError:
+            return ast.Module(body=[], type_ignores=[])
+
+    def scope_nodes(fn):
+        def walk(node):
+            yield node
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.Lambda, ast.ClassDef)):
+                return
+            for child in ast.iter_child_nodes(node):
+                yield from walk(child)
+        for statement in fn.body:
+            yield from walk(statement)
+
+    runner = parse(_RUNNER_SRC)
+    gate = next((n for n in runner.body if isinstance(n, ast.FunctionDef)
+                 and n.name == "_run_declared_signoff_gate"), None)
+    if gate is None or not gate.args.args:
+        return set()
+    aliases = {a.asname or a.name for n in scope_nodes(gate)
+               if isinstance(n, ast.Import) for a in n.names
+               if a.name == "drv_capture_plan"}
+    try:
+        owner = parse((_PROGRAMS / "drv_capture_plan.py").read_text())
+    except (OSError, UnicodeError):
+        return set()
+    functions = {n.name: n for n in owner.body
+                 if isinstance(n, ast.FunctionDef)}
+    writers = {a.asname or a.name for n in owner.body
+               if isinstance(n, ast.ImportFrom) and n.module == "_atomic_artefact"
+               for a in n.names if a.name in {"write_text", "write_json", "write_bytes"}}
+    outputs, visited = set(), set()
+
+    def follow(name):
+        if name in visited or name not in functions:
+            return
+        visited.add(name)
+        fn = functions[name]
+        if not fn.args.args:
+            return
+        root = fn.args.args[0].arg
+        bindings = {arg.arg: None for arg in fn.args.args[1:]}
+        for node in scope_nodes(fn):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bindings[node.name] = None
+            targets = (node.targets if isinstance(node, ast.Assign) else
+                       [node.target] if isinstance(node, ast.AnnAssign) else [])
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    # Ambiguous/rebound names are not evidence of a path.
+                    bindings[target.id] = (None if target.id in bindings else
+                                           node.value)
+
+        def path_value(node, seen=frozenset()):
+            if isinstance(node, ast.Name):
+                if node.id == root and node.id not in bindings:
+                    return ""
+                if node.id in bindings and node.id not in seen:
+                    return path_value(bindings[node.id], seen | {node.id})
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) \
+                    and isinstance(node.right, ast.Constant) \
+                    and isinstance(node.right.value, str):
+                prefix = path_value(node.left, seen)
+                suffix = Path(node.right.value)
+                if prefix is not None and not suffix.is_absolute() \
+                        and ".." not in suffix.parts:
+                    return str(Path(prefix) / suffix)
+            return None
+
+        for call in (n for n in scope_nodes(fn) if isinstance(n, ast.Call) and n.args):
+            if not isinstance(call.func, ast.Name):
+                continue
+            target = call.func.id
+            value = path_value(call.args[0])
+            if target in writers and target not in bindings and value:
+                outputs.add(value)
+            elif target in functions and target not in bindings and value == "":
+                follow(target)
+
+    project_arg = gate.args.args[0].arg
+    for call in (n for n in scope_nodes(gate) if isinstance(n, ast.Call) and n.args):
+        if isinstance(call.func, ast.Attribute) \
+                and isinstance(call.func.value, ast.Name) \
+                and call.func.value.id in aliases \
+                and isinstance(call.args[0], ast.Name) \
+                and call.args[0].id == project_arg:
+            follow(call.func.attr)
+    return outputs
 
 
 # ===========================================================================
@@ -585,3 +689,130 @@ def test_the_third_shape_is_what_admits_the_architectural_residual_report():
         rf'/\s*f?["\'][^"\'\n]*{re.escape(name)}["\']', _RUNNER_SRC), (
         "the runner now builds this path from a literal too; if that is "
         "intended, this pin should be retired rather than kept green by luck")
+
+
+# Neutral source inputs for the same oracle; no physical design or tool launch.
+_DELEGATED_RUNNER = '''
+_DECLARED_SIGNOFF_GATES = (
+    ("neutral", "neutral_gate.py", "reports/neutral/verdict.json", ()),
+)
+def _run_declared_signoff_gate(project):
+    import drv_capture_plan as owner
+    owner.capture_and_publish(project)
+'''
+_DELEGATED_OWNER = '''
+from _atomic_artefact import write_text
+def publish(project):
+    output = project / "reports/neutral/plan.json"
+    write_text(output, "neutral data")
+    return output
+def capture_and_publish(project):
+    return publish(project)
+'''
+_NEUTRAL_PLAN = "reports/neutral/plan.json"
+
+
+def _delegated_source_fixture(tmp_path, monkeypatch, *, runner=_DELEGATED_RUNNER,
+                              owner=_DELEGATED_OWNER):
+    monkeypatch.setattr(sys.modules[__name__], "_PROGRAMS", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_RUNNER_SRC", runner)
+    path = tmp_path / "drv_capture_plan.py"
+    if owner is not None:
+        path.write_text(owner)
+    return path
+
+
+def test_delegated_writer_paths_are_derived_from_the_called_owner(tmp_path, monkeypatch):
+    path = _delegated_source_fixture(tmp_path, monkeypatch)
+    assert _NEUTRAL_PLAN in _declared_signoff_outputs()
+    path.write_text(_DELEGATED_OWNER.replace(_NEUTRAL_PLAN, "reports/neutral/other.json"))
+    outputs = _declared_signoff_outputs()
+    assert "reports/neutral/other.json" in outputs
+    assert _NEUTRAL_PLAN not in outputs
+
+
+@pytest.mark.parametrize("fault", [
+    "absent_owner", "malformed_owner", "missing_entry", "disconnected_publish",
+    "reader_only", "unbound_path", "rebound_path", "foreign_root",
+    "unresolved_writer", "missing_import", "missing_dispatch", "empty_table",
+    "malformed_runner", "uncalled_nested_writer", "uncalled_lambda_writer",
+    "uncalled_class_writer", "shadowed_helper",
+])
+def test_delegated_writer_refuses_incomplete_source(tmp_path, monkeypatch, fault):
+    runner, owner = _DELEGATED_RUNNER, _DELEGATED_OWNER
+    if fault == "absent_owner":
+        owner = None
+    elif fault == "malformed_owner":
+        owner = "def publish(:"
+    elif fault == "missing_entry":
+        owner = owner.replace("def capture_and_publish", "def unused_entry")
+    elif fault == "disconnected_publish":
+        owner = owner.replace("return publish(project)", "return None")
+    elif fault == "shadowed_helper":
+        owner = owner.replace("return publish(project)",
+                              "def publish(project):\n        return project\n    return publish(project)")
+    elif fault == "reader_only":
+        owner = owner.replace('write_text(output, "neutral data")', "output.read_text()")
+    elif fault == "unbound_path":
+        owner = owner.replace('project / "reports/neutral/plan.json"', "unknown_path")
+    elif fault == "rebound_path":
+        owner = owner.replace('write_text(output, "neutral data")',
+                              'output = unknown_path\n    write_text(output, "neutral data")')
+    elif fault == "foreign_root":
+        runner = runner.replace("owner.capture_and_publish(project)",
+                                "owner.capture_and_publish(other_project)")
+    elif fault == "unresolved_writer":
+        owner = owner.replace("from _atomic_artefact import write_text", "")
+    elif fault == "missing_import":
+        runner = runner.replace("import drv_capture_plan as owner", "pass")
+    elif fault == "missing_dispatch":
+        runner = runner.replace("owner.capture_and_publish(project)", "pass")
+    elif fault == "empty_table":
+        runner = runner.replace("_DECLARED_SIGNOFF_GATES", "_UNUSED_GATES")
+    elif fault == "malformed_runner":
+        runner = "def gate(:"
+    elif fault in {"uncalled_nested_writer", "uncalled_lambda_writer",
+                   "uncalled_class_writer"}:
+        nested = {
+            "uncalled_nested_writer": 'def disconnected_writer(project):\n        output = project / "reports/neutral/plan.json"\n        write_text(output, "{}")',
+            "uncalled_lambda_writer": 'disconnected_writer = lambda: write_text(project / "reports/neutral/plan.json", "{}")',
+            "uncalled_class_writer": 'class DisconnectedWriter:\n        output = project / "reports/neutral/plan.json"\n        write_text(output, "{}")',
+        }[fault]
+        owner = ('from _atomic_artefact import write_text\n'
+                 'def capture_and_publish(project):\n    ' + nested + '\n    return project\n')
+    _delegated_source_fixture(tmp_path, monkeypatch, runner=runner, owner=owner)
+    assert _NEUTRAL_PLAN not in _declared_signoff_outputs()
+
+
+def test_delegated_writer_does_not_reuse_stale_owner_source(tmp_path, monkeypatch):
+    path = _delegated_source_fixture(tmp_path, monkeypatch)
+    assert _NEUTRAL_PLAN in _declared_signoff_outputs()
+    path.write_text(_DELEGATED_OWNER.replace('write_text(output, "neutral data")',
+                                            "output.read_text()"))
+    assert _NEUTRAL_PLAN not in _declared_signoff_outputs()
+    path.unlink()
+    assert _NEUTRAL_PLAN not in _declared_signoff_outputs()
+
+
+def test_capture_plan_publish_uses_the_actual_writer(tmp_path, monkeypatch):
+    import json
+    import drv_capture_plan
+    neutral_plan = {"identity": {"project": str(tmp_path)}, "neutral_input": True}
+    monkeypatch.setattr(drv_capture_plan, "build", lambda project, **kwargs: neutral_plan)
+    path = drv_capture_plan.publish(tmp_path)
+    assert path == tmp_path / "reports/phase3/sta/drv_capture_plan.json"
+    assert json.loads(path.read_text()) == neutral_plan
+    assert str(path.relative_to(tmp_path)) in _declared_signoff_outputs()
+
+_PEER_RUNNER = 'def _run_declared_signoff_gate(project):\n    import drv_capture_plan as _drv_plan\n    _drv_plan.capture_and_publish(project)\n'
+_PEER_OWNER = 'from _atomic_artefact import write_text\n\ndef capture_and_publish(project):\n    def disconnected_writer(project):\n        output = project / "reports/neutral/disconnected.json"\n        write_text(output, "{}")\n    return project\n'
+
+
+_PEER_SHADOWED_OWNER = 'from _atomic_artefact import write_text\n\ndef publish(project):\n    output = project / "reports/neutral/disconnected.json"\n    write_text(output, "{}")\n\ndef capture_and_publish(project):\n    def publish(project):\n        return None\n    return publish(project)\n'
+
+@pytest.mark.parametrize("owner_source", [_PEER_OWNER, _PEER_SHADOWED_OWNER],
+                         ids=["uncalled_nested_writer", "shadowed_helper"])
+def test_peer_uncalled_nested_writer_is_disconnected(tmp_path, monkeypatch, owner_source):
+    _delegated_source_fixture(tmp_path, monkeypatch, runner=_DELEGATED_RUNNER.split("def _run_declared_signoff_gate")[0] + _PEER_RUNNER,
+                              owner=owner_source)
+    assert "reports/neutral/disconnected.json" not in _declared_signoff_outputs()
