@@ -184,3 +184,110 @@ def test_real_geometry_change_is_measured_failure(project, tmp_path):
         for path, content in saved.items():
             path.write_bytes(content)
         script.unlink()
+
+
+@pytest.mark.parametrize('different', [False, True], ids=['equal', 'different'])
+def test_launcher_main_measures_neutral_geometry_and_current_consumer(tmp_path, monkeypatch, different):
+    """Actual adapter/native geometry/current producer; transport SOURCE_CONTROL.
+
+    No complete three-stream/PDK connectivity is claimed. A geometric zero
+    therefore remains NOT_MEASURED at the composed canonical consumer.
+    """
+    from types import SimpleNamespace
+    import shutil
+    import klayout.db as db
+    import _klayout_launch as kl
+    import _native373_docker as launcher
+
+    project = tmp_path / 'component'
+    pnr = project / 'phase3/stage3/pnr'
+    shipped = project / 'phase3/stage4/gds/neutral_top.gds'
+    reference = pnr / 'reference.oas'
+    for path in (pnr, shipped.parent, project / 'reports/phase3'):
+        path.mkdir(parents=True, exist_ok=True)
+    for path, extra in ((reference, False), (shipped, different)):
+        layout = db.Layout()
+        cell = layout.create_cell('neutral_top')
+        layer = layout.layer(1, 0)
+        cell.shapes(layer).insert(db.Box(0, 0, 1000, 1000))
+        if extra:
+            cell.shapes(layer).insert(db.Box(2000, 0, 3000, 1000))
+        layout.write(str(path))
+    (pnr / 'routed.def').write_text('VERSION 5.8 ;\nDESIGN neutral_top ;\nEND DESIGN\n')
+    (project / 'reports/phase3/technology_units.json').write_text(json.dumps({
+        'pdk': 'neutral_geometry', 'scope': 'SOURCE_CONTROL metadata; no PDK signoff'}))
+    # Two actual file formats preserve equal geometry but distinct bytes.
+    assert pc.digest(shipped) != pc.digest(reference)
+    inputs = {str(p.relative_to(project)): pc.digest(p) for p in
+              (shipped, reference, pnr / 'routed.def', project / 'reports/phase3/technology_units.json')}
+    image = os.environ['VIBEIC_EDA_IMAGE']
+    journal = project / 'launcher.jsonl'
+    monkeypatch.setenv('VIBEIC_NATIVE373_IMAGE', image)
+    monkeypatch.setenv('VIBEIC_NATIVE373_LAUNCH_LOG', str(journal))
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    host = kl.HostRunner(shutil.which('klayout'), ['-b', '-r'])
+    real_run = host.run
+    native_calls = []
+
+    def through_adapter(script, env, *, path_keys=(), timeout=1800):
+        observed = []
+        def transport(requested):
+            # Docker delegation alone is controlled; the existing native
+            # launcher executes KLayout and its unchanged XOR recipe.
+            native_argv = [host._bin, *host._flags, str(script)]
+            value = real_run(script, env, path_keys=path_keys, timeout=timeout)
+            observed.append(value)
+            native_calls.append({'requested_docker_argv': requested,
+                                 'actual_native_argv': native_argv,
+                                 'native_rc': value[0], 'stdout': value[1], 'stderr': value[2]})
+            host.execution = {'rc': value[0], 'argv': native_argv}
+            return SimpleNamespace(returncode=value[0])
+        flags = ['run', '--rm', '--memory', '4g', '--cpus', '2', '--network', 'none']
+        command = ['-b', '-r', str(script)]
+        args = ([*flags, '--entrypoint', host._bin, image, *command] if different else
+                [*flags, image, '--skip', host._bin, *command])
+        with monkeypatch.context() as patcher:
+            patcher.setattr(launcher, 'subprocess', SimpleNamespace(run=transport))
+            patcher.setattr(sys, 'argv', [str(Path(launcher.__file__)), *args])
+            rc = launcher.main()
+        value = observed[-1] if observed else (rc, '', '')
+        return rc, value[1], value[2]
+
+    monkeypatch.setattr(host, 'run', through_adapter)
+    monkeypatch.setattr(kl, 'find_runner', lambda *a, **kw: host)
+    # This component does not supply an actual full Magic/PDK stream chain.
+    def unsupported_chain(*args, **kwargs):
+        raise ValueError('SOURCE_CONTROL component has no full three-stream/PDK chain')
+    monkeypatch.setattr(native, 'produce', unsupported_chain)
+    monkeypatch.setattr(xor, 'resolve_reference', lambda *a: (
+        reference, 'authored component', {'kind': 'component_source_control',
+                                        'path': str(reference.relative_to(project))}))
+    report_path = project / xor.REPORT_REL
+    producer_rc = xor.main([str(project), '--json', str(report_path)])
+    before = pc.digest(report_path)
+    consumer_rc, line, report = xor.judge_receipt(project, xor.REPORT_REL)
+    launches = [json.loads(v) for v in journal.read_text().splitlines()] if journal.is_file() else []
+    refusal = pc.validate(project, report.get('current'), step='37.3', stage='stage4',
+                          tools=('klayout',),
+                          required_inputs=('shipped', 'reference', 'def', 'technology', 'recipe'),
+                          required_outputs=('log',), marker='XOR_DONE')
+    result = {'input_role': 'SOURCE_CONTROL geometry/transport/unsupported antecedent',
+              'inputs': inputs, 'different': different, 'native_calls': native_calls,
+              'launches': launches, 'producer_rc': producer_rc, 'consumer_rc': consumer_rc,
+              'consumer_line': line, 'current_refusal': refusal, 'report': report,
+              'consumer_read_only': pc.digest(report_path) == before}
+    (project / 'component_control.json').write_text(json.dumps(result, indent=2) + '\n')
+    assert len(native_calls) == len(launches) == 1, result
+    assert native_calls[0]['native_rc'] == launches[0]['rc'] == 0
+    assert launches[0]['argv'] == native_calls[0]['requested_docker_argv']
+    argv = launches[0]['argv']
+    assert argv[argv.index(image) + 1:argv.index(image) + 5] == [
+        '--skip', '/usr/bin/time', '-v', host._bin]
+    assert argv[argv.index('--cpus') + 1] == '2' and argv[argv.index('--network') + 1] == 'none'
+    assert argv[argv.index('--memory') + 1] == argv[argv.index('--memory-swap') + 1] == '4g'
+    assert not refusal, result
+    assert report['verdict'] == ('FAIL' if different else 'PASS'), result
+    assert report['design__xor_difference__count'] == (1 if different else 0), result
+    assert producer_rc == (1 if different else 0), result
+    assert consumer_rc == (1 if different else 2), result
+    assert result['consumer_read_only']

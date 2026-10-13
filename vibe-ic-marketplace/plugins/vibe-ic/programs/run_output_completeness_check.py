@@ -330,7 +330,9 @@ _LINKED_STATUS_SUBJECT_RE = re.compile(
     r"(?:(?:still\s+)?(?:is|remains)|is\s+marked|has\s+the\s+status)\s*$",
     re.IGNORECASE)
 _SELF_LINK_LABEL_RE = re.compile(
-    r"\b(?:this|current|our|the)\s+(?:report|document|deliverable|result)\b|"
+    r"\b(?:this|current|our|the)\s+"
+    r"(?:(?:final|current|latest|complete|completed|interim|draft|preliminary|provisional)\s+)*"
+    r"(?:report|document|deliverable|result)\b|"
     r"^(?:report|document|deliverable|result(?:\.md)?|readme(?:\.md)?)$",
     re.IGNORECASE)
 

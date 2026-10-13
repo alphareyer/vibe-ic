@@ -705,3 +705,21 @@ def test_linked_artifact_status_has_its_own_subject_at_actual_cli(tmp_path, line
     assert observed.returncode == expected_rc, result
     assert result['state'] == ('COMPLETE' if expected_rc == 0 else 'DELIVERABLE_SELF_DECLARED_INTERIM')
     assert result['evidence']['deliverable_complete'] is True
+
+
+@pytest.mark.parametrize('line, expected_rc', [
+    ('[This final report](https://example.org/result) remains **DRAFT**.', 1),
+    ('[Our latest completed deliverable](https://example.org/result) remains **PROVISIONAL**.', 1),
+    ('[This current preliminary document](https://example.org/result) remains **WIP**.', 1),
+    ('[PR](https://example.org/pull/1) remains **DRAFT**.', 0),
+    ('The linked PR has metadata `isDraft=true`.', 0),
+    ('[PR](https://example.org/pull/1) remains lowercase draft.', 0),
+    ('This report is **DRAFT** and remains unfinished.', 1),
+    ('```text\n[PR](https://example.org/pull/1) remains **DRAFT**.\n```', 0),
+    ('[PR](https://example.org/pull/1) remains **DRAFT**.\n**Score: PENDING**', 1),
+], ids=['public_self_final', 'self_latest_completed', 'self_current_preliminary',
+        'external_pr', 'external_metadata', 'external_lowercase', 'ordinary_self',
+        'external_fenced', 'unfinished_headline'])
+def test_linked_self_modifiers_keep_public_cli_subject_attribution(tmp_path, line, expected_rc):
+    # Reuse the original real CLI fixture and its unchanged state/artifact assertions.
+    test_linked_artifact_status_has_its_own_subject_at_actual_cli(tmp_path, line, expected_rc)
