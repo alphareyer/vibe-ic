@@ -555,3 +555,37 @@ def test_preload_metadata_consumer_refuses_forged_pass_over_first_edge_change(tm
  state, why = R.retention_case_state(tmp_path, CASE["name"], record)
  assert state == X.FAIL
  assert "including its first sampled edge" in why
+
+
+@pytest.mark.parametrize("protocol", ["sdp8_raddr_waddr_wdata_rdata_we_sync0r",
+    "registered_dual_port_8bit_async_read_sync_write"], ids=["sdp-five", "canonical-five"])
+@pytest.mark.parametrize("good", [True, False], ids=["retained", "first-edge-corruption"])
+def test_native_retention_uses_the_shared_selected_five_role_contract(tmp_path, monkeypatch, protocol, good):
+    import sys
+    import isa_suite_producer as isa
+    original = prepare
+    def selected_prepare(project, good=False):
+        rtl = original(project, good)
+        rtl.write_text(rtl.read_text().replace("module sample_store(", "module sample_store #(parameter memsize=8)("))
+        path = project / "plugin_output/declaration.json"
+        decl = json.loads(path.read_text())
+        decl.update(sram_interface_protocol=protocol, memsize_bytes=8, reset_pc=0)
+        path.write_text(json.dumps(decl, indent=2))
+        return rtl
+    monkeypatch.setattr(sys.modules[__name__], "prepare", selected_prepare)
+    project, result = _retention_native(tmp_path, good=good, diagnostic=False)
+    facts, reason = isa.design_facts(project)
+    assert facts is not None, reason
+    assert facts["sram"]["read_latency"] == 0 and "ren" not in facts["sram_ports"]
+    row = _retention_row(result["consumer"])
+    case = result["execution"]["cases"][0]
+    assert case["state"] == ("passed" if good else "failed"), result
+    assert row["status"] == ("pass" if good else "fail") and row["sim_executed"], row
+    if good:
+        measurement = case["reset_retention"]["measurement"]
+        assert measurement["complete"] and not measurement["changed"]
+        assert measurement["pending"] == {"address":2,"before":"c7","data":"3c"}
+    else:
+        log = (Path(case["work_dir"]) / "run.log").read_text()
+        assert "retention arm=1 edge=0 byte=2 before=c7 after=3c" in log, log
+    _debt_stays_owed(result["consumer"])

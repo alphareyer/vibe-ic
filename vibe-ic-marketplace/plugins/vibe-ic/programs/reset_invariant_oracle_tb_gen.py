@@ -351,10 +351,17 @@ def declared_retention_memory(project: Path, dut: str,
         decl = json.loads(raw)
     except (OSError, ValueError):
         return None, "NOT_MEASURED: no readable selected memory declaration"
-    if not isinstance(decl, dict) or decl.get("sram_interface_protocol") != RETENTION_PROTOCOL:
+    if isinstance(decl, dict) and isinstance(decl.get("fields"), dict):
+        decl = decl["fields"]
+    from isa_suite_producer import parse_sram_protocol
+    protocol, _ = parse_sram_protocol(decl.get("sram_interface_protocol")) if isinstance(decl, dict) else (None, "")
+    if (protocol is None or protocol["width"] != 8 or protocol["read_latency"] != 0
+            or {"we" if role == "wen" else role for role in protocol["stated_roles"]}
+            != {"raddr", "rdata", "waddr", "wdata", "we"}):
         return None, "NOT_MEASURED: unsupported or unstated external memory commit protocol"
     roles = decl.get("sram_interface")
-    if not isinstance(roles, dict) or roles.get("read_latency_cycles", 0) != 0:
+    if (not isinstance(roles, dict) or type(roles.get("read_latency_cycles", 0)) is not int
+            or roles.get("read_latency_cycles", 0) != 0 or "read_enable" in roles):
         return None, "NOT_MEASURED: selected protocol needs explicit SRAM roles and asynchronous read"
     memory = {role: roles.get(key) for role, key in (
         ("raddr", "read_address"), ("waddr", "write_address"),
@@ -376,7 +383,7 @@ def declared_retention_memory(project: Path, dut: str,
             or bits(outs[memory["wdata"]]) != 8 or bits(ins[memory["rdata"]]) != 8
             or bits(outs[memory["we"]]) != 1):
         return None, "NOT_MEASURED: unsupported or unknown byte-memory port widths"
-    memory.update(protocol=RETENTION_PROTOCOL, depth=1 << abits, dut=dut,
+    memory.update(protocol=decl["sram_interface_protocol"], depth=1 << abits, dut=dut,
                   declaration_sha256=hashlib.sha256(raw).hexdigest())
     preload, refusal = _declared_retention_preload(decl, memory["depth"])
     if refusal:

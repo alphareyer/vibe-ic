@@ -127,6 +127,62 @@ def test_authored_glue_producer_then_actual_derivative_and_ordinary_consumer(tmp
     assert consumed.extras['ip_fetch']['reuse_kind'] == 'LOCAL_DERIVATIVE'
 
 
+def test_actual_glue_then_derivative_preserves_history_and_verifies_manifest_output(tmp_path, monkeypatch):
+    import provenance_output_hash_completeness_check as provenance
+    project, match, ref = _authored_glue_fixture(tmp_path, monkeypatch)
+    assert pull.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])['status'] == pull.PIN_VERIFIED
+    ledger = project/'provenance.jsonl'
+    old_history = ledger.read_bytes()
+    old_manifest = _h(project/'phase2/stage1/rtl/SOURCE_MANIFEST.json')
+    emitted = _apply(project, match, ref)
+    assert emitted['status'] == pull.PIN_VERIFIED
+    # Grade the same existing audit's observed verdict on base and candidate;
+    # a missing new output field alone would not be a substantive control.
+    verdict, findings, _ = provenance.audit_counted(project)
+    assert verdict == 'PASS', [(f.rule, f.detail) for f in findings]
+    assert ledger.read_bytes().startswith(old_history)
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert rows[-2]['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:'+old_manifest
+    assert emitted['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == (
+        'sha256:'+_h(project/'phase2/stage1/rtl/SOURCE_MANIFEST.json'))
+    before = _authored_metadata_bytes(project)
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    assert _authored_metadata_bytes(project) == before
+
+
+@pytest.mark.parametrize('mutation', ['manifest_bytes', 'stale_latest_output', 'extra_inventory', 'stale_record'])
+def test_derivative_manifest_lineage_refusals_never_republish_bad_state(tmp_path, monkeypatch, mutation):
+    import provenance_output_hash_completeness_check as provenance
+    project, match, ref = _authored_glue_fixture(tmp_path, monkeypatch)
+    assert pull.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])['status'] == pull.PIN_VERIFIED
+    old_manifest = _h(project/'phase2/stage1/rtl/SOURCE_MANIFEST.json')
+    assert _apply(project, match, ref)['status'] == pull.PIN_VERIFIED
+    mf = project/'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    if mutation == 'manifest_bytes':
+        mf.write_bytes(mf.read_bytes()+b'\n')  # valid same JSON; genuinely different bytes
+    elif mutation == 'stale_latest_output':
+        _replace_last_derivative_event(project/'provenance.jsonl', lambda event: {
+            **event, 'outputs': {**event['outputs'],
+                'phase2/stage1/rtl/SOURCE_MANIFEST.json': 'sha256:'+old_manifest}})
+    elif mutation == 'extra_inventory':
+        (mf.parent/'notes.txt').write_text('unexpected current source report\n')
+    else:
+        record = project/ref['path']
+        record.write_bytes(record.read_bytes()+b'\n')
+    before = _authored_metadata_bytes(project)
+    before_rtl = {p.name: p.read_bytes() for p in mf.parent.iterdir() if p.is_file()}
+    state, reason = pull.verify_existing_reused_pins_outcome(project, [match], json.loads(mf.read_text()))
+    assert state == pull.PIN_MISMATCH, reason
+    refused = _apply(project, match, ref)
+    assert refused['status'] == pull.PIN_MISMATCH, refused
+    assert _authored_metadata_bytes(project) == before
+    assert {p.name: p.read_bytes() for p in mf.parent.iterdir() if p.is_file()} == before_rtl
+    if mutation in ('manifest_bytes', 'stale_latest_output'):
+        verdict, findings, _ = provenance.audit_counted(project)
+        assert verdict == 'FAIL'
+        assert any(f.rule == 'PROVENANCE_HASH_MISMATCH' for f in findings)
+
+
 def test_authored_glue_legacy_caller_rows_remain_admitted(tmp_path, monkeypatch):
     project, match, ref = _authored_glue_fixture(tmp_path, monkeypatch)
     path = project/'phase2/stage1/rtl/SOURCE_MANIFEST.json'
@@ -302,7 +358,8 @@ def test_normal_consumer_admits_complete_declared_local_derivative(tmp_path, mon
     mf=json.loads(mf_path.read_text());mf['local_derivative']=ref;_json(mf_path,mf)
     event={'event':'ip_catalog_local_derivative','kind':'LOCAL_DERIVATIVE',
            'record':ref,'current_inventory':record['current_inventory'],
-           'exit_code':0,'outputs':{'phase2/stage1/rtl/leaf.v':'sha256:'+record['current_inventory']['leaf.v']},
+           'exit_code':0,'outputs':{'phase2/stage1/rtl/leaf.v':'sha256:'+record['current_inventory']['leaf.v'],
+                                  'phase2/stage1/rtl/SOURCE_MANIFEST.json':'sha256:'+_h(mf_path)},
            'official_unmodified_files':1,'locally_adapted_reused_files':1,
            'separately_authored_files':[]}
     with (project/'provenance.jsonl').open('a') as f:f.write(json.dumps(event)+'\n')
@@ -347,7 +404,8 @@ def test_producer_recovers_exact_legacy_outputless_event_and_preserves_history(t
     current = json.loads(provenance.read_bytes().splitlines()[-1])
     assert current['event'] == 'ip_catalog_local_derivative'
     assert current['outputs'] == {
-        'phase2/stage1/rtl/leaf.v': 'sha256:'+_h(project/'phase2/stage1/rtl/leaf.v')}
+        'phase2/stage1/rtl/leaf.v': 'sha256:'+_h(project/'phase2/stage1/rtl/leaf.v'),
+        'phase2/stage1/rtl/SOURCE_MANIFEST.json': 'sha256:'+_h(project/'phase2/stage1/rtl/SOURCE_MANIFEST.json')}
     assert current != json.loads(legacy_bytes.splitlines()[-1])
     result = runner.step_rtl_gen(project, 'processor_cpu')
     assert result.status == 'PASS_WITH_WAIVERS', result.detail
@@ -718,3 +776,86 @@ def test_registered_mapper_glue_cannot_hide_other_source_drift(public_mapper_pro
     result = _publish_mapper_glue(project, match)
     assert result['status'] != pull.PIN_VERIFIED
     assert _authored_metadata_bytes(project) == before
+
+
+def _published52_producer(tmp_path, monkeypatch):
+    """Execute retained public source52, not a hand-authored producer event."""
+    import importlib.util
+    import subprocess
+    source = subprocess.check_output([
+        'git', '-C', str(Path(pull.__file__).resolve().parents[4]), 'show',
+        'ad6948d844086483593b3f5e8c3d5c5182de887a:'
+        'vibe-ic-marketplace/plugins/vibe-ic/programs/ip_catalog_pull.py'])
+    path = tmp_path / 'published52/ip_catalog_pull.py'
+    path.parent.mkdir()
+    path.write_bytes(source)
+    spec = importlib.util.spec_from_file_location('published52_pull', path)
+    old = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, old)
+    spec.loader.exec_module(old)
+    monkeypatch.setattr(old, 'CACHE_ROOT', pull.CACHE_ROOT)
+    monkeypatch.setattr(old, 'time', pull.time)
+    return old, hashlib.sha256(source).hexdigest()
+
+
+@pytest.mark.parametrize('history', ['current', 'recovered_outputless'])
+def test_published52_producer_republishes_manifest_through_current_consumer(tmp_path, monkeypatch, history):
+    """SOURCE_CONTROL ancestors/proof; actual source writers and P0 consumer."""
+    import time
+    from types import SimpleNamespace
+    import provenance_output_hash_completeness_check as provenance
+    monkeypatch.setenv('GIT_AUTHOR_DATE', '2020-01-01T00:00:00+0000')
+    monkeypatch.setenv('GIT_COMMITTER_DATE', '2020-01-01T00:00:00+0000')
+    # Only fixture timestamps are fixed, so the exact inputs can be sealed
+    # across source arms. No runtime clock or native measurement is replaced.
+    monkeypatch.setattr(pull, 'time', SimpleNamespace(time=lambda: 1577836800.0,
+                                                    time_ns=time.time_ns))
+    project, match, ref = _authored_glue_fixture(tmp_path, monkeypatch)
+    old, old_source_sha = _published52_producer(tmp_path, monkeypatch)
+    assert old.emit_authored_glue_inventory(project, [match], ['top_wrapper.v'])['status'] == pull.PIN_VERIFIED
+    old_result = old.apply_local_derivative(project, [match], ref)
+    assert old_result['status'] == pull.PIN_VERIFIED, old_result
+    ledger = project / 'provenance.jsonl'
+    if history == 'recovered_outputless':
+        _replace_last_derivative_event(ledger, lambda event: {
+            k: v for k, v in event.items() if k not in ('exit_code', 'outputs')})
+        old_result = old.apply_local_derivative(project, [match], ref)
+        assert old_result['status'] == pull.PIN_VERIFIED, old_result
+    assert old_result['exit_code'] == 0
+    assert 'phase2/stage1/rtl/leaf.v' in old_result['outputs']
+    assert 'phase2/stage1/rtl/SOURCE_MANIFEST.json' not in old_result['outputs']
+    original_history = ledger.read_bytes()
+    inputs = {str(p.relative_to(project)): _h(p)
+              for p in sorted(project.rglob('*')) if p.is_file()}
+    mf = project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    before_state, before_reason = pull.verify_existing_reused_pins_outcome(
+        project, [match], json.loads(mf.read_text()))
+    before_p0, before_findings, _ = provenance.audit_counted(project)
+    emitted = _apply(project, match, ref)
+    result = runner.step_rtl_gen(project, 'processor_cpu')
+    after_p0, findings, _ = provenance.audit_counted(project)
+    after_state, after_reason = pull.verify_existing_reused_pins_outcome(
+        project, [match], json.loads(mf.read_text()))
+    after = _authored_metadata_bytes(project)
+    repeated = _apply(project, match, ref)
+    receipt = {'history': history, 'input_role': 'SOURCE_CONTROL',
+               'old_producer_source_sha256': old_source_sha, 'input_hashes': inputs,
+               'old_producer': old_result, 'before_consumer': before_state,
+               'before_consumer_reason': before_reason, 'before_p0': before_p0,
+               'before_findings': [(f.rule, f.detail) for f in before_findings],
+               'current_producer': emitted, 'after_consumer': after_state,
+               'after_consumer_reason': after_reason, 'ordinary_runner': result.status,
+               'ordinary_runner_detail': result.detail, 'after_p0': after_p0,
+               'after_findings': [(f.rule, f.detail) for f in findings],
+               'repeated_producer': repeated,
+               'history_preserved': ledger.read_bytes().startswith(original_history),
+               'repeat_idempotent': _authored_metadata_bytes(project) == after,
+               'original_history_sha256': hashlib.sha256(original_history).hexdigest()}
+    _json(project / 'migration_receipt.json', receipt)
+    assert after_p0 == 'PASS', receipt  # BASE's actual P0 verdict is FAIL.
+    assert emitted['status'] == after_state == pull.PIN_VERIFIED, receipt
+    assert result.status == 'PASS_WITH_WAIVERS', receipt
+    assert before_p0 == 'FAIL', receipt
+    assert emitted['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:' + _h(mf)
+    assert repeated['status'] == pull.PIN_VERIFIED, receipt
+    assert receipt['history_preserved'] and receipt['repeat_idempotent'], receipt

@@ -400,11 +400,20 @@ def reset_vector(project: Path, decl: Dict[str, Any]) -> Tuple[Optional[int], st
 
 
 def parse_sram_protocol(token: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    from reset_invariant_oracle_tb_gen import RETENTION_PROTOCOL
+    if token == RETENTION_PROTOCOL:
+        return {"kind": "sdp", "width": 8, "read_latency": 0,
+                "stated_roles": ["raddr", "rdata", "waddr", "wdata", "we"],
+                "explicit_roles_required": True}, "declared registered byte SRAM protocol parsed"
     m = _SDP_RE.match(str(token or "").strip().lower())
     if not m:
         return None, (f"sram_interface_protocol {token!r} is not a protocol "
                       f"this producer can model (sdp<width>_<roles>_sync<N>r)")
     roles = set(m.group("roles").split("_"))
+    normalized = {"wen" if role == "we" else role for role in roles}
+    five = {"waddr", "wdata", "wen", "raddr", "rdata"}
+    if normalized not in (five, five | {"ren"}, {"waddr", "wen", "raddr", "ren"}):
+        return None, f"sram_interface_protocol {token!r}: unsupported SRAM role population"
     width = int(m.group("width"))
     if width != 8:
         return None, (f"sram_interface_protocol {token!r}: a {width}-bit word "
@@ -413,7 +422,9 @@ def parse_sram_protocol(token: str) -> Tuple[Optional[Dict[str, Any]], str]:
             "stated_roles": sorted(roles)}, "declared SRAM protocol parsed"
 
 
-def bind_sram_ports(ports: List[Tuple[str, str, str]]
+def bind_sram_ports(ports: List[Tuple[str, str, str]], *,
+                    protocol: Optional[Dict[str, Any]] = None,
+                    project: Optional[Path] = None
                     ) -> Tuple[Optional[Dict[str, str]], str]:
     """Bind unique SRAM roles, including direction-qualified shared data names.
 
@@ -424,6 +435,22 @@ def bind_sram_ports(ports: List[Tuple[str, str, str]]
     input/output marker. Data aliases must belong to that interface. An
     ambiguous or cross-interface role is a refusal.
     """
+    if protocol is not None and project is not None:
+        roles = {"we" if role == "wen" else role for role in protocol["stated_roles"]}
+        selected = _declaration(project)
+        if (protocol["read_latency"] == 0
+                and roles == {"waddr", "wdata", "we", "raddr", "rdata"}
+                and ("sram_interface" in selected or protocol.get("explicit_roles_required"))):
+            import reset_invariant_oracle_tb_gen as retention
+            memory, why = retention.declared_retention_memory(
+                project, selected.get("top_module"),
+                [(n, w) for d, w, n in ports if d == "input"],
+                [(n, w) for d, w, n in ports if d == "output"])
+            if memory is None:
+                return None, why
+            return {role: memory[key] for role, key in
+                    (("waddr", "waddr"), ("wdata", "wdata"), ("wen", "we"),
+                     ("raddr", "raddr"), ("rdata", "rdata"))}, why
     def _prefix(name: str, suffix: str) -> str:
         stem = name[:-(len(suffix) + 1)] if name != suffix else ""
         return re.sub(r"^(?:i|o)_", "", stem)
@@ -513,7 +540,7 @@ def design_facts(project: Path, rtl_dir: Optional[Path] = None
     module, ports, dut_why = _tg.resolve_dut(project, top)
     if module is None:
         return None, f"DUT not bound: {dut_why}"
-    roles, why = bind_sram_ports(ports)
+    roles, why = bind_sram_ports(ports, protocol=sram, project=project)
     if roles is None:
         return None, why
     inputs = [(n, w) for d, w, n in ports
@@ -732,7 +759,10 @@ def gen_tb(facts: Dict[str, Any]) -> str:
     if lat == 0:
         # An enabled zero-latency read follows address/memory changes without
         # a clock edge. Keep the existing read-enable hold and clocked writes.
-        read_pipe = "  always @* if (ren) rdata = mem[raddr % MEMSIZE];"
+        read_pipe = ("  always @* if (ren) rdata = mem[raddr % MEMSIZE];" if "ren" in p else
+                     "  always @* rdata = mem[raddr % MEMSIZE];")
+    ren_setup = "" if "ren" in p else "  assign ren = 1'b1;\n"
+    ren_connection = f",\n    .{p['ren']}(ren));" if "ren" in p else ");"
     return f"""// Flow-authored ISA-suite testbench (isa_suite_producer). No harness copied.
 `timescale 1ns/1ps
 module isa_tb;
@@ -744,7 +774,7 @@ module isa_tb;
   wire [31:0] waddr, raddr;
   wire [7:0] wdata;
   wire wen, ren;
-  reg [7:0] rdata;
+{ren_setup}  reg [7:0] rdata;
   reg [7:0] mem [0:MEMSIZE-1];
   always @(posedge clk) if (wen) mem[waddr % MEMSIZE] <= wdata;
 {read_pipe}
@@ -755,8 +785,7 @@ module isa_tb;
     .{p['wdata']}(wdata),
     .{p['wen']}(wen),
     .{p['raddr']}(raddr),
-    .{p['rdata']}(rdata),
-    .{p['ren']}(ren));
+    .{p['rdata']}(rdata){ren_connection}
   integer i, cyc, th, sb, se, fd, iv, settle;
   string hexfile, sigfile;
   reg seen;

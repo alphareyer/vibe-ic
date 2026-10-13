@@ -1336,3 +1336,114 @@ endmodule
     else:
         assert f"SRAM_READ_VALUE_PASS latency={latency}" in simulated.stdout, values
         assert parsed["tohost"] == 1, values
+
+
+_FIVE_ROLE_PROTOCOLS = ("sdp8_raddr_waddr_wdata_rdata_we_sync0r",
+                        "registered_dual_port_8bit_async_read_sync_write")
+
+
+def _five_role_project(tmp_path, protocol, mutation=None):
+    project = _project(tmp_path, units=("I",), memsize_bytes=16, rf_storage="flops",
+                       sram_interface_protocol=protocol)
+    decl_path = project / "plugin_output/declaration.json"
+    decl = json.loads(decl_path.read_text())
+    decl["sram_interface"] = {"read_address": "o_mem_raddr", "write_address": "o_mem_waddr",
+        "write_data": "o_mem_data", "read_data": "i_mem_data", "write_enable": "o_mem_we",
+        "read_latency_cycles": 0}
+    rtl = """`timescale 1ns/1ps
+module soc_top #(parameter memsize=16, parameter aw=$clog2(memsize)) (
+ input wire clk_i, input wire rst_i, input wire [7:0] i_mem_data,
+ output wire [aw-1:0] o_mem_raddr, output wire [aw-1:0] o_mem_waddr,
+ output wire [7:0] o_mem_data, output wire o_mem_we);
+ reg [aw-1:0] address=0;
+ reg write_enable=0;
+ assign o_mem_raddr=address; assign o_mem_waddr=8;
+ assign o_mem_data=1; assign o_mem_we=write_enable;
+ initial begin
+  wait(rst_i===1'b0); #1;
+  if(i_mem_data!==8'h19) $fatal(1,"INITIAL_VALUE_FAIL actual=%02x",i_mem_data);
+  #1 address=NEXT_ADDRESS; #1;
+  if(i_mem_data!==8'ha6) $fatal(1,"ASYNC0_VALUE_FAIL actual=%02x expected=a6",i_mem_data);
+  $display("FIVE_ROLE_ASYNC_VALUE_PASS initial=19 next=%02x",i_mem_data);
+  @(negedge clk_i); write_enable=1;
+  @(posedge clk_i); #1 write_enable=0;
+ end
+endmodule
+""".replace("NEXT_ADDRESS", "2" if mutation == "wrong_address" else "1")
+    if mutation == "missing_role":
+        decl["sram_interface"].pop("write_address")
+    elif mutation == "foreign_data":
+        rtl = rtl.replace("i_mem_data", "i_other_data")
+    elif mutation == "wrong_width":
+        rtl = rtl.replace("input wire [7:0] i_mem_data", "input wire [3:0] i_mem_data")
+    elif mutation == "sync_retention":
+        decl["sram_interface"]["read_latency_cycles"] = 1
+    elif mutation == "unknown_commit":
+        decl["sram_interface_protocol"] = "unstated_external_memory_commit"
+    elif mutation == "missing_clock":
+        decl["clock_port_name"] = "missing_clk"
+    elif mutation == "ambiguous_reset":
+        rtl = rtl.replace("input wire rst_i,", "input wire rst_i, input wire reset_other,")
+    decl_path.write_text(json.dumps(decl, indent=2))
+    (project / "phase2/stage1/rtl/soc_top.v").write_text(rtl)
+    return project
+
+
+@pytest.mark.parametrize("protocol", _FIVE_ROLE_PROTOCOLS, ids=["sdp-five", "canonical-five"])
+def test_explicit_five_role_contract_binds_the_same_actual_ports_for_both_readers(tmp_path, protocol):
+    import testbench_gen as tb
+    import reset_invariant_oracle_tb_gen as retention
+    project = _five_role_project(tmp_path, protocol)
+    facts, why = I.design_facts(project)
+    top, ports, detail = tb.resolve_dut(project, "soc_top")
+    memory, reason = retention.declared_retention_memory(project, top,
+        [(n,w) for d,w,n in ports if d == "input"], [(n,w) for d,w,n in ports if d == "output"])
+    print("FIVE_ROLE_BINDING " + json.dumps({"protocol": protocol, "isa_admitted": facts is not None,
+          "isa_reason": why, "retention_admitted": memory is not None, "retention_reason": reason}))
+    assert (facts is not None, memory is not None) == (True, True), (why, reason)
+    assert facts["sram"]["read_latency"] == 0
+    assert "ren" not in facts["sram_ports"]
+    assert facts["sram_ports"] == {"raddr": memory["raddr"], "waddr": memory["waddr"],
+        "wdata": memory["wdata"], "rdata": memory["rdata"], "wen": memory["we"]}
+    assert memory["depth"] == 16
+
+
+@pytest.mark.parametrize("mutation", ["missing_role", "foreign_data", "wrong_width",
+                                      "sync_retention", "unknown_commit", "missing_clock", "ambiguous_reset"])
+def test_explicit_five_role_admission_retains_named_refusals(tmp_path, mutation):
+    project = _five_role_project(tmp_path, _FIVE_ROLE_PROTOCOLS[0], mutation)
+    facts, why = I.design_facts(project)
+    assert facts is None and why, (mutation, facts, why)
+
+
+@pytest.mark.parametrize("protocol", _FIVE_ROLE_PROTOCOLS, ids=["sdp-five", "canonical-five"])
+@pytest.mark.parametrize("wrong_address", [False, True], ids=["correct", "wrong-address"])
+def test_native_five_role_parent_consumes_async_bytes_and_tohost(tmp_path, protocol, wrong_address):
+    import subprocess
+    project = _five_role_project(tmp_path, protocol, "wrong_address" if wrong_address else None)
+    facts, why = I.design_facts(project)
+    assert facts is not None, why
+    work = tmp_path / "native-five"
+    work.mkdir()
+    parent = work / "isa_tb.v"
+    parent.write_text(I.gen_tb(facts))
+    dut = project / "phase2/stage1/rtl/soc_top.v"
+    memory = bytes([0x19,0xa6]+[0]*14)
+    (work / "memory.hex").write_text("\n".join(f"{b:02x}" for b in memory)+"\n")
+    compile_argv = ["iverilog", "-g2012", "-s", "isa_tb", "-o", "sim", str(parent), str(dut)]
+    cp = subprocess.run(compile_argv, cwd=work, capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    run_argv = ["vvp", "sim", "+hex=memory.hex", "+tohost=8"]
+    run = subprocess.run(run_argv, cwd=work, capture_output=True, text=True)
+    parsed = I.parse_tb_transcript(run.stdout)
+    verdict, why = I.judge_tohost(0, parsed)
+    values = {"scope": "self-authored native SRAM/tohost component; reference rc SOURCE_CONTROL",
+        "protocol": protocol, "wrong_address": wrong_address,
+        "dut_sha256": _sha(dut.read_bytes()), "parent_sha256": _sha(parent.read_bytes()),
+        "memory_sha256": _sha(memory), "compile": {"argv": compile_argv, "rc": cp.returncode,
+        "stdout": cp.stdout, "stderr": cp.stderr}, "run": {"argv": run_argv, "rc": run.returncode,
+        "stdout": run.stdout, "stderr": run.stderr}, "consumer": {"verdict": verdict, "reason": why}}
+    (work / "native-values.json").write_text(json.dumps(values, indent=2)+"\n")
+    assert run.returncode == (1 if wrong_address else 0), values
+    assert verdict == (I.FAIL if wrong_address else I.PASS), values
+    assert ("ASYNC0_VALUE_FAIL" if wrong_address else "FIVE_ROLE_ASYNC_VALUE_PASS") in run.stdout, values
