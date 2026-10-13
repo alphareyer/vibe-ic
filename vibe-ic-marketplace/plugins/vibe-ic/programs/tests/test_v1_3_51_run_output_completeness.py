@@ -668,3 +668,40 @@ def test_selfdeclared_interim_corpus_sweep():
                             a["headline_placeholder"]))
     assert not flagged, (
         "published RESULT.md flagged as self-declared-INTERIM: " + repr(flagged))
+
+
+@pytest.mark.parametrize('line, expected_rc', [
+    ('[PR](https://example.org/pull/1) remains **DRAFT**.', 0),
+    ('The linked PR has metadata `isDraft=true`.', 0),
+    ('This report is **DRAFT** and remains unfinished.', 1),
+    ('[Issue](https://example.org/issues/2) is **WIP**.', 0),
+    ('[Prototype patch](https://example.org/patch/3) is marked **PROVISIONAL**.', 0),
+    ('[PR](https://example.org/pull/1) remains **DRAFT**.\nThis report is **DRAFT** and remains unfinished.', 1),
+    ('[PR](https://example.org/pull/1) remains **DRAFT**; this report is **DRAFT** and unfinished.', 1),
+    ('[This report](https://example.org/report/1) remains **DRAFT**.', 1),
+    ('[PR](https://example.org/pull/1) remains **DRAFT**.\n**Score: PENDING**', 1),
+    ('> **INTERIM** — this report remains unfinished.', 1),
+], ids=['public_external', 'public_metadata', 'public_self', 'linked_issue',
+        'linked_patch', 'later_self', 'same_line_self', 'self_link',
+        'unfinished_headline', 'interim_callout'])
+def test_linked_artifact_status_has_its_own_subject_at_actual_cli(tmp_path, line, expected_rc):
+    import hashlib
+    import subprocess
+    paragraphs = ['# Report', '**STATUS**: FAIL.', line,
+        'This is a synthetic completeness fixture. Its evidence records a terminal failed subject, and no process is running. The report distinguishes subject failure from whether the document is complete.',
+        'The investigation preserves the observed outcome and explains its limits. The fixture claims no hardware proof, release acceptance or implementation result. External publication metadata describes a separate artifact.']
+    report = tmp_path / 'RESULT.md'
+    report.write_text('\n\n'.join(paragraphs) + '\n')
+    (tmp_path / 'evidence.txt').write_text('Synthetic fixture output.\n')
+    argv = [sys.executable, str(PROG / 'run_output_completeness_check.py'), str(tmp_path),
+            '--require-artifacts', './evidence.txt', '--json', str(tmp_path / 'gate.json')]
+    observed = subprocess.run(argv, capture_output=True, text=True)
+    result = json.loads((tmp_path / 'gate.json').read_text())
+    (tmp_path / 'actual_values.json').write_text(json.dumps({
+        'argv': argv, 'report_sha256': hashlib.sha256(report.read_bytes()).hexdigest(),
+        'expected_rc': expected_rc, 'actual_rc': observed.returncode,
+        'state': result['state'], 'deliverable_complete': result['evidence']['deliverable_complete'],
+    }, indent=2) + '\n')
+    assert observed.returncode == expected_rc, result
+    assert result['state'] == ('COMPLETE' if expected_rc == 0 else 'DELIVERABLE_SELF_DECLARED_INTERIM')
+    assert result['evidence']['deliverable_complete'] is True

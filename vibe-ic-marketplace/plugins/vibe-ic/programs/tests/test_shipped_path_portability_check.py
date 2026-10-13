@@ -78,6 +78,38 @@ def test_personal_users_path_is_flagged(tmp_path):
     assert any(x.rule == "R1" for x in found)
 
 
+@pytest.mark.parametrize('extension', ['.json', '.md', '.py', '.js'])
+def test_official_http_url_path_is_not_a_local_home_path(tmp_path, extension):
+    url = 'https://example.org/en_US/home/tools/official-document.html'
+    path = tmp_path / ('official' + extension)
+    path.write_text('URL = ' + json.dumps(url) + '\n' if extension == '.py'
+                    else json.dumps({'official_url': url}))
+    assert mod.scan_file(path, Path(path.name)) == []
+
+
+@pytest.mark.parametrize('suffix', ['?source=', '#source='])
+def test_http_url_query_or_fragment_does_not_hide_local_home_path(tmp_path, suffix):
+    path = tmp_path / 'runtime.py'
+    path.write_text('URL = ' + json.dumps('https://example.org/api' + suffix +
+                                        _home(_FAKE_USER, 'input.json')) + '\n')
+    findings = mod.scan_file(path, Path(path.name))
+    assert {row.rule for row in findings} == {'R1', 'R2'}
+
+
+def test_hostless_http_prefix_does_not_hide_local_home_path(tmp_path):
+    path = tmp_path / 'runtime.py'
+    path.write_text('ROOT = ' + json.dumps('https://' +
+                                         _home(_FAKE_USER, 'input.json')) + '\n')
+    assert {row.rule for row in mod.scan_file(path, Path(path.name))} == {'R1', 'R2'}
+
+
+def test_http_url_does_not_hide_a_following_shell_local_path(tmp_path):
+    path = tmp_path / 'runtime.sh'
+    path.write_text('curl https://example.org/api;ROOT=' +
+                    _home(_FAKE_USER, 'run') + '\n')
+    assert {row.rule for row in mod.scan_file(path, Path(path.name))} == {'R1', 'R2'}
+
+
 def test_windows_personal_path_is_flagged(tmp_path):
     f = tmp_path / "a.md"
     f.write_text("See C:" + "\\\\Users\\\\" + _FAKE_USER + "\\\\designs for the workspace.\n")

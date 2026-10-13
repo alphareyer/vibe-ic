@@ -858,6 +858,15 @@ def report_to_markdown(rep: ReviewReport) -> str:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def _default_review_dir(rtl_dir: Path) -> Path:
+    """Keep audit outputs outside the complete staged source inventory."""
+    rtl_dir = rtl_dir.resolve()
+    if rtl_dir.parts[-3:] == ('phase2', 'stage1', 'rtl'):
+        return rtl_dir.parents[2] / 'reports' / 'phase2' / 'lint' / 'rtl_review'
+    return rtl_dir.with_name(rtl_dir.name + '.review')
+
+
 def _cli() -> int:
     p = argparse.ArgumentParser(
         description="Deterministic rtl-review aggregator (Pattern-B program).")
@@ -870,7 +879,9 @@ def _cli() -> int:
     p.add_argument("--rtl-file", type=Path, action="append",
                    help="Selected native RTL closure in frontend order (repeatable)")
     p.add_argument("--tmp-dir", type=Path, default=None,
-                   help="Working dir for sub-program JSON (default: rtl-dir/.review)")
+                   help="Working dir for child JSON/native evidence (default: project "
+                        "reports/phase2/lint/rtl_review for canonical RTL; "
+                        "sibling <rtl-dir>.review otherwise)")
     p.add_argument("--out-md", type=Path, default=None,
                    help="Markdown report path (default: stdout)")
     p.add_argument("--out-json", type=Path, default=None,
@@ -889,7 +900,7 @@ def _cli() -> int:
         print(f"rtl-dir does not exist: {args.rtl_dir}", file=sys.stderr)
         return 2
 
-    tmp_dir = args.tmp_dir or (args.rtl_dir / ".review")
+    tmp_dir = args.tmp_dir or _default_review_dir(args.rtl_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # #2036: an unreadable producer is a REFUSAL, never a clean review. It

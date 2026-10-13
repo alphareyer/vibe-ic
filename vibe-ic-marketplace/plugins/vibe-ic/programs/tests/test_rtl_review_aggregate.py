@@ -610,3 +610,133 @@ class TestEndToEndOnANeutralModule:
         # a downgrade keeps the evidence; a refusal would not
         assert out_md.is_file() and out_json.is_file()
         assert json.loads(out_json.read_text())["verdict"] == "PASS"
+
+
+def _review_catalog_glue_fixture(tmp_path, monkeypatch):
+    """Reuse the existing source-contract fixture, with explicit authored glue.
+
+    Parent/challenge receipts are SOURCE_CONTROL data, not native proof. The
+    aggregate invoked below produces its own fresh native elaboration evidence.
+    """
+    import hashlib
+    from test_reused_ip_local_derivative import _fixture, _json, _h
+    import ip_catalog_pull as pull
+    project, match, ref, record = _fixture(tmp_path, monkeypatch)
+    rtl = project / 'phase2/stage1/rtl'
+    glue = rtl / 'neutral_glue.v'
+    glue.write_text('module neutral_glue(input wire a, output wire y);\n'
+                    'leaf u_leaf(); helper u_helper(); assign y = a;\nendmodule\n')
+    manifest_path = rtl / 'SOURCE_MANIFEST.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['ai_authored_files'] = [{'path': glue.name, 'sha256': _h(glue)}]
+    _json(manifest_path, manifest)
+    record['current_inventory'][glue.name] = _h(glue)
+    for name, key in [('red', 'parent_red'), ('green', 'candidate_green')]:
+        path = project / ('local/' + name + '.json')
+        receipt = json.loads(path.read_text())
+        receipt['rtl'][glue.name] = _h(glue)
+        _json(path, receipt)
+        record['proof'][key]['sha256'] = _h(path)
+    _json(project / 'local/record.json', record)
+    ref['sha256'] = _h(project / 'local/record.json')
+    outcome = pull.apply_local_derivative(project, [match], ref)
+    assert outcome['status'] == pull.PIN_VERIFIED, outcome
+    assert outcome['separately_authored_files'] == ['neutral_glue.v'], outcome
+    return project
+
+
+@pytest.mark.parametrize('placement', ['default', 'explicit'])
+def test_actual_review_reports_preserve_complete_authored_catalog_inventory(tmp_path, monkeypatch, placement):
+    import hashlib
+    import subprocess
+    import sys
+    import design_one_shot_runner as runner
+    import ip_catalog_pull as pull
+    project = _review_catalog_glue_fixture(tmp_path, monkeypatch)
+    rtl = project / 'phase2/stage1/rtl'
+    before = pull._local_inventory(rtl)
+    admitted_before = runner.step_rtl_gen(project, 'processor_cpu')
+    assert admitted_before.status == 'PASS_WITH_WAIVERS', admitted_before.detail
+    reports = project / 'reports/phase2/lint'
+    reports.mkdir(parents=True, exist_ok=True)
+    work = reports / ('rtl_review' if placement == 'default' else 'explicit_review')
+    argv = [sys.executable, str(mod.PROGRAMS_DIR / 'rtl_review_aggregate.py'),
+            '--rtl-dir', str(rtl), '--top', 'neutral_glue',
+            '--out-json', str(reports / 'review.json'), '--out-md', str(reports / 'review.md')]
+    if placement == 'explicit':
+        argv += ['--tmp-dir', str(work)]
+    observed = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    (project / 'aggregate.log').write_text(observed.stdout + observed.stderr)
+    admitted_after = runner.step_rtl_gen(project, 'processor_cpu')
+    actual = {'argv': argv, 'aggregate_rc': observed.returncode,
+              'before': admitted_before.status, 'after': admitted_after.status,
+              'after_detail': admitted_after.detail, 'inventory_before': before,
+              'inventory_after': pull._local_inventory(rtl),
+              'expected_report_dir': str(work),
+              'child_reports': {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                for p in project.rglob('*.json')
+                                if p.name in ('hygiene.json', 'reset.json', 'precheck.json')},
+              'native_evidence_dirs': [str(p.relative_to(project)) for p in project.rglob('native-elaboration-*') if p.is_dir()],
+              'native_contexts': [json.loads(p.read_text()) for p in project.rglob('native-elaboration-*/context.json')]}
+    (project / 'report-placement-values.json').write_text(json.dumps(actual, indent=2) + '\n')
+    assert observed.returncode == 0, actual
+    assert admitted_after.status == 'PASS_WITH_WAIVERS', actual
+    assert pull._local_inventory(rtl) == before, actual
+    assert all((work / name).is_file() for name in ('hygiene.json', 'reset.json', 'precheck.json')), actual
+    assert actual['native_evidence_dirs'], actual
+    assert actual['native_contexts'] and all(context['status'] == 'MEASURED'
+            and context['native_returncode'] == 0 for context in actual['native_contexts']), actual
+    assert all(not (project / name).resolve().is_relative_to(rtl.resolve())
+               for name in actual['native_evidence_dirs']), actual
+
+
+def test_existing_hidden_review_evidence_is_retained_and_inventory_still_refuses(tmp_path, monkeypatch):
+    import hashlib
+    import subprocess
+    import sys
+    import design_one_shot_runner as runner
+    project = _review_catalog_glue_fixture(tmp_path, monkeypatch)
+    rtl = project / 'phase2/stage1/rtl'
+    legacy = rtl / '.review/retained.json'
+    legacy.parent.mkdir()
+    legacy.write_bytes(b'{"scope":"retained neutral review evidence"}\n')
+    original = legacy.read_bytes()
+    argv = [sys.executable, str(mod.PROGRAMS_DIR / 'rtl_review_aggregate.py'),
+            '--rtl-dir', str(rtl), '--top', 'neutral_glue']
+    observed = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    after = runner.step_rtl_gen(project, 'processor_cpu')
+    (project / 'legacy-placement-values.json').write_text(json.dumps({
+        'argv': argv, 'aggregate_rc': observed.returncode, 'consumer_status': after.status,
+        'consumer_detail': after.detail, 'legacy_sha256': hashlib.sha256(original).hexdigest(),
+        'legacy_bytes_preserved': legacy.is_file() and legacy.read_bytes() == original,
+    }, indent=2) + '\n')
+    assert observed.returncode == 0, observed.stderr
+    assert legacy.read_bytes() == original
+    assert after.status == 'FAIL', after.detail
+    assert 'current full inventory drift' in after.detail
+
+
+def test_standalone_default_reports_do_not_enter_the_rtl_inventory(tmp_path):
+    import hashlib
+    import subprocess
+    import sys
+    rtl = tmp_path / 'standalone_rtl'
+    rtl.mkdir()
+    source = rtl / 'register_slice.sv'
+    source.write_text('module register_slice(input wire clk, input wire rst, input wire d, output reg q);\n'
+                      'always @(posedge clk) if (rst) q <= 0; else q <= d;\nendmodule\n')
+    before = {str(p.relative_to(rtl)): hashlib.sha256(p.read_bytes()).hexdigest() for p in rtl.rglob('*') if p.is_file()}
+    argv = [sys.executable, str(mod.PROGRAMS_DIR / 'rtl_review_aggregate.py'),
+            '--rtl-dir', str(rtl), '--top', 'register_slice']
+    observed = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    after = {str(p.relative_to(rtl)): hashlib.sha256(p.read_bytes()).hexdigest() for p in rtl.rglob('*') if p.is_file()}
+    (tmp_path / 'standalone-placement-values.json').write_text(json.dumps({
+        'argv': argv, 'aggregate_rc': observed.returncode, 'inventory_before': before,
+        'inventory_after': after,
+        'native_contexts': [json.loads(p.read_text()) for p in tmp_path.rglob('native-elaboration-*/context.json')],
+    }, indent=2) + '\n')
+    assert observed.returncode == 0, observed.stderr
+    assert after == before
+    contexts = [json.loads(p.read_text()) for p in tmp_path.rglob('native-elaboration-*/context.json')]
+    assert contexts and all(context['status'] == 'MEASURED'
+            and context['native_returncode'] == 0 for context in contexts)

@@ -28,7 +28,8 @@ Two rules, applied to shipped plugin source:
        <name> is a recognised PLACEHOLDER (angle-bracketed like `<your-user>`,
        a shell expansion like `$USER`, or an ellipsis) or is on the short,
        explicit synthetic-name allow-list below. A real person's username is on
-       neither list, so it FAILs.
+       neither list, so it FAILs. HTTP URL resource paths are not local home
+       paths; query and fragment values remain subject to both rules.
 
   R2 — ABSOLUTE HOME PATH AS A VALUE (executable source only, excluding tests).
        In .py/.js/.sh sources outside test trees, an absolute home path may not
@@ -86,6 +87,7 @@ import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
+from urllib.parse import urlsplit
 
 import _published_tree as _pt
 
@@ -116,6 +118,29 @@ _HOME_PAT = re.compile(
     r"|/Users/(?P<u2>" + _USER_CHARS + r")/?"
     r"|[Cc]:\\+Users\\+(?P<u3>" + _USER_CHARS + r")\\*)"
 )
+
+_HTTP_URL = re.compile(r"https?://[^\s<>\"'`;|&]+", re.I)
+
+
+def _home_path_matches(text: str):
+    """HTTP URL path segments are not local filesystem paths.
+
+    Keep query/fragment values in scope: a URL surrounding a local-path
+    argument does not make that argument portable.
+    """
+    url_paths = []
+    for url in _HTTP_URL.finditer(text):
+        try:
+            parsed = urlsplit(url.group(0))
+        except ValueError:
+            continue
+        if parsed.netloc and '\\' not in parsed.netloc:
+            url_paths.append((url.start(), url.start() +
+                              len(re.split(r'[?#]', url.group(0), 1)[0])))
+    for match in _HOME_PAT.finditer(text):
+        if not any(start <= match.start() and match.end() <= end
+                   for start, end in url_paths):
+            yield match
 
 # Placeholder usernames: structurally impossible to mistake for a real value.
 _PLACEHOLDER_PAT = re.compile(
@@ -236,7 +261,7 @@ def scan_file(path: Path, rel: Path,
     findings: List[Finding] = []
 
     # ---- R1: personal username, anywhere in the file -----------------------
-    for m in _HOME_PAT.finditer(text):
+    for m in _home_path_matches(text):
         name = m.group("u1") or m.group("u2") or m.group("u3")
         if _user_allowed(name, extra_allowed):
             continue
@@ -259,7 +284,7 @@ def scan_file(path: Path, rel: Path,
             haystacks = [_strip_comments(text, ext)]
         seen = set()
         for hay in haystacks:
-            for m in _HOME_PAT.finditer(hay):
+            for m in _home_path_matches(hay):
                 frag = m.group(0)
                 if frag in seen:
                     continue

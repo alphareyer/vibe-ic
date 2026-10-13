@@ -320,6 +320,20 @@ _INTERIM_EMPH_RE = re.compile(
 _INTERIM_CALLOUT_RE = re.compile(
     r"^\s{0,3}>[\s>]*[^\w\s]{0,4}\s*(" + "|".join(_INTERIM_WORDS) + r")\b")
 
+
+# An HTTP-linked artifact can be the explicit subject of a status sentence.
+# Its status does not declare this deliverable unfinished. Keep ambiguous or
+# self-referential link labels in the ordinary S1 population.
+_LINKED_STATUS_SUBJECT_RE = re.compile(
+    r"^\s*(?:[-+>]\s+)?(?:The\s+(?:linked|external)\s+)?"
+    r"\[(?P<label>[^]\n]+)\]\(https?://[^)\s]+\)\s+"
+    r"(?:(?:still\s+)?(?:is|remains)|is\s+marked|has\s+the\s+status)\s*$",
+    re.IGNORECASE)
+_SELF_LINK_LABEL_RE = re.compile(
+    r"\b(?:this|current|our|the)\s+(?:report|document|deliverable|result)\b|"
+    r"^(?:report|document|deliverable|result(?:\.md)?|readme(?:\.md)?)$",
+    re.IGNORECASE)
+
 # S2 — the deliverable's HEADLINE verdict/score slot holds a PLACEHOLDER rather
 #      than a measurement, i.e. the document reached for a verdict and wrote
 #      "PENDING". Distinct from `deliverable_verdict_consistency_check`, which
@@ -605,9 +619,16 @@ def find_interim_banner(text: str) -> List[tuple]:
     Returns [(lineno, matched_word, line_excerpt)]."""
     hits: List[tuple] = []
     for lineno, ln in _prose_lines(text):
-        m = _INTERIM_CALLOUT_RE.search(ln) or _INTERIM_EMPH_RE.search(ln)
-        if m:
+        callout = _INTERIM_CALLOUT_RE.search(ln)
+        if callout:
+            hits.append((lineno, callout.group(1), ln.strip()[:120]))
+            continue
+        for m in _INTERIM_EMPH_RE.finditer(ln):
+            subject = _LINKED_STATUS_SUBJECT_RE.fullmatch(ln[:m.start()])
+            if subject and not _SELF_LINK_LABEL_RE.search(subject.group('label').strip()):
+                continue
             hits.append((lineno, m.group(1), ln.strip()[:120]))
+            break
     return hits
 
 

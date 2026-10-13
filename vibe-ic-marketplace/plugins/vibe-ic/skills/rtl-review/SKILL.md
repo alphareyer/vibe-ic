@@ -26,9 +26,21 @@ python3 plugins/vibe-ic/programs/rtl_review_aggregate.py \
     --rtl-dir <dir-of-.v-and-.sv> \
     --top <selected-top> \
     --define <selected-compile-define> \
-    --out-md  rtl_review.md \
-    --out-json rtl_review.json
+    --tmp-dir <project-root>/reports/phase2/lint/rtl_review \
+    --out-md  <project-root>/reports/phase2/lint/rtl_review.md \
+    --out-json <project-root>/reports/phase2/lint/rtl_review.json
 ```
+
+
+Child reports and native elaboration evidence belong outside the complete RTL
+source inventory. Without `--tmp-dir`, canonical `<project>/phase2/stage1/rtl`
+uses `<project>/reports/phase2/lint/rtl_review`; a standalone RTL directory uses
+its sibling `<rtl-dir>.review`. An explicit `--tmp-dir` remains honored.
+
+Existing `<rtl-dir>/.review` evidence is left unchanged. It remains extra
+inventory until explicitly archived outside RTL; do not ignore hidden files or
+delete reports to obtain admission. Any approved relocation must preserve the
+original bytes, hashes and receipts in that archive before moving the files.
 
 Pass the frontend's selected top and complete ordered RTL closure (repeat
 `--rtl-file` when the directory also contains testbenches or include hubs),
@@ -59,7 +71,7 @@ previously asked the LLM to author by hand.
 
 ## What Claude does (backstop only)
 
-After the program emits `rtl_review.md` + `rtl_review.json`:
+After the program emits the requested `rtl_review.md` + `rtl_review.json`:
 
 1. **Read the program output.** Do not re-derive any number it already returned.
 2. **Refuse to claim a higher score than the program returned.** The
@@ -166,7 +178,7 @@ prose + the gate's structural flag.
 python3 plugins/vibe-ic/_shared/skill_compliance_check.py \
     --requirements plugins/vibe-ic/skills/rtl-review/compliance.yaml \
     --rtl-source-root <complete-rtl-source-directory> \
-    rtl_review.md
+    <project-root>/reports/phase2/lint/rtl_review.md
 ```
 
 Exit 0 = PASS; exit 1 = the program output is missing a required section
