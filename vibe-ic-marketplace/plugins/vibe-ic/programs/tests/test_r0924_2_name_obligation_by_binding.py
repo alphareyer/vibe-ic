@@ -141,6 +141,10 @@ def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0", harness_edit=
         "properties": [{"task": "prove", "status": "PASS", "bound": "unbounded"}],
         "proof_inputs": {"files": {harness.name: hashlib.sha256(body.encode()).hexdigest()}},
     }
+    # This is a software-only predicate fixture, not a native proof. Its
+    # source record must still describe the public DUT actually on disk.
+    import _chip_synth_read as csr
+    results["chip_read"] = csr.current_chip_read(project, "ctr")
     row, = gate.binding_dispositions(project, formal, results)
     return row
 
@@ -291,3 +295,162 @@ def test_the_discharge_names_the_proved_harness(tmp_path):
     import hashlib
     assert b["proved_harness_sha256"]["formal_ctr.sv"] == hashlib.sha256(h.read_bytes()).hexdigest()
     assert res["proof_inputs"]["source"].startswith("sby src")
+
+
+# Issue #3145: keep the real partial proof immutable while changing only the
+# current public DUT. The normal CLI, not a binding helper alone, decides it.
+import os
+import re
+import subprocess
+import pytest
+from unittest.mock import patch
+import _chip_synth_read as csr
+import design_one_shot_runner as runner
+
+
+def _formal_bytes(project):
+    formal = project / "phase2/stage1/formal"
+    return {str(p.relative_to(formal)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(formal.rglob("*")) if p.is_file()}
+
+
+@pytest.fixture(scope="module")
+def issue3145_native_seeds(tmp_path_factory):
+    supplied = os.environ.get("ISSUE3145_FORMAL_SEEDS")
+    if supplied:
+        root = Path(supplied)
+        positive, failed = root / "native-seed", root / "native-failed-seed"
+    else:
+        missing = [t for t in ("yosys", "sby") if shutil.which(t) is None]
+        if missing:
+            skip_not_verified(f"{missing}: no real partial-proof seed",
+                              "run this owning module in the cached EDA image")
+        root = tmp_path_factory.mktemp("issue3145-seeds")
+        positive = _project(root / "native-seed")
+        l8 = positive / "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+        doc = json.loads(l8.read_text())
+        doc["clock_and_reset_waveform"]["resets"][0]["min_assert_cycles"] = 2
+        l8.write_text(json.dumps(doc, sort_keys=True))
+        runner.step_emit_phase2_manifests(positive, [], top_name="ctr", container="")
+        failed = root / "native-failed-seed"
+        shutil.copytree(positive, failed)
+        _step5(failed, harness_edit=lambda t: t.replace("(q == '0)", "(q == 4'd5)"))
+    for path, proved in ((positive, True), (failed, False)):
+        results = json.loads((path / "phase2/stage1/formal/results.json").read_text())
+        assert results["all_proved"] is proved
+        assert results["chip_read"] == csr.current_chip_read(path, "ctr")
+        assert results["proof_inputs"]["source"].startswith("sby src")
+        assert any(t["bound"] == ("unbounded" if proved else "cex")
+                   for t in results["properties"])
+    return positive, failed
+
+
+def _issue3145_copy(tmp_path, seeds, failed=False):
+    project = tmp_path / "public-component"
+    shutil.copytree(seeds[int(failed)], project)
+    return project
+
+
+def _issue3145_cli(project):
+    output = project / "consumer.json"
+    argv = [sys.executable, "-B", str(PROGRAMS / "formal_proof_evidence_check.py"),
+            str(project), "--json", str(output)]
+    proc = subprocess.run(argv, capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    (project / "consumer-process.json").write_text(json.dumps({
+        "argv": argv, "exit_code": proc.returncode, "stdout": proc.stdout,
+        "stderr": proc.stderr, "terminal": True}, indent=2))
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    rep = json.loads(output.read_text())
+    assert rep["property_denominator"] == 3, rep
+    assert rep["verdict"] == "INCOMPLETE", rep
+    assert any(o["id"].endswith("min_assert_cycles")
+               for o in rep["unresolved_obligations"]), rep
+    return rep
+
+
+def test_issue3145_matching_native_partial_binding_remains_reusable(tmp_path, issue3145_native_seeds):
+    project = _issue3145_copy(tmp_path, issue3145_native_seeds)
+    before = _formal_bytes(project)
+    rep = _issue3145_cli(project)
+    assert _binding(rep)["status"] == gate.DISCHARGED_BY_BINDING, rep
+    assert NAME_ID in rep["discharged_by_binding"]
+    assert _formal_bytes(project) == before
+
+
+@pytest.mark.parametrize("change", ["missing_reset", "changed_dut", "changed_readset", "changed_built"])
+def test_issue3145_current_dut_freshness_before_binding(tmp_path, issue3145_native_seeds, change):
+    project = _issue3145_copy(tmp_path, issue3145_native_seeds)
+    before = _formal_bytes(project)
+    rtl = project / "phase2/stage1/rtl/ctr.v"
+    outputs = [(p.name, p.direction, p.width) for p in fhg.parse_module(rtl.read_text(), "ctr").ports
+               if p.direction == "output"]
+    if change == "missing_reset":
+        rtl.write_text(re.sub(r"\brst\b", "fixture_reset_input_neutral", rtl.read_text()))
+        assert "rst" not in {p.name for p in fhg.parse_module(rtl.read_text(), "ctr").ports
+                             if p.direction == "input"}
+    elif change == "changed_dut":
+        rtl.write_text(rtl.read_text().replace("q + 4'd1", "q + 4'd2"))
+        assert "rst" in {p.name for p in fhg.parse_module(rtl.read_text(), "ctr").ports
+                         if p.direction == "input"}
+    elif change == "changed_readset":
+        (rtl.parent / "public_extra.v").write_text("module public_extra(input a, output z); assign z=a; endmodule\n")
+    else:
+        # A public synthetic *built-read* mismatch, not fabricated proof data.
+        built = csr.built_record_path(project)
+        built.parent.mkdir(parents=True, exist_ok=True)
+        record = csr.current_chip_read(project, "ctr")
+        record["top"] = "public_different_built_top"
+        built.write_text(json.dumps(record))
+    assert [(p.name, p.direction, p.width) for p in fhg.parse_module(rtl.read_text(), "ctr").ports
+            if p.direction == "output"] == outputs
+    rep = _issue3145_cli(project)
+    row = _binding(rep)
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert NAME_ID not in rep.get("discharged_by_binding", []), rep
+    assert NAME_ID in {o["id"] for o in rep["unresolved_obligations"]}
+    if change == "missing_reset":
+        assert "current DUT input" in row["reason"], row
+    elif change == "changed_built":
+        assert "phase-3 synthesis" in row["reason"], row
+    else:
+        assert "now" in row["reason"], row
+    assert _formal_bytes(project) == before
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["partial", "counterexample"])
+def test_issue3145_normal_producer_reuses_matching_proof_without_rewriting(tmp_path, issue3145_native_seeds, failed):
+    project = _issue3145_copy(tmp_path, issue3145_native_seeds, failed)
+    before = _formal_bytes(project)
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 0
+    assert _formal_bytes(project) == before
+    if failed:
+        rep = gate.audit(project)
+        assert rep["verdict"] == "FAIL", rep
+        assert _binding(rep)["status"] == gate.BINDING_OUTSTANDING
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["partial", "counterexample"])
+def test_issue3145_normal_producer_refreshes_stale_source_and_retains_entire_proof(tmp_path, issue3145_native_seeds, failed):
+    project = _issue3145_copy(tmp_path, issue3145_native_seeds, failed)
+    before = _formal_bytes(project)
+    rtl = project / "phase2/stage1/rtl/ctr.v"
+    rtl.write_text(rtl.read_text().replace("q + 4'd1", "q + 4'd2"))
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 1, "stale current source must invoke the real formal producer"
+    histories = list((project / "phase2/stage1/formal_history").glob("*"))
+    assert len(histories) == 1, histories
+    retained = {str(p.relative_to(histories[0])): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in histories[0].rglob("*") if p.is_file()}
+    assert retained == before, "retain every old transcript, proof input, failure and counterexample byte"
+    if failed:
+        assert any(name.endswith("trace.aiw") for name in retained), retained
+        old = json.loads((histories[0] / "results.json").read_text())
+        assert old["all_proved"] is False and old["verdict"] == "FAIL"
+    current = json.loads((project / "phase2/stage1/formal/results.json").read_text())
+    assert current["chip_read"] == csr.current_chip_read(project, "ctr")
+    assert current["all_proved"] is True
+    assert _binding(_issue3145_cli(project))["status"] == gate.DISCHARGED_BY_BINDING
