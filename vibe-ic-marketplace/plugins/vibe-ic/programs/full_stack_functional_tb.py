@@ -132,6 +132,7 @@ PASS, FAIL, NOT_MEASURED = "PASS", "FAIL", "NOT_MEASURED"
 ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
 BLOCKED_BY_UPSTREAM = "BLOCKED_BY_UPSTREAM"
 EXECUTION_ERROR = "EXECUTION_ERROR"
+MISSING_OBSERVATION_CONTRACT = "MISSING_OBSERVATION_CONTRACT"
 
 #: An acceptance that is a bare threshold PERCENTAGE ("≥ 95%") is a coverage
 #: figure measured over a run, not a verdict a case oracle returns. "100% PASS"
@@ -593,7 +594,8 @@ def _not_run_detail(project: Path, case: dict, ic_class: Optional[str],
     if isinstance(case.get("applies_when"), dict):
         out["applies_when"] = case["applies_when"]
     for key in ("known_answer_vector_unbound", "stated_vector_unbound",
-                "delivered_oracle_refusals", "oracle_errors"):
+                "delivered_oracle_refusals", "oracle_errors",
+                "arithmetic_scenario_requests"):
         rows = [r for r in (report.get(key) or [])
                 if isinstance(r, dict) and str(r.get("case")) == name]
         if rows:
@@ -698,9 +700,15 @@ def generate(project: Path, container: Optional[str] = None,
     project = Path(project)
     import testbench_gen as _tbg
     fdir = functional_dir(project)
-    # The directory is this producer's alone, so a stale case TB can never
-    # outlive the run that would have regenerated it.
-    shutil.rmtree(fdir, ignore_errors=True)
+    # A new invocation must not erase an earlier measured failure or its logs.
+    # Generated cases are regenerated in a fresh directory; authored cases are
+    # copied below through the unit producer's existing provenance predicate.
+    previous = None
+    if fdir.exists():
+        history = fdir.with_name(FUNCTIONAL_SUBDIR + "_history")
+        history.mkdir(parents=True, exist_ok=True)
+        previous = history / str(time.time_ns())
+        fdir.rename(previous)
     fdir.mkdir(parents=True, exist_ok=True)
     rec: Dict[str, Any] = {
         "program": PROGRAM, "schema": SCHEMA,
@@ -709,6 +717,8 @@ def generate(project: Path, container: Optional[str] = None,
         "design_input": _design_input_digest(project),
         "cases": [], "sources": [], "models": [],
     }
+    if previous is not None:
+        rec["previous_output"] = _rel(project, previous)
 
     def _finish(verdict: str, reason_class: Optional[str], why: str
                 ) -> Dict[str, Any]:
@@ -796,6 +806,18 @@ def generate(project: Path, container: Optional[str] = None,
         step4 = {}
     disp = dispatch or default_dispatch
     run_root = fdir / "run"
+    if previous is not None:
+        for case in cases:
+            name = str(case.get("name") or case.get("id") or "")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                continue
+            authored = _tbg.authored_oracle_preserved(previous, name, None)
+            if authored is not None:
+                target = fdir / f"{name}.v"
+                shutil.copy2(authored, target)
+                rec.setdefault("preserved_authored", []).append({
+                    "case": name, "source": _rel(project, authored),
+                    "sha256": sha256_file(authored), "path": _rel(project, target)})
     # ONE call into the Step-4 unit-TB producer's own ladder, into this
     # producer's directory, with the substance-floor scaffold withheld: a case
     # no real oracle grounds gets no file here, never a connectivity stand-in.
@@ -838,8 +860,39 @@ def generate(project: Path, container: Optional[str] = None,
             continue
         text = path.read_text(errors="replace")
         entry["family"] = _family_of(text)
+        if (top["pad_ring"] and top["module"] != core_mod
+                and entry["family"] == "declared_arithmetic_scenario"):
+            # Cycle framing is declared for the core. The existing model API
+            # supplies source bytes, not a bound on clock-input/output settling.
+            # Never dispatch a generated fixed-window scenario on this changed
+            # surface or blame a premature sample on the DUT. An authored TB can
+            # supply the observation contract through the existing expert path.
+            reason = (f"{MISSING_OBSERVATION_CONTRACT}: generated arithmetic "
+                      f"scenario changes observation from `{core_mod}` to "
+                      f"`{top['module']}`; no existing timing interface binds "
+                      "the selected input clock and output settling to a fixed "
+                      "sample inside the declared half-cycle. Author the "
+                      "full-stack testbench with that contract, retaining "
+                      "cycle offset, products, reset intent and populations.")
+            request = {"case": name, "verdict": NOT_MEASURED,
+                       "reason_class": MISSING_OBSERVATION_CONTRACT,
+                       "fallback_skill": "testbench-gen",
+                       "required_choices": {}, "required_population": None,
+                       "unsupported_requirements": [reason],
+                       "authored_tb": _rel(project, path)}
+            report.setdefault("arithmetic_scenario_requests", []).append(request)
+            entry.update(state=NO_ORACLE, reason=reason,
+                         reason_class=MISSING_OBSERVATION_CONTRACT,
+                         tb=_rel(project, path), tb_sha256=sha256_file(path),
+                         **_not_run_detail(project, case, ic_class, report, step4))
+            continue
         if top["pad_ring"]:
-            new, rwhy = retarget_instance(text, core_mod, top["module"])
+            if (entry["family"] == "authored_or_delivered"
+                    and instance_count(text, core_mod) == 0
+                    and instance_count(text, top["module"]) == 1):
+                new, rwhy = text, "authored testbench already instantiates the required full-stack top"
+            else:
+                new, rwhy = retarget_instance(text, core_mod, top["module"])
             if new is None:
                 entry.update(state=NO_ORACLE, reason=rwhy,
                              tb=_rel(project, path))
@@ -891,6 +944,8 @@ def generate(project: Path, container: Optional[str] = None,
                                      score["checks"])
         if score["state"] == PASSED and short:
             entry.update(state=SHORT, reason=short)
+    if report.get("arithmetic_scenario_requests"):
+        rec["arithmetic_scenario_requests"] = report["arithmetic_scenario_requests"]
     dp = _datapath_case(project, core_mod, core_ports, top, sources, fdir,
                         run_root, disp, container,
                         {c["name"] for c in rec["cases"]})
@@ -903,8 +958,12 @@ def generate(project: Path, container: Optional[str] = None,
             continue
         if entry.get("state") != NO_ORACLE:
             continue
-        d = unexecuted_disposition(project, case, ic_class, dp_passed,
-                                   top["module"])
+        if entry.get("reason_class") == MISSING_OBSERVATION_CONTRACT:
+            d = {"case": entry["name"], "disposition": DISP_UNMEASURED,
+                 "blocking": True, "reason": entry["reason"]}
+        else:
+            d = unexecuted_disposition(project, case, ic_class, dp_passed,
+                                       top["module"])
         entry["step5_disposition"] = d
         bar["dispositions"].append(d)
     rec["step5_bar"] = bar
@@ -934,6 +993,14 @@ def generate(project: Path, container: Optional[str] = None,
             f"{errored} case(s) with an emitted testbench could not be built or "
             f"gave no verdict; {executed} executed — the population was not "
             f"fully measured"))
+    observation_gaps = [c["name"] for c in rec["cases"]
+                        if c.get("reason_class") == MISSING_OBSERVATION_CONTRACT]
+    if observation_gaps:
+        return _finish(NOT_MEASURED, MISSING_OBSERVATION_CONTRACT, (
+            f"{len(observation_gaps)} generated arithmetic case(s) "
+            f"{observation_gaps[:8]} were not dispatched through "
+            f"`{top['module']}`: the changed observation contract is missing; "
+            "the existing testbench-gen author request must be resolved"))
     if executed == 0:
         return _finish(NOT_MEASURED,
                        EXECUTION_ERROR if errored else ZERO_DENOMINATOR, (
@@ -1047,7 +1114,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     rec = generate(args.project.resolve(), container, args.route)
     text = json.dumps({k: rec.get(k) for k in
                        ("verdict", "reason_class", "reason", "counts",
-                        "full_stack_top")}, indent=2, ensure_ascii=False)
+                        "full_stack_top", "arithmetic_scenario_requests",
+                        "previous_output")}, indent=2, ensure_ascii=False)
     if args.json:
         _atomic_write_text(args.json, text + "\n")
     print(text)

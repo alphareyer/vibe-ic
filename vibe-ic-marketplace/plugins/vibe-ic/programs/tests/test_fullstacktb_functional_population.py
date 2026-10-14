@@ -84,6 +84,180 @@ MODELS = {
         "module TIELO(output ZN); assign ZN = 1'b0; endmodule\n",
 }
 
+
+# Public neutral source controls for the changed arithmetic observation surface.
+# Transport below only records proposed argv; no simulator is launched.
+def _observation_project(tmp_path, *, width=8, renamed=False, period=10, delay=0):
+    from test_serial_parallel_declared_function_oracle import _declared_scenario_project
+    project = tmp_path / "neutral_observation"
+    cases = _declared_scenario_project(project, width=width, renamed=renamed, latency=1)
+    _write(project / 'input/submission_template/SELF_TAPEOUT.txt', 'self tape-out\n')
+    gd = project / "phase1/generated_docs"
+    l9_path = gd / "L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(l9_path.read_text())
+    l9['clocks'][0]['period_ns'] = period
+    l9_path.write_text(json.dumps(l9))
+    names = ({'clk': 'i_clk', 'rst': 'i_rst', 'x': 'operand_word',
+              'y': 'serial_bit', 'p': 'result_bit'} if renamed else
+             {n: n for n in ('clk', 'rst', 'x', 'y', 'p')})
+    c, r, x, y, p = [names[n] for n in ('clk', 'rst', 'x', 'y', 'p')]
+    top = project / "phase3/stage3/pnr/neutral_pad_surface.v"
+    _write(top, f'''module neutral_pad_surface(input {c}, {r},
+        input [{width-1}:0] {x}, input {y}, output {p});
+        wire core_clock, core_result;
+        OBSIN clock_pad(.PAD({c}), .Y(core_clock));
+        neutral_serial core(.{c}(core_clock), .{r}({r}), .{x}({x}),
+                            .{y}({y}), .{p}(core_result));
+        OBSOUT result_pad(.A(core_result), .PAD({p}));
+        endmodule\n''')
+    _write(project / _fsf().CHIP_TOP_RECORD_REL, json.dumps({
+        'verdict': 'WROTE', 'core_module': 'neutral_serial',
+        'chip_top_module': 'neutral_pad_surface',
+        'chip_top_verilog': str(top.relative_to(project))}))
+    models = {'/neutral/observation.v': f'''`timescale 1ns/1ps
+        module OBSIN(input PAD, output Y); buf #{delay}(Y,PAD); endmodule
+        module OBSOUT(input A, output PAD); buf #{delay}(PAD,A); endmodule\n'''}
+    calls = []
+    def transport(argv, wd, container, simulator, timeout):
+        calls.append(argv)
+        return 83, 'source-only transport refusal; no simulator executed'
+    return project, cases, models, calls, transport
+
+
+@pytest.mark.parametrize('width,renamed,period,delay', [
+    (4, False, 10, 0), (8, True, 24, 0.2), (12, False, 16, 0.4)])
+def test_new_padded_scenarios_request_observation_before_dispatch(
+        tmp_path, monkeypatch, width, renamed, period, delay):
+    project, cases, models, calls, transport = _observation_project(
+        tmp_path, width=width, renamed=renamed, period=period, delay=delay)
+    monkeypatch.setattr(importlib.import_module('testbench_gen'), '_detect_ic_class',
+                        lambda project: 'digital_arithmetic_primitive')
+    fs = _fsf()
+    result = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    assert result['verdict'] == 'NOT_MEASURED', result
+    assert calls == [], 'unsupported observation must stop before any dispatch'
+    assert result['reason_class'] == 'MISSING_OBSERVATION_CONTRACT', result
+    assert result['counts']['executed'] == 0 and result['counts']['rows'] == 3
+    requests = result['arithmetic_scenario_requests']
+    assert {r['case'] for r in requests} == {c['name'] for c in cases}
+    for case, entry in zip(cases, result['cases']):
+        assert entry['state'] == 'no_oracle' and entry['step5_disposition']['blocking']
+        request = next(r for r in requests if r['case'] == case['name'])
+        assert request['verdict'] == 'NOT_MEASURED'
+        assert request['fallback_skill'] == 'testbench-gen'
+        assert request['reason_class'] == 'MISSING_OBSERVATION_CONTRACT'
+        assert request['authored_tb'] == entry['tb']
+        assert request['unsupported_requirements']
+        assert entry['arithmetic_scenario_requests'] == [request]
+        plan = aog._scenario_header(project / entry['tb'])
+        assert plan['framing']['settled_latency'] == 1
+        assert plan['comparisons'] == width * plan['transactions'] > 0
+        assert result['full_stack_top']['source_sha256'] == fs.sha256_file(
+            project / result['full_stack_top']['source'])
+        for model in result['models']:
+            assert fs.sha256_file(project / model['path']) == model['sha256']
+    rc, consumed, sentinel = gate.functional_full_stack_verdict(project)
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED', consumed
+    assert sentinel.startswith('INCOMPLETE:') and consumed['counts']['executed'] == 0
+
+
+def test_missing_observation_cli_publishes_existing_author_request(tmp_path, monkeypatch, capsys):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    fs = _fsf(); tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    monkeypatch.setattr(fs, 'default_dispatch', transport)
+    monkeypatch.setattr(fs, 'default_model_resolver', lambda *args: (models, 'neutral source model'))
+    output = project / 'component-cli.json'
+    assert fs.main([str(project), '--route', 'DIE', '--container', 'source-double',
+                    '--json', str(output)]) == 2
+    published = json.loads(capsys.readouterr().out)
+    assert published == json.loads(output.read_text())
+    assert published['reason_class'] == 'MISSING_OBSERVATION_CONTRACT', published
+    assert {r['case'] for r in published['arithmetic_scenario_requests']} == {c['name'] for c in cases}
+    assert calls == [], 'CLI must publish the request before any simulator dispatch'
+
+
+def test_direct_core_scenario_schedule_and_strict_comparators_stay_unchanged(tmp_path, monkeypatch):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    result = _fsf().generate(project, route='HARDMACRO', dispatch=transport)
+    assert len(calls) == 3
+    assert not result.get('arithmetic_scenario_requests')
+    for entry in result['cases']:
+        path = project / entry['tb']
+        plan = aog._scenario_header(path)
+        text = path.read_text()
+        assert 'always #5 clk=~clk;' in text and '@(posedge clk); #1;' in text
+        assert plan['framing']['settled_latency'] == 1 and 'L=1;' in text
+        assert 'p !== gv[v][k-L]' in text and 'if(k>=L)' in text
+        assert 'clear_state(1)' in text and 'held_value=p' in text
+        assert "p !== 1'b0 && p !== 1'b1" in text
+        assert plan['comparisons'] == 8 * plan['transactions'] > 0
+        for index, (a, b) in enumerate(plan['pairs']):
+            assert f"gv[{index}]=8'd{a & b};" in text
+        assert 'build_rc' in entry and entry['state'] == 'errored'
+
+
+def test_new_handoff_retains_old_failures_and_authored_fullstack_provenance(tmp_path, monkeypatch):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    fs = _fsf(); tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    prior = fs.functional_dir(project)
+    authored = ('module operand_limits; reg clk=0; reg rst=1; reg [7:0] x=0; '
+                'reg y=0; wire p; neutral_serial dut(.clk(clk),.rst(rst),.x(x),.y(y),.p(p)); '
+                'always #5 clk=~clk; endmodule\n')
+    originals = {'functional_cases.json': '{"verdict":"FAIL","original":true}\n',
+                 'run/operand_limits/run.log': 'FAIL: retained original measurement\n',
+                 'operand_limits.v': authored,
+                 'reset_situations.v': '// VIBEIC_TB_ORACLE: GENERATED by old_emitter\nold bytes\n'}
+    for name, text in originals.items():
+        _write(prior / name, text)
+    result = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    archive = project / result['previous_output']
+    assert archive != prior and archive.is_dir()
+    for name, text in originals.items():
+        assert (archive / name).read_text() == text
+    current_authored = prior / 'operand_limits.v'
+    assert current_authored.read_text() == authored.replace('neutral_serial dut(', 'neutral_pad_surface dut(')
+    assert len(calls) == 1 and calls[0][calls[0].index('-s') + 1] == 'operand_limits'
+    entry = result['cases'][0]
+    assert entry['family'] == 'authored_or_delivered'
+    assert entry.get('reason_class') != 'MISSING_OBSERVATION_CONTRACT'
+    assert not (project / 'input/tb').exists()
+    assert result['preserved_authored'][0]['source'] == str((archive / 'operand_limits.v').relative_to(project))
+    assert result['preserved_authored'][0]['sha256'] == fs.sha256_file(archive / 'operand_limits.v')
+    second = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    assert second['previous_output'] != result['previous_output']
+    assert current_authored.read_text() == authored.replace('neutral_serial dut(', 'neutral_pad_surface dut(')
+    assert len(calls) == 2 and second['cases'][0]['family'] == 'authored_or_delivered'
+    for name, text in originals.items():
+        assert (archive / name).read_text() == text
+
+
+@pytest.mark.parametrize('mutation', ['stale_identity', 'missing_population'])
+def test_observation_source_receipt_controls_still_refuse_missing_evidence(tmp_path, mutation):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    plan = aog.arithmetic_scenario_plan(project, 'digital_arithmetic_primitive', cases[0])
+    tb = _write(project / 'source_probe.v', aog.emit_arithmetic_scenario_module(cases[0]['name'], plan))
+    transcript = _write(project / 'synthetic_source_transcript.txt',
+        f"ARITH_SCENARIO_DONE transactions={plan['transactions']} comparisons={plan['comparisons']} errors=0 held_edges=2\n")
+    sources = {path: digest for path, digest in plan['binding'].items() if Path(path).suffix == '.v'}
+    captured, reason = aog.capture_arithmetic_scenario_execution(project, tb, transcript, sources)
+    # This is a source consumer fixture, never a simulator or native receipt.
+    assert captured and captured['complete'], reason
+    row = {'tb_file': str(tb), 'arithmetic_scenario': captured}
+    if mutation == 'stale_identity':
+        declaration = project / 'plugin_output/declaration.json'
+        declaration.write_text(declaration.read_text() + ' ')
+    else:
+        captured['complete'] = False
+    state, detail = aog.arithmetic_scenario_case_state(row)
+    assert state == 'NOT_EXECUTED' and 'NOT_MEASURED' in detail
+
 CASES = [
     {"name": "random_equivalence", "kind": "coverage_goal",
      "stimulus": "隨機 ≥ 100 組 (x, y),全部對 golden model 一致",

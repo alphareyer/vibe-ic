@@ -975,3 +975,132 @@ def test_issue3131_source_roster_overrides_documentary_labels_emitted(
     if case.startswith("implemented_"):
         assert "out_example_addr" not in message
     assert dispatch == []
+
+
+# Required signal declarations must not become optional merely because the
+# selected-interface producer retains a False marker. Supplies remain the
+# physical layer's obligation even when explicitly mandatory.
+_ISSUE3134_REQUIRED_SIGNAL_CASES = (
+    ("normal_phase1_rtl_binding", "DISARMED"),
+    ("normal_netlist_binding", "DISARMED"),
+    ("genuine_source_port_missing", "REJECT"),
+    ("genuine_ansi_source_port_missing", "REJECT"),
+    ("optional_false_compatible", "DISARMED"),
+    ("supply_false_required", "DISARMED"),
+    ("supply_false_mandatory", "DISARMED"),
+    ("signal_optional_required", "REJECT"),
+    ("signal_optional_mandatory", "REJECT"),
+    ("signal_optional_alias_required", "REJECT"),
+    ("signal_optional_alias_mandatory", "REJECT"),
+)
+
+
+def _issue3134_required_signal_project(tmp_path, case):
+    if case == "normal_phase1_rtl_binding":
+        from test_d2_renamed_reused_ip_ports_take_their_documents_side import (
+            _selected_project, STAGED_TOP)
+        from _staged_top_module import bind_selected_interface
+        project = _selected_project(tmp_path)
+        (project / "phase2/stage1/rtl/core.v").write_text(STAGED_TOP)
+        l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+        content = bind_selected_interface(
+            project, json.loads(l9.read_text()), include_synthesis_handoff=False)
+        assert content["selected_interface_binding"]["selected_source"] == "phase2/stage1/rtl/core.v"
+        l9.write_text(json.dumps(content, indent=2) + "\n")
+        return project, {"intent": [str(l9.relative_to(project))],
+                         "artefact": ["phase2/stage2/synth/core_synth.v"]}
+    if case == "normal_netlist_binding":
+        return _r2_issue3131_fixture(tmp_path, "netlist_binding")
+    if case == "genuine_ansi_source_port_missing":
+        return _r2_issue3131_source_roster_fixture(tmp_path, "implemented_ansi")
+    missing = case == "genuine_source_port_missing" or case.startswith("signal_")
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real" if missing else "matched")
+    l9 = project / decl["intent"][0]
+    content = json.loads(l9.read_text())
+    input_path = project / "input/docs/interface.md"
+    if missing:
+        pin = next(row for row in content["top_ports"] if row["name"] == "out_write_addr")
+        pin["declared_by_staged_top"] = False
+        content["selected_interface_binding"]["document_examples_not_implemented"].append("out_write_addr")
+        if case.startswith("signal_"):
+            input_path.write_text(input_path.read_text() +
+                "out_write_addr is a required signal output for writes; it is not an optional or power pin.\n")
+            pin.update(optional=True, io=None)
+            flag = "mandatory" if case.endswith("mandatory") else "required"
+            if "_alias_" in case:
+                content["ports"] = [dict(row) for row in content["top_ports"]]
+                alias = next(row for row in content["ports"] if row["name"] == "out_write_addr")
+                alias.update({flag: True, "declared_by_staged_top": True})
+            else:
+                pin[flag] = True
+        assert "out_write_addr" in _sopr.read_netlist_interface(
+            project / content["selected_interface_binding"]["selected_source"])["ports"]
+        assert "out_write_addr" not in _sopr.read_netlist_interface(project / decl["artefact"][0])["ports"]
+    else:
+        content.pop("selected_interface_binding", None)
+        supply = case.startswith("supply_")
+        name = "physical_supply" if supply else "optional_gpio"
+        pin = {"name": name, "direction": "input", "declared_by_staged_top": False,
+               "evidence": "input/docs/interface.md"}
+        if supply:
+            flag = "mandatory" if case.endswith("mandatory") else "required"
+            pin.update(role="power", **{flag: True})
+            input_path.write_text(input_path.read_text() +
+                "physical_supply is a required power input for physical sign-off, not a signal netlist pin.\n")
+        else:
+            pin["optional"] = True
+            input_path.write_text(input_path.read_text() +
+                "optional_gpio is optional and may be omitted.\n")
+        content["top_ports"].append(pin)
+    l9.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("case,expected", _ISSUE3134_REQUIRED_SIGNAL_CASES,
+                         ids=[case for case, _ in _ISSUE3134_REQUIRED_SIGNAL_CASES])
+def test_issue3134_required_signal_and_existing_releases(tmp_path, case, expected,
+                                                         record_property):
+    import hashlib
+    import runpy
+
+    project, decl = _issue3134_required_signal_project(tmp_path, case)
+    l9 = project / decl["intent"][0]
+    original = l9.read_bytes()
+    before = {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in project.rglob("*") if path.is_file()}
+    result, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    # Seed the normal emitter with a genuine missing-signal finding, then
+    # restore exact current input bytes before its actual assertion executes.
+    seed = json.loads(original)
+    seed["top_ports"].append({"name": "out_seed_signal", "direction": "output"})
+    l9.write_text(json.dumps(seed))
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    l9.write_bytes(original)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), emitted_dispatch = _r2_issue3131_metadata_only(check)
+    record_property("api_verdict", result["verdict"])
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(before, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(emitted_dispatch))
+    assert before == {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in project.rglob("*") if path.is_file()
+                      and not str(path.relative_to(project)).startswith("reports/")}
+    assert result["verdict"] == expected
+    assert observed == ("REJECT" if expected == "REJECT" else "ACCEPT"), message
+    assert api_dispatch == emitted_dispatch == []
+    if case.startswith("signal_") or case.startswith("genuine_"):
+        assert "out_write_addr" in message

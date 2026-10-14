@@ -594,3 +594,152 @@ def test_native_retention_uses_the_shared_selected_five_role_contract(tmp_path, 
         log = (Path(case["work_dir"]) / "run.log").read_text()
         assert "retention arm=1 edge=0 byte=2 before=c7 after=3c" in log, log
     _debt_stays_owed(result["consumer"])
+
+
+# #3135: pure ISA-reference admission and source/metadata controls only.
+# This neutral source supplies ports/parameters, not a simulated CPU/oracle.
+def _3135_project(root, *, pc=0, size=1024, rf=256, isa='RV32I', choice=None,
+                  mutation=None, image=False):
+ import copy
+ decl = copy.deepcopy(DECL)
+ decl.update(top_module='neutral_cpu', memsize_bytes=size, reset_pc=pc)
+ decl['sram_interface']['rf_reserved_high_bytes'] = rf
+ width = (size - 1).bit_length()
+ rtl = f"""module neutral_cpu #(parameter memsize={size})(
+ input i_clk, input i_rst, input [7:0] i_store_rdata,
+ output [{width-1}:0] o_store_raddr, output [{width-1}:0] o_store_waddr,
+ output [7:0] o_store_wdata, output o_store_we);
+ endmodule
+ """
+ l1 = {'ic_class':'processor_cpu','isa_base':isa}
+ case = dict(CASE)
+ if mutation == 'missing_isa': l1.pop('isa_base')
+ elif mutation == 'unknown_isa': l1['isa_base']='RV64I'
+ elif mutation == 'missing_reset': decl.pop('reset_pc')
+ elif mutation == 'missing_reservation': decl['sram_interface'].pop('rf_reserved_high_bytes')
+ elif mutation == 'bool_reservation': decl['sram_interface']['rf_reserved_high_bytes']=True
+ elif mutation == 'wrong_delivery': decl['memsize_bytes']=size//2
+ elif mutation == 'wrong_parameter': rtl=rtl.replace(f'memsize={size}',f'memsize={size//2}')
+ elif mutation == 'no_room': decl['sram_interface']['rf_reserved_high_bytes']=size-4
+ elif mutation == 'misaligned_reset': decl['reset_pc']=2
+ elif mutation == 'unknown_protocol': decl['sram_interface_protocol']='unknown_commit_protocol'
+ if choice is not None: decl['verification_stimuli']=choice
+ if image:
+  case['stimulus'] += '; execute selected_program.hex'
+ for rel in ['phase1/generated_docs','phase2/stage1/rtl','plugin_output','input/docs']:
+  (root/rel).mkdir(parents=True,exist_ok=True)
+ ports=copy.deepcopy(PORTS)
+ for row in ports:
+  if row['name'] in ('o_store_raddr','o_store_waddr'):row['width']=width
+ docs={'L1_DATASHEET.json':l1,'L2_FRS.json':{'function':'RV32 instruction execution, program counter, register file, load/store'},
+       'L3_CMD_PROTOCOL.json':{'opcodes':[]},'L9_INTEGRATION_SPEC.json':{'top_module':'neutral_cpu','top_ports':ports},
+       'L10_TEST_CASES.json':{'test_cases':[case]}}
+ for name,doc in docs.items():(root/'phase1/generated_docs'/name).write_text(json.dumps(doc,sort_keys=True))
+ (root/'phase2/stage1/rtl/neutral_cpu.v').write_text(rtl)
+ (root/'plugin_output/declaration.json').write_text(json.dumps(decl,sort_keys=True))
+ (root/'input/docs/retention.md').write_text('Neutral CPU retention requirement\n'+case['stimulus']+'\n'+case['expected'])
+ if image:(root/'input/docs/selected_program.hex').write_text('23 20 00 04 6f 00 00 00\n')
+ report={}
+ T.emit_unit_tbs(root,top='neutral_cpu',report=report,scaffold=False,case_stated=True)
+ tb=T._pl.sim_dir(root)/'tb'/(CASE['name']+'.v')
+ return decl,tb,report
+
+
+def _3135_value(tmp_path, value):
+ import os,hashlib
+ sink=os.environ.get('ISSUE3135_VALUES_DIR')
+ folder=Path(sink) if sink else tmp_path/'issue3135-values'
+ folder.mkdir(parents=True,exist_ok=True)
+ value['inputs']={str(f.relative_to(tmp_path)):hashlib.sha256(f.read_bytes()).hexdigest()
+                  for directory in ['phase1/generated_docs','plugin_output','input/docs','phase2/stage1/rtl']
+                  for f in (tmp_path/directory).rglob('*') if f.is_file()}
+ (folder/(tmp_path.name+'.json')).write_text(json.dumps(value,indent=2))
+
+
+@pytest.mark.parametrize('pc,size,rf,isa',[(0,1024,256,'RV32I'),(64,1024,64,'RV32E'),(12,256,0,'RV32I')])
+def test_issue3135_generated_probe_is_admitted_by_the_existing_isa_reference(
+        tmp_path,pc,size,rf,isa):
+ import cpu_datapath_program as cpu
+ _,tb,report=_3135_project(tmp_path,pc=pc,size=size,rf=rf,isa=isa)
+ text=tb.read_text();preload=_emitted_preload(text)
+ before=bytearray((0xa5+17*a)&255 for a in range(size))
+ for address,byte in preload.items():before[address]=byte
+ try:after,_,steps=cpu.reference_execute(before,pc);refusal=None
+ except ValueError as exc:after=before;steps=None;refusal=str(exc)
+ changes=[a for a in range(size) if before[a]!=after[a]]
+ basis=report['reset_invariant_cases'][0]['retention_basis']
+ _3135_value(tmp_path,{'preload':preload,'reference_refusal':refusal,'changes':changes,
+                     'steps':steps,'basis':basis,'memory':report['reset_invariant_cases'][0]['retention_memory']})
+ assert refusal is None,refusal
+ assert len(preload)==8 and set(preload)==set(range(pc,pc+8))
+ assert changes and all(a < size-rf and not pc<=a<pc+8 for a in changes)
+ assert all(after[a]==0 for a in changes)
+ assert 'program-generated' in basis and 'NOT_MEASURED' in basis
+ assert R._retention_memory_identity(tmp_path,tb)[0]==report['reset_invariant_cases'][0]['retention_memory']
+ assert 'active_cycles < 64 && !pending_found' in text
+ assert 'edge_number = 0; edge_number < 6' in text
+ assert "retention_mem[o_store_waddr] <= o_store_wdata;" in text
+ assert "retention_mem[o_store_waddr] !== o_store_wdata" in text
+ assert 'observe_reset(1);' in text and 'first sampled edge' in text
+
+
+@pytest.mark.parametrize('mutation',['missing_isa','unknown_isa','missing_reset','missing_reservation',
+ 'bool_reservation','wrong_delivery','wrong_parameter','no_room','misaligned_reset'])
+def test_issue3135_incomplete_cpu_facts_request_typed_stimulus_without_stock_cpu_program(
+        tmp_path,mutation):
+ _,tb,report=_3135_project(tmp_path,mutation=mutation)
+ text=tb.read_text();row=report['reset_invariant_cases'][0]
+ requests=report.get('reset_retention_requests',[])
+ _3135_value(tmp_path,{'basis':row['retention_basis'],'memory':row['retention_memory'],
+                     'requests':requests,'retention_header':R.RETENTION_HEADER in text})
+ assert row['retention_basis'].startswith('NOT_MEASURED: missing-executable-write-stimulus'),row
+ assert row['retention_memory'] is None and R.RETENTION_HEADER not in text
+ assert 'NOT_MEASURED — write strobe necessary condition only' in text
+ assert requests and requests[0]['verdict']=='NOT_MEASURED'
+ assert requests[0]['fallback_skill']=='testbench-gen'
+ assert 'verification_stimuli.reset_retention.memory_preload' in requests[0]['required_choices']
+ disclosure=T.oracle_provenance(tmp_path)
+ assert disclosure['reset_retention_requests']==requests
+ assert CASE['name'] in report['no_real_oracle']
+
+
+@pytest.mark.parametrize('store',[True,False])
+def test_issue3135_explicit_preload_has_priority_and_no_store_is_not_retention(
+        tmp_path,store):
+ import cpu_datapath_program as cpu
+ words=[cpu.enc_sw(0,0,64),cpu.enc_jal(0,0)] if store else [cpu.enc_jal(0,0)]
+ entries=[{'address':4*i+j,'byte':b} for i,w in enumerate(words) for j,b in enumerate(w.to_bytes(4,'little'))]
+ decl,tb,report=_3135_project(tmp_path,choice=_preload_choice(entries),mutation='missing_reservation')
+ preload=_emitted_preload(tb.read_text())
+ assert preload=={e['address']:e['byte'] for e in entries}
+ before=bytearray((0xa5+17*a)&255 for a in range(1024))
+ for a,b in preload.items():before[a]=b
+ after,_,steps=cpu.reference_execute(before,0)
+ changed=[a for a in range(1024) if before[a]!=after[a]]
+ _3135_value(tmp_path,{'preload':preload,'changes':changed,'steps':steps,'report':report})
+ assert changed==(list(range(64,68)) if store else [])
+ assert not report.get('reset_retention_requests')
+ assert R._declared_retention_preload(decl,1024)[0]==entries
+ assert R.retention_measurement('',report['reset_invariant_cases'][0]['retention_memory'])['complete'] is False
+
+
+def test_issue3135_named_delivered_image_is_not_replaced_by_generated_probe(tmp_path):
+ import hashlib
+ _,tb,report=_3135_project(tmp_path,image=True)
+ image=tmp_path/'input/docs/selected_program.hex'
+ value={'image':image.read_text(),'basis':report['reset_invariant_cases'][0]['retention_basis'],
+        'requests':report.get('reset_retention_requests',[]),'preload':_emitted_preload(tb.read_text())}
+ _3135_value(tmp_path,value)
+ assert value['preload']=={}
+ assert 'missing-executable-write-stimulus' in value['basis'] and 'selected_program.hex' in value['basis']
+ assert value['requests'][0]['fallback_skill']=='testbench-gen'
+ assert image.read_text()=='23 20 00 04 6f 00 00 00\n'
+
+
+def test_issue3135_unknown_commit_protocol_keeps_the_original_refusal(tmp_path):
+ _,tb,report=_3135_project(tmp_path,mutation='unknown_protocol')
+ row=report['reset_invariant_cases'][0]
+ _3135_value(tmp_path,{'basis':row['retention_basis'],'memory':row['retention_memory']})
+ assert row['retention_memory'] is None
+ assert row['retention_basis']=='NOT_MEASURED: unsupported or unstated external memory commit protocol'
+ assert R.RETENTION_HEADER not in tb.read_text()
