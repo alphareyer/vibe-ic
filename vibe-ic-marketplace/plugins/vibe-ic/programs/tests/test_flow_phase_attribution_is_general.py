@@ -437,3 +437,200 @@ def test_summarize_accepts_a_caller_record_that_nests_the_phases(tmp_path):
     a = fpa.attribute(_project(tmp_path / "a", _REAL_SHAPE, prompt=_PROMPT))
     s = fpa.summarize([{"id": "anything", "phases": a}])
     assert s["phase2_emitters"] == {"multiplexer": 1}
+
+
+# Inputs are declared independently in data/retained_rtl_attribution.json.
+# These are source fixtures, not copies of a design or a reporter's capture.
+_RETAINED_INPUT_PATH = Path(__file__).parent / "data" / "retained_rtl_attribution.json"
+_RETAINED_INPUTS = json.loads(_RETAINED_INPUT_PATH.read_text())["cases"]
+_RETAINED_EXPECTED = {
+    # id: (ownership, solved_by, emitter)
+    "fresh-emit": ("generated", "EMITTER", "neutral_logic_emit"),
+    "fresh-waived-emit": ("generated", "WAIVED_NO_SKILL", None),
+    "retained-handoff": ("generated", "EMITTER", "neutral_logic_emit"),
+    "retained-other-producer": ("generated", "EMITTER", "neutral_counter_emit"),
+    "fallback-no-artifact": ("empty", "AI_BACKUP", None),
+    "modified-rtl": ("authored", "AI_BACKUP", None),
+    "added-authored-rtl": ("authored", "AI_BACKUP", None),
+    "missing-ledger": ("unknown", "AI_BACKUP", None),
+    "invalid-ledger": ("unknown", "AI_BACKUP", None),
+    "foreign-preexisting": ("unknown", "AI_BACKUP", None),
+    "source-comment-spoof": ("unknown", "AI_BACKUP", None),
+    "removed-all-rtl": ("generated", "AI_BACKUP", None),
+    "missing-producer": ("generated", "AI_BACKUP", None),
+    "invalid-producer": ("generated", "AI_BACKUP", None),
+    "retained-without-fallback": ("generated", "EMITTER", "neutral_logic_emit"),
+}
+_REUSED_IDS = {"retained-handoff", "retained-other-producer",
+               "retained-without-fallback"}
+
+
+def _retained_project(tmp_path, declared):
+    project = tmp_path / declared["id"]
+    stage = project / "phase2" / "stage1"
+    stage.mkdir(parents=True)
+    prompt = project / "input" / "phase1_prompt.md"
+    prompt.parent.mkdir()
+    prompt.write_text(declared["prompt"])
+    for rel, text in declared["rtl"].items():
+        dest = stage / "rtl" / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text)
+    if declared["ledger"] is not None:
+        (stage / "rtl.provenance.json").write_text(
+            json.dumps(declared["ledger"], indent=2) + "\n")
+    if declared["fallback_note"] is not None:
+        (stage / "fallback_skill.md").write_text(declared["fallback_note"])
+    report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps(declared["report"], indent=2) + "\n")
+    return project
+
+
+def _input_state(project):
+    """Include inode and mtime: rewriting equal RTL/ledger bytes is forbidden."""
+    import hashlib
+    return {
+        p.relative_to(project).as_posix(): {
+            "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+            "inode": p.stat().st_ino, "mtime_ns": p.stat().st_mtime_ns,
+        }
+        for p in sorted(project.rglob("*")) if p.is_file()
+        and p.name not in (fpa.REPORT_NAME, "vibe_ic_one_shot.json",
+                           "consumer.stdout", "consumer.stderr")
+    }
+
+
+def _terminal_report_only(project):
+    """Execute the actual terminal consumer and publisher, without the flow.
+
+    The _main() driver has no report-only CLI. Compile its unchanged attribution
+    try-block and the immediately following summary publication from its AST;
+    no routing, generation, gate, EDA, or main() call can execute here. This
+    also works on the pre-fix product, so RED observes values, not a missing API.
+    """
+    import vibe_ic_one_shot_runner as front
+    tree = ast.parse(Path(front.__file__).read_text())
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    positions = [i for i, n in enumerate(main.body)
+                 if isinstance(n, ast.Try) and any(
+                     isinstance(x, ast.Import) and any(
+                         a.name == "flow_phase_attribution" for a in x.names)
+                     for x in n.body)]
+    assert len(positions) == 1
+    start = positions[0]
+    nodes = main.body[start:start + 4]
+    assert isinstance(nodes[-1], ast.Expr)
+    assert isinstance(nodes[-1].value, ast.Call)
+    assert nodes[-1].value.func.id == "_write_runner_summary"
+    consumer = ast.Module(body=nodes, type_ignores=[])
+    summary = {"verdict": "FAIL", "plan": [["phase2", "PASS_WITH_WAIVERS", 0]]}
+    scope = {**vars(front), "project": project, "summary": summary}
+    exec(compile(consumer, front.__file__, "exec"), scope)
+    written = json.loads((project / "reports" / "orchestrator"
+                          / "vibe_ic_one_shot.json").read_text())
+    assert written["verdict"] == "FAIL"
+    assert written["plan"] == [["phase2", "PASS_WITH_WAIVERS", 0]]
+    sidecar = json.loads((project / "reports" / "orchestrator"
+                         / fpa.REPORT_NAME).read_text())
+    assert written["phase_attribution"] == sidecar
+    return written["phase_attribution"]
+
+
+@pytest.mark.parametrize("consumer", ["pure", "terminal", "standalone"])
+@pytest.mark.parametrize("declared", _RETAINED_INPUTS,
+                         ids=[c["id"] for c in _RETAINED_INPUTS])
+def test_retained_rtl_origin_through_report_consumers(
+        tmp_path, declared, consumer, monkeypatch, record_property):
+    import hashlib
+    import ai_signed_judgement
+    import rtl_provenance
+
+    project = _retained_project(tmp_path, declared)
+    before = _input_state(project)
+    ownership = rtl_provenance.classify(project)
+    signature_requested = ai_signed_judgement._requested(project, "1")
+
+    def no_stamp(*args, **kwargs):
+        raise AssertionError("a reporting consumer must never stamp retained RTL")
+
+    monkeypatch.setattr(rtl_provenance, "stamp", no_stamp)
+    if consumer == "pure":
+        att = fpa.attribute(project)
+    elif consumer == "terminal":
+        att = _terminal_report_only(project)
+    else:
+        proc = subprocess.run([sys.executable, str(MODULE), str(project), "--json"],
+                              capture_output=True, text=True)
+        (project / "consumer.stdout").write_text(proc.stdout)
+        (project / "consumer.stderr").write_text(proc.stderr)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        att = json.loads((project / "reports" / "orchestrator"
+                          / fpa.REPORT_NAME).read_text())
+        stdout_att = json.loads(proc.stdout)
+        stdout_att.pop("report")
+        assert stdout_att == att
+
+    after = _input_state(project)
+    current = rtl_provenance.classify(project)
+    signature_after = ai_signed_judgement._requested(project, "1")
+    observed = {"input_id": declared["id"], "consumer": consumer,
+                "input_population_sha256": hashlib.sha256(
+                    _RETAINED_INPUT_PATH.read_bytes()).hexdigest(),
+                "attribution": att, "ownership_before": ownership,
+                "ownership_after": current,
+                "ai_signature_requested_before": signature_requested,
+                "ai_signature_requested_after": signature_after,
+                "input_state_before": before, "input_state_after": after}
+    record_property("observed", json.dumps(observed, sort_keys=True))
+    (tmp_path / "observed.json").write_text(json.dumps(observed, indent=2) + "\n")
+
+    expected_kind, expected_solver, expected_emitter = _RETAINED_EXPECTED[declared["id"]]
+    assert before == after
+    assert ownership == current
+    assert ownership[0] == expected_kind
+    assert signature_requested == signature_after
+    assert signature_requested == (declared["fallback_note"] is not None
+                                   and expected_kind != "generated")
+    # Both publication paths must return exactly the pure API's current facts.
+    assert att == fpa.attribute(project)
+    assert att["phase3_verifying"]["failed"] == ["reference_tb"]
+    assert att["phase3_verifying"] == fpa.phase3_verifying(declared["report"], None)
+    assert att["phase4_debugging"] == fpa.phase4_debugging(declared["report"], None)
+    r = att["phase2_solving"]
+    # Existing values fail first on the pre-fix source, independently of new
+    # fields. The paired RED is a wrong attribution, not an absent feature.
+    assert (r["solved_by"], r["emitter"]) == (expected_solver, expected_emitter), r
+    assert r["status"] == declared["report"]["steps"][0]["status"]
+    if declared["id"] in _REUSED_IDS:
+        assert r["mechanism"] == "PROGRAM"
+        assert r["actor"] == "runner"
+        assert r["reused"] is True
+        assert r["emitted_in_this_invocation"] is False
+        assert r["ai_authored_in_this_invocation"] is False
+        assert "emitter_absent_reason" not in r
+        skill = declared["report"]["steps"][0]["extras"].get("fallback_skill")
+        assert r["current_dispatch"] == {
+            "status": "PASS_WITH_WAIVERS", "fallback_skill": skill,
+            "mechanism": "AI_HANDOFF" if skill else "NONE",
+            "actor": skill or "UNKNOWN",
+        }
+        assert r["rtl_provenance"] == "generated"
+        assert r["rtl_provenance_evidence"] == ownership[2]
+        assert "retained" in r["evidence"]
+        assert fpa.summarize([att])["phase2_emitters"] == {expected_emitter: 1}
+    elif declared["id"] == "fresh-emit":
+        assert r["mechanism"] == "PROGRAM" and r["actor"] == "runner"
+        assert not r.get("reused", False)
+    elif declared["id"] == "fresh-waived-emit":
+        # A recorded current output prevents a retained/no-new-emission claim.
+        # Preserve the existing waiver attribution; changing it is out of scope.
+        assert r["mechanism"] == "NONE" and r["actor"] == "UNKNOWN"
+        assert not r.get("reused", False)
+        assert "emitted_in_this_invocation" not in r
+    else:
+        assert r["mechanism"] == "AI_HANDOFF" and r["actor"] == "spec-to-rtl"
+        assert r["ai_authored_in_this_invocation"] is False
+        assert not r.get("reused", False)
+        assert not fpa.summarize([att])["phase2_emitters"]

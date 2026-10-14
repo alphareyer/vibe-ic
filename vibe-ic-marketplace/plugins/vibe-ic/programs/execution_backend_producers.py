@@ -417,6 +417,10 @@ def _parameters(project, params):
     pdk = R._detect_pdk(project, params['pdk_name'])
     if pdk is None or str(pdk.name) != params['pdk_name']:
         raise em.Refusal('BACKEND_PDK_RESOLUTION_FAILED', params['pdk_name'])
+    staging = ll.pdk_root_resolution(project, pdk.name, image=params['image_id'])
+    if Path(staging['path']).resolve() != Path(params['pdk_root']).resolve():
+        raise em.Refusal('BACKEND_PDK_ROOT_CHANGED', str(staging['path']))
+    R._host_staged_liberty(pdk, staging)
     R.set_invocation_provenance_sink(project)
     # F1's native_boundary converts legacy dispatch into admitted Docker run.
     container = params.get('container', '')

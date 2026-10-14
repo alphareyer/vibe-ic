@@ -735,8 +735,14 @@ def _emit_case_arithmetic_scenario(project: Path, ic_class, case: dict,
     if kept is not None:
         return kept
     import arith_oracle_tb_gen as arith
-    plan = arith.arithmetic_scenario_plan(project, ic_class, case)
+    request: dict = {}
+    plan = arith.arithmetic_scenario_plan(project, ic_class, case, request=request)
     if plan is None:
+        if request and report is not None:
+            target = out_dir / f"{name}.v"
+            request['authored_tb'] = (str(target.relative_to(project))
+                                      if target.is_relative_to(project) else str(target))
+            report.setdefault("arithmetic_scenario_requests", []).append(request)
         return None
     path = out_dir / f"{name}.v"
     path.write_text(stamp_generated(arith.emit_arithmetic_scenario_module(name, plan),
@@ -1827,7 +1833,7 @@ def oracle_provenance(project: Path) -> dict:
     counts: dict = {}
     for row in cases:
         counts[row["source"]] = counts.get(row["source"], 0) + 1
-    return {
+    disclosure = {
         "schema": "vibeic.l10_oracle_provenance.v1",
         "tb_dir": str(out_dir),
         "cases": cases,
@@ -1835,6 +1841,23 @@ def oracle_provenance(project: Path) -> dict:
         "authored_uncited": [r["case"] for r in cases if r.get("uncited")],
         "decided_by": "testbench_gen.oracle_provenance",
     }
+    # The ordinary caller publishes this file-derived disclosure, not the
+    # emitter's in-memory report. Carry current author requests along that same
+    # path; delivered/authored files retain priority over generated scenarios.
+    import arith_oracle_tb_gen as arith
+    authored = {r['case'] for r in cases if r.get('source') in
+                (ORACLE_SOURCE_AUTHORED, ORACLE_SOURCE_DELIVERED)}
+    requests = []
+    for case in load_l10_cases(project) or []:
+        if str(case.get('name') or case.get('id') or '') in authored:
+            continue
+        request: dict = {}
+        arith.arithmetic_scenario_plan(project, _detect_ic_class(project), case, request=request)
+        if request:
+            requests.append(request)
+    if requests:
+        disclosure['arithmetic_scenario_requests'] = requests
+    return disclosure
 
 
 #: Which oracle family wrote a case's TB, by the emitter's stamp. The full-stack
@@ -1956,6 +1979,13 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
                                                  ports, out_dir, report)
         if wrote is None:
             wrote = _emit_case_arithmetic_scenario(project, ic_class, c, out_dir, report)
+        if wrote is None and any(r['case'] == (c.get('name') or c.get('id'))
+                                 for r in report.get('arithmetic_scenario_requests', [])):
+            # A generic arithmetic PASS cannot fulfill a declared scenario.
+            # Keep the missing choices/population visible to the existing
+            # expert author, without overwriting any prior authored input.
+            report.setdefault('no_real_oracle', []).append(str(c.get('name') or c.get('id') or ''))
+            continue
         if wrote is None:
             wrote = _emit_case_golden_oracle(project, ic_class, c, out_dir,
                                              report, case_stated=case_stated)
@@ -2000,7 +2030,8 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
         return -2
     if emitted == 0:
         # #761 — say what the LAYER holds, not only what the filter matched.
-        report["reason"] = describe_scope(report["scope"])
+        report["reason"] = ("declared arithmetic scenarios require testbench-gen author choices/populations"
+                            if report.get('arithmetic_scenario_requests') else describe_scope(report["scope"]))
     return emitted
 
 
@@ -2541,6 +2572,9 @@ def main() -> int:
     except Exception as e:
         print(f"[FAIL] testbench_gen: L10 parse failed: {e}")
         return 1
+    for request in report.get('arithmetic_scenario_requests', []):
+        print('[NOT_MEASURED] arithmetic scenario author request: '
+              + json.dumps(request, sort_keys=True, ensure_ascii=False))
     if emitted == -1:
         print("[SKIP] testbench_gen: no L10_TEST_CASES.json")
         return 0

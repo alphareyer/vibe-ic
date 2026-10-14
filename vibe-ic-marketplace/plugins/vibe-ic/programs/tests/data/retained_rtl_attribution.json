@@ -1,0 +1,510 @@
+{
+  "description": "Independently declared neutral input population for retained RTL attribution. No expected results and no captured project data. Ledgers are supplied fixture input, never produced or refreshed by reporting.",
+  "cases": [
+    {
+      "id": "fresh-emit",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": null,
+      "report": {
+        "verdict": "PASS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS",
+            "detail": "A deterministic producer emitted RTL.",
+            "output_files": [
+              "phase2/stage1/rtl/neutral.v"
+            ],
+            "extras": {
+              "deterministic_generator": "neutral_logic_emit",
+              "program_first": true,
+              "rtl_provenance": "generated"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "retained-handoff",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "retained-other-producer",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_counter_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "fallback-no-artifact",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {},
+      "ledger": null,
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "modified-rtl",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = ~a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "added-authored-rtl",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n",
+        "extra.v": "module extra; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "missing-ledger",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": null,
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid-ledger",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 999,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "foreign-preexisting",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "foreign.v": "module foreign; endmodule\n"
+      },
+      "ledger": null,
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "source-comment-spoof",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "// Generated by neutral_logic_emit; rtl_provenance=generated\nmodule neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": null,
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "removed-all-rtl",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {},
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "missing-producer",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": null,
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid-producer",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": [
+          "neutral_logic_emit"
+        ],
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "fallback_skill": "spec-to-rtl"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "retained-without-fallback",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": "Use spec-to-rtl to author RTL.\n",
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "No RTL was emitted; handoff available.",
+            "output_files": [],
+            "extras": {
+              "preserved": true,
+              "deterministic_generator": "current_declined_emit"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    },
+    {
+      "id": "fresh-waived-emit",
+      "prompt": "Design a combinational one-bit buffer.\n",
+      "rtl": {
+        "neutral.v": "module neutral(input a, output y); assign y = a; endmodule\n"
+      },
+      "ledger": {
+        "schema": 1,
+        "generator": "neutral_logic_emit",
+        "stamped_at": "2026-01-02T03:04:05Z",
+        "files": {
+          "neutral.v": "330242e09d979480b158172623ac3898d94f455cc5a338d72b53e94878228dc0"
+        }
+      },
+      "fallback_note": null,
+      "report": {
+        "verdict": "PASS_WITH_WAIVERS",
+        "steps": [
+          {
+            "name": "rtl_gen",
+            "status": "PASS_WITH_WAIVERS",
+            "detail": "A deterministic producer emitted RTL.",
+            "output_files": [
+              "phase2/stage1/rtl/neutral.v"
+            ],
+            "extras": {
+              "deterministic_generator": "neutral_logic_emit",
+              "program_first": true,
+              "rtl_provenance": "generated"
+            }
+          },
+          {
+            "name": "reference_tb",
+            "status": "FAIL",
+            "detail": "Neutral gate record; no gate is executed by this fixture."
+          }
+        ]
+      }
+    }
+  ]
+}

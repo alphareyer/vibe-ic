@@ -469,3 +469,235 @@ def test_native_scenario_transcript_requires_canonical_records(tmp_path,marker,p
     actual=goals.measure_scenario_goal(cases[0],100.0,cases,record)
     (root/'record-grammar-values.json').write_text(json.dumps({'marker':marker,'prefix':prefix,'suffix':suffix,'duplicate':duplicate,'expected':expected,'actual':actual,'capture':captured,'why':why},indent=2))
     assert actual['verdict']==expected,actual
+
+
+# Public #3093 source/component controls.  The RTL below is a declared input
+# fixture only: these cases do not launch a simulator or claim execution credit.
+_SCENARIO_REQUEST_TEXTS = {
+    "zh_boundaries": "x = 0、y_stream = 0、x = MAX_POS、x = MIN_NEG、y = MAX_POS、y = MIN_NEG、x = -1、y = -1",
+    "en_boundaries": "Operand boundaries: x = 0, y = 0, x = MAX_POS, x = MIN_NEG, y = MAX_POS, y = MIN_NEG, x = -1, y = -1",
+    "zh_consecutive": "連續至少 6 筆乘法計算之間，內部狀態應依宣告 reset 或銜接，不加額外 idle cycles",
+    "en_consecutive": "Consecutive transactions: at least 6 operand pairs using the declared rearm, without extra idle cycles",
+    "zh_reset": "reset 期間 / reset 解除瞬間 / reset 在計算進行中 assert 三種情況",
+    "en_reset": "Synchronous reset held, released, and asserted during computation; expected no X",
+    "zh_unnumbered": "連續多筆乘法計算之間,內部狀態應正確 reset 或銜接",
+    "en_unnumbered": "Consecutive transactions with the declared reset or continuation",
+}
+
+
+def _public_scenario_input(tmp_path, text, *, choices=True, population=None):
+    root = tmp_path / "neutral_public_scenario"
+    _declared_scenario_project(root)
+    case = {"name": "requested_case", "kind": "coverage_goal",
+            "expected": "100% PASS", "stimulus": text, "coverage_scope": text}
+    (root / "phase1/generated_docs/L10_TEST_CASES.json").write_text(
+        json.dumps({"test_cases": [case]}, ensure_ascii=False))
+    path = root / "plugin_output/declaration.json"
+    declaration = json.loads(path.read_text())
+    if not choices:
+        for key in ("transaction_rearm", "rearm_reset_cycles", "parallel_hold"):
+            declaration.pop(key)
+    if population is not None:
+        declaration["verification_stimuli"] = {"arithmetic_scenarios": {
+            "requested_case": {"transaction_count": population}}}
+    path.write_text(json.dumps(declaration, ensure_ascii=False))
+    return root, case
+
+
+def _record_public_scenario(root, case, report, plan):
+    import hashlib
+    import os
+    target = os.environ.get("ISSUE3093_VALUES_DIR")
+    if not target:
+        return
+    name = os.environ["PYTEST_CURRENT_TEST"].split(" ", 1)[0].split("::", 1)[1]
+    files = [root / "phase1/generated_docs/L2_FRS.json",
+             root / "phase1/generated_docs/L9_INTEGRATION_SPEC.json",
+             root / "phase1/generated_docs/L10_TEST_CASES.json",
+             root / "plugin_output/declaration.json",
+             root / "phase2/stage1/rtl/neutral_serial.v"]
+    observed = {"case": case, "input_sha256": {
+        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in files}, "plan": None if plan is None else {
+            k: plan.get(k) for k in ("scenario", "transactions", "comparisons", "populations")},
+        "generated": sorted(p.name for p in (root / "phase2/stage1/sim/tb").glob("*.v")),
+        "requests": report.get("arithmetic_scenario_requests", [])}
+    out = Path(target); out.mkdir(parents=True, exist_ok=True)
+    (out / (name.replace("/", "_") + ".json")).write_text(
+        json.dumps(observed, sort_keys=True, indent=2, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("text_key,family", [
+    ("zh_boundaries", "operand_boundaries"), ("en_boundaries", "operand_boundaries"),
+    ("zh_consecutive", "consecutive_transactions"), ("en_consecutive", "consecutive_transactions"),
+    ("zh_reset", "reset_situations"), ("en_reset", "reset_situations"),
+])
+def test_public_multilingual_scenario_emits_the_declared_population(tmp_path, text_key, family):
+    import l10_coverage_goal_classify as goals
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS[text_key])
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    plan = aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case)
+    _record_public_scenario(root, case, report, plan)
+    tb = root / "phase2/stage1/sim/tb/requested_case.v"
+    assert count == 1 and tb.is_file(), report
+    assert aotg.ARITHMETIC_SCENARIO_HEADER in tb.read_text(), tb.read_text()[:250]
+    assert plan is not None and plan["scenario"] == family, plan
+    if family == "operand_boundaries":
+        assert set(plan["pairs"]) == {(a,b) for a in (0,1,127,128,255) for b in (0,1,127,128,255)}
+    elif family == "consecutive_transactions":
+        assert plan["transactions"] == 6, plan
+    else:
+        assert plan["transactions"] == 9 * len(plan["pairs"]), plan
+    # Emission is not measurement: the unchanged strict consumer has no run.
+    assert goals.measure_scenario_goal(case, 100.0, [case], {"available": False, "rows": {}})["verdict"] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("text_key", ["zh_boundaries", "en_boundaries", "zh_consecutive", "en_consecutive", "zh_reset", "en_reset"])
+def test_public_missing_arithmetic_choices_emit_typed_expert_request(tmp_path, text_key):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS[text_key], choices=False)
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case))
+    assert count == 0 and not list((root / "phase2/stage1/sim/tb").glob("*.v")), report
+    request = report["arithmetic_scenario_requests"][0]
+    assert request["verdict"] == "NOT_MEASURED" and request["fallback_skill"] == "testbench-gen", request
+    assert set(request["required_choices"]) == {"transaction_rearm", "rearm_reset_cycles", "parallel_hold"}, request
+    assert request["required_choices"]["rearm_reset_cycles"]["type"] == "integer", request
+    assert tbg.oracle_provenance(root)["arithmetic_scenario_requests"] == report["arithmetic_scenario_requests"]
+
+
+@pytest.mark.parametrize("text_key", ["zh_unnumbered", "en_unnumbered"])
+def test_public_unnumbered_consecutive_population_requires_author_choice(tmp_path, text_key):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS[text_key])
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case))
+    assert count == 0 and not list((root / "phase2/stage1/sim/tb").glob("*.v")), report
+    request = report["arithmetic_scenario_requests"][0]
+    assert request["required_choices"] == {}, request
+    assert request["required_population"]["type"] == "integer", request
+    assert request["required_population"]["declaration_path"] == "verification_stimuli.arithmetic_scenarios.requested_case.transaction_count", request
+
+
+@pytest.mark.parametrize("text_key", ["zh_unnumbered", "en_unnumbered"])
+def test_public_explicit_author_population_is_consumed_without_rewriting_l10(tmp_path, text_key):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS[text_key], population=7)
+    before = (root / "phase1/generated_docs/L10_TEST_CASES.json").read_bytes()
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    plan = aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case)
+    _record_public_scenario(root, case, report, plan)
+    assert count == 1 and plan is not None and plan["transactions"] == 7, (report, plan)
+    assert aotg.ARITHMETIC_SCENARIO_HEADER in (root / "phase2/stage1/sim/tb/requested_case.v").read_text()
+    assert (root / "phase1/generated_docs/L10_TEST_CASES.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("population", [True, "7", 1, 20001])
+def test_public_arithmetic_population_never_guesses_or_truncates(tmp_path, population):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS["en_unnumbered"], population=population)
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case))
+    assert count == 0 and not list((root / "phase2/stage1/sim/tb").glob("*.v")), report
+    assert report["arithmetic_scenario_requests"][0]["required_population"]["type"] == "integer", report
+
+
+@pytest.mark.parametrize("text", [
+    "Synchronous reset held and released", "reset 期間 / reset 解除瞬間",
+    "Asynchronous reset held, released, and asserted during computation",
+])
+def test_public_incomplete_or_unsupported_reset_requires_expert(tmp_path, text):
+    root, case = _public_scenario_input(tmp_path, text)
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case))
+    assert count == 0 and not list((root / "phase2/stage1/sim/tb").glob("*.v")), report
+    assert report["arithmetic_scenario_requests"][0]["unsupported_requirements"], report
+
+
+def test_public_authored_scenario_keeps_priority_over_missing_choices(tmp_path):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS["zh_reset"], choices=False)
+    path = root / "phase2/stage1/sim/tb/requested_case.v"; path.parent.mkdir(parents=True)
+    content = "// CITATION : L10 requested_case\nmodule requested_case; initial $fatal(1,\"unfinished author\"); endmodule\n"
+    path.write_text(content)
+    report = {}; assert tbg.emit_unit_tbs(root, "neutral_serial", report=report) == 1
+    assert path.read_text() == content and report["preserved_authored"], report
+    assert not report.get("arithmetic_scenario_requests"), report
+
+
+def test_public_multilingual_compound_scope_keeps_every_family(tmp_path):
+    text = "; ".join(_SCENARIO_REQUEST_TEXTS[k] for k in
+                     ("zh_boundaries", "zh_consecutive", "zh_reset"))
+    root, case = _public_scenario_input(tmp_path, text)
+    report = {}; tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    plan = aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case)
+    _record_public_scenario(root, case, report, plan)
+    assert plan is not None, report
+    assert [p["scenario"] for p in plan["populations"]] == [
+        "operand_boundaries", "consecutive_transactions", "reset_situations"], plan
+    assert plan["transactions"] == sum(p["transactions"] for p in plan["populations"]), plan
+
+
+def test_public_author_population_cannot_shrink_the_stated_minimum(tmp_path):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS["en_consecutive"], population=3)
+    report = {}; count = tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    plan = aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case)
+    _record_public_scenario(root, case, report, plan)
+    assert count == 0 and plan is None, (report, plan)
+    assert report["arithmetic_scenario_requests"][0]["required_population"]["minimum"] == 6, report
+
+
+def test_public_arithmetic_handoff_is_visible_through_the_actual_cli(tmp_path):
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS["zh_unnumbered"], choices=False)
+    result = subprocess.run([sys.executable, str(PROGRAMS / "testbench_gen.py"),
+                             str(root), "--top", "neutral_serial"],
+                            capture_output=True, text=True)
+    report = {}; tbg.emit_unit_tbs(root, "neutral_serial", report=report)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, "digital_arithmetic_primitive", case))
+    assert result.returncode == 0, result.stderr
+    assert "[NOT_MEASURED] arithmetic scenario author request" in result.stdout, result.stdout
+    assert '"transaction_rearm"' in result.stdout and '"required_population"' in result.stdout, result.stdout
+    assert not list((root / "phase2/stage1/sim/tb").glob("*.v"))
+
+
+def test_public_arithmetic_handoff_names_the_callers_actual_output(tmp_path):
+    import full_stack_functional_tb as fullstack
+    root, case = _public_scenario_input(tmp_path, _SCENARIO_REQUEST_TEXTS['zh_reset'], choices=False)
+    target = fullstack.functional_dir(root)
+    report = {}; count = tbg.emit_unit_tbs(root, 'neutral_serial', report=report,
+                                         out_dir=target, scaffold=False, case_stated=True)
+    _record_public_scenario(root, case, report, aotg.arithmetic_scenario_plan(root, 'digital_arithmetic_primitive', case))
+    assert count == 0, report
+    assert report['arithmetic_scenario_requests'][0]['authored_tb'] == str((target / 'requested_case.v').relative_to(root)), report
+
+
+@pytest.mark.parametrize('text,family', [
+    ('No operand boundaries are required', None),
+    ('Operand boundaries; no reset held, released, and asserted during computation', 'operand_boundaries'),
+])
+def test_public_arithmetic_intent_keeps_subject_local_polarity(tmp_path, text, family):
+    root, case = _public_scenario_input(tmp_path, text)
+    report = {}; tbg.emit_unit_tbs(root, 'neutral_serial', report=report)
+    plan = aotg.arithmetic_scenario_plan(root, 'digital_arithmetic_primitive', case)
+    _record_public_scenario(root, case, report, plan)
+    assert (None if plan is None else plan['scenario']) == family, plan
+
+
+@pytest.mark.parametrize('text,family', [
+    ('Operand boundaries are not required.', None),
+    ('Do not request operand boundaries.', None),
+    ('Operand boundaries; expected no X.', 'operand_boundaries'),
+    ('Consecutive transactions: at least 6 operand pairs without idle cycles or gaps.', 'consecutive_transactions'),
+    ('Synchronous reset held, released, and asserted during computation; expected no X.', 'reset_situations'),
+    ('Operand boundaries are not required; consecutive transactions: at least 6 operand pairs without idle cycles.', 'consecutive_transactions'),
+])
+def test_public_scenario_postposed_denial_binds_only_its_subject(tmp_path, text, family):
+    root, case = _public_scenario_input(tmp_path, text)
+    report = {}; count = tbg.emit_unit_tbs(root, 'neutral_serial', report=report)
+    plan = aotg.arithmetic_scenario_plan(root, 'digital_arithmetic_primitive', case)
+    _record_public_scenario(root, case, report, plan)
+    path = root / 'phase2/stage1/sim/tb/requested_case.v'
+    assert count == 1 and path.is_file(), report
+    assert (None if plan is None else plan['scenario']) == family, plan
+    assert (aotg.ARITHMETIC_SCENARIO_HEADER in path.read_text()) is (family is not None), report
+    if family is not None:
+        assert report['arithmetic_scenario_cases'] == ['requested_case'], report
+    else:
+        assert report.get('arithmetic_scenario_cases', []) == [], report
+    import l10_coverage_goal_classify as goals
+    assert goals.measure_scenario_goal(case, 100.0, [case], {'available': False, 'rows': {}})['verdict'] == 'NOT_MEASURED'

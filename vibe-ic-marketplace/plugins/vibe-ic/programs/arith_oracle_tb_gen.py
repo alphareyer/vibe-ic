@@ -1355,60 +1355,141 @@ def _emit_calibrated_framing_scoring(L: List[str], nv: int) -> None:
 ARITHMETIC_SCENARIO_HEADER = "// VIBEIC_ARITHMETIC_SCENARIO: "
 
 
-def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict) -> Optional[dict]:
+def _arithmetic_scenario_intent(case: dict, operand_names: Tuple[str, ...]) -> dict:
+    """Normalize only the row's declared intent, never its case/category name."""
+    import unicodedata
+    from _prose_polarity import is_denied, sentence_scope
+    normalized = {k: unicodedata.normalize('NFKC', str(case.get(k) or '')).lower()
+                  for k in ('stimulus', 'expected', 'coverage_scope', 'scope')}
+    text = '; '.join(normalized.values())
+
+    def stated(pattern: str, source: str = text) -> bool:
+        for hit in re.finditer(pattern, source, re.IGNORECASE):
+            lo, hi = sentence_scope(source, hit.start(), hit.end(),
+                                   extra_breaks=(';', '；', '/', '、', '。', '\n'))
+            # A denial of this subject governs it; a later "no X" or
+            # "without extra idle cycles" is an acceptance qualifier.
+            # Only a request predicate immediately following the subject can
+            # deny it from the right; never scan a later expected-value clause.
+            predicate = re.match(r'\s*(?:(?:is|are|was|were)\s+)?(?:[a-z]+\s+){0,2}'
+                                 r'(?:required|requested|needed)\b', source[hit.end():hi])
+            if (not is_denied(source[lo:hit.start()])
+                    and not (predicate and is_denied(predicate.group(0)))):
+                return True
+        return False
+
+    boundaries = stated(r'operand\s+(?:boundar\w*|extrem\w*|corners?)|(?:運算元|操作數|操作数)\s*(?:邊界|边界|極值|极值)')
+    named_text = '; '.join(normalized[k] for k in ('stimulus', 'coverage_scope'))
+    if operand_names:
+        operand = '|'.join(re.escape(n) for n in operand_names)
+        corner = '|'.join(re.escape(n) for n in _CORNER_NAMES)
+        boundaries |= stated(rf'\b(?:{operand})\s*=\s*(?:{corner})\b', named_text)
+    consecutive = stated(r'consecutive\s+(?:(?:(?:>=|≥|at\s+least)\s*)?[0-9][0-9,_]*\s+)?transactions?|back.to.back|(?:連續|连续)\s*(?:(?:至少\s*)?[0-9][0-9,_]*\s*)?(?:多筆|多笔|筆|笔|乘法|計算|计算|交易|運算|运算)')
+    held = stated(r'held|hold|(?:reset|rst|重置|復位|复位)\s*(?:期間|期间)')
+    released = stated(r'released|release|(?:reset|rst|重置|復位|复位)\s*(?:解除(?:瞬間|瞬间)?|釋放|释放)')
+    mid = stated(_RESET_MID_RE.pattern) or stated(r'asserted\s+during\s+computation')
+    reset = bool(stated(r'reset|rst|重置|復位|复位') and (mid or (held and released)))
+    return {'case': {**case, **normalized}, 'text': text,
+            'operand_boundaries': boundaries, 'consecutive_transactions': consecutive,
+            'reset_situations': reset, 'reset_complete': held and released and mid}
+
+
+def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict,
+                             *, request: Optional[dict] = None) -> Optional[dict]:
     """Supported L10 scope plus declared framing/rearm, without alignment search."""
     import hashlib
-    spec, _ = extract_serial_arith_spec(project, ic_class)
+    spec, why = extract_serial_arith_spec(project, ic_class)
+    intent = _arithmetic_scenario_intent(case, (spec['parallel'], spec['serial_in']) if spec else ())
+    families = [k for k in ('operand_boundaries', 'consecutive_transactions', 'reset_situations') if intent[k]]
+    if not families:
+        return None
+    required_choices = {}; required_population = None
+
+    def defer(reason: str) -> None:
+        if request is not None:
+            request.update(case=case.get('name') or case.get('id'), verdict='NOT_MEASURED',
+                           fallback_skill='testbench-gen', scenario_families=families,
+                           required_choices=required_choices, required_population=required_population,
+                           unsupported_requirements=[reason] if reason else [],
+                           authored_tb=f"phase2/stage1/sim/tb/{case.get('name') or case.get('id')}.v")
+
     if spec is None or spec.get('other_inputs'):
+        defer(why if spec is None else 'unmodeled input roles')
         return None
     declared = _read_json(project / 'plugin_output/declaration.json') or {}
     if declared.get('integer_encoding') not in ('unsigned', 'signed', 'signed_2c'):
+        defer('explicit integer encoding is required')
         return None
     conv = read_declared_conventions(project, spec['ports'])
-    if (not conv or conv.get('transaction_rearm') not in ('clocked_reset', 'continuous')
-            or conv.get('parallel_hold') != 'through_final_product_bit'
-            or type(conv.get('rearm_reset_cycles')) is not int
-            or not 1 <= conv['rearm_reset_cycles'] <= 16 or not spec.get('rst')):
+    choices = conv or declared
+    if choices.get('transaction_rearm') not in ('clocked_reset', 'continuous'):
+        required_choices['transaction_rearm'] = {'type': 'string', 'allowed': ['clocked_reset', 'continuous']}
+    if (type(choices.get('rearm_reset_cycles')) is not int
+            or not 1 <= choices['rearm_reset_cycles'] <= 16):
+        required_choices['rearm_reset_cycles'] = {'type': 'integer', 'minimum': 1, 'maximum': 16}
+    if choices.get('parallel_hold') != 'through_final_product_bit':
+        required_choices['parallel_hold'] = {'type': 'string', 'allowed': ['through_final_product_bit']}
+    # Read a designer's explicit count, never turn a generic sample into it.
+    count = declared_vector_population(intent['case']) if intent['consecutive_transactions'] else None
+    minimum = max(2, count or 2)
+    population_path = f"verification_stimuli.arithmetic_scenarios.{case.get('name') or case.get('id')}.transaction_count"
+    stimuli = declared.get('verification_stimuli') or {}
+    populations = stimuli.get('arithmetic_scenarios', {}) if isinstance(stimuli, dict) else None
+    selected = populations.get(case.get('name') or case.get('id'), {}) if isinstance(populations, dict) else None
+    malformed = selected is None or not isinstance(selected, dict)
+    if isinstance(selected, dict) and 'transaction_count' in selected:
+        chosen = selected['transaction_count']
+        malformed = type(chosen) is not int or not minimum <= chosen <= MAX_CASE_VECTORS
+        if not malformed:
+            count = chosen
+    if intent['consecutive_transactions'] and (malformed or count is None or not minimum <= count <= MAX_CASE_VECTORS):
+        required_population = {'type': 'integer', 'minimum': minimum, 'maximum': MAX_CASE_VECTORS,
+                               'declaration_path': population_path}
+    if required_choices or required_population:
+        defer('')
+        return None
+    if not conv or not spec.get('rst'):
+        defer('declared framing and reset role are required')
         return None
     width = spec['width']; latency = conv['settled_latency']
     if not 4 <= width <= 64 or latency > 2 * width:
+        defer('width or settled latency outside supported scenario range')
         return None
     # Continuous transactions can be generated without an unstated idle or
     # parallel-operand overlap only at zero settled latency.
     if conv['transaction_rearm'] == 'continuous' and latency != 0:
+        defer('continuous rearm requires zero settled latency')
         return None
     l9 = _read_json(_pl.generated_docs_dir(project) / 'L9_INTEGRATION_SPEC.json') or {}
     l9 = l9.get('fields') or l9
     resets = l9.get('reset_domains') or l9.get('resets') or []
     if not any(r.get('name') == spec['rst'] and str(r.get('sync', '')).lower()
                in ('sync', 'synchronous') for r in resets if isinstance(r, dict)):
+        defer('synchronous reset declaration is required')
         return None
-    text = ' '.join(str(case.get(k) or '') for k in
-                    ('stimulus', 'expected', 'coverage_scope', 'scope')).lower()
+    text = intent['text']
     # These scopes are exercised differently; unknown scope keeps the original
     # expert handoff. A generic arithmetic result is never renamed a scenario.
     populations = []
-    if re.search(r'operand\s+(?:boundar|extreme)|operand\s+corners?', text):
+    if intent['operand_boundaries']:
         corners = {0, 1, (1 << width) - 1}
         if spec['signed']:
             corners.update({(1 << (width - 1)) - 1, 1 << (width - 1)})
-        corners.update(named_corner_values(case, width))
+        corners.update(named_corner_values(intent['case'], width))
         populations.append(('operand_boundaries',
                             [(a, b) for a in sorted(corners) for b in sorted(corners)]))
-    if re.search(r'consecutive\s+(?:(?:(?:>=|≥|at\s+least)\s*)?[0-9][0-9,_]*\s+)?transactions?|back.to.back', text):
-        count = declared_vector_population(case)
-        if count is None or count < 2 or count > MAX_CASE_VECTORS:
-            return None
+    if intent['consecutive_transactions']:
         populations.append(('consecutive_transactions',
                             select_operand_pairs(spec, 'mixed', min_vectors=count)))
-    if (re.search(r'(?:reset|rst)', text) and re.search(r'held|hold', text)
-          and re.search(r'released|release', text)
-          and (reset_mid_computation_case(case)
-               or re.search(r'asserted\s+during\s+computation', text))):
+    if intent['reset_situations']:
+        if not intent['reset_complete']:
+            defer('reset scope must state held, released and asserted during computation')
+            return None
         populations.append(('reset_situations', select_operand_pairs(spec, 'corners')))
     if not populations:
         return None
     if re.search(r'asynchronous|different\s+clock|power\s+(?:on|off)', text):
+        defer('unmodeled asynchronous reset, clock or power scope')
         return None
     files = [*_pl.generated_docs_dir(project).glob('L2*.json'),
              _pl.generated_docs_dir(project) / 'L9_INTEGRATION_SPEC.json',
@@ -1417,6 +1498,7 @@ def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict)
              *sorted(_pl.rtl_dir(project).rglob('*.v')),
              *sorted(_pl.rtl_dir(project).rglob('*.sv'))]
     if any(not p.is_file() for p in files):
+        defer('current scenario input or DUT file is missing')
         return None
     binding = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     pairs = []; phases = []

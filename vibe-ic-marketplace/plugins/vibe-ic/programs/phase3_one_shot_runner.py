@@ -17217,6 +17217,50 @@ def _area_receipt_flags(area_receipt: Optional[str],
             "--area-run-manifest", str(area_run_manifest)]
 
 
+def _host_staged_liberty(pdk: PdkConfig, pdk_staging: Dict[str, Any]) -> Path:
+    """Resolve the selected Liberty through the synthesis PDK staging role.
+
+    Backend continuations use the same host asset before the Step7 strict
+    reader. This preserves its literal path and real byte binding; it never
+    substitutes a different library/corner merely because bytes happen to match.
+    """
+    import librelane_contract as _ll
+    liberty_path = Path(str(pdk.liberty))
+    pdk_root_host = pdk_staging["path"]
+    # Canonical image staging copies the selected named distribution,
+    # whereas the registry can resolve its Ciel version directory.
+    # Preserve the selected distribution and exact intra-PDK asset path.
+    if not liberty_path.is_file() and pdk_root_host:
+        derivation = pdk_staging.get("derivation") or {}
+        image_pdk_root = Path(derivation.get("image_pdk_root") or PDKS_IN_CONTAINER)
+        try:
+            relative_liberty = liberty_path.relative_to(image_pdk_root)
+        except ValueError:
+            relative_liberty = None
+        if relative_liberty is not None:
+            if pdk_staging.get("source") == "resolved":
+                if (derivation.get("pdk") != str(pdk.name) or
+                        Path(derivation.get("host_path") or "") !=
+                        Path(pdk_root_host) / str(pdk.name)):
+                    raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
+                                      "staging metadata disagrees with selected PDK")
+                parts = relative_liberty.parts
+                if (len(parts) >= 6 and parts[0] == "ciel" and
+                        parts[2] == "versions"):
+                    if parts[4] != str(pdk.name):
+                        raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
+                                          f"{liberty_path} is outside selected PDK {pdk.name}")
+                    relative_liberty = Path(*parts[4:])
+                elif not parts or parts[0] != str(pdk.name):
+                    raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
+                                      f"{liberty_path} is outside selected PDK {pdk.name}")
+            liberty_path = Path(pdk_root_host) / relative_liberty
+            if not liberty_path.is_file():
+                raise _ll.Refusal("LL_PDK_LIB_MISSING", str(liberty_path))
+            pdk.liberty = str(liberty_path)
+    return liberty_path
+
+
 def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                          container: str, *, area_receipt: Optional[str] = None,
                          area_run_manifest: Optional[str] = None) -> StepResult:
@@ -17267,37 +17311,7 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         # resolved from the image > refused, naming its cause).
         pdk_staging = _ll.pdk_root_resolution(project, str(pdk.name), image=image)
         pdk_root_host = pdk_staging["path"]
-        # Canonical image staging copies the selected named distribution,
-        # whereas the registry can resolve its Ciel version directory.
-        # Preserve the selected distribution and exact intra-PDK asset path.
-        if not liberty_path.is_file() and pdk_root_host:
-            derivation = pdk_staging.get("derivation") or {}
-            image_pdk_root = Path(derivation.get("image_pdk_root") or PDKS_IN_CONTAINER)
-            try:
-                relative_liberty = liberty_path.relative_to(image_pdk_root)
-            except ValueError:
-                relative_liberty = None
-            if relative_liberty is not None:
-                if pdk_staging.get("source") == "resolved":
-                    if (derivation.get("pdk") != str(pdk.name) or
-                            Path(derivation.get("host_path") or "") !=
-                            Path(pdk_root_host) / str(pdk.name)):
-                        raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
-                                          "staging metadata disagrees with selected PDK")
-                    parts = relative_liberty.parts
-                    if (len(parts) >= 6 and parts[0] == "ciel" and
-                            parts[2] == "versions"):
-                        if parts[4] != str(pdk.name):
-                            raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
-                                              f"{liberty_path} is outside selected PDK {pdk.name}")
-                        relative_liberty = Path(*parts[4:])
-                    elif not parts or parts[0] != str(pdk.name):
-                        raise _ll.Refusal("LL_PDK_LIB_CONFLICT",
-                                          f"{liberty_path} is outside selected PDK {pdk.name}")
-                liberty_path = Path(pdk_root_host) / relative_liberty
-                if not liberty_path.is_file():
-                    raise _ll.Refusal("LL_PDK_LIB_MISSING", str(liberty_path))
-                pdk.liberty = str(liberty_path)
+        liberty_path = _host_staged_liberty(pdk, pdk_staging)
         if pdk_root_host and liberty_path.is_relative_to(Path(pdk_root_host)):
             liberty_guest = "/pdk/" + str(liberty_path.relative_to(Path(pdk_root_host)))
         else:

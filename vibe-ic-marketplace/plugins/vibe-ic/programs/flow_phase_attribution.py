@@ -343,7 +343,8 @@ def _earlier_waive(rep: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
-                   artefact_collected: Optional[bool] = None) -> Dict[str, Any]:
+                   artefact_collected: Optional[bool] = None,
+                   project: Optional[Path] = None) -> Dict[str, Any]:
     """WHO wrote the RTL, BY NAME.
 
     "a program did it" is not an attribution — 32 distinct emitters fired
@@ -353,9 +354,11 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
     REFUSED are in `extras.rejected_emitters` / `rejected_rules`. Both are read
     here; neither is re-derived by calling the chain a second time.
 
-    The LAST `rtl_gen` step decides, because that is the step every artefact
-    reader looks at — the RTL repair/retry loop can run `rtl_gen` more than once, and the
-    attribution must name the attempt that produced what survived.
+    The LAST `rtl_gen` step describes the current dispatch. A waived dispatch
+    may retain earlier deterministic RTL: when a project is supplied, its
+    existing ownership ledger must validate the surviving bytes before its
+    recorded producer can override the solving summary. The handoff remains
+    visible separately; reporting never stamps or emits RTL.
 
     `artefact_collected` is a claim about a SCORER's collector, not about the
     design. It is optional and its absence is recorded as an absence.
@@ -441,6 +444,32 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
             "evidence": f"rtl_gen PASS_WITH_WAIVERS, "
                         f"extras.fallback_skill={skill!r}",
         })
+        if project is not None and not last.get("output_files"):
+            import rtl_provenance
+
+            ownership, ownership_reason, ownership_evidence = \
+                rtl_provenance.classify(project)
+            out.update({"rtl_provenance": ownership,
+                        "rtl_provenance_evidence": ownership_evidence})
+            producer = ownership_evidence.get("ledger_generator")
+            # GENERATED also covers a removed-only tree. It cannot attribute
+            # an artifact that no longer exists, nor supply a missing name.
+            if (ownership == rtl_provenance.GENERATED
+                    and ownership_evidence.get("file_count", 0) > 0
+                    and isinstance(producer, str) and producer.strip()):
+                out["current_dispatch"] = {
+                    "status": status, "fallback_skill": skill,
+                    "mechanism": out["mechanism"], "actor": out["actor"],
+                }
+                out.update({
+                    "solved_by": "EMITTER", "mechanism": "PROGRAM",
+                    "actor": "runner", "emitter": producer, "reused": True,
+                    "emitted_in_this_invocation": False,
+                    "evidence": f"retained RTL validated against the existing "
+                                f"ownership ledger, producer={producer!r}; "
+                                f"no new emission: {ownership_reason}",
+                })
+                out.pop("emitter_absent_reason", None)
     # R-0915-85 — `BLOCKED` is `NOT_MEASURED(input_absent)`, which the
     # NOT-ATTEMPTED arm below already owns. It is dropped here rather than
     # translated: a step that could not look is not a step that looked and
@@ -472,7 +501,8 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
                         f"{detail[:200]}")
 
     waive = _earlier_waive(rep)
-    if waive and out.get("solved_by") != "AI_BACKUP":
+    if (waive and out.get("solved_by") != "AI_BACKUP"
+            and not out.get("reused")):
         # A run that waived and then emitted on a later attempt shows both.
         # Say so instead of letting one of the two facts win silently.
         out["earlier_waive_to"] = waive.get("fallback_skill")
@@ -707,7 +737,7 @@ def attribute(project: Path,
         "project": str(project),
         "phase1_routing": phase1_routing(routing, entry, evidence, exit_step,
                                          rtl_present, route_why, derived),
-        "phase2_solving": phase2_solving(rep, why, artefact_collected),
+        "phase2_solving": phase2_solving(rep, why, artefact_collected, project),
         "phase3_verifying": phase3_verifying(rep, why),
         "phase4_debugging": phase4_debugging(rep, why),
     }

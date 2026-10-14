@@ -860,3 +860,90 @@ def test_pdk_core_targets_do_not_constrain_chip_io_ports(tmp_path, monkeypatch):
     assert 'set_max_fanout 10 [$_vibeic_core_cell cell]' in derived['text']
     assert derived['derivation']['core_library_targets'] == {
         'set_max_transition': 0.75, 'set_max_capacitance': 0.2, 'set_max_fanout': 10}
+
+
+@pytest.mark.parametrize('case', [
+    'fresh_detect', 'cache_reuse', 'changed_bytes', 'wrong_library',
+    'wrong_corner', 'missing_asset',
+])
+def test_default_backend_preserves_the_step7_staged_liberty_role(
+        tmp_path, monkeypatch, case):
+    """SOURCE_CONTROL image/staging ancestry; real emitter/resolver/SDC reader.
+
+    No native synthesis/PnR is performed. The image path is not host-readable;
+    the host copy retains the exact selected distribution and intra-PDK role.
+    """
+    import shutil
+    import execution_backend_producers as producers
+    import librelane_contract as ll
+
+    proj = _project(tmp_path)
+    host_root = tmp_path / 'staged_pdk'
+    image_root = tmp_path / 'image_only_pdk'
+    within_pdk = Path('sky130A/libs.ref/neutral_cells/lib/neutral_cells__tt.lib')
+    material = tmp_path / 'image_material' / within_pdk
+    material.parent.mkdir(parents=True)
+    material.write_text('library(neutral_cells) { time_unit : "1ns"; }\n')
+    staged = host_root / within_pdk
+    staged.parent.mkdir(parents=True)
+    shutil.copyfile(material, staged)
+    pdk = _pdk(monkeypatch)
+    pdk.liberty = str(staged)
+    T.emit_step7_asic_sdc(R, proj, TOP, pdk, '')
+    original_record = (proj / CONS / T.ASIC_SDC_RECORD).read_bytes()
+    original_sdc = (proj / _record(proj)['path']).read_bytes()
+    assert T.read_step7_asic_sdc(R, proj, TOP, pdk)[0] is not None
+    selected = within_pdk
+    if case == 'wrong_library':
+        selected = within_pdk.with_name('other_cells__tt.lib')
+    elif case == 'wrong_corner':
+        selected = within_pdk.with_name('neutral_cells__ss.lib')
+    if selected != within_pdk:
+        shutil.copyfile(material, host_root / selected)
+    if case == 'changed_bytes':
+        staged.write_text('library(neutral_cells) { time_unit : "2ns"; }\n')
+    elif case == 'missing_asset':
+        staged.unlink()
+    image_liberty = image_root / 'ciel/neutral/versions/frozen' / selected
+    detected = SimpleNamespace(name=pdk.name,
+                               liberty=str(staged if case == 'cache_reuse' else image_liberty),
+                               macro_libs=[])
+    resolution = {'path': str(host_root), 'source': 'resolved',
+                  'derivation': {'image_pdk_root': str(image_root),
+                                 'pdk': pdk.name, 'host_path': str(host_root / pdk.name)}}
+    monkeypatch.setattr(ll, 'resolve_image', lambda *a: 'source-control-image')
+    monkeypatch.setattr(ll, 'pdk_root_resolution', lambda *a, **k: resolution)
+    monkeypatch.setattr(R, '_detect_pdk', lambda *a: detected)
+    params = {**R._backend_parameter_values(proj, pdk), 'top': TOP}
+    refusal = None
+    resolved = None
+    try:
+        _, _, resolved, _ = producers._parameters(proj, params)
+        current_path, why = R._prepnr_constraint_file(proj, TOP, resolved)
+    except ll.Refusal as exc:
+        refusal = str(exc)
+        current_path, why = None, refusal
+    accepted = case in ('fresh_detect', 'cache_reuse')
+    observation = {'case': case, 'expected_accepted': accepted,
+                   'material_sha256': hashlib.sha256(material.read_bytes()).hexdigest(),
+                   'stage_before_sha256': _record(proj)['inputs']['@liberty_sha256'],
+                   'record_liberty': _record(proj)['inputs']['@liberty'],
+                   'detected_liberty': str(image_liberty),
+                   'resolved_liberty': str(resolved.liberty) if resolved else None,
+                   'reader_accepted': current_path is not None, 'reader_reason': why,
+                   'resolver_refusal': refusal}
+    (tmp_path / 'observed.json').write_text(json.dumps(observation, indent=2) + '\n')
+    print(json.dumps(observation, sort_keys=True))
+    assert (current_path is not None) is accepted, observation
+    if accepted:
+        assert resolved.liberty == str(staged)
+        current = T.asic_sdc_for_pnr(R, proj, TOP, resolved, '')
+        assert current['regenerated'] is None
+        published = T.publish_pnr_sdc(current, proj / producers.PNR)
+        evidence = json.loads(published.with_name('constraint_sdc_provenance.json').read_text())
+        assert evidence['step7_sha256'] == _record(proj)['sha256']
+        assert evidence['deck_sha256'] == hashlib.sha256(published.read_bytes()).hexdigest()
+    else:
+        assert refusal or why.startswith('SDC_SEAM_PENDING:'), observation
+    assert (proj / CONS / T.ASIC_SDC_RECORD).read_bytes() == original_record
+    assert (proj / _record(proj)['path']).read_bytes() == original_sdc
