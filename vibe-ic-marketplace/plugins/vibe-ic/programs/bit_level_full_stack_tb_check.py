@@ -1321,7 +1321,7 @@ def main():
                          "currently has no effect (gate is already strict)")
     args = ap.parse_args()
 
-    proj = Path(args.project_dir)
+    proj = Path(args.project_dir).resolve()
     if not proj.exists():
         print(f"ERROR: project_dir {proj} not found", file=sys.stderr)
         return 2
