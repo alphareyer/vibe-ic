@@ -96,6 +96,11 @@ def native_pad_project(tmp_path, monkeypatch):
                        'rearm_reset_cycles': 1,
                        'parallel_hold': 'through_final_product_bit'}.items():
         declaration.setdefault(key, value)
+    # Public ideal-pad fixture: retain the direct-surface 1 ns observation.
+    declaration.setdefault('verification_stimuli', {}).setdefault(
+        'arithmetic_observation', {})['chip_top'] = {
+            'clock': 'clk', 'output': 'p', 'sample_offset_ns': 1,
+            'settle_ns': 0, 'binding': {}}
     write(project, 'plugin_output/declaration.json', declaration)
     # Both pad generator and oracle see the same actual public fixture ports.
     l9 = json.loads((project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json').read_text())
@@ -158,7 +163,19 @@ module testlib_io__bi(inout PAD, input A,OE, output TIELO); assign TIELO=1'b0; a
 ''')
     # Model-file transport only; the actual CLI producer, build, simulation,
     # scoring and digest-checking consumer all execute without a stand-in.
-    monkeypatch.setattr(F, 'default_model_resolver', lambda *_a: ({str(model): model.read_text()}, 'neutral PDK behavioral models'))
+    def resolve_models(project, used_cells, container):
+        files = {str(model): model.read_text()}
+        # Bind the ordinary producer's current wrapper and transported models
+        # before arithmetic planning; the producer/consumer remain unmodified.
+        top = F.required_full_stack_top(project, 'DIE')
+        binding = {str((project / top['source']).resolve()):
+                   F.sha256_file(project / top['source'])}
+        binding.update({src: F.sha256_file(Path(src)) for src in files})
+        declared = json.loads((project / 'plugin_output/declaration.json').read_text())
+        declared['verification_stimuli']['arithmetic_observation'][top['module']]['binding'] = binding
+        write(project, 'plugin_output/declaration.json', declared)
+        return files, 'neutral PDK behavioral models'
+    monkeypatch.setattr(F, 'default_model_resolver', resolve_models)
     monkeypatch.setattr(TBG, '_detect_ic_class', lambda *_a: 'digital_arithmetic_primitive')
     return project, pdk
 
