@@ -278,6 +278,18 @@
       "required": [
         "rounding_mode"
       ]
+    },
+    "native-required-metric-power-ceiling": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "power": {
+          "note": "The power ceiling must be 25 mW."
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "rounding_mode"
+      ]
     }
   }
 }
