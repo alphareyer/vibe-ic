@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "step_status_schema_version": 2,
+  "version": "source-synthetic-1969",
+  "run_at": "2026-01-01T00:00:00+00:00",
+  "verdict": "FAIL",
+  "run_status": "FAIL",
+  "step_counts": {
+    "PASS": 1,
+    "PASS_WITH_WAIVERS": 0,
+    "FAIL": 1,
+    "NOT_MEASURED": 0,
+    "NOT_APPLICABLE": 0
+  },
+  "steps": [
+    {
+      "id": "1",
+      "name": "synthetic reporting step 1",
+      "stage": "stage1",
+      "status": "PASS",
+      "reason_class": "",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": [],
+      "partial_vacuity_disclosed": false
+    },
+    {
+      "id": "2",
+      "name": "synthetic reporting step 2",
+      "stage": "stage1",
+      "status": "FAIL",
+      "reason_class": "",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": [],
+      "partial_vacuity_disclosed": false
+    }
+  ]
+}

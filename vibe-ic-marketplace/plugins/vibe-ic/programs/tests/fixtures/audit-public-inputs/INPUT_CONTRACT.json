@@ -1,0 +1,66 @@
+{
+  "schema": "issue1969.author-neutral-reporting-input.v1",
+  "scope": "Public self-authored renderer boundary fixtures; not external four-script replay, owner-run evidence, native or IC measurement",
+  "base": {
+    "head": "56e59ce4db51ff2f2d88daef08f8c73b45fcd78b",
+    "tree": "8c30550d4fd2d7496b51a687c4ab51c40d91d546",
+    "version": "1.28.72"
+  },
+  "source_fact": "flow_compliance_check computes PASS minus PASS-row disclosures containing verdict.Disclosure.VACUITY.value=vacuity or PARTIAL_VACUITY.value=partial_vacuity; StepResult records serialize via asdict. Existing five step_counts are retained.",
+  "fixture_facts": [
+    {
+      "file": "failure_pass1_fail1_no_waivers.audit.json",
+      "sha256": "d7c3ea92b487ba2604ed0a97cad8f57c6a9519697b12c60b2df2b0a04810cf51",
+      "rows": 2,
+      "no_waivers": true,
+      "expected_global_counts": {
+        "PASS": 1,
+        "PASS_WITH_WAIVERS": 0,
+        "FAIL": 1,
+        "NOT_MEASURED": 0,
+        "NOT_APPLICABLE": 0
+      },
+      "expected_overall": "FAIL",
+      "expected_executed_pass": 1,
+      "expected_executed_total": 2
+    },
+    {
+      "file": "partial_vacuity_pass1_fail1.audit.json",
+      "sha256": "e14aab7735e80dda2ebd2805bc362f7e5bad33ca0554e6bf923c26e3f59d748a",
+      "rows": 2,
+      "no_waivers": true,
+      "expected_global_counts": {
+        "PASS": 1,
+        "PASS_WITH_WAIVERS": 0,
+        "FAIL": 1,
+        "NOT_MEASURED": 0,
+        "NOT_APPLICABLE": 0
+      },
+      "expected_overall": "FAIL",
+      "expected_executed_pass": 0,
+      "expected_executed_total": 2
+    },
+    {
+      "file": "all_pass2_no_waivers.audit.json",
+      "sha256": "92a5cf575111303bd2bba5a72575b26c9da003ba1ac75c0d8a778db11d29a80f",
+      "rows": 2,
+      "no_waivers": true,
+      "expected_global_counts": {
+        "PASS": 2,
+        "PASS_WITH_WAIVERS": 0,
+        "FAIL": 0,
+        "NOT_MEASURED": 0,
+        "NOT_APPLICABLE": 0
+      },
+      "expected_overall": "PASS",
+      "expected_executed_pass": 2,
+      "expected_executed_total": 2
+    }
+  ],
+  "named_failed_properties": [
+    "failure_must_not_claim_all_measured_pass",
+    "partial_pass_must_not_be_counted_as_executed"
+  ],
+  "instrumentation": "Only external _run_audit boundary supplies stdout and writes this JSON in current invocation; actual _render/_load_fresh_audit_snapshot/_audit_step_counts/_audit_step_verdicts/_counts_snapshot execute. No patch to any of those in tests. Preserve old G4 including real checker subprocess.",
+  "constant_input_proof": "File bytes/test/selectors fixed before baseline measurement, candidate and product-only reverse reuse exact bytes and actual named IDs. Synthetic facts explicitly authored; external script SHA2ae18... not claimed replayed."
+}

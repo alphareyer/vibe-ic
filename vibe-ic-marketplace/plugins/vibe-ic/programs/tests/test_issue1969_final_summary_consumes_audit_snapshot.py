@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -256,3 +257,117 @@ def test_checker_serializes_per_step_verdicts_beside_step_counts(tmp_path):
     # The checker injects its P0 preflight into even a one-step probe flow.
     # Whatever final universe it counted, every unit has a step record.
     assert len(observed) == sum(audit["step_counts"].values())
+
+
+PUBLIC_INPUTS = HERE / "fixtures" / "audit-public-inputs"
+
+
+def _render_public_input(monkeypatch, tmp_path: Path, filename: str):
+    """Supply only the external audit boundary; consume the real fresh JSON."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    audit = json.loads((PUBLIC_INPUTS / filename).read_text(encoding="utf-8"))
+    project = tmp_path / "public_project"
+    audit_path = project / "reports" / "audit" / "phase23_completion_audit.json"
+    flow = tmp_path / "public_flow.yaml"
+    _write_flow(flow, audit)
+    monkeypatch.setattr(F, "FLOW_YAML", flow)
+    # Match the checker's existing typed-disclosure rule, independently of
+    # the renderer. The global PASS bucket still includes these rows.
+    excluded = sum(
+        row["status"] == "PASS"
+        and bool({"vacuity", "partial_vacuity"} & set(row["disclosures"]))
+        for row in audit["steps"])
+    counts = audit["step_counts"]
+    executed = counts["PASS"] - excluded
+    total = sum(counts.values()) - counts["PASS_WITH_WAIVERS"] - counts["NOT_APPLICABLE"]
+    stdout = "\n".join([
+        "=== Vibe-IC public synthetic compliance ===",
+        "Project: /synthetic/public_project",
+        "Flow def: /synthetic/public_flow.yaml",
+        f"Steps: {sum(counts.values())} total ({executed}/{total} executed PASS, "
+        f"{counts['PASS_WITH_WAIVERS']} DEFERRED via waiver)",
+        "  " + "  ".join(f"{key}={value}" for key, value in counts.items()),
+        f"Overall: {audit['verdict']}  (strict=True)",
+    ]) + "\n"
+
+    def _fake_run_audit(*_args, **_kwargs):
+        audit_path.parent.mkdir(parents=True)
+        audit_path.write_bytes((PUBLIC_INPUTS / filename).read_bytes())
+        (project / "audit.stdout").write_text(stdout, encoding="utf-8")
+        return stdout, audit["verdict"]
+
+    monkeypatch.setattr(F, "_run_audit", _fake_run_audit)
+    md = F._render(project, run_audit=True)
+    (project / "reports" / "final_summary.md").write_text(md, encoding="utf-8")
+    assert json.loads(audit_path.read_text(encoding="utf-8")) == audit
+    return md, audit
+
+
+def _assert_public_summary(md: str, audit: dict) -> None:
+    assert f"**`Overall: {audit['verdict']}`**" in md
+    assert C.parse_rollup_table(md) == {
+        key: value for key, value in audit["step_counts"].items() if value}
+    assert C.RECONCILIATION_FAILED_MARKER not in md
+
+
+def _assert_executed_views(md: str, numerator: int, denominator: int) -> None:
+    # Check every published view, including the producer headline, prose,
+    # acceptance sentence and resource log. A correct headline alone is not
+    # enough when the renderer repeats a different number further down.
+    views = [
+        re.findall(r"\((\d+)/(\d+) executed PASS,", md),
+        re.findall(r"PASS=\d+ → executed PASS=(\d+)", md),
+        re.findall(r"executed PASS = (\d+)/(\d+)", md),
+        re.findall(r"Canonical step executed PASS: \*\*(\d+)/(\d+)\*\*", md),
+    ]
+    expected = [
+        [(str(numerator), str(denominator))], [str(numerator)],
+        [(str(numerator), str(denominator))],
+        [(str(numerator), str(denominator))],
+    ]
+    assert views == expected, {"observed": views, "expected": expected}
+
+
+def test_failure_must_not_claim_all_measured_pass(monkeypatch, tmp_path):
+    md, audit = _render_public_input(
+        monkeypatch, tmp_path, "failure_pass1_fail1_no_waivers.audit.json")
+    _assert_public_summary(md, audit)
+    _assert_executed_views(md, 1, 2)
+    # Scan the complete report for universal success claims about measured
+    # or executed steps, allowing synonymous wording and Markdown wrapping.
+    prose = " ".join(md.lower().replace("*", "").replace("_", " ").split())
+    false_claims = re.findall(
+        r"(?:every|all|each)\b[^.!?\n]{0,160}"
+        r"(?:measur\w*|execut\w*)[^.!?\n]{0,160}"
+        r"(?:passed|verified|successful\w*)", prose)
+    assert false_claims == [], {"false_universal_success_claims": false_claims}
+
+
+def test_partial_pass_must_not_be_counted_as_executed(monkeypatch, tmp_path):
+    md, audit = _render_public_input(
+        monkeypatch, tmp_path, "partial_vacuity_pass1_fail1.audit.json")
+    _assert_public_summary(md, audit)
+    assert audit["steps"][0]["status"] == "PASS"
+    assert audit["steps"][0]["disclosures"] == ["partial_vacuity"]
+    assert audit["steps"][0]["partial_vacuity_disclosed"] is True
+    assert audit["steps"][1]["status"] == "FAIL"
+    _assert_executed_views(md, 0, 2)
+
+
+def test_overall_fail_is_preserved_in_rendered_summary(monkeypatch, tmp_path):
+    for filename in ("failure_pass1_fail1_no_waivers.audit.json",
+                     "partial_vacuity_pass1_fail1.audit.json"):
+        md, audit = _render_public_input(
+            monkeypatch, tmp_path / filename, filename)
+        _assert_public_summary(md, audit)
+        assert "**FAIL=1**" in md
+        assert "INCOMPLETE — fix FAILs before claiming." in md
+        assert "Engineering Phase 2+3 complete." not in md
+
+
+def test_all_pass_companion_keeps_truthful_executed_counts(monkeypatch, tmp_path):
+    md, audit = _render_public_input(
+        monkeypatch, tmp_path, "all_pass2_no_waivers.audit.json")
+    _assert_public_summary(md, audit)
+    _assert_executed_views(md, 2, 2)
+    assert "Engineering Phase 2+3 complete." in md
