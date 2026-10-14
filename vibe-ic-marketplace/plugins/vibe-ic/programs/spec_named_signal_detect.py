@@ -23,6 +23,9 @@ from typing import Any, Dict, List, Optional
 
 # Formatting locates candidates; the source context supplies the role.
 _TICK_ID_RE = re.compile(r"`([a-zA-Z][A-Za-z0-9_]*)`")
+# File citations locate source evidence; their path components are not roles.
+_SOURCE_CITATION_RE = re.compile(
+    r"\b(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+(?::\d+)*")
 # Existing keyword/clock/reset exclusions are retained.
 _NOT_A_SIGNAL = frozenset({
     "module", "endmodule", "input", "output", "inout", "wire", "reg", "logic",
@@ -38,13 +41,15 @@ _ROLE_RE = re.compile(
     r"(?P<command>commands?|SDC|Tcl)|"
     r"(?P<setting>settings?|floorplan|constraints?)|"
     r"(?P<module>modules?|instances?)|"
-    r"(?P<signal>signals?|nets?|wires?|reg|logic|registers?|ports?|"
-    r"inputs?|outputs?|inout|flags?|counters?|strobes?|pulses?))\b", re.I)
+    r"(?P<signal>(?<![-/])signals?|nets?|wires?|reg|logic|registers?|ports?|"
+    r"inputs?|outputs?|inout|flags?|counters?|strobes?|pulses?))\b|"
+    r"(?P<design>\bdesigns?\b|設計)", re.I)
 _SIGNAL_ACTION_RE = re.compile(
     r"\b(?:drives?|compute[sd]?|holds?|gates?|clears?|tracks?)\b", re.I)
 # An absent register interface supplies no signal authority for its subject.
 _DENIED_ROLE_RE = re.compile(
-    r"\b(?:not|never|no)\s+(?:an?\s+)?(?:(?:RTL|SW[- ]visible)\s+)?$", re.I)
+    r"(?:\b(?:not|never|no)\s+|無\s*)(?:an?\s+)?"
+    r"(?:(?:RTL|SW[- ]visible)\s+)?$", re.I)
 
 
 def _context_role(text: str, start: Optional[int] = None,
@@ -86,6 +91,7 @@ def detect_named_signals(prompt: str) -> Dict[str, Any]:
             lambda m: (" " + m.group(1) + " " if
                        m.group(1).lower() in _NOT_A_SIGNAL else
                        " " * len(m.group(0))), line)
+        masked = _SOURCE_CITATION_RE.sub(lambda m: " " * len(m.group(0)), masked)
         if stripped.startswith("#"):
             section = stripped
             section_role = _context_role(masked)
