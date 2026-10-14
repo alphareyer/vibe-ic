@@ -1467,3 +1467,39 @@ def test_884_the_real_tree_census_adds_up(real_report):
         assert A._invoked(src, gate), (
             f"{gate} is no longer named by any runner; the 21 -> 16 delta "
             f"this change measured no longer describes this tree")
+
+
+# Source-only branch live-range controls: source strings are never executed.
+@pytest.mark.parametrize("case,body,expected", [
+    ("then_join", "if chosen:\n        cp = subprocess.run(['branch_check.py'])\n    else:\n        cp = other\n    if cp.returncode != 0:\n        return False", A.INLINE_UNPROVEN),
+    ("else_join", "if chosen:\n        cp = other\n    else:\n        cp = subprocess.run(['branch_check.py'])\n    if cp.returncode != 0:\n        return False", A.INLINE_UNPROVEN),
+    ("same_path_kill", "cp = subprocess.run(['branch_check.py'])\n    cp = other\n    observe(cp.returncode)", A.INLINE_STATUS_IGNORED),
+    ("unused", "cp = subprocess.run(['branch_check.py'])", A.INLINE_STATUS_IGNORED),
+    ("returned", "cp = subprocess.run(['branch_check.py'])\n    return cp.returncode", A.INLINE_UNPROVEN),
+    ("indirect", "cp = subprocess.run(['branch_check.py'])\n    observe(cp.returncode)", A.INLINE_UNPROVEN),
+    ("conditional_join", "cp = subprocess.run(['branch_check.py'])\n    if chosen:\n        cp = other\n    observe(cp.returncode)", A.INLINE_UNPROVEN),
+    ("conditional_kill_read", "cp = subprocess.run(['branch_check.py'])\n    if chosen:\n        cp = other\n        observe(cp.returncode)", A.INLINE_STATUS_IGNORED),
+], ids=["then_join", "else_join", "same_path_kill", "unused", "returned", "indirect", "conditional_join", "conditional_kill_read"])
+def test_884_branch_live_range_source_controls(tmp_path, case, body, expected):
+    source = "import subprocess\ndef step(chosen, other, observe):\n    " + body + "\n"
+    row = _rows(tmp_path, source, ["branch_check"])["branch_check"]
+    assert row["wiring"] == expected, (case, row)
+    assert row["enforcement"] == "AUDIT_ONLY", (case, row)
+
+
+def test_884_current_binding_excludes_preceding_conditional_store(tmp_path):
+    """A current unconditional producer replaces every earlier binding."""
+    source = '''
+import subprocess
+
+def step(chosen, other):
+    if chosen:
+        cp = other
+    cp = subprocess.run(["branch_check.py"])
+    if cp.returncode != 0:
+        return False
+    return True
+'''
+    row = _rows(tmp_path, source, ["branch_check"])["branch_check"]
+    assert row["wiring"] == A.INLINE_BLOCKING, row
+    assert row["enforcement"] == "ENFORCED", row

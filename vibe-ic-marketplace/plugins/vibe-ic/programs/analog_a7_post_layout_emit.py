@@ -87,6 +87,7 @@ import _analog_producer_common as _pc
 from _analog_producer_common import layout_netlist_identity  # noqa: E402,F401
 from _atomic_artefact import write_json, write_text
 import _watchdog as wd
+import step_metrics
 
 PRODUCER = "analog_a7_post_layout_emit"
 STEP = "A7"
@@ -914,8 +915,25 @@ def _budget_spent_proven(sim: dict, budget: dict) -> bool:
         return False
 
 
+def _write_terminal(record: dict, out: Path,
+                    metric_counts: Optional[dict] = None) -> None:
+    """Keep the canonical block record and emit this invocation's facts.
+
+    The record is phase3/analog/<block>/a7_post_layout.json. Fixed metrics
+    name the last block explicitly; they are not a whole-A7 aggregate.
+    None overwrites unavailable counts from an earlier successful invocation.
+    """
+    write_json(out, record)
+    step_metrics.emit_best_effort(out.parent.parent.parent.parent, STEP, {
+        "block": record["block"], "producer_result": record["result"],
+        "rule": record.get("rule"), "reason_class": record.get("reason_class"),
+        "pair_count": None, "measured_style_count": None,
+        "completed_style_count": None, **(metric_counts or {}),
+    })
+
+
 def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
-                  project: Path) -> int:
+                  project: Path, metric_counts: Optional[dict] = None) -> int:
     """Classify a stopped run from its actual supervision, not its exit alone."""
     span, budget = record.get("transient_span", {}), record.get("budget", {})
     reached, requested = sim["reached_s"], span.get("stop_s")
@@ -937,7 +955,7 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
         detail = (f"{deck.name}: simulator made no progress and was stopped "
                   f"after {sim['wall_s']:.3f} s ({sim['log']})")
         record["detail"] = detail
-        write_json(out, record)
+        _write_terminal(record, out, metric_counts)
         print(f"{NOT_MEASURED_TOKEN} {PRODUCER} "
               f"A7_SIMULATION_PROGRESS_STALLED: {detail}", file=sys.stderr)
         return EX_BUDGET_EXHAUSTED
@@ -960,7 +978,7 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
                   f"with no proven spent deadline; reached {reached} s of "
                   f"{requested} s requested ({sim['log']})")
         record["detail"] = detail
-        write_json(out, record)
+        _write_terminal(record, out, metric_counts)
         print(f"{NOT_MEASURED_TOKEN} {PRODUCER} "
               f"A7_SIMULATION_STOPPED_EXTERNALLY: {detail}", file=sys.stderr)
         return EX_BUDGET_EXHAUSTED
@@ -995,7 +1013,7 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
               f"(budget {budget.get('seconds')} s from "
               f"{budget.get('source')})")
     record["detail"] = detail
-    write_json(out, record)
+    _write_terminal(record, out, metric_counts)
     print(f"{NOT_MEASURED_TOKEN} {PRODUCER} A7_SIM_BUDGET_EXHAUSTED: {detail}",
           file=sys.stderr)
     return EX_BUDGET_EXHAUSTED
@@ -1015,22 +1033,24 @@ def declared_measurements(tb_text: str) -> List[str]:
 
 
 def _unmeasured(record: dict, out: Path, rule: str, reason_class: str,
-                detail: str, **facts) -> int:
+                detail: str, metric_counts: Optional[dict] = None,
+                **facts) -> int:
     """NOT_MEASURED for a reason other than a spent budget (T131): the step ran
     and a row it declared is genuinely absent, so it may not PASS on the rest
     -- and nothing about the circuit was learned, so it is not a FAIL."""
     record.update({"result": "NOT_MEASURED", "reason_class": reason_class,
                    "rule": rule, "detail": detail, **facts})
-    write_json(out, record)
+    _write_terminal(record, out, metric_counts)
     print(f"{NOT_MEASURED_TOKEN} {PRODUCER} {rule}: {detail}", file=sys.stderr)
     return EX_BUDGET_EXHAUSTED
 
 
 def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int,
-            result: Optional[str] = None) -> int:
+            result: Optional[str] = None,
+            metric_counts: Optional[dict] = None) -> int:
     record.update({"result": result or ("REFUSED" if rc == 1 else "NOT_PRODUCED"),
                    "rule": rule, "detail": detail})
-    write_json(out, record)
+    _write_terminal(record, out, metric_counts)
     token = _pc.HONEST_GAP_TOKEN if rc == 2 else (
         _pc.ENV_REFUSED_TOKEN if rc == _pc.EX_ENV_REFUSED else "FAIL:")
     print(f"{token} {PRODUCER} {rule}: {detail}", file=sys.stderr)
@@ -1355,10 +1375,16 @@ def run(project: Path, block: str, container: str, image: str,
                            f"the extraction kept ({post['log']})", 1)
     record["corners"] = corners
     record["compared_specs_count"] = len(specs)
+    metric_counts = {
+        "pair_count": len(specs),
+        "measured_style_count": len({row["extraction_style"] for row in specs}),
+        "completed_style_count": len(corners) - len(exhausted),
+    }
     if exhausted and not specs:
         _style, post_tb, post = exhausted[0]
         record["stopped_styles"] = [e[0] for e in exhausted]
-        return _not_measured(record, record_path, post_tb, post, project)
+        return _not_measured(record, record_path, post_tb, post, project,
+                             metric_counts=metric_counts)
     if not specs:
         if absent:
             return _unmeasured(
@@ -1367,9 +1393,10 @@ def run(project: Path, block: str, container: str, image: str,
                 f"{pre_tb.name}: no comparable post-layout row and "
                 f"{len(absent)} declared pre-layout measurement(s) absent "
                 f"({', '.join(absent[:8])})",
-                absent_measurements=absent)
+                absent_measurements=absent, metric_counts=metric_counts)
         return _refuse(record, record_path, "A7_NOTHING_COMPARED",
-                       "pre and post runs share no numeric measurement", 1)
+                       "pre and post runs share no numeric measurement", 1,
+                       metric_counts=metric_counts)
     if absent and not exhausted:
         import analog_a7_post_layout_resim_check as _gate
         deltas, _pairs = _gate._check_specs(specs)
@@ -1382,14 +1409,15 @@ def run(project: Path, block: str, container: str, image: str,
                 record, record_path, "A7_POSTSIM_DELTA_TOO_BIG",
                 f"measured post-layout degradation {bad[:8]} exceeds "
                 f"{_gate.DEFAULT_MAX_DELTA_PCT}% (max {worst:.2f}%); "
-                f"pre-layout rows absent: {absent[:8]}", 1)
+                f"pre-layout rows absent: {absent[:8]}", 1,
+                metric_counts=metric_counts)
         return _unmeasured(
             record, record_path, "A7_PRE_MEASUREMENT_ABSENT",
             "partial_population",
             f"{pre_tb.name}: {len(absent)} declared measurement(s) produced "
             f"no pre-layout value ({', '.join(absent[:8])}"
             f"{', ...' if len(absent) > 8 else ''}; {pre['log']})",
-            absent_measurements=absent)
+            absent_measurements=absent, metric_counts=metric_counts)
     measured_styles = {row["extraction_style"] for row in specs}
     typical = next(c for c in corners
                    if c.get("extraction_style") in measured_styles)
@@ -1426,11 +1454,13 @@ def run(project: Path, block: str, container: str, image: str,
                 record, record_path, "A7_POSTSIM_DELTA_TOO_BIG",
                 f"measured on the styles that completed: {bad[:8]} exceed "
                 f"{_gate.DEFAULT_MAX_DELTA_PCT}% (max {worst:.2f}%); "
-                f"{record['stopped_styles']} stopped before measurement", 1)
+                f"{record['stopped_styles']} stopped before measurement", 1,
+                metric_counts=metric_counts)
         _style, post_tb, post = exhausted[0]
-        return _not_measured(record, record_path, post_tb, post, project)
+        return _not_measured(record, record_path, post_tb, post, project,
+                             metric_counts=metric_counts)
     record["result"] = "PRODUCED"
-    write_json(record_path, record)
+    _write_terminal(record, record_path, metric_counts)
     print(f"[{PRODUCER}] block={block} {len(corners)} extraction style(s), "
           f"{len(specs)} spec row(s) -> phase3/analog/{block}/pre_vs_post.json")
     return 0

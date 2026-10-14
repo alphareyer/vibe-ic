@@ -29,6 +29,11 @@ import importlib
 import json
 import re
 import sys
+import os
+import shutil
+import subprocess
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -84,6 +89,180 @@ MODELS = {
         "module TIELO(output ZN); assign ZN = 1'b0; endmodule\n",
 }
 
+
+# Public neutral source controls for the changed arithmetic observation surface.
+# Transport below only records proposed argv; no simulator is launched.
+def _observation_project(tmp_path, *, width=8, renamed=False, period=10, delay=0):
+    from test_serial_parallel_declared_function_oracle import _declared_scenario_project
+    project = tmp_path / "neutral_observation"
+    cases = _declared_scenario_project(project, width=width, renamed=renamed, latency=1)
+    _write(project / 'input/submission_template/SELF_TAPEOUT.txt', 'self tape-out\n')
+    gd = project / "phase1/generated_docs"
+    l9_path = gd / "L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(l9_path.read_text())
+    l9['clocks'][0]['period_ns'] = period
+    l9_path.write_text(json.dumps(l9))
+    names = ({'clk': 'i_clk', 'rst': 'i_rst', 'x': 'operand_word',
+              'y': 'serial_bit', 'p': 'result_bit'} if renamed else
+             {n: n for n in ('clk', 'rst', 'x', 'y', 'p')})
+    c, r, x, y, p = [names[n] for n in ('clk', 'rst', 'x', 'y', 'p')]
+    top = project / "phase3/stage3/pnr/neutral_pad_surface.v"
+    _write(top, f'''module neutral_pad_surface(input {c}, {r},
+        input [{width-1}:0] {x}, input {y}, output {p});
+        wire core_clock, core_result;
+        OBSIN clock_pad(.PAD({c}), .Y(core_clock));
+        neutral_serial core(.{c}(core_clock), .{r}({r}), .{x}({x}),
+                            .{y}({y}), .{p}(core_result));
+        OBSOUT result_pad(.A(core_result), .PAD({p}));
+        endmodule\n''')
+    _write(project / _fsf().CHIP_TOP_RECORD_REL, json.dumps({
+        'verdict': 'WROTE', 'core_module': 'neutral_serial',
+        'chip_top_module': 'neutral_pad_surface',
+        'chip_top_verilog': str(top.relative_to(project))}))
+    models = {'/neutral/observation.v': f'''`timescale 1ns/1ps
+        module OBSIN(input PAD, output Y); buf #{delay}(Y,PAD); endmodule
+        module OBSOUT(input A, output PAD); buf #{delay}(PAD,A); endmodule\n'''}
+    calls = []
+    def transport(argv, wd, container, simulator, timeout):
+        calls.append(argv)
+        return 83, 'source-only transport refusal; no simulator executed'
+    return project, cases, models, calls, transport
+
+
+@pytest.mark.parametrize('width,renamed,period,delay', [
+    (4, False, 10, 0), (8, True, 24, 0.2), (12, False, 16, 0.4)])
+def test_new_padded_scenarios_request_observation_before_dispatch(
+        tmp_path, monkeypatch, width, renamed, period, delay):
+    project, cases, models, calls, transport = _observation_project(
+        tmp_path, width=width, renamed=renamed, period=period, delay=delay)
+    monkeypatch.setattr(importlib.import_module('testbench_gen'), '_detect_ic_class',
+                        lambda project: 'digital_arithmetic_primitive')
+    fs = _fsf()
+    result = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    assert result['verdict'] == 'NOT_MEASURED', result
+    assert calls == [], 'unsupported observation must stop before any dispatch'
+    assert result['reason_class'] == 'MISSING_OBSERVATION_CONTRACT', result
+    assert result['counts']['executed'] == 0 and result['counts']['rows'] == 3
+    requests = result['arithmetic_scenario_requests']
+    assert {r['case'] for r in requests} == {c['name'] for c in cases}
+    for case, entry in zip(cases, result['cases']):
+        assert entry['state'] == 'no_oracle' and entry['step5_disposition']['blocking']
+        request = next(r for r in requests if r['case'] == case['name'])
+        assert request['verdict'] == 'NOT_MEASURED'
+        assert request['fallback_skill'] == 'testbench-gen'
+        assert request['reason_class'] == 'MISSING_OBSERVATION_CONTRACT'
+        assert request['authored_tb'] == entry['tb']
+        assert request['unsupported_requirements']
+        assert entry['arithmetic_scenario_requests'] == [request]
+        plan = aog._scenario_header(project / entry['tb'])
+        assert plan['framing']['settled_latency'] == 1
+        assert plan['comparisons'] == width * plan['transactions'] > 0
+        assert result['full_stack_top']['source_sha256'] == fs.sha256_file(
+            project / result['full_stack_top']['source'])
+        for model in result['models']:
+            assert fs.sha256_file(project / model['path']) == model['sha256']
+    rc, consumed, sentinel = gate.functional_full_stack_verdict(project)
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED', consumed
+    assert sentinel.startswith('INCOMPLETE:') and consumed['counts']['executed'] == 0
+
+
+def test_missing_observation_cli_publishes_existing_author_request(tmp_path, monkeypatch, capsys):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    fs = _fsf(); tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    monkeypatch.setattr(fs, 'default_dispatch', transport)
+    monkeypatch.setattr(fs, 'default_model_resolver', lambda *args: (models, 'neutral source model'))
+    output = project / 'component-cli.json'
+    assert fs.main([str(project), '--route', 'DIE', '--container', 'source-double',
+                    '--json', str(output)]) == 2
+    published = json.loads(capsys.readouterr().out)
+    assert published == json.loads(output.read_text())
+    assert published['reason_class'] == 'MISSING_OBSERVATION_CONTRACT', published
+    assert {r['case'] for r in published['arithmetic_scenario_requests']} == {c['name'] for c in cases}
+    assert calls == [], 'CLI must publish the request before any simulator dispatch'
+
+
+def test_direct_core_scenario_schedule_and_strict_comparators_stay_unchanged(tmp_path, monkeypatch):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    result = _fsf().generate(project, route='HARDMACRO', dispatch=transport)
+    assert len(calls) == 3
+    assert not result.get('arithmetic_scenario_requests')
+    for entry in result['cases']:
+        path = project / entry['tb']
+        plan = aog._scenario_header(path)
+        text = path.read_text()
+        assert 'always #5 clk=~clk;' in text and '@(posedge clk); #1;' in text
+        assert plan['framing']['settled_latency'] == 1 and 'L=1;' in text
+        assert 'p !== gv[v][k-L]' in text and 'if(k>=L)' in text
+        assert 'clear_state(1)' in text and 'held_value=p' in text
+        assert "p !== 1'b0 && p !== 1'b1" in text
+        assert plan['comparisons'] == 8 * plan['transactions'] > 0
+        for index, (a, b) in enumerate(plan['pairs']):
+            assert f"gv[{index}]=8'd{a & b};" in text
+        assert 'build_rc' in entry and entry['state'] == 'errored'
+
+
+def test_new_handoff_retains_old_failures_and_authored_fullstack_provenance(tmp_path, monkeypatch):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    fs = _fsf(); tbg = importlib.import_module('testbench_gen')
+    monkeypatch.setattr(tbg, '_detect_ic_class', lambda project: 'digital_arithmetic_primitive')
+    prior = fs.functional_dir(project)
+    authored = ('module operand_limits; reg clk=0; reg rst=1; reg [7:0] x=0; '
+                'reg y=0; wire p; neutral_serial dut(.clk(clk),.rst(rst),.x(x),.y(y),.p(p)); '
+                'always #5 clk=~clk; endmodule\n')
+    originals = {'functional_cases.json': '{"verdict":"FAIL","original":true}\n',
+                 'run/operand_limits/run.log': 'FAIL: retained original measurement\n',
+                 'operand_limits.v': authored,
+                 'reset_situations.v': '// VIBEIC_TB_ORACLE: GENERATED by old_emitter\nold bytes\n'}
+    for name, text in originals.items():
+        _write(prior / name, text)
+    result = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    archive = project / result['previous_output']
+    assert archive != prior and archive.is_dir()
+    for name, text in originals.items():
+        assert (archive / name).read_text() == text
+    current_authored = prior / 'operand_limits.v'
+    assert current_authored.read_text() == authored.replace('neutral_serial dut(', 'neutral_pad_surface dut(')
+    assert len(calls) == 1 and calls[0][calls[0].index('-s') + 1] == 'operand_limits'
+    entry = result['cases'][0]
+    assert entry['family'] == 'authored_or_delivered'
+    assert entry.get('reason_class') != 'MISSING_OBSERVATION_CONTRACT'
+    assert not (project / 'input/tb').exists()
+    assert result['preserved_authored'][0]['source'] == str((archive / 'operand_limits.v').relative_to(project))
+    assert result['preserved_authored'][0]['sha256'] == fs.sha256_file(archive / 'operand_limits.v')
+    second = fs.generate(project, route='DIE', dispatch=transport,
+                         model_resolver=lambda *args: (models, 'neutral source model'))
+    assert second['previous_output'] != result['previous_output']
+    assert current_authored.read_text() == authored.replace('neutral_serial dut(', 'neutral_pad_surface dut(')
+    assert len(calls) == 2 and second['cases'][0]['family'] == 'authored_or_delivered'
+    for name, text in originals.items():
+        assert (archive / name).read_text() == text
+
+
+@pytest.mark.parametrize('mutation', ['stale_identity', 'missing_population'])
+def test_observation_source_receipt_controls_still_refuse_missing_evidence(tmp_path, mutation):
+    project, cases, models, calls, transport = _observation_project(tmp_path)
+    plan = aog.arithmetic_scenario_plan(project, 'digital_arithmetic_primitive', cases[0])
+    tb = _write(project / 'source_probe.v', aog.emit_arithmetic_scenario_module(cases[0]['name'], plan))
+    transcript = _write(project / 'synthetic_source_transcript.txt',
+        f"ARITH_SCENARIO_DONE transactions={plan['transactions']} comparisons={plan['comparisons']} errors=0 held_edges=2\n")
+    sources = {path: digest for path, digest in plan['binding'].items() if Path(path).suffix == '.v'}
+    captured, reason = aog.capture_arithmetic_scenario_execution(project, tb, transcript, sources)
+    # This is a source consumer fixture, never a simulator or native receipt.
+    assert captured and captured['complete'], reason
+    row = {'tb_file': str(tb), 'arithmetic_scenario': captured}
+    if mutation == 'stale_identity':
+        declaration = project / 'plugin_output/declaration.json'
+        declaration.write_text(declaration.read_text() + ' ')
+    else:
+        captured['complete'] = False
+    state, detail = aog.arithmetic_scenario_case_state(row)
+    assert state == 'NOT_EXECUTED' and 'NOT_MEASURED' in detail
+
 CASES = [
     {"name": "random_equivalence", "kind": "coverage_goal",
      "stimulus": "隨機 ≥ 100 組 (x, y),全部對 golden model 一致",
@@ -106,8 +285,194 @@ def _write(p: Path, text: str) -> Path:
     return p
 
 
+def _authored_integrity_tb(name: str) -> str:
+    """Public INPUT for gate integrity fixtures, with explicit author choices.
+
+    These checks specify the L2 multiplier, not the synthetic CORE_V's behavior.
+    _FakeSim transports the declared population; no native result is claimed.
+    """
+    case = next(c for c in CASES if c["name"] == name)
+    nv = 25 if name == "corner_operand" else 225
+    schedule = """
+    // L10 operand boundaries: 0, MAX_POS, MIN_NEG, -1; also include 1.
+    for (i=0; i<5; i=i+1) for (j=0; j<5; j=j+1) begin
+      clear_state(1);
+      complete_pair(values[i], values[j], -1);
+    end
+""" if name == "corner_operand" else """
+    // L10 reset: held, released, and asserted DURING computation.
+    // 25 pairs * (3 interruption positions * 2 reset holds + 3 pulses) = 225.
+    for (i=0; i<5; i=i+1) for (j=0; j<5; j=j+1) begin
+      for (position=1; position<=7; position=position+3) begin
+        for (hold_edges=1; hold_edges<=3; hold_edges=hold_edges+2) begin
+          clear_state(1);
+          interrupt_pair(values[i], values[j], position);
+          clear_state(hold_edges);
+          // First released edge restarts bit0; compare the full restarted word.
+          complete_pair(values[i], values[j], -1);
+        end
+      end
+      for (position=1; position<=7; position=position+3) begin
+        clear_state(1);
+        // A synchronous reset pulse wholly BETWEEN edges must not clear state.
+        complete_pair(values[i], values[j], position);
+      end
+    end
+"""
+    header = (
+        "// Authored public synthetic INPUT; source fixture only.\n"
+        "// L2: p = x * y mod 2^N (serial-parallel multiplier), N=8.\n"
+        f"// Original L10: {json.dumps(case, ensure_ascii=False)}\n"
+        "// Author observation contract: selected PADIN/PADOUT are zero-delay\n"
+        "// continuous assignments; 10ns clock, negedge stimulus, posedge+1ns\n"
+        "// settled sample. signed_2c, LSB_first, settled_edge_offset1.\n"
+        "// Hold x through final product bit; rearm with one synchronous\n"
+        "// active-high reset edge (reset coverage additionally holds three).\n"
+    )
+    body = r"""`timescale 1ns/1ps
+module @NAME@;
+  localparam integer NV = @NV@;
+  reg clk=0, rst=1;
+  reg [7:0] x=0;
+  reg y=0;
+  wire p;
+  supply1 VDD;
+  supply0 VSS;
+  chip_top dut(.clk(clk), .rst(rst), .x(x), .y(y), .p(p),
+               .VDD(VDD), .VSS(VSS));
+  always #5 clk=~clk;
+  reg [7:0] values [0:4];
+  integer i, j, position, hold_edges;
+  integer errors=0, transactions=0, passed=0, comparisons=0;
+
+  // Independent L2 golden, including negative two's-complement operands.
+  function [7:0] product;
+    input [7:0] a, b;
+    reg signed [15:0] full_product;
+    begin
+      full_product = $signed(a) * $signed(b);
+      product = full_product[7:0];
+    end
+  endfunction
+
+  task clear_state;
+    input integer cycles;
+    integer edge_index;
+    begin
+      @(negedge clk); rst=1; x=0; y=0;
+      for (edge_index=0; edge_index<cycles; edge_index=edge_index+1) begin
+        @(posedge clk); #1;
+        if (p !== 1'b0) begin
+          errors=errors+1;
+          $display("ORACLE_MISMATCH: held synchronous reset p=%b", p);
+        end
+      end
+      // Keep reset high until the next transaction's first negedge stimulus.
+    end
+  endtask
+
+  task stream_edge;
+    input [7:0] a, b;
+    input integer k;
+    begin
+      @(negedge clk); rst=0; x=a;
+      if (k<8) y=b[k]; else y=0;
+      @(posedge clk); #1;
+    end
+  endtask
+
+  task compare_bit;
+    input [7:0] golden;
+    input integer bit_index;
+    begin
+      if (p !== golden[bit_index]) begin
+        errors=errors+1;
+        $display("ORACLE_MISMATCH: bit=%0d expected=%b actual=%b",
+                 bit_index, golden[bit_index], p);
+      end
+    end
+  endtask
+
+  task interrupt_pair;
+    input [7:0] a, b;
+    input integer stop_edge;
+    integer k;
+    reg [7:0] golden;
+    begin
+      golden=product(a,b);
+      for (k=0; k<stop_edge; k=k+1) begin
+        stream_edge(a,b,k);
+        if (k>=1) compare_bit(golden,k-1);
+      end
+      // Abort here by synchronous reset; this prefix is not a scored word.
+    end
+  endtask
+
+  task complete_pair;
+    input [7:0] a, b;
+    input integer pulse_edge;
+    integer k, prior_errors;
+    reg [7:0] golden;
+    reg held_p;
+    begin
+      golden=product(a,b); prior_errors=errors;
+      for (k=0; k<=8; k=k+1) begin
+        stream_edge(a,b,k);
+        if (k>=1) begin
+          compare_bit(golden,k-1);
+          comparisons=comparisons+1;
+        end
+        if (k==pulse_edge) begin
+          // Intentional reset exception: +2ns..+3ns after this posedge,
+          // wholly before the next negedge/posedge. A sync reset has no edge.
+          held_p=p; #1; rst=1; #1; rst=0; #1;
+          if (p !== held_p) begin
+            errors=errors+1;
+            $display("ORACLE_MISMATCH: between-edge reset changed p");
+          end
+        end
+      end
+      // x is still a through bit7's settled comparison at edge offset8.
+      transactions=transactions+1;
+      if (errors==prior_errors) passed=passed+1;
+    end
+  endtask
+
+  initial begin
+    values[0]=8'd0; values[1]=8'd1; values[2]=8'd127;
+    values[3]=8'd128; values[4]=8'd255;
+@SCHEDULE@
+    if (transactions!=NV || comparisons!=8*NV)
+      $fatal(1, "authored population mismatch");
+    $display("ORACLE_TB_DONE pass=%0d/%0d", passed, NV);
+    if (errors!=0) $fatal(1, "oracle/reset errors=%0d", errors);
+    $finish;
+  end
+endmodule
+"""
+    return header + body.replace("@NAME@", name).replace("@NV@", str(nv)).replace(
+        "@SCHEDULE@", schedule)
+
+
+def _supplement_integrity_input(proj: Path) -> None:
+    """Explicit neutral fixture authorship; enabled only by four integrity tests."""
+    _write(proj / "plugin_output/declaration.json", json.dumps({
+        "integer_encoding": "signed_2c", "bit_order": "LSB_first",
+        "latency_cycles": 1, "latency_cycles_origin": "settled_edge_offset",
+        "reset_polarity": "active_high", "transaction_rearm": "clocked_reset",
+        "rearm_reset_cycles": 1, "parallel_hold": "through_final_product_bit"}))
+    l9_path = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(l9_path.read_text())
+    l9["clocks"] = [{"name": "clk", "period_ns": 10}]
+    l9["reset_domains"] = [
+        {"name": "rst", "sync": "synchronous", "polarity": "active_high"}]
+    l9_path.write_text(json.dumps(l9))
+    for name in ("corner_operand", "reset"):
+        _write(proj / "input/tb" / f"{name}.v", _authored_integrity_tb(name))
+
+
 def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
-                cases=None) -> Path:
+                cases=None, integrity_input: bool = False) -> Path:
     proj = tmp_path / "proj"
     gd = proj / "phase1" / "generated_docs"
     _write(gd / "L3_CMD_PROTOCOL.json", json.dumps(
@@ -146,6 +511,8 @@ def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
                                "core_module": CORE,
                                "chip_top_verilog":
                                    "phase3/stage3/pnr/chip_top_io.v"}))
+    if integrity_input:
+        _supplement_integrity_input(proj)
     return proj
 
 
@@ -327,8 +694,8 @@ def test_off_the_pad_ring_route_the_core_is_the_full_stack_top(tmp_path,
 # ===========================================================================
 # THE GATE — crediting a population, and refusing one that cannot vouch
 # ===========================================================================
-def _passing_die(tmp_path, arith_class=None):
-    proj = _mk_project(tmp_path, die=True)
+def _passing_die(tmp_path, arith_class=None, *, integrity_input=False):
+    proj = _mk_project(tmp_path, die=True, integrity_input=integrity_input)
     rec = _fsf().generate(proj, "ctr", dispatch=_FakeSim(),
                           model_resolver=_resolver)
     assert rec["verdict"] == "PASS"
@@ -350,7 +717,7 @@ def test_gate_credits_a_population_measured_through_the_chip_top(
 
 def test_gate_fails_a_case_whose_oracle_disagreed(tmp_path, arith_class,
                                                   capsys):
-    proj = _mk_project(tmp_path, die=True)
+    proj = _mk_project(tmp_path, die=True, integrity_input=True)
     sim = _FakeSim(lambda case, nv: (nv - 1, nv) if case == "corner_operand"
                    else (nv, nv))
     rec = _fsf().generate(proj, "ctr", dispatch=sim, model_resolver=_resolver)
@@ -362,7 +729,7 @@ def test_gate_fails_a_case_whose_oracle_disagreed(tmp_path, arith_class,
 
 def test_gate_refuses_a_transcript_that_is_not_the_recorded_one(
         tmp_path, arith_class, capsys):
-    proj, rec = _passing_die(tmp_path)
+    proj, rec = _passing_die(tmp_path, integrity_input=True)
     log = proj / next(c for c in rec["cases"]
                       if c["name"] == "reset")["run_log"]
     log.write_text(log.read_text() + "\n")
@@ -374,7 +741,7 @@ def test_gate_refuses_a_transcript_that_is_not_the_recorded_one(
 def test_gate_rescores_the_transcript_rather_than_trusting_the_record(
         tmp_path, arith_class, capsys):
     """A record that says `passed` over a transcript with no verdict marker."""
-    proj, rec = _passing_die(tmp_path)
+    proj, rec = _passing_die(tmp_path, integrity_input=True)
     fsf = _fsf()
     c = next(c for c in rec["cases"] if c["name"] == "corner_operand")
     log = proj / c["run_log"]
@@ -413,7 +780,7 @@ def test_gate_refuses_a_record_measured_through_the_core_on_a_die(
 
 def test_gate_refuses_a_record_of_bytes_that_have_changed(
         tmp_path, arith_class, capsys):
-    proj, _rec = _passing_die(tmp_path)
+    proj, _rec = _passing_die(tmp_path, integrity_input=True)
     rtl = proj / "phase2" / "stage1" / "rtl" / f"{CORE}.v"
     rtl.write_text(rtl.read_text() + "// edited\n")
     rc, res, _ = _run_gate(proj, tmp_path, capsys)
@@ -920,3 +1287,272 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
         produced = json.loads((project / 'reports/phase3/io_pad_chip_top.json').read_text())
         assert len(produced['pad_instances']) == 12
     assert _actual_late_rollup(env, phase3_started) == ('PASS', 0)
+
+
+# Issue 3132: tiny PUBLIC native components. No owner design or oracle is used.
+# The INPUT author states the schedule before any producer/simulator executes.
+_TIMED_CONFIGS = {
+    'core4': (4, False, 10, 0, 0, False, 'clocked_reset', 1),
+    'wrapped4_zero': (4, True, 10, 0, 0, False, 'clocked_reset', 1),
+    'core8_renamed': (8, False, 18, 0, 0, True, 'clocked_reset', 1),
+    'wrapped8_delayed': (8, True, 18, 1.2, 1.4, True, 'clocked_reset', 1),
+    'wrapped12_continuous': (12, True, 14, 0.3, 0.8, False, 'continuous', 0),
+}
+
+
+def _timed_input(root, key, *, mode='good', refusal=None):
+    """Self-authored serial multiply, same declarations/bytes in all proof arms."""
+    fs = _fsf()
+    width, wrapped, period, cd, od, renamed, rearm, latency = _TIMED_CONFIGS[key]
+    root = Path(root)
+    gd = root / 'phase1/generated_docs'; gd.mkdir(parents=True)
+    rd = root / 'phase2/stage1/rtl'; rd.mkdir(parents=True)
+    (root / 'plugin_output').mkdir()
+    names = ['clk', 'rst', 'x', 'y', 'p']
+    if renamed:
+        names = ['i_clk', 'i_rst', 'operand_word', 'serial_bit', 'result_bit']
+    c, r, x, y, p = names
+    cases = [{'name': name, 'kind': 'functional_vector', 'expected': '100% PASS',
+              'coverage_scope': scope} for name, scope in [
+        ('operand_limits', 'Operand boundaries: zero, one, MAX; all Cartesian combinations'),
+        ('transaction_sequence', 'Consecutive transactions: at least 16 operand pairs using declared rearm, no extra idle cycles'),
+        ('reset_situations', 'Synchronous reset held, released, and asserted during computation; between-edge reset pulses must not reset'),
+    ]]
+    (gd / 'L2_FRS.json').write_text(json.dumps({'ic_class': 'digital_arithmetic_primitive',
+        'frs_sections': [{'content': f'{p} = ({x} * {y}) mod 2^{width}; serial-parallel multiply'}]}))
+    (gd / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'top_module': 'public_serial_product', 'ic_class': 'digital_arithmetic_primitive',
+        'top_ports': [{'name': name, 'direction': d, 'width': w} for name, d, w in
+                      [(c, 'input', 1), (r, 'input', 1), (x, 'input', width),
+                       (y, 'input', 1), (p, 'output', 1)]],
+        'clocks': [{'name': c, 'period_ns': period}],
+        'reset_domains': [{'name': r, 'polarity': 'active_high', 'sync': 'sync'}]}))
+    (gd / 'L10_TEST_CASES.json').write_text(json.dumps({'test_cases': cases}))
+    reset = "1'b0" if mode == 'ignored_reset' else r
+    delay_cycles = latency + int(mode == 'wrong_cycle')
+    expression = "1'bx" if mode == 'unknown' else ('~total[0]' if mode == 'wrong_product' else 'total[0]')
+    regs = ''.join(f'reg pipe{i}=0;\n' for i in range(delay_cycles))
+    reset_pipe = ''.join(f'pipe{i}<=0; ' for i in range(delay_cycles))
+    pipeline = ''.join(f'pipe{i}<=' + (expression if i == 0 else f'pipe{i-1}') + '; '
+                       for i in range(delay_cycles))
+    output = f'pipe{delay_cycles-1}' if delay_cycles else expression
+    # LSB recurrence derives each product bit from the partial sum; the last
+    # bit discards the carry (mod 2^N), allowing the declared continuous rearm.
+    core = rd / 'public_serial_product.v'
+    core.write_text(f'''`timescale 1ns/1ps
+module public_serial_product(input {c}, {r}, input [{width-1}:0] {x}, input {y}, output reg {p}=0);
+reg [{width}:0] carry=0;
+wire [{width}:0] total = carry + ({y} ? {{1'b0,{x}}} : 0);
+integer index=0;
+{regs}always @(posedge {c}) begin
+ if ({reset}) begin carry<=0; index<=0; {p}<=0; {reset_pipe}end
+ else begin
+  carry <= (index=={width-1}) ? 0 : (total >> 1);
+  index <= (index=={width-1}) ? 0 : index+1;
+  {pipeline}{p} <= {output};
+ end
+end
+endmodule
+''')
+    binding = {}
+    if wrapped:
+        _write(root / 'input/submission_template/SELF_TAPEOUT.txt', 'self tape-out\n')
+        top = root / 'phase3/stage3/pnr/public_surface.v'
+        _write(top, f'''`timescale 1ns/1ps
+module public_surface(input {c}, {r}, input [{width-1}:0] {x}, input {y}, output {p});
+wire selected_clock, core_result;
+PUBLIC_CLK clock_pad(.A({c}), .Y(selected_clock));
+public_serial_product core(.{c}(selected_clock), .{r}({r}), .{x}({x}), .{y}({y}), .{p}(core_result));
+PUBLIC_OUT output_pad(.A(core_result), .Y({p}));
+endmodule
+''')
+        model = root / 'input/models/public_delay.v'
+        _write(model, f'''`timescale 1ns/1ps
+module PUBLIC_CLK(input A, output Y); buf #{cd}(Y,A); endmodule
+module PUBLIC_OUT(input A, output Y); buf #{od}(Y,A); endmodule
+''')
+        _write(root / fs.CHIP_TOP_RECORD_REL, json.dumps({
+            'verdict': 'WROTE', 'core_module': 'public_serial_product',
+            'chip_top_module': 'public_surface', 'chip_top_verilog': str(top.relative_to(root))}))
+        binding = {str(f.relative_to(root)): fs.sha256_file(f) for f in (top, model)}
+    observation = {'clock': c, 'output': p, 'settle_ns': cd + od,
+                   'sample_offset_ns': cd + od + 0.75, 'binding': binding}
+    if refusal == 'stale_model':
+        observation['binding']['input/models/public_delay.v'] = '0' * 64
+    elif refusal == 'wrong_clock':
+        observation['clock'] = 'absent_clock'
+    elif refusal == 'outside_cycle':
+        observation['sample_offset_ns'] = period / 2
+    elif refusal == 'before_settle':
+        observation['sample_offset_ns'] = cd + od
+    declaration = {'bit_order': 'LSB_first', 'latency_cycles': latency,
+        'latency_cycles_origin': 'settled_edge_offset', 'integer_encoding': 'unsigned',
+        'reset_polarity': 'active_high', 'transaction_rearm': rearm,
+        'rearm_reset_cycles': 2, 'parallel_hold': 'through_final_product_bit',
+        'verification_stimuli': {'arithmetic_observation': {
+            ('public_surface' if wrapped else 'public_serial_product'): observation}}}
+    if refusal == 'missing':
+        declaration['verification_stimuli'] = {}
+    (root / 'plugin_output/declaration.json').write_text(json.dumps(declaration, sort_keys=True))
+    return cases
+
+
+def _timed_fixture(tmp_path, key, *, mode='good', refusal=None):
+    root = tmp_path / 'public_input'
+    frozen = os.environ.get('R70_NEUTRAL_ROOT')
+    if frozen:
+        shutil.copytree(Path(frozen) / f'{key}-{mode}-{refusal or "bound"}', root)
+        for file in root.rglob('*'):
+            if file.is_file():
+                file.chmod(0o644)
+    else:
+        _timed_input(root, key, mode=mode, refusal=refusal)
+    paths = [*root.glob('phase1/generated_docs/*.json'),
+             root / 'plugin_output/declaration.json',
+             *root.glob('phase2/stage1/rtl/*.v'), *root.glob('input/**/*'),
+             *root.glob('phase3/stage3/pnr/*.v'), *root.glob('reports/**/*.json')]
+    inventory = {str(f.relative_to(root)): _fsf().sha256_file(f) for f in paths if f.is_file()}
+    (root / 'frozen_input_hashes.json').write_text(json.dumps(inventory, sort_keys=True, indent=2))
+    return root
+
+
+def _timed_native(root):
+    # Native executable dispatch is the production default. The only injected
+    # dependency supplies self-authored public model bytes, without any PDK.
+    model = root / 'input/models/public_delay.v'
+    resolver = (lambda *args: ({str(model): model.read_text()}, 'public declared delay model'))
+    # Observe real Popen handles without substituting any simulator result.
+    launched = []
+    real_popen = subprocess.Popen
+    def observed_popen(*args, **kwargs):
+        started = time.time_ns()
+        process = real_popen(*args, **kwargs)
+        launched.append((process, {'argv': args[0], 'pid': process.pid,
+                                  'parent_pid': os.getpid(), 'started_ns': started}))
+        return process
+    with patch.object(subprocess, 'Popen', observed_popen):
+        result = _fsf().generate(root, model_resolver=resolver)
+    handles = []
+    for process, receipt in launched:
+        receipt.update(rc=process.poll(), observed_terminal_ns=time.time_ns())
+        assert receipt['rc'] is not None, receipt
+        handles.append(receipt)
+    (root / 'native_handles.json').write_text(json.dumps(handles, indent=2))
+    rc, consumed, sentinel = gate.functional_full_stack_verdict(root)
+    (root / 'consumer.json').write_text(json.dumps({'rc': rc, 'report': consumed, 'sentinel': sentinel}, indent=2))
+    return result, rc, consumed
+
+
+@pytest.mark.parametrize('key', list(_TIMED_CONFIGS))
+def test_declared_timing_native_fullstack_and_consumer(tmp_path, key):
+    root = _timed_fixture(tmp_path, key)
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'PASS' and rc == 0, (result, consumed)
+    assert result['counts']['passed'] == 3 and result['counts']['executed'] == 3
+    width, wrapped, period, cd, od, renamed, rearm, latency = _TIMED_CONFIGS[key]
+    top = 'public_surface' if wrapped else 'public_serial_product'
+    for entry in result['cases']:
+        tb = root / entry['tb']; plan = aog._scenario_header(tb)
+        transcript = (root / entry['run_log']).read_text()
+        match = re.search(r'^ARITH_SCENARIO_DONE transactions=(\d+) comparisons=(\d+) errors=(\d+) held_edges=(\d+)$', transcript, re.M)
+        assert match and tuple(map(int, match.groups()[:3])) == (plan['transactions'], plan['comparisons'], 0)
+        expected_transactions = {'operand_limits': 9, 'transaction_sequence': 16, 'reset_situations': 180}[entry['name']]
+        assert plan['transactions'] == expected_transactions
+        assert plan['comparisons'] == width * expected_transactions
+        assert entry['run_rc'] == 0 and entry['build_rc'] == 0
+        assert _fsf().instance_count(tb.read_text(), top) == 1
+        assert plan['observation']['clock_period_ns'] == period
+        assert plan['observation']['sample_offset_ns'] == cd + od + 0.75
+        assert plan['framing']['settled_latency'] == latency
+        assert len(plan['pairs']) == (9 if entry['name'] == 'operand_limits' else
+                                     16 if entry['name'] == 'transaction_sequence' else 20)
+        # Independently inspect the actual simulator clock waveform, rather
+        # than accepting the producer's claimed period in the plan header.
+        trace = (root / entry['trace']['vcd']).read_text()
+        clock = 'i_clk' if renamed else 'clk'
+        symbol = re.search(r'\$var \w+ 1 (\S+) ' + clock + r' \$end', trace).group(1)
+        assert '$timescale\n\t1ps\n$end' in trace
+        time = 0; rising = []
+        for line in trace.splitlines():
+            if line.startswith('#'):
+                time = int(line[1:])
+            elif line == '1' + symbol:
+                rising.append(time)
+        assert len(rising) > 2 and set(b - a for a, b in zip(rising, rising[1:])) == {period * 1000}
+    assert not (root / 'input/tb').exists()
+
+
+@pytest.mark.parametrize('mode', ['wrong_product', 'wrong_cycle', 'ignored_reset', 'unknown'])
+def test_declared_timing_native_bad_design_stays_blocking(tmp_path, mode):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed', mode=mode)
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'FAIL' and rc == 1, (result, consumed)
+    assert result['counts']['failed'] > 0
+    for entry in result['cases']:
+        assert entry['build_rc'] == 0
+        assert entry['run_rc'] in (0, 1)
+        plan = aog._scenario_header(root / entry['tb'])
+        transcript = (root / entry['run_log']).read_text()
+        match = re.search(r'^ARITH_SCENARIO_DONE transactions=(\d+) comparisons=(\d+) errors=(\d+) held_edges=(\d+)$', transcript, re.M)
+        assert match and tuple(map(int, match.groups()[:2])) == (plan['transactions'], plan['comparisons'])
+    assert consumed['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('refusal', ['missing', 'stale_model', 'wrong_clock', 'outside_cycle', 'before_settle'])
+def test_declared_timing_unsupported_contract_refuses_before_native(tmp_path, refusal):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed', refusal=refusal)
+    calls = []
+    def forbidden(*args):
+        calls.append(args)
+        pytest.fail('unsupported timing dispatched a simulator')
+    model = root / 'input/models/public_delay.v'
+    result = _fsf().generate(root, dispatch=forbidden, model_resolver=lambda *args: ({str(model): model.read_text()}, 'public model'))
+    assert not calls and result['verdict'] == 'NOT_MEASURED', result
+    assert result['counts']['executed'] == 0 and result['counts']['rows'] == 3
+    rc, consumed, _ = gate.functional_full_stack_verdict(root)
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED'
+    assert result.get('arithmetic_scenario_requests')
+    assert all('plugin_output/declaration.json#/verification_stimuli/arithmetic_observation/' in
+               '; '.join(r['unsupported_requirements'])
+               for r in result['arithmetic_scenario_requests'])
+
+
+@pytest.mark.parametrize('mutation', ['missing_population', 'stale_declaration', 'stale_model', 'stale_input_model'])
+def test_declared_timing_consumer_rechecks_population_and_identity(tmp_path, mutation):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed')
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'PASS' and rc == 0, (result, consumed)
+    fs = _fsf()
+    if mutation == 'missing_population':
+        entry = result['cases'][0]; log = root / entry['run_log']
+        shutil.copy2(log, log.with_suffix('.original'))
+        log.write_text(re.sub(r'^ARITH_SCENARIO_DONE.*\n', '', log.read_text(), flags=re.M))
+        entry['run_log_sha256'] = fs.sha256_file(log)
+        fs.record_path(root).write_text(json.dumps(result))
+    elif mutation == 'stale_declaration':
+        file = root / 'plugin_output/declaration.json'
+        file.write_text(file.read_text() + ' ')
+    elif mutation == 'stale_model':
+        file = root / result['models'][0]['path']
+        file.write_text(file.read_text() + '\n// changed model identity\n')
+    else:
+        file = root / 'input/models/public_delay.v'
+        file.write_text(file.read_text() + '\n// changed original selected model identity\n')
+    rc, consumed, _ = gate.functional_full_stack_verdict(root)
+    (root / 'mutated_consumer.json').write_text(json.dumps({'rc': rc, 'report': consumed}, indent=2))
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED', consumed
+
+
+@pytest.mark.parametrize('rc,record,marker,state', [
+    (0, 'transactions=9 comparisons=72 errors=1 held_edges=2', True, 'failed'),
+    (1, 'transactions=9 comparisons=72 errors=0 held_edges=2', False, 'failed'),
+    (0, 'transactions=0 comparisons=0 errors=0 held_edges=2', True, 'errored'),
+    (0, 'transactions=9 comparisons=72 errors=0 held_edges=2\nARITH_SCENARIO_DONE transactions=9 comparisons=72 errors=0 held_edges=2', True, 'errored'),
+    (0, 'transactions=9 comparisons=72 errors=0 held_edges=2', True, 'passed'),
+], ids=['errors_override_pass', 'nonzero_rc_blocks', 'empty_population', 'duplicate_population', 'canonical_success'])
+def test_arithmetic_population_counters_keep_strict_score_precedence(rc, record, marker, state):
+    # Source-only transcript controls, separate from the native DUT arms above.
+    text = 'ARITH_SCENARIO_DONE ' + record + '\n'
+    if marker:
+        text += '[TB counter_case] PASS: scenario\n'
+    assert _fsf().score_transcript('counter_case', rc, text)['state'] == state

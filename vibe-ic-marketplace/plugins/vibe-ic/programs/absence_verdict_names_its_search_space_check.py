@@ -404,9 +404,8 @@ def absence_verdicts(tree: ast.AST) -> List[Tuple[int, str, List[ast.AST]]]:
         if _func_name(call.func) in _NOT_A_REFUSAL:
             continue
         for i, arg in enumerate(call.args):
-            if not (isinstance(arg, ast.Constant)
-                    and isinstance(arg.value, str)
-                    and ABSENCE_RULE_ID.match(arg.value)):
+            rule_id, detail = _prefixed_rule(arg)
+            if rule_id is None:
                 continue
             companions: List[ast.AST] = [
                 a for j, a in enumerate(call.args) if j != i]
@@ -415,6 +414,7 @@ def absence_verdicts(tree: ast.AST) -> List[Tuple[int, str, List[ast.AST]]]:
             # says where it looked in the keyword, not in a value.
             companions += [ast.Constant(value=kw.arg) for kw in call.keywords
                            if kw.arg]
+            companions += detail
             # walk out to the enclosing call(s), at most two levels
             node: Any = call
             for _ in range(6):
@@ -428,7 +428,8 @@ def absence_verdicts(tree: ast.AST) -> List[Tuple[int, str, List[ast.AST]]]:
                                    for kw in node.keywords if kw.arg]
                     break
             companions += _returned_collector_context(tree, call)
-            out.append((call.lineno, arg.value, companions))
+            companions += _printed_path_parameters(tree, call, companions)
+            out.append((call.lineno, rule_id, companions))
             break
     return out
 
@@ -445,6 +446,64 @@ def _enclosing_function(tree: ast.AST, lineno: int) -> ast.AST:
                 if best_span < 0 or span < best_span:
                     best, best_span = n, span
     return best
+
+
+def _prefixed_rule(arg: ast.AST) -> Tuple[Optional[str], List[ast.AST]]:
+    """Keep a stable exception code plus its detail in the refusal population.
+
+    ValueError takes a single message. ``CODE + ': ' + detail`` is the same
+    refusal as ``Refusal(CODE, detail)``; counting only the latter would lose
+    the former entirely. Only an exact leading rule literal is recognized.
+    A mention of a rule inside arbitrary prose is not a constructed refusal.
+    """
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        if ABSENCE_RULE_ID.fullmatch(arg.value):
+            return arg.value, []
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
+        if isinstance(arg.left, ast.Constant) and isinstance(arg.left.value, str) \
+                and ABSENCE_RULE_ID.fullmatch(arg.left.value):
+            tail = arg.right
+            first = tail.values[0] if isinstance(tail, ast.JoinedStr) and tail.values else tail
+            if isinstance(first, ast.BinOp) and isinstance(first.op, ast.Add):
+                first = first.left
+            if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                    and first.value.startswith(": "):
+                return arg.left.value, [tail]
+    return None, []
+
+
+def _printed_path_parameters(tree: ast.AST, call: ast.Call,
+                             companions: List[ast.AST]) -> List[ast.AST]:
+    """Recognize an emitted Path argument even when named ``folder``.
+
+    Require a real pathlib import, no shadow/rebinding of its alias or of the
+    parameter, and an actual reference in this diagnostic. Merely annotating
+    an unprinted input or calling an arbitrary variable 'folder' proves nothing.
+    """
+    owner = _enclosing_function(tree, call.lineno)
+    if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return []
+    aliases = {a.asname or a.name for n in tree.body if isinstance(n, ast.ImportFrom)
+               and n.module == 'pathlib' for a in n.names if a.name == 'Path'}
+    module_bound = _bound_names(_scope_nodes(tree))
+    local_bound = _bound_names(_scope_nodes(owner))
+    aliases = {name for name in aliases if module_bound.count(name) == 1
+               and name not in local_bound}
+    emitted = {expr.id for expr in companions if isinstance(expr, ast.Name)}
+    for expr in companions:
+        for node in ast.walk(expr):
+            if isinstance(node, ast.FormattedValue) and isinstance(node.value, ast.Name):
+                emitted.add(node.value.id)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in {'str', 'repr'}
+                  and node.func.id not in module_bound + local_bound
+                  and len(node.args) == 1 and not node.keywords
+                  and isinstance(node.args[0], ast.Name)):
+                emitted.add(node.args[0].id)
+    args = [*owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs]
+    return [a.annotation for a in args if a.arg in emitted
+            and local_bound.count(a.arg) == 1
+            and isinstance(a.annotation, ast.Name) and a.annotation.id in aliases]
 
 
 def scan(root: Path, include_tests: bool = False) -> Dict[str, Any]:

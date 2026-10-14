@@ -677,3 +677,24 @@ def test_the_shipped_tree_reports_no_unparseable_file(shipped_sweep):
     assert rep["unparseable"] == [], rep["unparseable"]
     assert rep["undecidable"] == [], rep["undecidable"]
     assert rc == 0, out
+
+
+@pytest.mark.parametrize('worker_name',['frontend','native'])
+@pytest.mark.parametrize('tap',['omitted',None,'neutral_tap'])
+def test_allocated_pdk_kwargs_preserve_typed_default_and_selected_value(tmp_path,monkeypatch,worker_name,tap):
+    from dataclasses import asdict
+    import phase3_one_shot_runner as phase3
+    import execution_frontend_worker as frontend
+    import execution_native_worker as native
+    observed=[];original=phase3.PdkConfig.__init__
+    def init(self,*args,**kwargs):
+        observed.append(dict(kwargs));original(self,*args,**kwargs)
+    monkeypatch.setattr(phase3.PdkConfig,'__init__',init)
+    values={'name':'neutral','liberty':'input/neutral.lib','site':'neutral_site'}
+    if tap!='omitted':values['tapcell_master']=tap
+    got=frontend._step7_pdk(values,tmp_path,tmp_path/'out') if worker_name=='frontend' else native._pdk_config(values,tmp_path/'pdk',tmp_path,tmp_path/'out')
+    expected=None if tap=='omitted' else tap
+    assert got.tapcell_master==expected
+    assert observed[0].get('tapcell_master','implicit-default')==expected
+    assert asdict(got)['tapcell_master']==expected and got.name=='neutral' and got.liberty=='input/neutral.lib'
+    assert got.tech_lef=='' and got.cell_lef=='' and got.cell_gds is None

@@ -1122,7 +1122,7 @@ def _supply_declared(pin: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
+def _optional_declared(pin: Dict[str, Any], required_signal_names=()) -> Optional[str]:
     """The intent's OWN declaration that this pin is OPTIONAL, or None.
 
     Phase 1 writes `optional: true` on a pin whose source row the design input
@@ -1135,38 +1135,18 @@ def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
     reviewer that disarmed on it would be silencing a pin the intent did not
     release.
     """
-    if pin.get("optional") is True:
+    # An explicit required signal, including its published pin aliases, is
+    # still an obligation when another row carries an optional/False marker.
+    if (pin.get("optional") is True
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True
+            and str(pin.get("name")) not in required_signal_names):
         return "optional=True"
     return None
 
 
-def _intent_pin_obligations(content, pins):
-    """Explicit requirements and conflicting alias labels release no pin.
-
-    L9 retains the same interface in several pin tables. A false documentary
-    label in one table cannot override a true implementation label elsewhere,
-    nor can an optional/supply label override an explicit required/mandatory
-    declaration. Only actual boolean labels count.
-    """
-    rows = list(pins)
-    for field in ("top_ports", "ports", "top_module_pins"):
-        if isinstance(content.get(field), list):
-            rows.extend(content[field])
-    required, implemented, documentary = set(), set(), set()
-    for pin in rows:
-        if not isinstance(pin, dict) or not pin.get("name"):
-            continue
-        name = str(pin["name"])
-        if pin.get("required") is True or pin.get("mandatory") is True:
-            required.add(name)
-        if pin.get("declared_by_staged_top") is True:
-            implemented.add(name)
-        elif pin.get("declared_by_staged_top") is False:
-            documentary.add(name)
-    return required | (implemented & documentary)
-
-
-def _documentary_intent_pins(project, content, pins, artefact_top):
+def _documentary_intent_pins(project, content, pins, artefact_top,
+                             required_signal_names=()):
     """Document examples released by a current selected-interface binding.
 
     The producer keeps these rows for document provenance. An absent-from-top
@@ -1216,6 +1196,7 @@ def _documentary_intent_pins(project, content, pins, artefact_top):
         return set()
     return {str(pin["name"]) for pin in pins
             if pin.get("name") in examples
+            and str(pin["name"]) not in required_signal_names
             and str(pin["name"]) not in implemented
             and pin.get("declared_by_staged_top") is False
             and pin.get("required") is not True
@@ -1230,16 +1211,30 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
         return {"readable": False, "why": str(e)}
     if not isinstance(d, dict):
         return {"readable": False, "why": "L9 is not a mapping"}
+    required_signal_pins = [pin
+        for field in _INTENT_PIN_FIELDS
+        for pin in (d.get(field) if isinstance(d.get(field), list) else [])
+        if isinstance(pin, dict) and pin.get("name")
+        and (pin.get("required") is True or pin.get("mandatory") is True)
+        and not _supply_declared(pin)]
+    required_signal_names = sorted({str(pin["name"]) for pin in required_signal_pins})
     for field in _INTENT_PIN_FIELDS:
         rows = d.get(field)
         if isinstance(rows, list) and rows:
             pins = [p for p in rows if isinstance(p, dict) and p.get("name")]
             if pins:
+                # A required signal published only in another supported alias
+                # still belongs to this interface. Keep the primary rows.
+                names = {str(pin["name"]) for pin in pins}
+                for pin in required_signal_pins:
+                    name = str(pin["name"])
+                    if name not in names:
+                        pins.append(pin)
+                        names.add(name)
                 return {"readable": True, "file": str(l9_path), "field": field,
                         "value": [str(p["name"]) for p in pins],
-                        "pins": pins, "top_module": d.get("top_module"),
-                        **{alias: d[alias] for alias in _INTENT_PIN_FIELDS
-                           if isinstance(d.get(alias), list)},
+                        "pins": pins, "_required_signal_names": required_signal_names,
+                        "top_module": d.get("top_module"),
                         "selected_interface_binding": d.get("selected_interface_binding")}
     return {"readable": True, "file": str(l9_path), "field": None,
             "value": [], "pins": []}
@@ -1359,6 +1354,7 @@ def rule_intent_pin_not_in_netlist(project: Path,
         return {"verdict": "NOT_CHECKED",
                 "why": f"{l9} does not exist; the intent was never published"}
     intent = read_intent_pins(l9)
+    required_signal_names = set(intent.pop("_required_signal_names", []))
     intent["intent_rel"] = str(l9.relative_to(project))
     if not intent.get("readable"):
         return {"verdict": "NOT_CHECKED", "why": f"{l9}: {intent.get('why')}"}
@@ -1391,8 +1387,8 @@ def rule_intent_pin_not_in_netlist(project: Path,
                         f"certifies nothing")}
 
     built = set(art["ports"])
-    obligations = _intent_pin_obligations(intent, intent["pins"])
-    documentary = _documentary_intent_pins(project, intent, intent["pins"], art["top"])
+    documentary = _documentary_intent_pins(
+        project, intent, intent["pins"], art["top"], required_signal_names)
     absent_signal: List[Dict[str, Any]] = []
     disarmed: List[Dict[str, Any]] = []
     for pin in intent["pins"]:
@@ -1400,13 +1396,12 @@ def rule_intent_pin_not_in_netlist(project: Path,
         if name in built:
             continue
         why_supply = _supply_declared(pin)
-        why_optional = None if why_supply else _optional_declared(pin)
+        why_optional = None if why_supply else _optional_declared(pin, required_signal_names)
         row = {"name": name,
                "direction": pin.get("direction") or pin.get("mode"),
                "evidence": pin.get("evidence")}
-        if name in obligations:
-            absent_signal.append(row)
-        elif why_supply:
+        # A same-name required signal alias still owes a built digital port.
+        if why_supply and name not in required_signal_names:
             row["intent_declares_supply"] = why_supply
             disarmed.append(row)
         elif why_optional:
@@ -1420,14 +1415,6 @@ def rule_intent_pin_not_in_netlist(project: Path,
             disarmed.append(row)
         else:
             absent_signal.append(row)
-    primary_names = {str(p["name"]) for p in intent["pins"]}
-    for name in sorted(obligations - built - primary_names):
-        pin = next(p for field in _INTENT_PIN_FIELDS
-                   for p in intent.get(field, [])
-                   if isinstance(p, dict) and str(p.get("name")) == name)
-        absent_signal.append({"name": name,
-                              "direction": pin.get("direction") or pin.get("mode"),
-                              "evidence": pin.get("evidence")})
     extra = sorted(built - {str(p["name"]) for p in intent["pins"]})
 
     art["extra_ports_not_in_intent"] = extra
@@ -3302,8 +3289,11 @@ _MODULE_RE = re.compile(
     return False
 
 
-def _is_optional(pin) -> bool:
-    return pin.get("optional") is True
+def _is_optional(pin, required_signal_names=()) -> bool:
+    return (pin.get("optional") is True
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True
+            and str(pin.get("name")) not in required_signal_names)
 
 
 def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
@@ -3313,6 +3303,19 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
     pins = [p for p in (intent.get(INTENT_FIELD) or [])
             if isinstance(p, dict) and p.get("name")]
     assert pins, "%s::%s declares no external pin" % (INTENT_REL, INTENT_FIELD)
+    required_signal_pins = [pin
+        for field in ("top_ports", "ports", "top_module_pins")
+        for pin in (intent.get(field) if isinstance(intent.get(field), list) else [])
+        if isinstance(pin, dict) and pin.get("name")
+        and (pin.get("required") is True or pin.get("mandatory") is True)
+        and not _is_supply(pin)]
+    required_signal_names = set(str(pin["name"]) for pin in required_signal_pins)
+    names = set(str(pin["name"]) for pin in pins)
+    for pin in required_signal_pins:
+        name = str(pin["name"])
+        if name not in names:
+            pins.append(pin)
+            names.add(name)
 
     text = (root / NETLIST_REL).read_text(encoding="utf-8", errors="replace")
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
@@ -3342,12 +3345,13 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "the netlist's structural top %r declares no port; an empty interface "
         "refutes nothing" % roots[0])
 
-    documentary = _documentary_intent_pins(root, intent, pins, roots[0])
-    obligations = _intent_pin_obligations(intent, pins)
-    absent = sorted((obligations - built) | {{str(p["name"]) for p in pins
+    documentary = _documentary_intent_pins(
+        root, intent, pins, roots[0], required_signal_names)
+    absent = sorted(str(p["name"]) for p in pins
                     if str(p["name"]) not in built
-                    and not _is_supply(p) and not _is_optional(p)
-                    and str(p["name"]) not in documentary}})
+                    and (not _is_supply(p) or str(p["name"]) in required_signal_names)
+                    and not _is_optional(p, required_signal_names)
+                    and str(p["name"]) not in documentary)
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
@@ -4078,8 +4082,7 @@ def _body_r2(finding: Dict[str, Any], stage_id: str) -> str:
         intent_rel=finding["intent"]["intent_rel"],
         intent_field=finding["intent"]["field"],
         netlist_rel=finding["artefact"]["artefact_rel"],
-        documentary_helper=(parser_source + inspect.getsource(_intent_pin_obligations)
-                            + "\n\n" + inspect.getsource(_documentary_intent_pins)))
+        documentary_helper=parser_source + inspect.getsource(_documentary_intent_pins))
 
 
 def _body_phase1_cited_input(finding: Dict[str, Any], stage_id: str) -> str:

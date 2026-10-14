@@ -51,6 +51,7 @@ from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
 from _atomic_artefact import write_bytes as _atomic_write_bytes
 import _runtime_pair_preflight as _runtime_pair
+import _progress_run
 import _container_exec as _challenge_exec
 
 HARNESS = Path(__file__).resolve().parent.parent / "benchmark"
@@ -3500,12 +3501,17 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             receipt["declaration"] = frozen
         try:
             inspect_argv = ["docker", "inspect", "--format", "{{json .Mounts}}", declaration["container_id"]]
-            cp = subprocess.run(inspect_argv, capture_output=True, text=True, timeout=30)
+            cp = _progress_run.run(inspect_argv, capture_output=True, text=True,
+                hard_ceiling_s=30, ceiling_notice=_challenge_exec.default_ceiling_notice('challenge mounts', 30))
             receipt["commands"].append({"stage": "mounts", "argv": inspect_argv,
                 "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr})
             mounts = _strict_json_loads(cp.stdout) if cp.returncode == 0 else []
             if not isinstance(mounts, list):
                 raise ValueError("container mounts are not a list")
+        except _progress_run.Stalled as exc:
+            receipt['commands'].append({'stage': 'mounts', 'argv': inspect_argv,
+                'returncode': None, 'stdout': exc.stdout, 'stderr': exc.stderr, 'stalled': True})
+            return finish({'status': 'UNAVAILABLE', 'reasons': [str(exc)]})
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return finish({"status": "UNAVAILABLE", "reasons": [f"native mounts unavailable: {exc}"]})
 
@@ -3534,21 +3540,29 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             command = shlex.join(argv)
             if cwd is not None:
                 command = "cd " + shlex.quote(mapped(cwd)) + " && exec " + command
-            actual_argv = _challenge_exec.container_deadline_argv(
-                declaration["container_id"], command, 30,
-                shell=("env", "IIC_OSIC_TOOLS_QUIET=1", "bash", "-lc"))
-        record = {"stage": stage, "tool_argv": argv, "argv": actual_argv, "cwd": cwd}
+            actual_argv = _challenge_exec.docker_exec_argv(
+                declaration['container_id'], 'env', 'IIC_OSIC_TOOLS_QUIET=1', 'bash', '-lc', command)
+        record = {"stage": stage, "tool_argv": argv, "argv": actual_argv, "cwd": cwd,
+                  "declared_budgets_s": {"tool": 30, "client": 45 if native else 30}}
         receipt["commands"].append(record)
         try:
-            cp = subprocess.run(actual_argv, cwd=None if native else cwd,
-                capture_output=True, text=True, timeout=45 if native else 30)
-        except subprocess.TimeoutExpired as exc:
-            record.update(returncode=None,
-                stdout=exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout,
-                stderr=exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
-                timed_out=True)
-            raise
+            if native:
+                cp = _challenge_exec.run_in_container_supervised(
+                    declaration['container_id'], command, ceiling_s=45,
+                    shell=('env', 'IIC_OSIC_TOOLS_QUIET=1', 'bash', '-lc'))
+                # CompletedProcess.args is the exact supervised/stamped launch.
+                record['argv'] = cp.args
+            else:
+                cp = _progress_run.run(actual_argv, cwd=cwd,
+                    capture_output=True, text=True, hard_ceiling_s=30,
+                    ceiling_notice=_challenge_exec.default_ceiling_notice('challenge ' + stage, 30))
+        except _progress_run.Stalled as exc:
+            record.update(returncode=None, stdout=exc.stdout, stderr=exc.stderr, stalled=True)
+            raise ValueError(f'STALLED challenge {stage}: {exc}') from exc
         record.update(returncode=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
+        if cp.returncode == _progress_run.RC_STALLED:
+            record.update(returncode=None, supervisor_returncode=cp.returncode, stalled=True)
+            raise ValueError(f'STALLED challenge {stage}: {cp.stderr}')
         if native:
             actual, why = _challenge_native_identity(declaration)
             receipt["identity_after_" + stage] = actual
@@ -5565,7 +5579,7 @@ def _read_receipt_history(project: Path, kind: str) -> tuple[dict, list[dict]]:
         raise ValueError("RECEIPT_HISTORY_HEAD_SEQUENCE_INVALID")
     history_dir = _receipt_history_dir(project, kind)
     if history_dir.is_symlink() or not history_dir.is_dir():
-        raise ValueError("RECEIPT_HISTORY_MISSING")
+        raise ValueError('RECEIPT_HISTORY_MISSING' + f": {history_dir}: receipt history directory is absent or linked; required *.json sequence members not read")
     indexed = []
     for path in history_dir.glob("*.json"):
         if path.is_symlink():
@@ -5846,7 +5860,7 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
     _seal_route_admission(run_p, task, decision)
     source_sha = str(route_receipt.get("source_sha256") or "")
     if not source_sha:
-        raise ValueError("D1_ACTIVATION_SOURCE_MISSING")
+        raise ValueError('D1_ACTIVATION_SOURCE_MISSING' + (": " + "_activate_route_d1.route_receipt.source_sha256 is empty after route admission validation"))
     task_sha = str(task.get("task_sha256") or "")
     pending = rd.write_d1_pending(
         _receipt_current_pointer(project, "d1_pending"), route_receipt=route_receipt,
@@ -5949,7 +5963,7 @@ def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
     report = capture(report_path)
     ldocs = tuple(capture(p) for p in sorted(docs.glob("L*.json")))
     if not ldocs:
-        raise ValueError("D1_SNAPSHOT_LDOCS_MISSING")
+        raise ValueError('D1_SNAPSHOT_LDOCS_MISSING' + f": {docs}: glob L*.json yielded no D1 layer documents")
     try:
         activation_sha = _read_current_receipt(project, "d1_activation")["receipt"]["activation_sha256"]
     except (OSError, ValueError, KeyError):
@@ -6135,7 +6149,7 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         current_route = _read_current_receipt(project, "route_decision")
         receipt = current_route["receipt"]
         if not isinstance(stored_receipt, dict):
-            raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_MISSING")
+            raise ValueError('ROUTE_REENTRY_ROUTE_RECEIPT_MISSING' + (": " + "result.route_receipt and result.routing_verdict.route_receipt are absent or not objects at route reentry"))
         if stored_receipt.get("receipt_sha256") != receipt.get("receipt_sha256"):
             raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_STALE")
         errors = _rd.validate_route_receipt(receipt)
@@ -7374,7 +7388,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             nature = verdict["nature"]
             route_receipt = verdict.get("route_receipt")
             if not isinstance(route_receipt, dict):
-                raise ValueError("ROUTE_RECEIPT_MISSING")
+                raise ValueError('ROUTE_RECEIPT_MISSING' + f": route_decisions[{pid!r}].route_receipt is absent or not an object")
             receipt_errors = rd.validate_route_receipt(route_receipt)
             if receipt_errors:
                 raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(receipt_errors))

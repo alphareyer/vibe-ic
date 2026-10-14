@@ -425,9 +425,10 @@ def test_shipped_step_30_is_incomplete_without_correlation_inputs(
     """END-TO-END on the step definition the flow actually ships, so a rewire
     that drops the gate breaks this test rather than passing quietly.
 
-    The fixture satisfies step 30's `files_exist` sub-gate (a SPICE deck is
-    present) while the program still has nothing to correlate — no SPEF, no
-    STA. That is precisely the state the vacuous tier exists to name."""
+    The component examines nothing before its producer and reports that
+    nonmeasurement. The aggregate still FAILs: a deck alone satisfies only
+    one of two declared outputs. These are distinct contracts; an early
+    component audit cannot certify the missing correlation product."""
     step = _shipped_step(30)
     assert "spice_correlation_check" in _flow._declared_gate_commands(
         step["gate"]), step["gate"]
@@ -436,10 +437,45 @@ def test_shipped_step_30_is_incomplete_without_correlation_inputs(
     (proj / "phase3" / "stage3" / "spice").mkdir(parents=True)
     (proj / "phase3" / "stage3" / "spice" / "crit.sp").write_text("* deck\n.end\n")
     (proj / "reports" / "phase3").mkdir(parents=True)
-    (proj / "reports" / "phase3" / "spice_correlation.json").write_text("{}")
+
+    correlation_spec = (
+        "phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json")
+    assert correlation_spec in step["required_outputs"]
+    correlation_outputs = (
+        proj / "phase3" / "stage3" / "spice" / "correlation.json",
+        proj / "reports" / "phase3" / "spice_correlation.json")
+    assert not any(path.exists() for path in correlation_outputs)
+    assert not (proj / "phase3" / "stage3" / "pnr" / "routed.def").exists()
+    assert not (proj / "phase3" / "stage3" / "extracted").exists()
+    assert not (proj / "phase3" / "stage3" / "sta").exists()
+
+    # Use the existing real Python CLI helper. This separate audit output is
+    # outside the project and cannot masquerade as a Step30 producer product.
+    audit = tmp_path / "step30-component-audit.json"
+    component = _run("spice_correlation_check", proj, report=audit)
+    assert component.returncode == _vx.RC_VACUOUS, component.stdout + component.stderr
+    component_doc = json.loads(audit.read_text())
+    summary = component_doc["summary"]
+    assert summary["skipped"] is True, component_doc
+    assert summary["measurement"] == "NOT_MEASURED", component_doc
+    # Top-level passed is routing bookkeeping, never measurement or IC PASS.
+    assert summary["pass"] is False, component_doc
+    assert summary["reason"] == "asked_before_producer", component_doc
+    assert summary["reason_class"] == "ASKED_BEFORE_PRODUCER", component_doc
+    assert summary["current_binding"] == "NOT_YET_PRODUCED", component_doc
 
     result = _flow.check_step(proj, step, waivers={})
-    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
+    assert result.status == "FAIL", (result.status, result.reasons)
+    assert result.reason_class == "missing_artefact", result.reasons
+    binding = result.output_binding
+    assert binding["n_specs"] == 2, binding
+    assert binding["n_satisfied"] == 1, binding
+    assert [row["spec"] for row in binding["specs"]
+            if not row["satisfied"]] == [correlation_spec], binding
+    assert any(reason.startswith(f"required_outputs missing: {[correlation_spec]} ")
+               and "satisfied: 1/2" in reason for reason in result.reasons), result.reasons
+    assert result.evidence == ["phase3/stage3/spice/crit.sp"], result.evidence
+    assert not any(path.exists() for path in correlation_outputs)
 
 
 def test_the_live_step_wiring_is_what_this_change_measured(tmp_path):

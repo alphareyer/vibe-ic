@@ -29,6 +29,8 @@ design. The guard is keyed on RTL provenance alone.
 """
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -510,3 +512,198 @@ def test_guard_ignores_ic_class_identity(tmp_path, monkeypatch):
 
     assert outcomes == ["PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS"], (
         "provenance decisions must not vary with the IC class label")
+
+
+# Public, independently declared source inputs; no HDL tools or field captures.
+_ORIGIN_INPUT = Path(__file__).parent / "data" / "origin_finalizer.json"
+_ORIGIN_CASES = json.loads(_ORIGIN_INPUT.read_text())["producers"]
+
+
+@pytest.fixture
+def origin_session(monkeypatch):
+    R._phase1_replace_session_binding(None)
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    yield
+    R._phase1_replace_session_binding(None)
+
+
+def _origin_project(tmp_path, declared):
+    project = tmp_path / declared["id"]
+    for rel, text in declared["input_files"].items():
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    result = R.step_rtl_gen(project, "digital_arithmetic_primitive")
+    assert result.status == "PASS", result.detail
+    ledger = R._rtl_prov.load_ledger(project)
+    assert ledger["generator"] == declared["origin"], ledger
+    assert R._rtl_prov.classify(project)[0] == R._rtl_prov.GENERATED
+    return project, result
+
+
+def _origin_observed(tmp_path, record_property, observed):
+    import hashlib
+    observed["input_sha256"] = hashlib.sha256(
+        _ORIGIN_INPUT.read_bytes()).hexdigest()
+    record_property("observed", json.dumps(observed, sort_keys=True))
+    (tmp_path / "origin_observed.json").write_text(
+        json.dumps(observed, indent=2, sort_keys=True) + "\n")
+
+
+@pytest.mark.parametrize("declared", _ORIGIN_CASES,
+                         ids=[c["id"] for c in _ORIGIN_CASES])
+@pytest.mark.parametrize("late_work", ["unchanged", "wrapper", "hygiene"])
+@pytest.mark.parametrize("consumer", ["pure", "standalone", "terminal"])
+def test_origin_survives_actual_producer_finalization_and_handoff(
+        tmp_path, monkeypatch, origin_session, declared, late_work, consumer,
+        record_property):
+    from test_flow_phase_attribution_is_general import (
+        _input_state, _terminal_report_only)
+    import flow_phase_attribution as attribution
+    import ai_signed_judgement
+
+    project, emitted = _origin_project(tmp_path, declared)
+    original_ledger = R._rtl_prov.load_ledger(project)
+    if late_work == "wrapper":
+        (_rtl(project) / "neutral_alias.v").write_text(
+            "module neutral_alias; endmodule\n")
+    elif late_work == "hygiene":
+        primary = next(_rtl(project).glob("*.v"))
+        primary.write_text(primary.read_text() + "// runner hygiene pass\n")
+    owned_bytes = {p.name: p.read_bytes() for p in _rtl(project).glob("*.v")}
+    emitted_record = json.dumps(emitted.__dict__, sort_keys=True)
+    R._finalize_rtl_provenance()
+    final_ledger = R._rtl_prov.load_ledger(project)
+    final_kind = R._rtl_prov.classify(project)
+    assert final_kind[0] == R._rtl_prov.GENERATED, final_kind
+    assert {p.name: p.read_bytes() for p in _rtl(project).glob("*.v")} == owned_bytes
+    assert set(final_ledger["files"]) == set(owned_bytes)
+    assert json.dumps(emitted.__dict__, sort_keys=True) == emitted_record
+    # A repeated exit callback has no remaining held transaction to publish.
+    finalized_state = _input_state(project)
+    R._finalize_rtl_provenance()
+    assert _input_state(project) == finalized_state
+    assert R._RTL_SESSION_BINDING is None
+
+    R._RTL_SESSION_OWNED = False
+    R._RTL_SESSION_PROJECT = None
+    # The second public subject declares a later unsupported specification.
+    # Exercise a real subsequent no-emission handoff, without stubbing dispatch.
+    for rel, text in declared.get("handoff_input_files", {}).items():
+        (project / rel).write_text(text)
+    handoff = R.step_rtl_gen(project, "digital_arithmetic_primitive")
+    assert handoff.status == "PASS_WITH_WAIVERS", handoff.detail
+    assert handoff.output_files == []
+    assert handoff.extras["fallback_skill"] == "spec-to-rtl"
+    report = project / "reports/orchestrator/phase2_one_shot.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({"verdict": "PASS_WITH_WAIVERS",
+                                 "steps": [handoff.__dict__]}) + "\n")
+    before = _input_state(project)
+    signature_before = ai_signed_judgement._requested(project, "1")
+    pure = attribution.attribute(project)
+    if consumer == "standalone":
+        proc = subprocess.run([
+            sys.executable, str(PROGRAMS_DIR / "flow_phase_attribution.py"),
+            str(project), "--json", "--no-write"],
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        actual = json.loads(proc.stdout)
+    elif consumer == "terminal":
+        actual = _terminal_report_only(project)
+    else:
+        actual = pure
+    assert actual == pure
+    after = _input_state(project)
+    solving = actual["phase2_solving"]
+    _origin_observed(tmp_path, record_property, {
+        "producer": declared["id"], "late_work": late_work,
+        "consumer": consumer, "emission": emitted.__dict__,
+        "original_ledger": original_ledger, "final_ledger": final_ledger,
+        "final_classification": final_kind, "handoff": handoff.__dict__,
+        "attribution": actual, "before_report": before, "after_report": after,
+        "signature_requested": signature_before})
+    assert after == before
+    assert R._rtl_prov.classify(project) == final_kind
+    assert ai_signed_judgement._requested(project, "1") == signature_before is False
+    assert (solving["solved_by"], solving["emitter"]) == (
+        "EMITTER", declared["origin"]), solving
+    assert final_ledger["generator"] == declared["origin"]
+    assert solving["reused"] is True
+    assert solving["emitted_in_this_invocation"] is False
+    assert solving["ai_authored_in_this_invocation"] is False
+    assert solving["current_dispatch"] == {
+        "status": "PASS_WITH_WAIVERS", "fallback_skill": "spec-to-rtl",
+        "mechanism": "AI_HANDOFF", "actor": "spec-to-rtl"}
+
+
+@pytest.mark.parametrize("damage", [
+    "missing-ledger", "invalid-ledger", "missing-producer",
+    "invalid-producer", "blank-producer"])
+def test_finalizer_does_not_invent_an_unvalidated_origin(
+        tmp_path, origin_session, damage, record_property):
+    import flow_phase_attribution as attribution
+    project, _ = _origin_project(tmp_path, _ORIGIN_CASES[0])
+    lp = R._rtl_prov.ledger_path(project)
+    if damage == "missing-ledger":
+        lp.unlink()
+    elif damage == "invalid-ledger":
+        lp.write_text("{invalid public ledger")
+    else:
+        ledger = R._rtl_prov.load_ledger(project)
+        ledger["generator"] = {"missing-producer": None,
+                               "invalid-producer": {"name": "unvalidated"},
+                               "blank-producer": "  "}[damage]
+        lp.write_text(json.dumps(ledger))
+    R._finalize_rtl_provenance()
+    kind = R._rtl_prov.classify(project)
+    row = attribution.phase2_solving({"steps": [{
+        "name": "rtl_gen", "status": "PASS_WITH_WAIVERS",
+        "extras": {"fallback_skill": "spec-to-rtl"}}]}, None, project=project)
+    _origin_observed(tmp_path, record_property,
+                     {"damage": damage, "classification": kind, "solving": row})
+    assert (row["solved_by"], row["emitter"]) == ("AI_BACKUP", None), row
+    assert kind[0] == (R._rtl_prov.UNKNOWN if damage.endswith("ledger")
+                       else R._rtl_prov.GENERATED)
+    assert R._RTL_SESSION_BINDING is None
+
+
+@pytest.mark.parametrize("state", [
+    "foreign", "modified", "added", "missing-ledger", "invalid-ledger", "empty"])
+def test_finalizer_without_session_preserves_unowned_state(
+        tmp_path, origin_session, state):
+    from test_flow_phase_attribution_is_general import _input_state
+    project = _new_project(tmp_path)
+    source = _rtl(project) / "neutral.v"
+    if state != "empty":
+        source.write_text("// generator=spoofed_name\nmodule neutral; endmodule\n")
+    if state in ("modified", "added"):
+        R._rtl_prov.stamp(project, generator="prior-public-emitter")
+        if state == "modified":
+            source.write_text(source.read_text() + "// foreign edit\n")
+        else:
+            (_rtl(project) / "foreign.sv").write_text("module foreign; endmodule\n")
+    elif state == "invalid-ledger":
+        R._rtl_prov.ledger_path(project).write_text("{invalid public ledger")
+    before = _input_state(project)
+    classification = R._rtl_prov.classify(project)
+    R._finalize_rtl_provenance()
+    assert _input_state(project) == before
+    assert R._rtl_prov.classify(project) == classification
+    assert classification[0] != R._rtl_prov.GENERATED
+
+
+def test_origin_finalization_refuses_a_replaced_held_project(
+        tmp_path, origin_session):
+    from test_flow_phase_attribution_is_general import _input_state
+    project, _ = _origin_project(tmp_path, _ORIGIN_CASES[0])
+    displaced = project.with_name("held-original")
+    project.rename(displaced)
+    project.mkdir()
+    (project / "foreign.txt").write_text("foreign replacement\n")
+    original_state, foreign_state = _input_state(displaced), _input_state(project)
+    R._finalize_rtl_provenance()
+    assert _input_state(displaced) == original_state
+    assert _input_state(project) == foreign_state
+    assert R._RTL_SESSION_BINDING is None

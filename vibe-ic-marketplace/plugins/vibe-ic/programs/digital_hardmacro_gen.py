@@ -2349,7 +2349,7 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         timing = json.loads((hm / LIBERTY_TIMING_RECORD).read_text())
         selected_netlist = Path(timing.get("netlist", ""))
         if not selected_netlist.is_file():
-            raise RuntimeError("IP_KIT_CURRENT_NETLIST_MISSING")
+            raise RuntimeError('IP_KIT_CURRENT_NETLIST_MISSING' + f": {hm / LIBERTY_TIMING_RECORD}: netlist={timing.get('netlist')!r} selected {selected_netlist}, which is not a file")
         stage(v_path, lambda q: shutil.copyfile(selected_netlist, q))
 
     # ORDER IS A DECISION, AND IT DEPENDS ON WHETHER A DELIVERY IS AT RISK.
@@ -2426,7 +2426,7 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
                 ("verilog", v_path), ("log", hm / "digital_lef.log"),
                 ("timing_log", hm / "timing_native.log"))}
             if "DIGITAL_LEF_WRITE_DONE" not in (hm / "digital_lef.log").read_text():
-                raise ValueError("IP_KIT_NATIVE_LEF_EXECUTION_MISSING")
+                raise ValueError('IP_KIT_NATIVE_LEF_EXECUTION_MISSING' + f": {hm / 'digital_lef.log'}: missing DIGITAL_LEF_WRITE_DONE completion marker")
             rec.current = _pc.build(project, "37.5ip", "stage4", design, pdk_name,
                                     "magic+opensta", inputs, outputs,
                                     {"rc": 0, "argv": ["magic", "lef write"],

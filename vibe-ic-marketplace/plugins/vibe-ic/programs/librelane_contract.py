@@ -579,29 +579,18 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
     with _ce.local_engine_cwd() as scratch:
         if child_cwd is None:
             kw.setdefault('cwd', scratch)
-        if probe_deadline_s is not None:
-            # A probe timeout kills the native group, including descendants.
-            # A tool's natural rc=124 remains an ordinary tool failure.
-            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True, start_new_session=True, env=environment, **kw) as child:
-                try:
-                    out, err = child.communicate(timeout=probe_deadline_s)
-                except subprocess.TimeoutExpired:
-                    os.killpg(child.pid, signal.SIGKILL)
-                    out, err = child.communicate()
-                    raise Refusal('LL_TOOL_DEADLINE', f'LOCAL probe passed {probe_deadline_s:g} s; '
-                                  f'{_salvage(out, err, log)}') from None
-                result = subprocess.CompletedProcess(command, child.returncode, out, err)
-        else:
-            import _watchdog as _wd
-            grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
-            result = _wd.run_host_supervised(command, env=environment,
-                stall_grace_s=grace, hard_ceiling_s=TOOL_BUDGET_S,
-                ceiling_notice=_ce.default_ceiling_notice('LOCAL LibreLane', TOOL_BUDGET_S), **kw)
-            if result.outcome == 'stalled':
-                raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
-                              f'{_salvage(result.out, result.err, log)}')
-            result = _wd.completed_process(command, result)
+        import _watchdog as _wd
+        # The caller's probe allowance remains an observable budget. Stillness,
+        # rather than crossing that budget, is what permits the owned group reap.
+        budget = TOOL_BUDGET_S if probe_deadline_s is None else probe_deadline_s
+        grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
+        result = _wd.run_host_supervised(command, env=environment,
+            stall_grace_s=grace, hard_ceiling_s=budget,
+            ceiling_notice=_ce.default_ceiling_notice('LOCAL LibreLane', budget), **kw)
+        if result.outcome == 'stalled':
+            raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
+                          f'{_salvage(result.out, result.err, log)}')
+        result = _wd.completed_process(command, result)
     if provider is not None:
         changed = []
         if (provider.librelane_root and
@@ -2744,9 +2733,9 @@ def image_capability(image: str, docker: str = 'docker') -> dict:
                              '--entrypoint', 'bash', image, '-c', _TCL_PROBE],
                             probe_deadline_s=PROBE_DEADLINE_S)
     except Refusal as exc:
-        if exc.code != 'LL_TOOL_DEADLINE':
+        if exc.code not in ('LL_TOOL_DEADLINE', 'LL_TOOL_STALLED'):
             raise
-        # Best effort, like rc != 0 below: a probe that ran out of time
+        # Best effort, like rc != 0 below: a secondary probe that stopped
         # measured nothing, and the capability verdict above still stands.
         _CAPABILITY[key] = {'image': image, 'openroad_aliases': {},
                             'tcl_probe': f'NOT_MEASURED: {str(exc)[:300]}'}

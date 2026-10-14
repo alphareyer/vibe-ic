@@ -12,6 +12,83 @@ sys.path.insert(0, str(PROGRAMS))
 import hdl_declaration_scan_strips_comments_check as G  # noqa: E402
 
 
+def _section_source():
+    from _source_pin import func_src
+
+    source = (PROGRAMS / "l9_l19_contract_carrythrough.py").read_text()
+    heading = next(line for line in source.splitlines()
+                   if line.startswith("_HEADING_RE ="))
+    return ("from __future__ import annotations\nimport re\n" + heading + "\n"
+            + func_src(source, "_sections") + "\n"
+            + func_src(source, "_selected") + "\n")
+
+
+def test_public_markdown_heading_reader_returns_sections_without_hdl_findings():
+    import re
+    from types import SimpleNamespace
+
+    source = _section_source() + r'''
+def request(records):
+    rx = re.compile(r"\bmodule\b")
+    return _selected(records, ["L9"], rx)
+'''
+    namespace = {"_polarity": SimpleNamespace(is_denied=lambda text: False)}
+    exec(compile(source, "<public-markdown-source>", "exec"), namespace)
+    records = [{"layer": "L9", "source": "input/docs/L9.md", "text":
+                "# module requirements\nordinary description\n# timing\n10 ns\n"}]
+    assert namespace["request"](records) == [{
+        "source": "input/docs/L9.md", "heading": "module requirements",
+        "evidence": "# module requirements\nordinary description"}]
+    assert G.scan_source(source, "neutral") == []
+
+
+@pytest.mark.parametrize("venue", [
+    "heading_name", "markdownlike_hdl", "misleading_reader",
+    "rebound_heading", "shadowed_reader",
+])
+def test_heading_labels_do_not_hide_real_unstripped_hdl(venue):
+    import re
+
+    source = _section_source().split("def _selected", 1)[0]
+    prelude = ""
+    scan = "heading = text"
+    if venue == "misleading_reader":
+        source = "import re\n"
+        prelude = "def _sections(text):\n    return [(text, text)]\n"
+        scan = "for heading, body in _sections(text):\n        return rx.findall(heading)"
+    elif venue in {"rebound_heading", "shadowed_reader"}:
+        if venue == "shadowed_reader":
+            prelude = "def _sections(text):\n    return [(text, text)]\n"
+        scan = ("for heading, body in _sections(text):\n"
+                "        heading = text\n        return rx.findall(heading)")
+    if venue in {"heading_name", "markdownlike_hdl"}:
+        scan += "\n    return rx.findall(heading)"
+    source += prelude + ("\ndef parse(text):\n"
+                         '    rx = re.compile(r"\\bmodule\\s+(\\w+)")\n'
+                         "    " + scan + "\n")
+    namespace = {}
+    exec(compile(source, "<raw-hdl-heading-control>", "exec"), namespace)
+    text = ("/*\n# module phantom\n*/\nmodule actual; endmodule\n"
+            if venue == "markdownlike_hdl" else
+            "# title\n// module phantom\nmodule actual; endmodule\n")
+    assert namespace["parse"](text) == ["phantom", "actual"]
+    assert G.scan_source(source, "neutral") == ["neutral::parse::rx(heading)"]
+
+
+def test_section_body_retains_its_unstripped_hdl_status():
+    source = _section_source().split("def _selected", 1)[0] + r'''
+def parse(text):
+    rx = re.compile(r"\bmodule\s+(\w+)")
+    for heading, body in _sections(text):
+        return rx.findall(body)
+'''
+    namespace = {}
+    exec(compile(source, "<section-body-control>", "exec"), namespace)
+    assert namespace["parse"]("# heading\n// module phantom\nmodule actual; endmodule") == [
+        "phantom", "actual"]
+    assert G.scan_source(source, "neutral") == ["neutral::parse::rx(body)"]
+
+
 _DEFINITION_EXPRESSIONS = {
     "default": "def inner(seed=rx.findall(code)):\n        return seed",
     "annotation": "def inner(seed: rx.findall(code)):\n        return seed",

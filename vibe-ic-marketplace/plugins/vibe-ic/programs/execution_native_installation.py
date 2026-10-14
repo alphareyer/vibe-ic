@@ -203,7 +203,7 @@ def verify_installation(receipt: Mapping[str, object], request: InstallationRequ
                         input_files: Mapping[str, Path], docker: str = "docker") -> InstallationReceipt:
     """Parent re-reads all bindings and image identity before adapter admission."""
     if not isinstance(receipt, Mapping):
-        raise em.Refusal("STEP9_INSTALLATION_RECEIPT_MISSING", request.image_ref)
+        raise em.Refusal("STEP9_INSTALLATION_RECEIPT_MISSING", f"verify_installation.receipt argument must be a Step9 installation object for image {request.image_ref}; no receipt fields inspected")
     try:
         typed = InstallationReceipt(**dict(receipt))
     except (TypeError, ValueError) as exc:

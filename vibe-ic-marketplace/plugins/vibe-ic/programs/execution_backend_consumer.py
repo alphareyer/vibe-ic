@@ -28,7 +28,7 @@ def import_selected(project, context, controller, run, adopted):
         raise em.Refusal("BACKEND_SELECTED_GENERATION_UNBOUND", context.step_id)
     manifest = selected_dir / "manifest.json"
     if not manifest.is_file() or manifest.is_symlink():
-        raise em.Refusal("BACKEND_SELECTED_MANIFEST_MISSING", context.step_id)
+        raise em.Refusal("BACKEND_SELECTED_MANIFEST_MISSING", f"{manifest}: selected-generation manifest.json is absent or linked for step {context.step_id}")
     try:
         bound = em._issued(manifest)
     except (OSError, ValueError, KeyError, em.Refusal) as exc:

@@ -535,3 +535,216 @@ def test_legacy_direct_sta_does_not_excuse_step30_current_input(tmp_path, monkey
     assert row.status == 'NOT_MEASURED'
     assert 'missing current inputs' in row.detail
     assert 'sta_postpnr_signoff.json' in row.detail
+
+
+def selected_path_transport(p, folder, lib, monkeypatch, *, available=3, mismatch_path=None):
+    """Extend the existing neutral executor substitute, without replacing consumers.
+
+    The finite requested count is a maximum. All path values and execution
+    records here are SOFTWARE_FIXTURE_ONLY, never native measurements.
+    """
+    import copy
+    import test_step30_r4_current_failures as current_fixture
+    current_fixture.correlation_tool(p, folder, lib, monkeypatch,
+                                     mismatch='CORRELATED', companion='success')
+    substitute = PST.run_step30
+    captured = []
+
+    def run(project, image, root, pdk_name, **kwargs):
+        requested = kwargs['paths']
+        captured.append(requested)
+        doc = substitute(project, image, root, pdk_name, **kwargs)
+        arm = doc['detail']['ngspice']
+        for variant in ('base', 'mutated'):
+            data = arm[variant]
+            prototype = data['paths'][0]
+            directory = Path(prototype['deck']).parent
+            rows = []
+            for index in range(1, min(requested, available) + 1):
+                row = copy.deepcopy(prototype)
+                row.update(path=index, startpoint=f'launch_{index}', endpoint=f'capture_{index}')
+                if index > 1:
+                    for source in sorted(directory.glob('path_1*')):
+                        target = directory / source.name.replace('path_1', f'path_{index}', 1)
+                        target.write_bytes(source.read_bytes())
+                    row['deck'] = str(directory / f'path_{index}.sp')
+                    execution = row['simulator_execution']
+                    for key in ('script', 'log'):
+                        execution[key] = execution[key].replace('path_1', f'path_{index}')
+                    execution['argv'] = [arg.replace('path_1', f'path_{index}')
+                                         for arg in execution['argv']]
+                if index == mismatch_path:
+                    row.update(spice_ns=row['sta_ns'] * 1.15, error_pct=15.0, verdict='MISMATCH')
+                rows.append(row)
+            data['paths'] = rows
+        judgment = PST.judge(arm['base'], arm['mutated'])
+        doc.update(arms={'ngspice': judgment},
+                   **PST.step_verdict({'ngspice': judgment}, {'ngspice': arm['base']['paths']}))
+        put(p / 'reports/phase3/spice_path_tool.json', doc)
+        print('SOURCE70_OBSERVATION=' + json.dumps({
+            'scope': 'SOFTWARE_FIXTURE_ONLY', 'requested_at_executor': requested,
+            'available_paths': available, 'selected_paths': len(arm['base']['paths']),
+            'verdict': doc['verdict']}))
+        return doc
+
+    monkeypatch.setattr(PST, 'run_step30', run)
+    return captured
+
+
+def requested_backend_step30(p, lib, monkeypatch, *, requested=None, mode='default'):
+    import execution_adapters_backend as adapter
+    import execution_backend_producers as backend
+    monkeypatch.setattr(backend, '_parameters',
+                        lambda *_: (R, None, pdk(lib), 'SOFTWARE_FIXTURE_ONLY'))
+    supplied = {'top': 'neutral', 'image_id': BF.IMAGE, 'pdk_root': str(p / 'fixture_pdk')}
+    if requested is not None:
+        supplied['spice_paths'] = requested
+    params = adapter._typed_parameters({'step_id': '30'}, 'fixture-source', supplied)
+    params['step_id'] = '30'
+    if mode is not None:
+        params['execution_mode'] = mode
+    return backend.produce_signoff(p, params)
+
+
+@pytest.mark.parametrize('mode', ['default', None], ids=['default', 'unspecified-default'])
+@pytest.mark.parametrize('requested,available', [(None, 3), (1, 3), (3, 3), (3, 1)],
+                         ids=['omitted-one', 'explicit-one', 'requested-three', 'three-maximum-one-available'])
+def test_backend_step30_delivers_requested_path_population(tmp_path, monkeypatch, requested, available, mode):
+    p, folder, lib = project(tmp_path)
+    captured = selected_path_transport(p, folder, lib, monkeypatch, available=available)
+    result = requested_backend_step30(p, lib, monkeypatch, requested=requested, mode=mode)
+    assert captured == [requested or 1], f'executor received {captured}; requested {requested or 1}'
+    assert result['verdict'] == 'PASS', result
+    gate = SC.run_audit(p, run_spice=False)
+    assert gate.passed and gate.summary['current_binding'] == 'CURRENT', gate.summary
+    doc = json.loads((p / 'reports/phase3/spice_path_tool.json').read_text())
+    receipt = json.loads((p / 'reports/phase3/spice_correlation.current.json').read_text())
+    named = {row['deck'] for variant in ('base', 'mutated')
+             for row in doc['detail']['ngspice'][variant]['paths']}
+    bound = {row['path'] for row in receipt['outputs'] if row['role'].startswith('deck:')}
+    assert len(named) == 2 * min(requested or 1, available) and bound == named
+    canonical = p / 'phase3/stage3/spice/correlation.spice'
+    assert canonical.read_bytes() == (p / 'phase3/tool_arms/30/ngspice/base/path_1.sp').read_bytes()
+    for path in named:
+        assert any(row['path'] == path and row['role'].startswith('product:')
+                   for row in receipt['outputs'])
+
+
+def test_backend_nondefault_step30_preserves_requested_path_population(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    captured = selected_path_transport(p, folder, lib, monkeypatch)
+    requested_backend_step30(p, lib, monkeypatch, requested=3, mode='ultra')
+    assert captured == [3]
+
+
+def test_backend_step30_selected_third_path_mismatch_stays_fail(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    captured = selected_path_transport(p, folder, lib, monkeypatch, mismatch_path=3)
+    result = requested_backend_step30(p, lib, monkeypatch, requested=3)
+    assert captured == [3], captured
+    assert result['verdict'] == 'FAIL', result
+    gate = SC.run_audit(p, run_spice=False)
+    assert gate.summary['current_binding'] == 'CURRENT'
+    assert gate.summary['measurement'] == 'MEASURED' and not gate.passed
+    assert gate.summary['arms']['ngspice']['worst_path'] == 3
+
+
+@pytest.mark.parametrize('filename', ['path_3.sp', 'path_3.wave', 'path_3.run.subckt'])
+def test_backend_step30_selected_third_path_byte_drift_is_refused(tmp_path, monkeypatch, filename):
+    p, folder, lib = project(tmp_path)
+    captured = selected_path_transport(p, folder, lib, monkeypatch)
+    result = requested_backend_step30(p, lib, monkeypatch, requested=3)
+    assert captured == [3], captured
+    assert result['verdict'] == 'PASS', result
+    target = p / 'phase3/tool_arms/30/ngspice/base' / filename
+    target.write_text(target.read_text() + '\nSOFTWARE_FIXTURE_ONLY byte drift\n')
+    gate = SC.run_audit(p, run_spice=False)
+    assert not gate.passed and gate.summary['current_binding'] == 'REFUSED', gate.summary
+    assert gate.summary['measurement'] == 'NOT_MEASURED'
+
+
+@pytest.mark.parametrize('site', ['retained_paths', 'rcx_handoff'])
+def test_backend_absence_diagnostics_name_inspected_scope(tmp_path, monkeypatch, site):
+    import execution_backend_producers as backend
+    p, folder, lib = project(tmp_path)
+    if site == 'retained_paths':
+        private = tmp_path / 'private'
+        missing = private / 'phase3/tool_arms/30/ngspice/base/absent.sp'
+        inspected = p / 'phase3/tool_arms/30/ngspice/base/absent.sp'
+        code = 'STEP30_RETAINED_ARTIFACT_ABSENT'
+        with pytest.raises(backend.em.Refusal) as caught:
+            backend._step30_retain_document(p, private, 'ngspice', {'deck': str(missing)})
+    else:
+        inspected = p / 'reports/phase3/librelane_rcx_handoff.json'
+        code = 'BACKEND_CURRENT_RCX_HANDOFF_ABSENT'
+        monkeypatch.setattr(backend, '_parameters',
+                            lambda *_: (R, None, pdk(lib), 'SOFTWARE_FIXTURE_ONLY'))
+        with pytest.raises(backend.em.Refusal) as caught:
+            backend.produce_signoff(p, {'step_id': '23', 'top': 'neutral',
+                'pdk_root': str(p / 'fixture_pdk'), 'image_id': BF.IMAGE})
+    assert caught.value.code == code
+    assert str(inspected) in str(caught.value), str(caught.value)
+    assert 'inspected' in str(caught.value), str(caught.value)
+
+
+@pytest.mark.parametrize('missing', ['pdk', 'container', 'spef'])
+def test_si_basis_absence_diagnostic_names_supplied_keys(tmp_path, missing):
+    p, folder, lib = project(tmp_path)
+    arguments = {'pdk': pdk(lib), 'container': 'SOFTWARE_FIXTURE_ONLY',
+                 'spef': p / 'phase3/stage3/extracted/neutral.spef'}
+    arguments[missing] = None
+    report = p / 'reports/phase3/si_crosstalk.rpt'
+    assert not R._emit_si_crosstalk_report(p, 'neutral', arguments.pop('spef'),
+                                          report.parent / 'ir_drop.rpt', report, [], **arguments)
+    body = json.loads(report.with_suffix('.json').read_text())
+    assert body['verdict'] == 'NOT_MEASURED'
+    reason = body['current_input_reason']
+    assert reason.startswith('CURRENT_SI_BASIS_MISSING'), reason
+    assert f'{missing}=None' in reason and 'supplied arguments' in reason, reason
+    assert not report.with_suffix('.current.json').exists()
+
+
+def test_si_producer_import_absence_diagnostic_names_import_search(tmp_path, monkeypatch):
+    import importlib
+    p, folder, lib = project(tmp_path)
+    actual_import = importlib.import_module
+    attempted = []
+    def absent(name, *args, **kwargs):
+        if name == 'si_signoff_timing_aware':
+            attempted.append(name)
+            raise ModuleNotFoundError('SOFTWARE_FIXTURE_ONLY optional import refused')
+        return actual_import(name, *args, **kwargs)
+    monkeypatch.setattr(importlib, 'import_module', absent)
+    notes = []
+    extracted = p / 'phase3/stage3/extracted'
+    assert not R._emit_si_timing_json(p, 'neutral', pdk(lib), 'SOFTWARE_FIXTURE_ONLY',
+        extracted / 'neutral.spef', p / 'phase3/stage3/pnr/constraint.sdc',
+        p / 'phase3/stage3/pnr/neutral_pnr.v', extracted / 'neutral_si_timing.json', notes)
+    assert attempted == ['si_signoff_timing_aware'], notes
+    reason = '\n'.join(notes)
+    assert 'CURRENT_SI_TIMING_PRODUCER_MISSING' in reason
+    assert 'si_signoff_timing_aware' in reason and 'sys.path' in reason, reason
+
+
+def test_si_coupling_absence_diagnostic_names_selected_spef(tmp_path, monkeypatch):
+    import _opensta_current as current
+    p, folder, lib = project(tmp_path)
+    actual_subject = current.tool_subject
+    selected = p / 'phase3/stage3/extracted/neutral.spef'
+    def remove_coupling_after_validation(*args, **kwargs):
+        # Exercise the existing second read with real, previously validated
+        # input. This public inter-read mutation is only a refusal control.
+        result = actual_subject(*args, **kwargs)
+        text = selected.read_text()
+        selected.write_text(text.replace('2 u0:Z u1:Z 0.01\n', '')
+                                .replace('2 u1:Z u0:Z 0.01\n', ''))
+        return result
+    monkeypatch.setattr(current, 'tool_subject', remove_coupling_after_validation)
+    report = p / 'reports/phase3/si_crosstalk.rpt'
+    assert not R._emit_si_crosstalk_report(p, 'neutral', selected,
+        report.parent / 'ir_drop.rpt', report, [], pdk(lib), 'SOFTWARE_FIXTURE_ONLY')
+    body = json.loads(report.with_suffix('.json').read_text())
+    assert body['verdict'] == 'NOT_MEASURED'
+    reason = body['current_input_reason']
+    assert reason.startswith('CURRENT_SPEF_COUPLING_MISSING'), reason
+    assert str(selected) in reason and 'coupling' in reason and 'inspected' in reason, reason

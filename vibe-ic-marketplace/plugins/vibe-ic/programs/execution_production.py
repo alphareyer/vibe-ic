@@ -245,7 +245,7 @@ def _canonical_inputs(project: Path, declaration: Path | None, pdk: object) -> d
         inputs["project/phase1/generated_docs/" + path.relative_to(docs_root).as_posix()] = path
     liberty = _pdk_liberty(pdk)
     if liberty is None:
-        raise em.Refusal("PRODUCTION_PDK_LIBERTY_MISSING", str(pdk))
+        raise em.Refusal("PRODUCTION_PDK_LIBERTY_MISSING", f"_canonical_inputs.pdk.liberty={_pdk_dict(pdk).get('liberty')!r}: no declared regular nonlinked Liberty file available")
     inputs["pdk/" + liberty.name] = liberty
     pdk_values = _pdk_dict(pdk)
     root = Path(str(pdk_values.get("pdk_root_host", "")))

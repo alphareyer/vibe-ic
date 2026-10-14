@@ -289,3 +289,21 @@ def test_all_three_catch_unprotected_design(tmp_path):
     assert pdc.main([str(tmp_path)]) == 1
     assert lsr.main([str(tmp_path)]) == 1
     assert icr.main([str(tmp_path)]) == 1
+
+
+import pytest
+
+@pytest.mark.parametrize('code',[0,7,199])
+def test_allocated_m2_container_tool_supervision(tmp_path,monkeypatch,code):
+    import mixed_signal_power_domain_run as producer
+    import subprocess
+    calls=[]
+    def observed(container,command,**kw):
+        calls.append((container,command,kw))
+        return subprocess.CompletedProcess([],code,'retained output','WATCHDOG_STALLED' if code==199 else 'retained stderr')
+    monkeypatch.setattr(producer.ce,'run_in_container_supervised',observed)
+    monkeypatch.setattr(producer.ce,'run_in_container',lambda *a,**k:subprocess.CompletedProcess([],7,'raw','raw'))
+    script=tmp_path/'neutral.ys';script.write_text('# neutral source-only input\n')
+    got=producer.run_tool(script,tmp_path,'neutral-container')
+    assert got==code and (tmp_path/'yosys.log').read_text()=='retained output'+('WATCHDOG_STALLED' if code==199 else 'retained stderr')
+    assert calls==[('neutral-container','yosys -T -s '+str(script),{'ceiling_s':120})]

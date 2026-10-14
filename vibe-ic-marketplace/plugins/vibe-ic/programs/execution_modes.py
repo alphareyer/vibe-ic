@@ -1936,7 +1936,7 @@ class Controller:
         if (selected_mode == 'ultra-mode' and
                 context.route_receipt.get('kind') != 'neutral-test' and
                 context.intent_label != 'USER_EXPLICIT_ULTRA'):
-            raise Refusal('ULTRA_INTENT_MISSING', context.step_id)
+            raise Refusal('ULTRA_INTENT_MISSING', f"context.intent_label={context.intent_label!r}, context.route_receipt.kind={context.route_receipt.get('kind')!r}: Ultra requires USER_EXPLICIT_ULTRA for step {context.step_id}")
         if (context.route_receipt.get('kind') == 'issued-route' and
                 route_mode != self._mode_intent(selected_mode)):
             raise Refusal('ROUTE_INTENT_MISMATCH', context.step_id)
@@ -3010,7 +3010,7 @@ class Controller:
             adoption['run_id'] = plan['run_id']
             if not choice or not all(isinstance(choice.get(k), str) and choice[k].strip()
                                      for k in ('arm_id', 'receipt_sha256', 'rationale', 'reviewer')):
-                raise Refusal('AI_CHOICE_MISSING', context.step_id)
+                raise Refusal('AI_CHOICE_MISSING', f"adopt.choice argument for {root / 'plan.json'}: arm_id, receipt_sha256, rationale and reviewer must be nonempty strings for step {context.step_id}")
             if choice.get('binding') != self._context_binding(context) or plan['binding'] != self._context_binding(context):
                 raise Refusal('AI_CHOICE_UNBOUND', context.step_id)
             arm_id = choice['arm_id']
@@ -3202,7 +3202,7 @@ class Controller:
             raise Refusal('PROGRAM_ADOPTION_NOT_ADOPTED', context.step_id)
         generation = adoption.get('selected_generation')
         if not isinstance(generation, dict):
-            raise Refusal('PROGRAM_ADOPTION_GENERATION_MISSING', context.step_id)
+            raise Refusal('PROGRAM_ADOPTION_GENERATION_MISSING', f"{root / 'program_adoption.json'}: selected_generation must be an object for step {context.step_id}")
         if (generation.get('run_id') != plan.get('run_id') or
                 generation.get('arm_id') != winner.get('arm_id') or
                 generation.get('outputs') != winner.get('artifact_outputs')):

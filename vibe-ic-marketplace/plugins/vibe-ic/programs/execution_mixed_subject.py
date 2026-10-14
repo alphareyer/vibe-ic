@@ -28,7 +28,7 @@ def project_subject(project: Path, step_id: str | None = None) -> str:
     objective = binding.get("objective")
     subject = objective.get("project_subject") if isinstance(objective, dict) else None
     if not isinstance(subject, str) or not Path(subject).is_absolute():
-        raise ValueError("MIXED_ISSUED_SUBJECT_MISSING")
+        raise ValueError('MIXED_ISSUED_SUBJECT_MISSING' + f": $VIBEIC_EXECUTION_BINDING: objective.project_subject={subject!r} must be an absolute project path for step {issued_step}; no canonical subject opened")
     canonical = Path(subject).resolve(strict=True)
     if not canonical.is_dir() or str(canonical) != subject:
         raise ValueError("MIXED_ISSUED_SUBJECT_INVALID")

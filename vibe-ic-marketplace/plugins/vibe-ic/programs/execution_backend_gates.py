@@ -56,7 +56,7 @@ def contracts(project: Path, row: dict) -> dict:
                 if p.is_file() and not p.is_symlink() and p.stat().st_size:
                     files.append(str(p.relative_to(project)))
         if not files:
-            raise em.Refusal('BACKEND_SUBSTANTIVE_CONTRACT_MISSING', spec)
+            raise em.Refusal('BACKEND_SUBSTANTIVE_CONTRACT_MISSING', f"{project}: required_outputs glob alternatives {spec!r} yielded no regular nonempty nonlinked files")
         result[spec] = {name: snap.sha(project / name) for name in files}
     return result
 

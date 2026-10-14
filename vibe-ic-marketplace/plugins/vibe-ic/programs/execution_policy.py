@@ -296,7 +296,7 @@ def configure(args: argparse.Namespace, *, _issuer=None, _entry_capability=None)
     if ENV not in os.environ and (parent_digest or parent_receipt):
         had_transport = True
         if not parent_digest or not parent_receipt:
-            raise Refusal('PARENT_REQUEST_MISSING', 'digest and receipt must travel together')
+            raise Refusal('PARENT_REQUEST_MISSING', f"configure args.parent_request_digest={parent_digest!r}, args.parent_request_receipt={parent_receipt!r}: both are required together; no receipt file opened")
         receipt_path = Path(parent_receipt)
         if not receipt_path.is_absolute():
             raise Refusal('REQUEST_RECEIPT_INVALID', str(receipt_path))
@@ -340,7 +340,7 @@ def configure(args: argparse.Namespace, *, _issuer=None, _entry_capability=None)
 def require_explicit_ultra() -> dict:
     value = request()
     if value['mode'] == 'ultra' and value['authority'] != 'USER_EXPLICIT_ULTRA':
-        raise Refusal('ULTRA_INTENT_MISSING', 'explicit --execution-mode ultra is required')
+        raise Refusal('ULTRA_INTENT_MISSING', f"${ENV}: request.mode={value['mode']!r}, request.authority={value['authority']!r}; explicit --execution-mode ultra is required")
     return value
 
 
@@ -966,8 +966,12 @@ def _selection_request(context, run: Path, result: dict, response: Path) -> dict
 def _wait_for_choice(context, run: Path, result: dict, response: Path,
                      baseline, timeout_s: int):
     request = _selection_request(context, run, result, response)
+    from _watchdog import loop_guard
     deadline = time.monotonic() + timeout_s
-    while True:
+    # This wait admits an external response; it does not kill a running job.
+    # Retain its deadline and bound polling even when the clock stops advancing.
+    max_polls = max(1, int(timeout_s / 0.25) + 2)
+    for _ in loop_guard('ai_selection_choice', max_iter=max_polls):
         choice = _read_new_choice(response, baseline)
         if choice is not None:
             # BLOCKING: the external reviewer must acknowledge the complete
@@ -983,6 +987,7 @@ def _wait_for_choice(context, run: Path, result: dict, response: Path,
         if remaining <= 0:
             return None
         time.sleep(min(0.25, remaining))
+    return None
 
 
 def _prepare_step9(runtime: dict, parameters: dict) -> None:

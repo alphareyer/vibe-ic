@@ -197,3 +197,142 @@ def test_negated_context_does_not_request_signals_in_rtl_handoff(tmp_path, promp
         'choice_a', 'choice_b', 'choice_c']
     assert {row['role'] for row in detected['non_signal_identifiers']} == {'non_signal'}
     assert advice == []
+
+
+# Public issue #3122 clauses, prefixed with authored interface ports. These
+# reproduce the source pattern only; the reporter-held design is not replayed.
+PUBLIC_CLAUSE_CONTROLS = [
+    {
+        'id': 'module-no-registers',
+        'clause': '`serial_unit` has no SW-visible registers',
+        'signals': ['x', 'y'],
+        'roles': {'serial_unit': 'non_signal'},
+    },
+    {
+        'id': 'cell-area-gate',
+        'clause': 'The cell area gate is carried in `cell_area_gate`',
+        'signals': ['x', 'y'],
+        'roles': {'cell_area_gate': 'metadata'},
+    },
+    {
+        'id': 'both-public-clauses',
+        'clause': ('`serial_unit` has no SW-visible registers\n'
+                   'The cell area gate is carried in `cell_area_gate`'),
+        'signals': ['x', 'y'],
+        'roles': {'serial_unit': 'non_signal', 'cell_area_gate': 'metadata'},
+    },
+    {
+        'id': 'real-internal-register',
+        'clause': 'Internal register `count` tracks the current state.',
+        'signals': ['x', 'y', 'count'],
+        'roles': {},
+    },
+    {
+        'id': 'public-clauses-with-register',
+        'clause': ('`serial_unit` has no SW-visible registers\n'
+                   'The cell area gate is carried in `cell_area_gate`\n'
+                   'Internal register `count` tracks the current state.'),
+        'signals': ['x', 'y', 'count'],
+        'roles': {'serial_unit': 'non_signal', 'cell_area_gate': 'metadata'},
+    },
+    {
+        'id': 'same-spellings-real-signals',
+        'clause': ('Internal register `serial_unit` tracks the current state.\n'
+                   'Internal signal `cell_area_gate` gates requests.'),
+        'signals': ['x', 'y', 'serial_unit', 'cell_area_gate'],
+        'roles': {},
+    },
+    {
+        'id': 'clause-local-denial-and-register',
+        'clause': ('`serial_unit` has no SW-visible registers; '
+                   'internal register `count` tracks the current state. '
+                   'The cell area gate is carried in `cell_area_gate`.'),
+        'signals': ['x', 'y', 'count'],
+        'roles': {'serial_unit': 'non_signal', 'cell_area_gate': 'metadata'},
+    },
+    {
+        'id': 'generic-no-registers',
+        'clause': ('`storage_block` has no registers; '
+                   'internal register `count` tracks the current state.'),
+        'signals': ['x', 'y', 'count'],
+        'roles': {'storage_block': 'non_signal'},
+    },
+]
+
+
+@pytest.mark.parametrize('case', PUBLIC_CLAUSE_CONTROLS,
+                         ids=[c['id'] for c in PUBLIC_CLAUSE_CONTROLS])
+@pytest.mark.parametrize('surface', ['detector', 'detector-cli', 'rtl-pack', 'phase1-pack'])
+def test_public_clause_roles_through_normal_consumers(tmp_path, case, surface):
+    import json
+    import os
+    import subprocess
+
+    prompt = 'Input port `x`.\nOutput port `y`.\n' + case['clause']
+    prompt_file = tmp_path / 'public_input.md'
+    prompt_file.write_text(prompt)
+    advice = []
+    observed = {'surface': surface, 'case': case['id'], 'prompt': prompt}
+    if surface == 'detector-cli':
+        argv = [sys.executable, str(_PROGRAMS / 'spec_named_signal_detect.py'),
+                '--prompt', '@' + str(prompt_file)]
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        observed.update(argv=argv, returncode=proc.returncode,
+                        stdout=proc.stdout, stderr=proc.stderr)
+        assert proc.returncode == 0, observed
+        detected = json.loads(proc.stdout)
+    else:
+        detected = detect(prompt)
+    observed['detected'] = detected
+    if surface in {'rtl-pack', 'phase1-pack'}:
+        dest = tmp_path / 'pack'
+        if surface == 'rtl-pack':
+            import ic_expert_backup_pack as pack
+            handoff = pack.assemble(prompt, None, None, [], [], dest,
+                                    output_target='rtl.sv')
+        else:
+            import phase1_expert_parse_track as track
+            status = track.ai_subtrack(tmp_path, prompt, dest)
+            observed['phase1_status'] = status
+            assert status['status'] == 'HANDOFF_EMITTED', status
+            handoff = status['handoff']
+        saved = json.loads((dest / 'ic_expert_agent_handoff.json').read_text())
+        assert saved == handoff
+        if surface == 'phase1-pack':
+            assert (dest / handoff['read_design_input_from']).read_text() == prompt
+        advice = [r for r in saved['spec_requirements']
+                  if r['kind'] == 'preserve_named_signals']
+        observed.update(handoff=saved, advice=advice)
+
+    # Retain actual values before any contract assertion, including RED arms.
+    raw = json.dumps(observed, indent=2) + '\n'
+    (tmp_path / 'observed.json').write_text(raw)
+    artifact_dir = os.environ.get('R72_ARTIFACT_DIR')
+    if artifact_dir:
+        dest = Path(artifact_dir) / case['id'] / surface
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / 'observed.json').write_text(raw)
+    print(raw)
+
+    expected = case['signals']
+    fires = len(expected) >= 3
+    if surface in {'rtl-pack', 'phase1-pack'}:
+        assert [r['named_signals'] for r in advice] == ([expected] if fires else [])
+        if fires:
+            assert advice[0]['signal_evidence'] == detected['signal_evidence']
+            assert advice[0]['non_signal_identifiers'] == detected['non_signal_identifiers']
+            text = advice[0]['requirement']
+            if surface == 'rtl-pack':
+                assert 'Declare EACH' in text
+            else:
+                assert 'Declare EACH' not in text
+                assert 'l_doc_expectations.json' in text
+            assert all(name not in text for name in case['roles'])
+    assert detected['named_signals'] == expected
+    assert detected['has_named_signals'] is fires
+    assert bool(detected['requirement']) is fires
+    assert {r['name']: r['role'] for r in detected['non_signal_identifiers']} == case['roles']
+    assert [r['name'] for r in detected['signal_evidence']] == expected
+    assert detected['ambiguous_identifiers'] == []
+    for row in detected['signal_evidence']:
+        assert row['line'] > 0 and row['name'] in row['context']

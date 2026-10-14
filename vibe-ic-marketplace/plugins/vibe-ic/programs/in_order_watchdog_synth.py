@@ -115,7 +115,7 @@ def load_declared(project: Path) -> dict | None:
         raise ValueError("WATCHDOG_MAPPING_SOURCE_CHANGED")
     text = raw.decode("utf-8")
     if any(q not in text for q in c["mapping"]["citations"].values()):
-        raise ValueError("WATCHDOG_MAPPING_CITATION_ABSENT")
+        raise ValueError('WATCHDOG_MAPPING_CITATION_ABSENT' + f": {source}: mapping.citations in {path} includes text absent from the hash-bound public document")
     return {"shape": "in_order_watchdog", "module": c["module"], "rtl": emit(c),
             "contract_sha256": hashlib.sha256(declared_bytes).hexdigest(),
             "source_sha256": c["mapping"]["sha256"], "mapping_actor": c["mapping"]["actor"]}

@@ -4059,7 +4059,11 @@ def test_d3_cell_states_partition_all_steps():
         f"waived cells {sorted(F.normalize_id(s) for s in waived)} do not match "
         f"the registered waivers {sorted(declared)}"
     )
-    assert (len(enforced), len(waived), len(na)) == (55, 2, 13), (
+    # Root-authorized source alignment: 3fc358130eb4d28bd6437625d8e34ef34408d5ac
+    # declares FS1's two reports. Both remain UNPROVEN; the historical mutation
+    # ledger and qualification are unchanged. This is a declaration partition.
+    assert "FS1" in enforced and "FS1" not in na
+    assert (len(enforced), len(waived), len(na)) == (56, 2, 12), (
         f"the ENFORCED/WAIVED/NA split changed to "
         f"({len(enforced)}, {len(waived)}, {len(na)}); it was measured as "
         f"(51, 2, 15) after folding 1.6x into Step 2. A step moving between states "
@@ -6582,7 +6586,9 @@ def test_d3_the_producer_oracle_answers_both_ways():
     verdicts exercise it.
     """
     yes = producer_evidence("phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json")
-    assert yes and "phase3_one_shot_runner" in yes.producers, yes
+    # The current writer publishes the decision before the pre-stream gate.
+    # Its real source-only write/hash control is below; do not alias the runner.
+    assert yes and "librelane_postroute_repair" in yes.producers, yes
     no = producer_evidence("phase3/stage3/pnr/floorplan.def")
     assert not no.producers, no
     # ...and a NO must still disclose its reach, never read as a proven zero.
@@ -6593,6 +6599,41 @@ def test_d3_the_producer_oracle_answers_both_ways():
         "phase3/stage3/pnr/floorplan.def OR "
         "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json")
     assert either.producers == yes.producers, either
+
+
+def test_d3_current_repair_writer_binds_its_actual_report(tmp_path, monkeypatch):
+    """Source-only producer control for the explicit writer assertion migration.
+
+    Reuse the existing public external transport fixture. The ordinary producer,
+    closure and decision writer run; no native OpenROAD measurement is claimed.
+    """
+    import hashlib
+    import test_t102_librelane_postroute_repair as transport
+    transport._stated_image.__wrapped__(monkeypatch)
+    project, shim, sdc, route = transport._chain_setup(tmp_path, monkeypatch, {
+        "32-base": transport._base(4.0, 0.2)})
+    producer = transport.prr
+    report = producer.run_in_chain(
+        project, mode="librelane", image="img", pdk="pdk", pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    source = project / producer.REPORT_REL
+    decision_path = project / producer.DECLARED_REPAIR_REL / "postroute_timing_repair_decision.json"
+    decision = json.loads(decision_path.read_text())
+    assert report["verdict"] == "PASS" and report["adopted"] is None
+    assert decision["action"] == "input_route_kept" and decision["repair_needed"] is False
+    assert decision["source_report"] == source.relative_to(project).as_posix()
+    assert decision["source_report_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    evidence = producer_evidence(decision_path.relative_to(project).as_posix())
+    assert evidence.producers == ("librelane_postroute_repair",), evidence
+    (tmp_path / "current-writer-observation.json").write_text(json.dumps({
+        "scope": "SOFTWARE_FIXTURE_ONLY; native timing NOT_MEASURED",
+        "entry": "librelane_postroute_repair.run_in_chain",
+        "input_scenario_sha256": hashlib.sha256((tmp_path / "scenario.json").read_bytes()).hexdigest(),
+        "producer": evidence.producers, "decision": decision,
+        "decision_sha256": hashlib.sha256(decision_path.read_bytes()).hexdigest(),
+        "producer_source_sha256": hashlib.sha256(Path(producer.__file__).read_bytes()).hexdigest(),
+        "source_report_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}, indent=2))
 
 
 def test_d3_a_departure_from_the_pin_is_routed_to_the_REASON_it_left(monkeypatch):
@@ -8104,3 +8145,18 @@ def test_d3_the_blind_capture_predicate_fires_on_a_checkout_walk():
     # quietly treated as a live capture.
     assert _blind_capture_reason("u", {"__unreadable__": "boom"})
     assert _blind_capture_reason("n", None)
+
+
+def test_d3_fs1_declares_two_unproven_source_outputs():
+    """3fc358130eb4d28bd6437625d8e34ef34408d5ac: declaration, not qualification."""
+    paths = {"reports/phase2/safety/fmeda_coverage.json",
+             "reports/phase2/safety/fmeda_coverage_gate.json"}
+    import yaml
+    doc = yaml.safe_load(F.FLOW_YAML.read_text())
+    fs1 = next(s for s in doc["steps"] if str(s["id"]) == "FS1")
+    assert set(fs1["required_outputs"]) == paths
+    rec = step_record("FS1")
+    assert rec["verdict"] == "ENFORCED"
+    assert set(rec["entries"]) == paths
+    assert {e["status"] for e in rec["entries"].values()} == {"UNPROVEN"}
+    assert waiver_for("FS1") is None

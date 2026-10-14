@@ -232,7 +232,8 @@ def _step30_retain_document(project, private_project, simulator, document):
                 missing.append(value)
     visit(retained)
     if missing:
-        raise em.Refusal('STEP30_RETAINED_ARTIFACT_ABSENT', repr(sorted(set(missing))))
+        raise em.Refusal('STEP30_RETAINED_ARTIFACT_ABSENT',
+                         'inspected retained artifact paths: ' + repr(sorted(set(missing))))
     if isinstance(retained, dict):
         retained['retained_artifact_sha256'] = hashes
     return retained
@@ -1214,7 +1215,9 @@ def produce_signoff(project, params):
     elif sid == '23':
         corners = R._librelane_handed_spefs(rpt / 'librelane_rcx_handoff.json')
         if not corners:
-            raise em.Refusal('BACKEND_CURRENT_RCX_HANDOFF_ABSENT', sid)
+            raise em.Refusal('BACKEND_CURRENT_RCX_HANDOFF_ABSENT',
+                             f'step {sid}: inspected current corner records in '
+                             f'{rpt / "librelane_rcx_handoff.json"}')
         nominal = _require(spef)
         sta = project / 'phase3/stage3/sta'
         sta.mkdir(parents=True, exist_ok=True)
@@ -1322,7 +1325,8 @@ def produce_signoff(project, params):
             # Use the same current producer and strict consumer as the
             # ordinary Phase-3 caller. Its native correlation record belongs
             # at the canonical path; the audit belongs in phase2/gates.
-            if not R._step30_tool_arm(project, pdk, written, notes, container=container):
+            if not R._step30_tool_arm(project, pdk, written, notes, container=container,
+                                     paths=params.get('spice_paths', 1)):
                 gate = _require(project / 'reports/phase2/gates/spice_correlation.json')
                 verdict = json.loads(gate.read_text()).get('summary', {}).get('verdict')
                 return {'verdict': 'FAIL' if verdict == 'FAIL' else 'NOT_MEASURED',

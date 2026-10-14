@@ -182,6 +182,8 @@ _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import spec_required_artifact_check as _srac  # noqa: E402
+import provenance_logger as _prov  # noqa: E402
+import plugin_manifest_discovery as _pmd  # noqa: E402
 
 STDERR_BANNER = "spec_declaration_emit: UNDETERMINED"
 
@@ -1717,6 +1719,41 @@ def _write_json(path: Path, payload: Any, *, stable_publication: bool = False) -
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
+def _publication_hash(path: Path) -> str:
+    digest = _prov._sha256_file(path)
+    if not digest.startswith("sha256:"):
+        raise OSError("cannot hash publication file %s: %s" % (path, digest))
+    return digest
+
+
+def _record_publication(project: Path, argv: List[str], inputs: Dict[str, str],
+                        out_path: Path, sidecar: Path) -> None:
+    """Append a successor only after both canonical publication writes succeed.
+
+    Historical rows retain their bytes. The existing completeness consumer
+    checks the newest successful output claim and still rejects later drift.
+    """
+    record = {
+        "timestamp": _prov._utcnow_iso(),
+        "tool": "spec_declaration_emit",
+        "version": _pmd.running_plugin_version(),
+        "source_sha256": _publication_hash(Path(__file__).resolve()),
+        "cwd": str(Path.cwd()),
+        "argv": [sys.executable, str(Path(__file__).resolve()), *argv],
+        "inputs": inputs,
+        "outputs": {str(p.relative_to(project)): _publication_hash(p)
+                    for p in (out_path, sidecar)},
+        "exit_code": 0,
+    }
+    with (project / "provenance.jsonl").open("ab+") as stream:
+        stream.seek(0, 2)
+        if stream.tell():
+            stream.seek(-1, 2)
+            if stream.read(1) != b"\n":
+                stream.write(b"\n")
+        stream.write((json.dumps(record, sort_keys=True) + "\n").encode())
+
+
 def stage_contract(project: Path) -> Tuple[Path, List[Dict[str, Any]]]:
     """Write the declaration contract for `project` and return (path, contracts).
 
@@ -2155,6 +2192,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             existing = {}
             existing_unreadable = True
     sidecar = out_path.with_name(out_path.stem + ".provenance.json")
+    # Capture the author/spec sources and the carried declaration
+    # preimages before publication replaces them. CLI choices are in argv.
+    publication_sources = [project / rel for rel, _ in _iter_doc_texts(project)]
+    if args.from_json:
+        publication_sources.append(Path(args.from_json).resolve())
+    publication_sources.extend(p for p in (out_path, sidecar) if p.is_file())
+    try:
+        publication_inputs = {
+            str(p.relative_to(project)) if p.is_relative_to(project) else str(p):
+            _publication_hash(p) for p in publication_sources}
+    except OSError as exc:
+        print("ERROR: cannot capture declaration publication inputs: %s" % exc,
+              file=sys.stderr)
+        return 2
     prior = _load_prior_provenance(sidecar)
     # A field the author declares that the spec's contract does not list is
     # retained with provenance, except a producer-owned declaration fact.
@@ -2302,6 +2353,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "rejected": rtl_rejected,
         },
     }, stable_publication=True)
+
+    try:
+        _record_publication(project, list(argv if argv is not None else sys.argv[1:]),
+                            publication_inputs, out_path, sidecar)
+    except OSError as exc:
+        print("ERROR: canonical declaration files were published, but generic "
+              "provenance publication failed: %s" % exc, file=sys.stderr)
+        return 2
 
     print("spec_declaration_emit: PASS — %d/%d contract field(s) declared -> %s"
           % (n_determined, len(status), out_path))

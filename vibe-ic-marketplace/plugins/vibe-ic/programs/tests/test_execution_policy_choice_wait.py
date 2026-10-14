@@ -265,3 +265,27 @@ def test_explicit_choice_still_reaches_core_for_terminal_result(tmp_path, monkey
     with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
         policy.dispatch_fixed_step(project, '1', choice=H.choice(ctx, run, 'a'))
     assert not (run / 'selection-request.json').exists()
+
+
+@pytest.mark.parametrize('state',['absent','valid','wrong_comparison'])
+def test_allocated_choice_poll_is_finite_and_bound(tmp_path,monkeypatch,state):
+    from types import SimpleNamespace
+    context=SimpleNamespace(step_id='neutral')
+    request={'run_id':'run','comparison_digest':'comparison','frozen_work_digest':'work'}
+    monkeypatch.setattr(policy,'_selection_request',lambda *a:request)
+    attempts=[]
+    def read(*a):
+        attempts.append(1)
+        assert len(attempts)<=6, 'choice wait exceeded the finite polling budget on a frozen clock'
+        if state=='absent' or len(attempts)<2:return None
+        return dict(request,comparison_digest='wrong' if state=='wrong_comparison' else 'comparison')
+    monkeypatch.setattr(policy,'_read_new_choice',read)
+    monkeypatch.setattr(policy,'time',SimpleNamespace(monotonic=lambda:1000.,sleep=lambda secs:None))
+    if state=='wrong_comparison':
+        with pytest.raises(policy.Refusal) as refused:
+            policy._wait_for_choice(context,tmp_path,{},tmp_path/'choice.json',None,1)
+        assert refused.value.code=='AI_COMPARISON_UNBOUND'
+    else:
+        got=policy._wait_for_choice(context,tmp_path,{},tmp_path/'choice.json',None,1)
+        assert got==(None if state=='absent' else request)
+    assert len(attempts)==(6 if state=='absent' else 2)
