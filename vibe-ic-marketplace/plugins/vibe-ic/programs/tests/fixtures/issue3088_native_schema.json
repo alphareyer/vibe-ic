@@ -254,6 +254,30 @@
       "required": [
         "rounding_mode"
       ]
+    },
+    "native-metric-note-required-result": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "power": {
+          "note": "The result must use ceiling."
+        }
+      },
+      "rc": 1,
+      "required": [
+        "rounding_mode"
+      ]
+    },
+    "native-metric-note-required-product-output": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "power": {
+          "note": "The product output must use ceiling."
+        }
+      },
+      "rc": 1,
+      "required": [
+        "rounding_mode"
+      ]
     }
   }
 }
