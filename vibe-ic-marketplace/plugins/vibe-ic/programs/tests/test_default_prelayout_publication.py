@@ -307,7 +307,9 @@ def test_issue3141_normal_publication_scales_native_readings(tmp_path, name, sca
     assert summary["slack_measurement"] == "MEASURED"
     metrics = json.loads((folder / "state_out.json").read_text())["metrics"]
     expected = round(metrics["timing__setup__ws__corner:max_ss_025C_1v00"], 2) * scale
-    assert summary["setup_wns_ns"] == pytest.approx(expected)
+    assert summary["slack_ns"]
+    assert all(row["setup_wns_ns"] == pytest.approx(expected)
+               for row in summary["slack_ns"])
 
 
 @pytest.mark.parametrize("change", ["missing", "changed"])
