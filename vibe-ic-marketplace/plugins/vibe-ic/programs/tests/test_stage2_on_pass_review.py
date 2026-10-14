@@ -1088,3 +1088,77 @@ def test_r2_required_or_conflicting_pin_accepts_when_actually_built(
     _, dispatch = _r2_issue3131_metadata_only(lambda: runpy.run_path(str(emitted))[
         "test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]())
     assert dispatch == []
+
+
+_R2_SECONDARY_ONLY_OBLIGATIONS = (
+    ("ports", "required"),
+    ("ports", "mandatory"),
+    ("top_module_pins", "required"),
+    ("top_module_pins", "mandatory"),
+)
+
+
+def _r2_secondary_only_fixture(tmp_path, alias, requirement, built):
+    import hashlib
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "documentary")
+    l9 = project / decl["intent"][0]
+    content = json.loads(l9.read_text())
+    content[alias] = [{"name": "out_alias_only_addr", "direction": "output",
+                       "width": 10, "declared_by_staged_top": False,
+                       "optional": True, requirement: True,
+                       "evidence": "input/docs/interface.md"}]
+    if built:
+        source = project / content["selected_interface_binding"]["selected_source"]
+        for path in (source, project / decl["artefact"][0]):
+            path.write_text(path.read_text().replace(
+                "out_write_addr);", "out_write_addr, out_alias_only_addr);").replace(
+                "endmodule", "  output [9:0] out_alias_only_addr;\nendmodule"))
+        content["selected_interface_binding"]["selected_source_sha256"] = hashlib.sha256(
+            source.read_bytes()).hexdigest()
+    l9.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("alias,requirement", _R2_SECONDARY_ONLY_OBLIGATIONS)
+@pytest.mark.parametrize("built", (False, True), ids=("missing", "actually_built"))
+def test_r2_secondary_only_obligation_is_consumed_api(
+        tmp_path, alias, requirement, built, record_property):
+    project, decl = _r2_secondary_only_fixture(tmp_path, alias, requirement, built)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("observed_verdict", result["verdict"])
+    assert result["verdict"] == ("DISARMED" if built else "REJECT")
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == (
+        [] if built else ["out_alias_only_addr"])
+    assert [p["name"] for p in result["disarmed"]] == ["out_example_addr"]
+    assert dispatch == []
+
+
+@pytest.mark.parametrize("alias,requirement", _R2_SECONDARY_ONLY_OBLIGATIONS)
+@pytest.mark.parametrize("built", (False, True), ids=("missing", "actually_built"))
+def test_r2_secondary_only_obligation_is_consumed_emitted(
+        tmp_path, alias, requirement, built, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_secondary_only_fixture(tmp_path, alias, requirement, built)
+
+    def check():
+        try:
+            runpy.run_path(str(emitted))[
+                "test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    record_property("observed_verdict", observed)
+    assert observed == ("ACCEPT" if built else "REJECT"), message
+    if not built:
+        assert "out_alias_only_addr" in message
+    assert dispatch == []

@@ -1420,6 +1420,14 @@ def rule_intent_pin_not_in_netlist(project: Path,
             disarmed.append(row)
         else:
             absent_signal.append(row)
+    primary_names = {str(p["name"]) for p in intent["pins"]}
+    for name in sorted(obligations - built - primary_names):
+        pin = next(p for field in _INTENT_PIN_FIELDS
+                   for p in intent.get(field, [])
+                   if isinstance(p, dict) and str(p.get("name")) == name)
+        absent_signal.append({"name": name,
+                              "direction": pin.get("direction") or pin.get("mode"),
+                              "evidence": pin.get("evidence")})
     extra = sorted(built - {str(p["name"]) for p in intent["pins"]})
 
     art["extra_ports_not_in_intent"] = extra
@@ -3336,11 +3344,10 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
 
     documentary = _documentary_intent_pins(root, intent, pins, roots[0])
     obligations = _intent_pin_obligations(intent, pins)
-    absent = sorted(str(p["name"]) for p in pins
+    absent = sorted((obligations - built) | {{str(p["name"]) for p in pins
                     if str(p["name"]) not in built
-                    and (str(p["name"]) in obligations
-                         or (not _is_supply(p) and not _is_optional(p)
-                             and str(p["name"]) not in documentary)))
+                    and not _is_supply(p) and not _is_optional(p)
+                    and str(p["name"]) not in documentary}})
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
