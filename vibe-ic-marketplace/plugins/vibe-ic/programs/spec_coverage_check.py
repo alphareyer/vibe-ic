@@ -1695,18 +1695,28 @@ _HANDSHAKE_RE = re.compile(
 def _requirement_text(text: str) -> str:
     """Remove typed provenance subtrees before prose requirement extraction.
 
-    Keep requirement-bearing keys and values verbatim. Only JSON object fields
-    explicitly labelled provenance are metadata; the word in ordinary prose,
-    and hardware fields such as ``truncated``, retain their existing meaning.
+    Keep requirement-bearing fields, adding their typed ancestor qualifiers
+    to diagnostic/reference scalar clauses. Schema keys and their values occupy
+    separate source lines so a property label cannot become a hardware field.
+    Raw station bytes remain available for source-bound provenance receipts.
     L-doc directories concatenate JSON documents, so consume the whole stream
     before using the typed view. Mixed prose is left unchanged.
     """
-    def requirements(value):
+    def requirements(value, path=()):
         if isinstance(value, dict):
-            return {key: requirements(item) for key, item in value.items()
+            return {key: requirements(item, path + (key,)) for key, item in value.items()
                     if key != "provenance" and not key.endswith("_provenance")}
         if isinstance(value, list):
-            return [requirements(item) for item in value]
+            return [requirements(item, path) for item in value]
+        if isinstance(value, str):
+            context = " ".join(path).replace("_", " ").replace("-", " ")
+            qualified = re.search(
+                r"\b(?:alternat(?:e|ive)|reference|example|diagnostic\w*|baseline)\b",
+                context, re.I)
+            metric_note = (path and path[-1] == "note" and
+                           re.search(r"\b(?:area|power)\b", context, re.I))
+            if (qualified or metric_note) and not value.startswith(context + ": "):
+                return context + ": " + value
         return value
 
     decoder = json.JSONDecoder()
@@ -1721,7 +1731,10 @@ def _requirement_text(text: str) -> str:
             remaining = remaining[end:].lstrip()
     except (ValueError, TypeError):
         return text
-    return "\n".join(json.dumps(requirements(value), ensure_ascii=False)
+    # A schema key is not a hardware identifier on its value's source line.
+    # Keep valid JSON and typed scalar clauses while separating those lines.
+    return "\n".join(json.dumps(requirements(value), ensure_ascii=False,
+                                indent=2, separators=(",", ":\n"))
                      for value in documents)
 
 
@@ -3337,6 +3350,10 @@ _LDOC_SCAFFOLD_KEYS = (
     "emitted_by",
     "_generator",
     "input_filename",
+    "source_documents",
+    "doc_id",
+    "doc_name",
+    "doc_class",
 )
 
 #: The status an L-doc skeleton declares when NOTHING has been extracted into it
@@ -3347,13 +3364,15 @@ _LDOC_SCAFFOLD_KEYS = (
 _LDOC_UNEXTRACTED_STATUS = "NOT_YET_EXTRACTED"
 
 
-def _strip_scaffold(node):
+def _strip_scaffold(node, path=()):
     """Recursively drop `_LDOC_SCAFFOLD_KEYS` from a parsed L-doc."""
     if isinstance(node, dict):
-        return {k: _strip_scaffold(v) for k, v in node.items()
-                if k not in _LDOC_SCAFFOLD_KEYS}
+        return {k: _strip_scaffold(v, path + (k,)) for k, v in node.items()
+                if k not in _LDOC_SCAFFOLD_KEYS
+                and not (k == "source" and "integration" in path
+                         and "applicability" in path)}
     if isinstance(node, list):
-        return [_strip_scaffold(v) for v in node]
+        return [_strip_scaffold(v, path) for v in node]
     return node
 
 
@@ -3368,7 +3387,7 @@ def _ldoc_design_text(raw: str) -> str:
         return raw
     if not isinstance(doc, dict):
         return raw
-    if not (doc.get("doc_id") or doc.get("doc_name")):
+    if not (doc.get("doc_id") or doc.get("doc_name") or doc.get("doc_class")):
         return raw                       # not an L-doc: leave it alone
     status = doc.get("extraction_status")
     if isinstance(status, str) and status.strip() == _LDOC_UNEXTRACTED_STATUS:
