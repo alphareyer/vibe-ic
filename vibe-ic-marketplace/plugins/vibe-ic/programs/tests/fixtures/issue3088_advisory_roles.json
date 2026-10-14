@@ -45,6 +45,11 @@
       "prompt": "The valid/done handshake accepts another transaction immediately after completion.\n",
       "handshake": true,
       "consecutive": false
+    },
+    "explicitly-no-consecutive-arithmetic": {
+      "prompt": "# Public arithmetic contract\nPorts: input clk; input rst; input [7:0] x; input [7:0] y; output [7:0] p.\nCompute (x*y) mod 2^8. No start, valid, ready, or done ports exist.\nNo consecutive arithmetic operations are required; only one multiplication is performed.\n",
+      "handshake": false,
+      "consecutive": false
     }
   }
 }
