@@ -343,6 +343,7 @@ if __name__ == "__main__":
 _ISSUE3087_DECLARED_OUTPUTS = {
     "before": "The output `p` carries the result.",
     "before_signal": "The output signal `p` carries the result.",
+    "before_pin": "The output pin `p` carries the result.",
     "after_copula": "`p` is an output.",
     "after_label": "`p`: output signal.",
 }
