@@ -975,3 +975,116 @@ def test_issue3131_source_roster_overrides_documentary_labels_emitted(
     if case.startswith("implemented_"):
         assert "out_example_addr" not in message
     assert dispatch == []
+
+
+# Required declarations and contradictory alias labels outrank a release.
+# Keep the source-roster and legacy optional/supply controls above intact.
+_R2_PRIORITY_CASES = (
+    ("documentary", {}, None, {}, "DISARMED"),
+    ("optional_false", {"optional": False}, None, {}, "DISARMED"),
+    ("supply_false", {"supply": False}, None, {}, "DISARMED"),
+    ("optional_true", {"optional": True}, None, {}, "DISARMED"),
+    ("supply_role", {"role": "power"}, None, {}, "DISARMED"),
+    ("required_optional", {"required": True, "optional": True}, None, {}, "REJECT"),
+    ("mandatory_optional", {"mandatory": True, "optional": True}, None, {}, "REJECT"),
+    ("required_supply", {"required": True, "role": "power"}, None, {}, "REJECT"),
+    ("mandatory_supply", {"mandatory": True, "role": "power"}, None, {}, "REJECT"),
+    ("alias_ports_implemented", {}, "ports", {"declared_by_staged_top": True}, "REJECT"),
+    ("alias_pins_implemented", {}, "top_module_pins", {"declared_by_staged_top": True}, "REJECT"),
+    ("alias_ports_required", {}, "ports", {"required": True}, "REJECT"),
+    ("alias_pins_mandatory", {}, "top_module_pins", {"mandatory": True}, "REJECT"),
+    ("alias_required_optional", {"optional": True}, "ports", {"required": True}, "REJECT"),
+    ("alias_mandatory_supply", {"role": "power"}, "top_module_pins", {"mandatory": True}, "REJECT"),
+    ("required_false", {"required": False}, None, {}, "DISARMED"),
+    ("required_string", {"required": "true"}, None, {}, "DISARMED"),
+    ("mandatory_integer", {"mandatory": 1}, None, {}, "DISARMED"),
+)
+
+
+def _r2_priority_fixture(tmp_path, primary, alias, alias_flags):
+    project, decl = _r2_issue3131_fixture(tmp_path, "documentary")
+    path = project / decl["intent"][0]
+    content = json.loads(path.read_text())
+    content["top_ports"][-1].update(primary)
+    if alias:
+        content[alias] = [dict(pin) for pin in content["top_ports"]]
+        content[alias][-1].update(alias_flags)
+    path.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("case,primary,alias,alias_flags,verdict",
+                         _R2_PRIORITY_CASES, ids=[c[0] for c in _R2_PRIORITY_CASES])
+def test_r2_required_and_alias_conflict_priority_api(
+        tmp_path, case, primary, alias, alias_flags, verdict, record_property):
+    project, decl = _r2_priority_fixture(tmp_path, primary, alias, alias_flags)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("observed_verdict", result["verdict"])
+    assert result["verdict"] == verdict
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == (
+        ["out_example_addr"] if verdict == "REJECT" else [])
+    assert dispatch == []
+
+
+@pytest.mark.parametrize("case,primary,alias,alias_flags,verdict",
+                         _R2_PRIORITY_CASES, ids=[c[0] for c in _R2_PRIORITY_CASES])
+def test_r2_required_and_alias_conflict_priority_emitted(
+        tmp_path, case, primary, alias, alias_flags, verdict, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_priority_fixture(tmp_path, primary, alias, alias_flags)
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    record_property("observed_verdict", observed)
+    assert observed == ("REJECT" if verdict == "REJECT" else "ACCEPT"), message
+    if verdict == "REJECT":
+        assert "out_example_addr" in message
+    assert dispatch == []
+
+
+@pytest.mark.parametrize("case,primary,alias,alias_flags,verdict",
+                         [c for c in _R2_PRIORITY_CASES if c[-1] == "REJECT"],
+                         ids=[c[0] for c in _R2_PRIORITY_CASES if c[-1] == "REJECT"])
+def test_r2_required_or_conflicting_pin_accepts_when_actually_built(
+        tmp_path, case, primary, alias, alias_flags, verdict):
+    import hashlib
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_priority_fixture(tmp_path, primary, alias, alias_flags)
+    l9 = project / decl["intent"][0]
+    content = json.loads(l9.read_text())
+    source = project / content["selected_interface_binding"]["selected_source"]
+    for path in (source, project / decl["artefact"][0]):
+        path.write_text(path.read_text().replace(
+            "out_write_addr);", "out_write_addr, out_example_addr);").replace(
+            "endmodule", "  output [9:0] out_example_addr;\nendmodule"))
+    content["selected_interface_binding"]["selected_source_sha256"] = hashlib.sha256(
+        source.read_bytes()).hexdigest()
+    l9.write_text(json.dumps(content, indent=2) + "\n")
+
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    assert result["verdict"] == "ACCEPT", result
+    assert result.get("absent_signal_pins", []) == [] and dispatch == []
+    _, dispatch = _r2_issue3131_metadata_only(lambda: runpy.run_path(str(emitted))[
+        "test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]())
+    assert dispatch == []

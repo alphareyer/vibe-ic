@@ -1140,6 +1140,32 @@ def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _intent_pin_obligations(content, pins):
+    """Explicit requirements and conflicting alias labels release no pin.
+
+    L9 retains the same interface in several pin tables. A false documentary
+    label in one table cannot override a true implementation label elsewhere,
+    nor can an optional/supply label override an explicit required/mandatory
+    declaration. Only actual boolean labels count.
+    """
+    rows = list(pins)
+    for field in ("top_ports", "ports", "top_module_pins"):
+        if isinstance(content.get(field), list):
+            rows.extend(content[field])
+    required, implemented, documentary = set(), set(), set()
+    for pin in rows:
+        if not isinstance(pin, dict) or not pin.get("name"):
+            continue
+        name = str(pin["name"])
+        if pin.get("required") is True or pin.get("mandatory") is True:
+            required.add(name)
+        if pin.get("declared_by_staged_top") is True:
+            implemented.add(name)
+        elif pin.get("declared_by_staged_top") is False:
+            documentary.add(name)
+    return required | (implemented & documentary)
+
+
 def _documentary_intent_pins(project, content, pins, artefact_top):
     """Document examples released by a current selected-interface binding.
 
@@ -1212,6 +1238,8 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
                 return {"readable": True, "file": str(l9_path), "field": field,
                         "value": [str(p["name"]) for p in pins],
                         "pins": pins, "top_module": d.get("top_module"),
+                        **{alias: d[alias] for alias in _INTENT_PIN_FIELDS
+                           if isinstance(d.get(alias), list)},
                         "selected_interface_binding": d.get("selected_interface_binding")}
     return {"readable": True, "file": str(l9_path), "field": None,
             "value": [], "pins": []}
@@ -1363,6 +1391,7 @@ def rule_intent_pin_not_in_netlist(project: Path,
                         f"certifies nothing")}
 
     built = set(art["ports"])
+    obligations = _intent_pin_obligations(intent, intent["pins"])
     documentary = _documentary_intent_pins(project, intent, intent["pins"], art["top"])
     absent_signal: List[Dict[str, Any]] = []
     disarmed: List[Dict[str, Any]] = []
@@ -1375,7 +1404,9 @@ def rule_intent_pin_not_in_netlist(project: Path,
         row = {"name": name,
                "direction": pin.get("direction") or pin.get("mode"),
                "evidence": pin.get("evidence")}
-        if why_supply:
+        if name in obligations:
+            absent_signal.append(row)
+        elif why_supply:
             row["intent_declares_supply"] = why_supply
             disarmed.append(row)
         elif why_optional:
@@ -3304,9 +3335,12 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "refutes nothing" % roots[0])
 
     documentary = _documentary_intent_pins(root, intent, pins, roots[0])
+    obligations = _intent_pin_obligations(intent, pins)
     absent = sorted(str(p["name"]) for p in pins
-                    if str(p["name"]) not in built and not _is_supply(p)
-                    and not _is_optional(p) and str(p["name"]) not in documentary)
+                    if str(p["name"]) not in built
+                    and (str(p["name"]) in obligations
+                         or (not _is_supply(p) and not _is_optional(p)
+                             and str(p["name"]) not in documentary)))
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
@@ -4037,7 +4071,8 @@ def _body_r2(finding: Dict[str, Any], stage_id: str) -> str:
         intent_rel=finding["intent"]["intent_rel"],
         intent_field=finding["intent"]["field"],
         netlist_rel=finding["artefact"]["artefact_rel"],
-        documentary_helper=parser_source + inspect.getsource(_documentary_intent_pins))
+        documentary_helper=(parser_source + inspect.getsource(_intent_pin_obligations)
+                            + "\n\n" + inspect.getsource(_documentary_intent_pins)))
 
 
 def _body_phase1_cited_input(finding: Dict[str, Any], stage_id: str) -> str:
