@@ -1637,7 +1637,13 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
     rearm = int(framing['transaction_rearm'] == 'clocked_reset')
     reset_cycles = framing['rearm_reset_cycles']
     lsb = framing['bit_order'] == 'LSB'
-    lines = ['`timescale 1ns/1ps', ARITHMETIC_SCENARIO_HEADER + json.dumps(plan, sort_keys=True),
+    # A 10000-pair plan exceeds native lexer comment-line limits. Keep the
+    # exact JSON as short comment chunks; the same reader joins them losslessly.
+    encoded_plan = json.dumps(plan, sort_keys=True)
+    headers = ([ARITHMETIC_SCENARIO_HEADER + encoded_plan[i:i+2048]
+                for i in range(0, len(encoded_plan), 2048)] if random_vectors
+               else [ARITHMETIC_SCENARIO_HEADER + encoded_plan])
+    lines = ['`timescale 1ns/1ps', *headers,
              f'module {module_name};', f'localparam integer N={n}, NV={len(pairs)}, L={latency};']
     for p in spec['ports']:
         width = n if p['name'] == par else int(p.get('numeric_width') or 1)
@@ -1725,8 +1731,10 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
 
 def _scenario_header(tb: Path) -> Optional[dict]:
     try:
-        line = next(l for l in tb.read_text().splitlines() if l.startswith(ARITHMETIC_SCENARIO_HEADER))
-        plan = json.loads(line[len(ARITHMETIC_SCENARIO_HEADER):])
+        encoded = ''.join(l[len(ARITHMETIC_SCENARIO_HEADER):]
+                          for l in tb.read_text().splitlines()
+                          if l.startswith(ARITHMETIC_SCENARIO_HEADER))
+        plan = json.loads(encoded)
         return plan if isinstance(plan, dict) and plan.get('schema') == 'vibeic.arithmetic_scenario.v1' else None
     except (OSError, ValueError, StopIteration):
         return None
