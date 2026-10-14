@@ -1275,15 +1275,16 @@ def _counts_snapshot(
     total_steps: int,
     flow: Optional[Dict[str, Any]] = None,
     verdicts: Optional[Dict[str, str]] = None,
+    audit_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
-    """#461 symptom (2): derive ALL displayed counts from ONE rollup.
+    """#461 / #1969: consume counts and disclosures from ONE audit snapshot.
 
     `executed_pass` / `executed_total` match the audit summary line's
     "X/Y executed PASS" definition (PASS over total − waived − skipped),
     so the headline audit block, the prose bullets, and the resource log
     never disagree. `pass_only` is the strict PASS bucket retained for
     the per-verdict roll-up table. chip-AGNOSTIC: pure arithmetic on
-    verdict buckets.
+    verdict buckets plus the producer's typed per-step disclosures.
 
     VACUOUS-PASS is NOT in `executed_pass`. It used to be (Wave 93,
     `executed_pass = pass_only + vacuous`), mirroring
@@ -1333,7 +1334,19 @@ def _counts_snapshot(
     # the roll-up-consistency gate) can tell an unreadable verdict apart
     # from an absent required output.
     no_verdict = rollup.get(NO_VERDICT, 0)
-    executed_pass = pass_only
+    # The checker keeps disclosed vacuity in the global PASS bucket but
+    # excludes it from executed PASS. Consume those same serialized facts;
+    # neither the supplemental boolean nor human stdout defines this count.
+    audit_rows = (audit_snapshot or {}).get("steps")
+    vacuity_disclosed = sum(
+        1 for row in (audit_rows if isinstance(audit_rows, list) else [])
+        if isinstance(row, dict)
+        and row.get("status") == _T.Verdict.PASS.value
+        and ({_T.Disclosure.VACUITY.value,
+              _T.Disclosure.PARTIAL_VACUITY.value}
+             & {str(d) for d in (row.get("disclosures") or [])})
+    ) if pass_only else 0
+    executed_pass = pass_only - vacuity_disclosed
     executed_total = total_steps - waived - skipped
     if flow is not None and verdicts is not None:
         skipped_manufacturing, skipped_midflow = _split_skipped_by_stage(flow, verdicts)
@@ -2133,16 +2146,18 @@ def _render(project: Path, run_audit: bool = True,
     chip_addendum = (_pl.report_path(project, "chip_specific_summary.md")).is_file()
 
     # #461 / #1969: SINGLE COUNTS SNAPSHOT. Every PASS / executed count
-    # displayed anywhere in the report derives from the producer's ONE
-    # `step_counts` object — never from a renderer-side per-step recount and
-    # never from a different PASS definition. `executed_pass` matches the
+    # displayed anywhere in the report consumes the producer's ONE snapshot:
+    # `step_counts` owns the buckets; PASS-row disclosures qualify executed
+    # PASS without changing those buckets or statuses. `executed_pass` matches the
     # audit summary line's
     # "X/Y executed PASS" semantics (strict PASS only — VACUOUS-PASS was
     # ruled out of the numerator and stays in the denominator) so the
     # headline audit block, the prose, and the resource log all agree. A
     # snapshot marker is stamped so a reader knows a fresh `--strict`
     # re-run can move the numbers (e.g. once late artefacts land).
-    snap = _counts_snapshot(rollup, total_steps, flow=flow, verdicts=verdicts)
+    snap = _counts_snapshot(
+        rollup, total_steps, flow=flow, verdicts=verdicts,
+        audit_snapshot=audit_snapshot if not counts_withheld else None)
     # The census is folded into the digest, not merely rendered: the digest is
     # the token a reader quotes as proof of WHICH run these counts are, and it
     # gave the same answer for a designed run and a silent one.
@@ -2308,9 +2323,8 @@ def _render(project: Path, run_audit: bool = True,
                         f"{_d['steps_missing_from_the_step_table']}")
             md.append("")
 
-    # #461 / #1969: every count below comes from the SINGLE producer-owned
-    # `step_counts` snapshot via `snap` — never a stdout parse or per-step
-    # recount, never a divergent PASS definition.
+    # #461 / #1969: buckets and executed qualification consume the same
+    # producer-owned snapshot via `snap`, never a stdout recount.
     pass_n = snap["pass_only"]
     waived_n = snap["waived"]
     skipped_n = snap["skipped"]
@@ -2318,10 +2332,10 @@ def _render(project: Path, run_audit: bool = True,
     fail_n = snap["fail"]
     executed_pass = snap["executed_pass"]
     executed_total = snap["executed_total"]
-    md.append(f"- PASS={pass_n} → executed PASS={executed_pass} — every "
-              f"canonical step that MEASURED something passed "
-              f"deterministically. VACUOUS-PASS={vacuous_n} is NOT included: "
-              f"those gates ran and found no input to audit.")
+    md.append(f"- PASS={pass_n} → executed PASS={executed_pass} — PASS rows "
+              f"disclosing `vacuity` or `partial_vacuity` are excluded from "
+              f"executed PASS; the global PASS bucket is unchanged. "
+              f"NOT_MEASURED={vacuous_n} is not counted as executed PASS.")
     if waived_n:
         md.append(f"- WAIVED-DEFERRED={waived_n} — deferred via documented waiver "
                   "(human review required before tapeout).")
@@ -2337,8 +2351,8 @@ def _render(project: Path, run_audit: bool = True,
                   f"mid-flow (board absent / capability gap / "
                   f"cascade-blocked)={skipped_mid_n}.")
     if vacuous_n:
-        md.append(f"- VACUOUS-PASS={vacuous_n} — gate accepts the present project "
-                  "shape; check whether it should be a real PASS for your flow.")
+        md.append(f"- NOT_MEASURED={vacuous_n} — these steps do not certify "
+                  "a measured PASS.")
     if fail_n:
         md.append(f"- **FAIL={fail_n}** — blocking; do not claim PASS.")
     if snap.get("no_verdict"):
@@ -2353,7 +2367,12 @@ def _render(project: Path, run_audit: bool = True,
     md.append(f"Per the SOLE ACCEPTANCE CRITERION: `executed PASS = "
               f"{executed_pass}/{executed_total}, deferred = {waived_n} pending "
               f"foundry sign-off`. Engineering Phase 2+3 "
-              + ("complete." if overall in ("PASS", "PASS_WITH_WAIVERS") else "INCOMPLETE — fix FAILs before claiming."))
+              + ("INCOMPLETE — no coherent audit counts available."
+                 if (audit_snapshot is None or counts_withheld
+                     or snapshot_problems or _recon or not total_steps
+                     or snap["no_verdict"])
+                 else "complete." if overall in ("PASS", "PASS_WITH_WAIVERS")
+                 else "INCOMPLETE — fix FAILs before claiming."))
     md.append("")
 
     # A staged RTL that differs from the design input says so on the card, one
@@ -2713,7 +2732,7 @@ def _render(project: Path, run_audit: bool = True,
             md.append(f"_+{len(waivers)-20} additional waivers omitted; see `waivers.json` directly._")
             md.append("")
     else:
-        md.append("_No waivers — every executed step verified deterministically._")
+        md.append("_No waivers recorded._")
         md.append("")
     # Top-level PDK / EDA tooling gaps (also tracked in waivers.json).
     # Render as a 2-col table — Reason column is truncated to keep table
@@ -2793,7 +2812,7 @@ def _render(project: Path, run_audit: bool = True,
               f"**{snap['executed_pass']}/{snap['executed_total']}** "
               f"(strict PASS: {snap['pass_only']}, "
               f"deferred via waiver: {snap['waived']}, "
-              f"vacuous-pass: {snap['vacuous']}, "
+              f"not measured: {snap['vacuous']}, "
               f"manufacturing-skipped: {snap['skipped_manufacturing']}, "
               f"mid-flow-skipped: {snap['skipped_midflow']})")
     md.append("")
