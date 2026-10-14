@@ -491,3 +491,21 @@ def test_public_resource_has_no_private_paths_or_chinese_fields():
     assert 'title_zh' not in text
     assert not re.search(r'(?<![A-Za-z0-9_])/(?:home/reyerchu|mnt/ssd|tmp)/', text)
     assert not re.search(r'\\u[49a][0-9a-f]{3}', text)
+
+
+def test_issue3139_real_portfolio_rejects_stale_canonical_identity(tmp_path):
+    """The public reader must reject the previous real canonical binding."""
+    path = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                        'programs', 'data', 'execution_modes_portfolio.json')
+    data = json.loads(path.read_text())
+    data['meta']['canonical_flow_sha256'] = (
+        '2a43207e98e23aad3073ab0aeb1819bb29804cc57e66967402ebd8552ff6069b')
+    stale_blob = '86cf02224a3f1733688b41f7f9cc0e6cf6d7d657'
+    data['meta']['canonical_flow_git_blob'] = stale_blob
+    for row in data['steps']:
+        row['current_default']['source']['canonical_blob'] = stale_blob
+    stale = tmp_path / 'stale-portfolio.json'
+    stale.write_text(json.dumps(data))
+    with pytest.raises(em.Refusal, match='PORTFOLIO_STALE_CANONICAL') as refusal:
+        em.load_portfolio(stale)
+    assert refusal.value.code == 'PORTFOLIO_STALE_CANONICAL'
