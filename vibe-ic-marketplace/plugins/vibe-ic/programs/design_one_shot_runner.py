@@ -24509,13 +24509,28 @@ def step_emit_phase2_manifests(project: Path,
     #   * applicable work with no sound property is INCOMPLETE, never SKIP.
     # A counterexample is evidence. Deleting it and replacing it with a skip was
     # the false-green defect, so this block never unlinks results.json.
-    if not (formal_dir / "results.json").is_file():
+    _formal_results = formal_dir / "results.json"
+    _refresh_formal = not _formal_results.is_file()
+    if not _refresh_formal:
+        try:
+            import formal_proof_evidence_check as _formal_evidence
+            _refresh_formal = bool(_formal_evidence.proof_source_staleness(
+                project, formal_dir, json.loads(_formal_results.read_text())))
+        except (OSError, ValueError, TypeError):
+            _refresh_formal = True
+    if _refresh_formal:
         try:
             import sys as _sys
             if str(PROGRAMS_DIR) not in _sys.path:
                 _sys.path.insert(0, str(PROGRAMS_DIR))
             import formal_harness_gen as _fhg
             import formal_property_run as _fpr
+            if _formal_results.is_file():
+                # A stale proof is history, never disposable evidence. SBY
+                # refreshes its task folders, so retain the whole old epoch
+                # (including failed transcripts and CEX) before generating.
+                _history = formal_dir.parent / "formal_history" / f"pre_refresh_{time.time_ns()}"
+                shutil.copytree(formal_dir, _history)
             _gen = _fhg.generate(project=project, top=top_name,
                                  container=(container or None))
             if _gen.get("verdict") == "EMITTED":

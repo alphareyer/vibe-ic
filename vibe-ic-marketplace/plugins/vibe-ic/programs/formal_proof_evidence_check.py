@@ -418,8 +418,8 @@ def _harness_binds_reset(harness: str, port: str) -> bool:
         rf"\bwire\s+rst_active\s*=\s*[!~]?\s*{re.escape(port)}\s*;", harness))
 
 
-def _dut_output_ports(project: Path, harness: str) -> set[str]:
-    """Output ports of the DUT instance actually named by the proved harness."""
+def _dut_ports(project: Path, harness: str, direction: str) -> set[str]:
+    """Current ports of the DUT instance named by the proved harness."""
     import formal_harness_gen as _fhg
     name, _ = _dut_instance(harness)
     if name is None:
@@ -428,8 +428,12 @@ def _dut_output_ports(project: Path, harness: str) -> set[str]:
     for path in sorted(list(rtl_dir.rglob("*.v")) + list(rtl_dir.rglob("*.sv"))):
         iface = _fhg.parse_module(path.read_text(errors="replace"), name)
         if iface is not None:
-            return {p.name for p in iface.ports if p.direction == "output"}
+            return {p.name for p in iface.ports if p.direction == direction}
     return set()
+
+
+def _dut_output_ports(project: Path, harness: str) -> set[str]:
+    return _dut_ports(project, harness, "output")
 
 
 _RESET_LITERAL = r"(?:'0|'1|\d+'[sS]?[bBoOdDhH][0-9a-fA-F_xXzZ]+|[01])"
@@ -492,7 +496,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     if not rows:
         return []
     hfiles = _harness_files(project, formal_dir, results)
-    stale = _harness_not_proven(hfiles, results)
+    stale = proof_source_staleness(project, formal_dir, results)
     harness = strip_comments("\n".join(f.read_text(errors="replace") for f in hfiles))
     tasks = [t for t in results.get("properties") or [] if isinstance(t, dict)]
     proven = (results.get("all_proved") is True and bool(tasks)
@@ -501,6 +505,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     proof_status = ", ".join(f"{t.get('task')}:{t.get('status')}"
                              f"({t.get('bound')})" for t in tasks) or "no proof task"
     covering = _reset_guarded_properties(harness, _dut_output_ports(project, harness))
+    current_inputs = _dut_ports(project, harness, "input")
     out: List[dict] = []
     for row, b in rows:
         rec = {"id": str(row.get("id")), "kind": "binding", "role": b["role"],
@@ -509,6 +514,8 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
                    f.name: ((results.get("proof_inputs") or {}).get("files") or {}).get(f.name)
                    for f in hfiles}}
         why = []
+        if b["port"] not in current_inputs:
+            why.append(f"the declared reset {b['port']!r} is not a current DUT input")
         if not _harness_connects(harness, b["port"]):
             why.append(f"the harness does not connect the DUT port {b['port']!r}")
         if not _harness_binds_reset(harness, b["port"]):
@@ -518,8 +525,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
             rec["property"] = covering[0]
         else:
             why.append("no substantive reset assertion on a connected DUT output is guarded by that reset")
-        if stale:
-            why.append(stale)
+        why.extend(stale)
         if not proven:
             why.append(f"the covering property is not proven ({proof_status})")
         if why:
@@ -556,6 +562,21 @@ def _chip_read_stale(project: Path, results: dict) -> List[str]:
             out += [f"phase-3 synthesis — {d}"
                     for d in _csr.chip_read_differences(proved, rec)]
     return out
+
+
+def proof_source_staleness(project: Path, formal_dir: Path, results: dict) -> List[str]:
+    """Source validity shared by binding discharge and normal producer reuse.
+
+    A current failed or partial proof is still evidence worth retaining and
+    reusing. This checks its source, not whether its verdict was successful.
+    """
+    if not isinstance(results, dict):
+        return ["the recorded formal results are not an object"]
+    stale = _chip_read_stale(project, results)
+    harness_stale = _harness_not_proven(_harness_files(project, formal_dir, results), results)
+    if harness_stale:
+        stale.append(harness_stale)
+    return stale
 
 
 def audit(project: Path) -> dict:
