@@ -222,7 +222,7 @@
         "items": [
           {
             "id": "15-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "On a ring-pinned die, the die size is the pad perimeter requirement (2 x PAD_EDGE_SPACING + corners + pads) and the core is the ring interior. No utilisation grow ladder.",
@@ -231,7 +231,7 @@
           },
           {
             "id": "15-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/1",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "In-deck grow/loosen/downsize die ladders that restart the whole PnR",
@@ -240,7 +240,7 @@
           },
           {
             "id": "15-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/2",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Tap distance taken from the foundry DRC deck (DF.13/DF.14 by the library's voltage class). Tap coverage counts only in the SAME row, because DF.13_MV grows the tap .and(nwell).",
@@ -249,7 +249,7 @@
           },
           {
             "id": "15-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/3",
             "kind": "enhancement",
             "declared_destination": "drop",
             "item": "#684 post-placement sparse-die tap prune + welltie coverage repair",
@@ -258,7 +258,7 @@
           },
           {
             "id": "15-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "librelane_config",
             "item": "Unplaceable-master cap: after tapcell, measure the longest free-site run over the ROWS and set_dont_use every master wider than it",
@@ -267,7 +267,7 @@
           },
           {
             "id": "15-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane",
             "item": "PDN_GRID_EMPTY: after pdngen, every POWER/GROUND net that has terminals must own special wires, and the refusal quotes pdngen's own reason",
@@ -276,7 +276,7 @@
           },
           {
             "id": "15-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/6",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "EM-driven PDN sizing: a joint strap width+pitch plan from rail current, a pitch floor of 2*(width+spacing), and PDN_EM_RING_CAPACITY_UNREACHABLE",
@@ -285,7 +285,7 @@
           },
           {
             "id": "15-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/7",
             "kind": "lesson",
             "declared_destination": "librelane_config",
             "item": "GF180 pad core-facing supply pins sit on Metal2, so the core ring needs add_pdn_connect Metal2-Metal5",
@@ -294,7 +294,7 @@
           },
           {
             "id": "15-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/8",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Tapcell-master declaration gate (staged_pdk_declares_tapcell_master_check)",
@@ -303,7 +303,7 @@
           },
           {
             "id": "15-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/9",
             "kind": "lesson",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Macro OBS dropped in full when it names an undeclared layer (64 declared rects -> 0 loaded) while read_lef returns success",
@@ -312,7 +312,7 @@
           },
           {
             "id": "15-H11",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/10",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/10",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Opendp cell cache not re-imported after new instances: filler_placement tiled spacers over 43 fresh ties until check_placement forced a re-import",
@@ -321,7 +321,7 @@
           },
           {
             "id": "15-H12",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/11",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/11",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Catch-and-continue (NONFATAL) wrappers around tool commands, e.g. PDN_NONFATAL, TAPCELL_NONFATAL",
@@ -330,7 +330,7 @@
           },
           {
             "id": "15-H13",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/12",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15/harvest/12",
             "kind": "feature",
             "declared_destination": "drop",
             "item": "Pin placement from pin_order.cfg -> set_io_pin_constraint (#650)",
@@ -542,7 +542,7 @@
         "items": [
           {
             "id": "15.5ic-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "io_pad_chip_top_gen: instantiate IO cells per port from the L-doc per-side partition + L9 directions + IO LEF CLASS PAD subtype, and derive supply pad pairs from measured current",
@@ -551,7 +551,7 @@
           },
           {
             "id": "15.5ic-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/1",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "pad_assignment_gen: PAD_* in LibreLane's own variable names, sourced from the slot or the tapeout declaration with per-variable provenance, refusing a half-answered declaration",
@@ -560,7 +560,7 @@
           },
           {
             "id": "15.5ic-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/2",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "PADRING_DOES_NOT_ABUT (walk each side corner->pad/filler->corner and require zero residual gap), BTERM_WITHOUT_PAD (every top port reaches a pad), and PAD_SITE_DECLARATION_AMBIGUOUS",
@@ -569,7 +569,7 @@
           },
           {
             "id": "15.5ic-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/3",
             "kind": "enhancement",
             "declared_destination": "fork_patch:librelane",
             "item": "Machine-readable refusal ids for the pad placer (PAD_SITE_NOT_FOUND, PAD_SITE_CLASS_NOT_PAD, PAD_INSTANCE_NOT_IN_BLOCK, PAD_RING_DOES_NOT_FIT, PAD_CORNER_SPACING_NOT_SITE_MULTIPLE, PAD_CONFIG_VARIABLE_ABSENT)",
@@ -578,7 +578,7 @@
           },
           {
             "id": "15.5ic-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "make_io_sites -rotation_horizontal/-rotation_vertical act on the opposite axis (H moves W/E, V moves S/N), and the site-selection flag pair crosses the same way",
@@ -587,7 +587,7 @@
           },
           {
             "id": "15.5ic-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Along-row extent must be the master WIDTH on all four sides (the Python port used the oriented height: 19x350 um vs a 1500 um side)",
@@ -596,7 +596,7 @@
           },
           {
             "id": "15.5ic-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "librelane_config",
             "item": "Supply-pad allocation must respect the ring's site/filler spacing rules on a re-run PnR pass",
@@ -605,7 +605,7 @@
           },
           {
             "id": "15.5ic-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/7",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A HARDMACRO/IP delivery must not get a pad ring; the route is decided by the declared deliverable",
@@ -614,7 +614,7 @@
           },
           {
             "id": "15.5ic-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=15.5ic/harvest/8",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Runner seam glue: stop the deck at floorplan, inject padring.def, exclude pad BTerms, add physical-only pad instances, gate the routing consumer",
@@ -814,7 +814,7 @@
         "items": [
           {
             "id": "17-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "buffer_ports -inputs before repair_design, so high-fanout port nets such as reset_n get a buffer tree",
@@ -823,7 +823,7 @@
           },
           {
             "id": "17-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "set_wire_rc before any repair (without it STA is optimistic and repair_timing -setup aborts RSZ-0089)",
@@ -832,7 +832,7 @@
           },
           {
             "id": "17-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/2",
             "kind": "enhancement",
             "declared_destination": "drop",
             "item": "Escalating, proven legalization ladder (displacement rungs, diamond legalizer, full-die rung, clock-buffer downsize rung, tap-ripup rung) at four sites",
@@ -841,7 +841,7 @@
           },
           {
             "id": "17-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A legalizer that aborts leaves already-moved cells illegal (DPL-0701 'Violations remain: 2' vs 37 overlap + 37 padding + 22 site-align), so legality must be read back from check_placement, never from the legalizer's claim or the DEF status field",
@@ -850,7 +850,7 @@
           },
           {
             "id": "17-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=17/harvest/4",
             "kind": "lesson",
             "declared_destination": "librelane_config",
             "item": "PL_TIMING_DRIVEN assumed to be the default 'ORFS/OpenLane stance'",
@@ -1034,7 +1034,7 @@
         "items": [
           {
             "id": "18-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Spare plan: density -> count, type distribution, core grid positions, masters discovered from the Liberty, insertion provenance",
@@ -1043,7 +1043,7 @@
           },
           {
             "id": "18-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "librelane_custom_step",
             "item": "One tie-low driver per spare, placed at the spare, instead of one driver for the whole pool (an RC tree that later drew 12 antenna diodes)",
@@ -1052,7 +1052,7 @@
           },
           {
             "id": "18-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/2",
             "kind": "lesson",
             "declared_destination": "librelane_custom_step",
             "item": "global_connect skips dont_touch instances, leaving spare PG pins floating (ODB-0383 236 -> 0 after lifting dont_touch around the connect)",
@@ -1061,7 +1061,7 @@
           },
           {
             "id": "18-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/3",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Spare tie-off wires broke after checkpoint restore (DRT-0206 on spare_tielo_* nets; dont_touch lost on restore)",
@@ -1070,7 +1070,7 @@
           },
           {
             "id": "18-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/4",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "spare_cell_coverage_check as the sole declaring producer of the coverage verdict (density >= target, distributed, tied off)",
@@ -1079,7 +1079,7 @@
           },
           {
             "id": "18-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=18/harvest/5",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "The #684 tap prune had to pre-mark spare grid positions so their taps survived",
@@ -1260,7 +1260,7 @@
         "items": [
           {
             "id": "19-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Clock-path drive sizing for cells upstream of the CTS root that neither CTS nor the resizer owns (the DFT test-clock mux: 2.00 ns, 30% of insertion delay)",
@@ -1269,7 +1269,7 @@
           },
           {
             "id": "19-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "librelane_config",
             "item": "sink_clustering_size taken from the library/SDC max_fanout, and distance_between_buffers 10 um to avoid a 2-level H-tree collapse",
@@ -1278,7 +1278,7 @@
           },
           {
             "id": "19-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/2",
             "kind": "lesson",
             "declared_destination": "librelane_config",
             "item": "CTS masters must fit the tap-grid free run. With clkbuf_16 as root, CTS used it 2,055 times, leaving ~2,344 illegal cells; 10 h of the full-die rung recovered 11%.",
@@ -1287,7 +1287,7 @@
           },
           {
             "id": "19-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/3",
             "kind": "enhancement",
             "declared_destination": "librelane_config",
             "item": "CTS buffer family derived from the Liberty when a PDK ships no LibreLane config (median drive for leaves, largest for the root, one family)",
@@ -1296,7 +1296,7 @@
           },
           {
             "id": "19-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "CTS silently skipped (on nangate45 a sky130 buffer name went CTS_NONFATAL, so no CTS ran); LibreLane likewise only warns when CLOCK_PORT/CLOCK_NET is unset",
@@ -1305,7 +1305,7 @@
           },
           {
             "id": "19-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/5",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "cts_quality_check: buffers > 0 cross-checked between the report and the DEF, depth/latency present, skew <= declared target",
@@ -1314,7 +1314,7 @@
           },
           {
             "id": "19-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/6",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Post-hoc clock_tree.rpt emission from the OpenROAD log (#519)",
@@ -1323,7 +1323,7 @@
           },
           {
             "id": "19-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=19/harvest/7",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "repair_clock_nets, repair_clock_inverters and the CTS NDR are absent from the vibe-ic deck",
@@ -1337,7 +1337,7 @@
             "obligation": "DFT test-clock mux upstream CTS root drive sizing #2160",
             "source_target": "Vibeic.ClockNetworkGlobalSizing",
             "historical_status": "WAIT_REAL_DFT_MUX_INPUT",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           },
@@ -1346,7 +1346,7 @@
             "obligation": "CTS cells must retain clock buffer family",
             "source_target": "OpenROAD#39 merged + actual shipped image capability",
             "historical_status": "OWNED_C930EM_IMAGE_AND_W4_SOURCE_REVIEW",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           }
@@ -1529,7 +1529,7 @@
         "items": [
           {
             "id": "20-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/0",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Hold report relabel: 'worst hold slack $_whs' is appended so the checker's regex matches",
@@ -1538,7 +1538,7 @@
           },
           {
             "id": "20-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A gate that required post_hold.def to differ from post_cts.def pushed the runner into an extra legalization pass only so the two files differ",
@@ -1547,7 +1547,7 @@
           },
           {
             "id": "20-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Hold repair must load the IO/pad Liberty per corner, or a register-to-pad path shows false hold (-0.40 ns via u_pad_x_23)",
@@ -1556,7 +1556,7 @@
           },
           {
             "id": "20-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/3",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "A stale candidate was reused and the shipped repair fixed setup only",
@@ -1565,7 +1565,7 @@
           },
           {
             "id": "20-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/4",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "hold_area_budget_check: hold-buffer area vs budget, currently unable to refuse for lack of a producer",
@@ -1574,7 +1574,7 @@
           },
           {
             "id": "20-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "openroad_hold_repair_tcl_gen, the PPA registry's only EXECUTABLE actuator, emits '-slack_margin {margin_ps}' with no ps->ns conversion and '-allow_setup_violations false'",
@@ -1583,7 +1583,7 @@
           },
           {
             "id": "20-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=20/harvest/6",
             "kind": "enhancement",
             "declared_destination": "drop",
             "item": "Post-hold legalization clock-buffer downsize rung (subservient: 468 clkbuf_16 off-grid -> 1001x DRT-0073 -> unrouted DEF)",
@@ -1597,7 +1597,7 @@
             "obligation": "Every repair scene loads every signoff IO/pad Liberty",
             "source_target": "librelane_contract.PAD_LIBS + existing completeness consumers",
             "historical_status": "WAIT_W4_REVIEW_AND_SHARED_WRITER",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           },
@@ -1606,7 +1606,7 @@
             "obligation": "hold_area_budget_check already producer, excluded step20 all_of",
             "source_target": "flow/phase1_phase2_phase3.yaml + hold_area_budget_check",
             "historical_status": "ROOT_DECISION_EXISTING_GATE_DENOMINATOR",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           },
@@ -1615,7 +1615,7 @@
             "obligation": "timing.repair_hold DECLARED_ONLY closure harness planner",
             "source_target": "programs/_ppa/timing.py + existing hold repair consumer",
             "historical_status": "WAIT_TOOL_ACTUATOR_MAPPING",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           },
@@ -1624,7 +1624,7 @@
             "obligation": "clkbuf16 downsize rung prevents Subservient off-grid #296",
             "source_target": "OpenROAD detailed_placement + current CTS cell pool",
             "historical_status": "WAIT_ACTUAL_SUBSERVIENT_STAGE_INPUT",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           },
@@ -1633,7 +1633,7 @@
             "obligation": "hold_fix_planner strategy and buffer selection",
             "source_target": "OpenROAD repair_timing; preserve planner where PPA no counterpart",
             "historical_status": "WAIT_REAL_APPLICABLE_CASE",
-            "historical_evidence": "/home/reyerchu/codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
+            "historical_evidence": "codex_tasks/out/codex0930/host-120/CUT_W4.last.md",
             "as_of": "2026-09-29T18:06:20.512708+00:00",
             "current_adjudication": "REUSE_EXISTING_OWNER_DISPOSITION; historical row is not a fresh reopened verdict"
           }
@@ -1865,7 +1865,7 @@
         "items": [
           {
             "id": "21-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Router bug fixes already in the fork: DRT-0708 unowned-object counter (PR #16), frMarker copy-ctor (PR #18), marker belongs to the tile whose drcBox owns it (PR #20: subservient's 12 NS-Metal markers went to 0), and the LEF58_SPACING EOL TONOTCHLENGTH parse fix",
@@ -1874,7 +1874,7 @@
           },
           {
             "id": "21-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/1",
             "kind": "feature",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Scoped detailed routing: route only the named nets and hold the others byte-identical (DRT-0633/0634/0711)",
@@ -1883,7 +1883,7 @@
           },
           {
             "id": "21-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/2",
             "kind": "enhancement",
             "declared_destination": "librelane_custom_step",
             "item": "Named-violation reroute: rip up only the nets that the router's post-route verification names, then re-run detailed_route, bounded and re-measured. It targets DRT-0701, where verification finds violations the loop never reported (subservient round 3: the loop plateaued at 1, verification published 3)",
@@ -1892,7 +1892,7 @@
           },
           {
             "id": "21-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/3",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Sign-off-deck feedback repair for rules the router cannot see: CO.6a comes from a cell-internal Contact that is missing from the router LEF",
@@ -1901,7 +1901,7 @@
           },
           {
             "id": "21-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Antenna repair rolls back and re-verifies. A reroute that returns a nonfatal refusal restores the verified snapshot, and route_modified_after_last_verification must be false at ship time",
@@ -1910,7 +1910,7 @@
           },
           {
             "id": "21-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/5",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Workarounds for DEF round-trips: re-establish guides before each post-restore detailed_route, the ext-wire relay, and the ODB/DEF two-leg child",
@@ -1919,7 +1919,7 @@
           },
           {
             "id": "21-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "DRT-1010: the router's wire reader pairs a path's begin with another path's POINT_EXT extension point",
@@ -1928,7 +1928,7 @@
           },
           {
             "id": "21-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/7",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Post-route fill followed by PG re-route caused DRT-1231 PG_REROUTE_FAILED on subservient int4",
@@ -1937,7 +1937,7 @@
           },
           {
             "id": "21-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/8",
             "kind": "enhancement",
             "declared_destination": "librelane_config",
             "item": "Route-feedback die-loosen ladder: only for an auto-owned die, only on a non-converging DRT trajectory, with stall patience and a named reason for every decline (#307/#914)",
@@ -1946,7 +1946,7 @@
           },
           {
             "id": "21-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/9",
             "kind": "enhancement",
             "declared_destination": "drop",
             "item": "Per-iteration DRT violation trajectory parser (_drt_violation_trajectory and related)",
@@ -1955,7 +1955,7 @@
           },
           {
             "id": "21-H11",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/10",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=21/harvest/10",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Step gates: drc_report_check --under (step scoping), def_stage_progression_check (anti-fabrication), provenance_check --require-measured, macro_obs_geometry_intersect_check (#828), route_congestion_trade_disclosure (GRT-0273 clock NDR dropped; #306/#297)",
@@ -2194,7 +2194,7 @@
         "items": [
           {
             "id": "22-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "LEF-RC v2 fallback (extract_parasitics -lef_rc -version 2.0) when a PDK ships no OpenRCX rules: a real grounded-cap SPEF from tech-LEF R/C (RCX-0468 with the v1 engine)",
@@ -2203,7 +2203,7 @@
           },
           {
             "id": "22-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/1",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "write_spef needs extract_parasitics, not estimate_parasitics; the latter gave RCX-0134 and an empty SPEF",
@@ -2212,7 +2212,7 @@
           },
           {
             "id": "22-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/2",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Captable discovery for two naming conventions (open_pdks rules.openrcx.<pdk>.<c>[.magic] vs IHP openrcx/<pdk>.<c>.magic.rules; SPM-SI-1), copy-pasted in four places",
@@ -2221,7 +2221,7 @@
           },
           {
             "id": "22-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/3",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Analytical lateral coupling augment (parallel-plate Cc from routed DEF, generic dielectric), with a guard against double-counting when the SPEF already has coupling",
@@ -2230,7 +2230,7 @@
           },
           {
             "id": "22-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/4",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "FasterCap field-solve accuracy tier with PDK dielectric fit",
@@ -2239,7 +2239,7 @@
           },
           {
             "id": "22-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "One tech LEF for all RC corners in vibe-ic vs per-corner nom/min/max .tlef in LibreLane",
@@ -2248,7 +2248,7 @@
           },
           {
             "id": "22-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/6",
             "kind": "lesson",
             "declared_destination": "fork_patch:vibeic-eda",
             "item": "The vibe-ic image's /foss/pdks/gf180mcuD reportedly lacks rules.openrcx per-corner files, which the ciel gf180 PDK b344c97 ships",
@@ -2257,7 +2257,7 @@
           },
           {
             "id": "22-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=22/harvest/7",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Gates: spef_extraction_check (coverage/zero caps; 'the SI gate signed off on a zero it measured itself') and provenance_check --require-measured",
@@ -2556,7 +2556,7 @@
         "items": [
           {
             "id": "23-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "librelane_config",
             "item": "Flat OCV derate \u00b15% issued as two separate set_timing_derate commands (a single -early/-late command gave Error 110 and aborted the rigor report)",
@@ -2565,7 +2565,7 @@
           },
           {
             "id": "23-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Propagated clock in SPEF-based sign-off decks (subservient r7 reported 'clock network delay (ideal) 0.00')",
@@ -2574,7 +2574,7 @@
           },
           {
             "id": "23-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/2",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "Recovery/removal/min-pulse-width check types that sta_signoff_rigor_check requires",
@@ -2583,7 +2583,7 @@
           },
           {
             "id": "23-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/3",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "AOCV table discovery",
@@ -2592,7 +2592,7 @@
           },
           {
             "id": "23-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/4",
             "kind": "enhancement",
             "declared_destination": "drop",
             "item": "Pairing setup at SS+max-RC with hold at FF+min-RC",
@@ -2601,7 +2601,7 @@
           },
           {
             "id": "23-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Required-PVT corner accounting: a declared post-route role cannot be satisfied by pre-layout values, and a missing role is NOT_MEASURED",
@@ -2610,7 +2610,7 @@
           },
           {
             "id": "23-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/6",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Refuse stale or aliased reports: never credit post_route_timing.rpt aliased from an in-session pnr/sta.rpt or from an earlier run's report picked by mtime",
@@ -2619,7 +2619,7 @@
           },
           {
             "id": "23-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/7",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "A SPEF cannot annotate a driver outside the die (pad drivers), so the census stops asking",
@@ -2628,7 +2628,7 @@
           },
           {
             "id": "23-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/8",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane",
             "item": "LibreLane fork fixes found while running spm: OpenSTA scene compatibility, netgen parser, io_place",
@@ -2637,7 +2637,7 @@
           },
           {
             "id": "23-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/9",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "sta vs openroad engine parity: the standalone sta lacked the fork's commands",
@@ -2646,7 +2646,7 @@
           },
           {
             "id": "23-H11",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/10",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=23/harvest/10",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Nine step-23 gates (hold_corner_coverage, post_route_signoff_corner, sta_architectural_residual, sta_assumed_clock_disclosure, clock_target_record_agreement, drv_promotion_corroboration, achieved_period_recorded [advisory; refuses on real spm input], sta_report_check, sta_corner_record_completeness)",
@@ -2880,7 +2880,7 @@
         "items": [
           {
             "id": "24-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane (take the max over all per-net matches and record how many nets were analysed); vibeic_gate (psm_analysis_coverage rule)",
             "item": "Worst IR must be the max over ALL analysed nets. A net whose analysis failed (PSM_NONFATAL) or that has unconnected supply pins must not let the verdict read PASS.",
@@ -2889,7 +2889,7 @@
           },
           {
             "id": "24-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/1",
             "kind": "feature",
             "declared_destination": "librelane_custom_step (a Checker.IRDrop that compares ir__drop__worst with the declared budget)",
             "item": "IR budget verdict: worst drop compared against a % of VDD (pdk.ir_budget_pct, default 10%). A parsed 0 V supply means UNMEASURED, not PASS (#662).",
@@ -2898,7 +2898,7 @@
           },
           {
             "id": "24-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Via-cut resistance for PSM (it aborted with PSM-0021 'Resistance map contains invalid values' when the cut layers were at 0 \u03a9)",
@@ -2907,7 +2907,7 @@
           },
           {
             "id": "24-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "drop (static); librelane_custom_step (keep inside the dynamic-IR step)",
             "item": "Supply voltage when the liberty declares operating_conditions without a default (PSM-0079, #362). 30/30 gf180mcuD liberties have this shape.",
@@ -2916,7 +2916,7 @@
           },
           {
             "id": "24-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/4",
             "kind": "feature",
             "declared_destination": "librelane_custom_step (a dynamic-IR step after OpenROAD.IRDropReport) + vibeic_gate (the scaled_static_bound disclosure)",
             "item": "Dynamic IR from the fork's analyze_power_grid -transient. A quasi-static result (no decap) must be labelled scaled_static_bound, not genuine di/dt.",
@@ -2925,7 +2925,7 @@
           },
           {
             "id": "24-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/5",
             "kind": "lesson",
             "declared_destination": "fork_patch:librelane (add optional -enable_em -em_outfile to irdrop.tcl so one SDC+SPEF session produces both IR and EM)",
             "item": "vibe-ic's IR/EM session loads no SDC and no SPEF (runner:64820-64833), while LibreLane's IRDropReport loads both, so the per-instance currents are computed on a different power basis.",
@@ -2934,7 +2934,7 @@
           },
           {
             "id": "24-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/6",
             "kind": "feature",
             "declared_destination": "librelane_config (generate VSRC_LOC_FILES from the pad ring's supply pads on the DIE path)",
             "item": "Voltage-source model: neither flow feeds PSM real supply-pad locations. vibe-ic never passes -vsrc or set_pdnsim_source_settings (grep: 0 hits) and relies on PSM's single-bump default (PSM-0073, runner:64945-64958). LibreLane warns when VSRC_LOC_FILES is unset (openroad.py:2246-2249), and the spm run had it null.",
@@ -2943,7 +2943,7 @@
           },
           {
             "id": "24-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=24/harvest/7",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A PSM error must not be laundered into SKIP (#2109)",
@@ -3134,7 +3134,7 @@
         "items": [
           {
             "id": "25-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate (now); fork_patch:OpenROAD if an A/B shows check_current_density lacks per-layer LEF Jmax",
             "item": "Per-layer J vs Jmax read from the PDK tech LEF (DCCURRENTDENSITY), with relative lifetime headroom. It replaced a decap-count proxy.",
@@ -3143,7 +3143,7 @@
           },
           {
             "id": "25-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/1",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Supply-current conservation bound: a segment current cannot exceed the net's total supplied current. A missing Jmax authority gives INCOMPLETE rc 2, never PASS.",
@@ -3152,7 +3152,7 @@
           },
           {
             "id": "25-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD (emit segment width in -em_outfile) + vibeic_gate until then",
             "item": "EM segment width taken from drawn DEF/ODB geometry (a dump of SWire and via metal boxes), not the LEF layer minimum. T52: 8 offenders dropped to 0 once the 12.01 \u00b5m strap was measured instead of a distant ring's 1.6 \u00b5m minimum.",
@@ -3161,7 +3161,7 @@
           },
           {
             "id": "25-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "EM evidence must bind to this run's DEF digest. A copy run read a stale em_segments.csv from an aside directory and reported a false 9/9 PASS.",
@@ -3170,7 +3170,7 @@
           },
           {
             "id": "25-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/4",
             "kind": "lesson",
             "declared_destination": "librelane_config (PDN width/pitch/supply pads chosen BEFORE routing by a PPA sweep); drop the post-route re-PnR loop",
             "item": "The post-route pdn_em_resize (widen straps, then re-run PnR) broke repeatedly: pdngen drew no grid at 4.39 \u00b5m (PG_UNROUTED_SUPPLY); PDN-0191 off-grid offset; DRT-0206 after the re-PnR; computed widths of 3.95 and 10.97 \u00b5m but 1.6 \u00b5m drawn; PDN_EM_CHAIN_STOPPED stopped runs before GDS; a second PnR pass broke the pad ring.",
@@ -3179,7 +3179,7 @@
           },
           {
             "id": "25-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/5",
             "kind": "feature",
             "declared_destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/\u2026)",
             "item": "Supply-pad count allocated from measured current (T55: 12 VDD/VSS pairs)",
@@ -3188,7 +3188,7 @@
           },
           {
             "id": "25-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=25/harvest/6",
             "kind": "lesson",
             "declared_destination": "librelane_config (VSRC_LOC_FILES) + vibeic_gate (the EM verdict records its source model)",
             "item": "The EM currents are solved under PSM's default source model (no -vsrc) and with no SDC/SPEF loaded (runner:64820-64833). Whether the Metal4/Metal1 Jmax offenders persist under pad-located VSRC and an SDC basis is NOT_MEASURED.",
@@ -3406,7 +3406,7 @@
         "items": [
           {
             "id": "26-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/0",
             "kind": "lesson",
             "declared_destination": "vibeic_gate (antenna evidence bound to the shipped DEF/GDS digest); drop the log-scraping re-emit",
             "item": "Measure antenna on the route that SHIPS. The pnr.tcl DEF re-read as 0/0, but the promoted signoff_spef_repair DEF carried 2 violations (i_clk ratio 871.94; net828 401.02 vs 400), which showed up as 7 ANT.16_ii_ANT.4 on the shipped GDS (#2172).",
@@ -3415,7 +3415,7 @@
           },
           {
             "id": "26-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/1",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "ANT-0008: a fresh read_def cannot see detailed routing, and the re-global_route discards the antenna jumpers, so the count is wrong",
@@ -3424,7 +3424,7 @@
           },
           {
             "id": "26-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Route-abort markers make a 0/0 antenna count vacuous (DRT-0305/DRT-0085 abort; DRT-1010 is cosmetic, R-0915-69; DRT-627 leaves a pin unaccessed)",
@@ -3433,7 +3433,7 @@
           },
           {
             "id": "26-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "drop (the problem disappears with the tool path); lesson kept as vibeic_gate",
             "item": "0-byte, unsigned, or non-shipped-iteration antenna reports must never count as a tool report. FP-18: passed:true with ERROR findings on 0-byte reports; #2157; T31 read earlier-iteration and rollback JSON as reports; spm final13's pre-stream antenna gate hit the same defect.",
@@ -3442,7 +3442,7 @@
           },
           {
             "id": "26-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/4",
             "kind": "feature",
             "declared_destination": "fork_patch:klayout (the engine stays in vibeic/klayout gds-antenna/) + vibeic_gate (fail when OpenROAD antenna__violating__nets and klayout__antenna_error__count disagree)",
             "item": "Independent GDS antenna engine: connectivity staged per etch stage, cumulative antenna area (CAA), and a router-vs-geometry DISAGREEMENT counts as FAIL",
@@ -3451,7 +3451,7 @@
           },
           {
             "id": "26-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "The KLayout engine must be staged into a path the container can reach. Before #2119 the GDS antenna opinion was DISCLOSED_SKIPped on every PDK.",
@@ -3460,7 +3460,7 @@
           },
           {
             "id": "26-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate (for any post-route ECO); drop for the tool path",
             "item": "A refused post-DRT antenna reroute rolls back to the verified route; route_modified_after_last_verification must be false at ship (R-0915-74)",
@@ -3652,7 +3652,7 @@
         "items": [
           {
             "id": "26.5ic-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane (fail unless the output exists and contains new seal-ring marker geometry)",
             "item": "Verify the ring by measuring the output layout, not the exit code. gf180mcuD sealring.py in image 0.3.46 exited 0 and wrote nothing when sealring_cells was missing.",
@@ -3661,7 +3661,7 @@
           },
           {
             "id": "26.5ic-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/1",
             "kind": "feature",
             "declared_destination": "fork_patch:librelane",
             "item": "Emit a seal-ring metric (sealed / skipped / no generator)",
@@ -3670,7 +3670,7 @@
           },
           {
             "id": "26.5ic-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/2",
             "kind": "enhancement",
             "declared_destination": "fork_patch:librelane (interface detection; check the transposition on a non-square ihp die, NOT_MEASURED)",
             "item": "Choose the invocation form from the script's declared interface (does it accept --die-width?) and read the tech name from the PDK .lyt, instead of branching on the PDK name. LibreLane's ihp branch also passes width=DIE_AREA[3] and height=DIE_AREA[2], transposed relative to the generic branch. vibe-ic reproduces this and records it.",
@@ -3679,7 +3679,7 @@
           },
           {
             "id": "26.5ic-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "librelane_config (macros use the Classic flow or leave KLAYOUT_SEALRING_SCRIPT unset) + vibeic_gate",
             "item": "A HARDMACRO delivery ships no die seal ring. Stamping one produced 1,359,528 sign-off DRC violations on subservient (97.4% GR.4).",
@@ -3688,7 +3688,7 @@
           },
           {
             "id": "26.5ic-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "librelane_config (derive the CORE/DIE margin) + vibeic_gate (refuse to seal a core in the band)",
             "item": "A DIE reserves the seal-ring band + GR.2 clearance read from the PDK's own text (26 \u00b5m on gf180mcuD). Sealing a core that sits inside the band gave 1,276,840 violations; with the inset, 548.",
@@ -3697,7 +3697,7 @@
           },
           {
             "id": "26.5ic-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Seal the DIE rectangle, not the routed core bbox (fix 3a)",
@@ -3706,7 +3706,7 @@
           },
           {
             "id": "26.5ic-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/6",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Die-identification cells are NOT_DETERMINED, unless the design declares no package, in which case they are N/A",
@@ -3715,7 +3715,7 @@
           },
           {
             "id": "26.5ic-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=26.5ic/harvest/7",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Ordering: after antenna and before fill/density/DRC/LVS, so the verified die is the shipped die",
@@ -3926,7 +3926,7 @@
         "items": [
           {
             "id": "27-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/0",
             "kind": "feature",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "MCF crosstalk-delay envelope: fold Cc\u00d7MCF (2 for setup, 0 for hold, 1 when windows cannot overlap) into victim ground caps, then let OpenSTA re-time",
@@ -3935,7 +3935,7 @@
           },
           {
             "id": "27-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/1",
             "kind": "enhancement",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Timing-window-aware delta-delay/noise screen: the reading that proves something. subservient r24 read PASS on 2375 nets / 18999 pairs while the envelope said \u22120.266",
@@ -3944,7 +3944,7 @@
           },
           {
             "id": "27-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/2",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Verdict basis: a conservative bound is disclosure only; a conclusive delta-delay reading is the verdict",
@@ -3953,7 +3953,7 @@
           },
           {
             "id": "27-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/3",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "SI repair child. Resize moved the envelope \u22120.266 \u2192 \u22121.570 and nominal slack +2.498 \u2192 +1.663; spacing moved the envelope to \u22122.490. Both were REJECTED on the merits",
@@ -3962,7 +3962,7 @@
           },
           {
             "id": "27-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The publisher iterated a dict as a list and the caller never checked rc, so a producer that died after writing its JSON was recorded as success",
@@ -3971,7 +3971,7 @@
           },
           {
             "id": "27-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "A '---' placeholder truncated the timing JSON, and the SI child wrote bounded SPEFs over the shipping run's extracted/si_mcf",
@@ -3980,7 +3980,7 @@
           },
           {
             "id": "27-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=27/harvest/6",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Legacy floating-victim coupling-ratio advisory, whose violations_count is always 0",
@@ -4161,7 +4161,7 @@
         "items": [
           {
             "id": "28-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "PERC-equivalent aggregation with honest tiers: MEASURED-without-comparison = INCOMPLETE (#444); benign ERC floats = REVIEW (#698)",
@@ -4170,7 +4170,7 @@
           },
           {
             "id": "28-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "'All AUTOMATED categories conclusive PASS' must not be printed over zero categories (#1115)",
@@ -4179,7 +4179,7 @@
           },
           {
             "id": "28-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "librelane_config (read FP_TAPCELL_DIST) + vibeic_gate (screen radius = pitch/2)",
             "item": "The latch-up tap pitch must come from the PDK (gf180mcuD FP_TAPCELL_DIST=20), not a SKY130 14 \u00b5m default, and a pitch is not a coverage radius (radius = pitch/2) (R-0915-106). Measured: pitch 14 gave 2624 ties, pitch 20 gave 1278.",
@@ -4188,7 +4188,7 @@
           },
           {
             "id": "28-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The spacing-from-DEF screen is conclusive-FAIL-only: a clean result means necessary-but-not-sufficient, never 'latch-up safe'",
@@ -4197,7 +4197,7 @@
           },
           {
             "id": "28-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/4",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Tapless-cell PDKs: verify ties from GDS diffusion geometry (implant inside/outside NWELL minus poly). IHP draws only pSD.",
@@ -4206,7 +4206,7 @@
           },
           {
             "id": "28-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/5",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "The EM category reads the Jmax authority verdict when em.json is measurement-only (#1215)",
@@ -4215,7 +4215,7 @@
           },
           {
             "id": "28-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=28/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Cross-voltage-domain crossings: count domains from NETS+SPECIALNETS. The old SPECIALNETS-only heuristic misclassified Caravel (v0.2.11).",
@@ -4413,7 +4413,7 @@
         "items": [
           {
             "id": "29-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "write_sdf -include_typ. Without it the two-value (min::max) form made Icarus apply no delay at all: sha256 had about 31000 SDF ERROR lines and zero 'Putting delay'",
@@ -4422,7 +4422,7 @@
           },
           {
             "id": "29-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Icarus needs -gspecify to build module paths for IOPATH annotation. The -DFUNCTIONAL cell models carry no specify block (isolated probe: 0 ps vs 98 ps)",
@@ -4431,7 +4431,7 @@
           },
           {
             "id": "29-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/2",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Re-run the design's executed L10 suite at gate level with a per-case table, naming each NOT_EXECUTED case and its SDF-annotation failure",
@@ -4440,7 +4440,7 @@
           },
           {
             "id": "29-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "librelane_custom_step",
             "item": "The gate-sim supervisor must watch the simulator container, not the client",
@@ -4449,7 +4449,7 @@
           },
           {
             "id": "29-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/4",
             "kind": "lesson",
             "declared_destination": "fork_patch:iverilog",
             "item": "Icarus does not support timing checks, so NOTIFIER-based $setuphold injects X",
@@ -4458,7 +4458,7 @@
           },
           {
             "id": "29-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=29/harvest/5",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "synth_wrapper_check is advisory and refuses on real spm input (2 wrappers checked, 0 valid)",
@@ -4669,7 +4669,7 @@
         "items": [
           {
             "id": "30-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/0",
             "kind": "feature",
             "declared_destination": "drop",
             "item": "Self-built critical-path SPICE deck builders (build_installed_path_deck, build_installed_stagewise_deck)",
@@ -4678,7 +4678,7 @@
           },
           {
             "id": "30-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The deck ignored the SPEF: when the STA report states a stage load, that lumped load is used; scaling every *D_NET cap by 10 moved nothing",
@@ -4687,7 +4687,7 @@
           },
           {
             "id": "30-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/2",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Tolerance derived from the Liberty NLDM grid per stage at the STA-stated slew/load, with no fixed or design-tuned percentage",
@@ -4696,7 +4696,7 @@
           },
           {
             "id": "30-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Use a post-route STA report of THIS run that states its operating point, or refuse by name",
@@ -4705,7 +4705,7 @@
           },
           {
             "id": "30-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Compare the arc the deck actually stimulated (the error went \u221265.2% \u2192 \u221234.4% once fixed)",
@@ -4714,7 +4714,7 @@
           },
           {
             "id": "30-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Write the correlation record at the declared path, or a named refusal",
@@ -4723,7 +4723,7 @@
           },
           {
             "id": "30-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/6",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Analog-block SPICE coverage check",
@@ -4732,7 +4732,7 @@
           },
           {
             "id": "30-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=30/harvest/7",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "Commercial-PDK HSPICE-shim path for PDKs without ngspice models",
@@ -4935,7 +4935,7 @@
         "items": [
           {
             "id": "32-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:OpenROAD",
             "item": "Post-detailed-route real-SPEF repair in the fork: Signal-11 crash fix, estimate_parasitics -detailed_routing, and a makeBufferedNet kDetailedRouting\u2192Steiner dispatch",
@@ -4944,7 +4944,7 @@
           },
           {
             "id": "32-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Capability probe that tries the real flag against a deliberately bogus control flag, instead of scraping help text",
@@ -4953,7 +4953,7 @@
           },
           {
             "id": "32-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/2",
             "kind": "enhancement",
             "declared_destination": "librelane_custom_step",
             "item": "Post-DRT repair transaction: child session, candidate judged on measurement, rollback on regression, both legs disclosed",
@@ -4962,7 +4962,7 @@
           },
           {
             "id": "32-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/3",
             "kind": "lesson",
             "declared_destination": "librelane_custom_step",
             "item": "Parasitics source during post-route repair. extract_parasitics does not reach OpenSTA until read_spef, so with EST-0027 the repair ran blind on wire-load models (AES). estimate_parasitics -global_routing on a routed checkpoint reported +4.013 where the SPEF said \u22121.108. Re-reading the pass SPEF before each repair re-annotated rebuffered nets.",
@@ -4971,7 +4971,7 @@
           },
           {
             "id": "32-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Input-digest receipt: never reuse a stale repair candidate, and run hold repair after setup repair",
@@ -4980,7 +4980,7 @@
           },
           {
             "id": "32-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/5",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Route each residual to the right instrument: spm's step 32 was red because the needed repair was antenna, not timing",
@@ -4989,7 +4989,7 @@
           },
           {
             "id": "32-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/6",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "ODB/DEF two-leg child, ext-wire relay, guide re-establishment",
@@ -4998,7 +4998,7 @@
           },
           {
             "id": "32-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=32/harvest/7",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Gates: postroute_timing_repair_audit, flow_step_output_content_check --mode repair, drv_promotion_corroboration (claimed 105 vs sign-off 233)",
@@ -5201,7 +5201,7 @@
         "items": [
           {
             "id": "33-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "drop (take sign-off power from STAPostPNR); keep the lesson as vibeic_gate (a power record names the netlist it linked)",
             "item": "Sign-off power must link the ROUTED netlist + SPEF. The old deck linked <top>_synth.v and shipped a number 1.873x too low (0.306 vs 0.573 mW) with the clock group at 0.000, and power.rpt stayed byte-identical across a 60-configuration PnR sweep.",
@@ -5210,7 +5210,7 @@
           },
           {
             "id": "33-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/1",
             "kind": "feature",
             "declared_destination": "vibeic_gate (+ fork_patch:librelane: optional SAIF/VCD read and a power__activity_basis / annotated-count metric)",
             "item": "The activity basis is a claim to corroborate: all 8 'vector_vcd' reports were contradicted by their own transcripts (5 READ_VCD_FAIL, 3 'Annotated 0 pin activities')",
@@ -5219,7 +5219,7 @@
           },
           {
             "id": "33-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/2",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Total power vs the design's DECLARED budget. A baseline bound to another technology is NOT_APPLICABLE and is never borrowed (R-0915-22).",
@@ -5228,7 +5228,7 @@
           },
           {
             "id": "33-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "The wrapper dropped every flag after the project dir, so the declared --json never took effect",
@@ -5237,7 +5237,7 @@
           },
           {
             "id": "33-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=33/harvest/4",
             "kind": "lesson",
             "declared_destination": "librelane_custom_step (use OpenROAD read_upf as the check)",
             "item": "UPF syntax is checked by a self-written parser",
@@ -5498,7 +5498,7 @@
         "items": [
           {
             "id": "34-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/0",
             "kind": "feature",
             "declared_destination": "fork_patch:OpenROAD (a region/density-cap option for filler_placement) or fork_patch:librelane (an optional fill region)",
             "item": "Sparse-die-aware filler guard: a small design in a large fixed die must not be flooded. A 189-cell design in a 2920x3520 \u00b5m die became 940,262 fillers and a 2.0 GB GDS (#684).",
@@ -5507,7 +5507,7 @@
           },
           {
             "id": "34-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate (read LibreLane's DPL filler count and the odb row utilisation)",
             "item": "Fill substantiation: 0 fillers placed with rows not full is a NO-OP and the done marker is withheld (#445). Row-area and core-area utilisation are reported separately (#510).",
@@ -5516,7 +5516,7 @@
           },
           {
             "id": "34-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop (keep the ordering lesson)",
             "item": "Die-wide denominator: fill and measure density over the DIE, not the core bbox. The operator precheck found 8 density errors (DCF.1b, PL.8, M1.4..MT.3) on a sealed slot die whose core-bbox fill had reported success.",
@@ -5525,7 +5525,7 @@
           },
           {
             "id": "34-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Density windows must resolve the PDK DISTRIBUTION (gf180mcuD), not the family. FP-20: five metal layers went unchecked, and KLayoutDensity failed a die that meets the rule.",
@@ -5534,7 +5534,7 @@
           },
           {
             "id": "34-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Fill engines must run where the container can reach them. The engine never reached the container, so shipped density was 0.86-4.04% with 6 M*.4 violations (4653cfcd2); #2107 (06d3d1684).",
@@ -5543,7 +5543,7 @@
           },
           {
             "id": "34-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/5",
             "kind": "feature",
             "declared_destination": "fork_patch:klayout (the engine stays as a second arm) + vibeic_gate (UNREACHABLE_BY_ANY_FILL refusal)",
             "item": "Density lattice derived from the deck's own dummy rules and the measured free room. A floor that no legal fill can reach is refused by name (#2135: metal2/3 reached 0.2048/0.2267 vs the 0.30 floor; legal room caps at 0.318/0.332).",
@@ -5552,7 +5552,7 @@
           },
           {
             "id": "34-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:klayout",
             "item": "PARTIAL-above-floor: do not discard a fill that clears the foundry floor but misses the plugin's own margin (#433: metal3 0.3497 vs target 0.35)",
@@ -5561,7 +5561,7 @@
           },
           {
             "id": "34-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/7",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "ECO-aware fill: every spare in spare_cells.json survives fill with keep/dont_touch intact, and the artefacts agree (RECORD_ARTEFACT_MISMATCH)",
@@ -5570,7 +5570,7 @@
           },
           {
             "id": "34-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=34/harvest/8",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "HARDMACRO: die-level density rules are attributed to the integrator, with disclosure (#2148)",
@@ -5870,7 +5870,7 @@
         "items": [
           {
             "id": "37-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate (also fork_patch:librelane: an element-count checker after Magic.StreamOut)",
             "item": "GDS substance gate: element count must be at least the DEF placed-instance count. It catches the 106-byte GDS Magic writes after 'Cell spm couldn't be read'",
@@ -5879,7 +5879,7 @@
           },
           {
             "id": "37-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/1",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Top-cell port-label check by name (DEF PINS vs GDS top-cell texts)",
@@ -5888,7 +5888,7 @@
           },
           {
             "id": "37-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Refuse stream-out without a LEF/DEF layer map when a sign-off deck runs (vibe-ic#789)",
@@ -5897,7 +5897,7 @@
           },
           {
             "id": "37-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/3",
             "kind": "lesson",
             "declared_destination": "librelane_custom_step (run Magic.DRC+KLayout.DRC on MAG_GDS and KLAYOUT_GDS, promote the cleaner one) fed to the PPA layer",
             "item": "Stream-out engine changes the sign-off DRC count: Magic merge gives false met2 enclosure on stacked vias (VIBEIC_FORCE_KLAYOUT_STREAMOUT); a KLayout stream can be dominated by boundary edge-pairs (Magic re-stream hypothesis test)",
@@ -5906,7 +5906,7 @@
           },
           {
             "id": "37-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/4",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "In-place finishing chain, prefinish boundary retention, stale-boundary unlink (R-0915-148) and P0 in-place chain verification",
@@ -5915,7 +5915,7 @@
           },
           {
             "id": "37-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane (use x1-x0/y1-y0; verify the ihp width/height order)",
             "item": "Seal-ring size from the declared die rectangle as (x1-x0, y1-y0), never the core bbox (fix 3a / CT-03)",
@@ -5924,7 +5924,7 @@
           },
           {
             "id": "37-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "drop (keep a vibeic_gate: no step writes under input/)",
             "item": "step_gds wrote derived geometry into input/submission_template/tapeout_declaration.json (F4, doctrine inversion)",
@@ -5933,7 +5933,7 @@
           },
           {
             "id": "37-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/7",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "DBU declaration published at stream-out (consumed by the precheck DatabaseUnit rung)",
@@ -5942,7 +5942,7 @@
           },
           {
             "id": "37-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/8",
             "kind": "lesson",
             "declared_destination": "librelane_custom_step (non-deferred checker set before Magic.StreamOut)",
             "item": "Pre-stream admission: no GDS after a failed timing/antenna/route gate (T44/T47, owner)",
@@ -5951,7 +5951,7 @@
           },
           {
             "id": "37-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/9",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Strict provenance for the GDS (--output --tool --require-measured) instead of the coarse mode, which passed on a hash mismatch",
@@ -5960,7 +5960,7 @@
           },
           {
             "id": "37-H11",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/10",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37/harvest/10",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "gds_size_check against a flow-wide 100 KB constant",
@@ -6123,7 +6123,7 @@
         "items": [
           {
             "id": "37.3-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/0",
             "kind": "feature",
             "declared_destination": "librelane_custom_step (a Checker after KLayout.Filler that runs xor.drc between the pre-SealRing GDS state and the final GDS, with KLAYOUT_XOR_IGNORE_LAYERS = layers the SealRing/Filler steps added)",
             "item": "Finishing-fidelity comparison: shipped GDS vs pre-finish GDS with finishing-declared layers subtracted (R-0915-129 metric 2)",
@@ -6132,7 +6132,7 @@
           },
           {
             "id": "37.3-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane (print a per-layout cell/shape census in xor.drc) + vibeic_gate",
             "item": "Faithfulness census: the reference must carry at least 0.5x the shipped shape count, else refuse. A bare DEF read gave a false 776,403 differences",
@@ -6141,7 +6141,7 @@
           },
           {
             "id": "37.3-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/2",
             "kind": "lesson",
             "declared_destination": "fork_patch:librelane (missing metric under RUN_KLAYOUT_XOR=true is an error)",
             "item": "An unrun XOR is not a zero (a refusal blocks)",
@@ -6150,7 +6150,7 @@
           },
           {
             "id": "37.3-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Producer writes, gate reads (--check judges the receipt, never re-measures)",
@@ -6159,7 +6159,7 @@
           },
           {
             "id": "37.3-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/4",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Retained <top>.prefinish.gds boundary, glob/stale refusal, runner stops packaging it",
@@ -6168,7 +6168,7 @@
           },
           {
             "id": "37.3-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/5",
             "kind": "enhancement",
             "declared_destination": "librelane_config (KLAYOUT_XOR_IGNORE_LAYERS)",
             "item": "Datatype-precise fill exemption",
@@ -6177,7 +6177,7 @@
           },
           {
             "id": "37.3-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=37.3/harvest/6",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Two in-repo XOR engines (gds_xor_check _XOR_RB, xor_layout_check pya emitter)",
@@ -6530,7 +6530,7 @@
         "items": [
           {
             "id": "31-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/0",
             "kind": "feature",
             "declared_destination": "fork_patch:librelane (a missing metric under RUN_*=true is an error) + vibeic_gate",
             "item": "Vacuous-zero refusal: a DRC zero needs categories registered + items counted + shapes measured (empty layout and real layout give byte-identical XML)",
@@ -6539,7 +6539,7 @@
           },
           {
             "id": "31-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/1",
             "kind": "lesson",
             "declared_destination": "drop (waivers must be explicit human waivers, e.g. waiver_growth_check)",
             "item": "Automatic WAIVED status when 100% of violations sit on stdcell-internal layer rules",
@@ -6548,7 +6548,7 @@
           },
           {
             "id": "31-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop (keep signoff_drc_format.classify_file as a vibeic_gate)",
             "item": "Sign-off DRC path may hold only a rule deck's report, never the router's DRC mirror",
@@ -6557,7 +6557,7 @@
           },
           {
             "id": "31-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate (wrap LibreLane step invocation in the progress supervisor)",
             "item": "Killed/stalled DRC run is NOT_MEASURED and the partial RDB is isolated, never parsed as 0",
@@ -6566,7 +6566,7 @@
           },
           {
             "id": "31-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/4",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate (region clustering over LibreLane feedback.xml)",
             "item": "Illegal-overlap gate names its regions (22 rectangles = 3 flip-flops on one net)",
@@ -6575,7 +6575,7 @@
           },
           {
             "id": "31-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/5",
             "kind": "feature",
             "declared_destination": "librelane_custom_step (KLayout.SVRFDRC wrapping the fork engine); engine stays fork_patch:klayout",
             "item": "Native SVRF DRC through the vibeic/klayout fork svrfdrc for PDKs that ship only a Calibre deck",
@@ -6584,7 +6584,7 @@
           },
           {
             "id": "31-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/6",
             "kind": "enhancement",
             "declared_destination": "librelane_config",
             "item": "Project-local netgen setup ignoring fill/tap/decap/fakediode classes; top-port alias repair; spare-only class netlist selection",
@@ -6593,7 +6593,7 @@
           },
           {
             "id": "31-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/7",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate (classifier over the Netgen JSON report)",
             "item": "Power-aware LVS / power-pin-only mismatch classification; padring IO LEFs kept for power LVS",
@@ -6602,7 +6602,7 @@
           },
           {
             "id": "31-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/8",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "asap7 device-level LVS via KLayout geometric extraction vs CDL",
@@ -6611,7 +6611,7 @@
           },
           {
             "id": "31-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/9",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Die-level density rule attribution for a hard macro (M2.4/M3.4 handed to integrator)",
@@ -6620,7 +6620,7 @@
           },
           {
             "id": "31-H11",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/10",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/10",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate",
             "item": "Off-grid classification and source-DEF grid check (#597)",
@@ -6629,7 +6629,7 @@
           },
           {
             "id": "31-H12",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/11",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=31/harvest/11",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "DRC/LVS report provenance must be a measured invocation (a rebound row superseded the measurement)",

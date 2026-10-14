@@ -81,3 +81,55 @@ def test_assemble_is_input_only(tmp_path):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_named_signal_advice_follows_authoring_target_and_source_roles(tmp_path):
+    import os
+    import shutil
+    from test_spec_named_signal_detect import MIXED_ROLES
+    for target in ['rtl.sv', 'l_doc_expectations.json', 'review_notes.md']:
+        dest = tmp_path / target.replace('.', '_')
+        h = P.assemble(MIXED_ROLES, None, None, [], [], dest,
+                       output_target=target)
+        saved = json.loads((dest / 'ic_expert_agent_handoff.json').read_text())
+        assert saved == h
+        advice = next(r for r in h['spec_requirements']
+                      if r['kind'] == 'preserve_named_signals')
+        text = advice['requirement']
+        artifact_dir = os.environ.get('C60_ARTIFACT_DIR')
+        if artifact_dir:
+            shutil.copytree(dest, Path(artifact_dir) / ('pack-' + target), dirs_exist_ok=True)
+        if target != 'rtl.sv':
+            assert 'Declare EACH' not in text
+            assert target in text
+        else:
+            assert 'Declare EACH' in text
+        assert set(advice['named_signals']) == {
+            'ingress_valid', 'egress_ready', 'stage_cursor', 'beat_remaining'}
+        assert advice['signal_evidence']
+        assert 'neutral_cells_a' not in text and 'serial_order' not in text
+        assert h['output_target'] == target
+        assert h['subagent_type'] == 'vibe-ic:ic-expert-agent'
+        assert h['dual_track']['track1_general_blind']['n_skills'] > 0
+        assert h['dual_track']['track2_db_informed']['n_db_lessons'] > 0
+
+
+def test_phase1_ai_subtrack_handoff_keeps_expectation_authoring_scope(tmp_path):
+    import os
+    import shutil
+    import phase1_expert_parse_track as track
+    from test_spec_named_signal_detect import MIXED_ROLES
+    dest = tmp_path / 'pack'
+    status = track.ai_subtrack(tmp_path, MIXED_ROLES, dest)
+    h = json.loads((dest / 'ic_expert_agent_handoff.json').read_text())
+    artifact_dir = os.environ.get('C60_ARTIFACT_DIR')
+    if artifact_dir:
+        shutil.copytree(dest, Path(artifact_dir) / 'phase1-consumer', dirs_exist_ok=True)
+        (Path(artifact_dir) / 'phase1-status.json').write_text(json.dumps(status, indent=2))
+    assert status['status'] == 'HANDOFF_EMITTED'
+    assert h['output_target'] == 'l_doc_expectations.json'
+    advice = next(r for r in h['spec_requirements'] if r['kind'] == 'preserve_named_signals')
+    assert 'Declare EACH' not in advice['requirement']
+    assert set(advice['named_signals']) == {
+        'ingress_valid', 'egress_ready', 'stage_cursor', 'beat_remaining'}
+    assert (dest / h['read_design_input_from']).read_text() == MIXED_ROLES

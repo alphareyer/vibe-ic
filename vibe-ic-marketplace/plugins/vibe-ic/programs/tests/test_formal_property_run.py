@@ -923,3 +923,108 @@ endmodule""")
     for task in ("prove", "bmc"):
         log = formal / f"formal_alias_inductive_{task}/model/design.log"
         assert "used but has no driver" not in log.read_text()
+
+
+@pytest.mark.parametrize('scope', ['reset', 'arithmetic'])
+def test_bmc_report_names_task_bound_and_status_without_guessing_semantics(tmp_path, scope):
+    import os
+    import shutil
+    formal = tmp_path / 'phase2' / 'stage1' / 'formal'
+    formal.mkdir(parents=True)
+    harness = formal / 'formal_neutral.sv'
+    if scope == 'reset':
+        harness.write_text(FPR.emit_reset_safety_harness('neutral', out_port='q'))
+    else:
+        harness.write_text('module formal_neutral(input [3:0] a, b, input [4:0] sum);\n'
+                           'always @* p_sum_relation: assert (sum == ({1\'b0, a} + {1\'b0, b}));\n'
+                           'endmodule\n')
+    # A task name carries no semantic authority, even when it sounds like an
+    # arithmetic claim. Both self-authored harnesses get the SAME task name.
+    name = 'datapath_equivalence'
+    cfg = FPR.parse_sby_config('[tasks]\n' + name + '\n[options]\nmode bmc\ndepth 7\n')
+    lp = FPR.parse_sby_log('SBY  0:00:01 [neutral_' + name + '] DONE (PASS, rc=0)\n',
+                           sby_stem='neutral', seed=cfg)
+    result = FPR.build_results('neutral', cfg, lp, 'e/neutral.log', 'e/neutral.sby')
+    FPR._attach_property_contract(result, formal, harness)
+    FPR._write_report(formal, result)
+    (formal / 'results.json').write_text(json.dumps(result, indent=2))
+    artifact_dir = os.environ.get('C60_ARTIFACT_DIR')
+    if artifact_dir:
+        shutil.copytree(formal, Path(artifact_dir) / ('formal-' + scope), dirs_exist_ok=True)
+    disclosure = ' '.join(result['bounded_vs_unbounded'])
+    assert 'functional property' not in disclosure
+    assert 'solver-hard' not in disclosure and 'wide datapath' not in disclosure
+    assert name in disclosure and 'depth 7' in disclosure and 'PASS' in disclosure
+    assert 'no counterexample' in disclosure and 'unbounded proof' in disclosure
+    assert result['bounded_vs_unbounded_scope'] == result['bounded_vs_unbounded']
+    assert disclosure in (formal / 'neutral_report.md').read_text()
+    assert result['proof_strength'] == 'bounded'
+    assert result['unbounded_proved'] is False
+    assert result['properties'] == [{'task': name, 'mode': 'bmc', 'engine': '',
+                                     'depth': 7, 'status': 'PASS', 'bound': 'bounded',
+                                     'cex_frame': None}]
+
+
+def test_bmc_disclosure_keeps_each_task_at_its_own_depth():
+    cfg = FPR.parse_sby_config('[tasks]\nshort_window\nlong_window\nreachability\n'
+                               '[options]\nshort_window: mode bmc\nshort_window: depth 4\n'
+                               'long_window: mode bmc\nlong_window: depth 17\n'
+                               'reachability: mode prove\n')
+    lp = FPR.LogParse(tasks={name: FPR.TaskResult(name=name, status='PASS') for name in cfg})
+    result = FPR.build_results('neutral', cfg, lp, 'e/log', 'e/sby')
+    lines = result['bounded_vs_unbounded']
+    assert any('short_window' in d and 'depth 4' in d and 'PASS' in d for d in lines)
+    assert any('long_window' in d and 'depth 17' in d and 'PASS' in d for d in lines)
+    assert any('reachability' in d and 'UNBOUNDED' in d for d in lines)
+    assert result['verdict'] == 'PASS' and result['unbounded_proved'] is True
+    assert result['proof_strength'] == 'unbounded'
+
+
+@pytest.mark.parametrize('status,expected,bound', [
+    ('PASS', 'PASS', 'bounded'), ('FAIL', 'FAIL', 'cex'),
+    ('UNKNOWN', 'INCONCLUSIVE', 'inconclusive'), ('ERROR', 'INCONCLUSIVE', 'inconclusive')])
+def test_bmc_disclosure_preserves_observed_outcomes(status, expected, bound):
+    cfg = {'window': FPR.TaskResult(name='window', mode='bmc', depth=9)}
+    tr = FPR.TaskResult(name='window', status=status, cex_frame=3 if status == 'FAIL' else None)
+    result = FPR.build_results('neutral', cfg, FPR.LogParse(tasks={'window': tr}), 'e/log', 'e/sby')
+    assert result['verdict'] == expected
+    assert result['all_proved'] is (status == 'PASS')
+    assert result['unbounded_proved'] is False
+    assert result['proved'] == int(status == 'PASS')
+    assert result['failed'] == int(status == 'FAIL')
+    assert result['properties'] == [{'task': 'window', 'mode': 'bmc', 'engine': '', 'depth': 9,
+                                     'status': status, 'bound': bound, 'cex_frame': tr.cex_frame}]
+    if status != 'PASS':
+        assert result['bounded_vs_unbounded'] == []
+
+
+def test_neutral_bmc_wording_preserves_incomplete_obligations_and_report(tmp_path):
+    import os
+    import shutil
+    formal = tmp_path / 'phase2' / 'stage1' / 'formal'
+    formal.mkdir(parents=True)
+    harness = formal / 'formal_neutral.sv'
+    harness.write_text(FPR.emit_reset_safety_harness('neutral', out_port='q'))
+    outstanding = {'id': 'declared.transfer', 'layer': 'L6',
+                   'description': 'transfer behavior remains unauthored', 'status': 'UNAUTHORED'}
+    (formal / 'property_contract.json').write_text(json.dumps({
+        'property_denominator': 2, 'authored_property_count': 1,
+        'unresolved_obligations': [outstanding]}))
+    cfg = {'reset_window': FPR.TaskResult(name='reset_window', mode='bmc', depth=6)}
+    lp = FPR.LogParse(tasks={'reset_window': FPR.TaskResult(name='reset_window', status='PASS')})
+    result = FPR.build_results('neutral', cfg, lp, 'e/log', 'e/sby')
+    FPR._attach_property_contract(result, formal, harness)
+    FPR._write_report(formal, result)
+    (formal / 'results.json').write_text(json.dumps(result, indent=2))
+    artifact_dir = os.environ.get('C60_ARTIFACT_DIR')
+    if artifact_dir:
+        shutil.copytree(formal, Path(artifact_dir) / 'formal-incomplete', dirs_exist_ok=True)
+    assert result['verdict'] == 'INCOMPLETE'
+    assert result['proof_verdict'] == 'PASS'
+    assert result['formal_completion'] == 'INCOMPLETE'
+    assert result['unresolved_obligations'] == [outstanding]
+    assert result['property_denominator'] == 2 and result['authored_property_count'] == 1
+    report = (formal / 'neutral_report.md').read_text()
+    assert 'reset_window' in report and 'depth 6' in report
+    assert 'functional property' not in report and 'solver-hard' not in report
+    assert 'declared.transfer' in report and 'INCOMPLETE' in report

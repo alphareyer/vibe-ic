@@ -180,7 +180,7 @@ def _db_hits(prompt: str, k: int, ic_class=None) -> List[Dict[str, Any]]:
 
 
 def _spec_requirements(prompt: str,
-                       context_keys=None) -> List[Dict[str, Any]]:
+                       context_keys=None, output_target="rtl.sv") -> List[Dict[str, Any]]:
     """Run the deterministic spec detectors on the prompt (+ `input.context` file
     keys) and return the concrete, chip-agnostic requirements an author would
     otherwise silently drop. These are the distilled RCA rules (issue #126): an
@@ -243,10 +243,23 @@ def _spec_requirements(prompt: str,
         import spec_named_signal_detect as _sig
         r = _sig.detect_named_signals(prompt)
         if r.get("has_named_signals") and r.get("requirement"):
+            requirement = r["requirement"]
+            if Path(output_target).suffix.lower() not in {".v", ".sv"}:
+                requirement = (
+                    f"When authoring {output_target}, preserve the input's "
+                    "explicit signal identities and source roles in the "
+                    "expectations or review: " + ", ".join(r["named_signals"]) +
+                    ". Use the source context to place each fact in its owning "
+                    "layer. Keep libraries, parameters, metadata and commands "
+                    "in their declared roles; review ambiguous identifiers "
+                    "with the expert. This is advisory.")
             reqs.append({
                 "kind": "preserve_named_signals",
-                "requirement": r["requirement"],
+                "requirement": requirement,
                 "named_signals": r.get("named_signals", [])[:20],
+                "signal_evidence": r.get("signal_evidence", []),
+                "non_signal_identifiers": r.get("non_signal_identifiers", []),
+                "ambiguous_identifiers": r.get("ambiguous_identifiers", []),
             })
     except Exception:
         pass
@@ -405,7 +418,7 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
         "prompt_is_input_only": True,
         "target_module": target,
         "interface_contract": contract_rel,
-        "spec_requirements": _spec_requirements(prompt, context_keys),
+        "spec_requirements": _spec_requirements(prompt, context_keys, output_target),
         "expert_skills": expert_skills,
         "verify_gates": verify_gates,
         "db_classes": db_classes,

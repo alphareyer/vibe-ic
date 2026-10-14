@@ -1,6 +1,6 @@
 # Retained OpenROAD.STAPrePNR fixture
 
-These bytes were copied without modification from the retained 8HD-4 SPM run at `/home/reyerchu/fleet-artefacts/20261008/spm-step8-current101008al/project/phase3/librelane/prelayout/design_sdc/02-openroad-staprepnr`. The source archive `spm-prelayout-real-project.tar.gz` had SHA256 `7bbc2b13c717f81699cee04984d64e6868a061651ac4a2099a4b5da31372924b`. The state, receipt, three distinct TT/SS/FF corner reports, and their actual `sta.log` discovery inputs are retained exactly.
+These bytes were copied without modification from the retained 8HD-4 SPM run at `fleet-artefacts/20261008/spm-step8-current101008al/project/phase3/librelane/prelayout/design_sdc/02-openroad-staprepnr`. The source archive `spm-prelayout-real-project.tar.gz` had SHA256 `7bbc2b13c717f81699cee04984d64e6868a061651ac4a2099a4b5da31372924b`. The state, receipt, three distinct TT/SS/FF corner reports, and their actual `sta.log` discovery inputs are retained exactly.
 
 `default_prelayout_native.tar.gz` is deterministic and contains 58 receipt-bound native files, the producer `vibeic_receipt.json`, and the three corner `sta.log` files (62 archived members). Archive SHA256: `29dc94907ce2c02b45d14573dffab6e4ef9cb5c87f46c10a0790d3457e93484d`.
 
@@ -70,3 +70,8 @@ ad509148993d884e4fbf3729f30640d97ff8d99713fef0ad5813096f1f83b9d7  nom_tt_025C_5v
 79e01ea599828d39d4f59c70fcc8a2b4d76dbba2f2767f94642373e726df1156  state_out.json
 5a62fb3de380405ebcf6698b8ff1da0ff07bf2a51b5689b73b7de40d2fdd5089  summary.rpt
 e19d70cea9406b9f54ab14bfce49a09932aadd6c606c18a34ffd1939994c2963  vibeic_receipt.json
+
+Historical evidence locators in this document are relative to the original
+operator workspace. They identify retained artifacts; they are not runtime
+paths on an installation. Original artifact SHA256 values and evidence remain
+unchanged.

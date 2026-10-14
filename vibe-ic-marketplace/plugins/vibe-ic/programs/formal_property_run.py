@@ -725,13 +725,14 @@ def build_results(top: str, cfg: Dict[str, TaskResult], lp: LogParse,
             f"states): {', '.join(sorted(p['task'] for p in up))}")
     if any_bounded:
         bd = [p for p in props if p["bound"] == "bounded"]
-        depths = sorted({p["depth"] for p in bd if p["depth"] is not None})
-        disclosure.append(
-            "functional property proved BOUNDED via BMC to depth "
-            f"{max(depths) if depths else '?'} (no counterexample within the "
-            "bound; a full unbounded proof of a wide datapath may be "
-            "solver-hard — this is a disclosed bounded result, not a full "
-            "proof)")
+        for p in bd:
+            # Task/mode/depth/status do not establish assertion semantics.
+            # Neither BMC mode nor task spelling grants equivalence coverage.
+            disclosure.append(
+                f"assertions in task {p['task']} checked BOUNDED via BMC "
+                f"through depth {p['depth'] if p['depth'] is not None else '?'} "
+                f"(observed status: {p['status']}; no counterexample within "
+                "this bound; this is a bounded result, not an unbounded proof)")
     if any(r["engines_disagree"] for r in prove_arms):
         verdict = "FAIL"
         disclosure.append(

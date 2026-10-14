@@ -5,11 +5,11 @@
     "schema": 1,
     "producer": "analog_a3_netlist_emit",
     "producer_fingerprint": "7db62e2fd178b02d",
-    "produced_at": "2026-10-03T01:05:48Z",
+    "produced_at": "2026-10-14T02:00:55Z",
     "rendered_from": {
       "topology_json": {
         "path": "phase3/analog/ldo_open/topology.json",
-        "sha256": "2c7d82b96611f10657d24fcaf6a33e47d6c7162e49526dac6d2f1243d40f6c2a"
+        "sha256": "bcd736dbf4e30bab900eb3d3c1bbdb815578c9802c4c640f21c921ca2b79a40c"
       },
       "spec_json": {
         "path": "phase3/analog/ldo_open/spec.json",

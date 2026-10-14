@@ -68,7 +68,7 @@ close that finding. This item runs no repair actuator or full IC flow.
 Raw source controls, mutations, tool argv, admissions, PID/CID/rc records,
 native artifacts and hashes live under
 `/mnt/ssd2/codex0930/c930w2_rcx/evidence/` and `native/` on the evidence host.
-The feature receipt is `/home/reyerchu/codex_tasks/out/c930w2_rcx.result.json`.
+The feature receipt is `codex_tasks/out/c930w2_rcx.result.json`.
 
 ## Original first-pair source repair
 
@@ -84,5 +84,10 @@ This continuation launches no native tools and establishes source contracts
 only. The earlier native proof and original SS hold failure remain immutable;
 fresh numerical accuracy, physical signoff and shipping receive no credit.
 The exact repair receipt is
-`/home/reyerchu/codex_tasks/out/c930rcx_fivegap_repair.result.json`.
+`codex_tasks/out/c930rcx_fivegap_repair.result.json`.
 Root sends that source to the same original reviewers for bounded closure.
+
+Historical evidence locators in this document are relative to the original
+operator workspace. They identify retained artifacts; they are not runtime
+paths on an installation. Original artifact SHA256 values and evidence remain
+unchanged.

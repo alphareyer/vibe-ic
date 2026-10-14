@@ -137,7 +137,7 @@
         "items": [
           {
             "id": "A1-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/0",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The gate could not encode an honest absence: a body with specs:[] and extraction_status NO_SPEC_IN_DOCS was rc1 A1_SPEC_NO_FIELDS (a fabricated FAIL), and per-type defaults would have been a fabricated PASS. So the fix is to write spec_gap.json with rc 2",
@@ -146,7 +146,7 @@
           },
           {
             "id": "A1-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A1/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "No default spec numbers: the static TARGETS table graded a bandgap against 1.205 V, a target no document stated",
@@ -158,7 +158,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A1",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A1",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],
@@ -333,7 +333,7 @@
         "items": [
           {
             "id": "A2-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Closed-loop CIFB coefficient bug: A2 applied an open-loop ramp bound, giving ci/cs = 183.5 where the loop needs about 4. The fix is a = min(swing/(4*vref), 0.25), giving ci/cs = 4.0016",
@@ -342,7 +342,7 @@
           },
           {
             "id": "A2-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/1",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate",
             "item": "Two-term capacitor sizing (area + perimeter). A capacitor above the gencell maximum becomes an N-unit parallel array that keeps the value (error 2.2e-16 vs 1e-3 tolerance)",
@@ -351,7 +351,7 @@
           },
           {
             "id": "A2-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/2",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The A2 gate measures vocabulary, not structure: any file over 200 bytes with one circuit word passes (a content-free memo headed '# Topology - ldo' passed)",
@@ -360,7 +360,7 @@
           },
           {
             "id": "A2-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Grade at the declared operating clock, not the fclk_max ceiling; publish the ceiling margin as INFO",
@@ -369,7 +369,7 @@
           },
           {
             "id": "A2-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A2/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Floor every drawn width to the PDK's own rule. A static res width of 0.35 made KLayout-extract -> netgen report property mismatches (vibe-ic#1952)",
@@ -381,7 +381,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A2",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A2",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],
@@ -569,7 +569,7 @@
         "items": [
           {
             "id": "A3-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Emit '.options trtol=1' in every testbench. With ngspice's default trtol=7, delta_sigma aborted with 'Timestep too small ... node xdut.nbias'. Loosening tolerances or using gmin/gear/rshunt all still failed; only trtol=1 completed",
@@ -578,7 +578,7 @@
           },
           {
             "id": "A3-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A relative .lib path resolves against the deck file's directory in ngspice-47. An absolute host path baked into decks made copied projects unrunnable",
@@ -587,7 +587,7 @@
           },
           {
             "id": "A3-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/2",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Transient .meas on every internal net (railx_* prefix). A +3.34 V excursion on a 1.2 V block was invisible in the DC operating-point table",
@@ -596,7 +596,7 @@
           },
           {
             "id": "A3-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/3",
             "kind": "lesson",
             "declared_destination": "fork_patch:ngspice",
             "item": "ngspice answers 'no such vector' and measures nothing on a run that still exits 0",
@@ -605,7 +605,7 @@
           },
           {
             "id": "A3-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The four netlist checkers printed PASS over 126 flat corner decks with files_with_subckt: 0, a green sign-off over zero block netlists",
@@ -614,7 +614,7 @@
           },
           {
             "id": "A3-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A3/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The stale-netlist check must compare content digests with produced_at stripped. A re-emitted topology.json with a new timestamp failed A3 with A3_NETLIST_STALE_VS_IR",
@@ -626,7 +626,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A3",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A3",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -873,7 +873,7 @@
         "items": [
           {
             "id": "A4-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "A4 never ran under the orchestrator: one of seven sites omitted getattr(args,'container'), exited without running, and was reported as 'invoke skill ams-sim'. A producer that cannot reach its tool is ENV_UNAVAILABLE, not WAIVED",
@@ -882,7 +882,7 @@
           },
           {
             "id": "A4-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The A4 gate certified a record with 1 of 9 corners executed, and corners were ended by a 120 s clock",
@@ -891,7 +891,7 @@
           },
           {
             "id": "A4-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/2",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate",
             "item": "Admit corners by aggregate host RAM (about 1-24 GiB per corner measured); the docker-inspect probe template was refused by Docker",
@@ -900,7 +900,7 @@
           },
           {
             "id": "A4-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The gf180mcuD ngspice library names its MOS corners typical/ff/ss/fs/sf with no 'tt' ('section definition tt not found'); section names must be read from the PDK lib",
@@ -909,7 +909,7 @@
           },
           {
             "id": "A4-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "'.option scale=1u' silently zeroes the subckt's mismatch arithmetic, which consumes raw w; the operating point stays identical to six digits",
@@ -918,7 +918,7 @@
           },
           {
             "id": "A4-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/5",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Corner-lib realism: a deck that includes a real PDK lib and also inlines a LEVEL=1 override is invisible to analog_netlist_pdk_check",
@@ -927,7 +927,7 @@
           },
           {
             "id": "A4-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The tone bin at band_bins//3 folded the loop's periodic error onto the signal bin (a false-green ENOB); the tone must be coprime with the window",
@@ -936,7 +936,7 @@
           },
           {
             "id": "A4-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A4/harvest/7",
             "kind": "feature",
             "declared_destination": "fork_patch:ngspice",
             "item": "Structured measurements via the vibeic/ngspice fork's --json-measure (#29), probed at runtime because some images lack it",
@@ -948,7 +948,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A4",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A4",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -1144,7 +1144,7 @@
         "items": [
           {
             "id": "A5-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/0",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "'A5 paints what it places': u_hawaii_adc's two blocks went from DRC 2780 and 264 to 0",
@@ -1153,7 +1153,7 @@
           },
           {
             "id": "A5-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Ask Magic what a layer IS (layer identity), not what its section is called. This took 13 MiM shorts to 0; a drawn short is BLOCKING with its witness path",
@@ -1162,7 +1162,7 @@
           },
           {
             "id": "A5-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "A PDK gencell above its maximum CLAMPS and draws, so eight netlist capacitors became two drawn cells. Now refused as A5_DEVICE_ABOVE_PDK_MAXIMUM",
@@ -1171,7 +1171,7 @@
           },
           {
             "id": "A5-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Guard-ring layer resolved from the PDK technology file; the bulk-tap search runs on every gencell child (it previously examined nothing)",
@@ -1180,7 +1180,7 @@
           },
           {
             "id": "A5-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A5/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A generator refused a legal w=1.0u l=0.5u device because its tap scan walked one direction from a label; limits must come from the PDK, not from probed widths",
@@ -1192,7 +1192,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A5",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A5",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -1386,7 +1386,7 @@
         "items": [
           {
             "id": "A6-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "A second engine adjudicates rules the sign-off deck never grades. The ihp-sg13g2 deck has its MiM include commented out (ihp-sg13g2.drc:522), so '0 of 560' was silence about MIM.i; Magic saw 8 violations on the flow's own paint",
@@ -1395,7 +1395,7 @@
           },
           {
             "id": "A6-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/1",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "DRC attribution: which violations belong to the PDK's own gencell (60 M2.d rectangles on ldo, 816 on delta_sigma), to placement, or to the flow's paint",
@@ -1404,7 +1404,7 @@
           },
           {
             "id": "A6-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/2",
             "kind": "enhancement",
             "declared_destination": "librelane_custom_step",
             "item": "Comparison-side prep for a sign-off LVS runset: X-subckt device calls rewritten to M/R/C element letters from role_models, .lib lines stripped, only declared-port labels kept, parameters grid-snapped",
@@ -1413,7 +1413,7 @@
           },
           {
             "id": "A6-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "svrfdrc handed an open PDK's KLayout-DSL runset reports '0 layers, 122 derivations, 0 rules' with an empty tally and no error; the same runset under klayout -b -r found 4 real violations in 5 s",
@@ -1422,7 +1422,7 @@
           },
           {
             "id": "A6-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/4",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "klayout_pdk_lvs generic example-layer-map extraction as the analog LVS arm: on any PDK other than the example's it recognized nothing and died with an AttributeError",
@@ -1431,7 +1431,7 @@
           },
           {
             "id": "A6-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A6/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "librelane_config",
             "item": "Rung-2 PDK availability set no decks, so A6 was NO_EVIDENCE on every open-PDK project. Decks must be derived from the PDK volume, as LibreLane's PDK config does (KLAYOUT_DRC_RUNSET etc.)",
@@ -1443,7 +1443,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A6",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A6",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -1679,7 +1679,7 @@
         "items": [
           {
             "id": "A7-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/0",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "'ext2spice lvs' resets cthresh/rthresh to infinite, so thresholds must be asserted after it",
@@ -1688,7 +1688,7 @@
           },
           {
             "id": "A7-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/1",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "'ext2spice rthresh 0.0' is a parse error that Magic silently refuses (it wants an integer)",
@@ -1697,7 +1697,7 @@
           },
           {
             "id": "A7-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "fork_patch:librelane",
             "item": "The emitted recipe put extresist before extract and armed it incompletely, giving 0 parasitics while --validate passed. Full R needs extresist extout on + extresist all + ext2spice extresist on",
@@ -1706,7 +1706,7 @@
           },
           {
             "id": "A7-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/3",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Audit the extracted netlist: 0 R and 0 C = FAIL (a re-sim would be pre-layout again); report the depth achieved (RC / C_ONLY) in pre_vs_post provenance",
@@ -1715,7 +1715,7 @@
           },
           {
             "id": "A7-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A post-layout comparison of every number against itself must name evidence that resolves",
@@ -1724,7 +1724,7 @@
           },
           {
             "id": "A7-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A7/harvest/5",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "The MCP eda_extraction pdk enum has no ihp, yet the only analog IC (u_hawaii_adc) is on ihp-sg13g2",
@@ -1736,7 +1736,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A7",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A7",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -1937,7 +1937,7 @@
         "items": [
           {
             "id": "A8-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/0",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate",
             "item": "Magic 'lef write' emits pins with no DIRECTION and no USE, so supplies reach pdngen as signals. The fix adds DIRECTION INOUT + USE POWER/GROUND from the block's declared rails",
@@ -1946,7 +1946,7 @@
           },
           {
             "id": "A8-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "OBS carve around pins: 'lef write -hide' tiles OBS up to each pin, and OpenROAD detailed route refused every macro with DRT-0073 No access point. A later measurement found the carve unnecessary once A5 paints a 2.0 x 1.5 um port pad",
@@ -1955,7 +1955,7 @@
           },
           {
             "id": "A8-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/2",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "Interface Liberty for an analog macro: pg_pins for declared rails, inout is_analog pins, interface_timing false, no invented arcs",
@@ -1964,7 +1964,7 @@
           },
           {
             "id": "A8-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The declared .gds was produced by nothing: the GDS producer was dispatched 0 times at A8, so M1 could never merge a macro",
@@ -1973,7 +1973,7 @@
           },
           {
             "id": "A8-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/4",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "LEF SIZE vs GDS bounding box numeric check (500 bytes of non-GDS noise passed analog_hardmacro_check)",
@@ -1982,7 +1982,7 @@
           },
           {
             "id": "A8-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/5",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Macro pins vs the digital RTL instantiation in both directions: a vss PG pin no RTL blackbox declares, and vin vs vdd disagreements",
@@ -1991,7 +1991,7 @@
           },
           {
             "id": "A8-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A8/harvest/6",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Topology behaviour check: a delta-sigma modulator whose bitstream density moved 0.0012 across a 0.40/0.60/0.80 V sweep passes every other gate",
@@ -2003,7 +2003,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A8",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A8",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -2340,7 +2340,7 @@
         "items": [
           {
             "id": "A9-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Anti-fabrication: walk every declared scenario instead of trusting the self-produced all_scenarios_passed; zero scenarios = FAIL; absence with analog blocks = FAIL, never VACUOUS_PASS",
@@ -2349,7 +2349,7 @@
           },
           {
             "id": "A9-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/1",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The step was renamed from 'HW Verification'. A run with cosim results and zero hw_measurements.json used to report a bare PASS; a simulation-only close is now VACUOUS_PASS",
@@ -2358,7 +2358,7 @@
           },
           {
             "id": "A9-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The aggregate mixed_signal_results.json did not match the declared *_cosim_results.json glob, so check_step returned MISSING before the gate ever ran",
@@ -2367,7 +2367,7 @@
           },
           {
             "id": "A9-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=A9/harvest/3",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The HIL gates are advisory because nothing in the repo writes hw_tuning_report.json / hw_sizing_history.json. A blocking gate over an artefact with no producer certifies nothing",
@@ -2379,7 +2379,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=A9",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=A9",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],
@@ -2606,7 +2606,7 @@
         "items": [
           {
             "id": "M1-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Per-macro shape count before and after the merge, with the action taken (added/filled/kept_digital), recorded in merge.json so a doubled or missing macro body shows up in the artefact",
@@ -2615,7 +2615,7 @@
           },
           {
             "id": "M1-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Macros are instantiated at their DEF COMPONENTS positions, and a merged GDS with more than one top cell is refused (#612)",
@@ -2624,7 +2624,7 @@
           },
           {
             "id": "M1-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Placements are read from the DEF the sign-off GDS was streamed from (def_rank), and sibling DEFs that disagree are disclosed (#626/#633)",
@@ -2633,7 +2633,7 @@
           },
           {
             "id": "M1-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Freshness check: each tool's log must have been rewritten by THIS invocation and carry its completion marker. A top_merged.gds that is reused is named in merge_provenance",
@@ -2642,7 +2642,7 @@
           },
           {
             "id": "M1-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "SKIP is not a mismatch: when no comparison ran, report MERGE_LVS_NOT_RUN with the producer's reason verbatim, and never let a skip overwrite a completed comparison (#614)",
@@ -2651,7 +2651,7 @@
           },
           {
             "id": "M1-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/5",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "The netgen schematic side is the gate netlist plus N macro .v files read into one netlist, with the top referenced as {fnum cell}",
@@ -2660,7 +2660,7 @@
           },
           {
             "id": "M1-H7",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/6",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/6",
             "kind": "bug_fix",
             "declared_destination": "drop",
             "item": "Top cell and PDK are derived from the DEF DESIGN line and the back-end artefacts instead of the 'chip_top'/'sky130A' literals",
@@ -2669,7 +2669,7 @@
           },
           {
             "id": "M1-H8",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/7",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/7",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "The top-level LVS includes the analog hardmacros (the schematic side adds each A8 hardmacro .v)",
@@ -2678,7 +2678,7 @@
           },
           {
             "id": "M1-H9",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/8",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/8",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "The A8 hardmacro GDS must carry a PR-boundary layer before LibreLane Magic.StreamOut will accept it",
@@ -2687,7 +2687,7 @@
           },
           {
             "id": "M1-H10",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/9",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M1/harvest/9",
             "kind": "lesson",
             "declared_destination": "drop",
             "item": "Cut the rows under the macro halo before PDN (7 PDN-0178 channels, then PDN-0179; 105 of 151 DRC were M1.b from rails through macro metal)",
@@ -2699,7 +2699,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M1",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=M1",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [
@@ -2894,7 +2894,7 @@
         "items": [
           {
             "id": "M2-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Derivation engine: the level-shifter/isolation requirement comes from the domains' nominal voltage and OFF/CORRUPT power states, so a bare {net, driver_domain, receiver_domain} crossing is enough",
@@ -2903,7 +2903,7 @@
           },
           {
             "id": "M2-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/1",
             "kind": "enhancement",
             "declared_destination": "librelane_custom_step",
             "item": "The UPF regex parser (_RE_PD/_RE_ISO/_RE_LS) should be replaced by OpenROAD read_upf, and a producer added for the known_gap sidecars",
@@ -2912,7 +2912,7 @@
           },
           {
             "id": "M2-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/2",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "Recompute all_crossings_protected / all_required_inserted from the substance; never trust the boolean the producer wrote",
@@ -2921,7 +2921,7 @@
           },
           {
             "id": "M2-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/3",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "The L21 producer and its consumer never agreed on a key, so no voltage ever arrived (#598)",
@@ -2930,7 +2930,7 @@
           },
           {
             "id": "M2-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/4",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "An absent protection statement is not a statement that no protection is needed (#379)",
@@ -2939,7 +2939,7 @@
           },
           {
             "id": "M2-H6",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/5",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M2/harvest/5",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "DEF-based supply-family discovery (power nets carried in NETS, not SPECIALNETS; the Caravel single-supply mis-count)",
@@ -2951,7 +2951,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M2",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=M2",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],
@@ -3173,7 +3173,7 @@
         "items": [
           {
             "id": "M3-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "Walk every scenario, parse PASS/FAIL tokens, and fail a set of zero scenarios",
@@ -3182,7 +3182,7 @@
           },
           {
             "id": "M3-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/1",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "SI_LIMIT_UNSTATED: never invent a limit. A measured value with no stated bound fails, and a self-verdict that disagrees with the recomputed bound fails",
@@ -3191,7 +3191,7 @@
           },
           {
             "id": "M3-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/2",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "Stub hole: an aggregate carrying a deterministic_stub marker returns pass with scenarios_total 0, which contradicts the zero-scenario rule; per-block stubs count as simulated",
@@ -3200,7 +3200,7 @@
           },
           {
             "id": "M3-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/3",
             "kind": "feature",
             "declared_destination": "librelane_custom_step",
             "item": "interface_si.json has no producer",
@@ -3209,7 +3209,7 @@
           },
           {
             "id": "M3-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M3/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "A co-sim run against A8's behavioural Verilog (skill Approach 1) verifies the model, not the macro",
@@ -3221,7 +3221,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M3",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=M3",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],
@@ -3402,7 +3402,7 @@
         "items": [
           {
             "id": "M4-H1",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/0",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/0",
             "kind": "feature",
             "declared_destination": "vibeic_gate",
             "item": "OVERCLAIM cross-check: ready_for_tapeout=true must be backed by every upstream M1-M3 substance field",
@@ -3411,7 +3411,7 @@
           },
           {
             "id": "M4-H2",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/1",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/1",
             "kind": "bug_fix",
             "declared_destination": "vibeic_gate",
             "item": "M4 accepts PASS_WITH_STUB and PASS_WITH_STUB_PARTIAL from merge.json",
@@ -3420,7 +3420,7 @@
           },
           {
             "id": "M4-H3",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/2",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/2",
             "kind": "feature",
             "declared_destination": "librelane_config",
             "item": "No DRC runs on the merged A+D top, although the step is named 'top-level PV'",
@@ -3429,7 +3429,7 @@
           },
           {
             "id": "M4-H4",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/3",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/3",
             "kind": "enhancement",
             "declared_destination": "vibeic_gate",
             "item": "signoff.json is a hand-typed boolean that no program writes",
@@ -3438,7 +3438,7 @@
           },
           {
             "id": "M4-H5",
-            "original_ref": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/4",
+            "original_ref": "codex_tasks/review70/review70_final.json#/rows/step_id=M4/harvest/4",
             "kind": "lesson",
             "declared_destination": "vibeic_gate",
             "item": "'Earned zero': a DRC count of zero counts only when the layout the deck ran over had shapes",
@@ -3450,7 +3450,7 @@
         "own_source_deletion": "NOT_AUTHORIZED_UNTIL_EACH_ACCEPTED_DESTINATION_BOUND"
       },
       "original_review": {
-        "review70_path": "/home/reyerchu/codex_tasks/review70/review70_final.json#/rows/step_id=M4",
+        "review70_path": "codex_tasks/review70/review70_final.json#/rows/step_id=M4",
         "current_source_runtime_scope": "SOURCE_AND_EXISTING_RECEIPTS_ONLY",
         "new_production_original_FIRST_C_I": "NEW_FAMILY_PAIR_NOT_YET_EXECUTED; do not substitute earlier library review",
         "historical_native_calls": [],

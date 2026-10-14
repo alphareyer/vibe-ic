@@ -1280,7 +1280,7 @@ def run(project: Path, top: str, container: str, pdk: str,
         receipt_path.unlink(missing_ok=True)
         return {"verdict": "FAIL", "rc": 1, "compared": False,
                 "reason": "current M1 evidence changed during LVS: " + stale}
-    (rpt_dir / "top_lvs.json").write_text(
+    _aa.write_text(rpt_dir / "top_lvs.json",
         json.dumps(top_lvs, indent=2) + "\n")
     _aa.write_text(rpt_dir / "merge.json", json.dumps({
         "gate": "mixed_signal_merge",

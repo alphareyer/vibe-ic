@@ -291,7 +291,7 @@
     "library_entry": "ldo",
     "inputs": [
       {
-        "path": "/home/reyerchu/codex_tasks/out/default-a8-subject-r4/sample-ldo-a2-a3-a5-a8/project/phase3/analog/ldo_open/spec.json",
+        "path": "phase3/analog/ldo_open/spec.json",
         "sha256": "d880c51b22e84223c31681aa947246f5743f9fe08bb4cacd5668880b81f64878"
       }
     ],

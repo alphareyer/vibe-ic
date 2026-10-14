@@ -418,3 +418,105 @@ def test_reverting_that_one_site_brings_the_truncated_pass_back(tmp_path):
     assert size < PAYLOAD_MB * 1024 * 1024, size
     with pytest.raises(json.JSONDecodeError):
         json.loads((tmp_path / FORMAL_REL).read_text(errors="replace"))
+
+
+# #3101: execute the two actual publication statements that the residual
+# guard found. This isolates publication from upstream LVS/STA execution;
+# neutral JSON is not evidence that either native tool ran or passed.
+_CURRENT_PUBLICATIONS = [
+    ("mixed_signal_top_lvs_run.py", "top_lvs.json",
+     "reports/analog/mixed_signal/top_lvs.json", "rpt_dir", "top_lvs"),
+    ("phase3_one_shot_runner.py", "achievable_fmax.json",
+     "reports/phase3/achievable_fmax.json", "rpt_phase3", "_fmax_rep"),
+]
+
+
+def _current_publication(program, basename):
+    """Select source, rather than reimplement the producer's write."""
+    import ast
+    source = (PROGRAMS / program).read_text()
+    statements = [n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                  and isinstance(n.value.func, ast.Attribute)
+                  and n.value.func.attr == "write_text"
+                  and any(isinstance(c, ast.Constant) and c.value == basename
+                          for c in ast.walk(n.value))]
+    assert len(statements) == 1, (program, basename, len(statements))
+    return ast.unparse(statements[0]), hashlib.sha256(source.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("program,basename,rel,directory,payload_name",
+                         _CURRENT_PUBLICATIONS, ids=["top_lvs", "achievable_fmax"])
+def test_current_publication_preserves_complete_json(
+        tmp_path, program, basename, rel, directory, payload_name):
+    statement, source_hash = _current_publication(program, basename)
+    dest = tmp_path / rel
+    dest.parent.mkdir(parents=True)
+    payload = {"component_only": True, "neutral_text": "publication \u03bc", "value": 3.25}
+    namespace = {"_aa": AA, "json": json,
+                 directory: dest.parent, payload_name: payload}
+    exec(compile(statement, str(PROGRAMS / program), "exec"), namespace)
+    # The exact pre-fix bytes, including JSON's default escaping and newline.
+    assert dest.read_text() == json.dumps(payload, indent=2) + "\n"
+    import flow_compliance_check as fcc
+    ok, found, missing = fcc._check_files_exist(tmp_path, [rel], False)
+    assert ok and found == [rel] and missing == []
+    assert list(dest.parent.glob(basename + AA.TMP_SUFFIX + ".*")) == []
+    print(json.dumps({"scope": "COMPONENT_PUBLICATION", "program": program,
+                      "source_sha256": source_hash, "path": rel,
+                      "final_sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
+                      "required_outputs": {"ok": ok, "found": found, "missing": missing}}))
+
+
+@pytest.mark.parametrize("program,basename,rel,directory,payload_name",
+                         _CURRENT_PUBLICATIONS, ids=["top_lvs", "achievable_fmax"])
+def test_killed_current_publication_is_missing_to_required_outputs(
+        tmp_path, program, basename, rel, directory, payload_name):
+    statement, source_hash = _current_publication(program, basename)
+    dest = tmp_path / rel
+    dest.parent.mkdir(parents=True)
+    child = tmp_path / "publication.py"
+    # Test-only size amplification makes the partial write observable. The
+    # source statement and required_outputs consumer execute unchanged.
+    child.write_text(
+        "import sys, json\nfrom pathlib import Path\n"
+        f"sys.path.insert(0, {str(PROGRAMS)!r})\n"
+        "import _atomic_artefact as _aa\n"
+        f"{directory} = Path({str(dest.parent)!r})\n"
+        f"{payload_name} = {{'component_only': True, 'padding': 'x' * ({PAYLOAD_MB} * 1024 * 1024)}}\n"
+        + statement + "\n")
+    proc = subprocess.Popen([sys.executable, str(child)])
+    killed_at = None
+    watched = None
+    deadline = time.monotonic() + 30
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            candidates = [dest] if dest.exists() else list(
+                dest.parent.glob(basename + AA.TMP_SUFFIX + ".*"))
+            if candidates:
+                watched = candidates[0]
+                size = watched.stat().st_size
+                if 0 < size < PAYLOAD_MB * 1024 * 1024:
+                    proc.send_signal(signal.SIGKILL)
+                    killed_at = size
+                    break
+            time.sleep(0.001)
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=10)
+    assert killed_at is not None, "no partial write observed; this run proves nothing"
+    assert proc.returncode == -signal.SIGKILL
+    import flow_compliance_check as fcc
+    ok, found, missing = fcc._check_files_exist(tmp_path, [rel], False)
+    proof = {"scope": "COMPONENT_PUBLICATION", "program": program,
+             "source_sha256": source_hash, "path": rel, "child_pid": proc.pid,
+             "child_returncode": proc.returncode, "killed_at_bytes": killed_at,
+             "watched": watched.name, "final_exists": dest.exists(),
+             "required_outputs": {"ok": ok, "found": found, "missing": missing}}
+    (tmp_path / "publication-control.json").write_text(json.dumps(proof, indent=2) + "\n")
+    print(json.dumps(proof))
+    assert not dest.exists(), proof
+    assert not ok and found == [] and missing == [rel], proof
+    leftovers = list(dest.parent.glob(basename + AA.TMP_SUFFIX + ".*"))
+    assert len(leftovers) == 1 and AA.is_temp_artefact(leftovers[0])

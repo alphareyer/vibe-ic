@@ -63556,7 +63556,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 # F17: when step 23 runs on the tool, the reached period is
                 # the TOOL's worst setup, recorded after STAPostPNR below.
                 if _ll_m23 == "direct":
-                    (rpt_phase3 / "achievable_fmax.json").write_text(
+                    _aa.write_text(rpt_phase3 / "achievable_fmax.json",
                         json.dumps(_fmax_rep, indent=2) + "\n")
                     written.append(str(rpt_phase3 / "achievable_fmax.json"))
                 # The sentence has to be true on BOTH branches now. "setup FAIL
