@@ -226,13 +226,19 @@ def detect_selftb_coverage(prompt: str) -> Dict[str, Any]:
             "check the output pulse on the FOLLOWING clock edge; hold data-valid "
             "outputs until consumed.")
 
-    if _CONSECUTIVE_ARITHMETIC_RE.search(p):
+    from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope
+    for match in _CONSECUTIVE_ARITHMETIC_RE.finditer(p):
+        lo, hi = sentence_scope(p, match.start(), match.end(),
+                                extra_breaks=LINE_END_BREAKS + (",", ";", "。"))
+        if is_denied(p[lo:hi]):
+            continue
         shapes.append("consecutive_arithmetic")
         slices.append(
             "CONSECUTIVE ARITHMETIC: exercise the declared consecutive operations "
             "and compare every arithmetic result using the input's stimulus, "
             "clock/reset and re-arm schedule; do not infer additional control "
             "ports or a handshake protocol.")
+        break
 
     # 2) register peripheral (AXI-Lite / APB) with time-varying internal state
     if (_AXI_LITE_RE.search(p) or _APB_RE.search(p)) and _DYN_STATE_RE.search(p):
