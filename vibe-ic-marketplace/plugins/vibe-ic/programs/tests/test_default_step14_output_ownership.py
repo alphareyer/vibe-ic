@@ -87,7 +87,8 @@ def _default_handoff_audit(project, monkeypatch):
 
     monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(runner, '_finish_selected_interface_currentness',
-                        lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE'))
+                        lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE',
+                            declared_by='public control scopes its consumer to Step14'))
     monkeypatch.setattr(runner._pl, 'emit_final_summary', lambda *args: None)
     observed = []
 
@@ -199,13 +200,15 @@ def test_default_phase2_caller_does_not_start_synthesis_for_analog_compliance(
     # select Step14, even when its analog-compliance clause could run alone.
     monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(runner, '_finish_selected_interface_currentness',
-                        lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE'))
+                        lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE',
+                            declared_by='public control scopes its consumer to Step14'))
     monkeypatch.setattr(runner._pl, 'emit_final_summary', lambda *args: None)
     seen = []
     def audit(*args, **kwargs):
         receipt = json.loads((project / producers.REPORT_REL).read_text())
         seen.append(receipt)
-        return runner.StepResult('final_audit', 'NOT_APPLICABLE')
+        return runner.StepResult('final_audit', 'NOT_APPLICABLE',
+                                 declared_by='public INPUT has no digital synthesis track')
     monkeypatch.setattr(runner, 'step_final_audit', audit)
     result = runner._audit_after_declared_producers(project, True)
     assert result.status == 'NOT_APPLICABLE'
