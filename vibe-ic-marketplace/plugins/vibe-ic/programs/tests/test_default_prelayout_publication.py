@@ -306,7 +306,7 @@ def test_issue3141_normal_publication_scales_native_readings(tmp_path, name, sca
     assert record["passed"] is True
     assert summary["slack_measurement"] == "MEASURED"
     metrics = json.loads((folder / "state_out.json").read_text())["metrics"]
-    expected = round(metrics["timing__setup__ws__corner:max_ss_025C_1v00"], 2) * scale
+    expected = round(metrics["timing__setup__wns__corner:max_ss_025C_1v00"], 2) * scale
     assert summary["slack_ns"]
     assert all(row["setup_wns_ns"] == pytest.approx(expected)
                for row in summary["slack_ns"])
@@ -357,6 +357,13 @@ def test_issue3141_genuine_negative_native_slack_still_blocks(tmp_path):
     assert metrics["timing__setup__ws__corner:max_ss_025C_1v00"] < 0
     with pytest.raises(ll.Refusal, match="PRELAYOUT_STA_SUMMARY_FAILED"):
         phase3.publish_prelayout_reports(tmp_path, folder)
+    record = json.loads((tmp_path / "reports/phase3/sta/pre_pnr_summary.json").read_text())
+    assert record["passed"] is False
+    assert record["summary"]["real_violation_found"] is True
+    expected = round(metrics["timing__setup__wns__corner:max_ss_025C_1v00"], 2) * .001
+    assert expected < 0
+    assert all(row["setup_wns_ns"] == pytest.approx(expected)
+               for row in record["summary"]["slack_ns"])
 
 
 @pytest.mark.parametrize("change", ["missing", "changed", "unbound"])
