@@ -41,7 +41,7 @@ _ROLE_RE = re.compile(
     r"(?P<command>commands?|SDC|Tcl)|"
     r"(?P<setting>settings?|floorplan|constraints?)|"
     r"(?P<module>modules?|instances?)|"
-    r"(?P<signal>(?<![-/])signals?|nets?|wires?|reg|logic|registers?|ports?|"
+    r"(?P<signal>signals?|nets?|wires?|reg|logic|registers?|ports?|"
     r"inputs?|outputs?|inout|flags?|counters?|strobes?|pulses?))\b|"
     r"(?P<design>\bdesigns?\b|設計)", re.I)
 _SIGNAL_ACTION_RE = re.compile(
