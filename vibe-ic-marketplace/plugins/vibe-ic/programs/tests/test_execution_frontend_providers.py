@@ -1221,3 +1221,42 @@ def test_05ic_measured_gate_fail_precedes_changed_chain(tmp_path):
     assert adoption.get('selected') is None
     assert not adoption.get('selected_generation')
     assert completion_path.read_bytes() == completion_bytes
+
+
+@__import__('pytest').mark.parametrize('document,row,field,required', [
+    (document, row, field, required)
+    for document in ('catalog', 'coverage')
+    for row, field, required in (
+        ('2', 'inputs', {'from': 'D1', 'path': 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'}),
+        ('7', 'outputs', 'reports/phase3/single_corner_stance.json'),
+        ('FS1', 'outputs', 'reports/phase2/safety/fmeda_coverage_gate.json'),
+    )
+], ids=['catalog-row2-input', 'catalog-row7-output', 'catalog-FS1-output',
+        'coverage-row2-input', 'coverage-row7-output', 'coverage-FS1-output'])
+def test_frontend_machine_reader_retains_canonical_input_output_refusals(
+        tmp_path, monkeypatch, document, row, field, required):
+    """Consume checked-in data first; a missing canonical entry stays refused."""
+    catalog, coverage = p._machine_contracts()
+    current = p.coverage()[row]
+    assert required in current['input_contract' if field == 'inputs' else 'output_contract']
+    documents = {'catalog': catalog, 'coverage': coverage}
+    changed = json.loads(json.dumps(documents[document]))
+    changed['contracts'][row][field].remove(required)
+    paths = {}
+    for name, payload in documents.items():
+        path = tmp_path / (name + '.json')
+        path.write_text(json.dumps(changed if name == document else payload))
+        paths[name] = path
+    monkeypatch.setattr(p, '_CATALOG_PATH', paths['catalog'])
+    monkeypatch.setattr(p, '_COVERAGE_PATH', paths['coverage'])
+    try:
+        p.coverage()
+        refusal = None
+    except ValueError as exc:
+        refusal = str(exc)
+    observed = {'scope': 'Actual machine-contract reader; neutral copied data, no EDA/70-row claim',
+                'document': document, 'row': row, 'field': field, 'removed': required,
+                'current_contract': documents[document]['contracts'][row], 'refusal': refusal}
+    (tmp_path / 'catalog_contract_observed.json').write_text(json.dumps(observed, indent=2) + '\n')
+    assert refusal == ('frontend catalog is out of sync with source routes' if document == 'catalog'
+                       else 'frontend coverage is out of sync with source rows'), observed

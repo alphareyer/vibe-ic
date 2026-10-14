@@ -61,16 +61,32 @@ def test_complete_package_execution_and_drift_refusal(tmp_path, dotted):
     assert not (root / 'selected').exists()
 
 
-def test_unbound_package_helper_refuses_before_launch(tmp_path):
+def test_unbound_package_helper_refuses_before_launch(tmp_path, monkeypatch):
     candidate, helper, entry = package_arm(tmp_path, omit=True)
     assert helper in proven_dispatcher_closure(entry, Path(arm().components[0].argv[1]))
-    ctl = controller(candidate, fixture_root=tmp_path); root = tmp_path / 'run'
-    result = ctl.run(fixtures.context16(tmp_path), root, 'ultra-mode')
-    assert result['candidate_statuses'] == {candidate.arm_id: 'NOT_MEASURED'}
-    receipt = json.loads((root / candidate.arm_id / 'receipt.json').read_text())
-    assert receipt['reason'] == 'PROVIDER_DEPENDENCY_UNBOUND'
-    assert receipt['processes'] == []
+    # A real omitted package helper is refused at enrollment once absolute
+    # imports resolve correctly.  Runtime refusal remains covered by the
+    # unsupported-interpreter controls below; no invalid enrollment is made.
+    root = tmp_path / 'run'
+    run_calls = []
+    real_run = em.Controller.run
+    def observe_run(self, *args, **kwargs):
+        run_calls.append(True)
+        return real_run(self, *args, **kwargs)
+    monkeypatch.setattr(em.Controller, 'run', observe_run)
+    with pytest.raises(em.Refusal, match='^ADAPTER_SOURCE_CLOSURE_INCOMPLETE:') as caught:
+        controller(candidate, fixture_root=tmp_path)
+    assert caught.value.code == 'ADAPTER_SOURCE_CLOSURE_INCOMPLETE'
+    assert str(caught.value) == f'ADAPTER_SOURCE_CLOSURE_INCOMPLETE: {helper}'
+    assert run_calls == []
+    assert not root.exists()
     assert not (root / 'selected').exists()
+    (tmp_path / 'package_enrollment_observed.json').write_text(json.dumps({
+        'reason': caught.value.code, 'detail': str(caught.value),
+        'omitted_helper': str(helper), 'controller_run_calls': len(run_calls),
+        'run_root_exists': root.exists(), 'selected_exists': (root / 'selected').exists(),
+        'scope': 'SOURCE_CONTROL enrollment refusal; no native worker launched',
+    }, indent=2))
 
 
 @pytest.mark.parametrize('option', ['-B', '-u', '-q', '-O', '-OO', '--'])
@@ -279,3 +295,160 @@ def test_timestamp_valid_stale_package_cache_uses_current_source(tmp_path, cache
                             for p in prior.rglob('*') if p.is_file()}
         assert inputs == {name: em.digest(path) for name, path in ctx.inputs.items()}
         ctl._generation_current(accepted['selected_generation'])
+
+
+def test_image_editable_dependency_reaches_current_release_consumer(tmp_path):
+    """Use the current worker and installed dependency, with no native PASS claim."""
+    import importlib.util
+    candidate = arm()
+    native = Path(importlib.util.find_spec('cocotb.simulator').origin).resolve()
+    assert str(native) in candidate.source_files
+    assert candidate.source_files[str(native)] == em.digest(native)
+    registry = em.Registry(); registry.register(candidate)
+    assert em.Controller._source_current(registry.adapters('16')[0])['files'][str(native)] == em.digest(native)
+    ctx = fixtures.context16(tmp_path, native_clock=True)
+    root = tmp_path / 'real'
+    ctl = em.Controller(registry, em.Budget(1, 4096, workers=1))
+    assert ctl.run(ctx, root)['candidate_statuses'] == {candidate.arm_id: 'ELIGIBLE'}
+    assert ctl.adopt(ctx, root, decisions.choice(ctx, root, candidate.arm_id))['status'] == 'ADOPTED'
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'changed', 'unbound'])
+def test_current_image_dependency_refused_before_execution(tmp_path, mutation):
+    import importlib.util
+    native = Path(importlib.util.find_spec('cocotb.simulator').origin).resolve()
+    candidate = arm()
+    assert str(native) in candidate.source_files
+    registry = em.Registry(); registry.register(candidate)
+    enrolled = registry.adapters('16')[0]
+    if mutation == 'unbound':
+        candidate = replace(enrolled, source_files={k: v for k, v in enrolled.source_files.items() if k != str(native)})
+        with pytest.raises(em.Refusal, match='PROVIDER_DEPENDENCY_UNBOUND'):
+            em.Controller._source_current(candidate)
+        return
+    original = native.read_bytes()
+    try:
+        if mutation == 'missing':
+            saved = native.with_name(native.name + '.control-saved'); native.rename(saved)
+        else:
+            native.write_bytes(original + b'changed dependency control')
+        with pytest.raises(em.Refusal, match='ADAPTER_SOURCE_MISMATCH'):
+            em.Controller._source_current(enrolled)
+    finally:
+        if mutation == 'missing': saved.rename(native)
+        else: native.write_bytes(original)
+
+
+@pytest.mark.parametrize('mutation', ['valid', 'malformed', 'missing_metadata', 'bad_url',
+                                      'not_editable', 'wrong_top', 'shadow', 'unbound_local'])
+def test_editable_native_exact_package_ownership(tmp_path, monkeypatch, mutation):
+    """Neutral metadata/source controls; no fixture receipt claims native success."""
+    import importlib.metadata as metadata
+    import importlib.util
+    import execution_provider_catalog as catalog
+    library = tmp_path / 'installed'; library.mkdir()
+    project = tmp_path / 'dependency'; project.mkdir()
+    package = project / 'src' / 'neutral_pkg'; package.mkdir(parents=True)
+    init = package / '__init__.py'; init.write_text('from . import native\n')
+    actual = Path(importlib.util.find_spec('cocotb.simulator').origin)
+    suffix = actual.name.removeprefix('simulator')
+    native = package / ('native' + suffix); native.write_bytes(actual.read_bytes())
+    info = library / 'neutral_dist-1.0.dist-info'; info.mkdir()
+    (info / 'METADATA').write_text('Metadata-Version: 2.1\nName: neutral-dist\nVersion: 1.0\n')
+    direct = info / 'direct_url.json'
+    direct.write_text(json.dumps({'url': project.as_uri(), 'dir_info': {'editable': True}}))
+    hook = library / '_editable_neutral.py'
+    hook.write_text('def install(*args): pass\ninstall(' + repr({'neutral_pkg': str(init)}) + ', {}, {})\n')
+    pth = library / '_editable_neutral.pth'; pth.write_text('import _editable_neutral\n' + str(package.parent) + '\n')
+    (info / 'RECORD').write_text('\n'.join(p + ',,' for p in [
+        '_editable_neutral.py', '_editable_neutral.pth', 'neutral_dist-1.0.dist-info/METADATA',
+        'neutral_dist-1.0.dist-info/direct_url.json', 'neutral_dist-1.0.dist-info/RECORD']) + '\n')
+    monkeypatch.setattr(catalog, '_python_trusted_roots', lambda: (library,))
+    # Distribution discovery uses only the interpreter's roots, never local PYTHONPATH metadata.
+    search = [package.parent]
+    entry = tmp_path / 'entry.py'; entry.write_text('import neutral_pkg.native\n')
+    if mutation == 'malformed': native.write_bytes(b'not a native extension')
+    elif mutation == 'missing_metadata': direct.rename(info / 'direct_url.saved')
+    elif mutation == 'bad_url': direct.write_text('{"url": "https://invalid.example/dependency", "dir_info": {"editable": true}}')
+    elif mutation == 'not_editable': direct.write_text(json.dumps({'url': project.as_uri(), 'dir_info': {'editable': False}}))
+    elif mutation == 'wrong_top': hook.write_text('install(' + repr({'other_pkg': str(init)}) + ', {}, {})\n')
+    elif mutation in ('shadow', 'unbound_local'):
+        shadow = tmp_path / 'shadow'; shadow.mkdir()
+        local = shadow / 'neutral_pkg'; local.mkdir()
+        (local / '__init__.py').write_text('from . import native\n')
+        (local / native.name).write_bytes(native.read_bytes())
+        search.insert(0, shadow)
+        if mutation == 'unbound_local':
+            # Local dist-info claiming an editable project cannot establish interpreter ownership.
+            import shutil
+            shutil.copytree(info, shadow / info.name)
+            monkeypatch.setenv('PYTHONPATH', str(shadow))
+    if mutation == 'valid':
+        closure = implementation_closure(entry, search=search)
+        assert {entry, init, native, direct, hook, pth, info / 'RECORD', info / 'METADATA'} <= closure
+        assert em.digest(native) == em.digest(actual)
+    else:
+        with pytest.raises(ValueError, match='unsupported local Python module'):
+            implementation_closure(entry, search=search)
+
+
+def test_nonstandard_script_suffix_preserves_local_import_closure(tmp_path):
+    entry = tmp_path / 'entry.script'
+    helper = tmp_path / 'helper.py'
+    entry.write_text('import helper\n')
+    helper.write_text('VALUE = 1\n')
+    assert implementation_closure(entry, search=[tmp_path]) == {entry, helper}
+
+
+def test_installed_native_closure_reports_observed_binding(tmp_path):
+    import importlib.util
+    native = Path(importlib.util.find_spec('cocotb.simulator').origin).resolve()
+    entry = tmp_path / 'entry.py'; entry.write_text('import cocotb.simulator\n')
+    try:
+        closure = implementation_closure(entry, search=[native.parent.parent])
+        actual = 'BOUND' if native in closure else 'UNBOUND'
+    except ValueError:
+        actual = 'REFUSED'
+    assert actual == 'BOUND'
+
+
+@pytest.mark.parametrize('kind', ['bare', 'absolute', 'relative'])
+def test_package_lookup_matches_actual_absolute_and_relative_imports(tmp_path, kind):
+    import subprocess
+    package = tmp_path / 'neutral_pkg'; package.mkdir()
+    init = package / '__init__.py'; init.write_text('')
+    sibling = package / 'logging.py'; sibling.write_text('VALUE = 1\n')
+    member = package / 'member.py'
+    imports = {'bare': 'import logging as selected',
+               'absolute': 'import neutral_pkg.logging as selected',
+               'relative': 'from . import logging as selected'}
+    member.write_text(imports[kind] + '\nIMPORT_PATH = selected.__file__\n')
+    actual = subprocess.run([sys.executable, '-B', '-c',
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import neutral_pkg.member as selected; print(selected.IMPORT_PATH)', str(tmp_path)],
+        capture_output=True, text=True, check=True)
+    closure = em._source_closure([str(member)])
+    observed = {'kind': kind, 'actual_import': actual.stdout.strip(),
+                'closure': sorted(str(p.relative_to(tmp_path)) for p in closure),
+                'scope': 'Real Python import and existing source closure on neutral files'}
+    (tmp_path / 'package_lookup_observed.json').write_text(json.dumps(observed, indent=2) + '\n')
+    if kind == 'bare':
+        assert Path(actual.stdout.strip()).resolve() != sibling
+        assert sibling not in closure, observed
+    else:
+        assert Path(actual.stdout.strip()).resolve() == sibling
+        assert sibling in closure, observed
+        if kind == 'absolute':
+            assert init in closure, observed
+
+
+def test_flat_script_import_remains_a_bound_local_dependency(tmp_path):
+    import subprocess
+    entry = tmp_path / 'entry.py'; helper = tmp_path / 'helper.py'
+    entry.write_text('import helper\nprint(helper.VALUE)\n')
+    helper.write_text('VALUE = 1\n')
+    actual = subprocess.run([sys.executable, '-B', str(entry)],
+                            capture_output=True, text=True, check=True)
+    closure = em._source_closure([str(entry)])
+    assert actual.stdout.strip() == '1'
+    assert closure == {entry, helper}

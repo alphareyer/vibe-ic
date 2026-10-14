@@ -403,6 +403,12 @@ def _local_python_imports(path: Path) -> set[Path]:
         if level:
             roots = [path.parent.joinpath(*(['..'] * (level - 1))).resolve()]
         else:
+            # An imported package's bare names start outside that package,
+            # not at its sibling files (e.g. stdlib logging vs pkg.logging).
+            root = path.parent
+            while (root / '__init__.py').is_file():
+                root = root.parent
+            roots = [root]
             roots += [programs, programs.parent]
         for root in roots:
             parts = name.split('.') if name else []
@@ -1521,6 +1527,11 @@ class Registry:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', path)
         declared_sources = {Path(path).resolve() for path in adapter.source_files}
         external = set(executable_paths) - {p for p in executable_paths if p.is_relative_to(_REPO_ROOT)}
+        from execution_provider_catalog import _python_installed_dependencies
+        # Installed editable image dependencies keep their declared byte binding;
+        # their exact installation proof supplies provenance instead of repo Git.
+        external.update(_python_installed_dependencies(
+            p for p in declared_sources if p not in external and not p.is_relative_to(_REPO_ROOT)))
         source_blobs = _git_source_blobs(adapter.source_sha, declared_sources - external)
         for path in declared_sources - external:
             if source_blobs[str(path)] != _blob_bytes(path):

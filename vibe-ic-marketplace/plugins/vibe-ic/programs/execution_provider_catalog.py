@@ -283,6 +283,102 @@ def _python_trusted_roots() -> tuple[Path, ...]:
     return tuple(Path(sysconfig.get_path(key)).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib'))
 
 
+def _python_editable_packages() -> dict[str, tuple[Path, frozenset[Path]]]:
+    """Read interpreter-owned editable mappings without importing their hooks.
+
+    A project directory or PYTHONPATH entry is not installation authority.
+    Only recorded .pth hooks, editable direct_url metadata and exact literal
+    top-package mappings rooted in that install can own an external extension.
+    Keep the installation proof in the same byte-bound closure as the module.
+    """
+    from importlib import metadata
+    from urllib.parse import urlsplit, unquote
+    from execution_source_snapshot import active
+    snapshot = active()
+    roots = _python_trusted_roots()
+    key = ('provider-editable-packages', tuple(map(str, roots)))
+    if snapshot is not None:
+        cached = snapshot.value_get(key)
+        if cached is not None:
+            return cached
+    def read(path):
+        return snapshot.read_text(path) if snapshot is not None else path.read_text()
+    def installed(path):
+        return (path.is_file() and not path.is_symlink() and
+                path.absolute() == path.resolve() and
+                any(path.resolve().is_relative_to(root) for root in roots))
+    found = {}
+    ambiguous = set()
+    for dist in metadata.distributions(path=[str(root) for root in dict.fromkeys(roots)]):
+        # Most distributions are not editable. Avoid their entire RECORD census;
+        # positive installation metadata is still read and bound below.
+        if dist.read_text('direct_url.json') is None:
+            continue
+        files = {str(f): Path(dist.locate_file(f)).absolute() for f in dist.files or ()}
+        direct = next((p for n, p in files.items() if n.endswith('.dist-info/direct_url.json')), None)
+        if direct is None or not installed(direct):
+            continue
+        try:
+            info = json.loads(read(direct)); url = urlsplit(info['url'])
+            if (info.get('dir_info', {}).get('editable') is not True or
+                    url.scheme != 'file' or url.netloc or url.query or url.fragment):
+                continue
+            project = Path(unquote(url.path))
+            if not project.is_absolute() or project != project.resolve():
+                continue
+            proof = {direct, direct.parent / 'METADATA', direct.parent / 'RECORD'}
+            if not all(installed(p) for p in proof):
+                continue
+            for p in proof:
+                read(p)
+            for pth in files.values():
+                if pth.suffix != '.pth' or not installed(pth):
+                    continue
+                for line in read(pth).splitlines():
+                    if not line.startswith('import ') or not line[7:].isidentifier():
+                        continue
+                    hook = pth.parent / (line[7:] + '.py')
+                    if hook not in files.values() or not installed(hook):
+                        continue
+                    tree = ast.parse(read(hook))
+                    for statement in tree.body:
+                        if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                                and isinstance(statement.value.func, ast.Name)
+                                and statement.value.func.id == 'install' and statement.value.args):
+                            continue
+                        mapping = ast.literal_eval(statement.value.args[0])
+                        if not isinstance(mapping, dict):
+                            continue
+                        for top, origin in mapping.items():
+                            if not isinstance(top, str) or not top.isidentifier() or not isinstance(origin, str):
+                                continue
+                            init = Path(origin)
+                            if (not init.is_absolute() or init.name != '__init__.py' or
+                                    init.parent.name != top or not init.is_relative_to(project) or
+                                    init != init.resolve() or not init.is_file()):
+                                continue
+                            owner = (init, frozenset(proof | {pth, hook}))
+                            if top in found and found[top] != owner:
+                                ambiguous.add(top)
+                            found[top] = owner
+        except (OSError, ValueError, KeyError, TypeError, SyntaxError):
+            continue
+    result = {top: owner for top, owner in found.items() if top not in ambiguous}
+    if snapshot is not None:
+        snapshot.value_put(key, result)
+    return result
+
+
+def _python_installed_dependencies(paths: Iterable[Path]) -> set[Path]:
+    """Classify only exact installed package/provenance files for registration."""
+    paths = tuple(paths)
+    if not paths:
+        return set()
+    owners = tuple(_python_editable_packages().values())
+    return {path for path in paths if not path.is_symlink() and path == path.resolve() and
+            any(path in proof or path.is_relative_to(init.parent) for init, proof in owners)}
+
+
 def _python_module(name: str, search: list[Path], package: str = '',
                    level: int = 0) -> list[tuple[Path, str]]:
     """Resolve complete dotted names with Python package-before-module rules.
@@ -369,8 +465,18 @@ def _python_module(name: str, search: list[Path], package: str = '',
             if snapshot is not None:
                 snapshot.module_lookup_put(lookup_key, ())
             return []
-        if (target_state[1] if snapshot is not None else target.is_symlink()) or target.suffix != '.py':
+        if (target_state[1] if snapshot is not None else target.is_symlink()):
             raise ValueError(f'unsupported local Python module: {name}')
+        if target.suffix != '.py':
+            owner = _python_editable_packages().get(top) if result else None
+            native = any(target.name.endswith(suffix) for suffix in EXTENSION_SUFFIXES)
+            content = (snapshot.read_bytes(target) if snapshot is not None else target.read_bytes())
+            if (not owner or result[0][0] != owner[0] or not native or is_package or
+                    index != len(parts) - 1 or target.absolute() != resolved_target or
+                    not resolved_target.is_relative_to(owner[0].parent) or
+                    content[:4] != b'\x7fELF'):
+                raise ValueError(f'unsupported local Python module: {name}')
+            result.extend((path, '') for path in sorted(owner[1]))
         owner = '.'.join(prefix) if is_package else '.'.join(prefix[:-1])
         result.append((resolved_target, owner))
         if not is_package and index < len(parts) - 1:
@@ -432,6 +538,12 @@ def implementation_closure(entry: Path, *, cwd: Path | None = None,
         if not path.is_file() and not (path == entry and source_text is not None):
             raise ValueError(f'missing Python source: {path}')
         seen.add(path)
+        if path != entry and path.suffix != '.py':
+            # Proven installed native files and metadata are byte identities,
+            # not Python source to decode/parse. Resolution already proved ownership.
+            if snapshot is not None:
+                snapshot.read_bytes(path)
+            continue
         text = source_text if path == entry and source_text is not None else (
             snapshot.read_text(path) if snapshot is not None else path.read_text())
         for name, level, names, optional_relative in _python_import_specs(text):

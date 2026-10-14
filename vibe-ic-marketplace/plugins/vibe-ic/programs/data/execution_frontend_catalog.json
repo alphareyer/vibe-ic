@@ -5,7 +5,7 @@
         {
           "check": "none",
           "from": "external",
-          "what": "the shuttle operator's published project template — the repository or archive that pins the slot geometry, ships the die-identification fixtures, and lists the pads for each slot. Declared as external and unprobed because it is fetched, not produced, and the flow must be able to say it was never fetched."
+          "what": "the shuttle operator's published project template \u2014 the repository or archive that pins the slot geometry, ships the die-identification fixtures, and lists the pads for each slot. Declared as external and unprobed because it is fetched, not produced, and the flow must be able to say it was never fetched."
         }
       ],
       "outputs": [
@@ -94,6 +94,10 @@
         {
           "from": 1,
           "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        },
+        {
+          "from": "D1",
+          "path": "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
         }
       ],
       "outputs": [
@@ -175,7 +179,8 @@
       ],
       "outputs": [
         "phase2/stage2/constraints/*.sdc",
-        "phase2/stage2/constraints/pvt_matrix.json"
+        "phase2/stage2/constraints/pvt_matrix.json",
+        "reports/phase3/single_corner_stance.json"
       ]
     },
     "8": {
@@ -253,7 +258,10 @@
           "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
         }
       ],
-      "outputs": []
+      "outputs": [
+        "reports/phase2/safety/fmeda_coverage.json",
+        "reports/phase2/safety/fmeda_coverage_gate.json"
+      ]
     },
     "P0": {
       "inputs": [

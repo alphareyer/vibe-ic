@@ -18,7 +18,10 @@ def register_source_fixture(registry, adapter, *, fixture_root):
     root = Path(fixture_root).resolve()
     paths = {Path(name).resolve() for name in adapter.source_files}
     interpreter = Path(sys.executable).resolve()
-    generated = paths - {interpreter} - {
+    import execution_provider_catalog as catalog
+    classify = getattr(catalog, '_python_installed_dependencies', None)
+    installed = classify(paths - {interpreter}) if classify is not None else set()
+    generated = paths - installed - {interpreter} - {
         p for p in paths if p.is_relative_to(em._REPO_ROOT)}
     if not generated:
         registry.register(adapter)
@@ -26,7 +29,7 @@ def register_source_fixture(registry, adapter, *, fixture_root):
     assert all(p.is_relative_to(root) for p in generated), generated
     assert adapter.arm_id not in registry._adapters
     em._verified_current_source_commit(adapter.source_sha)
-    committed = paths - generated - {interpreter}
+    committed = paths - installed - generated - {interpreter}
     blobs = em._git_source_blobs(adapter.source_sha, committed)
     for name, expected in adapter.source_files.items():
         path = Path(name)
