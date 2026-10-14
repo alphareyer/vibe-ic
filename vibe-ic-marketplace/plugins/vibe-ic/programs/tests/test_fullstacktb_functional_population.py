@@ -1661,6 +1661,33 @@ def test_issue3132_random_strict_consumer_rechecks_contract(tmp_path, mutation):
             text = text.replace('pass=10000/10000', 'pass=9999/9999')
             text = text.replace('transactions=10000 comparisons=80000', 'transactions=9999 comparisons=79992')
         path.write_text(text); entry['run_log_sha256'] = fs.sha256_file(path)
+        if mutation == 'framing_transcript' and isinstance(entry.get('arithmetic_scenario'), dict):
+            # Refresh descriptive receipt hashes too: refusal must come from
+            # re-reading the actual framing, not merely a stale transcript hash.
+            measured = entry['arithmetic_scenario']
+            measured['transcript_sha256'] = fs.sha256_file(path)
+            if isinstance(measured.get('framing'), dict):
+                measured['framing']['latency_cycles'] = 99
         record.write_text(json.dumps(rec, indent=2))
     rc, checked, _ = gate.functional_full_stack_verdict(root)
     assert rc != 0 and checked['functional_verified'] is False, checked
+
+
+def test_issue3132_legacy_native_search_receipt_does_not_evade_current_contract(tmp_path):
+    root = _random_contract_input(tmp_path)
+    tbg = importlib.import_module('testbench_gen')
+    # Build historical search-family evidence with the real old emitter and
+    # native dispatch, never a fabricated transcript or simulator verdict.
+    with patch.object(tbg, '_emit_case_arithmetic_scenario', return_value=None):
+        result, rc, consumed = _timed_native(root)
+    entry, = result['cases']
+    assert entry['family'] == 'declared_function_golden'
+    assert entry['state'] == 'passed' and entry['run_rc'] == 0
+    assert entry['checks'] == {'passed': 10000, 'total': 10000}
+    log = (root / entry['run_log']).read_text()
+    observed = re.search(r'ORACLE_TB_FRAMING in_order=0 out_order=0 latency_cycles=(\d+) latency_origin=settled_edge_offset', log)
+    assert observed and int(observed.group(1)) == 2
+    declaration = json.loads((root / 'plugin_output/declaration.json').read_text())
+    assert declaration['latency_cycles'] == 1
+    assert declaration['latency_cycles_origin'] == 'settled_edge_offset'
+    assert rc == 2 and consumed['functional_verified'] is False, consumed
