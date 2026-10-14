@@ -25,10 +25,11 @@ Deterministic feature extraction per module:
   - ff_count        : registers written under a posedge/negedge clock edge,
                       bit-width-aware (a `reg [7:0] x` written in an edge block
                       counts as 8 FFs).
-  - max_counter     : largest integer constant that a register is compared
-                      against with >=, <=, >, < or == (the counter terminal
-                      value) OR the largest right-hand decimal a register is
-                      loaded with — i.e. the deepest timer reload value.
+  - max_counter     : largest compare/reload constant of a clocked state
+                      with a direct unit-step self-update. Input decoding,
+                      arbitrary data loads and combinational updates do not
+                      imply a temporal depth. This is a static heuristic,
+                      not a proof of the module's reachable-state diameter.
   - mem_bits        : widest unpacked memory array, in bits (depth * element
                       width); e.g. `reg [7:0] buf [0:46]` -> 47*8 = 376 bits.
   - fsm_states      : number of distinct state localparam/`define enum values
@@ -140,11 +141,13 @@ _MEM_DECL_RE = re.compile(
     r"[A-Za-z_]\w*\s*\[\s*([0-9A-Za-z_+\-* ]+?)\s*:\s*([0-9A-Za-z_+\-* ]+?)\s*\]")
 # A non-blocking assignment target inside an edge block: name <= ...
 _NB_ASSIGN_RE = re.compile(r"([A-Za-z_]\w*)\s*<=")
-# Counter terminal: reg compared to a decimal constant
-_CMP_CONST_RE = re.compile(
-    r"\b([A-Za-z_]\w*)\s*(?:>=|<=|==|>|<)\s*(\d+)")
-_CMP_CONST_REV_RE = re.compile(
-    r"\b(\d+)\s*(?:>=|<=|==|>|<)\s*([A-Za-z_]\w*)")
+_INT_OR_NAME = r"(?:\d+\s*'\s*[sS]?[bBoOdDhH][0-9A-Fa-f_]+|\d+|[A-Za-z_]\w*)"
+_CMP_RE = re.compile(
+    rf"(?<![\w'])({_INT_OR_NAME})\s*(?:>=|<=|==|>|<)\s*({_INT_OR_NAME})(?![\w'])")
+_SELF_UPDATE_RE = re.compile(
+    rf"\b([A-Za-z_]\w*)\s*(?:<=|=(?!=))\s*\(?\s*\1\s*[+-]\s*({_INT_OR_NAME})\s*\)?\s*;")
+_RELOAD_RE = re.compile(
+    rf"\b([A-Za-z_]\w*)\s*(?:<=|=(?!=))\s*({_INT_OR_NAME})\s*;")
 # State localparam values: localparam ... STATE_X = <n>;
 _STATE_LP_RE = re.compile(
     r"\blocalparam\b[^;]*?\b([A-Za-z_]\w*)\s*=\s*[^;,]+", re.IGNORECASE)
@@ -163,6 +166,13 @@ def _resolve_int(token: str, params: dict) -> Optional[int]:
     token = token.strip()
     if re.fullmatch(r"\d+", token):
         return int(token)
+    literal = re.fullmatch(r"\d+\s*'\s*[sS]?([bBoOdDhH])([0-9A-Fa-f_]+)", token)
+    if literal:
+        try:
+            return int(literal.group(2).replace("_", ""),
+                       {"b": 2, "o": 8, "d": 10, "h": 16}[literal.group(1).lower()])
+        except ValueError:
+            return None
     # bare parameter name
     if token in params:
         return params[token]
@@ -178,7 +188,7 @@ def _module_params(body: str) -> dict:
     out: dict = {}
     for m in re.finditer(
             r"\b(?:parameter|localparam)\b(?:\s+integer)?\s*(?:\[[^\]]*\])?\s*"
-            r"([A-Za-z_]\w*)\s*=\s*([^;,]+)", body):
+            r"([A-Za-z_]\w*)\s*=\s*([^;,)]+)", body):
         name, rhs = m.group(1), m.group(2)
         mm = re.search(r"(\d+)\s*'\s*[bBhHdDoO]?([0-9A-Fa-f]+)", rhs)
         if mm:
@@ -193,6 +203,23 @@ def _module_params(body: str) -> dict:
         if dm:
             out[name] = int(dm.group(1))
     return out
+
+
+def _clocked_regions(body: str):
+    """Keep self-updates inside the edge process that owns them."""
+    boundary = re.compile(r"\b(?:always(?:_ff|_seq|_comb|_latch)?|assign|initial|function|task)\b")
+    for match in _EDGE_BLOCK_RE.finditer(body):
+        following = boundary.search(body, match.end())
+        segment = body[match.end():following.start() if following else len(body)]
+        start = re.match(r"\s*(?:@\s*\([^)]*\)\s*)?begin\b", segment)
+        if start:
+            depth = 0
+            for token in re.finditer(r"\bbegin\b|\bend\b", segment[start.end() - 5:]):
+                depth += 1 if token.group() == "begin" else -1
+                if depth == 0:
+                    segment = segment[:start.end() - 5 + token.end()]
+                    break
+        yield segment
 
 
 def classify_module(name: str, body: str, file_label: str) -> ModuleClass:
@@ -210,10 +237,8 @@ def classify_module(name: str, body: str, file_label: str) -> ModuleClass:
             except ValueError:
                 widths[sig] = 1
     sequential_targets: set = set()
-    for m in _EDGE_BLOCK_RE.finditer(body):
-        # take the text from this always to the next 'always' (or end)
-        nxt = _EDGE_BLOCK_RE.search(body, m.end())
-        seg = body[m.end(): nxt.start() if nxt else len(body)]
+    clocked = list(_clocked_regions(body))
+    for seg in clocked:
         for tgt in _NB_ASSIGN_RE.findall(seg):
             sequential_targets.add(tgt)
     ff_count = sum(widths.get(sig, 1) for sig in sequential_targets)
@@ -233,16 +258,21 @@ def classify_module(name: str, body: str, file_label: str) -> ModuleClass:
         mem_bits = max(mem_bits, depth * ew)
 
     # --- max counter terminal value ---------------------------------------
+    counters = {sig for segment in clocked
+                for sig, step in _SELF_UPDATE_RE.findall(segment)
+                if _resolve_int(step, params) == 1}
     max_counter = 0
-    for sig, const in _CMP_CONST_RE.findall(body):
-        max_counter = max(max_counter, int(const))
-    for const, sig in _CMP_CONST_REV_RE.findall(body):
-        max_counter = max(max_counter, int(const))
-    # Also: a large parameter directly compared/loaded acts as the depth.
-    for sig, pname in re.findall(
-            r"\b([A-Za-z_]\w*)\s*(?:>=|<=|==|>|<)\s*([A-Za-z_]\w*)", body):
-        if pname in params:
-            max_counter = max(max_counter, params[pname])
+    for left, right in _CMP_RE.findall(body):
+        for signal, value in ((left, right), (right, left)):
+            terminal = _resolve_int(value, params)
+            if signal in counters and terminal is not None:
+                max_counter = max(max_counter, terminal)
+    # Reload constants count only for that same clocked stepping state.
+    for segment in clocked:
+        for signal, value in _RELOAD_RE.findall(segment):
+            reload = _resolve_int(value, params)
+            if signal in counters and reload is not None:
+                max_counter = max(max_counter, reload)
 
     # --- FSM state count --------------------------------------------------
     # Count localparam values whose name appears as an FSM-register assignment.
