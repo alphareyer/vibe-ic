@@ -29,6 +29,11 @@ import importlib
 import json
 import re
 import sys
+import os
+import shutil
+import subprocess
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -1282,3 +1287,272 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
         produced = json.loads((project / 'reports/phase3/io_pad_chip_top.json').read_text())
         assert len(produced['pad_instances']) == 12
     assert _actual_late_rollup(env, phase3_started) == ('PASS', 0)
+
+
+# Issue 3132: tiny PUBLIC native components. No owner design or oracle is used.
+# The INPUT author states the schedule before any producer/simulator executes.
+_TIMED_CONFIGS = {
+    'core4': (4, False, 10, 0, 0, False, 'clocked_reset', 1),
+    'wrapped4_zero': (4, True, 10, 0, 0, False, 'clocked_reset', 1),
+    'core8_renamed': (8, False, 18, 0, 0, True, 'clocked_reset', 1),
+    'wrapped8_delayed': (8, True, 18, 1.2, 1.4, True, 'clocked_reset', 1),
+    'wrapped12_continuous': (12, True, 14, 0.3, 0.8, False, 'continuous', 0),
+}
+
+
+def _timed_input(root, key, *, mode='good', refusal=None):
+    """Self-authored serial multiply, same declarations/bytes in all proof arms."""
+    fs = _fsf()
+    width, wrapped, period, cd, od, renamed, rearm, latency = _TIMED_CONFIGS[key]
+    root = Path(root)
+    gd = root / 'phase1/generated_docs'; gd.mkdir(parents=True)
+    rd = root / 'phase2/stage1/rtl'; rd.mkdir(parents=True)
+    (root / 'plugin_output').mkdir()
+    names = ['clk', 'rst', 'x', 'y', 'p']
+    if renamed:
+        names = ['i_clk', 'i_rst', 'operand_word', 'serial_bit', 'result_bit']
+    c, r, x, y, p = names
+    cases = [{'name': name, 'kind': 'functional_vector', 'expected': '100% PASS',
+              'coverage_scope': scope} for name, scope in [
+        ('operand_limits', 'Operand boundaries: zero, one, MAX; all Cartesian combinations'),
+        ('transaction_sequence', 'Consecutive transactions: at least 16 operand pairs using declared rearm, no extra idle cycles'),
+        ('reset_situations', 'Synchronous reset held, released, and asserted during computation; between-edge reset pulses must not reset'),
+    ]]
+    (gd / 'L2_FRS.json').write_text(json.dumps({'ic_class': 'digital_arithmetic_primitive',
+        'frs_sections': [{'content': f'{p} = ({x} * {y}) mod 2^{width}; serial-parallel multiply'}]}))
+    (gd / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'top_module': 'public_serial_product', 'ic_class': 'digital_arithmetic_primitive',
+        'top_ports': [{'name': name, 'direction': d, 'width': w} for name, d, w in
+                      [(c, 'input', 1), (r, 'input', 1), (x, 'input', width),
+                       (y, 'input', 1), (p, 'output', 1)]],
+        'clocks': [{'name': c, 'period_ns': period}],
+        'reset_domains': [{'name': r, 'polarity': 'active_high', 'sync': 'sync'}]}))
+    (gd / 'L10_TEST_CASES.json').write_text(json.dumps({'test_cases': cases}))
+    reset = "1'b0" if mode == 'ignored_reset' else r
+    delay_cycles = latency + int(mode == 'wrong_cycle')
+    expression = "1'bx" if mode == 'unknown' else ('~total[0]' if mode == 'wrong_product' else 'total[0]')
+    regs = ''.join(f'reg pipe{i}=0;\n' for i in range(delay_cycles))
+    reset_pipe = ''.join(f'pipe{i}<=0; ' for i in range(delay_cycles))
+    pipeline = ''.join(f'pipe{i}<=' + (expression if i == 0 else f'pipe{i-1}') + '; '
+                       for i in range(delay_cycles))
+    output = f'pipe{delay_cycles-1}' if delay_cycles else expression
+    # LSB recurrence derives each product bit from the partial sum; the last
+    # bit discards the carry (mod 2^N), allowing the declared continuous rearm.
+    core = rd / 'public_serial_product.v'
+    core.write_text(f'''`timescale 1ns/1ps
+module public_serial_product(input {c}, {r}, input [{width-1}:0] {x}, input {y}, output reg {p}=0);
+reg [{width}:0] carry=0;
+wire [{width}:0] total = carry + ({y} ? {{1'b0,{x}}} : 0);
+integer index=0;
+{regs}always @(posedge {c}) begin
+ if ({reset}) begin carry<=0; index<=0; {p}<=0; {reset_pipe}end
+ else begin
+  carry <= (index=={width-1}) ? 0 : (total >> 1);
+  index <= (index=={width-1}) ? 0 : index+1;
+  {pipeline}{p} <= {output};
+ end
+end
+endmodule
+''')
+    binding = {}
+    if wrapped:
+        _write(root / 'input/submission_template/SELF_TAPEOUT.txt', 'self tape-out\n')
+        top = root / 'phase3/stage3/pnr/public_surface.v'
+        _write(top, f'''`timescale 1ns/1ps
+module public_surface(input {c}, {r}, input [{width-1}:0] {x}, input {y}, output {p});
+wire selected_clock, core_result;
+PUBLIC_CLK clock_pad(.A({c}), .Y(selected_clock));
+public_serial_product core(.{c}(selected_clock), .{r}({r}), .{x}({x}), .{y}({y}), .{p}(core_result));
+PUBLIC_OUT output_pad(.A(core_result), .Y({p}));
+endmodule
+''')
+        model = root / 'input/models/public_delay.v'
+        _write(model, f'''`timescale 1ns/1ps
+module PUBLIC_CLK(input A, output Y); buf #{cd}(Y,A); endmodule
+module PUBLIC_OUT(input A, output Y); buf #{od}(Y,A); endmodule
+''')
+        _write(root / fs.CHIP_TOP_RECORD_REL, json.dumps({
+            'verdict': 'WROTE', 'core_module': 'public_serial_product',
+            'chip_top_module': 'public_surface', 'chip_top_verilog': str(top.relative_to(root))}))
+        binding = {str(f.relative_to(root)): fs.sha256_file(f) for f in (top, model)}
+    observation = {'clock': c, 'output': p, 'settle_ns': cd + od,
+                   'sample_offset_ns': cd + od + 0.75, 'binding': binding}
+    if refusal == 'stale_model':
+        observation['binding']['input/models/public_delay.v'] = '0' * 64
+    elif refusal == 'wrong_clock':
+        observation['clock'] = 'absent_clock'
+    elif refusal == 'outside_cycle':
+        observation['sample_offset_ns'] = period / 2
+    elif refusal == 'before_settle':
+        observation['sample_offset_ns'] = cd + od
+    declaration = {'bit_order': 'LSB_first', 'latency_cycles': latency,
+        'latency_cycles_origin': 'settled_edge_offset', 'integer_encoding': 'unsigned',
+        'reset_polarity': 'active_high', 'transaction_rearm': rearm,
+        'rearm_reset_cycles': 2, 'parallel_hold': 'through_final_product_bit',
+        'verification_stimuli': {'arithmetic_observation': {
+            ('public_surface' if wrapped else 'public_serial_product'): observation}}}
+    if refusal == 'missing':
+        declaration['verification_stimuli'] = {}
+    (root / 'plugin_output/declaration.json').write_text(json.dumps(declaration, sort_keys=True))
+    return cases
+
+
+def _timed_fixture(tmp_path, key, *, mode='good', refusal=None):
+    root = tmp_path / 'public_input'
+    frozen = os.environ.get('R70_NEUTRAL_ROOT')
+    if frozen:
+        shutil.copytree(Path(frozen) / f'{key}-{mode}-{refusal or "bound"}', root)
+        for file in root.rglob('*'):
+            if file.is_file():
+                file.chmod(0o644)
+    else:
+        _timed_input(root, key, mode=mode, refusal=refusal)
+    paths = [*root.glob('phase1/generated_docs/*.json'),
+             root / 'plugin_output/declaration.json',
+             *root.glob('phase2/stage1/rtl/*.v'), *root.glob('input/**/*'),
+             *root.glob('phase3/stage3/pnr/*.v'), *root.glob('reports/**/*.json')]
+    inventory = {str(f.relative_to(root)): _fsf().sha256_file(f) for f in paths if f.is_file()}
+    (root / 'frozen_input_hashes.json').write_text(json.dumps(inventory, sort_keys=True, indent=2))
+    return root
+
+
+def _timed_native(root):
+    # Native executable dispatch is the production default. The only injected
+    # dependency supplies self-authored public model bytes, without any PDK.
+    model = root / 'input/models/public_delay.v'
+    resolver = (lambda *args: ({str(model): model.read_text()}, 'public declared delay model'))
+    # Observe real Popen handles without substituting any simulator result.
+    launched = []
+    real_popen = subprocess.Popen
+    def observed_popen(*args, **kwargs):
+        started = time.time_ns()
+        process = real_popen(*args, **kwargs)
+        launched.append((process, {'argv': args[0], 'pid': process.pid,
+                                  'parent_pid': os.getpid(), 'started_ns': started}))
+        return process
+    with patch.object(subprocess, 'Popen', observed_popen):
+        result = _fsf().generate(root, model_resolver=resolver)
+    handles = []
+    for process, receipt in launched:
+        receipt.update(rc=process.poll(), observed_terminal_ns=time.time_ns())
+        assert receipt['rc'] is not None, receipt
+        handles.append(receipt)
+    (root / 'native_handles.json').write_text(json.dumps(handles, indent=2))
+    rc, consumed, sentinel = gate.functional_full_stack_verdict(root)
+    (root / 'consumer.json').write_text(json.dumps({'rc': rc, 'report': consumed, 'sentinel': sentinel}, indent=2))
+    return result, rc, consumed
+
+
+@pytest.mark.parametrize('key', list(_TIMED_CONFIGS))
+def test_declared_timing_native_fullstack_and_consumer(tmp_path, key):
+    root = _timed_fixture(tmp_path, key)
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'PASS' and rc == 0, (result, consumed)
+    assert result['counts']['passed'] == 3 and result['counts']['executed'] == 3
+    width, wrapped, period, cd, od, renamed, rearm, latency = _TIMED_CONFIGS[key]
+    top = 'public_surface' if wrapped else 'public_serial_product'
+    for entry in result['cases']:
+        tb = root / entry['tb']; plan = aog._scenario_header(tb)
+        transcript = (root / entry['run_log']).read_text()
+        match = re.search(r'^ARITH_SCENARIO_DONE transactions=(\d+) comparisons=(\d+) errors=(\d+) held_edges=(\d+)$', transcript, re.M)
+        assert match and tuple(map(int, match.groups()[:3])) == (plan['transactions'], plan['comparisons'], 0)
+        expected_transactions = {'operand_limits': 9, 'transaction_sequence': 16, 'reset_situations': 180}[entry['name']]
+        assert plan['transactions'] == expected_transactions
+        assert plan['comparisons'] == width * expected_transactions
+        assert entry['run_rc'] == 0 and entry['build_rc'] == 0
+        assert _fsf().instance_count(tb.read_text(), top) == 1
+        assert plan['observation']['clock_period_ns'] == period
+        assert plan['observation']['sample_offset_ns'] == cd + od + 0.75
+        assert plan['framing']['settled_latency'] == latency
+        assert len(plan['pairs']) == (9 if entry['name'] == 'operand_limits' else
+                                     16 if entry['name'] == 'transaction_sequence' else 20)
+        # Independently inspect the actual simulator clock waveform, rather
+        # than accepting the producer's claimed period in the plan header.
+        trace = (root / entry['trace']['vcd']).read_text()
+        clock = 'i_clk' if renamed else 'clk'
+        symbol = re.search(r'\$var \w+ 1 (\S+) ' + clock + r' \$end', trace).group(1)
+        assert '$timescale\n\t1ps\n$end' in trace
+        time = 0; rising = []
+        for line in trace.splitlines():
+            if line.startswith('#'):
+                time = int(line[1:])
+            elif line == '1' + symbol:
+                rising.append(time)
+        assert len(rising) > 2 and set(b - a for a, b in zip(rising, rising[1:])) == {period * 1000}
+    assert not (root / 'input/tb').exists()
+
+
+@pytest.mark.parametrize('mode', ['wrong_product', 'wrong_cycle', 'ignored_reset', 'unknown'])
+def test_declared_timing_native_bad_design_stays_blocking(tmp_path, mode):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed', mode=mode)
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'FAIL' and rc == 1, (result, consumed)
+    assert result['counts']['failed'] > 0
+    for entry in result['cases']:
+        assert entry['build_rc'] == 0
+        assert entry['run_rc'] in (0, 1)
+        plan = aog._scenario_header(root / entry['tb'])
+        transcript = (root / entry['run_log']).read_text()
+        match = re.search(r'^ARITH_SCENARIO_DONE transactions=(\d+) comparisons=(\d+) errors=(\d+) held_edges=(\d+)$', transcript, re.M)
+        assert match and tuple(map(int, match.groups()[:2])) == (plan['transactions'], plan['comparisons'])
+    assert consumed['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('refusal', ['missing', 'stale_model', 'wrong_clock', 'outside_cycle', 'before_settle'])
+def test_declared_timing_unsupported_contract_refuses_before_native(tmp_path, refusal):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed', refusal=refusal)
+    calls = []
+    def forbidden(*args):
+        calls.append(args)
+        pytest.fail('unsupported timing dispatched a simulator')
+    model = root / 'input/models/public_delay.v'
+    result = _fsf().generate(root, dispatch=forbidden, model_resolver=lambda *args: ({str(model): model.read_text()}, 'public model'))
+    assert not calls and result['verdict'] == 'NOT_MEASURED', result
+    assert result['counts']['executed'] == 0 and result['counts']['rows'] == 3
+    rc, consumed, _ = gate.functional_full_stack_verdict(root)
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED'
+    assert result.get('arithmetic_scenario_requests')
+    assert all('plugin_output/declaration.json#/verification_stimuli/arithmetic_observation/' in
+               '; '.join(r['unsupported_requirements'])
+               for r in result['arithmetic_scenario_requests'])
+
+
+@pytest.mark.parametrize('mutation', ['missing_population', 'stale_declaration', 'stale_model', 'stale_input_model'])
+def test_declared_timing_consumer_rechecks_population_and_identity(tmp_path, mutation):
+    root = _timed_fixture(tmp_path, 'wrapped8_delayed')
+    result, rc, consumed = _timed_native(root)
+    assert result['verdict'] == 'PASS' and rc == 0, (result, consumed)
+    fs = _fsf()
+    if mutation == 'missing_population':
+        entry = result['cases'][0]; log = root / entry['run_log']
+        shutil.copy2(log, log.with_suffix('.original'))
+        log.write_text(re.sub(r'^ARITH_SCENARIO_DONE.*\n', '', log.read_text(), flags=re.M))
+        entry['run_log_sha256'] = fs.sha256_file(log)
+        fs.record_path(root).write_text(json.dumps(result))
+    elif mutation == 'stale_declaration':
+        file = root / 'plugin_output/declaration.json'
+        file.write_text(file.read_text() + ' ')
+    elif mutation == 'stale_model':
+        file = root / result['models'][0]['path']
+        file.write_text(file.read_text() + '\n// changed model identity\n')
+    else:
+        file = root / 'input/models/public_delay.v'
+        file.write_text(file.read_text() + '\n// changed original selected model identity\n')
+    rc, consumed, _ = gate.functional_full_stack_verdict(root)
+    (root / 'mutated_consumer.json').write_text(json.dumps({'rc': rc, 'report': consumed}, indent=2))
+    assert rc == 2 and consumed['verdict'] == 'NOT_MEASURED', consumed
+
+
+@pytest.mark.parametrize('rc,record,marker,state', [
+    (0, 'transactions=9 comparisons=72 errors=1 held_edges=2', True, 'failed'),
+    (1, 'transactions=9 comparisons=72 errors=0 held_edges=2', False, 'failed'),
+    (0, 'transactions=0 comparisons=0 errors=0 held_edges=2', True, 'errored'),
+    (0, 'transactions=9 comparisons=72 errors=0 held_edges=2\nARITH_SCENARIO_DONE transactions=9 comparisons=72 errors=0 held_edges=2', True, 'errored'),
+    (0, 'transactions=9 comparisons=72 errors=0 held_edges=2', True, 'passed'),
+], ids=['errors_override_pass', 'nonzero_rc_blocks', 'empty_population', 'duplicate_population', 'canonical_success'])
+def test_arithmetic_population_counters_keep_strict_score_precedence(rc, record, marker, state):
+    # Source-only transcript controls, separate from the native DUT arms above.
+    text = 'ARITH_SCENARIO_DONE ' + record + '\n'
+    if marker:
+        text += '[TB counter_case] PASS: scenario\n'
+    assert _fsf().score_transcript('counter_case', rc, text)['state'] == state

@@ -2280,6 +2280,12 @@ steps:
                                       # "the agent before this gate", which is
                                       # to say nobody ran it and no run in the
                                       # corpus ever carried a measurement.
+    # The runner's professional-TB step writes this execution report, including
+    # refusals and mismatches. The existing professional_tb_check gate consumes
+    # it; naming the writer does not make any failed or unrun test pass.
+    program_outputs:
+      - program: design_one_shot_runner
+        path: "reports/phase2/gates/professional_tb.json"
     required_outputs:
       # ONE requirement — "a simulation ran and left a transcript" — in the
       # three shapes the supported TB paths actually emit, not three
@@ -2587,6 +2593,12 @@ steps:
       # phase3_one_shot_runner once io_pad_chip_top_gen has written the chip
       # top; the connectivity skeleton is refused as functional evidence.
       - full_stack_functional_tb
+    # The mandatory gate below writes this report before the Default parent's
+    # bounded deferral reader consumes it. This names its writer; the formal
+    # and simulation products and the gate remain mandatory.
+    program_outputs:
+      - program: bit_level_full_stack_tb_check
+        path: "reports/phase2/gates/bit_level_full_stack.json"
     required_outputs:
       - "phase2/stage1/formal/*.sby OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json"
       - "phase2/stage1/formal/results.json OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json"
@@ -7144,6 +7156,10 @@ steps:
     program_outputs:
       - program: path_spice_tool
         path: "reports/phase3/spice_path_tool.json"
+      # Conditional refusal presence prevents an early-producer exemption;
+      # it never substitutes for current executed correlation evidence.
+      - program: spice_correlation_check
+        path: "phase3/stage3/spice/spice_correlation_not_run.json"
     required_outputs:
       - "phase3/stage3/spice/*.sp OR phase3/stage3/spice/*.spice OR sim_spice/*.sp"
       - "phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json"

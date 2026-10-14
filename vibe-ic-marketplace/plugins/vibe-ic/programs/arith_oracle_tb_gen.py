@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -1394,8 +1395,90 @@ def _arithmetic_scenario_intent(case: dict, operand_names: Tuple[str, ...]) -> d
             'reset_situations': reset, 'reset_complete': held and released and mid}
 
 
+def arithmetic_observation(project: Path, spec: dict, *, top: Optional[str] = None,
+                           sources: Optional[dict] = None) -> Tuple[Optional[dict], str]:
+    """Fixed within-cycle schedule from the selected INPUT interface.
+
+    L9 owns the clock period. Optional observation choices live in the existing
+    declaration verification_stimuli.arithmetic_observation, keyed by top.
+    A changed surface requires an explicit clock/output, settling bound, sample
+    and exact wrapper/model binding. No waveform or golden is consulted.
+    The direct surface retains its 1 ns observation when no choice is supplied.
+    """
+    selected = top or spec['top']
+    l9_path = _pl.generated_docs_dir(project) / 'L9_INTEGRATION_SPEC.json'
+    declaration_path = project / 'plugin_output/declaration.json'
+    locus = f'{declaration_path}#/verification_stimuli/arithmetic_observation/{selected}'
+
+    def refuse(reason, location=locus):
+        return None, f'{location}: {reason}'
+
+    l9 = _read_json(l9_path) or {}
+    l9 = l9.get('fields') or l9
+    clocks = l9.get('clocks') or l9.get('clock_domains') or []
+    clocks = [c for c in clocks if isinstance(c, dict) and c.get('name') == spec['clk']]
+
+    def ns(value):
+        return (type(value) in (int, float) and math.isfinite(value)
+                and value >= 0 and math.isclose(value * 1000, round(value * 1000), abs_tol=1e-6))
+
+    if len(clocks) != 1 or not ns(clocks[0].get('period_ns')):
+        return refuse('selected clock needs one finite period_ns at 1 ps resolution',
+                      f'{l9_path}#/clocks or #/clock_domains (name={spec["clk"]})')
+    period = clocks[0]['period_ns']
+    if period <= 4 or not ns(period / 2) or clocks[0].get('duty_cycle', 0.5) != 0.5:
+        return refuse('unsupported clock half-cycle or duty cycle for between-edge reset pulses',
+                      f'{l9_path}#/clocks or #/clock_domains (name={spec["clk"]})')
+    declaration = _read_json(declaration_path) or {}
+    stimuli = declaration.get('verification_stimuli', {})
+    choices = stimuli.get('arithmetic_observation', {}) if isinstance(stimuli, dict) else None
+    if not isinstance(choices, dict):
+        return refuse('arithmetic observation choices must be a mapping by selected top')
+    choice = choices.get(selected)
+    if choice is None and selected == spec['top'] and selected not in choices:
+        return {'top': selected, 'clock': spec['clk'], 'output': spec['serial_out'],
+                'clock_period_ns': period, 'sample_offset_ns': 1,
+                'settle_ns': 0, 'binding': {}}, ''
+    if not isinstance(choice, dict):
+        return refuse('selected top has no declared arithmetic observation contract')
+    if choice.get('clock') != spec['clk'] or choice.get('output') != spec['serial_out']:
+        return refuse('observation clock/output does not match the selected arithmetic interface')
+    sample, settle = choice.get('sample_offset_ns'), choice.get('settle_ns')
+    if not ns(sample) or not ns(settle) or not 0 <= settle < sample < period / 2:
+        return refuse('observation must be after declared settling and strictly inside the half-cycle')
+    binding = choice.get('binding', {})
+    if not isinstance(binding, dict):
+        return refuse('observation source binding must be a mapping')
+    try:
+        binding = {str((project / p).resolve()): digest for p, digest in binding.items()}
+        actual = {str((project / p).resolve()): digest for p, digest in (sources or {}).items()}
+    except (TypeError, ValueError):
+        return refuse('observation source binding contains an unsupported path')
+    if selected != spec['top'] and (not actual or binding != actual):
+        return refuse('observation binding does not match the selected wrapper and model bytes')
+    if binding:
+        import hashlib
+        try:
+            for p, digest in binding.items():
+                path = Path(p)
+                # Project-owned inputs must still exist with the declared
+                # bytes. External model sources may be available only through
+                # the existing resolver; their exact staged bytes are checked
+                # against `sources` above and in the execution plan.
+                if path.is_relative_to(project.resolve()) or path.exists():
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                        return refuse(f'observation source bytes changed: {path}')
+        except OSError:
+            return refuse(f'observation source could not be read: {path}')
+    return {'top': selected, 'clock': spec['clk'], 'output': spec['serial_out'],
+            'clock_period_ns': period, 'sample_offset_ns': sample,
+            'settle_ns': settle, 'binding': binding}, ''
+
+
 def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict,
-                             *, request: Optional[dict] = None) -> Optional[dict]:
+                             *, request: Optional[dict] = None,
+                             observation_top: Optional[str] = None,
+                             observation_sources: Optional[dict] = None) -> Optional[dict]:
     """Supported L10 scope plus declared framing/rearm, without alignment search."""
     import hashlib
     spec, why = extract_serial_arith_spec(project, ic_class)
@@ -1450,6 +1533,13 @@ def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict,
         return None
     if not conv or not spec.get('rst'):
         defer('declared framing and reset role are required')
+        return None
+    observation, why = arithmetic_observation(project, spec, top=observation_top,
+                                              sources=observation_sources)
+    if observation is None:
+        defer('MISSING_OBSERVATION_CONTRACT: ' + why)
+        if request is not None:
+            request['reason_class'] = 'MISSING_OBSERVATION_CONTRACT'
         return None
     width = spec['width']; latency = conv['settled_latency']
     if not 4 <= width <= 64 or latency > 2 * width:
@@ -1513,7 +1603,7 @@ def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict,
             'scenario': kind, 'case_sha256': hashlib.sha256(json.dumps(
                 case, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
             'binding': binding, 'spec': spec, 'pairs': pairs,
-            'framing': conv, 'latency_origin': SERIAL_LATENCY_ORIGIN,
+            'framing': conv, 'observation': observation, 'latency_origin': SERIAL_LATENCY_ORIGIN,
             'transactions': sum(p['transactions'] for p in phases),
             'comparisons': sum(p['comparisons'] for p in phases)}
     if len(phases) > 1:
@@ -1527,6 +1617,9 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
     par, sin, sout, clk, rst = (spec[k] for k in
                                ('parallel', 'serial_in', 'serial_out', 'clk', 'rst'))
     latency = framing['settled_latency']; pairs = plan['pairs']
+    observation = plan['observation']
+    half = format(observation['clock_period_ns'] / 2, '.12g')
+    sample = format(observation['sample_offset_ns'], '.12g')
     on, off = (0, 1) if spec['reset_active_low'] else (1, 0)
     rearm = int(framing['transaction_rearm'] == 'clocked_reset')
     reset_cycles = framing['rearm_reset_cycles']
@@ -1537,14 +1630,14 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
         width = n if p['name'] == par else int(p.get('numeric_width') or 1)
         lines.append(f"{'reg' if p['dir'] == 'input' else 'wire'} "
                      f"{'['+str(width-1)+':0] ' if width > 1 else ''}{p['name']};")
-    lines += [f"{spec['top']} dut (" + ', '.join(f".{p['name']}({p['name']})" for p in spec['ports']) + ');',
-              f'initial {clk}=0; always #5 {clk}=~{clk};',
+    lines += [f"{observation['top']} dut (" + ', '.join(f".{p['name']}({p['name']})" for p in spec['ports']) + ');',
+              f'initial {clk}=0; always #{half} {clk}=~{clk};',
               'reg [N-1:0] av[0:NV-1], bv[0:NV-1], gv[0:NV-1];',
               'integer errors=0, comparisons=0, transactions=0, held_edges=0;',
               'integer vi,k,h,a; reg held_value;',
               'task clear_state(input integer holds); begin',
               f" {rst}=1'b{on}; {sin}=0; {par}=0;",
-              ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk}); #1;',
+              ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk}); #{sample};',
               f"  if ({sout} !== 1'b0 && {sout} !== 1'b1) errors=errors+1;",
               f'  if(h>0 && {sout} !== held_value) errors=errors+1;',
               f'  held_value={sout}; held_edges=held_edges+1; @(negedge {clk});',
@@ -1554,7 +1647,7 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
               ' for(k=0;k<N+L;k=k+1) begin',
               f"  {sin}=(k<N) ? bv[v][{'k' if lsb else 'N-1-k'}] : 0;",
               f"  if(pulse>0 && k==pulse) begin {rst}=1'b{on}; #1; {rst}=1'b{off}; #1; end",
-              f'  @(posedge {clk}); #1;', '  if(k>=L) begin',
+              f'  @(posedge {clk}); #{sample};', '  if(k>=L) begin',
               f"   if({sout} !== gv[v][{'k-L' if lsb else 'N-1-(k-L)'}]) begin",
               '    errors=errors+1;', f'    $display("FAIL: {module_name} fixed-window bit=%0d",k-L);',
               '   end', '   comparisons=comparisons+1;', '  end',
@@ -1562,7 +1655,7 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
               'task interrupted(input integer v,input integer position,input integer holds); begin',
               f' {par}=~av[v];', ' for(a=0;a<position;a=a+1) begin',
               f"  {sin}=~bv[v][{'a' if lsb else 'N-1-a'}];",
-              f'  @(posedge {clk}); #1; @(negedge {clk});', ' end',
+              f'  @(posedge {clk}); #{sample}; @(negedge {clk});', ' end',
               ' clear_state(holds); compare_transaction(v,0,0);', 'end endtask',
               'initial begin']
     for p in spec['ports']:

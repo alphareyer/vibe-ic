@@ -88,7 +88,7 @@ about what counts as evidence, which is separate from how big a file is.
 `phase3/stage3/extracted/*.spef` are all still NOT_PUBLISHED, and widening the
 SUBTREE remains an evidence-policy call left alone here.
 
-ONE artefact out of that subtree is now staged: `phase3/stage3/pnr/routed.def`,
+The routed DEF out of that subtree is staged: `phase3/stage3/pnr/routed.def`,
 under `_ROUTED_DEF_RELPATH`, size-routed exactly like the GDS. Not a widening
 of the scratch policy -- a repair of the same omission the GDS block below
 carries its own comment about. Its directory is not a copy subtree, so the size
@@ -99,6 +99,9 @@ population on that one path, so no number of published cells could make it
 check anything. It also moves this program TOWARD the hand-staged reference
 cells rather than away from them: they carry that file, and on the rest of the
 subtree (`extracted/*.spef`) this program still publishes less than they do.
+
+The exact canonical step-15 constraint and step-18 spare-cell DEF are also
+staged through `_COPY_FILES`; their sibling PnR scratch stays outside scope.
 
 COMPILER BUILD RESIDUE IS NOT EVIDENCE AND IS NEVER STAGED (#2006)
 ===================================================================
@@ -408,9 +411,13 @@ _COPY_SUBTREES = (
     Path("phase3") / "final",
     "reports",
 )
-_COPY_FILES = ("provenance.jsonl",)
+_COPY_FILES = (
+    "provenance.jsonl",
+    "phase3/stage3/pnr/constraint.sdc",
+    "phase3/stage3/pnr/post_spare.def",
+)
 
-# THE ONE ARTEFACT PUBLISHED OUT OF `phase3/stage3`, AND WHY IT IS NAMED HERE
+# THE ROUTED DEF PUBLISHED OUT OF `phase3/stage3`, AND WHY IT IS NAMED HERE
 # RATHER THAN ADDED TO `_COPY_SUBTREES`.
 #
 # `repo_hygiene_gates.sh` declares a BLOCKING loop over the corpus "published
@@ -2385,7 +2392,9 @@ def publish(args: argparse.Namespace) -> dict:
         src = run_dir / fname
         if src.is_file():
             if not dry:
-                shutil.copy2(src, dest / fname)
+                target = dest / fname
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
             staged.append(fname)
             copied_docs.append((src, fname))
             cell_rels.add(fname)

@@ -1,0 +1,26 @@
+{
+  "scope": "Public neutral Python source producer and finalizer metadata; no native HDL/EDA execution",
+  "producers": [
+    {
+      "id": "serial",
+      "origin": "serial_parallel_mul_synth",
+      "input_files": {
+        "input/phase1_prompt.md": "Serial-parallel arithmetic metadata with synchronous active-high reset.\n",
+        "phase1/generated_docs/L2_FRS.json": "{\"ic_name\": \"neutral_serial\", \"frs_sections\": [{\"content\": \"serial-parallel multiplier: p = (x * y) mod 2^N; synchronous active-high reset\"}]}",
+        "phase1/generated_docs/L9_INTEGRATION_SPEC.json": "{\"top_module\": \"neutral_serial\", \"top_ports\": [{\"name\": \"clk\", \"direction\": \"input\", \"width\": 1}, {\"name\": \"rst\", \"direction\": \"input\", \"width\": 1}, {\"name\": \"x\", \"direction\": \"input\", \"width\": \"size-1:0\", \"width_symbolic\": \"size-1:0\", \"msb\": \"size-1\", \"lsb\": \"0\"}, {\"name\": \"y\", \"direction\": \"input\", \"width\": 1}, {\"name\": \"p\", \"direction\": \"output\", \"width\": 1}]}"
+      }
+    },
+    {
+      "id": "sequence",
+      "origin": "spec_artifact_registry[behavioral_fsm]",
+      "input_files": {
+        "input/phase1_prompt.md": "Design a Moore detector of sequence \"10101\". When detected, set matched to 1 forever until reset. Synchronous active-high reset clears matched.\nmodule neutral_sequence(input clk, input rst, input data_in, output matched);\n",
+        "phase1/input_doc/design.md": "Design a Moore detector of sequence \"10101\". When detected, set matched to 1 forever until reset. Synchronous active-high reset clears matched.\nmodule neutral_sequence(input clk, input rst, input data_in, output matched);\n"
+      },
+      "handoff_input_files": {
+        "input/phase1_prompt.md": "Retain the existing implementation; no replacement behavior is specified.\n",
+        "phase1/input_doc/design.md": "Retain the existing implementation; no replacement behavior is specified.\n"
+      }
+    }
+  ]
+}

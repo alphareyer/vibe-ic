@@ -6586,7 +6586,9 @@ def test_d3_the_producer_oracle_answers_both_ways():
     verdicts exercise it.
     """
     yes = producer_evidence("phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json")
-    assert yes and "phase3_one_shot_runner" in yes.producers, yes
+    # The current writer publishes the decision before the pre-stream gate.
+    # Its real source-only write/hash control is below; do not alias the runner.
+    assert yes and "librelane_postroute_repair" in yes.producers, yes
     no = producer_evidence("phase3/stage3/pnr/floorplan.def")
     assert not no.producers, no
     # ...and a NO must still disclose its reach, never read as a proven zero.
@@ -6597,6 +6599,41 @@ def test_d3_the_producer_oracle_answers_both_ways():
         "phase3/stage3/pnr/floorplan.def OR "
         "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json")
     assert either.producers == yes.producers, either
+
+
+def test_d3_current_repair_writer_binds_its_actual_report(tmp_path, monkeypatch):
+    """Source-only producer control for the explicit writer assertion migration.
+
+    Reuse the existing public external transport fixture. The ordinary producer,
+    closure and decision writer run; no native OpenROAD measurement is claimed.
+    """
+    import hashlib
+    import test_t102_librelane_postroute_repair as transport
+    transport._stated_image.__wrapped__(monkeypatch)
+    project, shim, sdc, route = transport._chain_setup(tmp_path, monkeypatch, {
+        "32-base": transport._base(4.0, 0.2)})
+    producer = transport.prr
+    report = producer.run_in_chain(
+        project, mode="librelane", image="img", pdk="pdk", pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    source = project / producer.REPORT_REL
+    decision_path = project / producer.DECLARED_REPAIR_REL / "postroute_timing_repair_decision.json"
+    decision = json.loads(decision_path.read_text())
+    assert report["verdict"] == "PASS" and report["adopted"] is None
+    assert decision["action"] == "input_route_kept" and decision["repair_needed"] is False
+    assert decision["source_report"] == source.relative_to(project).as_posix()
+    assert decision["source_report_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    evidence = producer_evidence(decision_path.relative_to(project).as_posix())
+    assert evidence.producers == ("librelane_postroute_repair",), evidence
+    (tmp_path / "current-writer-observation.json").write_text(json.dumps({
+        "scope": "SOFTWARE_FIXTURE_ONLY; native timing NOT_MEASURED",
+        "entry": "librelane_postroute_repair.run_in_chain",
+        "input_scenario_sha256": hashlib.sha256((tmp_path / "scenario.json").read_bytes()).hexdigest(),
+        "producer": evidence.producers, "decision": decision,
+        "decision_sha256": hashlib.sha256(decision_path.read_bytes()).hexdigest(),
+        "producer_source_sha256": hashlib.sha256(Path(producer.__file__).read_bytes()).hexdigest(),
+        "source_report_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}, indent=2))
 
 
 def test_d3_a_departure_from_the_pin_is_routed_to_the_REASON_it_left(monkeypatch):

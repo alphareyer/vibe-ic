@@ -1064,6 +1064,18 @@ def functional_full_stack_verdict(project: Path):
             continue
         got = _fsf.score_transcript(str(c.get("name")), c.get("run_rc"),
                                     log.read_text(errors="replace"))
+        if (_fsf._family_of(text) == 'declared_arithmetic_scenario'
+                and got['state'] == _fsf.PASSED):
+            measured, why = _fsf.arithmetic_case_evidence(
+                project, declared_rows[str(c['name'])], _tbg._detect_ic_class(project),
+                required, rec.get('models') or [], c, rec.get('sources') or [])
+            if measured is None or measured != c.get('arithmetic_scenario'):
+                problems.append(f"{c['name']}: {why}; scenario receipt differs")
+                continue
+            got['checks'] = {'passed': measured['transactions'],
+                             'total': measured['transactions'],
+                             'comparisons': measured['comparisons'],
+                             'errors': measured['errors']}
         claimed = _fsf.PASSED if st == _fsf.SHORT else st
         if got["state"] != claimed:
             problems.append(f"{c.get('name')}: the transcript scores "

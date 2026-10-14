@@ -106,6 +106,13 @@ def test_canonical_primitive_recovery_routes_to_owning_generator(tmp_path):
         "Required interface obligations take priority over documentary release.",
         "Augment `programs/stage_on_pass_review.py`; preserve native and emitted consumer controls.",
         id="r2-netlist"),
+    pytest.param(
+        "phase2.full_stack_tb.reset_invariant_oracle_tb_gen.retention_case_state",
+        "programs/reset_invariant_oracle_tb_gen.py",
+        "retained_transaction_validity",
+        "Preserve actual retention transaction validity and honest missing-event refusal.",
+        "Augment `programs/reset_invariant_oracle_tb_gen.py`; preserve current strict consumer controls.",
+        id="retention-case-state"),
 ])
 def test_shared_owner_recovery_emits_candidate_for_exact_program(
         tmp_path, step, target, rule_name, docstring, fix_action):
@@ -135,6 +142,68 @@ def test_shared_owner_recovery_emits_candidate_for_exact_program(
     assert "# Expected signal: ERROR" in text
     assert f"# Suggested fix action: {fix_action}" in text
     assert "return []  # list of findings — TODO implement" in text
+
+
+@pytest.mark.parametrize("step,target", [
+    pytest.param("phase2.full_stack_tb", "programs/professional_tb_gen.py",
+                 id="full-stack-parent"),
+    pytest.param("phase2.final_audit", "programs/flow_compliance_check.py",
+                 id="final-audit-parent"),
+])
+def test_shared_owner_parent_capture_keeps_own_program(tmp_path, step, target):
+    """An exact recovery subtype must not change its parent's owner."""
+    res = run(tmp_path, [{
+        "step": step, "design": "public_neutral_parent", "bucket": "A",
+        "rule_name": "parent_owner_control", "docstring": "Preserve the parent owner.",
+        "expected_signal": "ERROR", "fix_action": "Preserve the existing producer.",
+    }])
+    summary = res["summary"]
+    assert summary["routing_used"]["bucket_A"] == [target], summary
+    assert not summary.get("bucket_A_unrouted"), summary
+    sketch, = [Path(p) for p in summary["bucket_A_files"]]
+    assert sketch.read_text().startswith(
+        f"# Bucket A — program-rule sketches for {target}\n")
+
+
+@pytest.mark.parametrize("step", [
+    pytest.param("phase2.public_unknown_owner_unlisted", id="public-unknown"),
+    pytest.param(
+        "phase2.full_stack_tb.reset_invariant_oracle_tb_gen.retention_case_state.unlisted",
+        id="retention-unknown-subtype"),
+])
+def test_unknown_owner_capture_has_no_borrowed_parent_or_sketch(tmp_path, step):
+    """Neither a phase prefix nor a known subtype authorizes an unknown owner."""
+    r, summary, out_dir = _run_capture(tmp_path, [{
+        "step": step, "design": "public_neutral_unknown", "bucket": "A",
+        "rule_name": "unknown_owner_control", "docstring": "Keep unknown ownership explicit.",
+        "expected_signal": "ERROR", "fix_action": "Retain honest unknown ownership.",
+    }])
+    assert r.returncode == 0, r.stderr
+    assert summary["totals"] == {"A": 1, "B": 0, "C": 0, "D": 0, "T": 0}
+    assert summary["routing_used"]["bucket_A"] == [], summary
+    assert summary["bucket_A_unrouted"] == [{
+        "step": step, "design": "public_neutral_unknown",
+        "rule_name": "unknown_owner_control",
+    }], summary
+    assert summary["bucket_A_files"] == [], summary
+    assert not list(out_dir.glob("bucket_A*"))
+    assert "unrouted" in r.stderr.lower() and step in r.stderr
+
+
+def test_shared_owner_capture_still_refuses_bare_source_filename(tmp_path):
+    """The owner route does not relax the existing identifier formatting guard."""
+    r, summary, out_dir = _run_capture(tmp_path, [{
+        "step": "phase2.full_stack_tb.cpu_datapath_program.build",
+        "design": "public_neutral_cpu", "bucket": "A",
+        "rule_name": "declared_datapath_program_precedes_release",
+        "docstring": "Build the data-path program from the declared interface obligations.",
+        "expected_signal": "ERROR",
+        "fix_action": "Augment programs/cpu_datapath_program.py; preserve emitted consumer controls.",
+    }])
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "wrap it in markdown backticks" in r.stderr
+    assert summary is None
+    assert not list(out_dir.glob("bucket_A*"))
 
 
 # ── 2. Bucket B routes to the skill file declared in the routing table ──
