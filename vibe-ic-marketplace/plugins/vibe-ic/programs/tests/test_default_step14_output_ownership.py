@@ -86,6 +86,9 @@ def _default_handoff_audit(project, monkeypatch):
             for p in sorted(project.rglob('*')) if p.is_file()}}, sort_keys=True) + '\n')
 
     monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(policy, '_ordinary_runtime', {
+        'project': str(project), 'policy': {'mode': 'default'},
+        'parameters': {'skip_analog': True}})
     monkeypatch.setattr(runner, '_finish_selected_interface_currentness',
                         lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE',
                             declared_by='public control scopes its consumer to Step14'))
@@ -96,8 +99,12 @@ def _default_handoff_audit(project, monkeypatch):
         assert actual_project == project and phase == 2 and skip_analog is True
         result = gates.evaluate(project, handoff())
         observed.append(result)
+        if capture:
+            target.with_suffix('.consumer.json').write_text(json.dumps(result, indent=2) + '\n')
         return runner.StepResult('final_audit', result['status'],
-                                 extras={'selected_step14': result})
+                                 extras={'selected_step14': result},
+                                 reason_class=result['step'].get('reason_class', ''),
+                                 declared_by=result['step'].get('declared_by', ''))
 
     monkeypatch.setattr(runner, 'step_final_audit', audit)
     result = runner._audit_after_declared_producers(project, True)
