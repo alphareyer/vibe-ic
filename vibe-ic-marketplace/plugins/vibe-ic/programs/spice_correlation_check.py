@@ -2948,7 +2948,7 @@ def _write_declared_correlation_refusal(project: Path, status: str,
 
 def run_installed_pdk_path_correlation(project: Path, liberty_path: str,
                                        container: str = _DEFAULT_CONTAINER,
-                                       max_stages: int = 12) -> dict:
+                                       max_stages: int = 12, *, paths: int = 1) -> dict:
     """Ordinary Step 30 uses the existing extracted OpenSTA path-SPICE route.
 
     No mode flag, staged report or schematic fallback can certify this row.
@@ -2974,7 +2974,7 @@ def run_installed_pdk_path_correlation(project: Path, liberty_path: str,
         config = json.loads((folder / 'config.json').read_text())
         pdk = config['PDK']
         root = lc.pdk_root_resolution(project, pdk, image=image)['path']
-        doc = pst.run_current_step30(project, image, Path(root), pdk)
+        doc = pst.run_current_step30(project, image, Path(root), pdk, paths=paths)
         return {'status': 'RAN', 'verdict': doc['verdict'], 'report': doc}
     except (lc.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
         reason = str(exc)

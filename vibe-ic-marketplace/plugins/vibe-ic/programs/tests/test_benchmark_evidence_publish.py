@@ -77,6 +77,115 @@ def _base_args(run: Path, dest_root: Path, version: str = "9.9.9"):
             "--plugin-version", version, "--dest-root", str(dest_root)]
 
 
+# Public, self-authored transport bytes; these are not native design evidence.
+_CANONICAL_PNR_INPUTS = {
+    "phase3/stage3/pnr/constraint.sdc": (
+        "# neutral publication transport fixture\n"
+        "create_clock -name neutral_clk -period 10 [get_ports clk]\n"),
+    "phase3/stage3/pnr/post_spare.def": (
+        "VERSION 5.8 ;\nDESIGN neutral_publish ;\nEND DESIGN\n"),
+}
+_CANONICAL_PNR_STEPS = ("15", "18")
+
+
+def _publish_canonical_pnr_fixture(tmp_path, entry, variant="present"):
+    import step_output_collector as collector
+    run = _make_run(tmp_path)
+    # Existing provenance pruning serializes JSON lines. Start this new
+    # byte-preservation control in that existing canonical representation.
+    (run / "provenance.jsonl").write_text(json.dumps({"tool": "yosys"}) + "\n")
+    for rel, text in _CANONICAL_PNR_INPUTS.items():
+        target = run / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    target = run / entry
+    if variant == "missing":
+        target.unlink()
+    elif variant == "wrong-sibling":
+        target.rename(target.with_name("wrong_" + target.name))
+    elif variant == "zero-byte":
+        target.write_bytes(b"")
+    observation = collector.materialize(run, only_steps=list(_CANONICAL_PNR_STEPS))
+    assert observation["bounded_to"] == list(_CANONICAL_PNR_STEPS)
+    dest_root = tmp_path / "benchmark-data"
+    r = _run(_base_args(run, dest_root))
+    (tmp_path / "publish.stdout").write_text(r.stdout)
+    (tmp_path / "publish.stderr").write_text(r.stderr)
+    (tmp_path / "publish.invocation.json").write_text(json.dumps({
+        "argv": r.args, "rc": r.returncode, "scope": "SOURCE_TRANSPORT_ONLY"}, indent=2))
+    assert r.returncode == 0, r.stdout + r.stderr
+    cell = dest_root / "ic" / "widgetmul" / "v9.9.9_openpdkx"
+    # Commit only this neutral published cell. The unchanged resolver asks HEAD.
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=Neutral fixture", "-c",
+                  "user.email=fixture@localhost", "commit", "-qm",
+                  "Record self-authored source transport fixture"]):
+        proc = subprocess.run(["git", *args], cwd=cell,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+    records = [json.loads(p.read_text())
+               for p in cell.glob("steps/**/STEP_RECORD.json")]
+    assert {row["id"] for row in records} == set(_CANONICAL_PNR_STEPS)
+    return run, cell, records
+
+
+@pytest.mark.parametrize("entry", tuple(_CANONICAL_PNR_INPUTS))
+def test_canonical_pnr_outputs_reach_the_record_and_resolver(tmp_path, entry):
+    import test_matrix_d3_outputs_produced as d3
+    run, cell, records = _publish_canonical_pnr_fixture(tmp_path, entry)
+    row = next(o for rec in records for o in rec["declared_outputs"]
+               if o["rel"] == entry)
+    expected = _CANONICAL_PNR_INPUTS[entry].encode()
+    assert row["bytes"] == len(expected)
+    assert row["sha256"] == hashlib.sha256(expected).hexdigest()
+    # This observed value is the RED -> GREEN -> RED production control.
+    assert row["decision"] == "IN_CELL", row
+    assert row["in_cell"] is True and row["symlink"] is False
+    assert (cell / entry).read_bytes() == expected == (run / entry).read_bytes()
+    assert (cell / "provenance.jsonl").read_bytes() == (run / "provenance.jsonl").read_bytes()
+    hit, rejected = d3.resolve(cell, entry)
+    assert hit and hit.path == entry and hit.size_bytes == len(expected), rejected
+    # Public scope stays exact: a sibling scratch artefact was not admitted.
+    assert not d3.publishable("phase3/stage3/pnr/floorplan.def")
+
+
+@pytest.mark.parametrize("entry", tuple(_CANONICAL_PNR_INPUTS))
+@pytest.mark.parametrize("variant", ("missing", "wrong-sibling", "zero-byte"))
+def test_canonical_pnr_missing_wrong_and_empty_are_not_positive(tmp_path, entry, variant):
+    import test_matrix_d3_outputs_produced as d3
+    _run_dir, cell, records = _publish_canonical_pnr_fixture(tmp_path, entry, variant)
+    rows = [o for rec in records for o in rec["declared_outputs"] if o["rel"] == entry]
+    assert not any(o["decision"] == "IN_CELL" and o["bytes"] > 0 for o in rows), rows
+    hit, rejected = d3.resolve(cell, entry)
+    assert hit is None, (hit, rejected)
+    if variant == "zero-byte" and (cell / entry).exists():
+        assert rejected.empty == (entry,), rejected
+
+
+@pytest.mark.parametrize("entry", tuple(_CANONICAL_PNR_INPUTS))
+def test_canonical_pnr_record_discloses_postpublication_byte_drift(tmp_path, entry):
+    import test_matrix_d3_outputs_produced as d3
+    _run_dir, cell, records = _publish_canonical_pnr_fixture(tmp_path, entry)
+    row = next(o for rec in records for o in rec["declared_outputs"] if o["rel"] == entry)
+    target = cell / entry
+    # A file added AFTER publication cannot supply the missing IN_CELL binding.
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_CANONICAL_PNR_INPUTS[entry])
+    target.write_bytes(target.read_bytes() + b"# changed after publication\n")
+    actual = hashlib.sha256(target.read_bytes()).hexdigest()
+    assert actual != row["sha256"] and target.stat().st_size != row["bytes"]
+    # The normal resolver enforces tracked/nonempty identity, not content hashes.
+    # Retain that limit: a hit alone must never be described as a bound record.
+    hit, rejected = d3.resolve(cell, entry)
+    (tmp_path / "drift-observation.json").write_text(json.dumps({
+        "record": row, "actual_sha256": actual,
+        "record_binding_matches": False,
+        "resolver_hit": hit.path if hit else None,
+        "scope": "SOURCE_TRANSPORT_ONLY; resolver is not a hash validator"}, indent=2))
+    assert not (row["in_cell"] and row["sha256"] == actual)
+
+
 # --------------------------------------------------------------------------
 # happy path
 # --------------------------------------------------------------------------

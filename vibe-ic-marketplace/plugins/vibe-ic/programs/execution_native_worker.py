@@ -47,7 +47,10 @@ def _pdk_config(values: dict, pdk_root: Path, original: Path, project: Path):
         if (item.name not in kwargs and item.default is MISSING
                 and item.default_factory is MISSING):
             kwargs[item.name] = "" if item.type in (str, 'str') else None
-    return PdkConfig(**kwargs)
+    # Preserve the selected value, or the dataclass's existing typed default.
+    tapcell_master = kwargs.pop('tapcell_master',
+        next(item.default for item in fields(PdkConfig) if item.name == 'tapcell_master'))
+    return PdkConfig(tapcell_master=tapcell_master, **kwargs)
 
 
 def _pinned_image_reference(spec: Mapping[str, object]) -> str:
@@ -108,7 +111,7 @@ def execute(inputs: Path, outputs: Path) -> dict:
     if (inputs / 'project').is_dir():
         shutil.copytree(inputs / 'project', project)
     else:
-        raise em.Refusal('PRODUCTION_WORKER_PROJECT_MISSING', str(inputs))
+        raise em.Refusal('PRODUCTION_WORKER_PROJECT_MISSING', f"{inputs / 'project'}: frozen worker project directory absent before copy; no producer launched")
     pdk_root = inputs / 'pdk'
     manifest_path = pdk_root / 'tree-manifest.json'
     manifest = json.loads(manifest_path.read_text())

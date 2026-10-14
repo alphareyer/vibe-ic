@@ -37,7 +37,7 @@ def entry(project, path, *, external=False):
 def design_of(path):
     match = re.search(r"(?m)^\s*DESIGN\s+(\S+)\s*;", Path(path).read_text())
     if not match:
-        raise ValueError("CURRENT_DEF_DESIGN_MISSING")
+        raise ValueError('CURRENT_DEF_DESIGN_MISSING' + f": {path}: DEF requires a DESIGN <name> ; statement")
     return match.group(1)
 
 
@@ -51,7 +51,7 @@ def pdk_of(project):
         if "libs.ref" in parts:
             name = parts[parts.index("libs.ref") - 1]
     if not isinstance(name, str) or not name.strip():
-        raise ValueError("CURRENT_PDK_MISSING")
+        raise ValueError('CURRENT_PDK_MISSING' + f": {path}: technology_units.pdk requires a nonempty string identity; tech_lef libs.ref fallback applies only to an unset pdk; observed identity={name!r}")
     return name, path
 
 
@@ -69,7 +69,7 @@ def validate(project, record, *, step, stage, tools, required_inputs,
     """Read-only, blocking subject check; return the refusal or an empty string."""
     try:
         if not isinstance(record, dict) or record.get("schema") != SCHEMA:
-            raise ValueError("CURRENT_RECORD_MISSING")
+            raise ValueError('CURRENT_RECORD_MISSING' + f": validate.record.schema must equal {SCHEMA!r} for step={step!r}, stage={stage!r}; record argument has no valid current subject")
         if record.get("step") != step or record.get("stage") != stage:
             raise ValueError("CURRENT_STEP_STAGE_MISMATCH")
         if record.get("tool") not in tools:
@@ -99,14 +99,14 @@ def validate(project, record, *, step, stage, tools, required_inputs,
                         raise ValueError("CURRENT_PDK_MISMATCH")
         execution = record.get("execution")
         if not isinstance(execution, dict) or execution.get("rc") != 0:
-            raise ValueError("CURRENT_EXECUTION_MISSING")
+            raise ValueError('CURRENT_EXECUTION_MISSING' + f": validate.record.execution requires an object with rc=0; step={step!r}, stage={stage!r}")
         if not isinstance(execution.get("argv"), list) or not execution["argv"]:
-            raise ValueError("CURRENT_ARGV_MISSING")
+            raise ValueError('CURRENT_ARGV_MISSING' + f": validate.record.execution.argv must be a nonempty list; step={step!r}, stage={stage!r}")
         log = record["outputs"].get("log")
         if log is None:
-            raise ValueError("CURRENT_LOG_MISSING")
+            raise ValueError('CURRENT_LOG_MISSING' + f": validate.record.outputs.log binding is absent; step={step!r}, stage={stage!r}; no execution log opened")
         if marker and marker not in (Path(project) / log["path"]).read_text():
-            raise ValueError("CURRENT_EXECUTION_MARKER_MISSING")
+            raise ValueError('CURRENT_EXECUTION_MARKER_MISSING' + f": {Path(project) / log['path']}: execution log lacks required marker {marker!r}")
         return ""
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return str(exc)
@@ -155,7 +155,7 @@ def clock_plan_lef_paths(pdk, *, io_context=None):
         root, tree = io_context
         io_lefs = [str(path) for path in discover_io_lefs(root, tree)]
         if not io_lefs:
-            raise ValueError("CLOCK_PLAN_IO_LEFS_ABSENT")
+            raise ValueError('CLOCK_PLAN_IO_LEFS_ABSENT' + f": clock_plan_lef_paths.io_context=(root={root!r}, pdk={tree!r}): discover_io_lefs returned no IO LEFs; requires libs.ref/<library containing io>/lef/*.lef within resolved PDK trees; discovery can be empty when root/tree is unresolved")
         lefs = list(dict.fromkeys([*lefs, *io_lefs]))
     return lefs
 
@@ -203,7 +203,7 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
     for i, path in enumerate(sdcs):
         inputs[f"sdc_{i}"] = entry(project, path)
     if not sdcs:
-        raise ValueError("CLOCK_PLAN_SDC_MISSING")
+        raise ValueError('CLOCK_PLAN_SDC_MISSING' + f": clock_plan.sdcs argument={sdcs!r}: no SDC files selected for {floorplan}; native clock producer not launched")
     # The runner already supplied any required IO views in macro_lefs. Use
     # the same normalized load set that validates reuse of this measurement.
     lefs = clock_plan_lef_paths(pdk)
@@ -272,7 +272,7 @@ def direct_half(project, top, pdk, half, producer):
         if not deck and half == "lvs":
             deck = Path("/foss/pdks") / pdk.name / "libs.tech/netgen" / f"{pdk.name}_setup.tcl"
         if not deck:
-            raise ValueError("CURRENT_NATIVE_DECK_MISSING")
+            raise ValueError('CURRENT_NATIVE_DECK_MISSING' + f": direct_half.pdk.{'drc_deck' if half == 'drc' else 'bridge_netgen_setup'} is unset for half={half!r}; no native deck selected")
         inputs["pdk_deck"] = entry(project, deck, external=True)
         declared_pdk, technology = pdk_of(project)
         if declared_pdk != pdk.name:
@@ -294,10 +294,10 @@ def direct_half(project, top, pdk, half, producer):
                    and any(Path(k).name == native_report.name for k in (e.get("outputs") or {}))
                    and e.get("tool") in ("klayout", "magic", "netgen", "svrfdrc")]
         if not invoked:
-            raise ValueError("CURRENT_NATIVE_INVOCATION_MISSING")
+            raise ValueError('CURRENT_NATIVE_INVOCATION_MISSING' + f": {native_report}: no new invocation in _signoff_drc_format._prov_entries({project}) names this report with tool klayout/magic/netgen/svrfdrc")
         execution = invoked[-1]
         if execution.get("measured") is not True or execution.get("exit_code") != 0:
-            raise ValueError("CURRENT_NATIVE_EXECUTION_MISSING")
+            raise ValueError('CURRENT_NATIVE_EXECUTION_MISSING' + f": {native_report}: selected provenance invocation requires measured=True and exit_code=0; observed measured={execution.get('measured')!r}, exit_code={execution.get('exit_code')!r}")
         for role, expected in inputs.items():
             if entry(project, project / expected["path"], external=role.startswith("pdk_")) != expected:
                 raise ValueError(f"CURRENT_INPUT_CHANGED_DURING_TOOL: {role}")

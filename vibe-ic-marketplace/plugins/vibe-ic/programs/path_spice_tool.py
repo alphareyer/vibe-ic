@@ -1191,10 +1191,13 @@ def _current_companion_errors(project: Path, tool: dict, subject: dict, context:
             measured = _scc.path_correlation_verdict((values[1] - values[0]) / values[0] * 100, values[2])
             if measured == row.get('verdict') and measured in ('MISMATCH', 'CRITICAL_MISMATCH'):
                 return errors
-    raise Refusal('CURRENT_STEP30_MEASURED_FAILURE_MISSING', str(errors))
+    raise Refusal('CURRENT_STEP30_MEASURED_FAILURE_MISSING',
+                  f'inspected sta_state {state["path"]} and current base-path rows: ' +
+                  ', '.join(f'tool.detail[{simulator}].base.paths' for simulator in tool['detail']) +
+                  f'; companion execution errors: {errors}')
 
 
-def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
+def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str, *, paths: int = 1):
     """Ordinary Step 30: existing write_path_spice route, one native simulator.
 
     The existing tool owns its decks, local Liberty tolerance and SPEF-response
@@ -1210,7 +1213,7 @@ def run_current_step30(project: Path, image: str, pdk_root: Path, pdk: str):
                  canonical_deck.with_suffix('.json')):
         path.unlink(missing_ok=True)
     subject, context = current_context(project, image, pdk_root, pdk)
-    tool = run_step30(project, image, pdk_root, pdk, paths=1, simulators=('ngspice',))
+    tool = run_step30(project, image, pdk_root, pdk, paths=paths, simulators=('ngspice',))
     if current_context(project, image, pdk_root, pdk) != (subject, context):
         raise Refusal('CURRENT_STEP30_INPUT_CHANGED_DURING_RUN', str(project))
     companion_errors = _current_companion_errors(project, tool, subject, context)

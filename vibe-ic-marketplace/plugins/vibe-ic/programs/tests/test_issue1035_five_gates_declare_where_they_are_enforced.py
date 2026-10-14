@@ -97,6 +97,97 @@ def _audit_mod():
     return mod
 
 
+@pytest.mark.parametrize("gate", ["fmeda_coverage_check", "mixed_signal_signoff_check"])
+def test_paid_gates_are_wired_at_a_status_consuming_venue(gate):
+    mod = _audit_mod()
+    row = next(row for row in mod.audit(_FLOW, _PROGRAMS)["gates"]
+               if row["gate"] == gate)
+    assert row == {"gate": gate, "enforcement": "ENFORCED",
+                   "wiring": "INLINE_BLOCKING", "declared": None,
+                   "slots": ["program_exit_zero"]}
+
+
+@pytest.mark.parametrize("gate", ["fmeda_coverage_check", "mixed_signal_signoff_check"])
+@pytest.mark.parametrize("state", ["pass", "fail", "missing"])
+def test_paid_gate_mock_status_is_consumed(gate, state, tmp_path):
+    """Execute only the public caller's gate branch, with every tool mocked."""
+    import ast
+    import sys
+    from types import SimpleNamespace
+    from _source_pin import func_src
+
+    gate_rc = {"pass": 0, "fail": 1, "missing": 2}[state]
+    gate_report = {"pass": {"verdict": "PASS", "passed": True},
+                   "fail": {"verdict": "FAIL", "passed": False},
+                   "missing": {}}[state]
+    calls = []
+    if gate == "fmeda_coverage_check":
+        source = (_PROGRAMS / "design_one_shot_runner.py").read_text()
+        function = ast.parse(func_src(source, "step_fmeda_fault_injection")).body[0]
+        branch = next(node for node in function.body
+                      if isinstance(node, ast.If) and ast.unparse(node.test) == "gate_command")
+        report_path = tmp_path / "gate.json"
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if state != "missing":
+                report_path.write_text(json.dumps(gate_report))
+            return SimpleNamespace(returncode=gate_rc)
+
+        namespace = {"_pr": SimpleNamespace(run=run), "sys": sys, "json": json,
+                     "PROGRAMS_DIR": _PROGRAMS, "gate_command": "gate . --json gate.json",
+                     "project": tmp_path, "gate_rel": "gate.json", "extras": {},
+                     "verdict": "PASS", "absence": None, "name": "neutral",
+                     "time": SimpleNamespace(time=lambda: 0), "t0": 0,
+                     "detail": "neutral", "files": [],
+                     "_sa": SimpleNamespace(evidence_of=lambda report: None),
+                     "_V": SimpleNamespace(ReasonClass=SimpleNamespace(EXECUTION_ERROR="error")),
+                     "StepResult": lambda name, status, *args, **kwargs: status}
+        wrapper = ast.parse("def probe():\n    return 'PASS'\n").body[0]
+        wrapper.body.insert(0, branch)
+        module = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+        exec(compile(module, "<public-fmeda-caller-mock>", "exec"), namespace)
+        observed = namespace["probe"]()
+        expected = {"pass": "PASS", "fail": "FAIL", "missing": "NOT_MEASURED"}[state]
+    else:
+        source = (_PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
+        tree = ast.parse(source)
+        branch = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and any(isinstance(child, ast.Call)
+                              and isinstance(child.func, ast.Attribute)
+                              and child.func.attr == "get"
+                              and isinstance(child.func.value, ast.Name)
+                              and child.func.value.id == "_m4_gate_rep"
+                              for child in ast.walk(node.test)))
+        scope = next(node for node in ast.walk(tree) if hasattr(node, "body")
+                     and isinstance(node.body, list) and branch in node.body)
+        gate_call = next(node for node in scope.body
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "_m4_gate_rc"
+                                 for target in node.targets))
+        read_call = next(node for node in scope.body
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "_m4_gate_rep"
+                                 for target in node.targets))
+
+        def run_phase(label, program, argv, **kwargs):
+            calls.append([str(program), *argv])
+            return gate_rc
+
+        namespace = {"_run_phase": run_phase, "_read_report": lambda path: gate_report,
+                     "PROGRAMS_DIR": _PROGRAMS, "project": tmp_path,
+                     "_m4_gate_json": tmp_path / "gate.json", "_phase_env": {},
+                     "_m4_rc": 0, "_m4_rep": {"program": "mixed_signal_signoff_run",
+                                                "verdict": "PASS"}}
+        module = ast.fix_missing_locations(ast.Module(
+            body=[gate_call, read_call, branch], type_ignores=[]))
+        exec(compile(module, "<public-m4-caller-mock>", "exec"), namespace)
+        observed = (namespace["_m4_rc"], namespace["_m4_verdict"])
+        expected = (0, "PASS") if state == "pass" else (1, "FAIL")
+    assert len(calls) == 1 and Path(calls[0][1 if gate == "fmeda_coverage_check" else 0]).stem == gate
+    assert observed == expected
+
+
 # ───────────────────────────────────────────── axis 1: the declaration exists
 
 @pytest.mark.parametrize("gate,_step,_slot", _GATES)

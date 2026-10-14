@@ -97,3 +97,25 @@ def test_characterization_refuses_incomplete_or_foreign_plan_before_any_process(
     assert refused.value.code == "ANALOG_CHARACTERIZATION_PLAN_REQUIRED"
     assert planfile.read_bytes() == before
     assert not records.exists() and not (tmp_path / "phase3/analog/hardmacro").exists()
+
+
+@pytest.mark.parametrize('state',['progressing','failed','stalled'])
+def test_allocated_characterization_retains_supervised_receipt(tmp_path,monkeypatch,state):
+    import _container_exec as ce
+    import _watchdog as wd
+    from types import SimpleNamespace
+    calls=[]; code=0 if state=='progressing' else (7 if state=='failed' else wd.RC_STALLED)
+    def observed(container,command,**kw):
+        calls.append((container,command,kw))
+        return SimpleNamespace(returncode=code,stdout='neutral output\n',stderr='WATCHDOG_STALLED\n' if state=='stalled' else 'neutral stderr\n')
+    monkeypatch.setattr(ce,'run_in_container_supervised',observed)
+    monkeypatch.setattr(ce,'run_in_container',lambda *a,**k:SimpleNamespace(returncode=7,stdout='raw',stderr='raw'))
+    if state=='progressing':row=worker._run(['ngspice','-b','neutral.sp'],tmp_path,'mock',12)
+    else:
+        with pytest.raises(em.Refusal) as refused:worker._run(['ngspice','-b','neutral.sp'],tmp_path,'mock',12)
+        assert refused.value.code==('ANALOG_NATIVE_PROCESS_STALLED' if state=='stalled' else 'ANALOG_NATIVE_PROCESS_FAILED')
+    row=json.loads((tmp_path/'mock.receipt.json').read_text())
+    assert row['rc']==code and row['argv']==['ngspice','-b','neutral.sp']
+    assert row['stdout_sha256']==hashlib.sha256(b'neutral output\n').hexdigest()
+    assert row['stderr_sha256']==hashlib.sha256((tmp_path/'mock.stderr').read_bytes()).hexdigest()
+    assert calls==[('host','ngspice -b neutral.sp',{'ceiling_s':12})]

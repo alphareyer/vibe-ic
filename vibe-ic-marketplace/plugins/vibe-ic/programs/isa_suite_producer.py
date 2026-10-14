@@ -261,9 +261,12 @@ def cache_dir() -> Path:
 
 def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
             fetch: Optional[Callable[[str], bytes]] = None,
-            use_cache: bool = True) -> Tuple[Optional[Path], str]:
+            use_cache: bool = True,
+            archive_dir: Optional[Path] = None) -> Tuple[Optional[Path], str]:
     """Fetch (or reuse a cached copy of) the pinned tarball, verify it, and
-    extract the locked files. Any failure is `(None, reason)`: NOT_MEASURED."""
+    extract the locked files and preserve the verified archive beside them
+    (or in archive_dir). Cache paths are fetch inputs, not durable output
+    provenance. Any failure is `(None, reason)`: NOT_MEASURED."""
     fetch = fetch or default_fetch
     cached = cache_dir() / f"{suite.get('commit')}.tar.gz"
     data: Optional[bytes] = None
@@ -273,7 +276,7 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
             with cached.open("rb") as fh:
                 blob = fh.read(FETCH_MAX_BYTES + 1)
             if len(blob) <= FETCH_MAX_BYTES and verify_tarball(blob, suite)[0]:
-                data, source = blob, f"cache {cached}"
+                data, source = blob, "cache"
         except OSError:
             pass
     if data is None:
@@ -297,6 +300,15 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
     root, why = extract_verified(data, suite, dest)
     if root is None:
         return None, f"{suite_name}: {why}"
+    # The extraction can be a disposable compilation workspace. The project
+    # producer supplies its durable archive directory separately so the native
+    # job's source/include paths and work-only mount remain unchanged.
+    archive = Path(archive_dir if archive_dir is not None else dest) / cached.name
+    try:
+        _aa.write_bytes(archive, data)
+    except OSError as exc:
+        return None, f"{suite_name}: could not preserve verified archive: {exc!r}"
+    source = f"cache {archive}" if source == "cache" else f"{source}; archive {archive}"
     return root, f"{suite_name}@{suite.get('commit')}: {source}; {why}"
 
 
@@ -1357,7 +1369,8 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
         acq: List[str] = []
         for sname in sorted({p["suite"] for p in progs if not p.get("system_obligation")}):
             root, awhy = acquire(sname, lock["suites"][sname],
-                                 work / "suites", fetch=fetch)
+                                 work / "suites", fetch=fetch,
+                                 archive_dir=project / ".vibeic-state" / "isa-suite-cache")
             acq.append(awhy)
             if root is None:
                 receipt["acquisition"] = acq

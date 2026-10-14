@@ -62,6 +62,40 @@ def test_a_count_is_not_an_address():
     ''') == [("SITE_NOT_FOUND", False)]
 
 
+def test_prefixed_exception_detail_is_an_equivalent_diagnostic():
+    assert _verdicts('''
+        def check(p):
+            raise ValueError("THING_MISSING" + f": {p}/thing.json lacks pins")
+    ''') == [("THING_MISSING", True)]
+
+
+def test_prefixed_exception_still_refuses_an_unaddressed_count():
+    assert _verdicts('''
+        def check(n):
+            raise ValueError("THING_MISSING" + f": {n} entries were empty")
+    ''') == [("THING_MISSING", False)]
+
+
+def test_printed_path_parameter_is_a_concrete_directory_address():
+    assert _verdicts('''
+        from pathlib import Path
+        def check(folder: Path):
+            raise Refusal("THING_MISSING", str(folder))
+    ''') == [("THING_MISSING", True)]
+
+
+@pytest.mark.parametrize("body", [
+    'def check(folder: str):\\n    raise Refusal("THING_MISSING", str(folder))',
+    'from pathlib import Path\\ndef check(folder: Path):\\n    raise Refusal("THING_MISSING", "zero entries")',
+    'from pathlib import Path\\ndef check(folder: Path):\\n    folder = "unknown"\\n    raise Refusal("THING_MISSING", str(folder))',
+    'from pathlib import Path\\nPath = str\\ndef check(folder: Path):\\n    raise Refusal("THING_MISSING", str(folder))',
+    'from pathlib import Path\\ndef check(folder: Path):\\n    raise Refusal("THING_MISSING", len(folder.parts))',
+    'from pathlib import Path\\ndef check(folder: Path):\\n    raise Refusal("THING_MISSING", folder.exists())',
+])
+def test_type_or_decorative_context_does_not_supply_a_printed_address(body):
+    assert _verdicts(body.replace('\\n', '\n')) == [("THING_MISSING", False)]
+
+
 # ── acceptance: each of these was a MEASURED false positive ─────────────────
 
 def test_a_filesystem_path_is_an_address():

@@ -642,3 +642,256 @@ def test_an_idle_read_address_at_the_reset_vector_is_not_a_fetch(tmp_path,
     assert dp["state"] == "failed"
     assert "DATAPATH_CHECK reset_vector_fetch MISS (1 of 32 image bytes" in log
     assert dp["checks"] == {"passed": 1, "total": 5}
+
+
+# ---- issue3128: source/component controls only; no simulator or ISA credit --
+ISSUE3128_SRAM = {
+    "read_address": "rd_addr", "write_address": "wr_addr",
+    "write_data": "wr_byte", "read_data": "rd_byte", "write_enable": "wr_en",
+    "read_latency_cycles": 0,
+}
+
+
+def test_issue3128_existing_isa_protocol_accepts_five_role_latency0():
+    from isa_suite_producer import parse_sram_protocol
+    protocol, why = parse_sram_protocol("sdp8_raddr_waddr_wdata_rdata_we_sync0r")
+    assert protocol is not None, why
+    assert protocol["read_latency"] == 0
+    assert set(protocol["stated_roles"]) == {"raddr", "waddr", "wdata",
+                                             "rdata", "we"}
+
+
+@pytest.mark.parametrize("latency", [0, 1, 3], ids=["lat0", "lat1", "lat3"])
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_reader_preserves_declared_latency_and_roles(latency,
+                                                              read_enable):
+    si = dict(ISSUE3128_SRAM, read_latency_cycles=latency)
+    expected_ports = {"raddr": "rd_addr", "waddr": "wr_addr",
+                      "wdata": "wr_byte", "rdata": "rd_byte", "we": "wr_en"}
+    if read_enable:
+        si["read_enable"] = "rd_en"
+        expected_ports["ren"] = "rd_en"
+    roles, why = _cdp().sram_roles({"sram_interface": si})
+    assert roles == {"ports": expected_ports, "read_latency": latency,
+                     "rf_reserved": None}, why
+
+
+@pytest.mark.parametrize("latency", [-1, None, True, "unspecified"])
+def test_issue3128_missing_or_invalid_latency_still_refuses(latency):
+    si = dict(ISSUE3128_SRAM, read_latency_cycles=latency)
+    roles, why = _cdp().sram_roles({"sram_interface": si})
+    assert roles is None and "read latency" in why
+
+
+def _issue3128_component_build(tmp_path, latency, read_enable):
+    decl = json.loads(json.dumps(DECL if read_enable else NO_REN_DECL))
+    decl["sram_interface"]["read_latency_cycles"] = latency
+    ports = _ports() if read_enable else [p for p in _ports() if p[2] != "o_mem_ren"]
+    proj = _cpu_project(tmp_path, decl=decl,
+                        rtl=CPU_V if read_enable else NO_REN_V,
+                        ports=CPU_PORTS if read_enable else NO_REN_PORTS)
+    built, why = _cdp().build(proj, CPU, ports)
+    return built, why, decl
+
+
+@pytest.mark.parametrize("latency", [0, 1, 3], ids=["lat0", "lat1", "lat3"])
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_builder_binds_input_roles_without_changing_image(
+        tmp_path, latency, read_enable):
+    built, why, decl = _issue3128_component_build(tmp_path, latency, read_enable)
+    assert built is not None, why
+    assert built["facts"]["read_latency"] == latency
+    assert built["facts"]["reset_pc"] == int(decl["core_parameters"]["RESET_PC"], 16)
+    assert built["delivered_memsize_bytes"] == decl["memsize_bytes"] == 256
+    assert built["facts"]["rf_reserved"] == 0
+    assert built["expected_words"] == ["0x0000000c", "0x00000011"]
+    assert built["hex_text"].splitlines()[0] == "@00000000"
+    for role, port in built["facts"]["ports"].items():
+        assert f".{port}({role})" in built["tb_text"]
+    assert ("ren" in built["facts"]["ports"]) is read_enable
+    assert ("wire ren = 1'b1;" in built["tb_text"]) is (not read_enable)
+    assert f"{CPU} u_dut (" in built["tb_text"] and f"{CPU} #" not in built["tb_text"]
+    # Rebuild the SAME declared input; this measures emission, never CPU execution.
+    again, _, _ = _issue3128_component_build(tmp_path, latency, read_enable)
+    assert built == again
+
+
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_async_emitter_has_no_clocked_read_pipeline(tmp_path, read_enable):
+    # Exercise the emitter independently so merely opening the reader guard
+    # cannot hide the original LAT0 negative indices.
+    sync, why, _ = _issue3128_component_build(tmp_path, 1, read_enable)
+    assert sync is not None, why
+    facts = dict(sync["facts"], read_latency=0)
+    tb = _cdp()._emit_tb(_cdp().CASE_NAME, CPU, facts, sync["data_address"],
+                         [12, 17], 32)
+    assert "localparam integer LAT = 0;" in tb
+    assert "rpipe" not in tb
+    assert "always @* if (ren === 1'b1) rdata = mem[raddr];" in tb
+    assert "mem[raddr %" not in tb
+    (tmp_path / "async_emitted.v").write_text(tb)
+
+
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_async_keeps_clocked_writes_and_all_scoreboard_obligations(
+        tmp_path, read_enable):
+    sync, why, _ = _issue3128_component_build(tmp_path, 1, read_enable)
+    assert sync is not None, why
+    tb = _cdp()._emit_tb(_cdp().CASE_NAME, CPU,
+                         dict(sync["facts"], read_latency=0),
+                         sync["data_address"], [12, 17], 32)
+    # The monitor (including writes) must be identical to the synchronous
+    # path after removing only its read-pipeline capture.
+    start = "  always @(posedge clk) begin\n    if (released)"
+    def monitor(text):
+        return text.split(start, 1)[1].split("\n  end\n", 1)[0]
+    assert monitor(tb) == monitor(sync["tb_text"]).replace(
+        "          rpipe[0] <= mem[raddr];\n", "")
+    for obligation in ("we === 1'bx || we === 1'bz", "ren === 1'bx || ren === 1'bz",
+                       "^raddr === 1'bx || raddr >= MEMSIZE",
+                       "^waddr === 1'bx || waddr >= MEMSIZE",
+                       "^wdata === 1'bx", "mem[waddr] <= wdata;",
+                       "lane_written[waddr - DATA] = 1'b1;",
+                       "else if (waddr < RF_LO) stray = stray + 1;",
+                       "fetched_bytes[raddr - RESET_PC] = 1'b1;"):
+        assert obligation in monitor(tb)
+    tail = "  function [31:0] word_at"
+    assert tb.split(tail, 1)[1] == sync["tb_text"].split(tail, 1)[1].replace(
+        "    for (i = 0; i < LAT; i = i + 1) rpipe[i] = 8'h00;\n", "")
+    assert [check for check in _cdp().CHECKS if f"DATAPATH_CHECK {check} " in tb] \
+        == list(_cdp().CHECKS)
+
+
+# ---- latency-0 continuous reads: the SAME native producer and consumer ----
+def _memory_timed_cpu(latency, with_ren, rtl=CPU_V):
+    """Neutral CPU timing matched to the stated memory protocol, never a TB
+    marker generator. It executes the assembled instructions and byte stores.
+    The one/two-clock variants preserve the existing synchronous protocol."""
+    if latency == 0 and with_ren:
+        rtl = (rtl.replace("1: st <= 2;", "")
+               .replace("2: begin ir[", "1: begin ir[")
+               .replace("6: st <= 7;", "")
+               .replace("7: begin ld[", "6: begin ld["))
+    elif latency == 2:
+        rtl = (rtl.replace("1: st <= 2;", "1: st <= 9;\n      9: st <= 2;")
+               .replace("6: st <= 7;", "6: st <= 10;\n      10: st <= 7;"))
+    if not with_ren:
+        rtl = (rtl.replace("output reg o_mem_we, output reg o_mem_ren);",
+                           "output reg o_mem_we);")
+               .replace(" o_mem_ren <= 0;", "")
+               .replace("o_mem_ren <= 1; ", ""))
+    return rtl
+
+
+def _native_datapath(tmp_path, latency=0, with_ren=False, rtl=CPU_V,
+                     load=GOOD_LOAD, ports=None):
+    """Actual owner -> Icarus -> actual re-deriving owner; no dispatch,
+    transcript, score, input-reader or ISA-credit stand-in."""
+    _require_iverilog()
+    import testbench_gen as tbg
+    import bit_level_full_stack_tb_check as gate
+    decl = json.loads(json.dumps(DECL))
+    decl["sram_interface"]["read_latency_cycles"] = latency
+    if not with_ren:
+        decl["sram_interface"].pop("read_enable")
+    ports = (CPU_PORTS if with_ren else NO_REN_PORTS) if ports is None else ports
+    proj = _cpu_project(tmp_path, decl=decl, load=load, ports=ports,
+                        rtl=_memory_timed_cpu(latency, with_ren, rtl))
+    fsf = _fsf()
+    top = fsf.required_full_stack_top(proj, "DIE")
+    mod, parsed, why = tbg.resolve_dut(proj, CPU)
+    assert mod == CPU, why
+    models = base._write(proj / "models" / "pads.v",
+                         next(iter(PAD_MODELS.values())))
+    sources = [proj / "phase2/stage1/rtl" / f"{CPU}.v",
+               proj / top["source"], models]
+    fdir = fsf.functional_dir(proj)
+    fdir.mkdir(parents=True, exist_ok=True)
+    dp = fsf._datapath_case(proj, mod, parsed, top, sources, fdir,
+                            fdir / "run", fsf.default_dispatch, None, set())
+    problems = []
+    got = gate._verify_datapath(proj, {fsf.DATAPATH_KEY: dp}, top, problems)
+    assert not problems, problems
+    assert got["state"] == dp["state"]
+    log = (proj / dp["run_log"]).read_text() if dp.get("run_log") else ""
+    return proj, dp, got, log
+
+
+@pytest.mark.parametrize("latency", [0, 1, 2])
+@pytest.mark.parametrize("with_ren", [False, True])
+def test_declared_memory_timing_runs_through_native_datapath_and_reader(
+        tmp_path, latency, with_ren):
+    proj, dp, got, log = _native_datapath(tmp_path, latency, with_ren)
+    assert dp["state"] == "passed", dp
+    assert got["checks"] == {"passed": 5, "total": 5}
+    assert got["delivered_memsize_bytes"] == 256
+    assert got["expected_words"] == ["0x0000000c", "0x00000011"]
+    assert "32 of 32 image bytes" in log
+    text = (proj / dp["tb"]).read_text()
+    assert _fsf().instance_count(text, "chip_top") == 1
+    assert _fsf().instance_count(text, CPU) == 0
+    if latency == 0:
+        assert "rpipe" not in text
+    else:
+        assert "rpipe[LAT-1]" in text
+
+
+@pytest.mark.parametrize("kind,rtl,load,needle", [
+    ("wrong_store", CPU_V.replace("r2[8*n +: 8]", "(r2[8*n +: 8] ^ 8'h01)"),
+     GOOD_LOAD, "DATAPATH_CHECK store_word MISS"),
+    ("missing_lane", ONE_LANE_V, GOOD_LOAD,
+     "DATAPATH_CHECK byte_lanes_written MISS"),
+    ("load_corruption", CPU_V, BROKEN_LOAD,
+     "DATAPATH_CHECK load_store_word MISS"),
+    ("stray_write", STRAY_V, GOOD_LOAD,
+     "DATAPATH_CHECK write_discipline MISS (stray=2"),
+    ("unknown_write_enable", CPU_V.replace("o_mem_we <= 1;",
+                                           "o_mem_we <= 1'bx;"),
+     GOOD_LOAD, "DATAPATH_CHECK write_discipline MISS"),
+    ("unknown_enabled_write_data", CPU_V.replace("r2[8*n +: 8]", "8'hxx"),
+     GOOD_LOAD, "DATAPATH_CHECK write_discipline MISS"),
+], ids=["wrong_store", "missing_lane", "load_corruption", "stray_write",
+        "unknown_write_enable", "unknown_enabled_write_data"])
+def test_async_native_datapath_keeps_each_write_and_load_negative(
+        tmp_path, kind, rtl, load, needle):
+    _proj, dp, got, log = _native_datapath(tmp_path, rtl=rtl, load=load)
+    assert dp["state"] == "failed", (kind, dp)
+    assert got["checks"]["total"] == 5 and got["checks"]["passed"] < 5
+    assert needle in log, log[-1600:]
+    assert "DATAPATH_CHECK reset_vector_fetch PASS" in log
+
+
+def test_async_native_datapath_keeps_out_of_range_write_negative(tmp_path):
+    ports = [(d, 9 if n == "o_mem_waddr" else w, n)
+             for d, w, n in NO_REN_PORTS]
+    rtl = STRAY_V.replace("output reg [7:0] o_mem_waddr",
+                          "output reg [8:0] o_mem_waddr")
+    # raddr and waddr share a declaration in the neutral source.
+    rtl = rtl.replace("output reg [7:0] o_mem_raddr, output reg [7:0] o_mem_waddr",
+                      "output reg [7:0] o_mem_raddr, output reg [8:0] o_mem_waddr")
+    rtl = rtl.replace("o_mem_waddr <= 8'h80", "o_mem_waddr <= 9'h100")
+    _proj, dp, got, log = _native_datapath(tmp_path, rtl=rtl, ports=ports)
+    assert dp["state"] == got["state"] == "failed", dp
+    assert "DATAPATH_CHECK write_discipline MISS (stray=0 oob=2" in log
+
+
+def test_async_native_datapath_keeps_idle_address_fetch_negative(tmp_path):
+    _proj, dp, got, log = _native_datapath(tmp_path, rtl=NO_REN_STUCK_V)
+    assert dp["state"] == got["state"] == "failed", dp
+    assert "DATAPATH_CHECK reset_vector_fetch MISS (1 of 32 image bytes" in log
+
+
+def test_async_native_datapath_keeps_unknown_read_enable_negative(tmp_path):
+    rtl = CPU_V.replace("o_mem_ren <= 1;", "o_mem_ren <= 1'bx;")
+    _proj, dp, got, log = _native_datapath(tmp_path, with_ren=True, rtl=rtl)
+    assert dp["state"] == got["state"] == "failed", dp
+    assert "DATAPATH_CHECK reset_vector_fetch MISS" in log
+    assert "DATAPATH_CHECK write_discipline MISS" in log
+
+
+@pytest.mark.parametrize("latency", [-1, None, True])
+def test_invalid_or_unstated_latency_still_refuses(latency):
+    decl = json.loads(json.dumps(DECL))
+    decl["sram_interface"]["read_latency_cycles"] = latency
+    got, why = _cdp().sram_roles(decl)
+    assert got is None and "read latency" in why

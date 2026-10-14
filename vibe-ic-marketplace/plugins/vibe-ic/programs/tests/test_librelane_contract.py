@@ -923,3 +923,75 @@ def test_dual_executes_in_separate_directories_and_keeps_loser(tmp_path):
     assert result['selection'] == 'librelane'
     assert seen[0][1] != seen[1][1]
     assert all((folder / 'gate.json').is_file() for _, folder in seen)
+
+
+@pytest.mark.parametrize('state',['progressing','failed','stalled'])
+def test_allocated_local_probe_budget_never_kills_progress(local_image,monkeypatch,state):
+    import _watchdog as wd
+    calls=[]
+    def observed(argv,**kw):
+        calls.append((argv,kw))
+        return wd.SupervisedResult(0 if state=='progressing' else (7 if state=='failed' else wd.RC_STALLED),
+            'retained output','WATCHDOG_STALLED' if state=='stalled' else 'retained stderr',
+            'stalled' if state=='stalled' else 'natural',elapsed_s=50,
+            supervision={'pid':321,'watched':'output+cpu'})
+    monkeypatch.setattr(wd,'run_host_supervised',observed)
+    class Raw:
+        pid=987;returncode=0
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def communicate(self,**kw):return 'raw clock path',''
+    monkeypatch.setattr(contract.subprocess,'Popen',lambda *a,**k:Raw())
+    argv=['docker','run','--rm',local_image.image,'--skip','neutral-tool','arg']
+    if state=='stalled':
+        with pytest.raises(contract.Refusal) as refused:
+            contract._run_local(argv,probe_deadline_s=.3,supervised=False,log=None)
+        assert refused.value.code=='LL_TOOL_STALLED'
+    else:
+        row=contract._run_local(argv,probe_deadline_s=.3,supervised=False,log=None)
+        assert (row.returncode,row.stdout,row.stderr)==(0 if state=='progressing' else 7,'retained output','retained stderr')
+    assert len(calls)==1 and calls[0][0]==['neutral-tool','arg']
+    assert calls[0][1]['hard_ceiling_s']==.3 and calls[0][1]['env']
+    assert callable(calls[0][1]['ceiling_notice'])
+
+
+def test_optional_tcl_stall_preserves_primary_cli_admission(tmp_path, monkeypatch):
+    """Two neutral caller inputs; every tool invocation is an API double."""
+    image = 'neutral-optional-tcl-caller-fixture'
+    calls = []
+    primary_rc = [0]
+    monkeypatch.setattr(contract, '_CAPABILITY', {})
+    monkeypatch.setattr(contract, '_provider_for_image', lambda value: None)
+    monkeypatch.setattr(contract, '_provider_route_mismatch', lambda value: None)
+    monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
+
+    def observed(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs)))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, primary_rc[0],
+                'neutral primary CLI output', 'neutral primary CLI stderr')
+        assert len(calls) == 2
+        raise contract.Refusal('LL_TOOL_STALLED', 'neutral optional Tcl made no progress')
+
+    monkeypatch.setattr(contract, 'run_container', observed)
+    capability = contract.image_capability(image)
+    assert capability['image'] == image
+    assert capability['openroad_aliases'] == {}
+    assert capability['tcl_probe'] == (
+        'NOT_MEASURED: LL_TOOL_STALLED: neutral optional Tcl made no progress')
+    assert len(calls) == 2 and calls[1][0][-1] == contract._TCL_PROBE
+    assert all(kwargs == {'probe_deadline_s': contract.PROBE_DEADLINE_S}
+               for _, kwargs in calls)
+    put(tmp_path / 'primary-ok-optional-stalled.json', capability)
+
+    contract._CAPABILITY.clear()
+    calls.clear()
+    primary_rc[0] = 7
+    with pytest.raises(contract.Refusal) as refused:
+        contract.image_capability(image)
+    assert refused.value.code == 'LL_IMAGE_INCAPABLE'
+    assert len(calls) == 1 and calls[0][0][-1] != contract._TCL_PROBE
+    assert contract._CAPABILITY == {}
+    put(tmp_path / 'primary-failed.json', {
+        'primary_rc': 7, 'refusal_code': refused.value.code,
+        'optional_stage_called': False, 'scope': 'neutral source/API mock'})

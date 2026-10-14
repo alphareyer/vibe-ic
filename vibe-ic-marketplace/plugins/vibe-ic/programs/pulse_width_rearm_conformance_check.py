@@ -331,30 +331,25 @@ def _build_measurement_tb(rtl_text: str, top: str,
 def _run(cmd: List[str], timeout: int = 120,
          cwd: Optional[Path] = None, *,
          launch_record: Optional[Dict] = None) -> Tuple[int, str, str]:
+    import _watchdog as _wd
+    import _container_exec as ce
+    launch = {}
+    def popen(argv, **kwargs):
+        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        launch['pid'] = process.pid
+        return process
     try:
+        result = _wd.run_host_supervised(cmd, popen_factory=popen,
+            cwd=str(cwd) if cwd else None, hard_ceiling_s=timeout,
+            ceiling_notice=ce.default_ceiling_notice('pulse conformance', timeout))
         if launch_record is not None:
-            with subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True,
-                                  cwd=str(cwd) if cwd else None) as process:
-                launch_record.update({"pid": process.pid, "argv": cmd,
-                                      "cwd": str(cwd) if cwd else None})
-                try:
-                    out, err = process.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    out, err = process.communicate()
-                    launch_record["returncode"] = 124
-                    return 124, out or "", (err or "") + "\nsimulation timeout"
-                launch_record["returncode"] = process.returncode
-                return process.returncode, out or "", err or ""
-        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                            cwd=str(cwd) if cwd else None)
-        return cp.returncode, cp.stdout or "", cp.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        return 124, out, "simulation timeout"
+            launch_record.update({'pid': launch.get('pid'), 'argv': cmd,
+                                  'cwd': str(cwd) if cwd else None,
+                                  'returncode': result.rc, 'outcome': result.outcome,
+                                  'supervision': result.supervision})
+        return result.rc, result.out or '', result.err or ''
     except OSError as exc:
-        return 127, "", str(exc)
+        return 127, '', str(exc)
 
 
 def _parse_result_channel(text: str, expected_binding: Optional[str] = None

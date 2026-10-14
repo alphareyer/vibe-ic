@@ -821,7 +821,8 @@ class _RunnerModule:
         #: Round 1's defect was filing these with `sys.exit`.
         self.return_ids: Set[int] = set()
         self.loads: Dict[Tuple[int, str], List[ast.Name]] = {}
-        self.stores: Dict[Tuple[int, str], List[int]] = {}
+        self.stores: Dict[Tuple[int, str], List[ast.Name]] = {}
+        self.joined_load_ids: Set[int] = set()
         #: every string constant naming a `.py` file, for gate lookup
         self.py_consts: List[ast.Constant] = []
         #: name-flow carriers, collected once — these modules are tens of
@@ -941,7 +942,7 @@ class _RunnerModule:
                 if isinstance(node.ctx, ast.Load):
                     self.loads.setdefault(key, []).append(node)
                 else:
-                    self.stores.setdefault(key, []).append(node.lineno)
+                    self.stores.setdefault(key, []).append(node)
             elif (isinstance(node, ast.Constant)
                   and isinstance(node.value, str) and ".py" in node.value):
                 self.py_consts.append(node)
@@ -1260,6 +1261,9 @@ class _RunnerModule:
                 if id(n) in seen:
                     continue
                 seen.add(id(n))
+                if id(n) in self.joined_load_ids:
+                    unproven = True
+                    continue
                 if id(n) in self.test_ids or id(n) in self.exit_arg_ids:
                     return _BLOCKS
                 # `cp.check_returncode()` as a bare statement raises on a
@@ -1407,10 +1411,33 @@ class _RunnerModule:
     def _in_ranges(line: int, ranges: Sequence[Tuple[int, int]]) -> bool:
         return any(lo <= line <= hi for lo, hi in ranges)
 
+    def _if_arms(self, node: ast.AST) -> Dict[int, str]:
+        """Enclosing if arms from the existing parent map."""
+        arms: Dict[int, str] = {}
+        cur = node
+        while (par := self.parent.get(id(cur))) is not None:
+            if isinstance(par, ast.If):
+                if cur in par.body:
+                    arms[id(par)] = "body"
+                elif cur in par.orelse:
+                    arms[id(par)] = "orelse"
+            cur = par
+        return arms
+
     def _next_store(self, scope: int, name: str, after: int,
-                    skip: Sequence[Tuple[int, int]]) -> int:
-        later = [ln for ln in self.stores.get((scope, name), ())
-                 if ln > after and not self._in_ranges(ln, skip)]
+                    skip: Sequence[Tuple[int, int]],
+                    reader: Optional[ast.AST] = None) -> int:
+        stores = self.stores.get((scope, name), ())
+        binding = next((n for n in stores if n.lineno == after), None)
+        path = self._if_arms(binding) if binding is not None else {}
+        if reader is not None:
+            path.update(self._if_arms(reader))
+        later = [n.lineno for n in stores
+                 if n.lineno > after and not self._in_ranges(n.lineno, skip)
+                 # Opposite-arm or conditional stores cannot prove a kill
+                 # on every feasible path of this binding and reader.
+                 and all(path.get(branch) == arm
+                         for branch, arm in self._if_arms(n).items())]
         return min(later) if later else sys.maxsize
 
     def _loads(self, scope: int, name: str, after: int,
@@ -1422,9 +1449,34 @@ class _RunnerModule:
         scope-wide search would call that consumption — the same
         proximity-as-evidence mistake #884 is about, one level down.
         """
-        stop = self._next_store(scope, name, after, skip)
-        return [n for n in self.loads.get((scope, name), ())
-                if after < n.lineno < stop]
+        stores = self.stores.get((scope, name), ())
+        binding = next((n for n in stores if n.lineno == after), None)
+        bound_arms = self._if_arms(binding) if binding is not None else {}
+        out = []
+        for n in self.loads.get((scope, name), ()):
+            read_arms = self._if_arms(n)
+            if any(branch in read_arms and read_arms[branch] != arm
+                   for branch, arm in bound_arms.items()):
+                continue
+            if not after < n.lineno < self._next_store(
+                    scope, name, after, skip, n):
+                continue
+            if any((after < store.lineno < n.lineno
+                    or (store.lineno < after < n.lineno
+                        and any(branch in bound_arms
+                                and bound_arms[branch] != arm
+                                and branch not in read_arms
+                                for branch, arm in self._if_arms(store).items())))
+                   and not self._in_ranges(store.lineno, skip)
+                   and any(branch not in read_arms
+                           and bound_arms.get(branch) != arm
+                           for branch, arm in self._if_arms(store).items())
+                   for store in stores):
+                # A joined value is read, but does not prove that this
+                # particular producer can block the flow.
+                self.joined_load_ids.add(id(n))
+            out.append(n)
+        return out
 
     def _attr_loads(self, scope: int, name: str, after: int,
                     skip: Sequence[Tuple[int, int]] = ()) -> List[ast.AST]:
@@ -1432,6 +1484,8 @@ class _RunnerModule:
         for n in self._loads(scope, name, after, skip):
             p = self.parent.get(id(n))
             if isinstance(p, ast.Attribute) and p.attr in _STATUS_ATTRS:
+                if id(n) in self.joined_load_ids:
+                    self.joined_load_ids.add(id(p))
                 out.append(p)
         return out
 

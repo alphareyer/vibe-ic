@@ -349,3 +349,107 @@ def test_live_preflight_gate_calls_step7_fn_after_default_placeholder(
                  lambda *args: None, direct, tmp_path)
     assert got is sentinel
     assert called and called[0][0] == (tmp_path,)
+
+
+def _release_runtime(project, monkeypatch, *, caller_token=True):
+    """SOURCE_CONTROL ordinary context; real opaque-token policy APIs."""
+    digest = 'c' * 64
+    markers = {('asic_sdc', str(project.resolve()), digest)}
+    if caller_token:
+        markers.add(('yosys_synth', str(project.resolve()), digest))
+    runtime = {'project': project.resolve(), 'policy': {
+        'mode': 'default', 'request_receipt': {'request_digest': digest}},
+        'program_first_fallback_sites': markers}
+    monkeypatch.setattr(EP, '_ordinary_runtime', runtime)
+    other = EP.consume_program_first_fallback(project, 'asic_sdc')
+    assert other is not None and EP.is_program_first_fallback_handoff(other, project, 'asic_sdc')
+    return runtime, other
+
+
+def test_total_release_none_preserves_other_active_handoff(tmp_path, monkeypatch):
+    runtime, other = _release_runtime(tmp_path, monkeypatch)
+    before = set(runtime['_active_program_first_fallback_handoffs'])
+    EP.release_program_first_fallback(None)
+    assert runtime['_active_program_first_fallback_handoffs'] == before
+    assert EP.is_program_first_fallback_handoff(other, tmp_path, 'asic_sdc')
+    monkeypatch.setattr(EP, '_ordinary_runtime', None)
+    assert EP.release_program_first_fallback(None) is None
+
+
+def test_total_release_opaque_removes_only_itself_and_cannot_be_reused(tmp_path, monkeypatch):
+    runtime, other = _release_runtime(tmp_path, monkeypatch)
+    owned = EP.consume_program_first_fallback(tmp_path, 'yosys_synth')
+    assert owned is not None and EP.is_program_first_fallback_handoff(owned, tmp_path, 'yosys_synth')
+    EP.release_program_first_fallback(owned)
+    assert runtime['_active_program_first_fallback_handoffs'] == {other}
+    assert not EP.is_program_first_fallback_handoff(owned, tmp_path, 'yosys_synth')
+    assert EP.consume_program_first_fallback(tmp_path, 'yosys_synth') is None
+    EP.release_program_first_fallback(owned)
+    assert EP.is_program_first_fallback_handoff(other, tmp_path, 'asic_sdc')
+
+
+@pytest.mark.parametrize('caller_token', [False, True], ids=['none', 'opaque'])
+@pytest.mark.parametrize('exit_path', ['return', 'refusal', 'unexpected'])
+def test_phase2_caller_finally_delegates_total_release_and_preserves_scope(
+        tmp_path, monkeypatch, caller_token, exit_path):
+    """Actual Phase2 caller/consume/release; the native producer is NOT_RUN."""
+    import json
+    import os
+    import librelane_contract as LC
+    import phase3_one_shot_runner as P3
+
+    project = tmp_path / 'neutral_cleanup'
+    rtl = project / 'phase2/stage1/rtl'; rtl.mkdir(parents=True)
+    rtl.joinpath('neutral_cleanup_top.v').write_text(
+        'module neutral_cleanup_top(input a, output y); assign y=a; endmodule\n')
+    runtime, other = _release_runtime(project, monkeypatch, caller_token=caller_token)
+    monkeypatch.setattr(LC, 'selected_mode', lambda *a: 'librelane')
+    monkeypatch.setattr(D, '_phase2_pdk_config', lambda *a: SimpleNamespace(name='source-control'))
+    producer_calls = []
+    def producer(*args, **kwargs):
+        handoff = kwargs['_fallback_handoff']
+        producer_calls.append(handoff)
+        assert (handoff is not None) is caller_token
+        if handoff is not None:
+            assert EP.is_program_first_fallback_handoff(handoff, project, 'yosys_synth')
+        if exit_path == 'refusal':
+            raise LC.Refusal('SOURCE_CONTROL_REFUSAL', 'no native execution')
+        if exit_path == 'unexpected':
+            raise RuntimeError('SOURCE_CONTROL_UNEXPECTED')
+        return D.StepResult('source_control_producer', 'NOT_MEASURED', 0, 'native producer NOT_RUN',
+                            reason_class=D._V.ReasonClass.NOT_EXECUTED)
+    monkeypatch.setattr(P3, 'step_synth', producer)
+    actual_release = EP.release_program_first_fallback
+    release_calls = []
+    def release(handoff):
+        release_calls.append(handoff)
+        return actual_release(handoff)
+    monkeypatch.setattr(EP, 'release_program_first_fallback', release)
+    if exit_path == 'unexpected':
+        with pytest.raises(RuntimeError, match='SOURCE_CONTROL_UNEXPECTED'):
+            D.step_yosys_synth(project, 'neutral_cleanup_top', 'unused')
+        status = 'PROPAGATED_RUNTIME_ERROR'
+    else:
+        row = D.step_yosys_synth(project, 'neutral_cleanup_top', 'unused')
+        status = row.status
+        assert status == ('FAIL' if exit_path == 'refusal' else 'NOT_MEASURED'), row
+    assert len(producer_calls) == 1
+    owned = producer_calls[0]
+    other_valid = EP.is_program_first_fallback_handoff(other, project, 'asic_sdc')
+    stale_valid = EP.is_program_first_fallback_handoff(owned, project, 'yosys_synth')
+    reuse = EP.consume_program_first_fallback(project, 'yosys_synth')
+    target = os.environ.get('ISSUE3101_VALUES_DIR')
+    if target:
+        folder = Path(target); folder.mkdir(parents=True, exist_ok=True)
+        name = os.environ['PYTEST_CURRENT_TEST'].rsplit(' (', 1)[0].split('::', 1)[1]
+        (folder / (name + '.json')).write_text(json.dumps({
+            'caller_token': caller_token, 'exit_path': exit_path, 'status': status,
+            'producer_calls': len(producer_calls), 'release_calls': len(release_calls),
+            'released_own_value': bool(release_calls and release_calls[0] is owned),
+            'other_handoff_still_active': other_valid, 'owned_still_active': stale_valid,
+            'token_reused': reuse is not None,
+            'remaining_active_count': len(runtime['_active_program_first_fallback_handoffs']),
+            'native_execution': False}, indent=2) + '\n')
+    assert release_calls == [owned], release_calls
+    assert runtime['_active_program_first_fallback_handoffs'] == {other}
+    assert other_valid and not stale_valid and reuse is None

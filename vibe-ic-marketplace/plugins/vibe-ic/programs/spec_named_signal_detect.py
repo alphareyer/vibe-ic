@@ -34,7 +34,7 @@ _NOT_A_SIGNAL = frozenset({
 _ROLE_RE = re.compile(
     r"\b(?:(?P<library>librar(?:y|ies))|"
     r"(?P<parameter>parameters?|localparam)|"
-    r"(?P<metadata>metadata|schema|fields?|keys?)|"
+    r"(?P<metadata>metadata|schema|fields?|keys?|(?:cell\s+)?area\s+gate)|"
     r"(?P<command>commands?|SDC|Tcl)|"
     r"(?P<setting>settings?|floorplan|constraints?)|"
     r"(?P<module>modules?|instances?)|"
@@ -42,7 +42,9 @@ _ROLE_RE = re.compile(
     r"inputs?|outputs?|inout|flags?|counters?|strobes?|pulses?))\b", re.I)
 _SIGNAL_ACTION_RE = re.compile(
     r"\b(?:drives?|compute[sd]?|holds?|gates?|clears?|tracks?)\b", re.I)
-_DENIED_ROLE_RE = re.compile(r"\b(?:not|never)\s+(?:an?\s+)?(?:RTL\s+)?$", re.I)
+# An absent register interface supplies no signal authority for its subject.
+_DENIED_ROLE_RE = re.compile(
+    r"\b(?:not|never|no)\s+(?:an?\s+)?(?:(?:RTL|SW[- ]visible)\s+)?$", re.I)
 
 
 def _context_role(text: str, start: Optional[int] = None,

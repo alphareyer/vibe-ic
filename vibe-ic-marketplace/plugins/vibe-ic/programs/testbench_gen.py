@@ -875,6 +875,12 @@ def _emit_case_reset_invariant_oracle(project: Path, case: dict,
             project, outputs, inputs)
         memory, memory_basis = _riv.declared_retention_memory(
             project, dut_module, inputs, outputs)
+        request = _riv.retention_stimulus_request(project, case, dut_module, inputs, outputs)
+        if request is not None:
+            memory, memory_basis = None, request['unsupported_requirements'][0]
+            if report is not None:
+                report.setdefault('reset_retention_requests', []).append(request)
+                report.setdefault('no_real_oracle', []).append(str(name))
         text = _riv.emit_case_oracle_from_ports(
             case, dut_module, inputs, outputs, inouts, qualifiers=quals,
             refusals=refused, memory=memory)
@@ -1857,6 +1863,19 @@ def oracle_provenance(project: Path) -> dict:
             requests.append(request)
     if requests:
         disclosure['arithmetic_scenario_requests'] = requests
+    import reset_invariant_oracle_tb_gen as retention
+    reset_requests = []
+    dut, ports, _ = resolve_dut(project, "chip_top")
+    if dut is not None:
+        inputs, outputs, _ = _classify(ports)
+        for case in load_l10_cases(project) or []:
+            if str(case.get('name') or case.get('id') or '') in authored:
+                continue
+            request = retention.retention_stimulus_request(project, case, dut, inputs, outputs)
+            if request:
+                reset_requests.append(request)
+    if reset_requests:
+        disclosure['reset_retention_requests'] = reset_requests
     return disclosure
 
 
@@ -2574,6 +2593,9 @@ def main() -> int:
         return 1
     for request in report.get('arithmetic_scenario_requests', []):
         print('[NOT_MEASURED] arithmetic scenario author request: '
+              + json.dumps(request, sort_keys=True, ensure_ascii=False))
+    for request in report.get('reset_retention_requests', []):
+        print('[NOT_MEASURED] reset retention author request: '
               + json.dumps(request, sort_keys=True, ensure_ascii=False))
     if emitted == -1:
         print("[SKIP] testbench_gen: no L10_TEST_CASES.json")

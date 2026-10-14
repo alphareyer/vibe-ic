@@ -132,6 +132,7 @@ PASS, FAIL, NOT_MEASURED = "PASS", "FAIL", "NOT_MEASURED"
 ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
 BLOCKED_BY_UPSTREAM = "BLOCKED_BY_UPSTREAM"
 EXECUTION_ERROR = "EXECUTION_ERROR"
+MISSING_OBSERVATION_CONTRACT = "MISSING_OBSERVATION_CONTRACT"
 
 #: An acceptance that is a bare threshold PERCENTAGE ("≥ 95%") is a coverage
 #: figure measured over a run, not a verdict a case oracle returns. "100% PASS"
@@ -342,6 +343,24 @@ def _score_transcript(case: str, rc: Optional[int], text: str
              if m.group(1) == case]
     fail_line = bool(_FAIL_LINE_RE.search(text) or _MISMATCH_RE.search(text))
     checks = None
+    scenario = re.findall(
+        r'^ARITH_SCENARIO_DONE transactions=(\d+) comparisons=(\d+) errors=(\d+) held_edges=(\d+)\r?$',
+        text, re.MULTILINE)
+    if scenario:
+        tx, comparisons, errors, _held = map(int, scenario[-1])
+        checks = {'total': tx, 'comparisons': comparisons, 'errors': errors}
+        if any(int(row[2]) > 0 for row in scenario) or fail_line or 'FAIL' in words or rc not in (0, None):
+            return {'state': FAILED, 'checks': checks,
+                    'message': f'ARITH_SCENARIO_DONE reports errors={errors}; rc={rc}'}
+        if len(scenario) != 1 or tx == 0 or comparisons == 0:
+            return {'state': ERRORED, 'checks': checks,
+                    'message': 'ARITH_SCENARIO_DONE population is empty or ambiguous'}
+        if 'PASS' in words and rc == 0:
+            checks['passed'] = tx
+            return {'state': PASSED, 'checks': checks,
+                    'message': f'ARITH_SCENARIO_DONE measured {tx} transactions / {comparisons} comparisons'}
+        return {'state': ERRORED, 'checks': checks,
+                'message': f'ARITH_SCENARIO_DONE has no case verdict for `{case}` (rc={rc})'}
     if done:
         a, b = int(done[-1].group(1)), int(done[-1].group(2))
         checks = {"passed": a, "total": b}
@@ -578,6 +597,65 @@ def _family_of(text: str) -> str:
     return "authored_or_delivered"
 
 
+def arithmetic_plan_for_top(project: Path, case: dict, ic_class: str,
+                            top: dict, models: list, request: dict) -> Optional[dict]:
+    """Re-use the normal producer with the actual selected observation surface.
+
+    Model resolution already supplies source identities and staged bytes. Bind
+    those exact bytes into the existing scenario plan; do not infer delays from
+    a cell name, retime cycles, or fall back to a core when a wrapper is selected.
+    This is also the consumer's re-derivation of the measured plan.
+    """
+    import arith_oracle_tb_gen as arith
+    identities = {}; compiled = {}
+    if top['pad_ring']:
+        src = project / top['source']
+        identities[str(src.resolve())] = sha256_file(src)
+        compiled[str(src.resolve())] = sha256_file(src)
+        for model in models:
+            staged = project / model['path']
+            digest = sha256_file(staged)
+            if digest != model['sha256']:
+                request.update(reason_class=MISSING_OBSERVATION_CONTRACT,
+                               unsupported_requirements=[f'selected staged model bytes changed: {staged}'])
+                return None
+            identities[model['source']] = digest
+            compiled[str(staged.resolve())] = digest
+    plan = arith.arithmetic_scenario_plan(
+        project, ic_class, case, request=request,
+        observation_top=top['module'], observation_sources=identities)
+    if plan is not None:
+        plan['binding'].update(compiled)
+    return plan
+
+
+def arithmetic_case_evidence(project: Path, case: dict, ic_class: str, top: dict,
+                             models: list, entry: dict, sources: list) -> Tuple[Optional[dict], str]:
+    """Actual nonzero scenario population, current plan and consumed sources.
+
+    A bare PASS marker cannot credit this family. Native FAIL keeps precedence;
+    this helper determines whether an otherwise successful case was measured.
+    """
+    import arith_oracle_tb_gen as arith
+    tb = project / entry['tb']; log = project / entry['run_log']
+    try:
+        expected = arithmetic_plan_for_top(project, case, ic_class, top, models, {})
+        # The emitter serializes tuple operand pairs as JSON arrays.
+        if expected is None or arith._scenario_header(tb) != json.loads(json.dumps(expected)):
+            return None, f'NOT_MEASURED: {tb} arithmetic scenario header differs from current selected declaration/L9/input plan'
+        compiled = {str((project / s['path']).resolve()): s['sha256'] for s in sources}
+        measured, why = arith.capture_arithmetic_scenario_execution(project, tb, log, compiled)
+        if measured is None or not measured['complete']:
+            return None, f'NOT_MEASURED: {log} ARITH_SCENARIO_DONE/population records incomplete for {tb}'
+        state, why = arith.arithmetic_scenario_case_state(
+            {'tb_file': str(tb), 'arithmetic_scenario': measured})
+        if state not in ('PASS', 'FAIL'):
+            return None, why
+        return measured, why
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return None, f'NOT_MEASURED: arithmetic scenario evidence unavailable at {tb} / {log}: {exc}'
+
+
 def _not_run_detail(project: Path, case: dict, ic_class: Optional[str],
                     report: dict, step4: Dict[str, Any]) -> Dict[str, Any]:
     """What is known about a case no oracle family grounds -- disclosure only."""
@@ -593,7 +671,8 @@ def _not_run_detail(project: Path, case: dict, ic_class: Optional[str],
     if isinstance(case.get("applies_when"), dict):
         out["applies_when"] = case["applies_when"]
     for key in ("known_answer_vector_unbound", "stated_vector_unbound",
-                "delivered_oracle_refusals", "oracle_errors"):
+                "delivered_oracle_refusals", "oracle_errors",
+                "arithmetic_scenario_requests"):
         rows = [r for r in (report.get(key) or [])
                 if isinstance(r, dict) and str(r.get("case")) == name]
         if rows:
@@ -698,9 +777,15 @@ def generate(project: Path, container: Optional[str] = None,
     project = Path(project)
     import testbench_gen as _tbg
     fdir = functional_dir(project)
-    # The directory is this producer's alone, so a stale case TB can never
-    # outlive the run that would have regenerated it.
-    shutil.rmtree(fdir, ignore_errors=True)
+    # A new invocation must not erase an earlier measured failure or its logs.
+    # Generated cases are regenerated in a fresh directory; authored cases are
+    # copied below through the unit producer's existing provenance predicate.
+    previous = None
+    if fdir.exists():
+        history = fdir.with_name(FUNCTIONAL_SUBDIR + "_history")
+        history.mkdir(parents=True, exist_ok=True)
+        previous = history / str(time.time_ns())
+        fdir.rename(previous)
     fdir.mkdir(parents=True, exist_ok=True)
     rec: Dict[str, Any] = {
         "program": PROGRAM, "schema": SCHEMA,
@@ -709,6 +794,8 @@ def generate(project: Path, container: Optional[str] = None,
         "design_input": _design_input_digest(project),
         "cases": [], "sources": [], "models": [],
     }
+    if previous is not None:
+        rec["previous_output"] = _rel(project, previous)
 
     def _finish(verdict: str, reason_class: Optional[str], why: str
                 ) -> Dict[str, Any]:
@@ -796,6 +883,18 @@ def generate(project: Path, container: Optional[str] = None,
         step4 = {}
     disp = dispatch or default_dispatch
     run_root = fdir / "run"
+    if previous is not None:
+        for case in cases:
+            name = str(case.get("name") or case.get("id") or "")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                continue
+            authored = _tbg.authored_oracle_preserved(previous, name, None)
+            if authored is not None:
+                target = fdir / f"{name}.v"
+                shutil.copy2(authored, target)
+                rec.setdefault("preserved_authored", []).append({
+                    "case": name, "source": _rel(project, authored),
+                    "sha256": sha256_file(authored), "path": _rel(project, target)})
     # ONE call into the Step-4 unit-TB producer's own ladder, into this
     # producer's directory, with the substance-floor scaffold withheld: a case
     # no real oracle grounds gets no file here, never a connectivity stand-in.
@@ -838,8 +937,35 @@ def generate(project: Path, container: Optional[str] = None,
             continue
         text = path.read_text(errors="replace")
         entry["family"] = _family_of(text)
+        if entry["family"] == "declared_arithmetic_scenario":
+            request = {}
+            plan = arithmetic_plan_for_top(project, case, ic_class, top,
+                                           rec['models'], request)
+            if plan is None:
+                reason = (f"{MISSING_OBSERVATION_CONTRACT}: " + '; '.join(
+                    request.get('unsupported_requirements') or ['selected arithmetic observation is unsupported']))
+                request.update(case=name, verdict=NOT_MEASURED,
+                               reason_class=MISSING_OBSERVATION_CONTRACT,
+                               fallback_skill='testbench-gen', required_choices={},
+                               required_population=None, authored_tb=_rel(project, path))
+                report.setdefault('arithmetic_scenario_requests', []).append(request)
+                entry.update(state=NO_ORACLE, reason=reason,
+                             reason_class=MISSING_OBSERVATION_CONTRACT,
+                             tb=_rel(project, path), tb_sha256=sha256_file(path),
+                             **_not_run_detail(project, case, ic_class, report, step4))
+                continue
+            import arith_oracle_tb_gen as arith
+            text = _tbg.stamp_generated(arith.emit_arithmetic_scenario_module(name, plan),
+                                        '_emit_case_arithmetic_scenario')
+            path.write_text(text)
+            entry['observation'] = plan['observation']
         if top["pad_ring"]:
-            new, rwhy = retarget_instance(text, core_mod, top["module"])
+            if (entry["family"] in ('authored_or_delivered', 'declared_arithmetic_scenario')
+                    and instance_count(text, core_mod) == 0
+                    and instance_count(text, top["module"]) == 1):
+                new, rwhy = text, "authored testbench already instantiates the required full-stack top"
+            else:
+                new, rwhy = retarget_instance(text, core_mod, top["module"])
             if new is None:
                 entry.update(state=NO_ORACLE, reason=rwhy,
                              tb=_rel(project, path))
@@ -885,12 +1011,26 @@ def generate(project: Path, container: Optional[str] = None,
         score = score_transcript(name, rrc, rlog or "")
         entry.update(state=score["state"], checks=score["checks"],
                      reason=score["message"])
+        if entry['family'] == 'declared_arithmetic_scenario' and score['state'] in EXECUTED_STATES:
+            measured, why = arithmetic_case_evidence(
+                project, case, ic_class, top, rec['models'], entry, rec['sources'])
+            if measured is None and score['state'] == PASSED:
+                entry.update(state=SHORT, reason=why)
+            elif measured is not None:
+                entry['arithmetic_scenario'] = measured
+                entry['checks'] = {'total': measured['transactions'],
+                                   'comparisons': measured['comparisons'],
+                                   'errors': measured['errors']}
+                if score['state'] == PASSED:
+                    entry['checks']['passed'] = measured['transactions']
         if score.get("x_exemptions"):
             entry["x_exemptions"] = score["x_exemptions"]
         short = population_shortfall(entry.get("declared_population"),
-                                     score["checks"])
+                                     entry["checks"])
         if score["state"] == PASSED and short:
             entry.update(state=SHORT, reason=short)
+    if report.get("arithmetic_scenario_requests"):
+        rec["arithmetic_scenario_requests"] = report["arithmetic_scenario_requests"]
     dp = _datapath_case(project, core_mod, core_ports, top, sources, fdir,
                         run_root, disp, container,
                         {c["name"] for c in rec["cases"]})
@@ -903,8 +1043,12 @@ def generate(project: Path, container: Optional[str] = None,
             continue
         if entry.get("state") != NO_ORACLE:
             continue
-        d = unexecuted_disposition(project, case, ic_class, dp_passed,
-                                   top["module"])
+        if entry.get("reason_class") == MISSING_OBSERVATION_CONTRACT:
+            d = {"case": entry["name"], "disposition": DISP_UNMEASURED,
+                 "blocking": True, "reason": entry["reason"]}
+        else:
+            d = unexecuted_disposition(project, case, ic_class, dp_passed,
+                                       top["module"])
         entry["step5_disposition"] = d
         bar["dispositions"].append(d)
     rec["step5_bar"] = bar
@@ -934,6 +1078,14 @@ def generate(project: Path, container: Optional[str] = None,
             f"{errored} case(s) with an emitted testbench could not be built or "
             f"gave no verdict; {executed} executed — the population was not "
             f"fully measured"))
+    observation_gaps = [c["name"] for c in rec["cases"]
+                        if c.get("reason_class") == MISSING_OBSERVATION_CONTRACT]
+    if observation_gaps:
+        return _finish(NOT_MEASURED, MISSING_OBSERVATION_CONTRACT, (
+            f"{len(observation_gaps)} generated arithmetic case(s) "
+            f"{observation_gaps[:8]} were not dispatched through "
+            f"`{top['module']}`: the changed observation contract is missing; "
+            "the existing testbench-gen author request must be resolved"))
     if executed == 0:
         return _finish(NOT_MEASURED,
                        EXECUTION_ERROR if errored else ZERO_DENOMINATOR, (
@@ -1047,7 +1199,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     rec = generate(args.project.resolve(), container, args.route)
     text = json.dumps({k: rec.get(k) for k in
                        ("verdict", "reason_class", "reason", "counts",
-                        "full_stack_top")}, indent=2, ensure_ascii=False)
+                        "full_stack_top", "arithmetic_scenario_requests",
+                        "previous_output")}, indent=2, ensure_ascii=False)
     if args.json:
         _atomic_write_text(args.json, text + "\n")
     print(text)

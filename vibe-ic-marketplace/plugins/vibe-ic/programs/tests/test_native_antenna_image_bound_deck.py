@@ -712,3 +712,18 @@ def test_die_finishing_names_the_technology_through_a_login_banner(
     name, why = dfg.derive_tech(runner, f"{tech}/scripts/sealring.py")
     assert name == "fx", why
     assert "fixture.lyt" in why
+
+
+@pytest.mark.parametrize('marker',['late','absent','wrong'])
+def test_allocated_antenna_generator_search_uses_complete_input(tmp_path,marker):
+    gds=tmp_path/'neutral.gds';gds.write_bytes(b'neutral source-only gds bytes')
+    sha=hashlib.sha256(gds.read_bytes()).hexdigest()
+    parent='/neutral/parent.drc';rule='/neutral/antenna.drc'
+    generator='' if marker=='absent' else "<generator>drc: script='"+(parent if marker=='late' else '/neutral/wrong.drc')+"'</generator>"
+    text='<report-database>'+(' '*9000)+generator+"<categories><category><name>ANT.1</name></category></categories><items></items></report-database>"
+    rdb=tmp_path/'neutral.lyrdb';rdb.write_text(text)
+    transcript=tmp_path/'neutral.log';transcript.write_text('VIBEIC_GDS_SHA256='+sha+'\nExecuting deck neutral from '+rule+'\nExecuting rule ANT.1\nDRC RESULT: SUCCESS (0 violations)\n')
+    count,reason,hashes=gate._bound_native_count(gds,rdb,transcript,sha,deck={'rule':rule,'parent':parent})
+    if marker=='late':
+        assert count==0 and reason=='' and hashes['rdb_sha256']==hashlib.sha256(rdb.read_bytes()).hexdigest()
+    else:assert count is None and 'not the hashed parent' in reason and hashes=={}

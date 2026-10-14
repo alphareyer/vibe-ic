@@ -697,3 +697,608 @@ def test_the_strip_is_idempotent_on_the_live_caller_path(tmp_path):
     got = _sopr.read_netlist_interface(nl)
     assert got["readable"] is True and got["top"] == "top"
     assert got["port_names"] == ["clk", "done"]
+
+
+# Issue 3131: documentary provenance is retained in L9, not built as hardware.
+# These fixtures are authored neutral INPUT/L9/RTL/netlist data; no corpus runs.
+_R2_DOCUMENTARY_CASES = (
+    ("matched", "ACCEPT", []),
+    ("documentary", "DISARMED", []),
+    ("netlist_binding", "DISARMED", []),
+    ("missing_real", "REJECT", ["out_write_addr"]),
+    ("unbound", "REJECT", ["out_example_addr"]),
+    ("unlisted", "REJECT", ["out_example_addr"]),
+    ("stale_source", "REJECT", ["out_example_addr"]),
+    ("wrong_top", "REJECT", ["out_example_addr"]),
+    ("missing_source", "REJECT", ["out_example_addr"]),
+    ("missing_hash", "REJECT", ["out_example_addr"]),
+    ("false_string", "REJECT", ["out_example_addr"]),
+    ("implemented", "REJECT", ["out_example_addr"]),
+    ("required", "REJECT", ["out_example_addr"]),
+    ("mandatory", "REJECT", ["out_example_addr"]),
+)
+
+
+def _r2_issue3131_fixture(tmp_path, case):
+    import hashlib
+
+    project = tmp_path / "neutral_interface"
+    l9_rel = "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    net_rel = "phase2/stage2/synth/netlist.v"
+    src_rel = "phase2/stage1/rtl/neutral_core.v"
+    input_rel = "input/docs/interface.md"
+    implemented = ["i_clk", "out_read_addr", "out_write_addr"]
+
+    def netlist(names):
+        return ("module neutral_core(" + ", ".join(names) + ");\n"
+                + "  input i_clk;\n"
+                + "".join("  output [9:0] " + n + ";\n"
+                          for n in names if n != "i_clk")
+                + "endmodule\n")
+
+    for rel in (l9_rel, net_rel, src_rel, input_rel):
+        (project / rel).parent.mkdir(parents=True, exist_ok=True)
+    (project / input_rel).write_text(
+        "The implemented ports are i_clk, out_read_addr and out_write_addr.\n"
+        "out_example_addr is a documentary example, not an implemented port.\n")
+    (project / src_rel).write_text(netlist(implemented))
+    built = [n for n in implemented
+             if case != "missing_real" or n != "out_write_addr"]
+    (project / net_rel).write_text(netlist(built))
+    ports = [{"name": n, "direction": "input" if n == "i_clk" else "output",
+              "width": 1 if n == "i_clk" else 10,
+              "declared_by_staged_top": True, "evidence": input_rel}
+             for n in implemented]
+    if case != "matched":
+        ports.append({"name": "out_example_addr", "direction": "output",
+                      "width": 10, "declared_by_staged_top": False,
+                      "evidence": input_rel})
+    selected_rel = net_rel if case == "netlist_binding" else src_rel
+    binding = {
+        "top_module": "neutral_core", "selected_source": selected_rel,
+        "selected_source_sha256": hashlib.sha256(
+            (project / selected_rel).read_bytes()).hexdigest(),
+        "document_examples_not_implemented": ([] if case == "matched"
+                                               else ["out_example_addr"]),
+        "illustrative_groups": [{"l9": ["out_example_addr"],
+                                 "rtl": ["out_read_addr", "out_write_addr"]}],
+    }
+    if case == "unlisted":
+        binding["document_examples_not_implemented"] = []
+    elif case == "stale_source":
+        (project / src_rel).write_text(netlist(implemented) + "// changed source\n")
+    elif case == "wrong_top":
+        binding["top_module"] = "other_core"
+    elif case == "missing_source":
+        (project / src_rel).unlink()
+    elif case == "missing_hash":
+        binding.pop("selected_source_sha256")
+    elif case == "false_string":
+        ports[-1]["declared_by_staged_top"] = "false"
+    elif case == "implemented":
+        ports[-1]["declared_by_staged_top"] = True
+    elif case in ("required", "mandatory"):
+        ports[-1][case] = True
+    l9 = {"top_module": "neutral_core", "top_ports": ports}
+    if case != "unbound":
+        l9["selected_interface_binding"] = binding
+    (project / l9_rel).write_text(json.dumps(l9, indent=2) + "\n")
+    return project, {"intent": [l9_rel], "artefact": [net_rel]}
+
+
+def _r2_issue3131_metadata_only(call):
+    events = []
+    active = True
+
+    def guard(event, values):
+        if active and (event in {"subprocess.Popen", "os.system", "os.posix_spawn",
+                                 "os.fork"} or event.startswith("os.exec")):
+            events.append(event)
+            raise AssertionError("metadata-only R2 attempted process dispatch: " + event)
+
+    sys.addaudithook(guard)
+    try:
+        return call(), events
+    finally:
+        active = False
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_DOCUMENTARY_CASES,
+                         ids=[c[0] for c in _R2_DOCUMENTARY_CASES])
+def test_issue3131_documentary_contract_api(tmp_path, case, verdict, absent,
+                                          record_property):
+    project, decl = _r2_issue3131_fixture(tmp_path, case)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("verdict", result["verdict"])
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert result["verdict"] == verdict
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == absent
+    assert dispatch == []
+    if verdict == "DISARMED":
+        assert [p["name"] for p in result["disarmed"]] == ["out_example_addr"]
+        assert "document" in result["observation"].lower()
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_DOCUMENTARY_CASES,
+                         ids=[c[0] for c in _R2_DOCUMENTARY_CASES])
+def test_issue3131_documentary_contract_emitted_test(tmp_path, case, verdict,
+                                                   absent, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_issue3131_fixture(tmp_path, case)
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    expected = "REJECT" if verdict == "REJECT" else "ACCEPT"
+    record_property("verdict", observed)
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert observed == expected, message
+    for name in absent:
+        assert name in message
+    if case == "missing_real":
+        assert "out_example_addr" not in message
+    assert dispatch == []
+
+
+# Review counterexample: current source bytes still implement a port that L9
+# inconsistently labels documentary. Retain the original 32 selected controls.
+_R2_SOURCE_ROSTER_CASES = (
+    ("implemented_nonansi", "REJECT", ["out_write_addr"]),
+    ("implemented_ansi", "REJECT", ["out_write_addr"]),
+    ("implemented_parameterized", "REJECT", ["out_write_addr"]),
+    ("implemented_grouped", "REJECT", ["out_write_addr"]),
+    ("example_implemented", "REJECT", ["out_example_addr"]),
+    ("source_top_absent", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("source_empty", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("source_unsupported", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("optional_true", "DISARMED", []),
+    ("optional_string", "REJECT", ["out_aux"]),
+    ("supply_role", "DISARMED", []),
+    ("signal_without_supply", "REJECT", ["out_aux"]),
+)
+
+
+def _r2_issue3131_source_roster_fixture(tmp_path, case):
+    import hashlib
+
+    missing_real = case.startswith("implemented_") or case.startswith("source_")
+    project, decl = _r2_issue3131_fixture(
+        tmp_path, "missing_real" if missing_real else "documentary")
+    l9_path = project / decl["intent"][0]
+    content = json.loads(l9_path.read_text())
+    binding = content["selected_interface_binding"]
+    source = project / binding["selected_source"]
+    if missing_real:
+        for pin in content["top_ports"]:
+            if pin["name"] == "out_write_addr":
+                pin["declared_by_staged_top"] = False
+        binding["document_examples_not_implemented"].append("out_write_addr")
+    if case == "implemented_ansi":
+        source.write_text(
+            "module neutral_core(input i_clk, output [9:0] out_read_addr, "
+            "output [9:0] out_write_addr);\nendmodule\n")
+    elif case == "implemented_parameterized":
+        source.write_text(
+            "module neutral_core #(parameter W=$clog2(1024)) (\n"
+            "  input logic i_clk,\n  output logic [W-1:0] out_read_addr,\n"
+            "  (* keep = \"true\" *) output logic [W-1:0] out_write_addr\n"
+            ");\nendmodule\n")
+    elif case == "implemented_grouped":
+        source.write_text(
+            "module neutral_core(input i_clk, output [9:0] out_read_addr, "
+            "out_write_addr);\nendmodule\n")
+    elif case == "example_implemented":
+        source.write_text(source.read_text().replace(
+            "out_write_addr);", "out_write_addr, out_example_addr);").replace(
+            "endmodule", "  output [9:0] out_example_addr;\nendmodule"))
+    elif case == "source_top_absent":
+        source.write_text(source.read_text().replace("module neutral_core", "module other_core"))
+    elif case == "source_empty":
+        source.write_text("// no module interface is available\n")
+    elif case == "source_unsupported":
+        source.write_text(
+            "module neutral_core(i_clk, out_read_addr, `WRITE_PORT);\n"
+            "input i_clk;\noutput [9:0] out_read_addr;\nendmodule\n")
+    elif case in ("optional_true", "optional_string", "supply_role", "signal_without_supply"):
+        aux = {"name": "out_aux", "direction": "output", "width": 1,
+               "declared_by_staged_top": True, "evidence": "input/docs/interface.md"}
+        if case == "optional_true":
+            aux["optional"] = True
+        elif case == "optional_string":
+            aux["optional"] = "true"
+        elif case == "supply_role":
+            aux["io"] = "POWER"
+        content["top_ports"].append(aux)
+    binding["selected_source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    l9_path.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_SOURCE_ROSTER_CASES,
+                         ids=[c[0] for c in _R2_SOURCE_ROSTER_CASES])
+def test_issue3131_source_roster_overrides_documentary_labels_api(
+        tmp_path, case, verdict, absent, record_property):
+    project, decl = _r2_issue3131_source_roster_fixture(tmp_path, case)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("verdict", result["verdict"])
+    record_property("absent_signal_pins", json.dumps(
+        [p["name"] for p in result.get("absent_signal_pins", [])]))
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert result["verdict"] == verdict
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == absent
+    assert dispatch == []
+    if case.startswith("implemented_"):
+        assert [p["name"] for p in result["disarmed"]] == ["out_example_addr"]
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_SOURCE_ROSTER_CASES,
+                         ids=[c[0] for c in _R2_SOURCE_ROSTER_CASES])
+def test_issue3131_source_roster_overrides_documentary_labels_emitted(
+        tmp_path, case, verdict, absent, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_issue3131_source_roster_fixture(tmp_path, case)
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    record_property("verdict", observed)
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert observed == ("REJECT" if verdict == "REJECT" else "ACCEPT"), message
+    for name in absent:
+        assert name in message
+    if case.startswith("implemented_"):
+        assert "out_example_addr" not in message
+    assert dispatch == []
+
+
+# Required signal declarations must not become optional merely because the
+# selected-interface producer retains a False marker. Supplies remain the
+# physical layer's obligation even when explicitly mandatory.
+_ISSUE3134_REQUIRED_SIGNAL_CASES = (
+    ("normal_phase1_rtl_binding", "DISARMED"),
+    ("normal_netlist_binding", "DISARMED"),
+    ("genuine_source_port_missing", "REJECT"),
+    ("genuine_ansi_source_port_missing", "REJECT"),
+    ("optional_false_compatible", "DISARMED"),
+    ("supply_false_required", "DISARMED"),
+    ("supply_false_mandatory", "DISARMED"),
+    ("signal_optional_required", "REJECT"),
+    ("signal_optional_mandatory", "REJECT"),
+    ("signal_optional_alias_required", "REJECT"),
+    ("signal_optional_alias_mandatory", "REJECT"),
+)
+
+
+def _issue3134_required_signal_project(tmp_path, case):
+    if case == "normal_phase1_rtl_binding":
+        from test_d2_renamed_reused_ip_ports_take_their_documents_side import (
+            _selected_project, STAGED_TOP)
+        from _staged_top_module import bind_selected_interface
+        project = _selected_project(tmp_path)
+        (project / "phase2/stage1/rtl/core.v").write_text(STAGED_TOP)
+        l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+        content = bind_selected_interface(
+            project, json.loads(l9.read_text()), include_synthesis_handoff=False)
+        assert content["selected_interface_binding"]["selected_source"] == "phase2/stage1/rtl/core.v"
+        l9.write_text(json.dumps(content, indent=2) + "\n")
+        return project, {"intent": [str(l9.relative_to(project))],
+                         "artefact": ["phase2/stage2/synth/core_synth.v"]}
+    if case == "normal_netlist_binding":
+        return _r2_issue3131_fixture(tmp_path, "netlist_binding")
+    if case == "genuine_ansi_source_port_missing":
+        return _r2_issue3131_source_roster_fixture(tmp_path, "implemented_ansi")
+    missing = case == "genuine_source_port_missing" or case.startswith("signal_")
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real" if missing else "matched")
+    l9 = project / decl["intent"][0]
+    content = json.loads(l9.read_text())
+    input_path = project / "input/docs/interface.md"
+    if missing:
+        pin = next(row for row in content["top_ports"] if row["name"] == "out_write_addr")
+        pin["declared_by_staged_top"] = False
+        content["selected_interface_binding"]["document_examples_not_implemented"].append("out_write_addr")
+        if case.startswith("signal_"):
+            input_path.write_text(input_path.read_text() +
+                "out_write_addr is a required signal output for writes; it is not an optional or power pin.\n")
+            pin.update(optional=True, io=None)
+            flag = "mandatory" if case.endswith("mandatory") else "required"
+            if "_alias_" in case:
+                content["ports"] = [dict(row) for row in content["top_ports"]]
+                alias = next(row for row in content["ports"] if row["name"] == "out_write_addr")
+                alias.update({flag: True, "declared_by_staged_top": True})
+            else:
+                pin[flag] = True
+        assert "out_write_addr" in _sopr.read_netlist_interface(
+            project / content["selected_interface_binding"]["selected_source"])["ports"]
+        assert "out_write_addr" not in _sopr.read_netlist_interface(project / decl["artefact"][0])["ports"]
+    else:
+        content.pop("selected_interface_binding", None)
+        supply = case.startswith("supply_")
+        name = "physical_supply" if supply else "optional_gpio"
+        pin = {"name": name, "direction": "input", "declared_by_staged_top": False,
+               "evidence": "input/docs/interface.md"}
+        if supply:
+            flag = "mandatory" if case.endswith("mandatory") else "required"
+            pin.update(role="power", **{flag: True})
+            input_path.write_text(input_path.read_text() +
+                "physical_supply is a required power input for physical sign-off, not a signal netlist pin.\n")
+        else:
+            pin["optional"] = True
+            input_path.write_text(input_path.read_text() +
+                "optional_gpio is optional and may be omitted.\n")
+        content["top_ports"].append(pin)
+    l9.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("case,expected", _ISSUE3134_REQUIRED_SIGNAL_CASES,
+                         ids=[case for case, _ in _ISSUE3134_REQUIRED_SIGNAL_CASES])
+def test_issue3134_required_signal_and_existing_releases(tmp_path, case, expected,
+                                                         record_property):
+    import hashlib
+    import runpy
+
+    project, decl = _issue3134_required_signal_project(tmp_path, case)
+    l9 = project / decl["intent"][0]
+    original = l9.read_bytes()
+    before = {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in project.rglob("*") if path.is_file()}
+    result, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    # Seed the normal emitter with a genuine missing-signal finding, then
+    # restore exact current input bytes before its actual assertion executes.
+    seed = json.loads(original)
+    seed["top_ports"].append({"name": "out_seed_signal", "direction": "output"})
+    l9.write_text(json.dumps(seed))
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    l9.write_bytes(original)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), emitted_dispatch = _r2_issue3131_metadata_only(check)
+    record_property("api_verdict", result["verdict"])
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(before, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(emitted_dispatch))
+    assert before == {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in project.rglob("*") if path.is_file()
+                      and not str(path.relative_to(project)).startswith("reports/")}
+    assert result["verdict"] == expected
+    assert observed == ("REJECT" if expected == "REJECT" else "ACCEPT"), message
+    assert api_dispatch == emitted_dispatch == []
+    if case.startswith("signal_") or case.startswith("genuine_"):
+        assert "out_write_addr" in message
+
+
+# An explicitly required digital signal can occur only in a secondary L9
+# alias. Keep the first table's ordinary pins and the existing supply policy.
+@pytest.mark.parametrize("primary,secondary", [
+    ("top_ports", "ports"), ("top_ports", "top_module_pins"),
+    ("ports", "top_module_pins"),
+])
+@pytest.mark.parametrize("flag", ["required", "mandatory"])
+@pytest.mark.parametrize("built", [False, True], ids=["missing", "built"])
+def test_r2_secondary_required_signal_alias(tmp_path, primary, secondary,
+                                          flag, built, record_property):
+    import hashlib
+    import runpy
+
+    project = tmp_path / "neutral_secondary_signal"
+    l9_rel = "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    net_rel = "phase2/stage2/synth/netlist.v"
+    src_rel = "phase2/stage1/rtl/neutral_core.v"
+    input_rel = "input/docs/interface.md"
+    for rel in (l9_rel, net_rel, src_rel, input_rel):
+        (project / rel).parent.mkdir(parents=True, exist_ok=True)
+
+    def netlist(include_required):
+        return ("module neutral_core(i_clk, out_ready"
+                + (", out_required" if include_required else "") + ");\n"
+                + "  input i_clk;\n  output out_ready;\n"
+                + ("  output out_required;\n" if include_required else "")
+                + "endmodule\n")
+
+    (project / input_rel).write_text(
+        "i_clk is a digital input; out_ready and out_required are required "
+        "digital signal outputs.\n")
+    (project / src_rel).write_text(netlist(True))
+    (project / net_rel).write_text(netlist(built))
+    content = {
+        "top_module": "neutral_core",
+        primary: [{"name": "i_clk", "direction": "input"},
+                  {"name": "out_ready", "direction": "output"}],
+        secondary: [{"name": "out_required", "direction": "output",
+                     "role": "signal", flag: True, "evidence": input_rel}],
+        "selected_interface_binding": {
+            "top_module": "neutral_core", "selected_source": src_rel,
+            "selected_source_sha256": hashlib.sha256(
+                (project / src_rel).read_bytes()).hexdigest(),
+            "document_examples_not_implemented": [],
+        },
+    }
+    l9 = project / l9_rel
+    l9.write_text(json.dumps(content, indent=2) + "\n")
+    decl = {"intent": [l9_rel], "artefact": [net_rel]}
+    original = l9.read_bytes()
+    before = {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in project.rglob("*") if path.is_file()}
+    result, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+
+    # Emit through the real rejection path even on the legitimate built arm.
+    seed = json.loads(original)
+    seed[primary].append({"name": "out_seed_signal", "direction": "output"})
+    l9.write_text(json.dumps(seed))
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    l9.write_bytes(original)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), generated_dispatch = _r2_issue3131_metadata_only(check)
+    absent = [p["name"] for p in result.get("absent_signal_pins", [])]
+    record_property("api_verdict", result["verdict"])
+    record_property("absent_signal_pins", json.dumps(absent))
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(before, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(generated_dispatch))
+    assert before == {str(path.relative_to(project)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in project.rglob("*") if path.is_file()
+                      and not str(path.relative_to(project)).startswith("reports/")}
+    expected = "ACCEPT" if built else "REJECT"
+    assert result["verdict"] == expected
+    assert observed == expected, message
+    assert absent == ([] if built else ["out_required"])
+    assert api_dispatch == generated_dispatch == []
+    if not built:
+        assert "out_required" in message
+
+
+# A primary supply label cannot release a same-name required SIGNAL in a
+# secondary table. Actual power-only aliases still owe physical sign-off.
+_R2_SUPPLY_SHADOW_CASES = (
+    ("same_name_supply_shadow_required_missing", "REJECT"),
+    ("same_name_supply_shadow_mandatory_missing", "REJECT"),
+    ("same_name_supply_shadow_required_built", "ACCEPT"),
+    ("same_name_supply_shadow_mandatory_built", "ACCEPT"),
+    ("same_name_all_power_required_missing", "DISARMED"),
+    ("same_name_all_power_mandatory_missing", "DISARMED"),
+)
+
+
+def _r2_same_name_supply_shadow_files(case):
+    import hashlib
+
+    payload = json.loads((FIX / "same_name_supply_shadow/INPUT.json").read_text())
+    files = payload["files"]
+    assert {rel: hashlib.sha256(text.encode()).hexdigest()
+            for rel, text in files.items()} == payload["input_sha256"]
+    l9_rel = payload["declaration"]["intent"][0]
+    content = json.loads(files[l9_rel])
+    flag = "mandatory" if "mandatory" in case else "required"
+    if flag == "mandatory":
+        content["ports"][0].pop("required")
+        content["ports"][0][flag] = True
+    src_rel = content["selected_interface_binding"]["selected_source"]
+    net_rel = payload["declaration"]["artefact"][0]
+    if "all_power" in case:
+        rail = {"name": "vcore", "direction": "input", "role": "power",
+                "supply": True, flag: True, "evidence": "input/docs/interface.md"}
+        content["top_ports"][-1] = dict(rail)
+        content["ports"] = [dict(rail)]
+        files[src_rel] = files[net_rel]
+        files["input/docs/interface.md"] = "\n".join(
+            line for line in files["input/docs/interface.md"].split("\n")
+            if not line.startswith("- out_required"))
+        content["selected_interface_binding"]["selected_source_sha256"] = (
+            hashlib.sha256(files[src_rel].encode()).hexdigest())
+    elif case.endswith("_built"):
+        files[net_rel] = files[src_rel]
+    # The primary counter retains the dispatcher's exact authored L9 bytes.
+    if case != "same_name_supply_shadow_required_missing":
+        files[l9_rel] = json.dumps(content, indent=2) + "\n"
+    return files, payload["declaration"]
+
+
+@pytest.mark.parametrize("case,expected", _R2_SUPPLY_SHADOW_CASES,
+                         ids=[case for case, _ in _R2_SUPPLY_SHADOW_CASES])
+def test_r2_same_name_supply_shadow(tmp_path, case, expected, record_property):
+    import hashlib
+    import runpy
+
+    project = tmp_path / "neutral_supply_shadow"
+    files, decl = _r2_same_name_supply_shadow_files(case)
+    for rel, text in files.items():
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    before = {rel: hashlib.sha256((project / rel).read_bytes()).hexdigest()
+              for rel in files}
+    l9 = project / decl["intent"][0]
+    original = l9.read_bytes()
+    result, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+
+    # Use the existing real emitter on a genuine rejection, then restore the
+    # exact counter bytes before executing the generated callable.
+    seed = json.loads(original)
+    seed["top_ports"].append({"name": "out_seed_signal", "direction": "output"})
+    l9.write_text(json.dumps(seed))
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    l9.write_bytes(original)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), generated_dispatch = _r2_issue3131_metadata_only(check)
+    absent = [pin["name"] for pin in result.get("absent_signal_pins", [])]
+    record_property("api_verdict", result["verdict"])
+    record_property("absent_signal_pins", json.dumps(absent))
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(before, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(generated_dispatch))
+    assert before == {rel: hashlib.sha256((project / rel).read_bytes()).hexdigest()
+                      for rel in files}
+    assert l9.read_bytes() == original
+    assert result["verdict"] == expected
+    assert observed == ("REJECT" if expected == "REJECT" else "ACCEPT"), message
+    assert absent == (["out_required"] if expected == "REJECT" else [])
+    assert api_dispatch == generated_dispatch == []
+    if expected == "REJECT":
+        assert "out_required" in message

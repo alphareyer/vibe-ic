@@ -45,13 +45,16 @@ def _run(argv: list[str], directory: Path, label: str, timeout_s: int, env=None)
     out, err = directory / (label + '.stdout'), directory / (label + '.stderr')
     import shlex
     import _container_exec as ce
-    completed = ce.run_in_container('host', shlex.join(argv))
+    completed = ce.run_in_container_supervised(
+        'host', shlex.join(argv), ceiling_s=timeout_s)
     rc = completed.returncode
     out.write_text(completed.stdout or '')
     err.write_text(completed.stderr or '')
     receipt = {'argv': argv, 'observer_pid': os.getpid(), 'rc': rc,
                'stdout_sha256': em.digest(out), 'stderr_sha256': em.digest(err)}
     write_json(directory / (label + '.receipt.json'), receipt)
+    if rc == _progress_run.RC_STALLED:
+        raise em.Refusal('ANALOG_NATIVE_PROCESS_STALLED', label + ':' + completed.stderr)
     if rc != 0:
         raise em.Refusal('ANALOG_NATIVE_PROCESS_FAILED', label + ':' + str(rc))
     return receipt
@@ -79,7 +82,7 @@ def characterize(project: Path, block: str, params: dict, records: Path) -> dict
         for quantity in ('cell_rise', 'cell_fall', 'rise_transition', 'fall_transition'):
             name = arc['measurements'].get(quantity)
             if not name or name not in values or not math.isfinite(values[name]) or values[name] < 0:
-                raise em.Refusal('ANALOG_CHARACTERIZATION_MEASUREMENT_MISSING', quantity)
+                raise em.Refusal('ANALOG_CHARACTERIZATION_MEASUREMENT_MISSING', f"{records / f'characterize-{block}-{index}.stdout'} and {planfile}: arcs[{index}].measurements[{quantity!r}]={name!r} requires a finite nonnegative measured value")
             row[quantity] = values[name]
         if arc.get('unit') != 's':
             raise em.Refusal('ANALOG_CHARACTERIZATION_UNIT_REQUIRED', block)

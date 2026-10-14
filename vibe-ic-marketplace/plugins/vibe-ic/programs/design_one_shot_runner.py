@@ -4607,7 +4607,8 @@ def _phase1_remap_stage_tree(stage_project: Path, project: Path,
 
 
 def _phase1_stamp_held_session(
-        binding: _Phase1ProjectBinding, generator: str) -> None:
+        binding: _Phase1ProjectBinding,
+        generator: Optional[str] = None) -> None:
     """Finish deferred provenance through isolation + held-dirfd commit."""
     global _PHASE1_ACTIVE_PROJECT_BINDING
     prior = _PHASE1_ACTIVE_PROJECT_BINDING
@@ -4631,6 +4632,20 @@ def _phase1_stamp_held_session(
                     "the isolated project snapshot")
             stage_binding = _Phase1ProjectBinding.open(stage_project)
             _PHASE1_ACTIVE_PROJECT_BINDING = stage_binding
+            if generator is None:
+                # Deferred finalization extends the owned tree; it is not a
+                # new producer. Read the existing origin from the same held
+                # snapshot that will be stamped and committed, so a mutable
+                # project pathname cannot supply a different ledger's name.
+                ledger = _rtl_prov.load_ledger(stage_project)
+                if ledger is None:
+                    raise _Phase1RtlOutputRefused(
+                        "RTL_LEDGER_ORIGIN_UNAVAILABLE",
+                        _rtl_prov.ledger_path(binding.project),
+                        "deferred provenance has no valid producer ledger")
+                origin = ledger.get("generator")
+                generator = (origin if isinstance(origin, str)
+                             and origin.strip() else None)
             _rtl_prov.stamp(stage_project, generator=generator)
             stage_binding.require_current()
             final = _phase1_tree_manifest_fd(
@@ -18875,8 +18890,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("yosys_synth", "FAIL", time.time() - t0, str(exc))
     finally:
-        if _step9_handoff is not None:
-            _execution.release_program_first_fallback(_step9_handoff)
+        _execution.release_program_first_fallback(_step9_handoff)
     # Stage stub OTP hex inside synth_dir so $readmemh resolves at synth.
     for stem in ("apple.hex", "otp_image.hex"):
         stub = synth_dir / stem
@@ -25560,7 +25574,9 @@ def _finalize_rtl_provenance() -> None:
     it fully owns — turning the guard into a regression.
 
     So the ledger records the state of ``rtl/`` as the runner LAST LEFT
-    it. Anything that differs on the next run appeared while the runner
+    it, retaining the originating producer from its validated ledger rather
+    than replacing that identity with the finalizer's name. Anything that
+    differs on the next run appeared while the runner
     was not running, which is exactly the authored-RTL case.
 
     Runs only when this process actually generated the RTL. If the guard
@@ -25581,8 +25597,7 @@ def _finalize_rtl_provenance() -> None:
         return
     binding = _RTL_SESSION_BINDING
     try:
-        _phase1_stamp_held_session(
-            binding, generator="design_one_shot_runner")
+        _phase1_stamp_held_session(binding)
     except (OSError, _Phase1RtlOutputRefused):
         # Best-effort: a failed stamp must never change the run verdict.
         # It fails SAFE — an absent/stale ledger makes the next run treat

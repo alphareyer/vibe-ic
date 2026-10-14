@@ -1,0 +1,81 @@
+{
+  "schema": "source70.r2.public-neutral-same-name-shadow-input.v1",
+  "scope": "Authored public synthetic INPUT; not owner facts. Prepared only, not executed. Worker A owns one actual Python API/emitted counter probe.",
+  "files": {
+    "input/docs/interface.md": "Interface requirements for neutral_core:\n- i_clk is a digital input.\n- out_ready is a digital output.\n- out_required is a required digital signal output and must be built by the synthesized top. It is not a physical supply pin.\n- vcore is a physical power supply. A non-power-aware synthesized Verilog top need not expose vcore; its physical connectivity remains owed to power-grid and power-aware LVS checks.\n",
+    "phase2/stage1/rtl/neutral_core.v": "module neutral_core(i_clk, out_ready, out_required);\n  input i_clk;\n  output out_ready;\n  output out_required;\nendmodule\n",
+    "phase2/stage2/synth/netlist.v": "module neutral_core(i_clk, out_ready);\n  input i_clk;\n  output out_ready;\nendmodule\n",
+    "phase1/generated_docs/L9_INTEGRATION_SPEC.json": "{\n  \"top_module\": \"neutral_core\",\n  \"top_ports\": [\n    {\n      \"name\": \"i_clk\",\n      \"direction\": \"input\"\n    },\n    {\n      \"name\": \"out_ready\",\n      \"direction\": \"output\"\n    },\n    {\n      \"name\": \"out_required\",\n      \"direction\": \"output\",\n      \"supply\": true,\n      \"evidence\": \"input/docs/interface.md\"\n    }\n  ],\n  \"ports\": [\n    {\n      \"name\": \"out_required\",\n      \"direction\": \"output\",\n      \"role\": \"signal\",\n      \"required\": true,\n      \"evidence\": \"input/docs/interface.md\"\n    }\n  ],\n  \"selected_interface_binding\": {\n    \"top_module\": \"neutral_core\",\n    \"selected_source\": \"phase2/stage1/rtl/neutral_core.v\",\n    \"selected_source_sha256\": \"150089e486281baf2d88562e3ab2c04ed39b7b56fb65aa8c7b801c064eb2ebcc\",\n    \"document_examples_not_implemented\": []\n  }\n}\n"
+  },
+  "declaration": {
+    "intent": [
+      "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    ],
+    "artefact": [
+      "phase2/stage2/synth/netlist.v"
+    ]
+  },
+  "input_sha256": {
+    "input/docs/interface.md": "62fa16f4c972a8479e2b83b52060106963bbb4cc2a751b1667b7c4c566318508",
+    "phase2/stage1/rtl/neutral_core.v": "150089e486281baf2d88562e3ab2c04ed39b7b56fb65aa8c7b801c064eb2ebcc",
+    "phase2/stage2/synth/netlist.v": "9a36eca3da7283cd227c91cf19cc1d7629450a5a6e9e7146a6e1dd8748609476",
+    "phase1/generated_docs/L9_INTEGRATION_SPEC.json": "584d3ed8e9997cab410af33e834c9149e006bd0b4794563393f49a461ed0e14d"
+  },
+  "static_causal_chain": [
+    "read_intent_pins1214-1220 adds out_required from secondary non-supply literal requiredTrue to _required_signal_names.",
+    "Names in primary already contain out_required, so1218-1233 do not append/replace its primary supply row.",
+    "Actual API1398-1405 unconditionally takes primary supply release although name is in required_signal_names.",
+    "Actual emitted3350 unconditionally excludes the same supply row, likewise losing the typed non-supply alias obligation."
+  ],
+  "expected_from_INPUT": {
+    "missing_actual_api": "REJECT",
+    "missing_actual_emitted": "REJECT",
+    "absent_signal_name": "out_required",
+    "actual_current_values": "NOT_MEASURED; Worker A must probe before repair credit"
+  },
+  "minimal_fix_proposal": [
+    "Use the existing required_signal_names in the existing supply-release predicate: supply release only when name is not in this non-supply-required set.",
+    "Apply identical scope in the existing emitted _is_supply filtering; optional/documentary handling already receives required_signal_names.",
+    "Do not broaden required names to include supply rows; do not reintroduce original3136 all-power rejection. No new persistence/schema/binding-class rule."
+  ],
+  "predeclared_controls": [
+    {
+      "id": "same_name_supply_shadow_required_missing",
+      "mutation": "Base authored files unchanged",
+      "expected_api": "REJECT",
+      "expected_emitted": "REJECT"
+    },
+    {
+      "id": "same_name_supply_shadow_mandatory_missing",
+      "mutation": "Only secondary ports row: replace requiredTrue with mandatoryTrue; still role=signal and no supply keys.",
+      "expected_api": "REJECT",
+      "expected_emitted": "REJECT"
+    },
+    {
+      "id": "same_name_supply_shadow_required_built",
+      "mutation": "Only netlist includes the already-required out_required port; retain all L9 labels.",
+      "expected_api": "ACCEPT",
+      "expected_emitted": "ACCEPT"
+    },
+    {
+      "id": "same_name_all_power_required_missing",
+      "mutation": "Use vcore in all alias rows, all role=power/supplyTrue/requiredTrue; input describes a physical supply. Exclude physical rail from RTL/netlist; use correct selected-source hash.",
+      "expected_api": "DISARMED",
+      "expected_emitted": "ACCEPT"
+    },
+    {
+      "id": "same_name_all_power_mandatory_missing",
+      "mutation": "Same explicit physical rail in all aliases, mandatoryTrue instead of requiredTrue.",
+      "expected_api": "DISARMED",
+      "expected_emitted": "ACCEPT"
+    }
+  ],
+  "existing_controls_to_preserve": "All current66 supply_false_required/supply_false_mandatory cases, Source67 secondary-only12 cases, documentary actual RTL binding and source-roster negatives. Do not rerun private/corpus tests or claim source value as EDA/native pass.",
+  "original_PR3136_overlap": {
+    "head": "e5f81a32659d0b0424eca48c290fc7757c6243ee",
+    "helper": "_intent_pin_obligations1143-1166",
+    "API": "1407 obligations before supply",
+    "emitted": "3346-3350 obligations-minus-built union",
+    "classification": "The genuine non-supply-required alias is a legitimate subset of original required-over-alias intent. Original helper is too broad because it also collects actual power required/mandatory rows and implements metadata-only True/False conflict policy."
+  }
+}

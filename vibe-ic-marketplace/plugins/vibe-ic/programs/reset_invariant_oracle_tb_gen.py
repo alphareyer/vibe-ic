@@ -341,6 +341,92 @@ def _declared_retention_preload(decl: dict, depth: int) -> Tuple[Optional[list],
     return sorted(entries, key=lambda entry: entry["address"]), None
 
 
+
+_CPU_STIMULUS_MISSING = "NOT_MEASURED: missing-executable-write-stimulus: "
+
+
+def _retention_is_cpu(project: Path) -> bool:
+    """Use the existing typed ISA/class context, never a case/core name."""
+    import cpu_datapath_program as cpu
+    import ic_class_profile as profile
+    import _path_layout as paths
+    l1 = cpu._json(paths.generated_docs_dir(project) / "L1_DATASHEET.json") or {}
+    fields = l1.get("fields") if isinstance(l1.get("fields"), dict) else l1
+    return ("isa_base" in fields or fields.get("ic_class") == "processor_cpu"
+            or profile.detect_ic_class(Path(project).resolve()).get("ic_class") == "processor_cpu")
+
+
+def _cpu_retention_preload(project: Path, dut: str, decl: dict, memory: dict,
+                           inputs, outputs) -> Tuple[Optional[list], str]:
+    """A generated two-word verification probe; not supplied application firmware."""
+    import cpu_datapath_program as cpu
+    def refuse(why):
+        return None, _CPU_STIMULUS_MISSING + why
+    # The datapath reader's historical 128-byte fallback is not a current
+    # reservation declaration. Require the actual selected value before using it.
+    si = decl.get("sram_interface") or {}
+    selected = {str(k).lower(): v for k, v in si.items()}
+    reservations = [cpu._int(selected[k]) for k in cpu._RF_KEYS if k in selected]
+    if (not reservations or any(v is None or v < 0 for v in reservations)
+            or len(set(reservations)) != 1):
+        return refuse("current explicit SRAM register-file reservation is missing or invalid")
+    ports = [("input", w, n) for n, w in inputs] + [("output", w, n) for n, w in outputs]
+    facts, why = cpu.design_facts(project, dut, ports)
+    if facts is None:
+        return refuse(why)
+    if (facts["memsize"] != memory["depth"] or facts["rf_reserved"] != reservations[0]):
+        return refuse("delivered memory depth or selected register-file reservation disagrees with the byte model")
+    reset, low = _pick_reset(inputs)
+    if (facts["clock"] != _pick_clock(inputs) or facts["reset"] != reset
+            or facts["reset_active_high"] != (not low)):
+        return refuse("selected clock/reset does not match the observation driver")
+    pc = facts["reset_pc"]
+    free = facts["memsize"] - facts["rf_reserved"]
+    if pc < 0 or pc % 4 or pc + 8 > free:
+        return refuse("two executable words do not fit at the aligned reset vector below the selected reservation")
+    # Choose the first encodable word that is outside code and reserved storage.
+    address = next((a for a in range(0, min(free, 2048) - 3, 4)
+                    if a + 4 <= pc or a >= pc + 8), None)
+    if address is None:
+        return refuse("no independent encodable data word fits below the selected reservation")
+    words = [cpu.enc_sw(0, 0, address), cpu.enc_jal(0, 0)]
+    preload = [{"address": pc + 4 * i + lane, "byte": byte}
+               for i, word in enumerate(words)
+               for lane, byte in enumerate(word.to_bytes(4, "little"))]
+    image = bytearray((0xa5 + 17 * a) & 255 for a in range(memory["depth"]))
+    for entry in preload:
+        image[entry["address"]] = entry["byte"]
+    after, _, _ = cpu.reference_execute(image, pc)
+    if after[address:address + 4] == image[address:address + 4]:
+        return refuse("the generated probe has no non-idempotent reference write")
+    return preload, (f"program-generated verification preload: {facts['isa_base']}, reset_pc={pc}, "
+                     f"delivered bytes={facts['memsize']}, reserved high bytes={facts['rf_reserved']}; "
+                     f"sw x0,{address}(x0); jal x0,0; reference admission only, hardware first-write NOT_MEASURED")
+
+
+def retention_stimulus_request(project: Path, case: dict, dut: str, inputs, outputs) -> Optional[dict]:
+    """Existing testbench-gen author handoff for a CPU probe that cannot be admitted."""
+    if case_family(case) != FAMILY_HOLD or not _retention_is_cpu(project):
+        return None
+    import testbench_gen as tb
+    decl = tb._declaration(project)
+    _, basis = declared_retention_memory(project, dut, inputs, outputs)
+    # A named application image has its own identity. Do not replace it with
+    # a generic verification probe; its author can admit it through typed preload.
+    preload, malformed = _declared_retention_preload(decl, 1 << 16)
+    named = tb.named_stimulus_images(str(case.get("stimulus") or ""))
+    if named and preload is None and malformed is None:
+        basis = _CPU_STIMULUS_MISSING + "named executable image requires typed preload admission: " + ", ".join(named)
+    if not basis.startswith(_CPU_STIMULUS_MISSING):
+        return None
+    return {"case": case.get("name") or case.get("id"), "verdict": "NOT_MEASURED",
+            "fallback_skill": "testbench-gen",
+            "required_choices": {"verification_stimuli.reset_retention.memory_preload":
+                "non-empty list of unique in-range integer {address, byte}; executable stimulus must be explicitly authored"},
+            "unsupported_requirements": [basis],
+            "authored_tb": f"phase2/stage1/sim/tb/{case.get('name') or case.get('id')}.v"}
+
+
 def declared_retention_memory(project: Path, dut: str,
                               inputs: List[Tuple[str, str]],
                               outputs: List[Tuple[str, str]]) -> Tuple[Optional[dict], str]:
@@ -388,9 +474,14 @@ def declared_retention_memory(project: Path, dut: str,
     preload, refusal = _declared_retention_preload(decl, memory["depth"])
     if refusal:
         return None, refusal
+    basis = "selected declaration; previous registered transaction commits on every rising edge"
+    if preload is None and _retention_is_cpu(project):
+        preload, basis = _cpu_retention_preload(project, dut, decl, memory, inputs, outputs)
+        if preload is None:
+            return None, basis
     if preload is not None:
         memory["memory_preload"] = preload
-    return memory, "selected declaration; previous registered transaction commits on every rising edge"
+    return memory, basis
 
 
 def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
@@ -417,11 +508,22 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
               f"  reg [7:0] retention_before [0:{depth - 1}];",
               "  integer errors = 0; integer _i; integer edge_number; integer active_cycles;",
               "  reg pending_found;",
+              "  reg checking_transactions = 0;",
               f"  always @(*) {rdata} = retention_mem[{raddr}];",
               "  // Consume the previous registered transaction on EVERY rising edge.",
               "  // Never gate the external memory commit on reset or discard a launched write.",
               f"  always @(posedge {clk}) if ({we} === 1'b1)",
               f"    retention_mem[{waddr}] <= {data};",
+              "  // Observe write validity after initial reset settles. Keep the",
+              "  // actual external commit above, including corrupt first edges.",
+              f"  always @(posedge {clk}) if (checking_transactions) begin",
+              f"    if (({we} !== 1'b0 && {we} !== 1'b1)",
+              f"        || ({we} === 1'b1 && (^({waddr}) === 1'bx",
+              f"            || {waddr} >= {depth} || ^({data}) === 1'bx))) begin",
+              "      errors = errors + 1;",
+              f'      $display("RESET_RETENTION INVALID_WRITE we=%b address=%h data=%h", {we}, {waddr}, {data});',
+              "    end",
+              "  end",
               "  task observe_reset(input integer arm);",
               "    begin",
               f"      for (_i = 0; _i < {depth}; _i = _i + 1)",
@@ -450,6 +552,7 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
         lines.append(f"    retention_mem[{entry['address']}] = 8'h{entry['byte']:02x};")
     lines += [f"    {rst} = 1'b{asserted};",
               f"    repeat (4) @(negedge {clk});",
+              "    checking_transactions = 1;",
               "    observe_reset(0);",
               f"    {rst} = 1'b{released}; pending_found = 0;",
               f"    for (active_cycles = 0; active_cycles < {RETENTION_ACTIVE_CYCLES} && !pending_found; active_cycles = active_cycles + 1) begin",
@@ -458,14 +561,15 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
               f"          && retention_mem[{waddr}] !== {data}) pending_found = 1;",
               "    end",
               "    if (!pending_found) begin",
+              f'      if (errors != 0) begin $display("[TB {name}] FAIL — invalid write transaction"); $fatal(1); end',
               f'      $display("[TB {name}] NOT_MEASURED: no actual non-idempotent pending write within {RETENTION_ACTIVE_CYCLES} cycles");',
               "      $finish;",
-              "    end",
-              f'    $display("RESET_RETENTION PENDING address=%0d before=%02x data=%02x", {waddr}, retention_mem[{waddr}], {data});',
-              "    observe_reset(1);",
-              f'    if (errors != 0) begin $display("[TB {name}] FAIL — %0d byte checks failed", errors); $fatal(1); end',
-              f'    $display("[TB {name}] PASS — actual byte retention including first sampled edge");',
-              "    $finish;", "  end", "endmodule"]
+              "    end else begin",
+              f'      $display("RESET_RETENTION PENDING address=%0d before=%02x data=%02x", {waddr}, retention_mem[{waddr}], {data});',
+              "      observe_reset(1);",
+              f'      if (errors != 0) begin $display("[TB {name}] FAIL — %0d byte checks failed", errors); $fatal(1); end',
+              f'      $display("[TB {name}] PASS — actual byte retention including first sampled edge");',
+              "      $finish;", "    end", "  end", "endmodule"]
     return "\n".join(lines) + "\n"
 
 
@@ -545,6 +649,8 @@ def retention_case_state(project: Optional[Path], case_id: str, record: dict) ->
         raw = Path(evidence["transcript"]).read_bytes()
         if hashlib.sha256(raw).hexdigest() != evidence.get("transcript_sha256"):
             return _l10x.NOT_EXECUTED, "NOT_MEASURED: current native retention transcript changed"
+        if re.search(r"(?m)^RESET_RETENTION INVALID_WRITE ", raw.decode(errors="replace")):
+            return _l10x.FAIL, "current native retention execution observed an invalid write transaction"
         measured = retention_measurement(raw.decode(errors="replace"), memory)
         if not measured["complete"] or measured != evidence.get("measurement"):
             return _l10x.NOT_EXECUTED, "NOT_MEASURED: complete current byte snapshots and first sampled edge are missing"

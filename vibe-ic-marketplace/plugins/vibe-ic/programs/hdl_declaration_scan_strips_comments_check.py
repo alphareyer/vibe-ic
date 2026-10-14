@@ -477,6 +477,36 @@ def _comment_masker(node: ast.AST) -> bool:
     return same(tail, 'i += 1\ncontinue')
 
 
+def _markdown_section_reader(node: ast.AST, compiled: Dict[str, str]) -> bool:
+    """Recognise the existing section reader's heading output, not its name.
+
+    Only the title captured by the anchored Markdown grammar has this venue.
+    The section body still carries raw text. Other helper shapes remain
+    unknown, including a similarly named helper that returns its HDL input.
+    """
+    if (not isinstance(node, ast.FunctionDef) or node.decorator_list
+            or compiled.get("_HEADING_RE") != r"^(#{1,6})\s+(.*\S)\s*$"):
+        return False
+    body = node.body
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    expected = ast.parse('''
+out: List[Tuple[str, str]] = []
+lines = text.splitlines()
+headings = [(i, len(m.group(1)), m.group(2).strip())
+            for i, line in enumerate(lines) if (m := _HEADING_RE.match(line))]
+for pos, (start, depth, heading) in enumerate(headings):
+    end = next((i for i, level, _ in headings[pos + 1:]
+                if not descendants or level <= depth), len(lines))
+    out.append((heading, "\\n".join(lines[start:end]).strip()))
+return out
+''').body
+    return [ast.dump(n, include_attributes=False) for n in body] == [
+        ast.dump(n, include_attributes=False) for n in expected]
+
+
 class _LexicalBindings:
     """Use Python's symbol table to resolve locals, globals and free names.
 
@@ -561,8 +591,20 @@ class _LexicalBindings:
         self._resolve_supplied_patterns()
         self.safe = {}
         self.maskers = set()
+        self.markdown_readers = set()
         for table, node in self.nodes.items():
-            if not _comment_masker(node):
+            masker = _comment_masker(node)
+            markdown = _markdown_section_reader(node, self.visible_patterns(table))
+            if markdown:
+                pattern_owner = self.binding(table, "_HEADING_RE")
+                markdown = sum(
+                    (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                     and n.name == "_HEADING_RE")
+                    or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                        and n.id == "_HEADING_RE")
+                    or (isinstance(n, ast.alias) and (n.asname or n.name) == "_HEADING_RE")
+                    for n in _scope_nodes(self.nodes[pattern_owner], self.eager_annotations)) == 1
+            if not (masker or markdown):
                 continue
             owner = self.binding(self.parents[table], node.name)
             writes = sum(
@@ -573,7 +615,10 @@ class _LexicalBindings:
                 or (isinstance(n, ast.alias) and (n.asname or n.name) == node.name)
                 for n in _scope_nodes(self.nodes[owner], self.eager_annotations))
             if writes == 1:
-                self.maskers.add((owner, node.name))
+                if masker:
+                    self.maskers.add((owner, node.name))
+                if markdown:
+                    self.markdown_readers.add((owner, node.name))
 
     def binding(self, table, name):
         """The defining scope; an unknown local still shadows outer regexes."""
@@ -660,6 +705,27 @@ class _LexicalBindings:
         return {symbol.get_name() for symbol in table.get_symbols()
                 if (self.binding(table, symbol.get_name()), symbol.get_name())
                 in self.maskers}
+
+    def markdown_headings(self, table):
+        """First tuple item from a proven reader, with no other local write."""
+        nodes = list(_scope_nodes(self.nodes[table], self.eager_annotations))
+        headings = set()
+        for node in nodes:
+            if not (isinstance(node, ast.For)
+                    and isinstance(node.target, (ast.Tuple, ast.List))
+                    and len(node.target.elts) == 2
+                    and isinstance(node.target.elts[0], ast.Name)
+                    and isinstance(node.iter, ast.Call)
+                    and isinstance(node.iter.func, ast.Name)
+                    and (self.binding(table, node.iter.func.id), node.iter.func.id)
+                    in self.markdown_readers):
+                continue
+            name = node.target.elts[0].id
+            writes = sum(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                         and n.id == name for n in nodes)
+            if writes == 1:
+                headings.add(name)
+        return headings
 
     def stripped(self, table):
         if table not in self.safe:
@@ -774,6 +840,7 @@ def scan_source(src: str, label: str) -> List[str]:
         if not regs:
             continue
         safe = bindings.stripped(table)
+        headings = bindings.markdown_headings(table)
         for n in _scope_nodes(scope, bindings.eager_annotations):
             if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                     and n.func.attr in _SCAN
@@ -782,7 +849,8 @@ def scan_source(src: str, label: str) -> List[str]:
             if n.func.value.id not in regs or not n.args:
                 continue
             arg = n.args[-1] if n.func.attr in ("sub", "split") else n.args[0]
-            if isinstance(arg, ast.Name) and arg.id not in safe:
+            if (isinstance(arg, ast.Name) and arg.id not in safe
+                    and arg.id not in headings):
                 out.append(f"{label}::{owner}::{n.func.value.id}({arg.id})")
     return sorted(set(out))
 

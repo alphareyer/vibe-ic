@@ -11,6 +11,7 @@ import argparse, json, os, subprocess, shutil, sys
 import hashlib
 from pathlib import Path
 import time
+import _progress_run
 from contextvars import ContextVar
 from _execution_manifest import (ISSUED_MANIFEST_ENV, issued_manifest_path, is_exclusive_regular)
 _STEP8_PRODUCER_TIMEOUT_S = 30
@@ -449,7 +450,10 @@ def _step7_pdk(values, source: Path, target: Path):
         if (item.name not in kwargs and item.default is MISSING
                 and item.default_factory is MISSING):
             kwargs[item.name] = '' if item.type in (str, 'str') else None
-    return PdkConfig(**kwargs)
+    # Preserve the selected value, or the dataclass's existing typed default.
+    tapcell_master = kwargs.pop('tapcell_master',
+        next(item.default for item in fields(PdkConfig) if item.name == 'tapcell_master'))
+    return PdkConfig(tapcell_master=tapcell_master, **kwargs)
 
 
 def produce_7(project, output, top=None, pdk=None, container=None, **k):
@@ -611,7 +615,11 @@ def produce_12(project,output,**k):
     if not scan.is_file(): return _write('12',output,'design_one_shot_runner Yosys command',reason='scan netlist input unavailable',inputs=str(scan))
     target.parent.mkdir(parents=True,exist_ok=True)
     script=f'read_verilog "{scan}"; opt_clean -purge; write_verilog -noattr "{target}"'
-    try: cp=subprocess.run(['yosys','-p',script],capture_output=True,text=True)
+    try: cp=_progress_run.run(['yosys','-p',script],capture_output=True,text=True)
+    except _progress_run.Stalled as exc:
+        return _write('12',output,'design_one_shot_runner Yosys command',
+                      reason='yosys producer stalled',rc=_progress_run.RC_STALLED,
+                      stdout=exc.stdout,stderr=exc.stderr + '\n' + str(exc))
     except OSError as exc: return _write('12',output,'design_one_shot_runner Yosys command',reason=f'yosys unavailable: {exc}')
     if cp.returncode != 0 or not target.is_file(): return _write('12',output,'design_one_shot_runner Yosys command',reason='yosys producer failed',rc=cp.returncode,stderr=cp.stderr)
     return target

@@ -268,7 +268,7 @@ def run_mixed_top(project: Path, image: str, pdk_root: Path, pdk: str, half: str
         try:
             if step == 'Netgen.LVS':
                 if extracted is None:
-                    raise Refusal('LL_MIXED_TOP_EXTRACTION_MISSING', step)
+                    raise Refusal('LL_MIXED_TOP_EXTRACTION_MISSING', f"run_mixed_top.extracted is absent before {step}: requires the Magic.SpiceExtraction state_out.json handoff; Netgen.LVS not invoked")
                 state = extracted
             else:
                 state = state_from_direct(project, image, configs[step], views,

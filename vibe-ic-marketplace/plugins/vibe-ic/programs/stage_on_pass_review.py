@@ -433,6 +433,8 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _design_module_set as _dms  # noqa: E402
+from module_port_audit import (lexical_mask, module_regions,
+                               parse_port_list_ansi)  # noqa: E402
 # THE ONE NEGATION VOCABULARY AND THE ONE SENTENCE REACH
 # (vibe-ic#712). `grounding_occurrence` below reads both from
 # here rather than growing this module's own copy, which is the
@@ -1120,7 +1122,7 @@ def _supply_declared(pin: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
+def _optional_declared(pin: Dict[str, Any], required_signal_names=()) -> Optional[str]:
     """The intent's OWN declaration that this pin is OPTIONAL, or None.
 
     Phase 1 writes `optional: true` on a pin whose source row the design input
@@ -1133,9 +1135,72 @@ def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
     reviewer that disarmed on it would be silencing a pin the intent did not
     release.
     """
-    if pin.get("optional") is True:
+    # An explicit required signal, including its published pin aliases, is
+    # still an obligation when another row carries an optional/False marker.
+    if (pin.get("optional") is True
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True
+            and str(pin.get("name")) not in required_signal_names):
         return "optional=True"
     return None
+
+
+def _documentary_intent_pins(project, content, pins, artefact_top,
+                             required_signal_names=()):
+    """Document examples released by a current selected-interface binding.
+
+    The producer keeps these rows for document provenance. An absent-from-top
+    label alone releases nothing: the selected source bytes and top must still
+    match. The current source's own header roster overrides inconsistent L9
+    labels: a port the source declares remains an implementation obligation.
+    An unreadable or incomplete roster cannot release a documentary row.
+    This stdlib-only helper is also embedded in R2's standalone reproducer.
+    """
+    import hashlib
+
+    binding = content.get("selected_interface_binding")
+    if not isinstance(binding, dict):
+        return set()
+    top = binding.get("top_module")
+    if not top or top != content.get("top_module") or top != artefact_top:
+        return set()
+    source_rel = binding.get("selected_source")
+    examples = binding.get("document_examples_not_implemented")
+    if (not isinstance(source_rel, str) or not source_rel
+            or not isinstance(examples, list)
+            or any(not isinstance(name, str) for name in examples)):
+        return set()
+    try:
+        root = Path(project).resolve()
+        source = (root / source_rel).resolve()
+        if Path(source_rel).is_absolute() or not source.is_relative_to(root):
+            return set()
+        source_bytes = source.read_bytes()
+        digest = hashlib.sha256(source_bytes).hexdigest()
+    except (OSError, ValueError):
+        return set()
+    if digest != binding.get("selected_source_sha256"):
+        return set()
+    issues = []
+    text = source_bytes.decode("utf-8", errors="replace")
+    regions = [region for region in module_regions(text, issues) if region[0] == top]
+    if issues or len(regions) != 1:
+        return set()
+    _, start, body_start, _ = regions[0]
+    try:
+        implemented = parse_port_list_ansi(
+            lexical_mask(text[start:body_start], attributes=True), str(source), 1, issues)
+    except ValueError:
+        return set()
+    if issues or not implemented:
+        return set()
+    return {str(pin["name"]) for pin in pins
+            if pin.get("name") in examples
+            and str(pin["name"]) not in required_signal_names
+            and str(pin["name"]) not in implemented
+            and pin.get("declared_by_staged_top") is False
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True}
 
 
 def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
@@ -1146,124 +1211,33 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
         return {"readable": False, "why": str(e)}
     if not isinstance(d, dict):
         return {"readable": False, "why": "L9 is not a mapping"}
+    required_signal_pins = [pin
+        for field in _INTENT_PIN_FIELDS
+        for pin in (d.get(field) if isinstance(d.get(field), list) else [])
+        if isinstance(pin, dict) and pin.get("name")
+        and (pin.get("required") is True or pin.get("mandatory") is True)
+        and not _supply_declared(pin)]
+    required_signal_names = sorted({str(pin["name"]) for pin in required_signal_pins})
     for field in _INTENT_PIN_FIELDS:
         rows = d.get(field)
         if isinstance(rows, list) and rows:
             pins = [p for p in rows if isinstance(p, dict) and p.get("name")]
             if pins:
+                # A required signal published only in another supported alias
+                # still belongs to this interface. Keep the primary rows.
+                names = {str(pin["name"]) for pin in pins}
+                for pin in required_signal_pins:
+                    name = str(pin["name"])
+                    if name not in names:
+                        pins.append(pin)
+                        names.add(name)
                 return {"readable": True, "file": str(l9_path), "field": field,
                         "value": [str(p["name"]) for p in pins],
-                        "pins": pins, "_documentary_input": d}
+                        "pins": pins, "_required_signal_names": required_signal_names,
+                        "top_module": d.get("top_module"),
+                        "selected_interface_binding": d.get("selected_interface_binding")}
     return {"readable": True, "file": str(l9_path), "field": None,
             "value": [], "pins": []}
-
-
-def _documentary_disarms(doc, project, netlist, built, top, other_release):
-    """Consume the existing selected-interface producer's documentary binding.
-
-    A boolean False alone cannot release a required interface. The same name
-    must be in the binding's exact retired list and its illustrative group,
-    with current selected netlist bytes and an agreeing module identity. This
-    read-only helper is embedded verbatim into R2's standalone emitted regression.
-    It does not verify declaration provenance or replace that owning gate.
-    """
-    import hashlib
-
-    fields = ("top_ports", "ports", "top_module_pins")
-    tables = [doc.get(key) for key in fields if key in doc]
-    false_names = {p.get("name") for rows in tables if isinstance(rows, list)
-                   for p in rows if isinstance(p, dict)
-                   and isinstance(p.get("name"), str)
-                   and p.get("declared_by_staged_top") is False}
-    # The legacy supply/optional contract already releases some names. A
-    # retained False marker does not make their absence a new documentary
-    # obligation. All published aliases must agree before excluding one.
-    ignored = set()
-    for name in false_names:
-        matching = [[p for p in rows if isinstance(p, dict) and p.get("name") == name]
-                    for rows in tables if isinstance(rows, list)]
-        if len(matching) == len(tables) and all(
-                len(rows) == 1 and rows[0].get("declared_by_staged_top") is False
-                and other_release(rows[0])
-                and all(rows[0].get(key) is None or rows[0][key] is False
-                        for key in ("required", "mandatory"))
-                for rows in matching):
-            ignored.add(name)
-    false_names -= ignored
-    binding = doc.get("selected_interface_binding")
-    retired = binding.get("document_examples_not_implemented") if isinstance(binding, dict) else None
-    if not false_names and not retired:
-        return {}, []
-
-    def refuse(reason):
-        return {}, [reason]
-
-    def names(value):
-        return (isinstance(value, list) and bool(value)
-                and all(isinstance(n, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", n)
-                        for n in value) and len(value) == len(set(value)))
-
-    if not isinstance(binding, dict) or not names(retired):
-        return refuse("documentary release lacks an exact nonempty retired-name list")
-    retired = set(retired) - ignored
-    if not retired and not false_names:
-        return {}, []
-    if retired != false_names:
-        return refuse("documentary retired names and exact False pin declarations disagree")
-    for rows in tables:
-        if not isinstance(rows, list):
-            return refuse("documentary intent pin field is not a list")
-        for name in retired:
-            matches = [p for p in rows if isinstance(p, dict) and p.get("name") == name]
-            if len(matches) != 1 or matches[0].get("declared_by_staged_top") is not False:
-                return refuse("documentary pin identity or False declaration conflicts across intent fields")
-            if any(matches[0].get(key) is not None and matches[0][key] is not False
-                   for key in ("required", "mandatory")):
-                return refuse("documentary pin also declares a required or mandatory interface")
-    if retired & set(built):
-        return refuse("documentary pin is present in the selected netlist")
-    if not isinstance(doc.get("top_module"), str) or not (
-            doc["top_module"] == binding.get("top_module") == top):
-        return refuse("documentary selected-interface module identity disagrees")
-    try:
-        relative = str(netlist.relative_to(project))
-        selected = binding.get("selected_source")
-        if not isinstance(selected, str) or selected != relative:
-            return refuse("documentary selected source is not this R2 netlist")
-        path = netlist
-        while path != project:
-            if path.is_symlink() or path.parent == path:
-                return refuse("documentary selected source has a symlink or foreign ancestor")
-            path = path.parent
-        expected = binding.get("selected_source_sha256")
-        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
-            return refuse("documentary selected source has no exact SHA256 identity")
-        if hashlib.sha256(netlist.read_bytes()).hexdigest() != expected:
-            return refuse("documentary selected netlist bytes changed")
-    except (OSError, ValueError) as exc:
-        return refuse("documentary selected source unreadable: " + str(exc))
-    groups = binding.get("illustrative_groups")
-    if not isinstance(groups, list) or not groups:
-        return refuse("documentary binding lacks illustrative groups")
-    grouped = []
-    for group in groups:
-        if not isinstance(group, dict) or not names(group.get("l9")) or not names(group.get("rtl")):
-            return refuse("documentary illustrative group has invalid name lists")
-        remaining = set(group["l9"]) - ignored
-        if not remaining:
-            continue
-        grouped.extend(name for name in group["l9"] if name not in ignored)
-        if not set(group["rtl"]) <= set(built):
-            return refuse("documentary illustrative group names an unbuilt replacement")
-        for rows in tables:
-            for name in group["rtl"]:
-                matches = [p for p in rows if isinstance(p, dict) and p.get("name") == name]
-                if len(matches) != 1 or matches[0].get("declared_by_staged_top") is not True:
-                    return refuse("documentary replacement lacks an exact implemented pin declaration")
-    if len(grouped) != len(set(grouped)) or set(grouped) != retired:
-        return refuse("documentary groups and exact retired names disagree")
-    return {name: "declared_by_staged_top=False; exact current selected-interface binding"
-            for name in sorted(retired)}, []
 
 
 def netlist_port_directions(text: str) -> Dict[str, str]:
@@ -1360,12 +1334,13 @@ def rule_intent_pin_not_in_netlist(project: Path,
     R4) already treats the same field as advisory. Read off the intent's own
     boolean and nothing else — see `_optional_declared`.
 
-    THE DOCUMENTARY DISARM consumes the existing selected-interface binding:
-    an exact False pin declaration, the exact retired-name list and
-    illustrative group must agree, and the binding must name this netlist's
-    current bytes and top. Missing identity or contradictory declarations
-    reject rather than silently releasing a required pin. The same helper
-    is embedded in the standalone regression — see `_documentary_disarms`.
+    DOCUMENTARY PORTS: the selected-interface producer retains illustrative
+    rows in L9 for provenance, marking them absent from the selected top. Only
+    a current source-hash/top binding naming the row as documentary releases
+    it, and the actual selected source must not declare it. The source header
+    roster overrides inconsistent documentary labels; an unbound false label
+    never releases a hardware requirement. This
+    changes the interface comparison, not stage 2's declared advisory policy.
     """
     intent_rel = [str(x) for x in (decl.get("intent") or [])]
     artefact_rel = [str(x) for x in (decl.get("artefact") or [])]
@@ -1379,7 +1354,7 @@ def rule_intent_pin_not_in_netlist(project: Path,
         return {"verdict": "NOT_CHECKED",
                 "why": f"{l9} does not exist; the intent was never published"}
     intent = read_intent_pins(l9)
-    documentary_input = intent.pop("_documentary_input", {})
+    required_signal_names = set(intent.pop("_required_signal_names", []))
     intent["intent_rel"] = str(l9.relative_to(project))
     if not intent.get("readable"):
         return {"verdict": "NOT_CHECKED", "why": f"{l9}: {intent.get('why')}"}
@@ -1412,9 +1387,8 @@ def rule_intent_pin_not_in_netlist(project: Path,
                         f"certifies nothing")}
 
     built = set(art["ports"])
-    documentary, documentary_refusals = _documentary_disarms(
-        documentary_input, project, netlist, built, art["top"],
-        lambda pin: bool(_supply_declared(pin) or _optional_declared(pin)))
+    documentary = _documentary_intent_pins(
+        project, intent, intent["pins"], art["top"], required_signal_names)
     absent_signal: List[Dict[str, Any]] = []
     disarmed: List[Dict[str, Any]] = []
     for pin in intent["pins"]:
@@ -1422,19 +1396,22 @@ def rule_intent_pin_not_in_netlist(project: Path,
         if name in built:
             continue
         why_supply = _supply_declared(pin)
-        why_optional = None if why_supply else _optional_declared(pin)
-        why_documentary = documentary.get(name)
+        why_optional = None if why_supply else _optional_declared(pin, required_signal_names)
         row = {"name": name,
                "direction": pin.get("direction") or pin.get("mode"),
                "evidence": pin.get("evidence")}
-        if why_supply:
+        # A same-name required signal alias still owes a built digital port.
+        if why_supply and name not in required_signal_names:
             row["intent_declares_supply"] = why_supply
             disarmed.append(row)
         elif why_optional:
             row["intent_declares_optional"] = why_optional
             disarmed.append(row)
-        elif why_documentary:
-            row["intent_declares_documentary"] = why_documentary
+        elif name in documentary:
+            row["intent_declares_documentary"] = (
+                "absent from current selected source port roster; "
+                "declared_by_staged_top=False; current selected_interface_binding."
+                "document_examples_not_implemented")
             disarmed.append(row)
         else:
             absent_signal.append(row)
@@ -1444,21 +1421,14 @@ def rule_intent_pin_not_in_netlist(project: Path,
     common = {"intent": intent, "artefact": art, "disarmed": disarmed,
               "extra_ports_not_in_intent": extra}
 
-    if documentary_refusals:
-        return {"verdict": "REJECT", **common,
-                "documentary_binding_refusals": documentary_refusals,
-                "absent_signal_pins": absent_signal,
-                "contradiction": "the intent's documentary release is unproven or contradictory: "
-                                 + "; ".join(documentary_refusals)}
-
     if not absent_signal:
         out = {"verdict": "ACCEPT", **common}
         if disarmed:
             supply = [r for r in disarmed if r.get("intent_declares_supply")]
             optional = [r for r in disarmed
                         if r.get("intent_declares_optional")]
-            documentary_rows = [r for r in disarmed
-                                if r.get("intent_declares_documentary")]
+            examples = [r for r in disarmed
+                        if r.get("intent_declares_documentary")]
             parts = []
             if supply:
                 parts.append(
@@ -1477,11 +1447,12 @@ def rule_intent_pin_not_in_netlist(project: Path,
                                 for r in optional)
                     + "); a design that does not take the option builds no "
                       "such port, which is not a contradiction of the intent")
-            if documentary_rows:
+            if examples:
                 parts.append(
-                    f"{len(documentary_rows)} of them THE INTENT ITSELF marks "
-                    "documentary, with an exact current selected-interface binding ("
-                    + "; ".join(r["name"] for r in documentary_rows) + ")")
+                    f"{len(examples)} of them the current selected-interface "
+                    "binding declares documentary examples, not implemented "
+                    "ports (" + "; ".join(r["name"] for r in examples)
+                    + "); their document provenance is retained in L9")
             out["verdict"] = "DISARMED"
             out["observation"] = (
                 f"{len(disarmed)} intent pin(s) are absent from the netlist's "
@@ -3285,7 +3256,11 @@ _EMITTED_TEST_R2 = (
         "job. It also does not assert on a pin the intent itself marks a supply: a\n"
         "non-power-aware netlist carries no supply port, and that is stage 3's to sign\n"
         "off. Nor on a pin the intent itself marks optional (`optional: true`): a\n"
-        "design that does not take the option builds no such port.")
+        "design that does not take the option builds no such port. Documentary\n"
+        "examples are released only by a current selected-source hash and top\n"
+        "binding, absence from the actual source roster and an explicit\n"
+        "absent-from-top label; implemented and mandatory pins remain\n"
+        "obligations.")
     + _emitted_prelude(r'''INTENT_REL = {intent_rel!r}
 INTENT_FIELD = {intent_field!r}
 NETLIST_REL = {netlist_rel!r}
@@ -3298,10 +3273,8 @@ _PORT_RE = re.compile(
 _MODULE_RE = re.compile(
     r"(?ms)^[ \t]*module[ \t]+([A-Za-z_]\w*)\b(.*?)^[ \t]*endmodule")
 ''', want_re=True)
-    + r'''{documentary_helper}
-
-
-def _is_supply(pin) -> bool:
+    + '{documentary_helper}\n\n'
+    + r'''def _is_supply(pin) -> bool:
     for key in ("io", "type", "kind", "role", "pin_type"):
         v = pin.get(key)
         if isinstance(v, str) and v.strip().lower() in SUPPLY_ROLES:
@@ -3316,8 +3289,11 @@ def _is_supply(pin) -> bool:
     return False
 
 
-def _is_optional(pin) -> bool:
-    return pin.get("optional") is True
+def _is_optional(pin, required_signal_names=()) -> bool:
+    return (pin.get("optional") is True
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True
+            and str(pin.get("name")) not in required_signal_names)
 
 
 def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
@@ -3327,6 +3303,19 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
     pins = [p for p in (intent.get(INTENT_FIELD) or [])
             if isinstance(p, dict) and p.get("name")]
     assert pins, "%s::%s declares no external pin" % (INTENT_REL, INTENT_FIELD)
+    required_signal_pins = [pin
+        for field in ("top_ports", "ports", "top_module_pins")
+        for pin in (intent.get(field) if isinstance(intent.get(field), list) else [])
+        if isinstance(pin, dict) and pin.get("name")
+        and (pin.get("required") is True or pin.get("mandatory") is True)
+        and not _is_supply(pin)]
+    required_signal_names = set(str(pin["name"]) for pin in required_signal_pins)
+    names = set(str(pin["name"]) for pin in pins)
+    for pin in required_signal_pins:
+        name = str(pin["name"])
+        if name not in names:
+            pins.append(pin)
+            names.add(name)
 
     text = (root / NETLIST_REL).read_text(encoding="utf-8", errors="replace")
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
@@ -3356,13 +3345,13 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "the netlist's structural top %r declares no port; an empty interface "
         "refutes nothing" % roots[0])
 
-    documentary, refusals = _documentary_disarms(
-        intent, root, root / NETLIST_REL, built, roots[0],
-        lambda pin: _is_supply(pin) or _is_optional(pin))
-    assert not refusals, "; ".join(refusals)
+    documentary = _documentary_intent_pins(
+        root, intent, pins, roots[0], required_signal_names)
     absent = sorted(str(p["name"]) for p in pins
-                    if str(p["name"]) not in built and not _is_supply(p)
-                    and not _is_optional(p) and str(p["name"]) not in documentary)
+                    if str(p["name"]) not in built
+                    and (not _is_supply(p) or str(p["name"]) in required_signal_names)
+                    and not _is_optional(p, required_signal_names)
+                    and str(p["name"]) not in documentary)
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
@@ -4069,14 +4058,31 @@ def _body_r1(finding: Dict[str, Any], stage_id: str) -> str:
 
 def _body_r2(finding: Dict[str, Any], stage_id: str) -> str:
     import inspect
+    import module_port_audit as port_parser
 
+    # Embed the same existing header parser used by the ordinary rule. No
+    # plugin dependency is left in the standalone test, and no second parser
+    # interprets the source names differently. Parser issues release nothing.
+    parser_source = (
+        "from dataclasses import dataclass\n"
+        "from typing import Dict, List, Optional, Tuple\n\n"
+        + "\n\n".join(inspect.getsource(symbol) for symbol in (
+            port_parser.PortDecl, port_parser.extract_balanced,
+            port_parser.split_top_level, port_parser._attribute_start,
+            port_parser.lexical_mask, port_parser.mask_attributes_only,
+            port_parser.module_regions, port_parser.eval_width_expr,
+            port_parser.parse_port_list_ansi))
+        + "\n_DIM_RE = re.compile(%r, %d)\n" % (
+            port_parser._DIM_RE.pattern, port_parser._DIM_RE.flags)
+        + "_NUMERIC_DIM_RE = re.compile(%r, %d)\n\n" % (
+            port_parser._NUMERIC_DIM_RE.pattern, port_parser._NUMERIC_DIM_RE.flags))
     return _EMITTED_TEST_R2.format(
         program=_NAME, stage=stage_id,
         contradiction=finding["contradiction"],
         intent_rel=finding["intent"]["intent_rel"],
         intent_field=finding["intent"]["field"],
         netlist_rel=finding["artefact"]["artefact_rel"],
-        documentary_helper=inspect.getsource(_documentary_disarms))
+        documentary_helper=parser_source + inspect.getsource(_documentary_intent_pins))
 
 
 def _body_phase1_cited_input(finding: Dict[str, Any], stage_id: str) -> str:

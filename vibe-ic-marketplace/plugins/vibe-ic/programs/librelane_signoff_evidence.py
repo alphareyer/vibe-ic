@@ -283,7 +283,7 @@ def count_row(project: Path, folder: Path, step: str, key: str,
         _require(isinstance(metrics, dict), 'LL_STATE_METRICS_MALFORMED')
         value = metrics.get(key)
         _require(type(value) is int and value >= 0, 'LL_COUNT_NOT_TYPED_NONNEGATIVE')
-        _require(key in pv.produced_metrics(folder), 'LL_METRIC_INHERITED_OR_ABSENT')
+        _require(key in pv.produced_metrics(folder), 'LL_METRIC_INHERITED_OR_ABSENT' + f": {folder / 'state_in.json'} -> {folder / 'state_out.json'}: metrics[{key!r}] was not newly produced or changed by step {step}")
         _require(any(key in kinds.get(step, ()) for kinds in COUNTS.values()) or
                  key in pv.PRODUCED.get(step, ()), 'LL_METRIC_NOT_OWNED')
         out.update(value=value, sha256=digest(source), receipt=str(folder / 'vibeic_receipt.json'),

@@ -42,7 +42,7 @@ def main():
     elif command and command[0] == "--skip":
         command = command[1:]
     else:
-        raise ValueError("NATIVE373_WRAPPER_COMMAND_MISSING")
+        raise ValueError('NATIVE373_WRAPPER_COMMAND_MISSING' + f": sys.argv[1:]: argv after image {image!r}: expected --entrypoint or --skip before command; observed {command!r}; no child launched")
     argv = ["docker", "run", *flags, *_dmem.docker_memory_flags(), "--cpus", "2",
             "--network", "none", image, "--skip",
             "/usr/bin/time", "-v", *command]

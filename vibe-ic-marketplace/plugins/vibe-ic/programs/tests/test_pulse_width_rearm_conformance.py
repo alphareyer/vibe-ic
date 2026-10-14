@@ -294,3 +294,34 @@ def _synthetic_receipt(source_text, rtl_text):
         "result_channel_sha256": "synthetic",
         "raw_simulation_tail": ["PWR_COUNTS legal=1 boundary_bad=0 bad=0 final=1 max=4"],
     }
+
+
+@pytest.mark.parametrize('state',['progressing','failed','stalled'])
+@pytest.mark.parametrize('with_record',[False,True])
+def test_allocated_pulse_run_preserves_progress_and_launch_record(tmp_path,monkeypatch,state,with_record):
+    import _watchdog as wd
+    calls=[]
+    def observed(argv,**kw):
+        calls.append((argv,kw))
+        kw['popen_factory'](argv)
+        return wd.SupervisedResult(0 if state=='progressing' else (7 if state=='failed' else wd.RC_STALLED),
+            'retained stdout','WATCHDOG_STALLED' if state=='stalled' else 'retained stderr',
+            'stalled' if state=='stalled' else 'natural',elapsed_s=50,
+            supervision={'pid':321,'watched':'output+cpu'})
+    monkeypatch.setattr(wd,'run_host_supervised',observed)
+    monkeypatch.setattr(checker.subprocess,'run',lambda *a,**k:subprocess.CompletedProcess([],7,'raw','raw'))
+    class Raw:
+        pid=321;returncode=7
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def communicate(self,**kw):return 'raw','raw'
+    monkeypatch.setattr(checker.subprocess,'Popen',lambda *a,**k:Raw())
+    record={} if with_record else None
+    argv=['neutral-tool','argument']
+    got=checker._run(argv,timeout=2,cwd=tmp_path,launch_record=record)
+    assert got==(0 if state=='progressing' else (7 if state=='failed' else wd.RC_STALLED),'retained stdout','WATCHDOG_STALLED' if state=='stalled' else 'retained stderr')
+    assert len(calls)==1 and calls[0][0]==argv and calls[0][1]['hard_ceiling_s']==2
+    assert calls[0][1]['cwd']==str(tmp_path)
+    if with_record:
+        assert record['pid']==321 and record['argv']==argv and record['returncode']==got[0]
+        assert record['supervision']['watched']=='output+cpu'
