@@ -76,6 +76,13 @@ def _default_handoff_audit(project, monkeypatch):
     import os
     import hashlib
 
+    # This public fixture declares only a digital buffer.  The unchanged
+    # analog intent reviewer needs that explicit INPUT, not an absent L5.
+    l5 = project / 'phase1/generated_docs/L5_ADI_SPEC.json'
+    l5.parent.mkdir(parents=True, exist_ok=True)
+    l5.write_text(json.dumps({'no_analog': True,
+                             'analog_blocks_detected': False,
+                             'analog_blocks': []}) + '\n')
     capture = os.environ.get('R3140_PUBLIC_INPUTS')
     if capture:
         case = os.environ['PYTEST_CURRENT_TEST'].removesuffix(' (call)')
