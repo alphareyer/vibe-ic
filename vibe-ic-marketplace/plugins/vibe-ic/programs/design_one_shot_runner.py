@@ -18875,8 +18875,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("yosys_synth", "FAIL", time.time() - t0, str(exc))
     finally:
-        if _step9_handoff is not None:
-            _execution.release_program_first_fallback(_step9_handoff)
+        _execution.release_program_first_fallback(_step9_handoff)
     # Stage stub OTP hex inside synth_dir so $readmemh resolves at synth.
     for stem in ("apple.hex", "otp_image.hex"):
         stub = synth_dir / stem
