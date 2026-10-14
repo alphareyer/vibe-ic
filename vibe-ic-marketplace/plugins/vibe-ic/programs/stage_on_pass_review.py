@@ -1158,7 +1158,7 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
             "value": [], "pins": []}
 
 
-def _documentary_disarms(doc, project, netlist, built, top):
+def _documentary_disarms(doc, project, netlist, built, top, other_release):
     """Consume the existing selected-interface producer's documentary binding.
 
     A boolean False alone cannot release a required interface. The same name
@@ -1175,6 +1175,21 @@ def _documentary_disarms(doc, project, netlist, built, top):
                    for p in rows if isinstance(p, dict)
                    and isinstance(p.get("name"), str)
                    and p.get("declared_by_staged_top") is False}
+    # The legacy supply/optional contract already releases some names. A
+    # retained False marker does not make their absence a new documentary
+    # obligation. All published aliases must agree before excluding one.
+    ignored = set()
+    for name in false_names:
+        matching = [[p for p in rows if isinstance(p, dict) and p.get("name") == name]
+                    for rows in tables if isinstance(rows, list)]
+        if len(matching) == len(tables) and all(
+                len(rows) == 1 and rows[0].get("declared_by_staged_top") is False
+                and other_release(rows[0])
+                and all(rows[0].get(key) is None or rows[0][key] is False
+                        for key in ("required", "mandatory"))
+                for rows in matching):
+            ignored.add(name)
+    false_names -= ignored
     binding = doc.get("selected_interface_binding")
     retired = binding.get("document_examples_not_implemented") if isinstance(binding, dict) else None
     if not false_names and not retired:
@@ -1190,7 +1205,9 @@ def _documentary_disarms(doc, project, netlist, built, top):
 
     if not isinstance(binding, dict) or not names(retired):
         return refuse("documentary release lacks an exact nonempty retired-name list")
-    retired = set(retired)
+    retired = set(retired) - ignored
+    if not retired and not false_names:
+        return {}, []
     if retired != false_names:
         return refuse("documentary retired names and exact False pin declarations disagree")
     for rows in tables:
@@ -1232,7 +1249,10 @@ def _documentary_disarms(doc, project, netlist, built, top):
     for group in groups:
         if not isinstance(group, dict) or not names(group.get("l9")) or not names(group.get("rtl")):
             return refuse("documentary illustrative group has invalid name lists")
-        grouped.extend(group["l9"])
+        remaining = set(group["l9"]) - ignored
+        if not remaining:
+            continue
+        grouped.extend(name for name in group["l9"] if name not in ignored)
         if not set(group["rtl"]) <= set(built):
             return refuse("documentary illustrative group names an unbuilt replacement")
         for rows in tables:
@@ -1393,7 +1413,8 @@ def rule_intent_pin_not_in_netlist(project: Path,
 
     built = set(art["ports"])
     documentary, documentary_refusals = _documentary_disarms(
-        documentary_input, project, netlist, built, art["top"])
+        documentary_input, project, netlist, built, art["top"],
+        lambda pin: bool(_supply_declared(pin) or _optional_declared(pin)))
     absent_signal: List[Dict[str, Any]] = []
     disarmed: List[Dict[str, Any]] = []
     for pin in intent["pins"]:
@@ -3336,7 +3357,8 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "refutes nothing" % roots[0])
 
     documentary, refusals = _documentary_disarms(
-        intent, root, root / NETLIST_REL, built, roots[0])
+        intent, root, root / NETLIST_REL, built, roots[0],
+        lambda pin: _is_supply(pin) or _is_optional(pin))
     assert not refusals, "; ".join(refusals)
     absent = sorted(str(p["name"]) for p in pins
                     if str(p["name"]) not in built and not _is_supply(p)

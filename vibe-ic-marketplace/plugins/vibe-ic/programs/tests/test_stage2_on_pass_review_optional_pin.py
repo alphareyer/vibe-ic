@@ -265,3 +265,46 @@ def test_documentary_disarm_keeps_required_pin_and_emitted_regression(tmp_path):
     l9p.write_text(json.dumps(doc))
     after = subprocess.run([sys.executable, str(emitted)], capture_output=True, text=True)
     assert after.returncode == 0, after.stdout + after.stderr
+
+
+@pytest.mark.parametrize("kind", ["optional", "supply"])
+@pytest.mark.parametrize("documentary", [False, True])
+def test_existing_legacy_disarm_keeps_an_exact_false_marker(tmp_path, kind, documentary):
+    d = documentary_cell(tmp_path)
+    l9p = d / L9_REL
+    doc = json.loads(l9p.read_text())
+    legacy = {"name": "legacy_absent", "direction": "input",
+              "declared_by_staged_top": False}
+    legacy.update({"optional": True} if kind == "optional" else {"role": "power"})
+    for field in ("top_ports", "ports", "top_module_pins"):
+        if field not in doc: continue
+        if not documentary:
+            doc[field] = [p for p in doc[field] if p["name"] != "retired_example"]
+        doc[field].append(dict(legacy))
+    if not documentary: del doc["selected_interface_binding"]
+    l9p.write_text(json.dumps(doc))
+    r = run(d, "--json", str(tmp_path / "r.json"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    f = json.loads((tmp_path / "r.json").read_text())["observations"][0]
+    assert f["verdict"] == "DISARMED"
+    row = next(p for p in f["disarmed"] if p["name"] == "legacy_absent")
+    assert "intent_declares_" + kind in row
+
+
+@pytest.mark.parametrize("kind", ["optional", "supply"])
+@pytest.mark.parametrize("contradiction", ["required", "alias"])
+def test_legacy_false_does_not_hide_required_or_alias_contradictions(tmp_path, kind, contradiction):
+    d = documentary_cell(tmp_path)
+    l9p = d / L9_REL
+    doc = json.loads(l9p.read_text())
+    row = {"name": "legacy_absent", "direction": "input",
+           "declared_by_staged_top": False}
+    row.update({"optional": True} if kind == "optional" else {"role": "power"})
+    doc["top_ports"].append(row)
+    if contradiction == "required": row["required"] = True
+    else:
+        doc["ports"] = [dict(p) for p in doc["top_ports"]]
+        next(p for p in doc["ports"] if p["name"] == "legacy_absent")["declared_by_staged_top"] = True
+    l9p.write_text(json.dumps(doc))
+    r = run(d, "--json", str(tmp_path / "r.json"))
+    assert r.returncode == 1, r.stdout + r.stderr
