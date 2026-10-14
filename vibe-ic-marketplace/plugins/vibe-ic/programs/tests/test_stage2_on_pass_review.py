@@ -697,3 +697,281 @@ def test_the_strip_is_idempotent_on_the_live_caller_path(tmp_path):
     got = _sopr.read_netlist_interface(nl)
     assert got["readable"] is True and got["top"] == "top"
     assert got["port_names"] == ["clk", "done"]
+
+
+# Issue 3131: documentary provenance is retained in L9, not built as hardware.
+# These fixtures are authored neutral INPUT/L9/RTL/netlist data; no corpus runs.
+_R2_DOCUMENTARY_CASES = (
+    ("matched", "ACCEPT", []),
+    ("documentary", "DISARMED", []),
+    ("netlist_binding", "DISARMED", []),
+    ("missing_real", "REJECT", ["out_write_addr"]),
+    ("unbound", "REJECT", ["out_example_addr"]),
+    ("unlisted", "REJECT", ["out_example_addr"]),
+    ("stale_source", "REJECT", ["out_example_addr"]),
+    ("wrong_top", "REJECT", ["out_example_addr"]),
+    ("missing_source", "REJECT", ["out_example_addr"]),
+    ("missing_hash", "REJECT", ["out_example_addr"]),
+    ("false_string", "REJECT", ["out_example_addr"]),
+    ("implemented", "REJECT", ["out_example_addr"]),
+    ("required", "REJECT", ["out_example_addr"]),
+    ("mandatory", "REJECT", ["out_example_addr"]),
+)
+
+
+def _r2_issue3131_fixture(tmp_path, case):
+    import hashlib
+
+    project = tmp_path / "neutral_interface"
+    l9_rel = "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    net_rel = "phase2/stage2/synth/netlist.v"
+    src_rel = "phase2/stage1/rtl/neutral_core.v"
+    input_rel = "input/docs/interface.md"
+    implemented = ["i_clk", "out_read_addr", "out_write_addr"]
+
+    def netlist(names):
+        return ("module neutral_core(" + ", ".join(names) + ");\n"
+                + "  input i_clk;\n"
+                + "".join("  output [9:0] " + n + ";\n"
+                          for n in names if n != "i_clk")
+                + "endmodule\n")
+
+    for rel in (l9_rel, net_rel, src_rel, input_rel):
+        (project / rel).parent.mkdir(parents=True, exist_ok=True)
+    (project / input_rel).write_text(
+        "The implemented ports are i_clk, out_read_addr and out_write_addr.\n"
+        "out_example_addr is a documentary example, not an implemented port.\n")
+    (project / src_rel).write_text(netlist(implemented))
+    built = [n for n in implemented
+             if case != "missing_real" or n != "out_write_addr"]
+    (project / net_rel).write_text(netlist(built))
+    ports = [{"name": n, "direction": "input" if n == "i_clk" else "output",
+              "width": 1 if n == "i_clk" else 10,
+              "declared_by_staged_top": True, "evidence": input_rel}
+             for n in implemented]
+    if case != "matched":
+        ports.append({"name": "out_example_addr", "direction": "output",
+                      "width": 10, "declared_by_staged_top": False,
+                      "evidence": input_rel})
+    selected_rel = net_rel if case == "netlist_binding" else src_rel
+    binding = {
+        "top_module": "neutral_core", "selected_source": selected_rel,
+        "selected_source_sha256": hashlib.sha256(
+            (project / selected_rel).read_bytes()).hexdigest(),
+        "document_examples_not_implemented": ([] if case == "matched"
+                                               else ["out_example_addr"]),
+        "illustrative_groups": [{"l9": ["out_example_addr"],
+                                 "rtl": ["out_read_addr", "out_write_addr"]}],
+    }
+    if case == "unlisted":
+        binding["document_examples_not_implemented"] = []
+    elif case == "stale_source":
+        (project / src_rel).write_text(netlist(implemented) + "// changed source\n")
+    elif case == "wrong_top":
+        binding["top_module"] = "other_core"
+    elif case == "missing_source":
+        (project / src_rel).unlink()
+    elif case == "missing_hash":
+        binding.pop("selected_source_sha256")
+    elif case == "false_string":
+        ports[-1]["declared_by_staged_top"] = "false"
+    elif case == "implemented":
+        ports[-1]["declared_by_staged_top"] = True
+    elif case in ("required", "mandatory"):
+        ports[-1][case] = True
+    l9 = {"top_module": "neutral_core", "top_ports": ports}
+    if case != "unbound":
+        l9["selected_interface_binding"] = binding
+    (project / l9_rel).write_text(json.dumps(l9, indent=2) + "\n")
+    return project, {"intent": [l9_rel], "artefact": [net_rel]}
+
+
+def _r2_issue3131_metadata_only(call):
+    events = []
+    active = True
+
+    def guard(event, values):
+        if active and (event in {"subprocess.Popen", "os.system", "os.posix_spawn",
+                                 "os.fork"} or event.startswith("os.exec")):
+            events.append(event)
+            raise AssertionError("metadata-only R2 attempted process dispatch: " + event)
+
+    sys.addaudithook(guard)
+    try:
+        return call(), events
+    finally:
+        active = False
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_DOCUMENTARY_CASES,
+                         ids=[c[0] for c in _R2_DOCUMENTARY_CASES])
+def test_issue3131_documentary_contract_api(tmp_path, case, verdict, absent,
+                                          record_property):
+    project, decl = _r2_issue3131_fixture(tmp_path, case)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("verdict", result["verdict"])
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert result["verdict"] == verdict
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == absent
+    assert dispatch == []
+    if verdict == "DISARMED":
+        assert [p["name"] for p in result["disarmed"]] == ["out_example_addr"]
+        assert "document" in result["observation"].lower()
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_DOCUMENTARY_CASES,
+                         ids=[c[0] for c in _R2_DOCUMENTARY_CASES])
+def test_issue3131_documentary_contract_emitted_test(tmp_path, case, verdict,
+                                                   absent, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_issue3131_fixture(tmp_path, case)
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    expected = "REJECT" if verdict == "REJECT" else "ACCEPT"
+    record_property("verdict", observed)
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert observed == expected, message
+    for name in absent:
+        assert name in message
+    if case == "missing_real":
+        assert "out_example_addr" not in message
+    assert dispatch == []
+
+
+# Review counterexample: current source bytes still implement a port that L9
+# inconsistently labels documentary. Retain the original 32 selected controls.
+_R2_SOURCE_ROSTER_CASES = (
+    ("implemented_nonansi", "REJECT", ["out_write_addr"]),
+    ("implemented_ansi", "REJECT", ["out_write_addr"]),
+    ("implemented_parameterized", "REJECT", ["out_write_addr"]),
+    ("implemented_grouped", "REJECT", ["out_write_addr"]),
+    ("example_implemented", "REJECT", ["out_example_addr"]),
+    ("source_top_absent", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("source_empty", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("source_unsupported", "REJECT", ["out_write_addr", "out_example_addr"]),
+    ("optional_true", "DISARMED", []),
+    ("optional_string", "REJECT", ["out_aux"]),
+    ("supply_role", "DISARMED", []),
+    ("signal_without_supply", "REJECT", ["out_aux"]),
+)
+
+
+def _r2_issue3131_source_roster_fixture(tmp_path, case):
+    import hashlib
+
+    missing_real = case.startswith("implemented_") or case.startswith("source_")
+    project, decl = _r2_issue3131_fixture(
+        tmp_path, "missing_real" if missing_real else "documentary")
+    l9_path = project / decl["intent"][0]
+    content = json.loads(l9_path.read_text())
+    binding = content["selected_interface_binding"]
+    source = project / binding["selected_source"]
+    if missing_real:
+        for pin in content["top_ports"]:
+            if pin["name"] == "out_write_addr":
+                pin["declared_by_staged_top"] = False
+        binding["document_examples_not_implemented"].append("out_write_addr")
+    if case == "implemented_ansi":
+        source.write_text(
+            "module neutral_core(input i_clk, output [9:0] out_read_addr, "
+            "output [9:0] out_write_addr);\nendmodule\n")
+    elif case == "implemented_parameterized":
+        source.write_text(
+            "module neutral_core #(parameter W=$clog2(1024)) (\n"
+            "  input logic i_clk,\n  output logic [W-1:0] out_read_addr,\n"
+            "  (* keep = \"true\" *) output logic [W-1:0] out_write_addr\n"
+            ");\nendmodule\n")
+    elif case == "implemented_grouped":
+        source.write_text(
+            "module neutral_core(input i_clk, output [9:0] out_read_addr, "
+            "out_write_addr);\nendmodule\n")
+    elif case == "example_implemented":
+        source.write_text(source.read_text().replace(
+            "out_write_addr);", "out_write_addr, out_example_addr);").replace(
+            "endmodule", "  output [9:0] out_example_addr;\nendmodule"))
+    elif case == "source_top_absent":
+        source.write_text(source.read_text().replace("module neutral_core", "module other_core"))
+    elif case == "source_empty":
+        source.write_text("// no module interface is available\n")
+    elif case == "source_unsupported":
+        source.write_text(
+            "module neutral_core(i_clk, out_read_addr, `WRITE_PORT);\n"
+            "input i_clk;\noutput [9:0] out_read_addr;\nendmodule\n")
+    elif case in ("optional_true", "optional_string", "supply_role", "signal_without_supply"):
+        aux = {"name": "out_aux", "direction": "output", "width": 1,
+               "declared_by_staged_top": True, "evidence": "input/docs/interface.md"}
+        if case == "optional_true":
+            aux["optional"] = True
+        elif case == "optional_string":
+            aux["optional"] = "true"
+        elif case == "supply_role":
+            aux["io"] = "POWER"
+        content["top_ports"].append(aux)
+    binding["selected_source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    l9_path.write_text(json.dumps(content, indent=2) + "\n")
+    return project, decl
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_SOURCE_ROSTER_CASES,
+                         ids=[c[0] for c in _R2_SOURCE_ROSTER_CASES])
+def test_issue3131_source_roster_overrides_documentary_labels_api(
+        tmp_path, case, verdict, absent, record_property):
+    project, decl = _r2_issue3131_source_roster_fixture(tmp_path, case)
+    result, dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+    record_property("verdict", result["verdict"])
+    record_property("absent_signal_pins", json.dumps(
+        [p["name"] for p in result.get("absent_signal_pins", [])]))
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert result["verdict"] == verdict
+    assert [p["name"] for p in result.get("absent_signal_pins", [])] == absent
+    assert dispatch == []
+    if case.startswith("implemented_"):
+        assert [p["name"] for p in result["disarmed"]] == ["out_example_addr"]
+
+
+@pytest.mark.parametrize("case,verdict,absent", _R2_SOURCE_ROSTER_CASES,
+                         ids=[c[0] for c in _R2_SOURCE_ROSTER_CASES])
+def test_issue3131_source_roster_overrides_documentary_labels_emitted(
+        tmp_path, case, verdict, absent, record_property):
+    import runpy
+
+    project, decl = _r2_issue3131_fixture(tmp_path, "missing_real")
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+    _r2_issue3131_source_roster_fixture(tmp_path, case)
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), dispatch = _r2_issue3131_metadata_only(check)
+    record_property("verdict", observed)
+    record_property("process_dispatch_attempts", json.dumps(dispatch))
+    assert observed == ("REJECT" if verdict == "REJECT" else "ACCEPT"), message
+    for name in absent:
+        assert name in message
+    if case.startswith("implemented_"):
+        assert "out_example_addr" not in message
+    assert dispatch == []

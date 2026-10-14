@@ -1447,3 +1447,171 @@ def test_native_five_role_parent_consumes_async_bytes_and_tohost(tmp_path, proto
     assert run.returncode == (1 if wrong_address else 0), values
     assert verdict == (I.FAIL if wrong_address else I.PASS), values
     assert ("ASYNC0_VALUE_FAIL" if wrong_address else "FIVE_ROLE_ASYNC_VALUE_PASS") in run.stdout, values
+
+
+# #3130: acquisition bytes are source inputs, its cited archive is an output.
+# The existing executor/network fixtures are SOURCE_CONTROL, not native CPU
+# observations. The producer, credit reader, report writer and storage CLI are real.
+def _3130_cache(tmp_path, monkeypatch, mode):
+    import os
+    import gzip
+    # The archive input must be byte-identical across independent QA arms.
+    monkeypatch.setitem(globals(), 'TARBALL',
+                        gzip.compress(gzip.decompress(TARBALL), mtime=0))
+    base = Path(os.environ['ISSUE3130_VOLATILE_ALIAS']) / tmp_path.name
+    base.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(I.tempfile, 'gettempdir', lambda: str(base))
+    monkeypatch.delenv('VIBEIC_ISA_SUITE_CACHE', raising=False)
+    if mode == 'custom':
+        monkeypatch.setenv('VIBEIC_ISA_SUITE_CACHE', str(base / 'chosen-cache'))
+    if mode != 'cold':
+        cache = I.cache_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / ('f' * 40 + '.tar.gz')).write_bytes(TARBALL)
+    return base
+
+
+def _3130_storage(project, output):
+    import subprocess
+    command = [sys.executable, str(PROGRAMS / 'project_outputs_in_tree_check.py'),
+               str(project), '--json', str(output)]
+    proc = subprocess.run(command, text=True, capture_output=True)
+    return {'argv': command, 'rc': proc.returncode, 'stdout': proc.stdout,
+            'stderr': proc.stderr, 'report': json.loads(output.read_text())}
+
+
+def _3130_observed(tmp_path, value):
+    import os
+    folder = Path(os.environ['ISSUE3130_VALUES_DIR'])
+    folder.mkdir(parents=True, exist_ok=True)
+    value['input'] = {'tarball_sha256': _sha(TARBALL),
+                      'files': {k: _sha(v) for k, v in FILES.items()},
+                      'lock': _lock()}
+    (folder / (tmp_path.name + '.json')).write_text(json.dumps(value, indent=2))
+
+
+@pytest.mark.parametrize('mode', ['warm', 'cold', 'custom'])
+def test_isa_acquisition_keeps_current_project_archive_through_credit_and_storage(
+        tmp_path, monkeypatch, mode):
+    import subprocess
+    _3130_cache(tmp_path, monkeypatch, mode)
+    p = _project(tmp_path)
+    archive = p / '.vibeic-state/isa-suite-cache' / ('f' * 40 + '.tar.gz')
+    observations = []
+    for attempt in range(2):
+        _step4(p, monkeypatch, {'s-add': OVERSIZED, 's-fencei': OVERSIZED})
+        credit, refusal = _base_isa_credit(p)
+        assert refusal is None and credit is not None, refusal
+        report = p / 'reports/phase2/gates/cpu_functional_oracle_waiver.json'
+        proc = subprocess.run([sys.executable,
+            str(PROGRAMS / 'cpu_functional_oracle_waiver_check.py'), str(p),
+            '--json', str(report)], text=True, capture_output=True)
+        doc = json.loads(report.read_text())
+        # This fixture leaves other CPU obligations incomplete. A storage fix
+        # must not turn the unrelated complete CPU verdict into PASS.
+        assert proc.returncode != 0
+        actual_credit = doc['isa_conformance_credit']['credited']
+        assert any(c['suite_pins'] == credit['suite_pins'] for c in actual_credit)
+        storage = _3130_storage(p, tmp_path / f'storage-{attempt}.json')
+        observations.append({'suite_pins': credit['suite_pins'], 'storage': storage,
+            'cpu_rc': proc.returncode, 'cpu_verdict': doc['verdict'],
+            'archive_sha256': _sha(archive.read_bytes()) if archive.is_file() else None})
+    _3130_observed(tmp_path, {'mode': mode, 'attempts': observations,
+        'archive': str(archive), 'locked_archive_sha256': _sha(TARBALL)})
+    assert [o['storage']['rc'] for o in observations] == [0, 0]
+    assert archive.read_bytes() == TARBALL
+    assert I.verify_tarball(archive.read_bytes(), _lock()['suites']['s'])[0]
+    assert all(str(archive) in o['suite_pins'][0] for o in observations)
+
+
+@pytest.mark.parametrize('use_cache', [True, False])
+def test_direct_acquisition_keeps_the_archive_beside_its_verified_output(
+        tmp_path, monkeypatch, use_cache):
+    _3130_cache(tmp_path, monkeypatch, 'warm')
+    p = tmp_path / 'project'
+    dest = p / '.vibeic-state/acquired'
+    root, why = I.acquire('s', _lock()['suites']['s'], dest,
+                          fetch=lambda _u: TARBALL, use_cache=use_cache)
+    assert root is not None
+    report = p / 'reports/acquisition.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({'suite_pin': why}))
+    storage = _3130_storage(p, tmp_path / 'storage.json')
+    archive = dest / ('f' * 40 + '.tar.gz')
+    _3130_observed(tmp_path, {'why': why, 'storage': storage,
+        'archive_sha256': _sha(archive.read_bytes()) if archive.is_file() else None})
+    assert storage['rc'] == 0, storage
+    assert archive.read_bytes() == TARBALL
+    assert {str(f.relative_to(root)): _sha(f.read_bytes()) for f in root.rglob('*')
+            if f.is_file()} == _lock()['suites']['s']['files']
+
+
+@pytest.mark.parametrize('bad', ['tarball', 'member'])
+def test_acquisition_refuses_changed_locked_bytes_before_archive_publication(
+        tmp_path, monkeypatch, bad):
+    _3130_cache(tmp_path, monkeypatch, 'cold')
+    suite = _lock()['suites']['s']
+    blob = TARBALL + b'drift' if bad == 'tarball' else TARBALL
+    if bad == 'member':
+        suite['files']['src/add-01.S'] = '0' * 64
+    dest = tmp_path / 'project/.vibeic-state/acquired'
+    root, why = I.acquire('s', suite, dest, fetch=lambda _u: blob, use_cache=False)
+    _3130_observed(tmp_path, {'root': str(root) if root else None, 'why': why})
+    assert root is None and 'sha256' in why
+    assert not (dest / (suite['commit'] + '.tar.gz')).exists()
+
+
+@pytest.mark.parametrize('live', [True, False])
+def test_storage_still_refuses_uncopied_live_or_dangling_volatile_archive(
+        tmp_path, monkeypatch, live):
+    base = _3130_cache(tmp_path, monkeypatch, 'cold')
+    external = base / 'uncopied.tar.gz'
+    if live:
+        external.write_bytes(TARBALL)
+    p = tmp_path / 'project'
+    report = p / 'reports/acquisition.json'
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({'suite_pin': f'cache {external}'}))
+    storage = _3130_storage(p, tmp_path / 'storage.json')
+    _3130_observed(tmp_path, {'storage': storage, 'live': live})
+    assert storage['rc'] == 1
+    assert any(f['path'] == str(external) and f['class'] == ('live' if live else 'dangling')
+               for f in storage['report']['flagged'])
+
+
+def test_unpreservable_project_archive_refuses_before_cpu_executor(
+        tmp_path, monkeypatch):
+    _3130_cache(tmp_path, monkeypatch, 'warm')
+    p = _project(tmp_path)
+    blocked = p / '.vibeic-state/isa-suite-cache'
+    blocked.parent.mkdir(parents=True)
+    blocked.write_text('a file is not an archive directory')
+    calls = []
+    execute = _fake_executor({'s-add': OVERSIZED, 's-fencei': OVERSIZED})
+    def executor(job, work):
+        calls.append(str(job))
+        return execute(job, work)
+    rec = I.produce(p, executor=executor, fetch=lambda _u: TARBALL,
+                    lock=_lock(), pol=ALLOW, work_root=tmp_path / 'work')
+    _3130_observed(tmp_path, {'refusal': rec['refusal'], 'executor_calls': calls,
+                             'rows': rec['rows']})
+    assert calls == []
+    assert 'preserve' in rec['refusal'] and 'archive' in rec['refusal']
+    assert {r['verdict'] for r in rec['rows']} == {'NOT_EXECUTED'}
+
+
+def test_a_changed_retained_archive_is_republished_from_verified_input(
+        tmp_path, monkeypatch):
+    _3130_cache(tmp_path, monkeypatch, 'warm')
+    dest = tmp_path / 'project/.vibeic-state/acquired'
+    archive = dest / ('f' * 40 + '.tar.gz')
+    first, why = I.acquire('s', _lock()['suites']['s'], dest,
+                           fetch=lambda _u: TARBALL)
+    assert first is not None
+    before = _sha(archive.read_bytes()) if archive.is_file() else None
+    archive.write_bytes(b'changed retained bytes')
+    second, why = I.acquire('s', _lock()['suites']['s'], dest,
+                            fetch=lambda _u: TARBALL)
+    after = _sha(archive.read_bytes())
+    _3130_observed(tmp_path, {'before': before, 'after': after, 'why': why})
+    assert second is not None and before == after == _sha(TARBALL)

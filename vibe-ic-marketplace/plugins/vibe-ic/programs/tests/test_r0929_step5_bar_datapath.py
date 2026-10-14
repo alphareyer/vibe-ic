@@ -642,3 +642,121 @@ def test_an_idle_read_address_at_the_reset_vector_is_not_a_fetch(tmp_path,
     assert dp["state"] == "failed"
     assert "DATAPATH_CHECK reset_vector_fetch MISS (1 of 32 image bytes" in log
     assert dp["checks"] == {"passed": 1, "total": 5}
+
+
+# ---- issue3128: source/component controls only; no simulator or ISA credit --
+ISSUE3128_SRAM = {
+    "read_address": "rd_addr", "write_address": "wr_addr",
+    "write_data": "wr_byte", "read_data": "rd_byte", "write_enable": "wr_en",
+    "read_latency_cycles": 0,
+}
+
+
+def test_issue3128_existing_isa_protocol_accepts_five_role_latency0():
+    from isa_suite_producer import parse_sram_protocol
+    protocol, why = parse_sram_protocol("sdp8_raddr_waddr_wdata_rdata_we_sync0r")
+    assert protocol is not None, why
+    assert protocol["read_latency"] == 0
+    assert set(protocol["stated_roles"]) == {"raddr", "waddr", "wdata",
+                                             "rdata", "we"}
+
+
+@pytest.mark.parametrize("latency", [0, 1, 3], ids=["lat0", "lat1", "lat3"])
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_reader_preserves_declared_latency_and_roles(latency,
+                                                              read_enable):
+    si = dict(ISSUE3128_SRAM, read_latency_cycles=latency)
+    expected_ports = {"raddr": "rd_addr", "waddr": "wr_addr",
+                      "wdata": "wr_byte", "rdata": "rd_byte", "we": "wr_en"}
+    if read_enable:
+        si["read_enable"] = "rd_en"
+        expected_ports["ren"] = "rd_en"
+    roles, why = _cdp().sram_roles({"sram_interface": si})
+    assert roles == {"ports": expected_ports, "read_latency": latency,
+                     "rf_reserved": None}, why
+
+
+@pytest.mark.parametrize("latency", [-1, None, True, "unspecified"])
+def test_issue3128_missing_or_invalid_latency_still_refuses(latency):
+    si = dict(ISSUE3128_SRAM, read_latency_cycles=latency)
+    roles, why = _cdp().sram_roles({"sram_interface": si})
+    assert roles is None and "read latency" in why
+
+
+def _issue3128_component_build(tmp_path, latency, read_enable):
+    decl = json.loads(json.dumps(DECL if read_enable else NO_REN_DECL))
+    decl["sram_interface"]["read_latency_cycles"] = latency
+    ports = _ports() if read_enable else [p for p in _ports() if p[2] != "o_mem_ren"]
+    proj = _cpu_project(tmp_path, decl=decl,
+                        rtl=CPU_V if read_enable else NO_REN_V,
+                        ports=CPU_PORTS if read_enable else NO_REN_PORTS)
+    built, why = _cdp().build(proj, CPU, ports)
+    return built, why, decl
+
+
+@pytest.mark.parametrize("latency", [0, 1, 3], ids=["lat0", "lat1", "lat3"])
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_builder_binds_input_roles_without_changing_image(
+        tmp_path, latency, read_enable):
+    built, why, decl = _issue3128_component_build(tmp_path, latency, read_enable)
+    assert built is not None, why
+    assert built["facts"]["read_latency"] == latency
+    assert built["facts"]["reset_pc"] == int(decl["core_parameters"]["RESET_PC"], 16)
+    assert built["delivered_memsize_bytes"] == decl["memsize_bytes"] == 256
+    assert built["facts"]["rf_reserved"] == 0
+    assert built["expected_words"] == ["0x0000000c", "0x00000011"]
+    assert built["hex_text"].splitlines()[0] == "@00000000"
+    for role, port in built["facts"]["ports"].items():
+        assert f".{port}({role})" in built["tb_text"]
+    assert ("ren" in built["facts"]["ports"]) is read_enable
+    assert ("wire ren = 1'b1;" in built["tb_text"]) is (not read_enable)
+    assert f"{CPU} u_dut (" in built["tb_text"] and f"{CPU} #" not in built["tb_text"]
+    # Rebuild the SAME declared input; this measures emission, never CPU execution.
+    again, _, _ = _issue3128_component_build(tmp_path, latency, read_enable)
+    assert built == again
+
+
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_async_emitter_has_no_clocked_read_pipeline(tmp_path, read_enable):
+    # Exercise the emitter independently so merely opening the reader guard
+    # cannot hide the original LAT0 negative indices.
+    sync, why, _ = _issue3128_component_build(tmp_path, 1, read_enable)
+    assert sync is not None, why
+    facts = dict(sync["facts"], read_latency=0)
+    tb = _cdp()._emit_tb(_cdp().CASE_NAME, CPU, facts, sync["data_address"],
+                         [12, 17], 32)
+    assert "localparam integer LAT = 0;" in tb
+    assert "rpipe" not in tb
+    assert "always @* if (ren === 1'b1) rdata = mem[raddr];" in tb
+    assert "mem[raddr %" not in tb
+    (tmp_path / "async_emitted.v").write_text(tb)
+
+
+@pytest.mark.parametrize("read_enable", [False, True], ids=["five_roles", "six_roles"])
+def test_issue3128_async_keeps_clocked_writes_and_all_scoreboard_obligations(
+        tmp_path, read_enable):
+    sync, why, _ = _issue3128_component_build(tmp_path, 1, read_enable)
+    assert sync is not None, why
+    tb = _cdp()._emit_tb(_cdp().CASE_NAME, CPU,
+                         dict(sync["facts"], read_latency=0),
+                         sync["data_address"], [12, 17], 32)
+    # The monitor (including writes) must be identical to the synchronous
+    # path after removing only its read-pipeline capture.
+    start = "  always @(posedge clk) begin\n    if (released)"
+    def monitor(text):
+        return text.split(start, 1)[1].split("\n  end\n", 1)[0]
+    assert monitor(tb) == monitor(sync["tb_text"]).replace(
+        "          rpipe[0] <= mem[raddr];\n", "")
+    for obligation in ("we === 1'bx || we === 1'bz", "ren === 1'bx || ren === 1'bz",
+                       "^raddr === 1'bx || raddr >= MEMSIZE",
+                       "^waddr === 1'bx || waddr >= MEMSIZE",
+                       "^wdata === 1'bx", "mem[waddr] <= wdata;",
+                       "lane_written[waddr - DATA] = 1'b1;",
+                       "else if (waddr < RF_LO) stray = stray + 1;",
+                       "fetched_bytes[raddr - RESET_PC] = 1'b1;"):
+        assert obligation in monitor(tb)
+    tail = "  function [31:0] word_at"
+    assert tb.split(tail, 1)[1] == sync["tb_text"].split(tail, 1)[1].replace(
+        "    for (i = 0; i < LAT; i = i + 1) rpipe[i] = 8'h00;\n", "")
+    assert [check for check in _cdp().CHECKS if f"DATAPATH_CHECK {check} " in tb] \
+        == list(_cdp().CHECKS)

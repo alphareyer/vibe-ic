@@ -433,6 +433,8 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _design_module_set as _dms  # noqa: E402
+from module_port_audit import (lexical_mask, module_regions,
+                               parse_port_list_ansi)  # noqa: E402
 # THE ONE NEGATION VOCABULARY AND THE ONE SENTENCE REACH
 # (vibe-ic#712). `grounding_occurrence` below reads both from
 # here rather than growing this module's own copy, which is the
@@ -1138,6 +1140,62 @@ def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _documentary_intent_pins(project, content, pins, artefact_top):
+    """Document examples released by a current selected-interface binding.
+
+    The producer keeps these rows for document provenance. An absent-from-top
+    label alone releases nothing: the selected source bytes and top must still
+    match. The current source's own header roster overrides inconsistent L9
+    labels: a port the source declares remains an implementation obligation.
+    An unreadable or incomplete roster cannot release a documentary row.
+    This stdlib-only helper is also embedded in R2's standalone reproducer.
+    """
+    import hashlib
+
+    binding = content.get("selected_interface_binding")
+    if not isinstance(binding, dict):
+        return set()
+    top = binding.get("top_module")
+    if not top or top != content.get("top_module") or top != artefact_top:
+        return set()
+    source_rel = binding.get("selected_source")
+    examples = binding.get("document_examples_not_implemented")
+    if (not isinstance(source_rel, str) or not source_rel
+            or not isinstance(examples, list)
+            or any(not isinstance(name, str) for name in examples)):
+        return set()
+    try:
+        root = Path(project).resolve()
+        source = (root / source_rel).resolve()
+        if Path(source_rel).is_absolute() or not source.is_relative_to(root):
+            return set()
+        source_bytes = source.read_bytes()
+        digest = hashlib.sha256(source_bytes).hexdigest()
+    except (OSError, ValueError):
+        return set()
+    if digest != binding.get("selected_source_sha256"):
+        return set()
+    issues = []
+    text = source_bytes.decode("utf-8", errors="replace")
+    regions = [region for region in module_regions(text, issues) if region[0] == top]
+    if issues or len(regions) != 1:
+        return set()
+    _, start, body_start, _ = regions[0]
+    try:
+        implemented = parse_port_list_ansi(
+            lexical_mask(text[start:body_start], attributes=True), str(source), 1, issues)
+    except ValueError:
+        return set()
+    if issues or not implemented:
+        return set()
+    return {str(pin["name"]) for pin in pins
+            if pin.get("name") in examples
+            and str(pin["name"]) not in implemented
+            and pin.get("declared_by_staged_top") is False
+            and pin.get("required") is not True
+            and pin.get("mandatory") is not True}
+
+
 def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
     """The intent's declared external pin list, and which field carried it."""
     try:
@@ -1153,7 +1211,8 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
             if pins:
                 return {"readable": True, "file": str(l9_path), "field": field,
                         "value": [str(p["name"]) for p in pins],
-                        "pins": pins}
+                        "pins": pins, "top_module": d.get("top_module"),
+                        "selected_interface_binding": d.get("selected_interface_binding")}
     return {"readable": True, "file": str(l9_path), "field": None,
             "value": [], "pins": []}
 
@@ -1251,6 +1310,14 @@ def rule_intent_pin_not_in_netlist(project: Path,
     shortfall the input never asked for. `l9_rtl_pin_consistency_check` (#491
     R4) already treats the same field as advisory. Read off the intent's own
     boolean and nothing else — see `_optional_declared`.
+
+    DOCUMENTARY PORTS: the selected-interface producer retains illustrative
+    rows in L9 for provenance, marking them absent from the selected top. Only
+    a current source-hash/top binding naming the row as documentary releases
+    it, and the actual selected source must not declare it. The source header
+    roster overrides inconsistent documentary labels; an unbound false label
+    never releases a hardware requirement. This
+    changes the interface comparison, not stage 2's declared advisory policy.
     """
     intent_rel = [str(x) for x in (decl.get("intent") or [])]
     artefact_rel = [str(x) for x in (decl.get("artefact") or [])]
@@ -1296,6 +1363,7 @@ def rule_intent_pin_not_in_netlist(project: Path,
                         f"certifies nothing")}
 
     built = set(art["ports"])
+    documentary = _documentary_intent_pins(project, intent, intent["pins"], art["top"])
     absent_signal: List[Dict[str, Any]] = []
     disarmed: List[Dict[str, Any]] = []
     for pin in intent["pins"]:
@@ -1313,6 +1381,12 @@ def rule_intent_pin_not_in_netlist(project: Path,
         elif why_optional:
             row["intent_declares_optional"] = why_optional
             disarmed.append(row)
+        elif name in documentary:
+            row["intent_declares_documentary"] = (
+                "absent from current selected source port roster; "
+                "declared_by_staged_top=False; current selected_interface_binding."
+                "document_examples_not_implemented")
+            disarmed.append(row)
         else:
             absent_signal.append(row)
     extra = sorted(built - {str(p["name"]) for p in intent["pins"]})
@@ -1327,6 +1401,8 @@ def rule_intent_pin_not_in_netlist(project: Path,
             supply = [r for r in disarmed if r.get("intent_declares_supply")]
             optional = [r for r in disarmed
                         if r.get("intent_declares_optional")]
+            examples = [r for r in disarmed
+                        if r.get("intent_declares_documentary")]
             parts = []
             if supply:
                 parts.append(
@@ -1345,6 +1421,12 @@ def rule_intent_pin_not_in_netlist(project: Path,
                                 for r in optional)
                     + "); a design that does not take the option builds no "
                       "such port, which is not a contradiction of the intent")
+            if examples:
+                parts.append(
+                    f"{len(examples)} of them the current selected-interface "
+                    "binding declares documentary examples, not implemented "
+                    "ports (" + "; ".join(r["name"] for r in examples)
+                    + "); their document provenance is retained in L9")
             out["verdict"] = "DISARMED"
             out["observation"] = (
                 f"{len(disarmed)} intent pin(s) are absent from the netlist's "
@@ -3148,7 +3230,11 @@ _EMITTED_TEST_R2 = (
         "job. It also does not assert on a pin the intent itself marks a supply: a\n"
         "non-power-aware netlist carries no supply port, and that is stage 3's to sign\n"
         "off. Nor on a pin the intent itself marks optional (`optional: true`): a\n"
-        "design that does not take the option builds no such port.")
+        "design that does not take the option builds no such port. Documentary\n"
+        "examples are released only by a current selected-source hash and top\n"
+        "binding, absence from the actual source roster and an explicit\n"
+        "absent-from-top label; implemented and mandatory pins remain\n"
+        "obligations.")
     + _emitted_prelude(r'''INTENT_REL = {intent_rel!r}
 INTENT_FIELD = {intent_field!r}
 NETLIST_REL = {netlist_rel!r}
@@ -3161,6 +3247,7 @@ _PORT_RE = re.compile(
 _MODULE_RE = re.compile(
     r"(?ms)^[ \t]*module[ \t]+([A-Za-z_]\w*)\b(.*?)^[ \t]*endmodule")
 ''', want_re=True)
+    + '{documentary_helper}\n\n'
     + r'''def _is_supply(pin) -> bool:
     for key in ("io", "type", "kind", "role", "pin_type"):
         v = pin.get(key)
@@ -3216,9 +3303,10 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "the netlist's structural top %r declares no port; an empty interface "
         "refutes nothing" % roots[0])
 
+    documentary = _documentary_intent_pins(root, intent, pins, roots[0])
     absent = sorted(str(p["name"]) for p in pins
                     if str(p["name"]) not in built and not _is_supply(p)
-                    and not _is_optional(p))
+                    and not _is_optional(p) and str(p["name"]) not in documentary)
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
@@ -3924,12 +4012,32 @@ def _body_r1(finding: Dict[str, Any], stage_id: str) -> str:
 
 
 def _body_r2(finding: Dict[str, Any], stage_id: str) -> str:
+    import inspect
+    import module_port_audit as port_parser
+
+    # Embed the same existing header parser used by the ordinary rule. No
+    # plugin dependency is left in the standalone test, and no second parser
+    # interprets the source names differently. Parser issues release nothing.
+    parser_source = (
+        "from dataclasses import dataclass\n"
+        "from typing import Dict, List, Optional, Tuple\n\n"
+        + "\n\n".join(inspect.getsource(symbol) for symbol in (
+            port_parser.PortDecl, port_parser.extract_balanced,
+            port_parser.split_top_level, port_parser._attribute_start,
+            port_parser.lexical_mask, port_parser.mask_attributes_only,
+            port_parser.module_regions, port_parser.eval_width_expr,
+            port_parser.parse_port_list_ansi))
+        + "\n_DIM_RE = re.compile(%r, %d)\n" % (
+            port_parser._DIM_RE.pattern, port_parser._DIM_RE.flags)
+        + "_NUMERIC_DIM_RE = re.compile(%r, %d)\n\n" % (
+            port_parser._NUMERIC_DIM_RE.pattern, port_parser._NUMERIC_DIM_RE.flags))
     return _EMITTED_TEST_R2.format(
         program=_NAME, stage=stage_id,
         contradiction=finding["contradiction"],
         intent_rel=finding["intent"]["intent_rel"],
         intent_field=finding["intent"]["field"],
-        netlist_rel=finding["artefact"]["artefact_rel"])
+        netlist_rel=finding["artefact"]["artefact_rel"],
+        documentary_helper=parser_source + inspect.getsource(_documentary_intent_pins))
 
 
 def _body_phase1_cited_input(finding: Dict[str, Any], stage_id: str) -> str:
