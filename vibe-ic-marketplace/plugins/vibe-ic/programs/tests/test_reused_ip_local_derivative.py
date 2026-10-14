@@ -1012,6 +1012,40 @@ def test_registered_mapper_glue_cannot_hide_other_source_drift(public_mapper_pro
     assert _authored_metadata_bytes(project) == before
 
 
+@pytest.mark.parametrize('codec', ['direct-port', 'group-row'])
+def test_typed_pad_publication_is_current_on_first_call_and_idempotent(tmp_path, monkeypatch, codec):
+    """The real typed publisher checks the newly supplied pairs before hashing."""
+    import subprocess
+    import renamed_interface_derive as rid
+    import _l_doc_pad_placement as placement
+    project, match, rel, _ = _interface_fixture(tmp_path, monkeypatch)
+    doc = project/'input/docs/L3_external_interface.md'
+    address = '`o_memory_addr[3:0]`' if codec == 'direct-port' else 'o_memory_addr[3:0] signals'
+    doc.write_text(doc.read_text() + '\n## Physical Pad Placement\n\n'
+                   '| Side | Signals |\n|---|---|\n| West | `clk` |\n'
+                   f'| East | {address} |\n| North | — |\n| South | — |\n')
+    import spec_declaration_emit as declaration
+    assert declaration.main([str(project), '--set', 'top_module=top_wrapper',
+                             '--set', 'memory_interface_protocol=split_read_write']) == 0
+    assert _publish_interface(project, match, rel)['status'] == pull.PIN_VERIFIED
+    manifest = json.loads((project/'phase2/stage1/rtl/SOURCE_MANIFEST.json').read_text())
+    stored = manifest['renamed_interfaces_check']
+    assert stored['verdict'] == 'PASS', stored
+    assert stored['pairs'] and all(row['verdict'] == 'VERIFIED' for row in stored['pairs']), stored
+    command = [sys.executable, '-B', rid.__file__, str(project), '--check']
+    checked = subprocess.run(command, capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert json.loads(checked.stdout)['verdict'] == 'PASS'
+    ring = placement.derive_own_ring(project, _selected_interface(project))
+    assert len(ring['signal_map']) == 9, ring
+    assert {side: len(ring['by_side'].get(side, [])) for side in 'WENS'} == {
+        'W': 1, 'E': 8, 'N': 0, 'S': 0}, ring
+    before = _authored_metadata_bytes(project)
+    repeated = _publish_interface(project, match, rel)
+    assert repeated['already_current'] is True and repeated['outputs'] == {}, repeated
+    assert _authored_metadata_bytes(project) == before
+
+
 def _published52_producer(tmp_path, monkeypatch):
     """Execute retained public source52, not a hand-authored producer event."""
     import importlib.util
@@ -1212,3 +1246,69 @@ def test_catalog_glue_remeasurement_refuses_changed_selected_image_identity(
     assert glue['status'] != pull.PIN_VERIFIED, observed
     assert 'image identity' in glue['reason'], observed
     assert not calls and observed['metadata_unchanged'], observed
+
+
+def test_native_derivative_pad_metadata_closes_before_current_source_admission(public_mapper_project):
+    """Real component remeasurement and strict consumers, not whole IC credit."""
+    import renamed_interface_derive as rid
+    import provenance_output_hash_completeness_check as provenance
+    project, match, _ = public_mapper_project
+    pull.pull_all_catalog_matches(project, [match], official_only=True)
+    rel, _ = _prepare_interface_inputs(project)
+    doc = project / 'input/docs/L3_external_interface.md'
+    doc.write_text(doc.read_text() + '\n## Physical Pad Placement\n\n'
+                   '| Side | Signals |\n|---|---|\n| West | `clk` |\n'
+                   '| East | `o_memory_addr[3:0]` |\n| North | — |\n| South | — |\n')
+    mf = project / 'phase2/stage1/rtl/SOURCE_MANIFEST.json'
+    ledger = project / 'provenance.jsonl'
+    previous = ledger.read_bytes()
+    prior_ref = json.loads(mf.read_text())['local_derivative']
+    input_hashes = {str(p.relative_to(project)): _h(p) for p in
+                    sorted((project / 'input').rglob('*')) if p.is_file()}
+    published = _publish_interface(project, match, rel)
+    manifest = json.loads(mf.read_text())
+    state, reason = pull.verify_existing_reused_pins_outcome(project, [match], manifest)
+    p0, findings, _ = provenance.audit_counted(project)
+    events = [json.loads(line) for line in ledger.read_text().splitlines()]
+    owned = [e for e in events if e.get('event') == 'ip_catalog_local_derivative'
+             and e.get('record') == manifest['local_derivative']]
+    observed = {'scope': 'SOURCE_CONTROL public ancestry; actual native component challenge/strict source consumers',
+                'input_sha256': input_hashes, 'publisher': published,
+                'pin_consumer': state, 'pin_reason': reason, 'p0': p0,
+                'p0_findings': [(f.rule, f.detail) for f in findings],
+                'pad_check': manifest.get('renamed_interfaces_check'),
+                'current_manifest_sha256': _h(mf), 'derivative_events': owned,
+                'history_preserved': ledger.read_bytes().startswith(previous)}
+    _json(project / 'derivative_pad_observed.json', observed)
+    assert published['status'] == pull.PIN_VERIFIED and state == pull.PIN_VERIFIED, observed
+    assert p0 == 'PASS' and observed['pad_check']['verdict'] == 'PASS', observed
+    assert owned[-1]['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:' + _h(mf), observed
+    record = json.loads((project / manifest['local_derivative']['path']).read_text())
+    assert record['previous_local_derivative'] == prior_ref and (project / prior_ref['path']).is_file()
+    for key, want in [('parent_red', 1), ('candidate_green', 0)]:
+        receipt = json.loads((project / record['proof'][key]['path']).read_text())
+        assert {r['name']: r['rc'] for r in receipt['results']} == {'compile': 0, 'run': want}
+        assert len(receipt['native_measurements']['case_rows']) == 12
+        assert receipt['rtl']['top_wrapper.v'] == _h(mf.parent / 'top_wrapper.v')
+    before_repeat = _authored_metadata_bytes(project)
+    again = _publish_interface(project, match, rel)
+    assert again['already_current'] and again['outputs'] == {}
+    assert _authored_metadata_bytes(project) == before_repeat
+    # A document-only pad change needs a genuine successor, not a patch to
+    # the old producer event or a later authored event covering stale bytes.
+    old_ref = manifest['local_derivative']
+    history = ledger.read_bytes()
+    doc.write_text(doc.read_text().replace('| East | `o_memory_addr[3:0]` |',
+                                           '| South | `o_memory_addr[3:0]` |').replace('| South | — |', '| East | — |'))
+    changed = _publish_interface(project, match, rel)
+    current = json.loads(mf.read_text())
+    assert changed['status'] == pull.PIN_VERIFIED and current['local_derivative'] != old_ref, changed
+    assert ledger.read_bytes().startswith(history) and (project / old_ref['path']).is_file()
+    assert current['renamed_interfaces_check']['verdict'] == 'PASS'
+    assert rid.check(project, rid.authored_pairs(current), current['derived_pad_pairs'])['verdict'] == 'PASS'
+    assert pull.verify_existing_reused_pins_outcome(project, [match], current)[0] == pull.PIN_VERIFIED
+    assert provenance.audit_counted(project)[0] == 'PASS'
+    changed_events = [json.loads(line) for line in ledger.read_text().splitlines()
+                      if json.loads(line).get('event') == 'ip_catalog_local_derivative'
+                      and json.loads(line).get('record') == current['local_derivative']]
+    assert changed_events[-1]['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:' + _h(mf)

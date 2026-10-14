@@ -25755,6 +25755,59 @@ FINAL_AUDIT_PENDING_REASON = (
     "tail overwrites it, and a run that never reaches the tail stays FAIL")
 
 
+def _finish_selected_interface_currentness(project: Path) -> StepResult:
+    """Finish derived Phase-1 bytes after native producers, before readers.
+
+    Mechanical producer freshness never signs the required fresh D1 review.
+    The existing retained expert call saves its previous output before reading
+    the final layer set; the old AI receipt remains untouched and stale.
+    """
+    import execution_policy
+    import phase1_expert_parse_track as expert
+    import phase1_one_shot_runner as phase1
+    import ai_signed_judgement as judgement
+    from _staged_top_module import refresh_selected_interface
+    t0 = time.time()
+    l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    if execution_policy.request()['mode'] != 'default' or not l9.is_file():
+        return StepResult('phase1_currentness', 'NOT_APPLICABLE', 0,
+                          'no Default selected-interface document to finish',
+                          declared_by='Default selected-interface document population')
+    try:
+        before = l9.read_bytes()
+        current = refresh_selected_interface(project, l9, json.loads(before),
+                                             include_synthesis_handoff=True)
+        if not current.get('selected_interface_binding'):
+            return StepResult('phase1_currentness', 'NOT_APPLICABLE', 0,
+                              'no delegated selected-interface derivation',
+                              declared_by='input-authorized selected-interface derivation')
+        report = _pl.report_path(project, 'phase1/expert_parse_track.json')
+        prior = json.loads(report.read_text()) if report.is_file() else {}
+        if not isinstance(prior, dict) or not isinstance(prior.get('phase1_root', {}), dict):
+            raise ValueError('prior expert producer record is malformed')
+        changed = before != l9.read_bytes()
+        stale = prior.get('phase1_root', {}).get('digest') != expert.phase1_root_identity(project).get('digest')
+        if changed or stale:
+            # Its ordinary retained producer archives prior evidence. It does
+            # not create an AI judgement or replace an existing signature.
+            phase1.run_phase1_second_track(project, 0)
+        reader_rc = expert.check_report(project)
+    except (OSError, ValueError, TypeError) as exc:
+        return StepResult('phase1_currentness', 'FAIL', time.time() - t0,
+                          f'current selected interface could not be finished: {exc}')
+    pending = judgement.pending(project, ('D1',))
+    rejected = judgement.check(project, 'D1', expected_verdict='FAIL')[0]
+    state = ('FAIL' if rejected or reader_rc not in (0, expert.AWAITING_EXIT_CODE)
+             else 'NOT_MEASURED' if pending or reader_rc else 'PASS')
+    detail = ('current selected-interface refs and native expert reading; '
+              + ('current D1 signed review rejected the evidence' if rejected
+                 else pending.get('D1') or 'current signed D1 handoff'))
+    return StepResult('phase1_currentness', state, time.time() - t0, detail,
+                      extras={'layer_bytes_changed': changed, 'expert_reader_rc': reader_rc,
+                              'ai_judgements': pending},
+                      reason_class='awaiting_signed_judgement' if pending and not rejected else '')
+
+
 def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepResult:
     """Run declared producers before the audit; their rc is a recorded fact.
 
@@ -25780,10 +25833,21 @@ def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepRes
               f"documents the flow declares this run's steps to produce may "
               f"still be authored by the audit and refused as its own "
               f"evidence", file=sys.stderr)
+    currentness = _finish_selected_interface_currentness(project)
     # The producer sweep may create or replace attested files. The audit must
     # read a summary of that resulting tree, even when the sweep exits nonzero.
     _pl.emit_final_summary(project, PROGRAMS_DIR)
-    return step_final_audit(project, phase=2, skip_analog=skip_analog)
+    audit = step_final_audit(project, phase=2, skip_analog=skip_analog)
+    audit.extras['phase1_currentness'] = asdict(currentness)
+    if currentness.status == 'FAIL':
+        audit.status = 'FAIL'
+    elif (currentness.status == 'NOT_MEASURED'
+          and audit.status in ('PASS', 'PASS_WITH_WAIVERS')):
+        audit.status = 'NOT_MEASURED'
+        audit.reason_class = currentness.reason_class
+    if currentness.status in ('FAIL', 'NOT_MEASURED'):
+        audit.detail += '; ' + currentness.detail
+    return audit
 
 
 def _run_refresh_only(project: Path, args) -> int:

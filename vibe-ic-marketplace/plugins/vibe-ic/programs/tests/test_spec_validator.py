@@ -134,3 +134,34 @@ def test_cli_exit_codes(tmp_path):
     an_bad.write_text(BAD_AN)
     assert sv.main(["--ds", str(ds), "--an", str(an_good), "--json"]) == 0
     assert sv.main(["--ds", str(ds), "--an", str(an_bad), "--json"]) == 1
+
+
+def test_project_cli_input_roles_are_missing(tmp_path, capsys):
+    (tmp_path / "L1_arbitrary_record.md").write_text("# Product Metadata\n\nOriginal input.\n")
+    (tmp_path / "L5_arbitrary_record.md").write_text("# Register Map Input\n\nOriginal input.\n")
+    assert sv.main([str(tmp_path), "--json"]) == 2
+    import json
+    assert json.loads(capsys.readouterr().out)["verdict"] == "MISSING"
+
+
+def test_project_cli_uses_document_roles_and_preserves_real_failure(tmp_path, capsys):
+    (tmp_path / "L1_arbitrary_record.md").write_text("# Product Metadata\n\nOriginal input.\n")
+    (tmp_path / "L5_arbitrary_record.md").write_text("# Register Map Input\n\nOriginal input.\n")
+    (tmp_path / "L1_DATASHEET.md").write_text(GOOD_DS)
+    (tmp_path / "L5_APPLICATION_NOTE.md").write_text(BAD_AN)
+    assert sv.main([str(tmp_path), "--json"]) == 1
+    import json
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "FAIL"
+    assert {f["rule"] for f in result["findings"] if f["severity"] == "ERROR"} == {
+        "pin-mismatch", "register-mismatch", "unresolved-tbd"}
+
+
+def test_project_cli_explicit_paths_override_autolocation(tmp_path, capsys):
+    (tmp_path / "04_datasheet.md").write_text(GOOD_DS)
+    (tmp_path / "05_appnote.md").write_text(BAD_AN)
+    explicit = tmp_path / "selected.md"
+    explicit.write_text(GOOD_AN)
+    assert sv.main([str(tmp_path), "--an", str(explicit), "--json"]) == 0
+    import json
+    assert json.loads(capsys.readouterr().out)["verdict"] == "PASS"

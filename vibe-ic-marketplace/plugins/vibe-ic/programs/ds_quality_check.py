@@ -38,6 +38,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import re
 import sys
@@ -52,8 +53,6 @@ MAX_SCORE = 100
 _DS_GLOBS = (
     "**/04_datasheet.md",
     "**/*datasheet*.md",
-    "**/L1*.md",
-    "**/*L1_DATASHEET*.md",
 )
 
 
@@ -411,12 +410,67 @@ def score_datasheet_text(text: str, source: str = "<text>") -> DSResult:
     return DSResult(total, MAX_SCORE, verdict, THRESHOLD, breakdown, source)
 
 
-def _locate_datasheet(project_dir: Path) -> Optional[Path]:
-    for pat in _DS_GLOBS:
-        for hit in sorted(project_dir.glob(pat)):
-            if hit.is_file():
-                return hit
+def _document_title(text: str) -> Optional[str]:
+    """Return the first top-level ATX/setext H1 outside fenced code."""
+    fence = ""
+    previous = ""
+    for line in text.splitlines():
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if (marker and marker.group(1)[0] == fence[0]
+                    and len(marker.group(1)) >= len(fence)
+                    and not marker.group(2).strip()):
+                fence = ""
+            continue
+        if marker and (marker.group(1)[0] == "~" or "`" not in marker.group(2)):
+            fence = marker.group(1)
+            previous = ""
+            continue
+        title = re.fullmatch(r" {0,3}#(?:[ \t]+(.*))?", line)
+        if title:
+            # A later role heading cannot replace an earlier metadata H1.
+            return re.sub(r"[ \t]+#+[ \t]*$", "", title.group(1) or "").strip()
+        if previous and re.fullmatch(r" {0,3}=+[ \t]*", line):
+            return previous.strip()
+        # Indented code, quoted/list content and ATX subsections are not
+        # paragraph text eligible for a top-level setext title.
+        previous = (line if re.match(r" {0,3}[^ \t#>\-+*]", line)
+                    and not re.match(r" {0,3}\d+[.)][ \t]", line) else "")
     return None
+
+
+def _locate_document(project_dir: Path, role_globs: Tuple[str, ...],
+                     layer_glob: str, title_role: str) -> Optional[Path]:
+    """Prefer role-named Markdown; require a role-ending title for layer aliases.
+
+    A layer number alone identifies neither a datasheet nor an application
+    note. Filename/title role selection is independent of the quality rubric:
+    an incomplete, empty or unreadable role-named file still reaches its scorer.
+    Explicit file arguments bypass this project-only locator.
+    """
+    documents = sorted(p for p in project_dir.rglob("*")
+                       if p.is_file() and p.suffix.casefold() == ".md")
+    for pat in role_globs:
+        name_glob = pat.rsplit("/", 1)[-1].casefold()
+        for hit in documents:
+            if fnmatch.fnmatchcase(hit.name.casefold(), name_glob):
+                return hit
+    for hit in documents:
+        if not fnmatch.fnmatchcase(hit.name.casefold(), layer_glob.casefold()):
+            continue
+        try:
+            text = hit.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # Cannot establish this layer file's document role.
+        title = _document_title(text)
+        if title and re.search(title_role, title, re.IGNORECASE):
+            return hit
+    return None
+
+
+def _locate_datasheet(project_dir: Path) -> Optional[Path]:
+    return _locate_document(project_dir, _DS_GLOBS, "L1*.md",
+                            r"\b(?:datasheet|data[ -]sheet)[ \t]*$")
 
 
 def score_datasheet_path(path: Path) -> DSResult:

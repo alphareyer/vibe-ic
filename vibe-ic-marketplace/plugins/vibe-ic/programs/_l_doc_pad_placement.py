@@ -304,7 +304,11 @@ def parse_pad_placement(text: str, source: str) -> Optional[PadPlacement]:
                     "to two different rows. Nothing here "
                     f"can say which row the design meant.")
             seen_sides.add(side)
-            if signals:
+            if group in {"-", "–", "—"}:
+                # The table explicitly declares an empty edge. A dash is
+                # zero signals, not an unresolved identifier family.
+                side_signals[side] = []
+            elif signals:
                 side_signals[side] = signals
             else:
                 side_groups[side] = group
@@ -447,6 +451,48 @@ def expand_side_ports(placement: PadPlacement, params: Dict[str, int]
     return ports, unresolved
 
 
+def expand_renamed_side_ports(placement: PadPlacement, params: Dict[str, int],
+                              implemented: Any, renames: Any, *,
+                              exact_carriers: Any = ()
+                              ) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Expand exact rows through electrically accepted, whole-port renames.
+
+    A partial or unresolved range cannot carry a whole renamed interface.
+    Replace the absent document endpoint only after its complete bit roster
+    matches the implemented width on exactly one edge. No illustrative net
+    remains in the implemented ring, and no additional bit is invented.
+    """
+    ports, unresolved = expand_side_ports(placement, params)
+    by_name = {str(p.get("name")): p for p in implemented or []}
+    for l9_names, rtl_names in renames:
+        targets = [by_name[n] for n in sorted(rtl_names) if n in by_name]
+        if len(targets) != len(rtl_names) or not targets:
+            continue
+        for name in sorted(l9_names):
+            if name in by_name or name not in exact_carriers:
+                continue
+            rosters = [bit_names(dict(p, name=name)) for p in targets]
+            if (any(_port_width(p) is None for p in targets)
+                    or any(r != rosters[0] for r in rosters)):
+                continue
+            expected = set(rosters[0])
+            sides = [side for side, nets in ports.items()
+                     if expected <= set(nets)]
+            if len(sides) != 1:
+                continue
+            side = sides[0]
+            if any(net.split("[")[0] == name and net not in expected
+                   for nets in ports.values() for net in nets):
+                continue
+            if any(expected & set(nets) for s, nets in ports.items() if s != side):
+                continue
+            replacements = {old: [bit_names(p)[i] for p in targets]
+                            for i, old in enumerate(rosters[0])}
+            ports[side] = [new for old in ports[side]
+                           for new in replacements.get(old, [old])]
+    return ports, unresolved
+
+
 # --------------------------------------------------------------------------- #
 # the design-owned GROUP row, and the ring that follows from it
 # --------------------------------------------------------------------------- #
@@ -514,10 +560,73 @@ def bit_names(port: Dict[str, Any]) -> List[str]:
     return [f"{name}[{b}]" for b in range(msb, lsb + step, step)]
 
 
+def input_delegated_rename_names(project: Path, renames: Any) -> set:
+    """Original interface rows that delegate their illustrative spelling.
+
+    A bare manifest pair still cannot repoint an exact physical endpoint.
+    Require the original input's own typical/illustrative row, using phase
+    2's existing notation and denial semantics; generated L9 is not authority
+    for a new input obligation.
+    """
+    from l9_rtl_pin_consistency_check import _RE_ILLUSTRATIVE_TAG
+    names = {n for left, _right in renames for n in left}
+    delegated = set()
+    for path in discover_docs(Path(project)):
+        relative = path.relative_to(project).parts
+        if not (relative[:2] == ("input", "docs") or
+                relative[:1] == ("input_doc",)):
+            continue
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            cells = _cells(line)
+            if (cells and cells[0].strip("` ") in names
+                    and _RE_ILLUSTRATIVE_TAG.search(line)
+                    and _is_denied(line) is None):
+                delegated.add(cells[0].strip("` "))
+    return delegated
+
+
+def declared_port_sides(placement: PadPlacement, params: Dict[str, int],
+                        port: Dict[str, Any], *, exact: bool = False) -> List[str]:
+    """Edges declaring this whole port, in either literal Markdown codec.
+
+    Family prose retains the exact-atom rule. An explicit range in prose is
+    also an extent obligation, just like the backticked exact-port form.
+    """
+    name = str(port.get("name") or "")
+    atoms = group_atoms(name, port_name=True)
+    sides = set()
+    for side, statement in placement.side_groups.items():
+        if not atoms or not atoms <= group_atoms(statement):
+            continue
+        ranges = re.findall(r"\b" + re.escape(name) + r"\[([^]]+)\]", statement)
+        if ranges:
+            if _port_width(port) is None:
+                continue
+            expected = set(bit_names(port))
+            if any((bits := resolve_bits(expr, params)) is None or
+                   {f"{name}[{b}]" for b in bits} != expected for expr in ranges):
+                continue
+        sides.add(side)
+    if exact and _port_width(port) is not None:
+        exact, unresolved = expand_side_ports(placement, params)
+        expected = set(bit_names(port))
+        for side, nets in exact.items():
+            own = {n for n in nets if n.split("[")[0] == name}
+            if own == expected and not any(
+                    token.split("[")[0] == name for token in unresolved):
+                sides.add(side)
+    return sorted(sides)
+
+
 def resolve_declared_pad_groups(
         placement: "PadPlacement",
         ports: "Any",
-        renames: "Sequence[Tuple[set, set]]" = (),
+        renames: "Sequence[Tuple[set, set]]" = (), *,
+        params: Optional[Dict[str, int]] = None,
         ) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
     """Resolve design-owned group rows against the design-owned port list.
 
@@ -544,14 +653,19 @@ def resolve_declared_pad_groups(
         for port in ports:
             name = str(port.get("name") or "")
             port_atoms = group_atoms(name, port_name=True)
-            if port_atoms and port_atoms <= statement_atoms:
+            if (port_atoms and port_atoms <= statement_atoms
+                    and side in declared_port_sides(placement, params or {}, port)):
                 matched.append(port)
         via_rename: List[Dict[str, Any]] = []
         for l9_names, rtl_names in renames:
             carriers = []
             for l9_name in sorted(l9_names):
                 l9_atoms = group_atoms(l9_name, port_name=True)
-                if l9_atoms and l9_atoms <= statement_atoms:
+                targets = [p for p in ports if str(p.get("name")) in rtl_names]
+                if (l9_atoms and l9_atoms <= statement_atoms and targets
+                        and all(side in declared_port_sides(
+                            placement, params or {}, dict(p, name=l9_name))
+                                for p in targets)):
                     carriers.append(l9_name)
             if not carriers:
                 continue
@@ -1001,6 +1115,9 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
     out["unresolved_tokens"] = list(unresolved)
     renames, rejected = accepted_renames(project, ports or [])
     splits, split_rejected = accepted_exposed_output_splits(project, ports or [])
+    exact, unresolved = expand_renamed_side_ports(
+        placement, params, ports or [], renames + splits,
+        exact_carriers=input_delegated_rename_names(project, renames + splits))
     out["renamed_interfaces"] = [{"l9": sorted(l9), "rtl": sorted(rtl)}
                                  for l9, rtl in renames]
     out["renamed_interfaces_rejected"] = rejected
@@ -1008,7 +1125,8 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
         {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in splits]
     out["exposed_output_splits_rejected"] = split_rejected
     grouped, records = resolve_declared_pad_groups(placement, ports or [],
-                                                   renames=renames + splits)
+                                                   renames=renames + splits,
+                                                   params=params)
     out["groups"] = records
     out["groups_unresolved"] = [r["side"] for r in records
                                 if not r["resolved_nets"]]

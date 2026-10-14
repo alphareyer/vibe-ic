@@ -1877,6 +1877,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     # (`accept_renames`); a rejected one is recorded with its reasons.
     renames, rejected_renames = LPP.accepted_renames(
         project, selected_core[1] if selected_core else None)
+    side_ports, unresolved = LPP.expand_renamed_side_ports(
+        placement, params, functional_ports, renames + splits,
+        exact_carriers=LPP.input_delegated_rename_names(project, renames + splits))
     if renames:
         rec["renamed_interfaces"] = [
             {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in renames]
@@ -1887,7 +1890,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     if rejected_renames:
         rec["renamed_interfaces_rejected"] = rejected_renames
     grouped, group_records = _resolve_declared_pad_groups(
-        placement, functional_ports, renames=renames + splits)
+        placement, functional_ports, renames=renames + splits, params=params)
     if group_records:
         rec["pad_group_resolution"] = group_records
     unresolved_groups = [r for r in group_records if not r["resolved_nets"]]

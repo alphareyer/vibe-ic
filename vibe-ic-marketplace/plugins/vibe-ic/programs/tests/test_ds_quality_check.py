@@ -172,3 +172,191 @@ def test_cli_exit_codes(tmp_path, capsys):
     assert ds.main([str(good), "--json"]) == 0
     assert ds.main([str(bad), "--json"]) == 1
     assert ds.main([str(tmp_path / "missing.md")]) == 2
+
+
+def test_layer_input_is_not_a_datasheet_even_with_scoring_content(tmp_path):
+    # The layer number and quality of its body do not establish document role.
+    _write(tmp_path, "L1_arbitrary_record.md",
+           GOOD_DS.replace("# Generic Sensor Datasheet", "# Original Layer Record", 1))
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "MISSING", result.to_dict()
+    assert result.score == 0
+    assert result.source == str(tmp_path)
+
+
+def test_layer_title_declares_datasheet_role(tmp_path):
+    path = _write(tmp_path, "L1_reference.md", GOOD_DS)
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "PASS", result.to_dict()
+    assert result.source == str(path)
+
+
+def test_role_filename_is_case_insensitive(tmp_path):
+    path = _write(tmp_path, "DEVICE_DATASHEET.MD", GOOD_DS)
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "PASS", result.to_dict()
+    assert result.source == str(path)
+
+
+def test_incomplete_role_keeps_fail_precedence_over_complete_fallback(tmp_path):
+    poor = _write(tmp_path, "04_datasheet.md", BAD_DS)
+    _write(tmp_path, "L1_complete.md", GOOD_DS)
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "FAIL", result.to_dict()
+    assert result.score == 2
+    assert result.source == str(poor)
+
+
+def test_malformed_role_document_is_fail(tmp_path):
+    path = _write(tmp_path, "04_datasheet.md", "#\nnot a complete document\n")
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "FAIL", result.to_dict()
+    assert result.score == 0
+    assert result.source == str(path)
+
+
+def test_empty_role_document_is_missing(tmp_path):
+    path = _write(tmp_path, "04_datasheet.md", " \n")
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "MISSING", result.to_dict()
+    assert result.source == str(path)
+
+
+def test_explicit_layer_input_is_still_scored(tmp_path):
+    path = _write(tmp_path, "L1_arbitrary_record.md", BAD_DS)
+    result = ds.score_datasheet_path(path)
+    assert result.verdict == "FAIL", result.to_dict()
+    assert result.score == 2
+    assert result.source == str(path)
+
+
+def test_current_in_repo_integration_fixture_is_not_a_layer_document(tmp_path):
+    from _hostpaths import require_repo
+
+    artifact = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "_shared",
+                            "integration_fixtures", "datasheet-gen.md")
+    _write(tmp_path, "L1_record.md", artifact.read_text(encoding="utf-8"))
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "MISSING", result.to_dict()
+    assert result.source == str(tmp_path)
+
+
+def test_incomplete_layer_title_is_scored_without_quality_filter(tmp_path):
+    path = _write(tmp_path, "L1_reference.md", "# Device Datasheet\n\n## Description\n"
+                  "This role document is deliberately incomplete but must still be scored.\n")
+    result = ds.score_datasheet_path(tmp_path)
+    assert result.verdict == "FAIL", result.to_dict()
+    assert result.score == 5
+    assert result.source == str(path)
+
+
+# Exact neutral input supplied by the independent fenced-title counterexample.
+FENCED_DS_INPUT = r"""Original layer input metadata. The following Markdown is a quoted document example, not this file's document title.
+
+```markdown
+# Neutral Controller Datasheet
+
+This is an independently authored structural scoring fixture, not measured hardware data.
+
+## Features
+- Byte-wide request data
+- Clocked ready indication
+- Active-high reset input
+- Readable status register
+- Configurable request mask
+
+## Description
+The neutral controller samples a byte request when the ready indication permits it. A subsequent status observation distinguishes an accepted request from an idle bus cycle, and reset returns the request controller to idle state.
+
+A small status register describes the most recent accepted request. Software may poll this value after writing the control register; the clock and reset pins remain mandatory independently of whether the application reads the status interface.
+
+## Pin Configuration
+| Pin | Direction | Description |
+|---|---|---|
+| CLK | Input | Clock samples the request |
+| RESET | Input | Active-high reset |
+| READY | Output | Request acceptance indication |
+
+## Absolute Maximum Ratings
+The following are illustrative metadata-fixture values, not qualified electrical limits.
+| Parameter | Value | Unit |
+|---|---|---|
+| Supply maximum | 2.2 | V |
+| Input maximum | 2.2 | V |
+| Input minimum | -0.3 | V |
+| Storage minimum | -40 | C |
+| Storage maximum | 125 | C |
+
+## Recommended Operating Conditions
+| Parameter | Min | Typ | Max | Unit |
+|---|---|---|---|---|
+| Supply | 1.62 | 1.8 | 1.98 | V |
+
+## Electrical Characteristics
+### DC
+| Parameter | Value | Unit |
+|---|---|---|
+| Input leakage | 1 | uA |
+### AC
+| Parameter | Value | Unit |
+|---|---|---|
+| Clock period | 20 | ns |
+
+## Timing Diagrams
+```text
+CLK    __/--\__/--\__
+REQ    ----valid-------
+READY  ______/------__
+```
+
+## Block Diagram
+```text
+Request --> Controller --> Status
+Clock   --> Controller
+Reset   --> Controller
+```
+
+## Detailed Description and Register Map
+The request controller accepts one byte transaction on an active clock edge when READY is asserted. Writing CONTROL while idle selects the mask used by the following transaction. STATUS records whether an acceptance occurred, and a read has no side effect. Reset clears both state and the acceptance flag. Polling STATUS while a request remains active does not authorize a second request; software must wait for READY before launching another byte.
+
+| Address | Register | Description |
+|---|---|---|
+| 0x00 | CONTROL | Request mask |
+| 0x04 | STATUS | Acceptance flag |
+
+## Application Information
+Place a 0.1 uF capacitor at the supply pins and use a 10 kohm illustrative bias resistor. These values only exercise document structure.
+```text
+Supply --+--> Controller
+         C1
+         |
+Return --+-------------
+```
+
+```
+"""
+
+
+def test_fenced_example_is_not_a_document_title(tmp_path):
+    import hashlib
+    import json
+    import os
+    import subprocess
+
+    fixture = FENCED_DS_INPUT.encode("utf-8")
+    assert hashlib.sha256(fixture).hexdigest() == "7c1ce4c72ce2815c73924d58ae42d0e26c57393a33389c4f3436748145a0e6fd"
+    path = tmp_path / "L1_arbitrary_record.md"
+    path.write_bytes(fixture)
+    command = [sys.executable, "-B", str(SCRIPT), str(tmp_path), "--json"]
+    process = subprocess.run(command, capture_output=True, text=True)
+    result = json.loads(process.stdout)
+    observation = {"id": "DS-fenced-example-auto", "argv": command,
+                   "rc": process.returncode, "result": result,
+                   "stderr": process.stderr, "input_sha256": "7c1ce4c72ce2815c73924d58ae42d0e26c57393a33389c4f3436748145a0e6fd"}
+    if os.environ.get("DOCUMENT_ROLE_OBSERVATIONS"):
+        with Path(os.environ["DOCUMENT_ROLE_OBSERVATIONS"]).open("a") as stream:
+            stream.write(json.dumps(observation) + "\n")
+    assert result["verdict"] == "MISSING", observation
+    assert process.returncode == 2, observation
+    assert result["score"] == 0, observation
+    assert result["source"] == str(tmp_path), observation

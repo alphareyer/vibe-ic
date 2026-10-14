@@ -48,12 +48,14 @@ try:
     from ds_quality_check import (
         _section_body, _bullet_count, _paragraph_count, _markdown_tables,
         _max_columns, _data_rows, _has_code_fence, _looks_like_diagram,
+        _locate_document,
     )
 except ImportError:  # allow running from another cwd
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from ds_quality_check import (  # noqa: E402
         _section_body, _bullet_count, _paragraph_count, _markdown_tables,
         _max_columns, _data_rows, _has_code_fence, _looks_like_diagram,
+        _locate_document,
     )
 
 THRESHOLD = 56
@@ -64,7 +66,6 @@ _AN_GLOBS = (
     "**/*appnote*.md",
     "**/*app_note*.md",
     "**/*application_note*.md",
-    "**/L5*.md",
 )
 
 _COMPONENT_VALUE_RE = re.compile(
@@ -302,11 +303,8 @@ def score_appnote_text(text: str, source: str = "<text>") -> ANResult:
 
 
 def _locate_appnote(project_dir: Path) -> Optional[Path]:
-    for pat in _AN_GLOBS:
-        for hit in sorted(project_dir.glob(pat)):
-            if hit.is_file():
-                return hit
-    return None
+    return _locate_document(project_dir, _AN_GLOBS, "L5*.md",
+                            r"\b(?:appnote|app[ _-]note|application[ _-]note)[ \t]*$")
 
 
 def score_appnote_path(path: Path) -> ANResult:

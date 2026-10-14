@@ -1321,6 +1321,16 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
                        event.get("inputs", {}).get(interface_rel) == "sha256:" + interface["ref"]["sha256"]
                        for event in events) and
                    all(latest_outputs.get(path) == digest for path, digest in current_outputs.items()))
+    # A changed pad derivation also requires the real derivative owner to
+    # publish a successor; keep the old on-disk manifest for its prechecks.
+    import copy
+    import renamed_interface_derive as rid
+    prospective = copy.deepcopy(manifest)
+    if interface:
+        prospective["authored_interface"] = interface["ref"]
+        prospective["renamed_interfaces"] = interface["pairs"]
+    rid.apply_to_manifest(project, prospective)
+    already = already and prospective == manifest
     derivative = "local_derivative" in manifest
     if derivative and not already:
         outcome = adopt_catalog_local_correction(project, matches, authored_rows=rows,
@@ -1345,14 +1355,21 @@ def emit_authored_glue_inventory(project: Path, matches: List[CatalogMatch],
             raise ValueError("source metadata changed before authored publication")
     if interface and _authored_interface_plan(project, interface_rel)["guards"] != interface["guards"]:
         raise ValueError("authored interface inputs changed before authored publication")
+    # Publish the separate pad derivation through this same source owner before
+    # hashing the manifest. A current glue inventory does not mean that its
+    # document-side derivation is current after an L-doc change.
+    previous_pad_manifest = copy.deepcopy(manifest)
+    if interface:
+        manifest["authored_interface"] = interface["ref"]
+        manifest["renamed_interfaces"] = interface["pairs"]
+    rid.apply_to_manifest(project, manifest)
+    already = already and manifest == previous_pad_manifest
     if already:
         return {"status": PIN_VERIFIED, "kind": "AUTHORED_GLUE_INVENTORY",
                 "already_current": True, "outputs": {}}
     manifest["ai_authored_files"] = rows
     declaration["ai_authored_files"] = sorted(authored)
     if interface:
-        manifest["authored_interface"] = interface["ref"]
-        manifest["renamed_interfaces"] = interface["pairs"]
         inputs.update(interface["inputs"])
     import _atomic_artefact as atomic
     atomic.write_json(mf_path, manifest)
@@ -1649,6 +1666,10 @@ def apply_local_derivative(project: Path, matches: List[CatalogMatch],
                 raise ValueError("authored interface inputs changed before derivative publication")
             manifest["authored_interface"] = interface["ref"]
             manifest["renamed_interfaces"] = interface["pairs"]
+        # Finish document-side metadata before this actual producer writes
+        # and hashes its manifest; a later glue publisher must not stale it.
+        import renamed_interface_derive as rid
+        rid.apply_to_manifest(project, manifest)
         atomic.write_json(mf_path, manifest)
         outputs["phase2/stage1/rtl/SOURCE_MANIFEST.json"] = "sha256:" + _sha256_file(mf_path)
         event = {**plan["event"], "outputs": outputs}

@@ -1,0 +1,23 @@
+{
+  "schema": "vibeic.authored_interface_renames.v1",
+  "top_module": "neutral_endpoint",
+  "actor": "independent fixed-input reviewer",
+  "rationale": "Original L3 explicitly delegates typical store address names; actual selected top uses independent read/write address outputs of the same literal width/direction.",
+  "renamed_interfaces": [
+    {
+      "l9": [
+        "o_store_addr"
+      ],
+      "rtl": [
+        "o_store_read_addr",
+        "o_store_write_addr"
+      ]
+    }
+  ],
+  "input_obligations": [
+    {
+      "path": "input/docs/L3_external_interface.md",
+      "quote": "(typical) address spelling; implemented names delegated"
+    }
+  ]
+}

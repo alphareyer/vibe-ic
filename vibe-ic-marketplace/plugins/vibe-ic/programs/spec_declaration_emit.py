@@ -1694,7 +1694,20 @@ def _report_outside(outside: Dict[str, Any], refused: Dict[str, str],
         print("  REFUSED, not written: %s — %s" % (k, why), file=stream)
 
 
-def _write_json(path: Path, payload: Any) -> None:
+def _write_json(path: Path, payload: Any, *, stable_publication: bool = False) -> None:
+    if stable_publication and path.is_file():
+        try:
+            previous = json.loads(path.read_text())
+            if (isinstance(previous, dict) and isinstance(payload, dict)
+                    and isinstance(previous.get('generated_at'), str)
+                    and previous['generated_at']
+                    and {k: v for k, v in previous.items() if k != 'generated_at'}
+                        == {k: v for k, v in payload.items() if k != 'generated_at'}):
+                # Same complete producer payload: keep published bytes. All
+                # consumers still hash generated_at and every other byte.
+                return
+        except (OSError, ValueError, TypeError):
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
@@ -2283,7 +2296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "accepted": sorted(rtl_declared),
             "rejected": rtl_rejected,
         },
-    })
+    }, stable_publication=True)
 
     print("spec_declaration_emit: PASS — %d/%d contract field(s) declared -> %s"
           % (n_determined, len(status), out_path))

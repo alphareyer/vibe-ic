@@ -50,7 +50,11 @@ authored ones and the derived ones alike, against the design: each `rtl` name is
 a port of the implemented top that the document does not already put on another
 side, each `l9` name is an L9 port, and the `l9` names resolve by the exact-atom
 rule to exactly ONE group side. A pair that fails is REFUSED with its reason;
-`--check` exits 1.
+`--check` exits 1. An authored rename can also carry a complete exact-port
+row when the original input interface row marks that spelling as
+typical/illustrative. Bare manifest pairs cannot repoint a fixed physical
+endpoint. The complete literal bit extent must agree; partial, unresolved,
+or contradictory side declarations remain refusals.
 
 Sides are counted per BIT NET, as the pad side places them: one pad per bit
 (`expand_side_ports`), a group row's `resolved_nets`, and a verified pair's rtl
@@ -61,7 +65,7 @@ Exit codes (`--check`): 0 every implemented bit net ends on EXACTLY ONE side
 (directly, or by a verified pair), 1 a pair is refused, a net has no side, or a
 net sits on two sides (what 15.5ic refuses as PORT_WITHOUT_A_SIDE /
 PORT_ON_TWO_SIDES), 2 the question does not arise (no reused-IP manifest, no
-pad placement with group rows, or no readable port list), 3 NOT_MEASURED: an
+pad placement, or no readable port list), 3 NOT_MEASURED: an
 extent the check cannot know, and no definite defect -- a design document that
 could not be read, a placement token whose bit range does not resolve from a
 declared parameter, or a port whose width neither its RTL header nor L9 states
@@ -220,9 +224,9 @@ def _placement(project: Path):
         raise NotMeasured("a design document could not be read: "
                           + "; ".join(f"{u['file']}: {u['reason']}"
                                       for u in unreadable))
-    if placement is None or not placement.side_groups:
-        raise NotApplicable("the design states no pad placement with a group "
-                            "row, so no side is carried by a rename")
+    if placement is None:
+        raise NotApplicable("the design states no pad placement, "
+                            "so no side is carried by a rename")
     return placement, params
 
 
@@ -285,7 +289,8 @@ def _explicit_document_aliases(project: Path) -> List[Tuple[str, str, str, str, 
 
 def _net_sides(placement, params: Dict[str, int],
                impl_ports: List[Dict[str, Any]],
-               renames: "List[Tuple[set, set]]" = (), *, split: bool = False):
+               renames: "List[Tuple[set, set]]" = (), *, split: bool = False,
+               exact_carriers=()):
     """Side(s) of every bit net, placed the way step 15.5ic places them.
 
     Exact rows are expanded one pad per bit (`expand_side_ports`); group rows
@@ -302,7 +307,8 @@ def _net_sides(placement, params: Dict[str, int],
     nets_of = {str(p["name"]): LPP.bit_names(p) for p in impl_ports}
     definite: Dict[str, Set[str]] = {}
     from_open: Dict[str, Set[str]] = {}
-    exact, unresolved = LPP.expand_side_ports(placement, params)
+    exact, unresolved = LPP.expand_renamed_side_ports(
+        placement, params, impl_ports, renames, exact_carriers=exact_carriers)
     for side, nets in exact.items():
         for net in nets:
             definite.setdefault(net, set()).add(side)
@@ -314,7 +320,7 @@ def _net_sides(placement, params: Dict[str, int],
                 for net in nets_of.get(m.group(1), [m.group(1)]):
                     from_open.setdefault(net, set()).add(side)
     _grouped, records = LPP.resolve_declared_pad_groups(
-        placement, impl_ports, renames=list(renames))
+        placement, impl_ports, renames=list(renames), params=params)
     for r in records:
         for net in r["resolved_nets"]:
             definite.setdefault(net, set()).add(r["side"])
@@ -374,10 +380,10 @@ def _named_on(placement) -> Dict[str, Set[str]]:
     return named
 
 
-def _whole_port_sides(placement, impl_ports, renames) -> Dict[str, Set[str]]:
+def _whole_port_sides(placement, impl_ports, renames, params=None) -> Dict[str, Set[str]]:
     """Sides assigned to every bit of a port by a matched group or pair."""
     _grouped, records = LPP.resolve_declared_pad_groups(
-        placement, impl_ports, renames=list(renames))
+        placement, impl_ports, renames=list(renames), params=params)
     whole: Dict[str, Set[str]] = {}
     for record in records:
         for name in record["matched_ports"]:
@@ -639,6 +645,9 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
         except (NotApplicable, NotMeasured) as exc:
             fresh_error = str(exc)
     out: List[Dict[str, Any]] = []
+    exact_carriers = LPP.input_delegated_rename_names(
+        project, [(set(left), set(right)) for left, right in
+                  _manifest_renamed_groups({parse_key: pairs})])
     for entry in pairs:
         groups = _manifest_renamed_groups({parse_key: [entry]})
         l9s, rtls = groups[0] if groups else (set(), set())
@@ -666,8 +675,12 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
         not_l9 = sorted(n for n in l9s if n not in l9_names)
         if not_l9:
             why.append(f"l9 name(s) {not_l9} are not L9 top_ports")
-        sides = sorted({s for n in l9s for s in _group_sides(placement, n)})
-        sideless = sorted(n for n in l9s if not _group_sides(placement, n))
+        l9_by_name = {str(p["name"]): p for p in l9_ports}
+        declared_sides = {n: LPP.declared_port_sides(
+            placement, params, l9_by_name.get(n, {"name": n}),
+            exact=n in exact_carriers and n not in implemented) for n in l9s}
+        sides = sorted({s for ss in declared_sides.values() for s in ss})
+        sideless = sorted(n for n, ss in declared_sides.items() if not ss)
         if sideless:
             why.append(f"l9 name(s) {sideless} fall in no group row by the "
                        "exact-atom rule, so the pair carries no side")
@@ -747,9 +760,9 @@ def check(project: Path, pairs: Any,
     renames = [(set(v["pair"]["l9"]), set(v["pair"]["rtl"]))
                for v in authored_v + derived_v if v["verdict"] == "VERIFIED"]
     definite, from_open = _net_sides(placement, params, counted, renames,
-                                     split=True)
+        split=True, exact_carriers=LPP.input_delegated_rename_names(project, renames))
     named = _named_on(placement)
-    whole_sides = _whole_port_sides(placement, counted, renames)
+    whole_sides = _whole_port_sides(placement, counted, renames, params)
     nets = [n for p in counted if str(p["name"]) not in uncountable
             for n in LPP.bit_names(p)]
     without = [n for n in nets if not definite.get(n) and not from_open.get(n)]
