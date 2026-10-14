@@ -1,0 +1,236 @@
+{
+  "input": {
+    "issue": 3087,
+    "scope": "GO_PUBLIC_NEUTRAL_SOURCE_ONLY_NOT_ORIGINAL_FIELD",
+    "verbatim_public_row": "| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |",
+    "authored_localized_wrapper": {
+      "config_heading": "## PDN 設定",
+      "config_header": "| 設定 | 值 |",
+      "interface_heading": "## 介面訊號",
+      "interface_header": "| 訊號 | 方向 |"
+    },
+    "expected": "Tool row never mandatory RTL port; actual required output deletion in same localized interface stays strictFAIL, no advisory-only substitute",
+    "original_heading_export": "NOT_PUBLICLY_SUPPLIED; original case NOT_VERIFIED and issue stays OPEN",
+    "root_scope": "GO_ONE_PUBLIC_NEUTRAL_CURRENT_VALUE_REPRO_THEN_MINIMAL_OWNER_FIX",
+    "preserve": "Real required port deletion remains strictFAIL; a setting sharing a real pin name does not erase its independently declared port role; no broad Chinese keyword suppression; no3088 coverage changes."
+  },
+  "authoring_provenance": "Only verbatim_public_row is original public bytes. All headings, headers, interface rows, neutral RTL and control variations are public fixture-author choices. No original field reproduction claim.",
+  "cases": [
+    {
+      "id": "public-neutral-value",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": []
+    },
+    {
+      "id": "public-neutral-missing-output",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y); endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "p"
+        ]
+      ]
+    },
+    {
+      "id": "public-neutral-wrong-direction",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, input p); endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": [
+        [
+          "PORT-DIRECTION",
+          "p"
+        ]
+      ]
+    },
+    {
+      "id": "setting-shared-required-pin-missing",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n| `FP_PDN_SKIPTRIM` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": "output"
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    },
+    {
+      "id": "setting-shared-required-pin-present",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n| `FP_PDN_SKIPTRIM` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p, FP_PDN_SKIPTRIM); assign p=x; assign FP_PDN_SKIPTRIM=y; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": "output"
+      },
+      "expected_findings": []
+    },
+    {
+      "id": "localized-interface-overrides-setting-columns",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## 介面訊號\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": ""
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    },
+    {
+      "id": "localized-signal-header-overrides-pdn-heading",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 訊號 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": ""
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    },
+    {
+      "id": "localized-direction-header-keeps-required-pin",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 設定 | 方向 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | output |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": "output"
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    },
+    {
+      "id": "english-header-localized-heading",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| Setting | Value |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": []
+    },
+    {
+      "id": "localized-header-english-heading",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN configuration\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": []
+    },
+    {
+      "id": "arbitrary-setting-identifier",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `ROUTE_OPTIMIZE` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output"
+      },
+      "expected_findings": []
+    },
+    {
+      "id": "localized-unrelated-heading-no-keyword-suppression",
+      "prompt": "## 介面訊號\n| 訊號 | 方向 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n\n## 產品設定\n| 訊號 | 方向 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | output |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": "output"
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    },
+    {
+      "id": "directionless-shared-pin-localized-interface",
+      "prompt": "## 介面訊號\n| 訊號 | 描述 |\n|---|---|\n| `clk` | input |\n| `rst` | input |\n| `x` | input |\n| `y` | input |\n| `p` | output |\n| `FP_PDN_SKIPTRIM` | product signal |\n\n## PDN 設定\n| 設定 | 值 |\n|---|---|\n| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n",
+      "rtl": "module neutral_core(input clk, rst, x, y, output p); assign p=x; endmodule\n",
+      "expected_ports": {
+        "clk": "input",
+        "rst": "input",
+        "x": "input",
+        "y": "input",
+        "p": "output",
+        "FP_PDN_SKIPTRIM": ""
+      },
+      "expected_findings": [
+        [
+          "MISSING-PORT",
+          "FP_PDN_SKIPTRIM"
+        ]
+      ]
+    }
+  ]
+}

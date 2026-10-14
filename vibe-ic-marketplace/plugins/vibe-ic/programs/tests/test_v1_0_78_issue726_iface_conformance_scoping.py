@@ -48,6 +48,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 
 
+_LOCALIZED_PDN_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" /
+     "iface_localized_pdn_public_neutral.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _LOCALIZED_PDN_FIXTURE["cases"],
+                         ids=lambda case: case["id"])
+def test_localized_pdn_public_neutral_role(tmp_path, case):
+    """Public neutral metadata -> authored source -> original strict consumer.
+
+    Only the setting row is public verbatim. The localized wrapper, interface,
+    RTL and control variants are fixture-author choices, not original field data.
+    """
+    pp = tmp_path / "prompt.md"
+    rp = tmp_path / "neutral_core.sv"
+    jp = tmp_path / "report.json"
+    pp.write_text(case["prompt"], encoding="utf-8")
+    rp.write_text(case["rtl"], encoding="utf-8")
+    cmd = [sys.executable, str(PROG), "--prompt", str(pp), "--rtl", str(rp),
+           "--strict", "--json", str(jp)]
+    result = _pr.run(cmd, capture_output=True, text=True)
+    (tmp_path / "argv.json").write_text(json.dumps(cmd) + "\n")
+    (tmp_path / "stdout.log").write_text(result.stdout)
+    (tmp_path / "stderr.log").write_text(result.stderr)
+    (tmp_path / "rc.txt").write_text(str(result.returncode) + "\n")
+    report = json.loads(jp.read_text())
+    expected = case["expected_findings"]
+    assert result.returncode == (1 if expected else 0), (result.stdout, result.stderr)
+    assert M._table_ports(case["prompt"]) == case["expected_ports"]
+    assert report["files_read"] == [str(pp), str(rp)]
+    assert report["blocking_findings"] == len(expected)
+    assert len(report["findings"]) == len(expected)
+    for finding, (kind, name) in zip(report["findings"], expected):
+        assert finding["kind"] == kind
+        assert f"'{name}'" in finding["message"]
+        assert finding["block_eligible"] is True
+        assert finding["advisory_note"] == ""
+    if not expected:
+        assert report["conformant"] is True
+        assert "interface-conformance ok" in result.stdout
+
+
 @pytest.mark.parametrize("option", ["FP_PDN_SKIPTRIM", "ROUTE_OPTIMIZE"])
 def test_physical_configuration_table_is_not_a_required_port(tmp_path, option):
     prompt = ("## Interface ports\n"

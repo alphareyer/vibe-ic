@@ -1106,6 +1106,7 @@ def _configuration_table_spans(prompt: str) -> List[Tuple[int, int]]:
 
     Keep occurrences outside these tables: a setting and a real port may share
     an identifier. Explicit interface or direction columns remain evidence.
+    Localized labels identify these same roles, never excluded signal names.
     """
     lines = prompt.splitlines(keepends=True)
     offsets = [0]
@@ -1119,23 +1120,23 @@ def _configuration_table_spans(prompt: str) -> List[Tuple[int, int]]:
         if heading:
             text = heading.group(1)
             interface_section = bool(re.search(
-                r"\b(?:interface|ports?|pins?|i/o)\b", text, re.I))
+                r"(?:\b(?:interface|ports?|pins?|i/o)\b|介面)", text, re.I))
             physical_config = bool(
                 re.search(r"\b(?:pdn|tool|physical|floorplan|routing|synthesis)\b", text, re.I)
-                and re.search(r"\b(?:config(?:uration)?|settings?|options?)\b", text, re.I))
+                and re.search(r"(?:\b(?:config(?:uration)?|settings?|options?)\b|設定)", text, re.I))
         header = _split_md_row_local(line)
         delimiter = _split_md_row_local(lines[i + 1])
         if not header or len(header) != len(delimiter) or not _is_md_delim_local(delimiter):
             continue
         clean = [cell.strip().strip("*_` ") for cell in header]
         if any(_DIR_HDR_RE.fullmatch(cell) or re.fullmatch(
-                r"(?:ports?|signals?|pins?)(?:\s+names?)?", cell, re.I)
+                r"(?:(?:ports?|signals?|pins?)(?:\s+names?)?|訊號|方向)", cell, re.I)
                for cell in clean):
             continue
         setting_header = re.fullmatch(
-            r"(?:settings?|options?|config(?:uration)?(?:\s+key)?|tool\s+parameters?)",
+            r"(?:settings?|options?|config(?:uration)?(?:\s+key)?|tool\s+parameters?|設定)",
             clean[0], re.I)
-        value_header = any(re.fullmatch(r"(?:value|default(?:\s+value)?|enabled)", cell, re.I)
+        value_header = any(re.fullmatch(r"(?:value|default(?:\s+value)?|enabled|值)", cell, re.I)
                            for cell in clean[1:])
         if interface_section or not value_header or not (setting_header or physical_config):
             continue
