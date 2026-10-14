@@ -338,3 +338,52 @@ def test_issue3141_missing_or_conflicting_unit_is_not_a_measurement(tmp_path, te
     receipt.write_text(json.dumps(record))
     with pytest.raises(ll.Refusal, match="TIME_UNIT"):
         phase3.publish_prelayout_reports(tmp_path, folder)
+
+
+def test_issue3141_real_image_internal_liberty_remains_measured(tmp_path):
+    folder = _issue3141_native(tmp_path, "image-internal")
+    assert json.loads((folder / "pdk_root.json").read_text())["mounts_under_it"] == []
+    result = phase3.publish_prelayout_reports(tmp_path, folder)
+    record = json.loads(Path(result["pre_pnr_summary"]).read_text())
+    assert record["passed"] is True
+    assert record["summary"]["slack_measurement"] == "MEASURED"
+    assert record["summary"]["slack_time_unit"] == "ns"
+
+
+def test_issue3141_genuine_negative_native_slack_still_blocks(tmp_path):
+    import librelane_contract as ll
+    folder = _issue3141_native(tmp_path, "negative-ps")
+    metrics = json.loads((folder / "state_out.json").read_text())["metrics"]
+    assert metrics["timing__setup__ws__corner:max_ss_025C_1v00"] < 0
+    with pytest.raises(ll.Refusal, match="PRELAYOUT_STA_SUMMARY_FAILED"):
+        phase3.publish_prelayout_reports(tmp_path, folder)
+
+
+@pytest.mark.parametrize("change", ["missing", "changed", "unbound"])
+def test_issue3141_invalid_mounted_liberty_context_cannot_publish_units(tmp_path, change):
+    """Invalid authored context controls do not claim a successful native run."""
+    import shutil
+    import librelane_contract as ll
+    folder = _issue3141_native(tmp_path, "ns")
+    pdk_path = folder / "pdk_root.json"
+    pdk = json.loads(pdk_path.read_text())
+    original = Path(pdk["mounts_under_it"][0][0])
+    assets = tmp_path / "assets"
+    shutil.copytree(original, assets)
+    pdk["mounts_under_it"][0][0] = str(assets)
+    if change == "missing":
+        (assets / "ss.lib").unlink()
+    elif change == "changed":
+        (assets / "ss.lib").write_text((assets / "ss.lib").read_text() + "\nchanged\n")
+    pdk_path.write_text(json.dumps(pdk))
+    receipt_path = folder / "vibeic_receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    if change == "unbound":
+        receipt["input"]["config_files"].pop("/foss/pdks/issue3141-neutral/ss.lib")
+        fp = folder / "input_fingerprint.json"
+        fp.write_text(json.dumps(receipt["input"]))
+        receipt["sha256"]["input_fingerprint.json"] = ll.digest(fp)
+    receipt["sha256"]["pdk_root.json"] = ll.digest(pdk_path)
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ll.Refusal, match="LIBERTY"):
+        phase3.publish_prelayout_reports(tmp_path, folder)
