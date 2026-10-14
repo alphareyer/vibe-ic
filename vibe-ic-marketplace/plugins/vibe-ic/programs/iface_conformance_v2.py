@@ -112,7 +112,8 @@ import _provenance as _prov  # noqa: E402  (ORGANIC #770)
 # ONLY in this form — `## New Input` + `- **enable:** 1-bit` — which the prose /
 # table / given-code extractors never see, so an RTL OMITTING `enable` slipped
 # through `interface-conformance ok`.) chip-AGNOSTIC: pure markdown structure.
-_STRUCTURAL_IFACE_SOURCES = frozenset({"table", "given_code", "bold_label"})
+_STRUCTURAL_IFACE_SOURCES = frozenset({"table", "given_code", "bold_label",
+                                       "port_name_role"})
 
 
 def _iface_provenance(sources: Set[str]) -> str:
@@ -1410,6 +1411,11 @@ def extract_prompt_iface(prompt: str) -> PromptIface:
         if not _before_dir_is_role_label(gap):
             continue
         pif.add(m.group(3), m.group(1).lower(), "prose")
+        # A directly bound role names a required port independently of whether
+        # the candidate DUT implements it. This supports NAME provenance only;
+        # the existing prose DIRECTION policy remains unchanged (#806).
+        if re.fullmatch(r"\s*(?:(?:port|signal|wire|logic)\s+)?", gap, re.I):
+            pif.add(m.group(3), "", "port_name_role")
     for m in _DIR_NEAR_AFTER_RE.finditer(prompt):
         gap = m.group(2) or ""
         # (#753) skip "the input"/"the output" trailing-NOUN references ("`Dx` ...
@@ -1437,6 +1443,11 @@ def extract_prompt_iface(prompt: str) -> PromptIface:
                 and _AFTER_GAP_CLAUSE_RE.search(gap)):
             continue
         pif.add(m.group(1), m.group(3).lower(), "prose")
+        # The optional copula in the match already binds "is an output" to
+        # this name; a bare/colon label is equally explicit. Broad proximity
+        # guesses retain their original advisory provenance.
+        if re.fullmatch(r"\s*(?::\s*)?", gap):
+            pif.add(m.group(1), "", "port_name_role")
     # (d) wavedrom signal names (names only, no direction)
     for m in _WAVEDROM_NAME_RE.finditer(prompt):
         pif.add(m.group(1), "", "wavedrom")
