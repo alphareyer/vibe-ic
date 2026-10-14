@@ -168,7 +168,67 @@ def documentary_cell(tmp_path):
     return d
 
 
-def test_current_documentary_binding_disarms_without_building_the_example(tmp_path):
+def _assert_current_r2_contract(project, expected, absent, record_property):
+    """Observe the real API and its normal emitted callable on exact input.
+
+    The original PR's stricter metadata policy remains in its immutable
+    ancestor. These assertions exercise the current source/required contract;
+    the emitter is seeded only when the current input has no rejection.
+    """
+    import runpy
+    from test_stage2_on_pass_review import _sopr, _r2_issue3131_metadata_only
+
+    declaration = {"intent": [str(L9_REL)], "artefact": [str(NETLIST_REL)]}
+    inputs = {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in project.rglob("*") if p.is_file()
+              and not str(p.relative_to(project)).startswith("reports/")}
+    finding, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, declaration))
+    seed = finding
+    if finding["verdict"] != "REJECT":
+        l9 = project / L9_REL
+        original = l9.read_bytes()
+        content = json.loads(original)
+        content["top_ports"].append({"name": "r73_seed_irq", "direction": "output"})
+        try:
+            l9.write_text(json.dumps(content))
+            seed = _sopr.rule_intent_pin_not_in_netlist(project, declaration)
+        finally:
+            l9.write_bytes(original)
+        assert seed["verdict"] == "REJECT"
+    seed = dict(seed, rule="R2_INTENT_PIN_NOT_IN_NETLIST")
+    emitted = _sopr.emit_test(project / "reports/tests/test_r73_r2.py", seed, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), emitted_dispatch = _r2_issue3131_metadata_only(check)
+    actual_absent = [p["name"] for p in finding.get("absent_signal_pins", [])]
+    record_property("api_verdict", finding["verdict"])
+    record_property("absent_signal_pins", json.dumps(actual_absent))
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(inputs, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(emitted_dispatch))
+    assert inputs == {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in project.rglob("*") if p.is_file()
+                      and not str(p.relative_to(project)).startswith("reports/")}
+    assert finding["verdict"] == expected
+    assert actual_absent == absent
+    assert observed == ("REJECT" if expected == "REJECT" else "ACCEPT"), message
+    assert api_dispatch == emitted_dispatch == []
+    for name in absent:
+        assert name in message
+    return finding
+
+
+def test_current_documentary_binding_disarms_without_building_the_example(tmp_path, record_property):
     d = documentary_cell(tmp_path)
     r = run(d, "--json", str(tmp_path / "r.json"))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -178,6 +238,7 @@ def test_current_documentary_binding_disarms_without_building_the_example(tmp_pa
     assert f["verdict"] == "DISARMED"
     assert f["disarmed"][0]["name"] == "retired_example"
     assert "intent_declares_documentary" in f["disarmed"][0]
+    _assert_current_r2_contract(d, "DISARMED", [], record_property)
 
 
 @pytest.mark.parametrize("change", [
@@ -189,7 +250,14 @@ def test_current_documentary_binding_disarms_without_building_the_example(tmp_pa
     "alias_conflict", "duplicate_pin", "replacement_flag_absent",
     "documentary_pin_built", "l9_top_changed", "pin_name_absent", "retired_invalid_name",
 ])
-def test_unproven_or_contradictory_documentary_release_still_rejects(tmp_path, change):
+def test_unproven_or_contradictory_documentary_release_still_rejects(tmp_path, change, record_property):
+    """Retain original case IDs while explicitly migrating obsolete policy.
+
+    Group/cardinality/replacement/marker-only/contained-symlink metadata does
+    not add a current R2 obligation. A truly built pin accepts; a nameless row
+    cannot earn named documentary credit. All genuine binding, literal flag,
+    required/mandatory and source-port negatives still reject.
+    """
     d = documentary_cell(tmp_path)
     l9p = d / L9_REL
     doc = json.loads(l9p.read_text())
@@ -236,13 +304,31 @@ def test_unproven_or_contradictory_documentary_release_still_rejects(tmp_path, c
     elif change == "pin_name_absent": del pin["name"]
     elif change == "retired_invalid_name": b["document_examples_not_implemented"] = [12]
     l9p.write_text(json.dumps(doc))
+    metadata_release = {"source_symlink", "retired_duplicate", "group_absent",
+                        "group_unknown_replacement", "group_duplicate",
+                        "alias_conflict", "duplicate_pin", "replacement_flag_absent"}
+    expected = ("DISARMED" if change in metadata_release else
+                "ACCEPT" if change in {"documentary_pin_built", "pin_name_absent"}
+                else "REJECT")
+    absent = ["retired_example"] if expected == "REJECT" else []
+    f = _assert_current_r2_contract(d, expected, absent, record_property)
+    if change == "pin_name_absent":
+        # No invented named-pin release for a row that has no name. The
+        # remaining named obligations are all actually present in netlist.
+        assert f.get("disarmed", []) == []
+        assert set(p["name"] for p in rows if p.get("name")) == {"clk", "rst", "x", "y", "p"}
+    if change == "documentary_pin_built":
+        assert f.get("disarmed", []) == []
     r = run(d, "--json", str(tmp_path / "r.json"))
-    assert r.returncode == 1, (change, r.stdout + r.stderr)
+    assert r.returncode == (1 if expected == "REJECT" else 0), (change, r.stdout + r.stderr)
     rec = json.loads((tmp_path / "r.json").read_text())
-    assert rec["rejections"][0]["rule"] == "R2_INTENT_PIN_NOT_IN_NETLIST"
-    emitted = d / rec["rejections"][0]["test"]
-    result = subprocess.run([sys.executable, str(emitted)], capture_output=True, text=True)
-    assert result.returncode == 1, (change, result.stdout + result.stderr)
+    if expected == "REJECT":
+        assert rec["rejections"][0]["rule"] == "R2_INTENT_PIN_NOT_IN_NETLIST"
+        emitted = d / rec["rejections"][0]["test"]
+        result = subprocess.run([sys.executable, str(emitted)], capture_output=True, text=True)
+        assert result.returncode == 1, (change, result.stdout + result.stderr)
+    else:
+        assert rec["rejections"] == []
 
 
 def test_documentary_disarm_keeps_required_pin_and_emitted_regression(tmp_path):
@@ -293,7 +379,7 @@ def test_existing_legacy_disarm_keeps_an_exact_false_marker(tmp_path, kind, docu
 
 @pytest.mark.parametrize("kind", ["optional", "supply"])
 @pytest.mark.parametrize("contradiction", ["required", "alias"])
-def test_legacy_false_does_not_hide_required_or_alias_contradictions(tmp_path, kind, contradiction):
+def test_legacy_false_does_not_hide_required_or_alias_contradictions(tmp_path, kind, contradiction, record_property):
     d = documentary_cell(tmp_path)
     l9p = d / L9_REL
     doc = json.loads(l9p.read_text())
@@ -306,5 +392,66 @@ def test_legacy_false_does_not_hide_required_or_alias_contradictions(tmp_path, k
         doc["ports"] = [dict(p) for p in doc["top_ports"]]
         next(p for p in doc["ports"] if p["name"] == "legacy_absent")["declared_by_staged_top"] = True
     l9p.write_text(json.dumps(doc))
+    # Pure power belongs to physical acceptance; an alias marker by itself
+    # creates no signal obligation. Literal required=True non-supply does.
+    expected = "REJECT" if (kind, contradiction) == ("optional", "required") else "DISARMED"
+    _assert_current_r2_contract(d, expected,
+                                ["legacy_absent"] if expected == "REJECT" else [],
+                                record_property)
     r = run(d, "--json", str(tmp_path / "r.json"))
-    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.returncode == (1 if expected == "REJECT" else 0), r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("built", [False, True], ids=["missing", "built"])
+def test_documentary_source_port_still_missing_from_netlist_rejects(tmp_path, built, record_property):
+    """The migrated actual-built y positive keeps a real source-port control."""
+    d = documentary_cell(tmp_path)
+    l9p = d / L9_REL
+    doc = json.loads(l9p.read_text())
+    doc["top_ports"] = [p for p in doc["top_ports"] if p["name"] != "retired_example"]
+    next(p for p in doc["top_ports"] if p["name"] == "y")["declared_by_staged_top"] = False
+    # Explicit neutral supplement: source really declares y in both arms;
+    # only the netlist header/declaration changes in the missing arm.
+    source_rel = Path("phase2/stage1/rtl/selected_spm.v")
+    source = d / source_rel
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes((d / NETLIST_REL).read_bytes())
+    doc["selected_interface_binding"].update(
+        selected_source=str(source_rel),
+        selected_source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        document_examples_not_implemented=["y"],
+        illustrative_groups=[{"l9": ["y"], "rtl": ["x"]}])
+    l9p.write_text(json.dumps(doc))
+    if not built:
+        netlist = d / NETLIST_REL
+        netlist.write_text(netlist.read_text().replace("x, y, p", "x, p")
+                           .replace("  input y;\n", ""))
+    finding = _assert_current_r2_contract(
+        d, "ACCEPT" if built else "REJECT", [] if built else ["y"], record_property)
+    assert finding.get("disarmed", []) == []
+
+
+@pytest.mark.parametrize("kind", ["optional", "supply"])
+@pytest.mark.parametrize("flag", ["required", "mandatory"])
+@pytest.mark.parametrize("built", [False, True], ids=["missing", "built"])
+def test_legacy_same_name_required_non_supply_alias(tmp_path, kind, flag, built, record_property):
+    """A real required non-supply alias defeats optional/power shadowing."""
+    d = documentary_cell(tmp_path)
+    l9p = d / L9_REL
+    doc = json.loads(l9p.read_text())
+    row = {"name": "legacy_absent", "direction": "input", "declared_by_staged_top": False}
+    row.update({"optional": True} if kind == "optional" else {"role": "power"})
+    doc["top_ports"].append(row)
+    doc["ports"] = [{"name": "legacy_absent", "direction": "input", flag: True}]
+    l9p.write_text(json.dumps(doc))
+    if built:
+        n = d / NETLIST_REL
+        n.write_text(n.read_text().replace(
+            "module spm(clk, rst, x, y, p);",
+            "module spm(clk, rst, x, y, p, legacy_absent);\n  input legacy_absent;"))
+        # Keep the selected netlist binding current after the authored build.
+        doc["selected_interface_binding"]["selected_source_sha256"] = hashlib.sha256(n.read_bytes()).hexdigest()
+        l9p.write_text(json.dumps(doc))
+    finding = _assert_current_r2_contract(
+        d, "DISARMED" if built else "REJECT", [] if built else ["legacy_absent"], record_property)
+    assert [p["name"] for p in finding["disarmed"]] == ["retired_example"]
