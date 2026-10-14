@@ -309,12 +309,17 @@ def _first_not_retired(rx, text: str, *, skip_width_helper: bool = False):
         if skip_width_helper and _is_log2_width_helper(text, m):
             continue
         clause = _rounding_clause(text, m)
+        # A mode-selection verb must govern this mode token. A mandatory
+        # physical limit ("power ceiling must be 25 mW") is still a metric.
+        selected_mode = re.search(
+            r"\b(?:must|shall|required\s+to)\s+(?:use|apply|select)\s+"
+            r"(?:the\s+)?" + re.escape(m.group(0)) + r"(?!\w)", clause, re.I)
         if (skip_width_helper and re.search(
                 r"\b(?:diagnostic\w*|baseline)\b|\b(?:area|power)\b[^\n]*\bnote\b",
                 clause, re.I)
                 and re.search(r"\b(?:area|power|upper\s+bound)\b", clause, re.I)
-                and not re.search(r"\b(?:must|shall|required|rounding(?:[_ -]mode)?|round(?:s|ed)?|RUP|arithmetic)\b|ceil\s*\(",
-                                  clause, re.I)):
+                and not re.search(r"\b(?:rounding(?:[_ -]mode)?|round(?:s|ed)?|RUP)\b|ceil\s*\(",
+                                  clause, re.I) and not selected_mode):
             continue  # a metric ceiling is not an arithmetic rounding mode
         if DENIAL_RETIRED_RE.search(clause):
             continue
