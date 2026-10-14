@@ -338,3 +338,55 @@ def test_chip_agnostic_source():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+_ISSUE3087_DECLARED_OUTPUTS = {
+    "before": "The output `p` carries the result.",
+    "before_signal": "The output signal `p` carries the result.",
+    "after_copula": "`p` is an output.",
+    "after_label": "`p`: output signal.",
+}
+
+
+@pytest.mark.parametrize("clause_id", list(_ISSUE3087_DECLARED_OUTPUTS))
+@pytest.mark.parametrize("present", [True, False], ids=["present", "missing"])
+def test_issue3087_declared_output_missing_is_strict(tmp_path, clause_id, present):
+    """DUT omission cannot refute an explicit source port-name declaration.
+
+    Public synthetic INPUT only. The quoted setting row/header is public issue
+    text; these four declaration clauses and neutral one-bit RTL are authored
+    controls, not the reporter's complete original field INPUT.
+    """
+    prompt = ("Inputs are `clk` (input), `rst` (input), `x` (input), "
+              "and `y` (input).\n" + _ISSUE3087_DECLARED_OUTPUTS[clause_id] +
+              "\n\n## 9.3 Power Network (PDN)\n"
+              "| 設定 | 值 |\n|---|---|\n"
+              "| `FP_PDN_SKIPTRIM` | true(略過 PDN trimming pass) |\n")
+    name = "p" if present else "result_removed"
+    rtl = (f"module neutral_core(input clk, rst, x, y, output {name}); "
+           f"assign {name} = x ^ y; endmodule\n")
+    pp, rp, jp = (tmp_path / "prompt.md", tmp_path / "neutral_core.sv",
+                  tmp_path / "report.json")
+    pp.write_text(prompt, encoding="utf-8")
+    rp.write_text(rtl, encoding="utf-8")
+    cmd = [sys.executable, str(PROG), "--id", "neutral_core", "--prompt",
+           str(pp), "--rtl", str(rp), "--strict", "--json", str(jp)]
+    result = _pr.run(cmd, capture_output=True, text=True)
+    (tmp_path / "argv.json").write_text(json.dumps(cmd) + "\n")
+    (tmp_path / "stdout.log").write_text(result.stdout)
+    (tmp_path / "stderr.log").write_text(result.stderr)
+    (tmp_path / "rc.txt").write_text(str(result.returncode) + "\n")
+    report = json.loads(jp.read_text())
+    assert report["files_read"] == [str(pp), str(rp)]
+    assert not any("FP_PDN_SKIPTRIM" in item["message"]
+                   for item in report["findings"])
+    assert result.returncode == (0 if present else 1), report
+    assert report["blocking_findings"] == (0 if present else 1)
+    assert report["conformant"] is present
+    assert len(report["findings"]) == (0 if present else 1)
+    if not present:
+        finding = report["findings"][0]
+        assert finding["kind"] == "MISSING-PORT"
+        assert "'p'" in finding["message"]
+        assert finding["block_eligible"] is True
+        assert finding["advisory_note"] == ""
