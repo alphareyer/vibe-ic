@@ -1198,3 +1198,107 @@ def test_r2_secondary_required_signal_alias(tmp_path, primary, secondary,
     assert api_dispatch == generated_dispatch == []
     if not built:
         assert "out_required" in message
+
+
+# A primary supply label cannot release a same-name required SIGNAL in a
+# secondary table. Actual power-only aliases still owe physical sign-off.
+_R2_SUPPLY_SHADOW_CASES = (
+    ("same_name_supply_shadow_required_missing", "REJECT"),
+    ("same_name_supply_shadow_mandatory_missing", "REJECT"),
+    ("same_name_supply_shadow_required_built", "ACCEPT"),
+    ("same_name_supply_shadow_mandatory_built", "ACCEPT"),
+    ("same_name_all_power_required_missing", "DISARMED"),
+    ("same_name_all_power_mandatory_missing", "DISARMED"),
+)
+
+
+def _r2_same_name_supply_shadow_files(case):
+    import hashlib
+
+    payload = json.loads((FIX / "same_name_supply_shadow/INPUT.json").read_text())
+    files = payload["files"]
+    assert {rel: hashlib.sha256(text.encode()).hexdigest()
+            for rel, text in files.items()} == payload["input_sha256"]
+    l9_rel = payload["declaration"]["intent"][0]
+    content = json.loads(files[l9_rel])
+    flag = "mandatory" if "mandatory" in case else "required"
+    if flag == "mandatory":
+        content["ports"][0].pop("required")
+        content["ports"][0][flag] = True
+    src_rel = content["selected_interface_binding"]["selected_source"]
+    net_rel = payload["declaration"]["artefact"][0]
+    if "all_power" in case:
+        rail = {"name": "vcore", "direction": "input", "role": "power",
+                "supply": True, flag: True, "evidence": "input/docs/interface.md"}
+        content["top_ports"][-1] = dict(rail)
+        content["ports"] = [dict(rail)]
+        files[src_rel] = files[net_rel]
+        files["input/docs/interface.md"] = "\n".join(
+            line for line in files["input/docs/interface.md"].split("\n")
+            if not line.startswith("- out_required"))
+        content["selected_interface_binding"]["selected_source_sha256"] = (
+            hashlib.sha256(files[src_rel].encode()).hexdigest())
+    elif case.endswith("_built"):
+        files[net_rel] = files[src_rel]
+    # The primary counter retains the dispatcher's exact authored L9 bytes.
+    if case != "same_name_supply_shadow_required_missing":
+        files[l9_rel] = json.dumps(content, indent=2) + "\n"
+    return files, payload["declaration"]
+
+
+@pytest.mark.parametrize("case,expected", _R2_SUPPLY_SHADOW_CASES,
+                         ids=[case for case, _ in _R2_SUPPLY_SHADOW_CASES])
+def test_r2_same_name_supply_shadow(tmp_path, case, expected, record_property):
+    import hashlib
+    import runpy
+
+    project = tmp_path / "neutral_supply_shadow"
+    files, decl = _r2_same_name_supply_shadow_files(case)
+    for rel, text in files.items():
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    before = {rel: hashlib.sha256((project / rel).read_bytes()).hexdigest()
+              for rel in files}
+    l9 = project / decl["intent"][0]
+    original = l9.read_bytes()
+    result, api_dispatch = _r2_issue3131_metadata_only(
+        lambda: _sopr.rule_intent_pin_not_in_netlist(project, decl))
+
+    # Use the existing real emitter on a genuine rejection, then restore the
+    # exact counter bytes before executing the generated callable.
+    seed = json.loads(original)
+    seed["top_ports"].append({"name": "out_seed_signal", "direction": "output"})
+    l9.write_text(json.dumps(seed))
+    finding = _sopr.rule_intent_pin_not_in_netlist(project, decl)
+    l9.write_bytes(original)
+    assert finding["verdict"] == "REJECT"
+    finding["rule"] = "R2_INTENT_PIN_NOT_IN_NETLIST"
+    emitted = _sopr.emit_test(project / "reports/tests/test_r2.py", finding, "stage2")
+
+    def check():
+        namespace = runpy.run_path(str(emitted))
+        try:
+            namespace["test_every_pin_the_intent_declares_is_built_by_the_synthesised_top"]()
+        except AssertionError as exc:
+            return "REJECT", str(exc)
+        return "ACCEPT", ""
+
+    (observed, message), generated_dispatch = _r2_issue3131_metadata_only(check)
+    absent = [pin["name"] for pin in result.get("absent_signal_pins", [])]
+    record_property("api_verdict", result["verdict"])
+    record_property("absent_signal_pins", json.dumps(absent))
+    record_property("actual_generated_callable", observed)
+    record_property("actual_generated_message", message)
+    record_property("fixture_sha256", json.dumps(before, sort_keys=True))
+    record_property("api_process_dispatch_attempts", json.dumps(api_dispatch))
+    record_property("generated_process_dispatch_attempts", json.dumps(generated_dispatch))
+    assert before == {rel: hashlib.sha256((project / rel).read_bytes()).hexdigest()
+                      for rel in files}
+    assert l9.read_bytes() == original
+    assert result["verdict"] == expected
+    assert observed == ("REJECT" if expected == "REJECT" else "ACCEPT"), message
+    assert absent == (["out_required"] if expected == "REJECT" else [])
+    assert api_dispatch == generated_dispatch == []
+    if expected == "REJECT":
+        assert "out_required" in message

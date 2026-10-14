@@ -186,7 +186,7 @@ def validate_preservation_declaration(
 
     if declaration is None:
         if require:
-            refuse("preservation declaration is missing", "DECLARATION_MISSING")
+            refuse("validate_preservation_declaration.declaration argument is missing while require=True; no declaration fields read", "DECLARATION_MISSING")
         else:
             report["verdict"] = "NOT_MEASURED"
         return report
@@ -457,12 +457,12 @@ def validate_matrix_declaration(
     actual_candidate = candidate_sha256 or sha256_text(candidate_source)
     expected_candidate = declaration.get("candidate_sha256")
     if not isinstance(expected_candidate, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_candidate):
-        refuse("matrix lacks a valid candidate hash", "CANDIDATE_HASH_MISSING")
+        refuse("matrix declaration.candidate_sha256 must be a 64-character lowercase hex SHA256", "CANDIDATE_HASH_MISSING")
     elif actual_candidate != expected_candidate:
         refuse("matrix candidate hash is stale", "CANDIDATE_HASH_MISMATCH")
     top = declaration.get("top", declaration.get("top_module"))
     if not isinstance(top, str) or not _IDENT.fullmatch(top):
-        refuse("matrix has no legal top module", "TOP_MISSING")
+        refuse("matrix declaration.top or declaration.top_module must name a legal top module", "TOP_MISSING")
     supported_macros = set(_names(declaration.get("supported_macros", declaration.get("macros", []))))
     supported_params = set(_names(declaration.get("supported_parameters", declaration.get("parameters", []))))
     macro_bindings = declaration.get("macro_bindings", {})

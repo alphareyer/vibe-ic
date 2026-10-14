@@ -586,21 +586,21 @@ def activate_d1(*, pending: Mapping[str, Any], route_receipt: Mapping[str, Any],
     if route_errors:
         raise ValueError("D1_ACTIVATION_ROUTE_INVALID: " + ", ".join(route_errors))
     if pending.get("status") != D1_PENDING:
-        raise ValueError("D1_ACTIVATION_PENDING_MISSING")
+        raise ValueError('D1_ACTIVATION_PENDING_MISSING' + f": activate_d1.pending.status={pending.get('status')!r}: requires {D1_PENDING!r}")
     if pending.get("route_receipt_sha256") != route_receipt.get("receipt_sha256"):
         raise ValueError("D1_ACTIVATION_ROUTE_MISMATCH")
     if pending.get("source_sha256") != source_sha256 or route_receipt.get("source_sha256") != source_sha256:
         raise ValueError("D1_ACTIVATION_SOURCE_MISMATCH")
     if not str(task_sha256 or "").strip():
-        raise ValueError("D1_ACTIVATION_TASK_MISSING")
+        raise ValueError('D1_ACTIVATION_TASK_MISSING' + (": " + "activate_d1.task_sha256 argument must be nonempty"))
     if not str(ldoc_root_handle or "").strip():
-        raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISSING")
+        raise ValueError('D1_ACTIVATION_LDOC_ROOT_MISSING' + (": " + "activate_d1.ldoc_root_handle argument must be nonempty; no L-doc directory opened"))
     if pending.get("task_sha256") != str(task_sha256):
         raise ValueError("D1_ACTIVATION_TASK_MISMATCH")
     if (not isinstance(provenance, Mapping)
             or provenance.get("ran") is not True
             or not _HEX64.fullmatch(str(provenance.get("digest") or ""))):
-        raise ValueError("D1_ACTIVATION_PROVENANCE_MISSING")
+        raise ValueError('D1_ACTIVATION_PROVENANCE_MISSING' + (": " + "activate_d1.provenance.ran must be True and provenance.digest must be a 64-character lowercase hex SHA256"))
     _validate_d1_gate(
         d1_gate, route_receipt=route_receipt, provenance=provenance,
         source_sha256=source_sha256, task_sha256=task_sha256,
@@ -650,9 +650,9 @@ def require_d1_activation(activation: Mapping[str, Any] | None,
             or not _HEX64.fullmatch(str(activation.get("d1_gate_sha256") or ""))):
         raise ValueError("D1_ACTIVATION_DIGEST_FIELD_INVALID")
     if not str(activation.get("task_sha256") or "").strip():
-        raise ValueError("D1_ACTIVATION_TASK_MISSING")
+        raise ValueError('D1_ACTIVATION_TASK_MISSING' + (": " + "require_d1_activation.activation.task_sha256 must be nonempty"))
     if not str(activation.get("ldoc_root_handle") or "").strip():
-        raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISSING")
+        raise ValueError('D1_ACTIVATION_LDOC_ROOT_MISSING' + (": " + "require_d1_activation.activation.ldoc_root_handle must be nonempty; no L-doc directory opened"))
     gate = activation.get("d1_gate")
     provenance = {"ran": True, "digest": activation["d1_provenance_sha256"]}
     _validate_d1_gate(
@@ -698,7 +698,7 @@ def _validate_d1_gate(gate: Mapping[str, Any] | None, *,
                       provenance: Mapping[str, Any], source_sha256: str,
                       task_sha256: str | None, ldoc_root_handle: str | None) -> None:
     if not isinstance(gate, Mapping):
-        raise ValueError("D1_ACTIVATION_GATE_MISSING")
+        raise ValueError('D1_ACTIVATION_GATE_MISSING' + (": " + "_validate_d1_gate.gate argument must be a current D1 gate object"))
     required = {
         "schema", "step", "verdict", "current_call", "invocation_id",
         "report_sha256", "route_receipt_sha256", "source_sha256", "task_sha256",
@@ -723,9 +723,9 @@ def _validate_d1_gate(gate: Mapping[str, Any] | None, *,
     if not _HEX64.fullmatch(str(gate.get("source_sha256") or "")):
         raise ValueError("D1_ACTIVATION_GATE_SOURCE_DIGEST_INVALID")
     if not str(gate.get("task_sha256") or "").strip():
-        raise ValueError("D1_ACTIVATION_GATE_TASK_MISSING")
+        raise ValueError('D1_ACTIVATION_GATE_TASK_MISSING' + (": " + "_validate_d1_gate.gate.task_sha256 must be nonempty"))
     if not str(gate.get("ldoc_root_handle") or "").strip():
-        raise ValueError("D1_ACTIVATION_GATE_LDOC_ROOT_MISSING")
+        raise ValueError('D1_ACTIVATION_GATE_LDOC_ROOT_MISSING' + (": " + "_validate_d1_gate.gate.ldoc_root_handle must be nonempty; no L-doc directory opened"))
     if not _HEX64.fullmatch(str(gate.get("d1_provenance_sha256") or "")):
         raise ValueError("D1_ACTIVATION_GATE_PROVENANCE_DIGEST_INVALID")
     if not _HEX64.fullmatch(str(gate.get("gate_sha256") or "")):
@@ -743,7 +743,7 @@ def _validate_d1_gate(gate: Mapping[str, Any] | None, *,
     if gate.get("verdict") == "PASS_WITH_WAIVERS":
         waiver = gate.get("waiver_receipt")
         if not isinstance(waiver, Mapping):
-            raise ValueError("D1_ACTIVATION_WAIVER_MISSING")
+            raise ValueError('D1_ACTIVATION_WAIVER_MISSING' + (": " + "_validate_d1_gate.gate.waiver_receipt must be an object for PASS_WITH_WAIVERS"))
         _validate_d1_waiver(
             waiver, route_receipt=route_receipt, source_sha256=source_sha256,
             task_sha256=task_sha256, ldoc_root_handle=ldoc_root_handle,

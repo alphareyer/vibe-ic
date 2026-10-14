@@ -82,7 +82,7 @@ def characterize(project: Path, block: str, params: dict, records: Path) -> dict
         for quantity in ('cell_rise', 'cell_fall', 'rise_transition', 'fall_transition'):
             name = arc['measurements'].get(quantity)
             if not name or name not in values or not math.isfinite(values[name]) or values[name] < 0:
-                raise em.Refusal('ANALOG_CHARACTERIZATION_MEASUREMENT_MISSING', quantity)
+                raise em.Refusal('ANALOG_CHARACTERIZATION_MEASUREMENT_MISSING', f"{records / f'characterize-{block}-{index}.stdout'} and {planfile}: arcs[{index}].measurements[{quantity!r}]={name!r} requires a finite nonnegative measured value")
             row[quantity] = values[name]
         if arc.get('unit') != 's':
             raise em.Refusal('ANALOG_CHARACTERIZATION_UNIT_REQUIRED', block)

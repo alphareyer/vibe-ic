@@ -591,7 +591,7 @@ def validate_products(outputs: Path, binding: dict, producer: dict, manifest: di
                              else 'GATE_NOT_MEASURED', 'complete producer work: ' + binding['step_id'])
     products = manifest.get('products')
     if not isinstance(products, dict) or not products:
-        raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', binding['step_id'])
+        raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', f"{outputs / 'products.json'}: products must be a nonempty object for step {binding['step_id']}")
     allowed = tuple(producer['adoption_paths'])
     for rel, expected in products.items():
         em._relative(rel)
@@ -606,7 +606,7 @@ def _substance(project: Path, step: str, blocks: list[str]) -> None:
     for expr in CONTRACTS[step]['canonical_row']['required_outputs']:
         if not any(any(p.is_file() and p.stat().st_size for p in project.glob(alt.strip()))
                    for alt in expr.split(' OR ')):
-            raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', expr)
+            raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', f"{project}: required_outputs glob alternatives {expr!r} yielded no nonempty files")
     if step == 'A1':
         for block in blocks:
             candidates = [project / f'{phase}/analog/{block}/spec.json' for phase in ('phase3', 'phase1')]

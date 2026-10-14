@@ -599,7 +599,7 @@ def test_native_retention_uses_the_shared_selected_five_role_contract(tmp_path, 
 # #3135: pure ISA-reference admission and source/metadata controls only.
 # This neutral source supplies ports/parameters, not a simulated CPU/oracle.
 def _3135_project(root, *, pc=0, size=1024, rf=256, isa='RV32I', choice=None,
-                  mutation=None, image=False):
+                  mutation=None, image=False, native_rtl=None):
  import copy
  decl = copy.deepcopy(DECL)
  decl.update(top_module='neutral_cpu', memsize_bytes=size, reset_pc=pc)
@@ -624,6 +624,7 @@ def _3135_project(root, *, pc=0, size=1024, rf=256, isa='RV32I', choice=None,
  elif mutation == 'misaligned_reset': decl['reset_pc']=2
  elif mutation == 'unknown_protocol': decl['sram_interface_protocol']='unknown_commit_protocol'
  if choice is not None: decl['verification_stimuli']=choice
+ if native_rtl is not None: rtl=native_rtl
  if image:
   case['stimulus'] += '; execute selected_program.hex'
  for rel in ['phase1/generated_docs','phase2/stage1/rtl','plugin_output','input/docs']:
@@ -643,6 +644,159 @@ def _3135_project(root, *, pc=0, size=1024, rf=256, isa='RV32I', choice=None,
  T.emit_unit_tbs(root,top='neutral_cpu',report=report,scaffold=False,case_stated=True)
  tb=T._pl.sim_dir(root)/'tb'/(CASE['name']+'.v')
  return decl,tb,report
+
+
+# Public CPU component controls. Icarus preserves unknown enabled transactions;
+# the existing producer, execution capture and current-byte L10 consumer own
+# generation and admission. No ISA-credit or simulator stand-in is used.
+def _3135_cpu_rtl(damage=None):
+ import test_r0929_step5_bar_datapath as dp
+ rtl=dp._memory_timed_cpu(0,False).replace('mini_cpu','neutral_cpu')
+ rtl=rtl.replace('memsize = 256','memsize = 1024').replace('[7:0] o_mem_raddr','[9:0] o_mem_raddr')
+ rtl=rtl.replace('[7:0] o_mem_waddr','[9:0] o_mem_waddr').replace('LOADVAL','ld')
+ for old,new in [('o_mem','o_store'),('i_mem','i_store'),('clk','i_clk'),('rst','i_rst')]:
+  rtl=rtl.replace(old,new)
+ if damage != 'first_edge':
+  rtl=rtl.replace('output reg o_store_we);','output wire o_store_we);')
+  rtl=rtl.replace('o_store_we <=','pending <=')
+  # The admitted first store is decoded/executed, then cancelled on reset.
+  # A first-edge mutant deliberately leaves the registered write visible.
+  signal="pending && !i_rst"
+  if damage == 'unknown_enable': signal="(i_rst && pending) ? 1'bx : pending && !i_rst"
+  elif damage == 'unknown_only': signal="(pending && !i_rst) ? 1'bx : 1'b0"
+  elif damage in ('unknown_address','unknown_data'): signal='pending'
+  rtl=rtl.replace('  reg [31:0] x',f'  reg pending; assign o_store_we = {signal};\n  reg [31:0] x')
+ if damage == 'unknown_address':
+  rtl=rtl.replace('output reg [9:0] o_store_waddr','output wire [9:0] o_store_waddr')
+  rtl=rtl.replace('o_store_waddr <=','write_address <=')
+  rtl=rtl.replace('  reg pending;',"  reg pending; reg [9:0] write_address; assign o_store_waddr = i_rst && pending ? 10'bx : write_address;")
+ elif damage == 'unknown_data':
+  rtl=rtl.replace('output reg [7:0] o_store_wdata','output wire [7:0] o_store_wdata')
+  rtl=rtl.replace('o_store_wdata <=','write_data <=')
+  rtl=rtl.replace('  reg pending;',"  reg pending; reg [7:0] write_data; assign o_store_wdata = i_rst && pending ? 8'bx : write_data;")
+ # A neutral pad wrapper is the actual full-stack top, without overrides.
+ ports=[('input',1,'i_clk'),('input',1,'i_rst'),('input',8,'i_store_rdata'),
+        ('output',10,'o_store_raddr'),('output',10,'o_store_waddr'),
+        ('output',8,'o_store_wdata'),('output',1,'o_store_we')]
+ wrapper=dp._chip_top(ports).replace('mini_cpu','neutral_cpu')
+ return rtl+'\n'+wrapper+'\n'+next(iter(dp.PAD_MODELS.values()))
+
+
+def _3135_native(project,damage=None,no_store=False):
+ from not_verified_tier import skip_not_verified
+ import cpu_datapath_program as cpu
+ if any(shutil.which(t) is None for t in ('iverilog','vvp')):
+  skip_not_verified('native CPU retention requires four-state Icarus','Use the pinned component image')
+ choice=None
+ if no_store:
+  entries=[{'address':i,'byte':b} for i,b in enumerate(cpu.enc_jal(0,0).to_bytes(4,'little'))]
+  choice=_preload_choice(entries)
+ _,old_tb,_=_3135_project(project,choice=choice,native_rtl=_3135_cpu_rtl(damage))
+ # Regenerate the same case through the public full-stack top.
+ old_tb.rename(old_tb.with_suffix('.core-generated.txt'))
+ generation={}
+ assert T.emit_unit_tbs(project,top='chip_top',report=generation,scaffold=False,case_stated=True)==1
+ tb=T._pl.sim_dir(project)/'tb'/(CASE['name']+'.v')
+ rtl=project/'phase2/stage1/rtl/neutral_cpu.v'
+ wd=project/'native-cpu-retention';wd.mkdir()
+ calls=[]
+ def run(argv):
+  import time
+  start=time.time()
+  p=subprocess.Popen([str(a) for a in argv],cwd=wd,stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE,text=True,preexec_fn=bounded)
+  stdout,stderr=p.communicate(timeout=30)
+  calls.append({'argv':[str(a) for a in argv],'pid':p.pid,'rc':p.returncode,
+                'start':start,'end':time.time(),'naturally_terminal':True})
+  return p.returncode,stderr+stdout
+ binary=wd/'retention.vvp'
+ rc,build=run(['iverilog','-g2012','-s',CASE['name'],'-o',binary,rtl,tb])
+ (wd/'build.log').write_text(build)
+ assert rc==0,build
+ rc,log=run(['vvp',binary])
+ transcript=wd/'run.log';transcript.write_text(log)
+ sources={str(rtl):X.file_sha256(rtl)}
+ evidence,why=R.capture_retention_execution(project,tb,transcript,sources)
+ state=X.FAIL if rc else (X.PASS if evidence and evidence['measurement']['complete'] else X.NOT_EXECUTED)
+ X.write_record(project,project/'phase1/generated_docs/L10_TEST_CASES.json',
+  [{'id':CASE['name'],'verdict':state,'sim_executed':state!=X.NOT_EXECUTED,
+    'tb_file':str(tb),**X.capture_tb_identity(tb),'detail':why,'reset_retention':evidence}],
+  producer='public CPU component Icarus execution',tb_dir=tb.parent)
+ consumer_rc,consumer=_retention_consumer(project)
+ result={'generation':generation,'simulator_rc':rc,'calls':calls,'evidence':evidence,
+         'consumer_rc':consumer_rc,'consumer':consumer,'tb':str(tb),'transcript':str(transcript),
+         'sources':sources,'four_state_simulator':True}
+ (wd/'receipt.json').write_text(json.dumps(result,indent=2))
+ return project,result
+
+
+@pytest.fixture(scope='module')
+def native_cpu_retention(tmp_path_factory):
+ return _3135_native(tmp_path_factory.mktemp('cpu_retention'))
+
+
+def test_issue3135_native_cpu_executes_generated_store_with_all_reset_snapshots(native_cpu_retention):
+ project,result=native_cpu_retention
+ row=_retention_row(result['consumer'])
+ assert row['status']=='pass' and row['sim_executed'] is True,row
+ measured=result['evidence']['measurement']
+ assert measured['complete'] and not measured['changed']
+ assert measured['pending']=={'address':8,'before':'2d','data':'00'}
+ assert set(measured['samples'])=={'0','1'}
+ assert all(set(rows)=={str(i) for i in range(6)} for rows in measured['samples'].values())
+ assert all(len(s)==2048 for rows in measured['samples'].values() for s in rows.values())
+ text=Path(result['tb']).read_text()
+ assert 'chip_top u_dut (' in text and 'chip_top #' not in text
+ assert 'active_cycles < 64 && !pending_found' in text
+ assert result['simulator_rc']==0 and result['consumer_rc']==0
+
+
+@pytest.mark.parametrize('damage',['first_edge','unknown_enable','unknown_address','unknown_data','unknown_only'])
+def test_issue3135_native_cpu_corruption_is_refused_by_current_consumer(tmp_path,damage):
+ project,result=_3135_native(tmp_path,damage=damage)
+ row=_retention_row(result['consumer'])
+ assert row['status']=='fail',row
+ assert row['pass'] is False and row['sim_executed'] is True,row
+ assert result['simulator_rc']!=0 and result['consumer_rc']==1
+ if damage=='first_edge':
+  assert 'retention arm=1 edge=0 byte=8 before=2d after=00' in Path(result['transcript']).read_text()
+ elif damage in ('unknown_enable','unknown_address'):
+  path=X.record_path(project);saved=path.read_bytes()
+  try:
+   record=json.loads(saved);record['cases'][0]['verdict']='PASS'
+   path.write_text(json.dumps(record))
+   _,consumer=_retention_consumer(project)
+   row=_retention_row(consumer)
+   (project/'native-cpu-retention'/'forged-pass-consumer.json').write_text(json.dumps(consumer,indent=2))
+   assert row['status']=='fail',row
+   assert row['pass'] is False,row
+  finally:path.write_bytes(saved)
+
+
+def test_issue3135_native_legal_no_store_keeps_the_original_not_measured(tmp_path):
+ _,result=_3135_native(tmp_path,no_store=True)
+ row=_retention_row(result['consumer'])
+ log=Path(result['transcript']).read_text()
+ assert row['status']=='NOT_EXECUTED' and row['pass'] is False,row
+ assert result['simulator_rc']==0 and result['consumer_rc']==1
+ assert 'no actual non-idempotent pending write within 64 cycles' in log
+ assert 'RESET_RETENTION PENDING' not in log and '[TB reset_content_retained] PASS' not in log
+
+
+@pytest.mark.parametrize('damage',['declaration','rtl','tb','transcript'])
+def test_issue3135_native_cpu_credit_rejects_stale_current_bytes(native_cpu_retention,damage):
+ project,result=native_cpu_retention
+ path={'declaration':project/'plugin_output/declaration.json',
+       'rtl':project/'phase2/stage1/rtl/neutral_cpu.v',
+       'tb':Path(result['tb']),'transcript':Path(result['transcript'])}[damage]
+ saved=path.read_bytes()
+ try:
+  path.write_bytes(saved+b'\n ')
+  _,consumer=_retention_consumer(project)
+  row=_retention_row(consumer)
+  assert row['status']=='NOT_EXECUTED' and row['pass'] is False,row
+  (project/'native-cpu-retention'/('stale-'+damage+'.json')).write_text(json.dumps(consumer,indent=2))
+ finally:path.write_bytes(saved)
 
 
 def _3135_value(tmp_path, value):

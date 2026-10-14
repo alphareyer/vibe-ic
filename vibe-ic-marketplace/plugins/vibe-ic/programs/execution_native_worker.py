@@ -111,7 +111,7 @@ def execute(inputs: Path, outputs: Path) -> dict:
     if (inputs / 'project').is_dir():
         shutil.copytree(inputs / 'project', project)
     else:
-        raise em.Refusal('PRODUCTION_WORKER_PROJECT_MISSING', str(inputs))
+        raise em.Refusal('PRODUCTION_WORKER_PROJECT_MISSING', f"{inputs / 'project'}: frozen worker project directory absent before copy; no producer launched")
     pdk_root = inputs / 'pdk'
     manifest_path = pdk_root / 'tree-manifest.json'
     manifest = json.loads(manifest_path.read_text())

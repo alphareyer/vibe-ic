@@ -88,14 +88,14 @@ def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_
     if design is None or design[1] != physical_top:
         raise Refusal("CURRENT_SPEF_DESIGN_MISMATCH")
     if not re.search(r'^\*D_NET\s', text, re.M):
-        raise Refusal("CURRENT_SPEF_EXTRACTION_MISSING")
+        raise Refusal('CURRENT_SPEF_EXTRACTION_MISSING' + f": {paths['spef']}: SPEF requires a *D_NET extraction section")
     if coupling:
         import si_mcf_sta as si
         if not si.coupling_pairs(text):
-            raise Refusal("CURRENT_SPEF_COUPLING_MISSING")
+            raise Refusal('CURRENT_SPEF_COUPLING_MISSING' + f": {paths['spef']}: SPEF requires inter-net coupling capacitance pairs")
     libs = [Path(p) for p in liberties]
     if not libs:
-        raise Refusal("CURRENT_LIBERTY_MISSING")
+        raise Refusal('CURRENT_LIBERTY_MISSING' + f": basis.liberties argument={liberties!r}: no Liberty files selected; no library search performed")
     inputs += [file_record(p, f"liberty:{i}") for i, p in enumerate(libs)]
     inputs += [file_record(p, role, project) for role, p in extra_inputs]
     subject = {"project": str(project), "top": top, "stage": "post_route_extracted",
@@ -107,7 +107,7 @@ def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_
 
 def check_files(records, project):
     if not isinstance(records, list) or not records:
-        raise Refusal("CURRENT_FILE_BINDINGS_MISSING")
+        raise Refusal('CURRENT_FILE_BINDINGS_MISSING' + (": " + "check_files.records argument: expected a nonempty list of role/path/resolved/sha256 bindings; no files opened"))
     for row in records:
         if not isinstance(row, dict) or not isinstance(row.get("role"), str):
             raise Refusal("CURRENT_FILE_BINDING_TYPE")
@@ -190,12 +190,12 @@ def validate(project, receipt_path, step, outputs):
     if ex_files != {k: ex[k] for k in ('script', 'log')}:
         raise Refusal("CURRENT_EXECUTION_PATH_MISMATCH")
     if marker(doc) not in Path(ex['log']).read_text() or marker(doc) not in Path(ex['script']).read_text():
-        raise Refusal("CURRENT_TOOL_COMPLETION_MISSING")
+        raise Refusal('CURRENT_TOOL_COMPLETION_MISSING' + f": {receipt_path}: execution.log={ex['log']}, execution.script={ex['script']} require completion marker {marker(doc)!r}")
     check_files(doc['outputs'], project)
     expected_outputs = {role: str(Path(path).absolute()) for role, path in outputs}
     got = {r['role']: r['path'] for r in doc['outputs']}
     if got != expected_outputs or len(got) != len(doc['outputs']):
-        raise Refusal("CURRENT_DOWNSTREAM_CONSUMPTION_MISSING")
+        raise Refusal('CURRENT_DOWNSTREAM_CONSUMPTION_MISSING' + f": {receipt_path}: outputs role/path bindings={got!r}; downstream requires {expected_outputs!r}")
     return doc
 
 
@@ -203,7 +203,7 @@ def timing_has_windows(path):
     data = json.loads(Path(path).read_text())
     pins = data.get('pins')
     if not isinstance(pins, dict) or not pins:
-        raise Refusal("CURRENT_TIMING_WINDOWS_MISSING")
+        raise Refusal('CURRENT_TIMING_WINDOWS_MISSING' + f": {path}: timing JSON pins must be a nonempty object")
     if not any(isinstance(row, dict) and any(type(row.get(k)) in (int, float)
                and math.isfinite(row[k]) for k in ('arr_rise_min', 'arr_rise_max',
                'arr_fall_min', 'arr_fall_max')) for row in pins.values()):
@@ -224,7 +224,7 @@ def power_binding(project):
         raise Refusal('CURRENT_POWER_TOOL_STAGE_MISMATCH')
     check_files(receipt['outputs'], project)
     if {r['role']: r['path'] for r in receipt['outputs']} != {'power_report': str(rpt.absolute())}:
-        raise Refusal('CURRENT_POWER_CONSUMPTION_MISSING')
+        raise Refusal('CURRENT_POWER_CONSUMPTION_MISSING' + f": {rpt.with_suffix('.current.json')}: outputs role/path must bind power_report={str(rpt.absolute())!r}")
     source = tool['state'].parent / tool['corner'] / 'power.rpt'
     if receipt.get('source_report') != file_record(source, 'source_power', project):
         raise Refusal('CURRENT_POWER_SOURCE_REPORT_CHANGED')
@@ -253,7 +253,7 @@ def si_binding(project):
                        [('si_report', rpt), ('si_result', rpt.with_suffix('.json'))])
     named = {r['role']: r['path'] for r in receipt['inputs']}
     if named.get('timing_windows') != str(timing) or named.get('timing_receipt') != str(timing.with_suffix('.current.json')):
-        raise Refusal("CURRENT_SI_TIMING_CONSUMPTION_MISSING")
+        raise Refusal('CURRENT_SI_TIMING_CONSUMPTION_MISSING' + f": {rpt.with_suffix('.current.json')}: inputs timing_windows={named.get('timing_windows')!r}, timing_receipt={named.get('timing_receipt')!r}; require {timing} and {timing.with_suffix('.current.json')}")
     if (doc.get('spef') != named.get('spef')
             or doc['timing_aware_advisory'].get('spef') != named.get('spef')):
         raise Refusal('CURRENT_SI_SPEF_CONSUMPTION_MISMATCH')
@@ -292,7 +292,7 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     evidence._hashes(fp.get('config_files'), mounts)
     evidence._hashes(fp.get('liberty_files'), mounts)
     if not fp.get('liberty_files'):
-        raise Refusal('CURRENT_STAPOSTPNR_LIBERTY_BINDING_MISSING')
+        raise Refusal('CURRENT_STAPOSTPNR_LIBERTY_BINDING_MISSING' + f": {folder / 'vibeic_receipt.json'}: input.liberty_files requires nonempty executed Liberty bindings")
     if any(not Path(p).resolve().is_relative_to(project) for p in fp['state_files']):
         raise Refusal('CURRENT_STAPOSTPNR_FOREIGN_INPUT')
     config = json.loads((folder / 'config.json').read_text())
@@ -310,7 +310,7 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
         raise Refusal('CURRENT_SI_CORNER_MISMATCH')
     corner = corner or selected_corner
     if not corner:
-        raise Refusal('CURRENT_STAPOSTPNR_CORNER_MISSING')
+        raise Refusal('CURRENT_STAPOSTPNR_CORNER_MISSING' + f": {project / lp.STEP23_RECORD}: judgment.worst_setup.corner and _tool_subject.corner argument are empty")
     inputs = lc.post_pnr_timing_inputs(project, folder / 'state_out.json', corner)
     def host(path):
         path = Path(path)

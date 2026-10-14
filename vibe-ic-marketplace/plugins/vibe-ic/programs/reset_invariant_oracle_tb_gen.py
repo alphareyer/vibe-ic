@@ -508,11 +508,22 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
               f"  reg [7:0] retention_before [0:{depth - 1}];",
               "  integer errors = 0; integer _i; integer edge_number; integer active_cycles;",
               "  reg pending_found;",
+              "  reg checking_transactions = 0;",
               f"  always @(*) {rdata} = retention_mem[{raddr}];",
               "  // Consume the previous registered transaction on EVERY rising edge.",
               "  // Never gate the external memory commit on reset or discard a launched write.",
               f"  always @(posedge {clk}) if ({we} === 1'b1)",
               f"    retention_mem[{waddr}] <= {data};",
+              "  // Observe write validity after initial reset settles. Keep the",
+              "  // actual external commit above, including corrupt first edges.",
+              f"  always @(posedge {clk}) if (checking_transactions) begin",
+              f"    if (({we} !== 1'b0 && {we} !== 1'b1)",
+              f"        || ({we} === 1'b1 && (^({waddr}) === 1'bx",
+              f"            || {waddr} >= {depth} || ^({data}) === 1'bx))) begin",
+              "      errors = errors + 1;",
+              f'      $display("RESET_RETENTION INVALID_WRITE we=%b address=%h data=%h", {we}, {waddr}, {data});',
+              "    end",
+              "  end",
               "  task observe_reset(input integer arm);",
               "    begin",
               f"      for (_i = 0; _i < {depth}; _i = _i + 1)",
@@ -541,6 +552,7 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
         lines.append(f"    retention_mem[{entry['address']}] = 8'h{entry['byte']:02x};")
     lines += [f"    {rst} = 1'b{asserted};",
               f"    repeat (4) @(negedge {clk});",
+              "    checking_transactions = 1;",
               "    observe_reset(0);",
               f"    {rst} = 1'b{released}; pending_found = 0;",
               f"    for (active_cycles = 0; active_cycles < {RETENTION_ACTIVE_CYCLES} && !pending_found; active_cycles = active_cycles + 1) begin",
@@ -549,6 +561,7 @@ def _emit_retention_oracle(case: dict, dut: str, inputs, outputs, inouts,
               f"          && retention_mem[{waddr}] !== {data}) pending_found = 1;",
               "    end",
               "    if (!pending_found) begin",
+              f'      if (errors != 0) begin $display("[TB {name}] FAIL — invalid write transaction"); $fatal(1); end',
               f'      $display("[TB {name}] NOT_MEASURED: no actual non-idempotent pending write within {RETENTION_ACTIVE_CYCLES} cycles");',
               "      $finish;",
               "    end else begin",
@@ -636,6 +649,8 @@ def retention_case_state(project: Optional[Path], case_id: str, record: dict) ->
         raw = Path(evidence["transcript"]).read_bytes()
         if hashlib.sha256(raw).hexdigest() != evidence.get("transcript_sha256"):
             return _l10x.NOT_EXECUTED, "NOT_MEASURED: current native retention transcript changed"
+        if re.search(r"(?m)^RESET_RETENTION INVALID_WRITE ", raw.decode(errors="replace")):
+            return _l10x.FAIL, "current native retention execution observed an invalid write transaction"
         measured = retention_measurement(raw.decode(errors="replace"), memory)
         if not measured["complete"] or measured != evidence.get("measurement"):
             return _l10x.NOT_EXECUTED, "NOT_MEASURED: complete current byte snapshots and first sampled edge are missing"

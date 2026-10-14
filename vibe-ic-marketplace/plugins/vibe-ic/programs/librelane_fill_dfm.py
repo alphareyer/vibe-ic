@@ -1207,7 +1207,7 @@ def _current_stage(project: Path, state: Path, step: str) -> tuple[dict, dict]:
     candidates = (project / 'phase3/librelane').rglob('*.json')
     if not any(p.name.endswith(('state.json', 'state_in.json', 'state_out.json'))
                and digest(p) == fp.get('state') for p in candidates):
-        raise Refusal('LL_FINISHING_INPUT_STATE_MISSING', str(state))
+        raise Refusal('LL_FINISHING_INPUT_STATE_MISSING', f"{project / 'phase3/librelane'}: recursive *.json search for state.json/state_in.json/state_out.json found no file with input.state={fp.get('state')!r}; consuming {state}")
     return before, _load(state)
 
 

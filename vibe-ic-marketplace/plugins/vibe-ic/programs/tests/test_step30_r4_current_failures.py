@@ -178,3 +178,17 @@ def test_step30_r4_ordinary_extraction_requires_current_cell_export(tmp_path, mo
     else:
         assert not consumed and not (p / 'reports/phase3/spice_correlation.current.json').exists()
         assert 'LL_SPICE_CURRENT_CELL_EXPORT_MISSING' in result['reason']
+
+
+def test_step30_r4_missing_measured_failure_names_current_base_search(tmp_path, monkeypatch):
+    p, folder, lib = fixture.project(tmp_path)
+    correlation_tool(p, folder, lib, monkeypatch, mismatch='CORRELATED', companion='nonzero')
+    result = SC.run_installed_pdk_path_correlation(p, str(lib))
+    gate = SC.run_audit(p)
+    assert result['status'] == 'ERROR' and not gate.passed
+    assert gate.summary['current_binding'] == 'REFUSED'
+    assert gate.summary['measurement'] == 'NOT_MEASURED'
+    reason = result['reason']
+    assert reason.startswith('CURRENT_STEP30_MEASURED_FAILURE_MISSING'), reason
+    assert str(folder / 'state_out.json') in reason, reason
+    assert 'tool.detail[ngspice].base.paths' in reason and 'inspected' in reason, reason

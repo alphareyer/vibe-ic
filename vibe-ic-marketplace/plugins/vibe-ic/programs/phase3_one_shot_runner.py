@@ -70870,7 +70870,7 @@ def _spice_correlation_skip_disclosure(
 
 
 def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
-                     notes: List[str], *, container: str = "") -> bool:
+                     notes: List[str], *, container: str = "", paths: int = 1) -> bool:
     """BLOCKING ordinary Step 30; adopt the existing producer and strict gate.
 
     Existing reports and mode flags cannot bypass a current execution. A
@@ -70879,7 +70879,7 @@ def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
     import spice_correlation_check as _scc
     try:
         produced = _scc.run_installed_pdk_path_correlation(
-            project, liberty_path=str(pdk.liberty), container=container)
+            project, liberty_path=str(pdk.liberty), container=container, paths=paths)
     except Exception as exc:
         produced = _scc._persist_declared_refusal(project, {
             "status": "ERROR", "measurement": "NOT_MEASURED", "reason": str(exc)})
@@ -73459,7 +73459,9 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
             raise current.Refusal("CURRENT_SI_OUTPUT_PATH_MISMATCH")
         mod = _si_timing_aware_module()
         if mod is None:
-            raise current.Refusal("CURRENT_SI_TIMING_PRODUCER_MISSING")
+            raise current.Refusal("CURRENT_SI_TIMING_PRODUCER_MISSING" +
+                                  ": inspected Python import search via sys.path for "
+                                  "si_signoff_timing_aware; import absent or failed")
         tcl_path = out_json.parent / f"si_timing_{top}.tcl"
         log = out_json.parent / "si_timing.log"
         tcl_c = _to_container_path(str(tcl_path), container)
@@ -73657,7 +73659,12 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             'scope': 'Advisory coupling noise screen; timing-window delta-delay is separate'}
     try:
         if pdk is None or container is None or spef is None:
-            raise current.Refusal('CURRENT_SI_BASIS_MISSING')
+            missing = [f'{key}=None' for key, value in
+                       [('pdk', pdk), ('container', container), ('spef', spef)]
+                       if value is None]
+            raise current.Refusal('CURRENT_SI_BASIS_MISSING' +
+                                  (': inspected supplied arguments pdk/container/spef; '
+                                   + ', '.join(missing)))
         if si_rpt.absolute() != (_pl.reports_phase3_dir(project) / 'si_crosstalk.rpt').absolute():
             raise current.Refusal('CURRENT_SI_OUTPUT_PATH_MISMATCH')
         subject, _ = current.tool_subject(project, top, coupling=True)
@@ -73671,7 +73678,9 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
         spef = selected_spef
         cg, cc = _parse_spef_caps(spef.read_text())
         if not cc:
-            raise current.Refusal('CURRENT_SPEF_COUPLING_MISSING')
+            raise current.Refusal('CURRENT_SPEF_COUPLING_MISSING' +
+                                  f': inspected selected SPEF {selected_spef}; '
+                                  'parsed coupling capacitance population is empty')
         m = _si_coupling_metrics(cg, cc)
         body.update(verdict='ADVISORY_SCREEN_ONLY', spef=str(spef),
                     max_crosstalk_noise=m['max_crosstalk_noise_mv'],

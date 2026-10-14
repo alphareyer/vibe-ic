@@ -70,13 +70,13 @@ def _site_path(site: str) -> Path:
     module, _, symbol = site.partition(":")
     path = HERE / module
     if not module or not symbol or not path.is_file():
-        raise em.Refusal("BACKEND_PRODUCER_SITE_MISSING", site)
+        raise em.Refusal("BACKEND_PRODUCER_SITE_MISSING", f"{path}: producer site {site!r} requires module:symbol and an existing source file")
     try:
         symbols = python_defined_symbols(path.read_text())
     except (OSError, SyntaxError) as exc:
         raise em.Refusal("BACKEND_PRODUCER_SITE_UNREADABLE", site) from exc
     if symbol not in symbols:
-        raise em.Refusal("BACKEND_PRODUCER_SYMBOL_MISSING", site)
+        raise em.Refusal("BACKEND_PRODUCER_SYMBOL_MISSING", f"{path}: producer symbol {symbol!r} from site {site!r} is not among parsed Python definitions")
     return path
 
 

@@ -1400,7 +1400,8 @@ def rule_intent_pin_not_in_netlist(project: Path,
         row = {"name": name,
                "direction": pin.get("direction") or pin.get("mode"),
                "evidence": pin.get("evidence")}
-        if why_supply:
+        # A same-name required signal alias still owes a built digital port.
+        if why_supply and name not in required_signal_names:
             row["intent_declares_supply"] = why_supply
             disarmed.append(row)
         elif why_optional:
@@ -3347,7 +3348,8 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
     documentary = _documentary_intent_pins(
         root, intent, pins, roots[0], required_signal_names)
     absent = sorted(str(p["name"]) for p in pins
-                    if str(p["name"]) not in built and not _is_supply(p)
+                    if str(p["name"]) not in built
+                    and (not _is_supply(p) or str(p["name"]) in required_signal_names)
                     and not _is_optional(p, required_signal_names)
                     and str(p["name"]) not in documentary)
     assert not absent, (

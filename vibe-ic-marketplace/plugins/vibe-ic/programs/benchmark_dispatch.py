@@ -5579,7 +5579,7 @@ def _read_receipt_history(project: Path, kind: str) -> tuple[dict, list[dict]]:
         raise ValueError("RECEIPT_HISTORY_HEAD_SEQUENCE_INVALID")
     history_dir = _receipt_history_dir(project, kind)
     if history_dir.is_symlink() or not history_dir.is_dir():
-        raise ValueError("RECEIPT_HISTORY_MISSING")
+        raise ValueError('RECEIPT_HISTORY_MISSING' + f": {history_dir}: receipt history directory is absent or linked; required *.json sequence members not read")
     indexed = []
     for path in history_dir.glob("*.json"):
         if path.is_symlink():
@@ -5860,7 +5860,7 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
     _seal_route_admission(run_p, task, decision)
     source_sha = str(route_receipt.get("source_sha256") or "")
     if not source_sha:
-        raise ValueError("D1_ACTIVATION_SOURCE_MISSING")
+        raise ValueError('D1_ACTIVATION_SOURCE_MISSING' + (": " + "_activate_route_d1.route_receipt.source_sha256 is empty after route admission validation"))
     task_sha = str(task.get("task_sha256") or "")
     pending = rd.write_d1_pending(
         _receipt_current_pointer(project, "d1_pending"), route_receipt=route_receipt,
@@ -5963,7 +5963,7 @@ def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
     report = capture(report_path)
     ldocs = tuple(capture(p) for p in sorted(docs.glob("L*.json")))
     if not ldocs:
-        raise ValueError("D1_SNAPSHOT_LDOCS_MISSING")
+        raise ValueError('D1_SNAPSHOT_LDOCS_MISSING' + f": {docs}: glob L*.json yielded no D1 layer documents")
     try:
         activation_sha = _read_current_receipt(project, "d1_activation")["receipt"]["activation_sha256"]
     except (OSError, ValueError, KeyError):
@@ -6149,7 +6149,7 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         current_route = _read_current_receipt(project, "route_decision")
         receipt = current_route["receipt"]
         if not isinstance(stored_receipt, dict):
-            raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_MISSING")
+            raise ValueError('ROUTE_REENTRY_ROUTE_RECEIPT_MISSING' + (": " + "result.route_receipt and result.routing_verdict.route_receipt are absent or not objects at route reentry"))
         if stored_receipt.get("receipt_sha256") != receipt.get("receipt_sha256"):
             raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_STALE")
         errors = _rd.validate_route_receipt(receipt)
@@ -7388,7 +7388,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             nature = verdict["nature"]
             route_receipt = verdict.get("route_receipt")
             if not isinstance(route_receipt, dict):
-                raise ValueError("ROUTE_RECEIPT_MISSING")
+                raise ValueError('ROUTE_RECEIPT_MISSING' + f": route_decisions[{pid!r}].route_receipt is absent or not an object")
             receipt_errors = rd.validate_route_receipt(route_receipt)
             if receipt_errors:
                 raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(receipt_errors))
