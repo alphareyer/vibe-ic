@@ -1737,3 +1737,146 @@ def test_stable_provenance_publication_preserves_json_types(tmp_path, corruption
         assert type(current["schema_version"]) is int, current["schema_version"]
     else:
         assert type(current["fields"]["bit_order"]["provenance_verified"]) is bool, current["fields"]["bit_order"]
+
+
+# Native declaration publication must supersede its previous generic output row.
+# The seed is a real CLI invocation through the existing provenance wrapper.
+def _publication_project(tmp_path):
+    project = _make_project(tmp_path, EN_CONTRACT, "publication")
+    author = project / "plugin_input" / "author.json"
+    author.parent.mkdir()
+    author.write_text(json.dumps({
+        "handshake_style": "valid_ready", "endianness": "little",
+        "verification_stimuli": {"reset_retention": {"memory_preload": [
+            {"memory": "buffer_mem", "address": 4, "value": 35}]}}
+    }, sort_keys=True) + "\n")
+    command = [sys.executable, str(PROGRAMS_DIR / "provenance_logger.py"),
+               "--project", str(project), "--tool", "spec_declaration_emit",
+               "--input", "input/docs/L7_verification_plan.md",
+               "--input", "plugin_input/author.json",
+               "--output", DECL_PATH, "--output",
+               "plugin_output/declaration.provenance.json", "--",
+               sys.executable, str(EMITTER), str(project),
+               "--from-json", str(author)]
+    seeded = subprocess.run(command, capture_output=True, text=True)
+    assert seeded.returncode == 0, (seeded.stdout, seeded.stderr)
+    before = (project / "provenance.jsonl").read_bytes()
+    author.write_text(author.read_text().replace('"little"', '"big"'))
+    return project, author, before
+
+
+def _publication_audit(project):
+    report_path = project / "reports" / "publication_audit.json"
+    completed = subprocess.run([
+        sys.executable, str(PROGRAMS_DIR /
+                            "provenance_output_hash_completeness_check.py"),
+        str(project), "--require-outputs-present", "--json", str(report_path)],
+        capture_output=True, text=True)
+    return completed, json.loads(report_path.read_text())
+
+
+def test_native_author_publication_supersedes_old_generic_output_hash(tmp_path):
+    project, author, before = _publication_project(tmp_path)
+    result = _run_emit(project, "--from-json", str(author))
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    completed, report = _publication_audit(project)
+    assert report["verdict"] == "PASS", report
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    ledger = (project / "provenance.jsonl").read_bytes()
+    assert ledger.startswith(before), "historical rows must remain byte-identical"
+    assert report["outcome_census"]["superseded"] >= 2, report
+    assert _declaration(project)["endianness"] == "big"
+    assert _provenance(project)["fields"]["endianness"]["provenance"] == "author_declared"
+
+
+def test_native_publication_records_real_inputs_outputs_and_source(tmp_path):
+    import hashlib
+    import plugin_manifest_discovery as manifests
+
+    project, author, before = _publication_project(tmp_path)
+    assert _run_emit(project, "--from-json", str(author)).returncode == 0
+    ledger = (project / "provenance.jsonl").read_bytes()
+    assert ledger.startswith(before)
+    rows = [json.loads(line) for line in ledger[len(before):].splitlines()]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    assert row["tool"] == "spec_declaration_emit"
+    assert row["exit_code"] == 0
+    assert row["inputs"]["plugin_input/author.json"] == digest(author)
+    assert row["inputs"]["input/docs/L7_verification_plan.md"] == digest(
+        project / "input/docs/L7_verification_plan.md")
+    assert row["outputs"] == {rel: digest(project / rel) for rel in (
+        DECL_PATH, "plugin_output/declaration.provenance.json")}
+    assert row["source_sha256"] == digest(EMITTER)
+    assert row["version"] == manifests.running_plugin_version()
+
+
+def test_native_publication_does_not_accept_later_declaration_byte_drift(tmp_path):
+    project, author, _ = _publication_project(tmp_path)
+    assert _run_emit(project, "--from-json", str(author)).returncode == 0
+    declaration = project / DECL_PATH
+    declaration.write_bytes(declaration.read_bytes() + b" ")
+    completed, report = _publication_audit(project)
+    assert completed.returncode == 1, report
+    assert report["verdict"] == "FAIL", report
+    assert any(f["rule"] == "PROVENANCE_HASH_MISMATCH" and
+               DECL_PATH in f["detail"] for f in report["findings"]), report
+
+
+@pytest.mark.parametrize("mode", ["verify", "contract", "refuse", "nothing"])
+def test_nonpublication_modes_never_append_successful_output(tmp_path, mode):
+    project, author, before = _publication_project(tmp_path)
+    declaration = project / DECL_PATH
+    original = declaration.read_bytes()
+    if mode == "verify":
+        result = _run_emit(project, "--verify")
+        expected_rc = 0
+    elif mode == "contract":
+        result = _run_emit(project, "--contract")
+        expected_rc = 0
+    elif mode == "refuse":
+        result = _run_emit(project, "--set", "handshake_style=null")
+        expected_rc = 1
+    else:
+        (project / "input/docs/L7_verification_plan.md").write_text(
+            ALL_INFORMATIONAL_CONTRACT.format(path=DECL_PATH))
+        result = _run_emit(project)
+        expected_rc = 4
+    assert result.returncode == expected_rc, (result.stdout, result.stderr)
+    assert declaration.read_bytes() == original
+    assert (project / "provenance.jsonl").read_bytes() == before
+
+
+def test_failed_sidecar_write_never_appends_successful_publication(tmp_path):
+    project, author, before = _publication_project(tmp_path)
+    sidecar = (project / DECL_PATH).with_suffix(".provenance.json")
+    sidecar.unlink()
+    sidecar.mkdir()
+    result = _run_emit(project, "--from-json", str(author))
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (project / "provenance.jsonl").read_bytes() == before
+
+
+def test_failed_declaration_write_never_appends_successful_publication(tmp_path):
+    project, author, before = _publication_project(tmp_path)
+    declaration = project / DECL_PATH
+    declaration.unlink()
+    declaration.mkdir()
+    result = _run_emit(project, "--from-json", str(author))
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert (project / "provenance.jsonl").read_bytes() == before
+
+
+def test_failed_ledger_append_reports_published_but_unrecorded(tmp_path):
+    project, author, _ = _publication_project(tmp_path)
+    ledger = project / "provenance.jsonl"
+    ledger.unlink()
+    ledger.mkdir()
+    result = _run_emit(project, "--from-json", str(author))
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "generic provenance publication failed" in result.stderr
+    assert "spec_declaration_emit: PASS" not in result.stdout
+    assert _declaration(project)["endianness"] == "big"
+    assert _provenance(project)["fields"]["endianness"]["value"] == "big"
+    assert not list(ledger.iterdir())

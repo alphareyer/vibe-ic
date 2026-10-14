@@ -1211,17 +1211,26 @@ def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
         return {"readable": False, "why": str(e)}
     if not isinstance(d, dict):
         return {"readable": False, "why": "L9 is not a mapping"}
-    required_signal_names = sorted({str(pin["name"])
+    required_signal_pins = [pin
         for field in _INTENT_PIN_FIELDS
         for pin in (d.get(field) if isinstance(d.get(field), list) else [])
         if isinstance(pin, dict) and pin.get("name")
         and (pin.get("required") is True or pin.get("mandatory") is True)
-        and not _supply_declared(pin)})
+        and not _supply_declared(pin)]
+    required_signal_names = sorted({str(pin["name"]) for pin in required_signal_pins})
     for field in _INTENT_PIN_FIELDS:
         rows = d.get(field)
         if isinstance(rows, list) and rows:
             pins = [p for p in rows if isinstance(p, dict) and p.get("name")]
             if pins:
+                # A required signal published only in another supported alias
+                # still belongs to this interface. Keep the primary rows.
+                names = {str(pin["name"]) for pin in pins}
+                for pin in required_signal_pins:
+                    name = str(pin["name"])
+                    if name not in names:
+                        pins.append(pin)
+                        names.add(name)
                 return {"readable": True, "file": str(l9_path), "field": field,
                         "value": [str(p["name"]) for p in pins],
                         "pins": pins, "_required_signal_names": required_signal_names,
@@ -3293,12 +3302,19 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
     pins = [p for p in (intent.get(INTENT_FIELD) or [])
             if isinstance(p, dict) and p.get("name")]
     assert pins, "%s::%s declares no external pin" % (INTENT_REL, INTENT_FIELD)
-    required_signal_names = set(str(pin["name"])
+    required_signal_pins = [pin
         for field in ("top_ports", "ports", "top_module_pins")
         for pin in (intent.get(field) if isinstance(intent.get(field), list) else [])
         if isinstance(pin, dict) and pin.get("name")
         and (pin.get("required") is True or pin.get("mandatory") is True)
-        and not _is_supply(pin))
+        and not _is_supply(pin)]
+    required_signal_names = set(str(pin["name"]) for pin in required_signal_pins)
+    names = set(str(pin["name"]) for pin in pins)
+    for pin in required_signal_pins:
+        name = str(pin["name"])
+        if name not in names:
+            pins.append(pin)
+            names.add(name)
 
     text = (root / NETLIST_REL).read_text(encoding="utf-8", errors="replace")
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)

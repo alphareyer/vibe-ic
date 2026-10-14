@@ -147,6 +147,11 @@
       ],
       "bucket_B_skill_file": "skills/testbench-gen/SKILL.md"
     },
+    "phase2.full_stack_tb.cpu_datapath_program.build": {
+      "description": "Capture subtype for the declared CPU data-path program and testbench producer; routing only, not a new flow step.",
+      "bucket_A_program": "programs/cpu_datapath_program.py",
+      "bucket_B_skill_file": "skills/testbench-gen/SKILL.md"
+    },
     "phase2.tb_substance": {
       "description": "Functional-verification SUBSTANCE — does a generated testbench actually drive the DUT, or does it merely print a pass? Distinct from phase2.full_stack_tb (which GENERATES a TB) and phase2.reference_tb (which checks a generated TB RAN). Discovery must stay DIRECTORY+STRUCTURE driven: scenario-named TBs (case_3.v, corner_operand.v) match no tb_*.v / *_tb.v glob, so a filename-driven audit silently reports zero hits on a corpus of real defects.",
       "bucket_A_program": "programs/vacuous_testbench_check.py",
@@ -203,6 +208,11 @@
     "phase2.final_audit": {
       "bucket_A_program": "programs/flow_compliance_check.py",
       "bucket_B_skill_file": "skills/checkpoint-gate/SKILL.md"
+    },
+    "phase2.final_audit.stage_on_pass_review.R2_INTENT_PIN_NOT_IN_NETLIST": {
+      "description": "Capture subtype for the stage-2 on-pass review of declared interface obligations against the emitted netlist; routing only, not a new flow step.",
+      "bucket_A_program": "programs/stage_on_pass_review.py",
+      "bucket_B_skill_file": "skills/phase2-rtl-verify/SKILL.md"
     },
     "phase3.io_pad_operating_mode": {
       "description": "Digital IO operating controls and voltage-domain tie outputs produced for the chip wrapper at step 15.5ic. Capture documented PDK operating profiles in the wrapper producer, not in a geometry checker.",

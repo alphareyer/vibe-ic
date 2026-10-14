@@ -91,6 +91,52 @@ def test_canonical_primitive_recovery_routes_to_owning_generator(tmp_path):
         f"canonical primitive recovery must route to its owning generator; got {a_files}"
 
 
+@pytest.mark.parametrize("step,target,rule_name,docstring,fix_action", [
+    pytest.param(
+        "phase2.full_stack_tb.cpu_datapath_program.build",
+        "programs/cpu_datapath_program.py",
+        "declared_datapath_program_precedes_release",
+        "Build the data-path program from the declared interface obligations.",
+        "Augment `programs/cpu_datapath_program.py`; preserve emitted consumer controls.",
+        id="cpu-build"),
+    pytest.param(
+        "phase2.final_audit.stage_on_pass_review.R2_INTENT_PIN_NOT_IN_NETLIST",
+        "programs/stage_on_pass_review.py",
+        "required_interface_obligation_precedes_release",
+        "Required interface obligations take priority over documentary release.",
+        "Augment `programs/stage_on_pass_review.py`; preserve native and emitted consumer controls.",
+        id="r2-netlist"),
+])
+def test_shared_owner_recovery_emits_candidate_for_exact_program(
+        tmp_path, step, target, rule_name, docstring, fix_action):
+    """The canonical CLI must select the producer/consumer named by the recovery.
+
+    A parent TB/compliance target is a different owner; rc0 alone also permits
+    honest UNROUTED output, so read both the selected target and emitted sketch.
+    The R2 record is the neutral public reproduction from issue #3137, with
+    the source filename quoted as the existing text guard requires.
+    """
+    rec = [{
+        "step": step, "design": "declared_interface", "bucket": "A",
+        "rule_name": rule_name, "docstring": docstring,
+        "expected_signal": "ERROR", "fix_action": fix_action,
+    }]
+    res = run(tmp_path, rec)
+    summary = res["summary"]
+    assert summary["routing_used"]["bucket_A"] == [target], summary
+    assert summary["totals"] == {"A": 1, "B": 0, "C": 0, "D": 0, "T": 0}
+    assert not summary.get("bucket_A_unrouted"), summary
+    sketch, = [Path(p) for p in summary["bucket_A_files"]]
+    text = sketch.read_text()
+    assert text.startswith(f"# Bucket A — program-rule sketches for {target}\n")
+    assert f"# Corpus-sweep REQUIRED before merging into {target}." in text
+    assert f"def rule_{rule_name}(sample_text, ports):" in text
+    assert docstring in text
+    assert "# Expected signal: ERROR" in text
+    assert f"# Suggested fix action: {fix_action}" in text
+    assert "return []  # list of findings — TODO implement" in text
+
+
 # ── 2. Bucket B routes to the skill file declared in the routing table ──
 def test_bucket_B_routes_per_step(tmp_path):
     rec = [{
