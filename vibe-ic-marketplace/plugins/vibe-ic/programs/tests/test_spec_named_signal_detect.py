@@ -453,3 +453,36 @@ def test_issue3122_same_spelling_signal_context(tmp_path, case):
             else:
                 assert 'Declare EACH' not in text
                 assert 'l_doc_expectations.json' in text
+
+
+def test_issue3122_compound_signal_role_is_preserved(tmp_path):
+    prompt = (LOCALIZED_PUBLIC_INPUT['real_port_prefix'] +
+              'The control-signal `ready` indicates completion.')
+    expected = ['sample_in', 'sample_out', 'ready']
+    # Observe every normal consumer before judging the rejected production arm.
+    observations = [
+        _localized_role_observation(tmp_path, 'compound_signal_role', prompt, surface)
+        for surface in LOCALIZED_PUBLIC_INPUT['negative_surfaces']]
+    for observed in observations:
+        detected = observed['detected']
+        assert detected['named_signals'] == expected
+        assert detected['has_named_signals'] is True
+        assert detected['requirement']
+        assert [r['name'] for r in detected['signal_evidence']] == expected
+        assert detected['ambiguous_identifiers'] == []
+        assert detected['non_signal_identifiers'] == []
+        for name, line in zip(expected, [1, 2, 3]):
+            assert any(r['name'] == name and r['line'] == line and
+                       name in r['context'] for r in detected['signal_evidence'])
+        if observed['surface'] in {'rtl-pack', 'phase1-pack'}:
+            advice = observed['advice']
+            assert [r['named_signals'] for r in advice] == [expected]
+            assert advice[0]['signal_evidence'] == detected['signal_evidence']
+            assert advice[0]['non_signal_identifiers'] == detected['non_signal_identifiers']
+            text = advice[0]['requirement']
+            assert all(name in text for name in expected)
+            if observed['surface'] == 'rtl-pack':
+                assert 'Declare EACH' in text
+            else:
+                assert 'Declare EACH' not in text
+                assert 'l_doc_expectations.json' in text
