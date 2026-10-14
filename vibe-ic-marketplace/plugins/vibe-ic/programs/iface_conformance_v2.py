@@ -1414,7 +1414,7 @@ def extract_prompt_iface(prompt: str) -> PromptIface:
         # A directly bound role names a required port independently of whether
         # the candidate DUT implements it. This supports NAME provenance only;
         # the existing prose DIRECTION policy remains unchanged (#806).
-        if re.fullmatch(r"\s*(?:(?:port|signal|wire|logic)\s+)?", gap, re.I):
+        if re.fullmatch(r"\s*(?:(?:port|pin|signal|wire|logic)\s+)?", gap, re.I):
             pif.add(m.group(3), "", "port_name_role")
     for m in _DIR_NEAR_AFTER_RE.finditer(prompt):
         gap = m.group(2) or ""
