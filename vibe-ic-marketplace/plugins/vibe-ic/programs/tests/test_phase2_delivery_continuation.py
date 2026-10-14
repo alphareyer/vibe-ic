@@ -90,7 +90,13 @@ def native_pad_project(tmp_path, monkeypatch):
     NATIVE._random_goal_project(source, 64, '*', 8, True)
     rtl = (source / 'phase2/stage1/rtl/neutral_arithmetic.v').read_text().replace('neutral_arithmetic', B.CORE)
     write(project, f'phase2/stage1/rtl/{B.CORE}.v', rtl)
-    write(project, 'plugin_output/declaration.json', json.loads((source / 'plugin_output/declaration.json').read_text()))
+    declaration = json.loads((source / 'plugin_output/declaration.json').read_text())
+    # Explicit fixture authorship for the existing serial implementation.
+    for key, value in {'transaction_rearm': 'clocked_reset',
+                       'rearm_reset_cycles': 1,
+                       'parallel_hold': 'through_final_product_bit'}.items():
+        declaration.setdefault(key, value)
+    write(project, 'plugin_output/declaration.json', declaration)
     # Both pad generator and oracle see the same actual public fixture ports.
     l9 = json.loads((project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json').read_text())
     l9['clocks'] = [{'name': 'clk', 'period_ns': 10}]
@@ -159,7 +165,7 @@ module testlib_io__bi(inout PAD, input A,OE, output TIELO); assign TIELO=1'b0; a
 
 def test_existing_row5_retention_owns_functional_producer_not_route_predicate(tmp_path, monkeypatch):
     """The existing retention callback keeps its actual producer identity."""
-    project = B._mk_project(tmp_path, die=False)
+    project = B._mk_project(tmp_path, die=False, integrity_input=True)
     monkeypatch.setattr(E, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(TBG, '_detect_ic_class', lambda *_a: 'digital_arithmetic_primitive')
     monkeypatch.setattr(F, 'default_dispatch', B._FakeSim())
