@@ -280,8 +280,194 @@ def _write(p: Path, text: str) -> Path:
     return p
 
 
+def _authored_integrity_tb(name: str) -> str:
+    """Public INPUT for gate integrity fixtures, with explicit author choices.
+
+    These checks specify the L2 multiplier, not the synthetic CORE_V's behavior.
+    _FakeSim transports the declared population; no native result is claimed.
+    """
+    case = next(c for c in CASES if c["name"] == name)
+    nv = 25 if name == "corner_operand" else 225
+    schedule = """
+    // L10 operand boundaries: 0, MAX_POS, MIN_NEG, -1; also include 1.
+    for (i=0; i<5; i=i+1) for (j=0; j<5; j=j+1) begin
+      clear_state(1);
+      complete_pair(values[i], values[j], -1);
+    end
+""" if name == "corner_operand" else """
+    // L10 reset: held, released, and asserted DURING computation.
+    // 25 pairs * (3 interruption positions * 2 reset holds + 3 pulses) = 225.
+    for (i=0; i<5; i=i+1) for (j=0; j<5; j=j+1) begin
+      for (position=1; position<=7; position=position+3) begin
+        for (hold_edges=1; hold_edges<=3; hold_edges=hold_edges+2) begin
+          clear_state(1);
+          interrupt_pair(values[i], values[j], position);
+          clear_state(hold_edges);
+          // First released edge restarts bit0; compare the full restarted word.
+          complete_pair(values[i], values[j], -1);
+        end
+      end
+      for (position=1; position<=7; position=position+3) begin
+        clear_state(1);
+        // A synchronous reset pulse wholly BETWEEN edges must not clear state.
+        complete_pair(values[i], values[j], position);
+      end
+    end
+"""
+    header = (
+        "// Authored public synthetic INPUT; source fixture only.\n"
+        "// L2: p = x * y mod 2^N (serial-parallel multiplier), N=8.\n"
+        f"// Original L10: {json.dumps(case, ensure_ascii=False)}\n"
+        "// Author observation contract: selected PADIN/PADOUT are zero-delay\n"
+        "// continuous assignments; 10ns clock, negedge stimulus, posedge+1ns\n"
+        "// settled sample. signed_2c, LSB_first, settled_edge_offset1.\n"
+        "// Hold x through final product bit; rearm with one synchronous\n"
+        "// active-high reset edge (reset coverage additionally holds three).\n"
+    )
+    body = r"""`timescale 1ns/1ps
+module @NAME@;
+  localparam integer NV = @NV@;
+  reg clk=0, rst=1;
+  reg [7:0] x=0;
+  reg y=0;
+  wire p;
+  supply1 VDD;
+  supply0 VSS;
+  chip_top dut(.clk(clk), .rst(rst), .x(x), .y(y), .p(p),
+               .VDD(VDD), .VSS(VSS));
+  always #5 clk=~clk;
+  reg [7:0] values [0:4];
+  integer i, j, position, hold_edges;
+  integer errors=0, transactions=0, passed=0, comparisons=0;
+
+  // Independent L2 golden, including negative two's-complement operands.
+  function [7:0] product;
+    input [7:0] a, b;
+    reg signed [15:0] full_product;
+    begin
+      full_product = $signed(a) * $signed(b);
+      product = full_product[7:0];
+    end
+  endfunction
+
+  task clear_state;
+    input integer cycles;
+    integer edge_index;
+    begin
+      @(negedge clk); rst=1; x=0; y=0;
+      for (edge_index=0; edge_index<cycles; edge_index=edge_index+1) begin
+        @(posedge clk); #1;
+        if (p !== 1'b0) begin
+          errors=errors+1;
+          $display("ORACLE_MISMATCH: held synchronous reset p=%b", p);
+        end
+      end
+      // Keep reset high until the next transaction's first negedge stimulus.
+    end
+  endtask
+
+  task stream_edge;
+    input [7:0] a, b;
+    input integer k;
+    begin
+      @(negedge clk); rst=0; x=a;
+      if (k<8) y=b[k]; else y=0;
+      @(posedge clk); #1;
+    end
+  endtask
+
+  task compare_bit;
+    input [7:0] golden;
+    input integer bit_index;
+    begin
+      if (p !== golden[bit_index]) begin
+        errors=errors+1;
+        $display("ORACLE_MISMATCH: bit=%0d expected=%b actual=%b",
+                 bit_index, golden[bit_index], p);
+      end
+    end
+  endtask
+
+  task interrupt_pair;
+    input [7:0] a, b;
+    input integer stop_edge;
+    integer k;
+    reg [7:0] golden;
+    begin
+      golden=product(a,b);
+      for (k=0; k<stop_edge; k=k+1) begin
+        stream_edge(a,b,k);
+        if (k>=1) compare_bit(golden,k-1);
+      end
+      // Abort here by synchronous reset; this prefix is not a scored word.
+    end
+  endtask
+
+  task complete_pair;
+    input [7:0] a, b;
+    input integer pulse_edge;
+    integer k, prior_errors;
+    reg [7:0] golden;
+    reg held_p;
+    begin
+      golden=product(a,b); prior_errors=errors;
+      for (k=0; k<=8; k=k+1) begin
+        stream_edge(a,b,k);
+        if (k>=1) begin
+          compare_bit(golden,k-1);
+          comparisons=comparisons+1;
+        end
+        if (k==pulse_edge) begin
+          // Intentional reset exception: +2ns..+3ns after this posedge,
+          // wholly before the next negedge/posedge. A sync reset has no edge.
+          held_p=p; #1; rst=1; #1; rst=0; #1;
+          if (p !== held_p) begin
+            errors=errors+1;
+            $display("ORACLE_MISMATCH: between-edge reset changed p");
+          end
+        end
+      end
+      // x is still a through bit7's settled comparison at edge offset8.
+      transactions=transactions+1;
+      if (errors==prior_errors) passed=passed+1;
+    end
+  endtask
+
+  initial begin
+    values[0]=8'd0; values[1]=8'd1; values[2]=8'd127;
+    values[3]=8'd128; values[4]=8'd255;
+@SCHEDULE@
+    if (transactions!=NV || comparisons!=8*NV)
+      $fatal(1, "authored population mismatch");
+    $display("ORACLE_TB_DONE pass=%0d/%0d", passed, NV);
+    if (errors!=0) $fatal(1, "oracle/reset errors=%0d", errors);
+    $finish;
+  end
+endmodule
+"""
+    return header + body.replace("@NAME@", name).replace("@NV@", str(nv)).replace(
+        "@SCHEDULE@", schedule)
+
+
+def _supplement_integrity_input(proj: Path) -> None:
+    """Explicit neutral fixture authorship; enabled only by four integrity tests."""
+    _write(proj / "plugin_output/declaration.json", json.dumps({
+        "integer_encoding": "signed_2c", "bit_order": "LSB_first",
+        "latency_cycles": 1, "latency_cycles_origin": "settled_edge_offset",
+        "reset_polarity": "active_high", "transaction_rearm": "clocked_reset",
+        "rearm_reset_cycles": 1, "parallel_hold": "through_final_product_bit"}))
+    l9_path = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(l9_path.read_text())
+    l9["clocks"] = [{"name": "clk", "period_ns": 10}]
+    l9["reset_domains"] = [
+        {"name": "rst", "sync": "synchronous", "polarity": "active_high"}]
+    l9_path.write_text(json.dumps(l9))
+    for name in ("corner_operand", "reset"):
+        _write(proj / "input/tb" / f"{name}.v", _authored_integrity_tb(name))
+
+
 def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
-                cases=None) -> Path:
+                cases=None, integrity_input: bool = False) -> Path:
     proj = tmp_path / "proj"
     gd = proj / "phase1" / "generated_docs"
     _write(gd / "L3_CMD_PROTOCOL.json", json.dumps(
@@ -320,6 +506,8 @@ def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
                                "core_module": CORE,
                                "chip_top_verilog":
                                    "phase3/stage3/pnr/chip_top_io.v"}))
+    if integrity_input:
+        _supplement_integrity_input(proj)
     return proj
 
 
@@ -501,8 +689,8 @@ def test_off_the_pad_ring_route_the_core_is_the_full_stack_top(tmp_path,
 # ===========================================================================
 # THE GATE — crediting a population, and refusing one that cannot vouch
 # ===========================================================================
-def _passing_die(tmp_path, arith_class=None):
-    proj = _mk_project(tmp_path, die=True)
+def _passing_die(tmp_path, arith_class=None, *, integrity_input=False):
+    proj = _mk_project(tmp_path, die=True, integrity_input=integrity_input)
     rec = _fsf().generate(proj, "ctr", dispatch=_FakeSim(),
                           model_resolver=_resolver)
     assert rec["verdict"] == "PASS"
@@ -524,7 +712,7 @@ def test_gate_credits_a_population_measured_through_the_chip_top(
 
 def test_gate_fails_a_case_whose_oracle_disagreed(tmp_path, arith_class,
                                                   capsys):
-    proj = _mk_project(tmp_path, die=True)
+    proj = _mk_project(tmp_path, die=True, integrity_input=True)
     sim = _FakeSim(lambda case, nv: (nv - 1, nv) if case == "corner_operand"
                    else (nv, nv))
     rec = _fsf().generate(proj, "ctr", dispatch=sim, model_resolver=_resolver)
@@ -536,7 +724,7 @@ def test_gate_fails_a_case_whose_oracle_disagreed(tmp_path, arith_class,
 
 def test_gate_refuses_a_transcript_that_is_not_the_recorded_one(
         tmp_path, arith_class, capsys):
-    proj, rec = _passing_die(tmp_path)
+    proj, rec = _passing_die(tmp_path, integrity_input=True)
     log = proj / next(c for c in rec["cases"]
                       if c["name"] == "reset")["run_log"]
     log.write_text(log.read_text() + "\n")
@@ -548,7 +736,7 @@ def test_gate_refuses_a_transcript_that_is_not_the_recorded_one(
 def test_gate_rescores_the_transcript_rather_than_trusting_the_record(
         tmp_path, arith_class, capsys):
     """A record that says `passed` over a transcript with no verdict marker."""
-    proj, rec = _passing_die(tmp_path)
+    proj, rec = _passing_die(tmp_path, integrity_input=True)
     fsf = _fsf()
     c = next(c for c in rec["cases"] if c["name"] == "corner_operand")
     log = proj / c["run_log"]
@@ -587,7 +775,7 @@ def test_gate_refuses_a_record_measured_through_the_core_on_a_die(
 
 def test_gate_refuses_a_record_of_bytes_that_have_changed(
         tmp_path, arith_class, capsys):
-    proj, _rec = _passing_die(tmp_path)
+    proj, _rec = _passing_die(tmp_path, integrity_input=True)
     rtl = proj / "phase2" / "stage1" / "rtl" / f"{CORE}.v"
     rtl.write_text(rtl.read_text() + "// edited\n")
     rc, res, _ = _run_gate(proj, tmp_path, capsys)
