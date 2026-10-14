@@ -208,3 +208,57 @@ def test_public_3088_context_reaches_actual_cli(tmp_path, label):
         assert len(signed) == 1 and signed[0]["coverage_tokens"][0].lower() == "signed", (label, doc)
         assert signed[0]["covered"] is False, (label, doc)
         assert signed[0]["block_eligible"] is case["uncovered_signed"], (label, doc)
+
+
+_NATIVE_SCHEMA_CASES = json.loads((Path(__file__).parent / "fixtures" /
+    "issue3088_native_schema.json").read_text())["cases"]
+
+
+@pytest.mark.parametrize("label", _NATIVE_SCHEMA_CASES)
+def test_public_3088_native_schema_reaches_actual_cli(tmp_path, label):
+    """Public native field shapes retain context before obligation attribution."""
+    case = _NATIVE_SCHEMA_CASES[label]
+    rtl = tmp_path / "neutral.v"
+    rtl.write_text(_UNSIGNED_RTL)
+    ldocs = tmp_path / "ldocs"
+    ldocs.mkdir()
+    (ldocs / "L7.json").write_text(json.dumps(case["ldoc"]) + "\n")
+    report = tmp_path / "coverage.json"
+    argv = [sys.executable, str(PROGRAMS / "spec_coverage_check.py"),
+            "--ldocs", str(ldocs), "--rtl", str(rtl),
+            "--strict", "--json", str(report)]
+    if "prompt" in case:
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text(case["prompt"])
+        argv += ["--prompt", str(prompt)]
+    if case.get("tb"):
+        tb = tmp_path / "tb.sv"
+        tb.write_text(_UNSIGNED_TB)
+        argv += ["--tb", str(tb)]
+    actual = subprocess.run(argv, capture_output=True, text=True)
+    (tmp_path / "CLI_RECEIPT.json").write_text(json.dumps({
+        "argv": argv, "exit_code": actual.returncode,
+        "stdout": actual.stdout, "stderr": actual.stderr,
+    }, indent=2) + "\n")
+    doc = json.loads(report.read_text())
+    assert actual.returncode == case["rc"], (label, actual.stdout, actual.stderr, doc)
+    kinds = {item["kind"] for item in doc["items"]}
+    assert not kinds.intersection(case.get("absent", [])), (label, doc)
+    for kind in case.get("required", []):
+        assert any(item["kind"] == kind and item["block_eligible"] and not item["covered"]
+                   for item in doc["items"]), (label, doc)
+    if "clock_rates" in case:
+        clocks = [item for item in doc["items"] if item["kind"] == "clock_frequency"]
+        assert {re.search(r"\b(\d+(?:\.\d+)?)\s+MHz\b", item["requirement"]).group(1)
+                for item in clocks} == set(case["clock_rates"]), (label, doc)
+        assert all(item["block_eligible"] and not item["covered"] for item in clocks), (label, doc)
+    if "signed_token" in case:
+        signed = [item for item in doc["items"] if item["kind"] == "signedness"]
+        assert len(signed) == 1 and signed[0]["coverage_tokens"] == [case["signed_token"]], (label, doc)
+        assert signed[0]["covered"] is True, (label, doc)
+    if "absent_token" in case:
+        assert all(case["absent_token"] not in item["coverage_tokens"]
+                   for item in doc["items"]), (label, doc)
+    for token in case.get("required_tokens", []):
+        assert any(token in item["coverage_tokens"] and item["block_eligible"]
+                   and not item["covered"] for item in doc["items"]), (label, doc)

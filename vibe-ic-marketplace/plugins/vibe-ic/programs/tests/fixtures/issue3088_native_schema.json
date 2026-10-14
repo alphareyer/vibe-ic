@@ -1,0 +1,259 @@
+{
+  "scope": "Self-authored neutral public-issue schema equivalents; not original owner input/corpus.",
+  "cases": {
+    "native-doc-class-na": {
+      "ldoc": {
+        "doc_class": "L6_CALIBRATION",
+        "status": "not-applicable",
+        "fields": {
+          "otp_present": false,
+          "lab_calibration_present": false,
+          "description": "No OTP-based calibration or trim DAC interface. The product output is 8-bit."
+        },
+        "integration": {
+          "applicability": [
+            {
+              "source": "L6_calibration.json"
+            }
+          ]
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "otp_field",
+        "otp_lock",
+        "calibration_field",
+        "calibration_procedure"
+      ]
+    },
+    "native-source-documents": {
+      "ldoc": {
+        "doc_class": "L2_ARCHITECTURE",
+        "source_documents": [
+          "calibration/L6_calibration.json"
+        ],
+        "fields": {
+          "datapath": "The unsigned product output is 8-bit."
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "calibration_field",
+        "calibration_procedure"
+      ]
+    },
+    "native-applicability-source": {
+      "ldoc": {
+        "doc_class": "L2_ARCHITECTURE",
+        "fields": {
+          "datapath": "The unsigned product output is 8-bit."
+        },
+        "integration": {
+          "applicability": [
+            {
+              "source": "calibration/L6_calibration.json",
+              "reason": "Reference document basename."
+            }
+          ]
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "calibration_field",
+        "calibration_procedure"
+      ]
+    },
+    "native-area-ceiling": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "area_signoff_baseline": {
+          "note": "Area ceiling from another technology is not a ceiling for this run."
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "rounding_mode"
+      ]
+    },
+    "native-power-ceiling": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "power": {
+          "note": "Power ceiling from another technology is not a ceiling for this run."
+        }
+      },
+      "rc": 0,
+      "absent": [
+        "rounding_mode"
+      ]
+    },
+    "native-nested-clock-context": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "fields": {
+          "selected_clock_requirement": "Selected target gf180mcuD: required clock frequency 41.7 MHz (24 ns).",
+          "alternate_libraries": [
+            {
+              "technology": "sky130A",
+              "clock_frequency": "100 MHz"
+            },
+            {
+              "technology": "sky130A",
+              "clock_frequency": "125 MHz"
+            }
+          ],
+          "reference_fmax": "250 MHz",
+          "clock_example": "95 MHz"
+        }
+      },
+      "rc": 1,
+      "clock_rates": [
+        "41.7"
+      ]
+    },
+    "native-mixed-clock-and-rounding": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "fields": {
+          "selected_clock_requirement": "Selected target gf180mcuD: required clock frequency 41.7 MHz (24 ns).",
+          "alternate_libraries": [
+            {
+              "clock_frequency": "100 MHz"
+            }
+          ],
+          "rounding_mode": "ceiling"
+        },
+        "area_signoff_baseline": {
+          "note": "Area ceiling from another technology is not a ceiling for this run."
+        }
+      },
+      "rc": 1,
+      "clock_rates": [
+        "41.7"
+      ],
+      "required": [
+        "rounding_mode"
+      ]
+    },
+    "native-declared-modulo": {
+      "ldoc": {
+        "doc_class": "L2_ARCHITECTURE",
+        "fields": {
+          "arithmetic_contract": "Signed and unsigned N-bit operands have identical modulo-2^N product bit patterns.",
+          "integer_encoding": "unsigned"
+        }
+      },
+      "tb": true,
+      "rc": 0,
+      "signed_token": "unsigned"
+    },
+    "native-required-otp": {
+      "ldoc": {
+        "doc_class": "L6_CALIBRATION",
+        "fields": {
+          "otp_requirement": "An OTP map is required.\n| Field | Offset | Width |\n|---|---|---|\n| device_code | 0x10 | 8-bit |\n"
+        }
+      },
+      "rc": 1,
+      "required": [
+        "otp_field"
+      ]
+    },
+    "native-required-calibration": {
+      "ldoc": {
+        "doc_class": "L6_CALIBRATION",
+        "fields": {
+          "calibration_requirement": "The calibration register trim_code at offset 0x10 is required."
+        }
+      },
+      "rc": 1,
+      "required": [
+        "calibration_field"
+      ],
+      "required_tokens": [
+        "trim_code"
+      ]
+    },
+    "native-required-rounding": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "fields": {
+          "rounding_mode": "ceiling"
+        }
+      },
+      "rc": 1,
+      "required": [
+        "rounding_mode"
+      ]
+    },
+    "native-required-alternate-clock": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "alternate_libraries": {
+          "clock_frequency": "The alternate library must support clock frequency 100 MHz."
+        }
+      },
+      "rc": 1,
+      "clock_rates": [
+        "100"
+      ]
+    },
+    "native-selected-timing-stays-open": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "fields": {
+          "selected_clock_requirement": "Selected target gf180mcuD: required clock frequency 41.7 MHz (24 ns)."
+        }
+      },
+      "rc": 1,
+      "clock_rates": [
+        "41.7"
+      ]
+    },
+    "native-na-cannot-erase-upstream": {
+      "prompt": "The calibration register trim_code at offset 0x10 is required.\n",
+      "ldoc": {
+        "doc_class": "L6_CALIBRATION",
+        "status": "not-applicable",
+        "fields": {
+          "lab_calibration_present": false
+        },
+        "source_documents": [
+          "L6_calibration.json"
+        ]
+      },
+      "rc": 1,
+      "required": [
+        "calibration_field"
+      ],
+      "absent_token": "L6_calibration"
+    },
+    "native-real-signed-arithmetic": {
+      "prompt": "| Arithmetic | Required behavior |\n|---|---|\n| Signed multiplication | Inputs a and b are signed 8-bit two-complement values; the full 16-bit product must represent -2 for -1 times 2. |\n",
+      "ldoc": {
+        "doc_class": "L2_ARCHITECTURE",
+        "fields": {
+          "arithmetic_contract": "Signed and unsigned N-bit operands have identical modulo-2^N product bit patterns.",
+          "integer_encoding": "unsigned"
+        }
+      },
+      "tb": true,
+      "rc": 1,
+      "required": [
+        "signedness"
+      ]
+    },
+    "native-metric-note-genuine-arithmetic": {
+      "ldoc": {
+        "doc_class": "L7_TEST_DEBUG",
+        "power": {
+          "note": "The arithmetic result must use ceiling."
+        }
+      },
+      "rc": 1,
+      "required": [
+        "rounding_mode"
+      ]
+    }
+  }
+}
