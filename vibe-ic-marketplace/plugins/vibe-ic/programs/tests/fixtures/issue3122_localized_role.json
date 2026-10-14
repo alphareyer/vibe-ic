@@ -1,0 +1,57 @@
+{
+  "scope": "Public verbatim clauses; authored neutral real-port prefix; not original whole22 script/input replay",
+  "origin_comment": "https://github.com/vibeic/vibe-ic/issues/3122#issuecomment-6171409158",
+  "comment_body_sha256": "e6c266287a21a23152e6b9de7f6ba0470bef4016a949e4e21adcaea8502de573",
+  "real_port_prefix": "input wire `sample_in`\noutput wire `sample_out`\n",
+  "clauses": [
+    {
+      "id": "localized_no_sw_registers",
+      "clause": "`serial_unit` **無 SW-visible registers**。",
+      "nonsignal": "serial_unit"
+    },
+    {
+      "id": "localized_no_analog_content",
+      "clause": "`serial_unit` 為純數位設計,**無 analog/mixed-signal 內容**,因此:",
+      "nonsignal": "serial_unit"
+    },
+    {
+      "id": "area_metadata_with_source_citation",
+      "clause": "The input's std-cell area gate still applies and is carried in `cell_area_gate`: input/docs/verification.md:111.",
+      "nonsignal": "cell_area_gate"
+    }
+  ],
+  "strict_companions": [
+    {
+      "id": "same_module_as_internal_register",
+      "clause_id": "localized_no_sw_registers",
+      "positive_line": "Internal register `serial_unit` holds state."
+    },
+    {
+      "id": "same_module_as_internal_wire",
+      "clause_id": "localized_no_analog_content",
+      "positive_line": "Internal wire `serial_unit` drives a real signal."
+    },
+    {
+      "id": "same_area_key_as_output_port",
+      "clause_id": "area_metadata_with_source_citation",
+      "positive_line": "output wire `cell_area_gate`"
+    },
+    {
+      "id": "same_module_in_localized_positive_context",
+      "clause_id": "localized_no_sw_registers",
+      "positive_line": "內部 register `serial_unit` holds the measured value."
+    },
+    {
+      "id": "same_area_key_as_real_gating_signal",
+      "clause_id": "area_metadata_with_source_citation",
+      "positive_line": "Signal `cell_area_gate` gates the request."
+    }
+  ],
+  "negative_surfaces": [
+    "detector",
+    "rtl-pack",
+    "phase1-pack"
+  ],
+  "prospective_node_count": 14,
+  "all_positive_companions_keep_real_names_through_normal_surfaces": true
+}

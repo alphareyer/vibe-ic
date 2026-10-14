@@ -336,3 +336,120 @@ def test_public_clause_roles_through_normal_consumers(tmp_path, case, surface):
     assert detected['ambiguous_identifiers'] == []
     for row in detected['signal_evidence']:
         assert row['line'] > 0 and row['name'] in row['context']
+
+
+# Verbatim public multilingual INPUT; this epoch is separate from the older
+# public-clause controls above and from the reporter's unavailable script.
+import json as _json
+
+LOCALIZED_PUBLIC_INPUT = _json.loads(
+    (Path(__file__).parent / 'fixtures' / 'issue3122_localized_role.json').read_text())
+LOCALIZED_CLAUSES = {c['id']: c for c in LOCALIZED_PUBLIC_INPUT['clauses']}
+LOCALIZED_ROLES = {
+    'localized_no_sw_registers': 'non_signal',
+    'localized_no_analog_content': 'design',
+    'area_metadata_with_source_citation': 'metadata',
+}
+
+
+def _localized_role_observation(tmp_path, case_id, prompt, surface):
+    """Use the existing detector/pack/ai_subtrack consumer paths and retain values."""
+    import hashlib
+    import os
+
+    dest = tmp_path / surface
+    dest.mkdir(parents=True)
+    (dest / 'public_input.md').write_text(prompt)
+    detected = detect(prompt)
+    observed = {'case': case_id, 'surface': surface, 'prompt': prompt,
+                'input_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+                'detected': detected, 'advice': []}
+    if surface in {'rtl-pack', 'phase1-pack'}:
+        pack_dir = dest / 'pack'
+        if surface == 'rtl-pack':
+            import ic_expert_backup_pack as pack
+            handoff = pack.assemble(prompt, None, None, [], [], pack_dir,
+                                    output_target='rtl.sv')
+        else:
+            import phase1_expert_parse_track as track
+            status = track.ai_subtrack(dest, prompt, pack_dir)
+            observed['phase1_status'] = status
+            handoff = status.get('handoff')
+        saved_path = pack_dir / 'ic_expert_agent_handoff.json'
+        saved = _json.loads(saved_path.read_text()) if saved_path.is_file() else None
+        observed.update(handoff=handoff, saved_handoff=saved,
+                        advice=[r for r in (saved or {}).get('spec_requirements', [])
+                                if r['kind'] == 'preserve_named_signals'])
+        if surface == 'phase1-pack' and handoff:
+            observed['saved_input'] = (
+                pack_dir / handoff['read_design_input_from']).read_text()
+
+    raw = _json.dumps(observed, indent=2, ensure_ascii=False) + '\n'
+    (dest / 'observed.json').write_text(raw)
+    artifact_dir = os.environ.get('R74_ARTIFACT_DIR')
+    if artifact_dir:
+        retained = Path(artifact_dir) / case_id / surface
+        retained.mkdir(parents=True, exist_ok=True)
+        (retained / 'observed.json').write_text(raw)
+    print(raw)
+
+    if surface in {'rtl-pack', 'phase1-pack'}:
+        assert observed['saved_handoff'] == observed['handoff']
+        expected_target = 'rtl.sv' if surface == 'rtl-pack' else 'l_doc_expectations.json'
+        assert observed['handoff']['output_target'] == expected_target
+        if surface == 'phase1-pack':
+            assert observed['phase1_status']['status'] == 'HANDOFF_EMITTED'
+            assert observed['saved_input'] == prompt
+    return observed
+
+
+@pytest.mark.parametrize('case', LOCALIZED_PUBLIC_INPUT['clauses'],
+                         ids=[c['id'] for c in LOCALIZED_PUBLIC_INPUT['clauses']])
+@pytest.mark.parametrize('surface', LOCALIZED_PUBLIC_INPUT['negative_surfaces'])
+def test_issue3122_localized_role_context(tmp_path, case, surface):
+    prompt = LOCALIZED_PUBLIC_INPUT['real_port_prefix'] + case['clause']
+    observed = _localized_role_observation(tmp_path, case['id'], prompt, surface)
+    detected = observed['detected']
+    expected = ['sample_in', 'sample_out']
+    if surface in {'rtl-pack', 'phase1-pack'}:
+        assert observed['advice'] == []
+    assert detected['named_signals'] == expected
+    assert detected['has_named_signals'] is False
+    assert detected['requirement'] is None
+    assert [r['name'] for r in detected['signal_evidence']] == expected
+    assert {r['name']: r['role'] for r in detected['non_signal_identifiers']} == {
+        case['nonsignal']: LOCALIZED_ROLES[case['id']]}
+    assert detected['ambiguous_identifiers'] == []
+    for row in detected['signal_evidence'] + detected['non_signal_identifiers']:
+        assert row['line'] > 0 and row['name'] in row['context']
+
+
+@pytest.mark.parametrize('case', LOCALIZED_PUBLIC_INPUT['strict_companions'],
+                         ids=[c['id'] for c in LOCALIZED_PUBLIC_INPUT['strict_companions']])
+def test_issue3122_same_spelling_signal_context(tmp_path, case):
+    clause = LOCALIZED_CLAUSES[case['clause_id']]
+    prompt = (LOCALIZED_PUBLIC_INPUT['real_port_prefix'] + clause['clause'] +
+              '\n' + case['positive_line'])
+    expected = ['sample_in', 'sample_out', clause['nonsignal']]
+    # One node per companion, each exercises all three normal surfaces.
+    for surface in LOCALIZED_PUBLIC_INPUT['negative_surfaces']:
+        observed = _localized_role_observation(tmp_path, case['id'], prompt, surface)
+        detected = observed['detected']
+        assert detected['named_signals'] == expected
+        assert detected['has_named_signals'] is True
+        assert detected['requirement']
+        for name, line in zip(expected, [1, 2, 4]):
+            assert any(r['name'] == name and r['line'] == line and
+                       name in r['context'] for r in detected['signal_evidence'])
+        if surface in {'rtl-pack', 'phase1-pack'}:
+            advice = observed['advice']
+            assert [r['named_signals'] for r in advice] == [expected]
+            assert advice[0]['signal_evidence'] == detected['signal_evidence']
+            assert advice[0]['non_signal_identifiers'] == detected['non_signal_identifiers']
+            text = advice[0]['requirement']
+            assert all(name in text for name in expected)
+            if surface == 'rtl-pack':
+                assert 'Declare EACH' in text
+            else:
+                assert 'Declare EACH' not in text
+                assert 'l_doc_expectations.json' in text
