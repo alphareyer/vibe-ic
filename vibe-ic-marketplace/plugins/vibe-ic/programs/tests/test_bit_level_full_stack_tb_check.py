@@ -520,20 +520,24 @@ def test_project_path_spelling_keeps_native_receipt_verdict(tmp_path, change):
 
     if change == 'transcript_changed':
         log = project / entry['run_log']
+        (tmp_path / 'original-transcript.bin').write_bytes(log.read_bytes())
         log.write_text(log.read_text() + '\nchanged public transcript bytes\n')
     elif change == 'plan_changed':
         declaration = project / 'plugin_output/declaration.json'
+        (tmp_path / 'original-declaration.json').write_bytes(declaration.read_bytes())
         contract = json.loads(declaration.read_text())
         contract['latency_cycles'] += 1
         declaration.write_text(json.dumps(contract))
     elif change == 'source_changed':
         rtl = project / produced['sources'][0]['path']
+        (tmp_path / 'original-source.v').write_bytes(rtl.read_bytes())
         rtl.write_text(rtl.read_text() + '\n// changed compiled public source\n')
     elif change == 'transcript_missing':
         log = project / entry['run_log']
         log.rename(log.with_suffix('.retained-before-missing'))
     elif change == 'population_short':
         log = project / entry['run_log']
+        (tmp_path / 'original-transcript.bin').write_bytes(log.read_bytes())
         log.write_text('\n'.join(line for line in log.read_text().splitlines()
                                  if not line.startswith('ARITH_SCENARIO_DONE ')) + '\n')
         entry['run_log_sha256'] = helpers._fsf().sha256_file(log)
