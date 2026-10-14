@@ -966,8 +966,12 @@ def _selection_request(context, run: Path, result: dict, response: Path) -> dict
 def _wait_for_choice(context, run: Path, result: dict, response: Path,
                      baseline, timeout_s: int):
     request = _selection_request(context, run, result, response)
+    from _watchdog import loop_guard
     deadline = time.monotonic() + timeout_s
-    while True:
+    # This wait admits an external response; it does not kill a running job.
+    # Retain its deadline and bound polling even when the clock stops advancing.
+    max_polls = max(1, int(timeout_s / 0.25) + 2)
+    for _ in loop_guard('ai_selection_choice', max_iter=max_polls):
         choice = _read_new_choice(response, baseline)
         if choice is not None:
             # BLOCKING: the external reviewer must acknowledge the complete
@@ -983,6 +987,7 @@ def _wait_for_choice(context, run: Path, result: dict, response: Path,
         if remaining <= 0:
             return None
         time.sleep(min(0.25, remaining))
+    return None
 
 
 def _prepare_step9(runtime: dict, parameters: dict) -> None:

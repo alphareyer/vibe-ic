@@ -10,6 +10,7 @@
       },
       "arm_id": "backend_15",
       "canonical_outputs": [
+        "phase3/stage3/pnr/constraint.sdc",
         "phase3/stage3/pnr/floorplan.def",
         "phase3/stage3/pnr/pdn.tcl OR phase3/stage3/pnr/pdn.done",
         "reports/phase2/gates/stage2_compliance.json"
@@ -241,6 +242,7 @@
       },
       "arm_id": "backend_18",
       "canonical_outputs": [
+        "phase3/stage3/pnr/post_spare.def",
         "phase3/stage3/pnr/spare_cells.json",
         "reports/spare_cell_coverage.json"
       ],
@@ -596,10 +598,18 @@
       "canonical_outputs": [
         "phase3/stage3/sta/post_route_timing.rpt",
         "reports/phase3/sta_spef_based.rpt",
+        "reports/phase3/sta_postpnr_signoff.json",
         "reports/phase3/sta/post_route_summary.json",
         "reports/phase3/sta/sta_corner_record_completeness.json",
         "reports/phase3/sta/post_route_signoff_corner.json",
-        "reports/phase3/sta/architectural_residual.json"
+        "reports/phase3/sta/architectural_residual.json",
+        "reports/phase3/sta/hold_corner_coverage.json",
+        "reports/phase3/sta/assumed_clock_disclosure.json",
+        "reports/phase3/clock_target_record_agreement.json",
+        "reports/phase3/achievable_fmax.json",
+        "reports/phase3/sta/drv_capture_plan.json",
+        "reports/phase3/sta/drv_signoff_bundle.json",
+        "reports/phase3/sta/drv_signoff.json"
       ],
       "consumer_gates": [
         "achieved_period_recorded_check",

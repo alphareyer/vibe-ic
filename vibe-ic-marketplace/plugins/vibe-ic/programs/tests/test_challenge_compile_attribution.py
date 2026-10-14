@@ -396,3 +396,32 @@ def test_a_compile_timeout_is_never_CANDIDATE_BROKEN(tmp_path, monkeypatch):
         task["candidate_snapshot"], challenge)
     assert result["status"] not in (bd._CHALLENGE_CANDIDATE_BROKEN, "FAIL")
     assert result["status"] == "INVALID"
+
+
+@pytest.mark.parametrize('state',['progressing','compile_stalled','runtime_stalled'])
+def test_allocated_challenge_runs_by_progress_and_retains_errors(tmp_path,monkeypatch,state):
+    import _progress_run as progress
+    calls=[]
+    challenge=tmp_path/'neutral-challenge.v';challenge.write_text('module vibeic_ai_challenge_tb; endmodule\n')
+    rtl=tmp_path/'neutral.v';rtl.write_text('module neutral; endmodule\n')
+    candidate={'id':'neutral','rtl_paths':[str(rtl)],'rtl_sha256':'neutral-source'}
+    proof={'path':str(challenge),'sha256':bd._sha256_text(challenge.read_text())}
+    monkeypatch.setattr(bd,'_validate_candidate_snapshot',lambda *a:[])
+    monkeypatch.setattr(bd,'_challenge_forbidden_hit',lambda source:None)
+    monkeypatch.setattr(bd.shutil,'which',lambda tool:'/mock/'+tool)
+    def observed(argv,**kw):
+        calls.append((argv,kw))
+        stage='compile' if '-g2012' in argv else ('runtime' if argv[0]=='/mock/vvp' and '-V' not in argv else 'version')
+        if state==stage+'_stalled':raise progress.Stalled(argv,3,.1,50,{'cpu':True,'output':False},'partial output','retained error')
+        return subprocess.CompletedProcess(argv,0,'VIBEIC_AI_CHALLENGE=PASS\n' if stage=='runtime' else 'neutral version','')
+    monkeypatch.setattr(progress,'run',observed)
+    monkeypatch.setattr(bd.subprocess,'run',lambda argv,**kw:subprocess.CompletedProcess(argv,0,'raw clock output',''))
+    result=bd._run_verification_challenge(candidate,proof)
+    assert result['status']==('PASS' if state=='progressing' else 'UNAVAILABLE')
+    assert calls and all(call[1]['hard_ceiling_s']==30 for call in calls)
+    records=result['execution']['commands']
+    if state=='progressing':assert records[-1]['stdout']=='VIBEIC_AI_CHALLENGE=PASS\n'
+    else:
+        assert records[-1]['stalled'] is True and records[-1]['stdout']=='partial output'
+        assert records[-1]['stderr']=='retained error' and records[-1]['returncode'] is None
+        assert 'STALLED' in ' '.join(result['reasons'])

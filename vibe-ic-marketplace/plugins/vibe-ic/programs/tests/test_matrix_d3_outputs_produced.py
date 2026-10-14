@@ -4059,7 +4059,11 @@ def test_d3_cell_states_partition_all_steps():
         f"waived cells {sorted(F.normalize_id(s) for s in waived)} do not match "
         f"the registered waivers {sorted(declared)}"
     )
-    assert (len(enforced), len(waived), len(na)) == (55, 2, 13), (
+    # Root-authorized source alignment: 3fc358130eb4d28bd6437625d8e34ef34408d5ac
+    # declares FS1's two reports. Both remain UNPROVEN; the historical mutation
+    # ledger and qualification are unchanged. This is a declaration partition.
+    assert "FS1" in enforced and "FS1" not in na
+    assert (len(enforced), len(waived), len(na)) == (56, 2, 12), (
         f"the ENFORCED/WAIVED/NA split changed to "
         f"({len(enforced)}, {len(waived)}, {len(na)}); it was measured as "
         f"(51, 2, 15) after folding 1.6x into Step 2. A step moving between states "
@@ -8104,3 +8108,18 @@ def test_d3_the_blind_capture_predicate_fires_on_a_checkout_walk():
     # quietly treated as a live capture.
     assert _blind_capture_reason("u", {"__unreadable__": "boom"})
     assert _blind_capture_reason("n", None)
+
+
+def test_d3_fs1_declares_two_unproven_source_outputs():
+    """3fc358130eb4d28bd6437625d8e34ef34408d5ac: declaration, not qualification."""
+    paths = {"reports/phase2/safety/fmeda_coverage.json",
+             "reports/phase2/safety/fmeda_coverage_gate.json"}
+    import yaml
+    doc = yaml.safe_load(F.FLOW_YAML.read_text())
+    fs1 = next(s for s in doc["steps"] if str(s["id"]) == "FS1")
+    assert set(fs1["required_outputs"]) == paths
+    rec = step_record("FS1")
+    assert rec["verdict"] == "ENFORCED"
+    assert set(rec["entries"]) == paths
+    assert {e["status"] for e in rec["entries"].values()} == {"UNPROVEN"}
+    assert waiver_for("FS1") is None

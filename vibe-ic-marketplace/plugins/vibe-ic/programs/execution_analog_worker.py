@@ -811,19 +811,19 @@ def observe_gate(outputs: Path, gate: str) -> dict:
     report = directory / (gate + '.report.json')
     command = [str(Path(sys.executable).resolve()), str(PROGRAMS / (gate + '.py')),
                str(outputs / 'project'), '--json', str(report)]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+    import _watchdog as _wd
+    import _container_exec as ce
+    launch = {}
+    def popen(argv, **kwargs):
+        process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+        launch['pid'] = process.pid
+        return process
+    result = _wd.run_host_supervised(command, popen_factory=popen,
+        hard_ceiling_s=120, ceiling_notice=ce.default_ceiling_notice('analog gate', 120),
         env={k: v for k, v in os.environ.items() if not k.startswith('VIBEIC_EXECUTION')})
-    try:
-        stdout, stderr = process.communicate(timeout=120)
-        rc = process.returncode
-    except subprocess.TimeoutExpired:
-        import signal
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        rc = None
-    record = dict(binding=binding, argv=command, pid=process.pid, rc=rc,
-        report=checked_json(report) if report.is_file() else {}, stdout=stdout, stderr=stderr,
+    record = dict(binding=binding, argv=command, pid=launch.get('pid'), rc=result.rc,
+        report=checked_json(report) if report.is_file() else {}, stdout=result.out, stderr=result.err,
+        supervision=result.supervision, outcome=result.outcome,
         program_sha256=em.digest(PROGRAMS / (gate + '.py')))
     write_json(directory / (gate + '.json'), record)
     return record

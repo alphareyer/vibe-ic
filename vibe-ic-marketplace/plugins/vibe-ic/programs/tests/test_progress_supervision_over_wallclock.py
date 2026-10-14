@@ -1012,3 +1012,74 @@ def test_no_program_hands_a_timeout_to_the_progress_run_primitive():
         "these call sites pass `timeout=` to a primitive that has no such "
         "parameter — each one is an uncaught TypeError at runtime: "
         + ", ".join(offenders))
+
+
+# Source-only API doubles: no native tools or real child workloads are launched.
+@pytest.mark.parametrize("state", ["progressing", "failed", "stalled"])
+def test_allocated_frontend_step12_supervision(tmp_path, monkeypatch, state):
+    import execution_frontend_worker as worker
+    import _progress_run as progress
+    calls=[]
+    scan=tmp_path/'project/phase2/stage2/dft/scan_netlist.v'
+    scan.parent.mkdir(parents=True); scan.write_text('module neutral; endmodule\n')
+    output=tmp_path/'output'; target=output/'phase2/stage2/synth/post_dft_netlist.v'
+    def observed(argv, **kw):
+        calls.append((argv,kw))
+        if state == 'stalled':
+            raise progress.Stalled(argv, 3, .1, 9, {'output':False,'cpu':True})
+        if state == 'progressing': target.write_text('module neutral; endmodule\n')
+        return subprocess.CompletedProcess(argv, 0 if state=='progressing' else 7, 'observed output', 'observed stderr')
+    monkeypatch.setattr(progress,'run',observed)
+    monkeypatch.setattr(worker.subprocess,'run',lambda argv,**kw: subprocess.CompletedProcess(argv,7,'','raw host launch'))
+    result=worker.produce_12(tmp_path/'project',output)
+    if state=='progressing': assert result==target and target.read_text()==scan.read_text()
+    else:
+        report=json.loads(result.read_text())
+        assert report['result']=='NOT_MEASURED'
+        assert report['reason']==('yosys producer stalled' if state=='stalled' else 'yosys producer failed')
+        if state=='failed': assert report['rc']==7 and report['stderr']=='observed stderr'
+        else: assert 'STALLED' in report['stderr']
+    assert len(calls)==1 and calls[0][0][0]=='yosys'
+    assert calls[0][1]=={'capture_output':True,'text':True}
+
+@pytest.mark.parametrize("state", ["progressing", "stalled"])
+def test_allocated_analog_gate_supervision(tmp_path, monkeypatch, state):
+    import execution_analog_worker as worker
+    from types import SimpleNamespace
+    calls=[]; binding={'step_id':'A6','required_gates':['neutral_gate']}
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING',json.dumps(binding))
+    monkeypatch.setattr(worker,'gate_specs',lambda step:[{'command':'neutral_gate project'}])
+    monkeypatch.setattr(worker.em,'digest',lambda path:'source-only-mock-digest')
+    def observed(argv,**kw):
+        calls.append((argv,kw))
+        kw['popen_factory'](argv)
+        return SimpleNamespace(rc=0 if state=='progressing' else _wd.RC_STALLED,
+            out='gate output',err='' if state=='progressing' else 'WATCHDOG_STALLED',
+            outcome='natural' if state=='progressing' else 'stalled',
+            supervision={'pid':321,'watched':'output+cpu','since_last_progress_s':0 if state=='progressing' else 120})
+    monkeypatch.setattr(_wd,'run_host_supervised',observed)
+    class Raw:
+        pid=321; returncode=0
+        def communicate(self,**kw): return 'raw unsupervised',''
+    monkeypatch.setattr(worker.subprocess,'Popen',lambda *a,**k:Raw())
+    row=worker.observe_gate(tmp_path,'neutral_gate')
+    assert row['stdout']=='gate output' and row['pid']==321 and row['binding']==binding
+    assert row['rc']==(0 if state=='progressing' else _wd.RC_STALLED)
+    assert row['supervision']['watched']=='output+cpu'
+    assert len(calls)==1 and calls[0][1]['hard_ceiling_s']==120
+    assert callable(calls[0][1]['popen_factory'])
+    assert not any(k.startswith('VIBEIC_EXECUTION') for k in calls[0][1]['env'])
+
+
+@pytest.mark.parametrize('state',['progressing','stalled'])
+def test_allocated_existing_supervisor_distinguishes_progress_from_stall(state):
+    now=[0.];kills=[];notices=[];observations={}
+    def wait(proc,poll):
+        now[0]+=1
+        return 0 if state=='progressing' and now[0]>=6 else None
+    outcome,rc=_wd.supervise(object(),lambda:now[0] if state=='progressing' else 0,
+        lambda proc,reason:kills.append(reason),poll_s=1,stall_grace_s=2,hard_ceiling_s=.5,
+        wait_fn=wait,clock=lambda:now[0],observations=observations,ceiling_notice=notices.append)
+    assert notices and observations['hard_ceiling_exceeded'] is True
+    if state=='progressing':assert (outcome,rc,kills)==('natural',0,[]) and now[0]>.5
+    else:assert outcome=='stalled' and rc is None and kills==['stalled']

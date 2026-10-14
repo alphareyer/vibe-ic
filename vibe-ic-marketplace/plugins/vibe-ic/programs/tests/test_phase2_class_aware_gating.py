@@ -337,43 +337,17 @@ def test_structural_gates_skip_protocol_for_generic_class(tmp_path):
 
 
 # ---------------------------------------------------------------------
-# v1.6.553 — post-layout SPICE correlation is an analog-track gate.
-# Digital-only protocol ICs (analog_applicable=False) that complete
-# Phase 3 emit phase3/stage3/extracted/*.spef + phase3/stage3/sta/*.rpt,
-# which previously tripped spice_correlation_check's NO_SPICE_VERIFICATION
-# FAIL even though such ICs have no transistor-level SPICE deck and never
-# should. Under --skip-analog this surfaced as a spurious phase2 FAIL on
-# espi / usb_pd / sgmii while interlaken (no Phase-3 SPEF/STA) "passed".
-# HONESTY: a genuinely-analog class still RUNS the gate (so a missing /
-# uncorrelated SPICE deck on a real analog IC still FAILs).
-#
-# WHERE THE EXEMPTION LIVES, AND WHY THESE TESTS MOVED (#1978 -> here).
-# It used to be a NAME in `flow_compliance_check._CLASS_SKIPPABLE_ANALOG_GATES`:
-# the umbrella silenced this gate by spelling it. #1978 removed that entry on
-# the rule that a caller's class table may not suppress a protocol-independent
-# question wholesale, and pinned the removal in
-# `test_issue1978_reason_taxonomy.py::
-# test_real_flow_keeps_protocol_independent_questions_out_of_class_skips`.
-# Nothing took over the QUESTION, so the v1.6.553 escape re-opened. MEASURED at
-# 2010063c1, pinned image 0.3.6, on a registry-matched
-# `digital_arithmetic_primitive` project carrying phase3 SPEF + STA and no
-# SPICE deck: `spice_correlation_check` rc 1 NO_SPICE_VERIFICATION.
-#
-# So the tests below no longer assert MEMBERSHIP of a table. They drive the
-# gate and assert the OUTCOME, which is the property v1.6.553 exists for and
-# the only form that survives the mechanism moving again. The table assertion
-# was also the weaker test in a second way: it went red for
-# `l1_electrical_specs_typed_depth_check` too, where there is no escape at all
-# (that gate self-skips rc 2 "no electrical entries to validate" on the same
-# project) -- one red per table entry, not one per defect.
+# Step 30 owes current critical-path correlation even for digital classes.
+# v1.26.98 (912474756450052b190c399db372df639be65964) replaced the old
+# whole-class exemption / NO_SPICE_VERIFICATION branch with current receipt
+# validation. Typed analog applicability remains a separate class fact.
+# SPEF + STA alone do not prove the producer was reached: the owning
+# predicate requires routed.def. Drive the actual CLI on both sides of that
+# boundary, retaining --no-spice and the original test IDs. A ready route
+# with no current receipt must FAIL for digital, analog and unknown alike.
 # ---------------------------------------------------------------------
 def _phase3_complete_no_spice(tmp_path, analog: bool):
-    """A project that REACHED post-layout (SPEF + STA) and ran no SPICE.
-
-    This is the shape v1.6.553 named: before Step 20/21 the gate self-skips
-    for a different reason (`no_spef` / `no_sta`) and the question never
-    arises, so a fixture without them proves nothing.
-    """
+    """Synthetic SPEF + STA inputs, without routed.def or any Step30 product."""
     proj = _make_class_project(tmp_path, {})
     if analog:
         (proj / "phase1" / "generated_docs" / "L5_ADI_SPEC.json").write_text(
@@ -388,39 +362,73 @@ def _phase3_complete_no_spice(tmp_path, analog: bool):
     return proj
 
 
-def _run_spice_gate(proj):
-    import subprocess
-    return subprocess.run(
+def _run_spice_gate(proj, audit_name):
+    # Outside the project: an audit must not become a producer product on
+    # the next invocation or alter the current receipt's applicability.
+    audit = proj.parent / f"{proj.name}-{audit_name}-spice-audit.json"
+    run = subprocess.run(
         [sys.executable, str(PROGRAMS / "spice_correlation_check.py"),
-         str(proj), "--no-spice"], capture_output=True, text=True)
+         str(proj), "--no-spice", "--json", str(audit)],
+        capture_output=True, text=True)
+    return run, json.loads(audit.read_text())
+
+
+def _assert_spice_route_obligation(proj):
+    """A pre-producer nonmeasurement cannot exempt a completed route."""
+    assert "spice_correlation_check" not in fcc._CLASS_SKIPPABLE_ANALOG_GATES
+    assert "spice_correlation_check" not in fcc._class_skipped_gates(proj)
+    route = proj / "phase3" / "stage3" / "pnr" / "routed.def"
+    receipt = proj / "reports" / "phase3" / "spice_correlation.current.json"
+    assert not route.exists()
+    assert not receipt.exists()
+
+    run, report = _run_spice_gate(proj, "before-route")
+    assert run.returncode == 2, run.stdout + run.stderr
+    summary = report["summary"]
+    assert summary["skipped"] is True, report
+    assert summary["pass"] is False, report
+    assert summary["measurement"] == "NOT_MEASURED", report
+    assert summary["current_binding"] == "NOT_YET_PRODUCED", report
+    assert summary["reason"] == "asked_before_producer", report
+    assert summary["reason_class"] == "ASKED_BEFORE_PRODUCER", report
+    assert summary["asked_before_producer"]["producer_has_run"] is False, report
+    assert "VACUOUS" in run.stderr, run.stderr
+
+    route.parent.mkdir(parents=True, exist_ok=True)
+    route.write_text("DESIGN neutral ;\nEND DESIGN\n")
+    assert route.is_file()
+    assert not receipt.exists()
+    run, report = _run_spice_gate(proj, "ready-route")
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert report["passed"] is False, report
+    summary = report["summary"]
+    assert summary["skipped"] is False, report
+    assert summary["pass"] is False, report
+    assert summary["measurement"] == "NOT_MEASURED", report
+    assert summary["current_binding"] == "REFUSED", report
+    assert any(f["rule"] == "SPICE_CURRENT_INPUTS_UNBOUND"
+               and f["severity"] == "ERROR" for f in report["findings"]), report
+    assert not receipt.exists()
 
 
 def test_spice_correlation_is_not_a_FAIL_for_a_pure_digital_class(tmp_path):
-    """The v1.6.553 property, asked of the gate instead of of a table."""
+    """Digital analog N/A never waives applicable critical-path correlation."""
     proj = _phase3_complete_no_spice(tmp_path, analog=False)
-    assert icp.detect_ic_class(proj)["ic_class"] == "digital_arithmetic_primitive"
-    r = _run_spice_gate(proj)
-    assert r.returncode == 2, (
-        "a pure-digital IC that completed Phase 3 has no transistor-level deck "
-        "to correlate; a missing deck is a design-declared N/A, not a FAIL\n"
-        + r.stdout + r.stderr)
-    assert "analog_not_applicable_for_class" in r.stdout, r.stdout
-    assert "VACUOUS" in r.stdout, (
-        "the N/A must land on the DISCLOSED tier — an rc 2 nobody can see is "
-        "the silent pass this gate exists to prevent\n" + r.stdout)
+    profile = icp.detect_ic_class(proj, refresh=True)
+    assert profile["ic_class"] == "digital_arithmetic_primitive"
+    flags = icp.class_verification_flags(profile["ic_class"])
+    assert flags["registry_matched"] is True
+    assert flags["analog_applicable"] is False
+    _assert_spice_route_obligation(proj)
 
 
 def test_spice_correlation_still_FAILs_an_analog_class(tmp_path):
-    """REVERSE, one property changed: the class IS analog-applicable.
-
-    Without this the exemption above could be unconditional and the file
-    would still be green."""
+    """Analog class still refuses missing current evidence once route exists."""
     proj = _phase3_complete_no_spice(tmp_path, analog=True)
-    flags = icp.class_verification_flags(icp.detect_ic_class(proj)["ic_class"])
+    flags = icp.class_verification_flags(
+        icp.detect_ic_class(proj, refresh=True)["ic_class"])
     assert flags.get("analog_applicable") is not False
-    r = _run_spice_gate(proj)
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "NO_SPICE_VERIFICATION" in r.stdout, r.stdout
+    _assert_spice_route_obligation(proj)
 
 
 def test_the_class_table_does_not_silence_the_spice_gate_by_name(tmp_path):
@@ -466,23 +474,18 @@ def test_spice_gate_NOT_skipped_for_analog_class(tmp_path):
 
 
 def test_spice_gate_skip_is_class_driven_not_skip_analog_flag(tmp_path):
-    """The skip is keyed on the detected IC class, NOT on a --skip-analog
-    flag or a benchmark name — so it is general (fires for any digital-only
-    class) and honest (never special-cased to espi/usb_pd).
+    """Class facts and --no-spice cannot suppress the current route obligation.
 
-    Asked of the gate, for the reason in the block comment above: the class
-    key now lives in `spice_correlation_check._analog_not_applicable_for_class`,
-    and a test of the caller's table would go green again the moment the
-    exemption moved without the escape ever being closed."""
+    Retain the historical ID; --skip-analog is not an accepted checker flag.
+    """
     proj = _phase3_complete_no_spice(tmp_path, analog=False)
-    r = _run_spice_gate(proj)
-    assert r.returncode == 2 and "analog_not_applicable_for_class" in r.stdout, \
-        r.stdout + r.stderr
-    assert "digital_arithmetic_primitive" in r.stdout, (
-        "the disclosure must name the class it keyed on; a reason that does "
-        "not say which record exempted the design cannot be audited\n"
-        + r.stdout)
-    # Unknown class (no L docs) → fail-closed → the gate still asks.
+    profile = icp.detect_ic_class(proj, refresh=True)
+    assert profile["ic_class"] == "digital_arithmetic_primitive"
+    flags = icp.class_verification_flags(profile["ic_class"])
+    assert flags["registry_matched"] is True
+    assert flags["analog_applicable"] is False
+    _assert_spice_route_obligation(proj)
+    # Unknown class (no L docs) retains the same strict route boundary.
     empty = tmp_path / "empty_proj"
     (empty / "phase2" / "stage1" / "rtl").mkdir(parents=True)
     ext = empty / "phase3" / "stage3" / "extracted"
@@ -492,15 +495,11 @@ def test_spice_gate_skip_is_class_driven_not_skip_analog_flag(tmp_path):
     sta.mkdir(parents=True)
     (sta / "sta.rpt").write_text("slack 0.5\n")
     _unknown = icp.class_verification_flags(
-        icp.detect_ic_class(empty).get("ic_class") or "unknown")
-    # FAIL-CLOSED, stated as the flag the gate actually keys on. `unknown`
-    # answers `registry_matched: True` (measured), so a test written against
-    # that flag would pass while proving nothing; the exemption is keyed on
-    # `analog_applicable is False` and an unclassified design never says that.
+        icp.detect_ic_class(empty, refresh=True).get("ic_class") or "unknown")
+    # Do not assume unknown.registry_matched=False: registered unknown may
+    # match. Its independently derived analog applicability is not False.
     assert _unknown.get("analog_applicable") is not False
-    assert _run_spice_gate(empty).returncode == 1, (
-        "an unmatched class must NOT be exempted — fail-closed is the whole "
-        "reason the key is the registry flag and not a name")
+    _assert_spice_route_obligation(empty)
 
 
 # ---------------------------------------------------------------------

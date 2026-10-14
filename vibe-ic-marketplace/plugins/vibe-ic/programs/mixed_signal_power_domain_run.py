@@ -411,10 +411,14 @@ def derive(paths, libs, top, native):
 
 def run_tool(script, work, container):
     command = "yosys -T -s " + shlex.quote(str(script))
-    if container in (None, "", "host"):
-        done = progress.run(["yosys", "-T", "-s", str(script)], capture_output=True, text=True)
-    else:
-        done = ce.run_in_container(container, command, deadline_s=120)
+    try:
+        if container in (None, "", "host"):
+            done = progress.run(["yosys", "-T", "-s", str(script)], capture_output=True, text=True)
+        else:
+            done = ce.run_in_container_supervised(container, command, ceiling_s=120)
+    except progress.Stalled as exc:
+        (work / "yosys.log").write_text(exc.stdout + exc.stderr + "\n" + str(exc))
+        return progress.RC_STALLED
     (work / "yosys.log").write_text(done.stdout + done.stderr)
     return done.returncode
 
@@ -491,6 +495,8 @@ def main(argv=None):
                  f"write_json {quote(native_path)}"]) + "\n")
             started = time.time_ns()
             code = run_tool(script, work, args.container)
+            if code == progress.RC_STALLED:
+                raise Refusal("NATIVE_TOOL_STALLED", f"Yosys supervision stalled; see {work / 'yosys.log'}", 2)
             if code:
                 raise Refusal("NATIVE_TOOL_FAILED", f"Yosys rc={code}")
             if binding(paths, libs) != before:

@@ -358,3 +358,97 @@ def test_the_runner_invokes_the_producer_by_default_and_direct_is_opt_out(
     assert len(calls) == 2
     assert calls[-1][calls[-1].index("--image") + 1].endswith(PIN.IMAGE_DIGEST)
     assert "@" in calls[-1][calls[-1].index("--image") + 1]
+
+
+# Neutral API mocks: the real producer runs, while every tool boundary is replaced.
+@pytest.fixture
+def metrics_mock_project(tmp_path, monkeypatch):
+    import librelane_contract as lc
+    import analog_real_corner_sweep as ars
+    import _designs_root as dr
+    project = _project(tmp_path)
+    monkeypatch.setattr(dr, "resolve_host_root", lambda *args: project)
+    monkeypatch.setattr(ars, "_container_path", lambda container, root, path: str(path))
+    def resolve(project, image, src, target, **kw):
+        target.write_text(src.read_text())
+        return target
+    def extract(project, image, steps, **kw):
+        folder = project / "mock_rcx" / Path(steps[0][1]).stem
+        folder.mkdir(parents=True, exist_ok=True)
+        rcx = folder / "view.sp"
+        rcx.write_text(RCX_RC)
+        (folder / "state_out.json").write_text(json.dumps({"spice_rcx": str(rcx)}))
+        return [folder]
+    monkeypatch.setattr(lc, "resolve_step_config", resolve)
+    monkeypatch.setattr(lc, "run_chain", extract)
+    monkeypatch.setattr(ars, "_docker", lambda *a, **kw: pytest.fail("unmocked Docker tool boundary"))
+    monkeypatch.setattr(ars, "_run_ngspice", lambda *a, **kw: (True, {"gain": 10.0}, "neutral mock", {"rc": 0}))
+    return project
+
+
+def _a7_metrics(project):
+    return json.loads((project / "reports" / "metrics" / "a7.json").read_text())
+
+
+def test_a7_metrics_emits_real_terminal_counts(metrics_mock_project):
+    project = metrics_mock_project
+    assert A7.run(project, "blk", "mock", IMAGE, ["ngspice()", "ngspice(hrhc)"]) == 0
+    row = _a7_metrics(project)
+    assert row == {"a7__flow__block": "blk", "a7__flow__producer_result": "PRODUCED",
+                   "a7__flow__rule": None, "a7__flow__reason_class": None,
+                   "a7__flow__pair_count": 2, "a7__flow__measured_style_count": 2,
+                   "a7__flow__completed_style_count": 2}
+    rec = json.loads((project / "phase3/analog/blk/a7_post_layout.json").read_text())
+    assert rec["result"] == "PRODUCED" and rec["compared_specs_count"] == 2
+
+
+@pytest.mark.parametrize("terminal", ["refused", "unmeasured", "stopped"], ids=["refused", "unmeasured", "stopped"])
+def test_a7_metrics_clears_prior_invocation_counts(metrics_mock_project, monkeypatch, terminal):
+    import analog_real_corner_sweep as ars
+    project = metrics_mock_project
+    assert A7.run(project, "blk", "mock", IMAGE, ["ngspice()"]) == 0
+    before = _a7_metrics(project)
+    assert before["a7__flow__producer_result"] == "PRODUCED" and before["a7__flow__pair_count"] == 1
+    if terminal == "refused":
+        (project / "phase3/analog/blk/blk.gds").unlink()
+        expected_rc, expected_result, rule = 2, "NOT_PRODUCED", "A7_INPUT_ABSENT"
+    elif terminal == "unmeasured":
+        (project / "phase3/analog/blk/tb_blk.sp").write_text(".include blk.sp\n.meas op absent find v(a)\n.end\n")
+        monkeypatch.setattr(ars, "_run_ngspice", lambda *a, **kw: (True, {}, "neutral mock", {"rc": 0}))
+        expected_rc, expected_result, rule = A7.EX_BUDGET_EXHAUSTED, "NOT_MEASURED", "A7_PRE_MEASUREMENT_ABSENT"
+    else:
+        monkeypatch.setattr(ars, "_run_ngspice", lambda *a, **kw: (False, {}, "neutral mock", {"rc": 1, "stopped": True}))
+        expected_rc, expected_result, rule = A7.EX_BUDGET_EXHAUSTED, "NOT_MEASURED", "A7_SIMULATION_STOPPED_EXTERNALLY"
+    assert A7.run(project, "blk", "mock", IMAGE, ["ngspice()"]) == expected_rc
+    row = _a7_metrics(project)
+    assert row["a7__flow__block"] == "blk" and row["a7__flow__producer_result"] == expected_result
+    assert row["a7__flow__rule"] == rule
+    expected_count = 0 if terminal == "unmeasured" else None
+    assert row["a7__flow__pair_count"] == expected_count
+    assert row["a7__flow__measured_style_count"] == expected_count
+    assert row["a7__flow__completed_style_count"] == (1 if terminal == "unmeasured" else None)
+
+
+def test_a7_metrics_sink_failure_preserves_producer_rc(metrics_mock_project, capsys):
+    project = metrics_mock_project
+    (project / "reports").write_text("a regular file refuses the metrics directory")
+    assert A7.run(project, "blk", "mock", IMAGE, ["ngspice()"]) == 0
+    captured = capsys.readouterr()
+    assert "[step_metrics] EMIT FAILED" in captured.err
+    rec = json.loads((project / "phase3/analog/blk/a7_post_layout.json").read_text())
+    assert rec["result"] == "PRODUCED" and rec["compared_specs_count"] == 1
+
+
+def test_a7_metrics_partial_measured_fail_keeps_precedence(metrics_mock_project, monkeypatch):
+    import analog_real_corner_sweep as ars
+    project = metrics_mock_project
+    (project / "phase3/analog/blk/tb_blk.sp").write_text(".include blk.sp\n.meas op absent find v(a)\n.end\n")
+    responses = iter([(True, {"gain": 10.0}, "pre mock", {"rc": 0}),
+                      (True, {"gain": 15.0}, "post mock", {"rc": 0})])
+    monkeypatch.setattr(ars, "_run_ngspice", lambda *a, **kw: next(responses))
+    assert A7.run(project, "blk", "mock", IMAGE, ["ngspice()"]) == 1
+    row = _a7_metrics(project)
+    assert row["a7__flow__producer_result"] == "REFUSED"
+    assert row["a7__flow__rule"] == "A7_POSTSIM_DELTA_TOO_BIG"
+    assert row["a7__flow__pair_count"] == 1
+    assert row["a7__flow__completed_style_count"] == row["a7__flow__measured_style_count"] == 1

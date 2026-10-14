@@ -51,6 +51,7 @@ from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
 from _atomic_artefact import write_bytes as _atomic_write_bytes
 import _runtime_pair_preflight as _runtime_pair
+import _progress_run
 import _container_exec as _challenge_exec
 
 HARNESS = Path(__file__).resolve().parent.parent / "benchmark"
@@ -3500,12 +3501,17 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             receipt["declaration"] = frozen
         try:
             inspect_argv = ["docker", "inspect", "--format", "{{json .Mounts}}", declaration["container_id"]]
-            cp = subprocess.run(inspect_argv, capture_output=True, text=True, timeout=30)
+            cp = _progress_run.run(inspect_argv, capture_output=True, text=True,
+                hard_ceiling_s=30, ceiling_notice=_challenge_exec.default_ceiling_notice('challenge mounts', 30))
             receipt["commands"].append({"stage": "mounts", "argv": inspect_argv,
                 "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr})
             mounts = _strict_json_loads(cp.stdout) if cp.returncode == 0 else []
             if not isinstance(mounts, list):
                 raise ValueError("container mounts are not a list")
+        except _progress_run.Stalled as exc:
+            receipt['commands'].append({'stage': 'mounts', 'argv': inspect_argv,
+                'returncode': None, 'stdout': exc.stdout, 'stderr': exc.stderr, 'stalled': True})
+            return finish({'status': 'UNAVAILABLE', 'reasons': [str(exc)]})
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return finish({"status": "UNAVAILABLE", "reasons": [f"native mounts unavailable: {exc}"]})
 
@@ -3534,21 +3540,29 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             command = shlex.join(argv)
             if cwd is not None:
                 command = "cd " + shlex.quote(mapped(cwd)) + " && exec " + command
-            actual_argv = _challenge_exec.container_deadline_argv(
-                declaration["container_id"], command, 30,
-                shell=("env", "IIC_OSIC_TOOLS_QUIET=1", "bash", "-lc"))
-        record = {"stage": stage, "tool_argv": argv, "argv": actual_argv, "cwd": cwd}
+            actual_argv = _challenge_exec.docker_exec_argv(
+                declaration['container_id'], 'env', 'IIC_OSIC_TOOLS_QUIET=1', 'bash', '-lc', command)
+        record = {"stage": stage, "tool_argv": argv, "argv": actual_argv, "cwd": cwd,
+                  "declared_budgets_s": {"tool": 30, "client": 45 if native else 30}}
         receipt["commands"].append(record)
         try:
-            cp = subprocess.run(actual_argv, cwd=None if native else cwd,
-                capture_output=True, text=True, timeout=45 if native else 30)
-        except subprocess.TimeoutExpired as exc:
-            record.update(returncode=None,
-                stdout=exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout,
-                stderr=exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
-                timed_out=True)
-            raise
+            if native:
+                cp = _challenge_exec.run_in_container_supervised(
+                    declaration['container_id'], command, ceiling_s=45,
+                    shell=('env', 'IIC_OSIC_TOOLS_QUIET=1', 'bash', '-lc'))
+                # CompletedProcess.args is the exact supervised/stamped launch.
+                record['argv'] = cp.args
+            else:
+                cp = _progress_run.run(actual_argv, cwd=cwd,
+                    capture_output=True, text=True, hard_ceiling_s=30,
+                    ceiling_notice=_challenge_exec.default_ceiling_notice('challenge ' + stage, 30))
+        except _progress_run.Stalled as exc:
+            record.update(returncode=None, stdout=exc.stdout, stderr=exc.stderr, stalled=True)
+            raise ValueError(f'STALLED challenge {stage}: {exc}') from exc
         record.update(returncode=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
+        if cp.returncode == _progress_run.RC_STALLED:
+            record.update(returncode=None, supervisor_returncode=cp.returncode, stalled=True)
+            raise ValueError(f'STALLED challenge {stage}: {cp.stderr}')
         if native:
             actual, why = _challenge_native_identity(declaration)
             receipt["identity_after_" + stage] = actual
