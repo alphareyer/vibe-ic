@@ -43,13 +43,19 @@ _COLLECTION_ACTIVE = False
 _COLLECTION_HITS: List[str] = []
 
 
-def _inside_programs(path) -> Optional[str]:
+def _inside_programs(path, dir_fd=None) -> Optional[str]:
     try:
         if isinstance(path, int):
             return None
         p = os.fsdecode(path)
     except TypeError:
         return None
+    # A non-negative destination FD owns relative names; -1 means CWD.
+    if isinstance(dir_fd, int) and dir_fd >= 0 and not os.path.isabs(p):
+        try:
+            p = os.path.join(os.readlink(f"/proc/self/fd/{dir_fd}"), p)
+        except OSError:
+            return None
     real = os.path.realpath(p)
     if not real.startswith(_PROGRAMS + os.sep):
         return None
@@ -68,11 +74,14 @@ def _hook(event: str, args) -> None:
     if _CURRENT is None and not _COLLECTION_ACTIVE:
         return
     target = None
+    dir_fd = None
     if event == "open":
         if len(args) >= 3 and _is_write_open(args[1], args[2]):
             target = args[0]
     elif event in ("os.mkdir", "os.symlink", "os.link"):
         target = args[1] if event in ("os.symlink", "os.link") else args[0]
+        if event == "os.link" and len(args) >= 4:
+            dir_fd = args[3]
         if event == "os.mkdir" and os.path.lexists(target):
             # Path.mkdir(parents=True, exist_ok=True) audits the attempted
             # mkdir even when the directory already exists. No path changed.
@@ -81,7 +90,7 @@ def _hook(event: str, args) -> None:
         target = args[1]
     else:
         return
-    hit = _inside_programs(target) if target is not None else None
+    hit = _inside_programs(target, dir_fd) if target is not None else None
     if hit is not None:
         record = f"{event} {os.path.relpath(hit, _PROGRAMS)}"
         if _CURRENT is not None:

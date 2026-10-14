@@ -116,3 +116,108 @@ def test_fixture_transient_write_refuses_the_session(tmp_path, phase):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "transient.py" in result.stdout + result.stderr
     assert phase in (result.stdout + result.stderr).lower()
+
+
+def _real_link_probe(tmp_path, *, cwd_inside, destination_inside, mode):
+    """Exercise the shipped hook in a fresh process, using real directory FDs."""
+    import json
+    probe = r'''
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("neutral_guard", sys.argv[1])
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+root = Path(sys.argv[2])
+source, programs, outside = [root / name for name in ("source", "programs", "outside")]
+for path in (source, programs, outside):
+    path.mkdir()
+seed = source / "seed.bin"
+seed.write_bytes(b"neutral hard-link payload\n")
+cwd = programs if sys.argv[3] == "1" else outside
+destination = programs if sys.argv[4] == "1" else outside
+mode = sys.argv[5]
+os.chdir(cwd)
+src_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+fd_directory = (outside if destination == programs else programs) if mode == "absolute" else destination
+dst_fd = os.open(fd_directory, os.O_RDONLY | os.O_DIRECTORY)
+descriptor_directories = [os.readlink(f"/proc/self/fd/{fd}") for fd in (src_fd, dst_fd)]
+guard._PROGRAMS = str(programs)
+guard._CURRENT = []
+events = []
+def capture(event, args):
+    if event == "os.link":
+        events.append(list(args))
+sys.addaudithook(capture)
+guard._install()
+basename = "linked.bin"
+target = str(destination / basename) if mode == "absolute" else basename
+kwargs = {"src_dir_fd": src_fd}
+if mode != "cwd":
+    kwargs["dst_dir_fd"] = dst_fd
+os.link("seed.bin", target, **kwargs)
+actual = (cwd if mode == "cwd" else destination) / basename
+stat_source, stat_destination = seed.stat(), actual.stat()
+values = {
+    "scope": "Real kernel os.link and shipped Python audit hook; neutral shadow tree only",
+    "mode": mode, "cwd_inside": cwd == programs,
+    "destination_inside": actual.parent == programs,
+    "audit_events": events, "descriptor_directories": descriptor_directories,
+    "payload": actual.read_text(),
+    "source_destination_same_device_inode":
+        (stat_source.st_dev, stat_source.st_ino) == (stat_destination.st_dev, stat_destination.st_ino),
+    "actual_destination_exists": actual.exists(),
+    "cwd_guess_exists": (cwd / basename).exists(), "hits": guard._CURRENT,
+}
+os.close(dst_fd)
+os.close(src_fd)
+print(json.dumps(values))
+'''
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", probe, guard.__file__, str(tmp_path),
+         str(int(cwd_inside)), str(int(destination_inside)), mode],
+        text=True, capture_output=True, timeout=30,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = json.loads(result.stdout)
+    (tmp_path / "link_guard_observed.json").write_text(json.dumps(values, indent=2) + "\n")
+    assert values["source_destination_same_device_inode"], values
+    assert values["actual_destination_exists"] and values["payload"] == "neutral hard-link payload\n", values
+    assert len(values["audit_events"]) == 1, values
+    return values
+
+
+@pytest.mark.parametrize("cwd_inside,destination_inside", [
+    pytest.param(True, False, id="outside-fd-from-inside-cwd"),
+    pytest.param(False, True, id="inside-fd-from-outside-cwd"),
+    pytest.param(True, True, id="inside-fd-normal"),
+    pytest.param(False, False, id="outside-fd-normal"),
+])
+def test_real_link_destination_uses_its_directory_fd(tmp_path, cwd_inside, destination_inside):
+    values = _real_link_probe(tmp_path, cwd_inside=cwd_inside,
+                              destination_inside=destination_inside, mode="fd")
+    event = values["audit_events"][0]
+    assert event[:2] == ["seed.bin", "linked.bin"] and event[2] >= 0 and event[3] >= 0, values
+    assert values["destination_inside"] == destination_inside, values
+    if cwd_inside != destination_inside:
+        assert values["cwd_guess_exists"] is False, values
+    assert values["hits"] == (["os.link linked.bin"] if destination_inside else []), values
+
+
+@pytest.mark.parametrize("inside", [True, False], ids=["inside-cwd", "outside-cwd"])
+def test_real_link_without_destination_fd_keeps_cwd_contract(tmp_path, inside):
+    values = _real_link_probe(tmp_path, cwd_inside=inside,
+                              destination_inside=not inside, mode="cwd")
+    assert values["audit_events"][0][3] == -1, values
+    assert values["hits"] == (["os.link linked.bin"] if inside else []), values
+
+
+@pytest.mark.parametrize("inside", [True, False], ids=["inside-absolute", "outside-absolute"])
+def test_absolute_link_destination_ignores_directory_fd(tmp_path, inside):
+    values = _real_link_probe(tmp_path, cwd_inside=not inside,
+                              destination_inside=inside, mode="absolute")
+    assert os.path.isabs(values["audit_events"][0][1]), values
+    assert values["hits"] == (["os.link linked.bin"] if inside else []), values
