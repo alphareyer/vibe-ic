@@ -422,7 +422,23 @@ def execute(
                 "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
              "VIBEIC_CLKPATH_SIZING_TCL": (
                  str(sizing_tcl.resolve()),
-                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
+                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl"),
+             "VIBEIC_CLKPATH_MAX_FANOUT": (
+                 overlay.get("MAX_FANOUT_CONSTRAINT", (None,))[0]
+                 if "MAX_FANOUT_CONSTRAINT" in overlay
+                 else _ll.emit_config(
+                     project, str(pdk.name), work / "emitted_fanout.json"
+                 ).get("MAX_FANOUT_CONSTRAINT"),
+                 "resolved MAX_FANOUT_CONSTRAINT; no value means no internal "
+                 "CTS-tree fanout repair"),
+             "VIBEIC_CLKPATH_CTS_BUFFERS": (
+                 list(dict.fromkeys(x for x in (
+                     list(json.loads(configs["OpenROAD.CTS"].read_text()).get(
+                         "CTS_CLK_BUFFERS") or [])
+                     + [json.loads(configs["OpenROAD.CTS"].read_text()).get(
+                         "CTS_ROOT_BUFFER")]
+                 ) if x)),
+                 "resolved OpenROAD.CTS CTS_CLK_BUFFERS plus CTS_ROOT_BUFFER")})
         configs["Vibeic.ExternalCaptureLaunchRetap"] = _ll.derive_step_config(
             configs["Vibeic.ExternalCaptureLaunchRetap"],
             configs["Vibeic.ExternalCaptureLaunchRetap"],

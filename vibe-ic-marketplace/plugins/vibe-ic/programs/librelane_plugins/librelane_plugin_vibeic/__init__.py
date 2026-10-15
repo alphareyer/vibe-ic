@@ -276,6 +276,18 @@ class ClockPathDriveSizing(OpenROADStep):
             "The sizing pass, emitted by phase3_one_shot_runner."
             "_clock_path_drive_sizing_tcl.",
         ),
+        Variable(
+            "VIBEIC_CLKPATH_MAX_FANOUT",
+            Optional[int],
+            "The declared MAX_FANOUT_CONSTRAINT for CTS-created clock-tree "
+            "branches; unset means no internal-tree fanout repair.",
+        ),
+        Variable(
+            "VIBEIC_CLKPATH_CTS_BUFFERS",
+            Optional[List[str]],
+            "The resolved CTS non-inverting buffer roles (CTS_CLK_BUFFERS plus "
+            "CTS_ROOT_BUFFER) from this exact CTS configuration.",
+        ),
     ]
 
     def get_script_path(self) -> str:
