@@ -6,7 +6,8 @@ canonical_url: https://github.com/olofk/serv
 canonical_commit: "1.4.0"
 # Maintainer correction, independently verified against the official parent.
 # This never changes the meaning of the two real upstream errata below.
-local_derivative: local_derivatives/wb_read_owner.json
+# Includes the proposed (not merged) upstream PR174 MTIE readback correction.
+local_derivative: local_derivatives/wb_read_owner_mtie.json
 errata:
   - upstream_commit: "41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2"
     file: servile/servile_rf_mem_if.v

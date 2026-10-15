@@ -1,0 +1,35 @@
+{
+  "format": "exact_utf8_replacements.v1",
+  "files": [
+    {
+      "path": "servile_rf_mem_if.v",
+      "sha256_before": "6829a9a568b00df2c4905b35a916c14dd747538ad1091c3852ebf43cfded408d",
+      "sha256_after": "64af4fe980224cf8a0d8cdd7a901cb88545cf872463858a51620aff13532d6f6",
+      "edits": [
+        {
+          "before": "   reg [1:0] \t\tbsel;\n",
+          "after": "   reg [1:0] \t\tbsel;\n\n   // Tag the read launched at the previous registered SRAM address edge.\n   reg wb_read_pending;\n   reg [1:0] wb_read_lane;\n"
+        },
+        {
+          "before": "      if (bsel == 2'b01) wb_rdt[7:0]   <= i_sram_rdata;\n      if (bsel == 2'b10) wb_rdt[15:8]  <= i_sram_rdata;\n      if (bsel == 2'b11) wb_rdt[23:16] <= i_sram_rdata;\n",
+          "after": "      wb_read_pending <= wb_en & !i_wb_we;\n      wb_read_lane <= bsel;\n      if (wb_read_pending) begin\n         if (wb_read_lane == 2'b00) wb_rdt[7:0]   <= i_sram_rdata;\n         if (wb_read_lane == 2'b01) wb_rdt[15:8]  <= i_sram_rdata;\n         if (wb_read_lane == 2'b10) wb_rdt[23:16] <= i_sram_rdata;\n      end\n"
+        },
+        {
+          "before": "\t o_wb_ack <= 1'b0;\n",
+          "after": "\t o_wb_ack <= 1'b0;\n         wb_read_pending <= 1'b0;\n         wb_read_lane <= 2'b00;\n"
+        }
+      ]
+    },
+    {
+      "path": "serv_csr.v",
+      "sha256_before": "2dd7167ed44817d921318a5d463281b43820c25e476039a604e95948be567e62",
+      "sha256_after": "d91ff9f850ee77e74a8bca04860c7a7568def573172155a8499e6cd714723e37",
+      "edits": [
+        {
+          "before": "   assign csr_out = ({W{i_mstatus_en & i_en}} & mstatus) |\n",
+          "after": "   assign csr_out = ({W{i_mstatus_en & i_en}} & mstatus) |\n\t\t    ({W{i_mie_en & i_en & i_cnt7}} & {mie_mtie,{B{1'b0}}}) |\n"
+        }
+      ]
+    }
+  ]
+}
