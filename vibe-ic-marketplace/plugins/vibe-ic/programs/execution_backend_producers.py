@@ -1345,8 +1345,16 @@ def produce_signoff(project, params):
             return {'verdict': 'FAIL', 'detail': 'current Step-24 IR measurement failed; ' + '; '.join(notes)}
     elif sid == '26':
         R._librelane_antenna_router(project, top, pdk, 'librelane', written)
+        if params.get('execution_mode') == 'default':
+            basis, refusal = R._layout_basis(project, top, pdk, container)
+            census, error = (R._prestream_route_census(project, top, pdk, container, basis)
+                             if not refusal else (None, refusal))
+            if error:
+                return {'verdict': 'NOT_MEASURED', 'detail': error}
+            if census['unrouted_nets']:
+                return {'verdict': 'FAIL', 'detail': 'routed ODB has unrouted nets'}
         gds = pnr / (top + '.gds')
-        if gds.is_file():
+        if params.get('execution_mode') != 'default' and gds.is_file():
             R._librelane_antenna_gds(project, top, pdk, 'librelane', written)
     elif sid == '26.5ic':
         ok, detail = R._die_finishing(project, top, pdk, _require(pnr / (top + '.gds')), container)
@@ -1448,18 +1456,35 @@ def produce_signoff(project, params):
                   notes, failures, written)
         R._step33_tool_arm(project, top, pdk, 'librelane', rpt / 'power.rpt', False, written, notes)
     elif sid == '34':
-        if not R._emit_metal_fill(project, top, pdk, container, pnr / 'filled.def', notes):
-            raise em.Refusal('BACKEND_FILL_NATIVE_UNMEASURED', sid)
-        if not R._emit_metal_density_report(project, top, pdk, container, rpt / 'density.json', notes):
-            raise em.Refusal('BACKEND_DENSITY_NATIVE_UNMEASURED', sid)
+        if params.get('execution_mode') == 'default':
+            # Stream-out already consumed these exact filled DEF/GDS bytes.
+            # This row owns their complete fill consumer, not a second writer.
+            import librelane_fill_dfm as fill
+            fill.validate_default_stream(project)
+        else:
+            if not R._emit_metal_fill(project, top, pdk, container, pnr / 'filled.def', notes):
+                raise em.Refusal('BACKEND_FILL_NATIVE_UNMEASURED', sid)
+            if not R._emit_metal_density_report(project, top, pdk, container, rpt / 'density.json', notes):
+                raise em.Refusal('BACKEND_DENSITY_NATIVE_UNMEASURED', sid)
     elif sid == '37':
         pre = R.step_prestream_gate(project, top, pdk, container)
         if pre.status != 'PASS':
             return {'verdict': pre.status, 'detail': pre.detail}
         route = _step37_route(params)
-        row = R.step_gds(project, top, pdk, container, route=route)
+        row = R.step_gds(project, top, pdk, container)
         if row.status == 'PASS':
             _copy(pnr / (top + '.gds'), project / 'phase3/stage4/gds' / (top + '.gds'))
+            if params.get('execution_mode') == 'default':
+                R._ga.admit_gds(project, pnr / (top + '.gds'),
+                                pre.extras['layout_digest'],
+                                R._layout_basis_paths(project, top))
+                if R._chip_path_requests_pad_ring(project):
+                    pad = R.step_pad_ring_final_evidence(project, top, row, container)
+                    if pad.status != 'PASS':
+                        return {'verdict': pad.status, 'detail': pad.detail}
+        if params.get('execution_mode') == 'default':
+            return {'verdict': row.status, 'detail': row.detail,
+                    'streamout_engine': row.extras.get('streamout_engine')}
         return _step37_streamout_result(project, route, row)
     elif sid == '37.3':
         import gds_xor_check as xor

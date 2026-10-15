@@ -201,6 +201,20 @@ def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
     paths are used and `att["binding"]` says so, so no reader can mistake a
     convention-bound comparison for an attested one.
     """
+    import librelane_fill_dfm as fill
+    if (project / fill.DEFAULT_STREAM_REL).is_file():
+        try:
+            stream = fill.validate_default_stream(project)
+            return Path(stream['canonical']), Path(stream['filled_def']), {
+                'source': fill.DEFAULT_STREAM_REL, 'binding': 'native-current-stream',
+                'gds': stream['canonical'],
+                'gds_sha256_recorded': stream['canonical_sha256'],
+                'def': stream['filled_def'],
+                'def_sha256_recorded': stream['filled_def_sha256'],
+                'streamout_engine': 'klayout'}
+        except (fill.Refusal, OSError, ValueError, KeyError) as exc:
+            return None, None, {'source': fill.DEFAULT_STREAM_REL,
+                                'binding': 'REFUSED', 'reason': str(exc)}
     ev = _json(project / ROUTE_EVIDENCE_REL) or {}
     gds_rel = ((ev.get("gds_evidence") or {}).get("path"))
     def_rel = ev.get("gds_source_def")
@@ -769,6 +783,32 @@ def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
         timeout)
     if not ok:
         return 127, "", f"{why}, so a re-stream would not read what the stream-out read"
+    native = rec.get('native_cli')
+    if native is not None:
+        # This recipe takes CLI arguments; applying the legacy environment
+        # interface would silently omit its actual LEFs/maps/library GDS.
+        try:
+            import librelane_fill_dfm as fill
+            fill.validate_default_stream(project)
+            commands = Path(native['commands'])
+            argv = list(native['argv'])
+            if (_sha256(commands) != native['commands_sha256']
+                    or len(argv) < 3 or Path(argv[1]).name != 'stream_out.py'):
+                raise ValueError('native stream COMMANDS changed')
+            argv[:3] = ['python3', str(runner.cpath(own)), str(runner.cpath(dfile))]
+            seen = set()
+            for entry in native['inputs']:
+                index = entry['argv_index']
+                if (type(index) is not int or index < 4 or index >= len(argv)
+                        or index in seen or argv[index] != entry['path']):
+                    raise ValueError('native stream input argument changed')
+                argv[index] = resolve(entry)
+                seen.add(index)
+            output_index = argv.index('--output') + 1
+            argv[output_index] = str(runner.cpath(out))
+        except (OSError, ValueError, TypeError, KeyError, fill.Refusal) as exc:
+            return 127, '', 'native stream recipe refused: ' + str(exc)
+        return runner.run_argv(argv, {}, timeout=timeout)
     env: Dict[str, Any] = dict(_sir.iter_env(rec, resolve))
     env["TOP"] = rec.get("top") or dfile.stem
     if rec["engine"] == "klayout":

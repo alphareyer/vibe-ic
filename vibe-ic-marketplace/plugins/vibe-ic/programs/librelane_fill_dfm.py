@@ -38,6 +38,7 @@ import fnmatch
 import json
 import math
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -1229,7 +1230,8 @@ def validate_default_stream(project: Path) -> dict:
             row.get('rc') != 0 or digest(Path(row['report'])) != row.get('sha256')
             or _load(Path(row['report'])).get('verdict') != 'PASS' for row in gates.values()):
         raise Refusal('LL_FINISHING_OUTPUT_GATE_CHANGED', str(gates))
-    for key in ('filled_def', 'stream', 'prefill', 'source', 'pnr_gds', 'canonical'):
+    for key in ('filled_def', 'stream', 'sealed', 'finishing_report',
+                'prefill', 'source', 'pnr_gds', 'canonical'):
         path, sha = Path(record[key]), record[key + '_sha256']
         if not re.fullmatch('[0-9a-f]{64}', str(sha)) or digest(path) != sha:
             raise Refusal('LL_FINISHING_BYTES_CHANGED', key)
@@ -1259,7 +1261,7 @@ def validate_default_stream(project: Path) -> dict:
         raise Refusal('LL_FILLER_STATE_CHANGED', str(filler_state))
     fin, fout = _current_stage(project, filler_state, 'KLayout.Filler')
     if (Path(fin['gds']).resolve() != Path(record['prefill']).resolve()
-            or record['prefill_sha256'] != record['stream_sha256']
+            or record['prefill_sha256'] != record['sealed_sha256']
             or digest(Path(fin['gds'])) != filler['gds_in_sha256']
             or Path(fout['gds']).resolve() != Path(filler['filled_gds']).resolve()
             or digest(Path(fout['gds'])) != filler['filled_sha256']
@@ -1278,9 +1280,94 @@ def validate_default_stream(project: Path) -> dict:
             raise Refusal('LL_DENSITY_TOPUP_WRONG_INPUT', str(topup))
     elif arm['subject_sha256'] != filler['filled_sha256']:
         raise Refusal('LL_DENSITY_NOT_FILLED_SUBJECT', str(arm))
+    finishing = _load(Path(record['finishing_report']))
+    if (Path(record['finishing_report']).resolve() !=
+            (project / 'reports/phase3/die_finishing.json').resolve()
+            or record['finishing_stream_sha256'] != record['stream_sha256']):
+        raise Refusal('LL_SEAL_WRONG_STREAM', str(finishing))
+    seal = finishing.get('seal_ring') or {}
+    if seal.get('state') == 'PASS' and (
+            seal.get('consumed_into') != str(Path(record['sealed']).relative_to(project))
+            or seal.get('staged_sha256') != record['sealed_sha256']):
+        raise Refusal('LL_SEAL_NOT_CONSUMED', str(seal))
+    import _stream_input_record as sir
+    inputs = sir.record_path(pnr / f'{top}.gds')
+    if digest(inputs) != record['stream_inputs_sha256']:
+        raise Refusal('LL_STREAM_INPUTS_CHANGED', str(inputs))
     current = validate_density_result(project, arm, layout=Path(record['canonical']))
     if current.get('value') != _count(arm.get(DENSITY_METRIC)) or current.get('value') == 'NOT_MEASURED':
         raise Refusal('LL_FINISHING_DENSITY_NOT_MEASURED', str(current))
+    return record
+
+
+def _default_stream_recipe(project: Path, image: str, root: Path) -> tuple[Path, str]:
+    """Retain the actual image's native recipe before starting stream-out."""
+    probe = ('import json; from pathlib import Path; '
+             'from librelane.common import get_script_dir; '
+             'p=Path(get_script_dir())/"klayout/stream_out.py"; '
+             'print(json.dumps({"path":str(p),"text":p.read_text()}))')
+    cp = run_container(['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+                        image, '--skip', 'python3', '-c', probe])
+    if cp.returncode:
+        raise Refusal('LL_STREAM_RECIPE_UNAVAILABLE', cp.stderr)
+    source = json.loads(cp.stdout)
+    recipe = project / 'phase3/stage3/pnr/stream_out.py'
+    recipe.write_text(source['text'])
+    if not recipe.stat().st_size or not Path(source['path']).is_absolute():
+        raise Refusal('LL_STREAM_RECIPE_INVALID', str(source))
+    return recipe, source['path']
+
+
+def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
+                           root: Path, pdk: str, recipe: Path, native_script: str,
+                           filled: Path, stream: Path) -> dict:
+    """Bind the native COMMANDS readset, without reconstructing it from config."""
+    import _stream_input_record as sir
+    commands = [shlex.split(line) for line in (folder / 'COMMANDS').read_text().splitlines()
+                if line.strip()]
+    calls = [argv for argv in commands if len(argv) > 2 and argv[1] == native_script]
+    if len(calls) != 1:
+        raise Refusal('LL_STREAM_COMMAND_UNBOUND', str(commands))
+    argv = calls[0]
+    if Path(argv[2]).resolve() != filled.resolve():
+        raise Refusal('LL_STREAM_DEF_UNBOUND', str(argv))
+    file_flags = {'--input-lef', '--with-gds-file', '--lyp', '--lyt', '--lym', '--seal-gds-file'}
+    value_flags = file_flags | {'--output', '--top', '--conflict-resolution'}
+    paths = []
+    scalars = {}
+    for i in range(3, len(argv), 2):
+        if i + 1 >= len(argv) or argv[i] not in value_flags:
+            raise Refusal('LL_STREAM_COMMAND_UNSUPPORTED', str(argv[i:]))
+        flag, value = argv[i:i + 2]
+        if flag in file_flags:
+            paths.append((i + 1, value))
+        else:
+            scalars[flag] = value
+    if (scalars.get('--top') != _def_design_name(filled)
+            or Path(scalars.get('--output', '')).resolve() != stream.resolve()
+            or not all(any(argv[i] == flag for i in range(3, len(argv), 2))
+                       for flag in ('--input-lef', '--lyt', '--lyp', '--lym'))):
+        raise Refusal('LL_STREAM_READSET_INCOMPLETE', str(argv))
+    probe = ('import hashlib,json,sys; from pathlib import Path; '
+             'print(json.dumps({p:hashlib.sha256(Path(p).read_bytes()).hexdigest() '
+             'for p in json.loads(sys.argv[1])}))')
+    cp = run_container(['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+                        '-v', f'{project}:{project}:ro', '-v', f'{root}:/pdk:ro',
+                        image, '--skip', 'python3', '-c', probe,
+                        json.dumps([native_script, *[p for _, p in paths]])])
+    if cp.returncode:
+        raise Refusal('LL_STREAM_INPUT_UNREADABLE', cp.stderr)
+    hashes = json.loads(cp.stdout)
+    if hashes.get(native_script) != digest(recipe):
+        raise Refusal('LL_STREAM_RECIPE_CHANGED', native_script)
+    record = sir.build(engine='klayout', output=stream, top=top,
+                       project=project, project_c=str(project), recipe=recipe,
+                       def_file=filled, files={}, scalars={}, rcfile=None, hashes={})
+    record['native_cli'] = {'argv': argv, 'commands': str(folder / 'COMMANDS'),
+                            'commands_sha256': digest(folder / 'COMMANDS'),
+                            'inputs': [dict(sir._entry(path, str(project), hashes), argv_index=i)
+                                       for i, path in paths]}
+    sir.write(project / 'phase3/stage3/pnr' / f'{top}.gds', record)
     return record
 
 
@@ -1323,14 +1410,32 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     state['def'] = str(filled)
     initial = project / 'phase3/librelane/37-default-state.json'
     write_json(initial, state)
+    recipe, native_script = _default_stream_recipe(project, image, root)
     folder = run_chain(project, image, [('KLayout.StreamOut', configs['KLayout.StreamOut'], initial)],
                        mounts=_mounts(root, pdk.name), lane='37-default-stream',
                        pdk_root=PDK_GUEST_ROOT)[0]
     before, after = _current_stage(project, folder / 'state_out.json', 'KLayout.StreamOut')
     stream = Path(after['klayout_gds'])
+    _default_stream_inputs(project, top, folder, image, root, pdk.name,
+                           recipe, native_script, filled, stream)
+    boundary = pnr / f'{top}.prefinish.gds'
+    shutil.copyfile(stream, boundary)
+    write_json(boundary.with_suffix('.gds.receipt.json'), {
+        'program': 'phase3_one_shot_runner', 'artefact': boundary.name,
+        'sha256': digest(boundary), 'size': boundary.stat().st_size,
+        'mtime_ns': boundary.stat().st_mtime_ns, 'top': top,
+        'streamed_from_def': filled.name, 'def_sha256': digest(filled),
+        'engine': 'klayout'})
     pnr_gds = pnr / f'{top}.gds'
-    # Retain the tool view; finishing never edits the stream-out's output.
-    shutil.copyfile(stream, pnr_gds)
+    # The raw native stream is immutable. Seal exactly once on a separate
+    # subject; its retained consumer runs before any filler touches the die.
+    sealed = project / 'phase3/tool_arms/26.5ic/default-stream/sealed.gds'
+    sealed.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(stream, sealed)
+    finishing = runner._die_finishing_record(project, top, pdk, sealed, container)
+    if finishing.status not in ('PASS', 'NOT_APPLICABLE'):
+        raise Refusal('LL_DIE_FINISHING_REFUSED', finishing.detail)
+    shutil.copyfile(sealed, pnr_gds)
     ctx = runner._step34_gds_tool_arm(project, pdk, pnr_gds)
     if ctx is None:
         raise Refusal('LL_FILL_GDS_NOT_RUN', 'Default finishing requires the primary fill arm')
@@ -1349,9 +1454,12 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     shutil.copyfile(pnr_gds, canonical)
     record = {'file_top': top, 'design_name': _def_design_name(filled),
               'image': image, 'pdk': pdk.name, 'gates': gates,
+              'finishing_stream_sha256': digest(stream),
+              'stream_inputs_sha256': digest(pnr / f'{top}.stream_inputs.json'),
               'stream_state': str(folder / 'state_out.json'),
               'stream_state_sha256': digest(folder / 'state_out.json')}
-    for key, path in {'filled_def': filled, 'stream': stream,
+    for key, path in {'filled_def': filled, 'stream': stream, 'sealed': sealed,
+                      'finishing_report': project / 'reports/phase3/die_finishing.json',
                       'prefill': project / 'phase3/tool_arms/34/prefill.gds',
                       'source': Path(arm['subject']), 'pnr_gds': pnr_gds,
                       'canonical': canonical}.items():

@@ -247,28 +247,9 @@ def _executed_rule_decks(project: Path, audit: Dict[str, Any]
     summary = audit.get("summary") if isinstance(audit.get("summary"), dict) else {}
     scoped = [r for r in (summary.get(_SCOPED_UNDER) or []) if isinstance(r, str)]
     logs = [r for r in scoped if r.endswith(".log")]
-    if not logs:
-        # THE TRANSCRIPT IS SCOPED BY A SIBLING, not by this audit. MEASURED on
-        # run21: `drc_signoff.json` scopes only `drc_signoff.rpt`, while
-        # `general_precheck/precheck_klayout_drc.json` scopes that SAME report AND
-        # `drc_signoff.log`. So the log is found by SHARED EVIDENCE -- another DRC
-        # audit in this run that covers one of the same report files -- rather than
-        # by guessing a filename from the report's stem. Binding on the shared
-        # `.rpt` is what makes it the transcript OF THIS REPORT and not of some
-        # other DRC run in the same tree.
-        reports = {r for r in scoped if not r.endswith(".log")}
-        for sibling in sorted(project.glob("reports/**/*drc*.json")):
-            try:
-                doc = json.loads(sibling.read_text(errors="replace"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(doc, dict):
-                continue
-            sib = (doc.get("summary") or {}).get(_SCOPED_UNDER) or []
-            sib = [r for r in sib if isinstance(r, str)]
-            if reports and not (reports & set(sib)):
-                continue
-            logs += [r for r in sib if r.endswith(".log")]
+    # Step31 scopes its native transcript when it publishes this audit. A
+    # later release precheck is a different producer and cannot add authority
+    # to an earlier metrics record merely by citing the same text report.
     decks: Set[str] = set()
     citation = ""
     for rel in dict.fromkeys(logs):

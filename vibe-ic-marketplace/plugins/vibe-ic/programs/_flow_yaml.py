@@ -96,3 +96,10 @@ def load(path: Optional[os.PathLike] = None, *, encoding: Optional[str] = None,
 def clear_cache() -> None:
     _CACHE.clear()
     PARSES.clear()
+
+
+def ordered_step_ids(*, stages=None) -> tuple[str, ...]:
+    """The declared execution order; step labels are never numeric ranks."""
+    selected = None if stages is None else frozenset(stages)
+    return tuple(str(row['id']) for row in load()['steps']
+                 if selected is None or row.get('stage') in selected)

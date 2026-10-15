@@ -322,29 +322,22 @@ def exit_pruned_sites(sites: Sequence[Tuple[str, Sequence[str]]],
                       exit_step: Any) -> Optional[List[str]]:
     """Share the runner's exit boundary with consumers of its gate evidence.
 
-    Named exits prune later sites in dispatch order. Numeric exits prune sites
-    whose span head is past the exit: a multi-step span executes atomically.
-    Unorderable spans are never numerically pruned; this does not establish
-    their evidence scope. An unknown exit returns None, never an empty plan.
+    Named exits prune later sites in dispatch order. Step labels use the
+    canonical YAML sequence, including fractional labels and reordered IDs.
+    A multi-step span executes atomically. Unknown exits return None.
     """
     names = [n for n, _ in sites]
     if exit_step in names:
         return list(names[names.index(exit_step) + 1:])
-    try:
-        cut = int(str(exit_step))
-    except (TypeError, ValueError):
+    import _flow_yaml
+    order = _flow_yaml.ordered_step_ids()
+    label = str(exit_step)
+    if label not in order:
         return None
-    pruned = []
-    for name, span in sites:
-        if not span:
-            continue
-        try:
-            head = int(str(span[0]))
-        except (TypeError, ValueError):
-            continue
-        if head > cut:
-            pruned.append(name)
-    return pruned
+    cut = order.index(label)
+    return [name for name, span in sites if span
+            and all(str(sid) in order and order.index(str(sid)) > cut
+                    for sid in span)]
 
 
 def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
@@ -369,6 +362,16 @@ def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
         cur = RUNNER_PLANS.get(cur.inherits) if cur.inherits else None
     for n, span in plan.sites:
         if n == site:
+            import execution_policy
+            if execution_policy.request()['mode'] == 'default' and span:
+                import _flow_yaml
+                order = _flow_yaml.ordered_step_ids()
+                positions = [order.index(str(sid)) for sid in span if str(sid) in order]
+                if positions:
+                    # A step label is an identity. YAML position alone says
+                    # which producer was due before this Default dispatch.
+                    return frozenset(acc & set(order[:min(positions)]) |
+                                     set(order[:min(positions)])), None
             return frozenset(acc), None
         acc.update(span)
     return frozenset(), f"{runner} declares no site {site!r}"

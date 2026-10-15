@@ -596,6 +596,7 @@ steps:
   - id: D1
     name: "Phase 1 Doc Extraction (17 skills + dialogue entry → L1-L27)"
     stage: stage_phase1
+    execution_stage: 1
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
     # ── required_inputs: the DATA half of the step contract ──────────────
@@ -1348,6 +1349,7 @@ steps:
   - id: 0.5ic
     name: "Submission Template Ingest — the operator's slot geometry and fixtures (chip/IC path only)"
     stage: stage_phase1
+    execution_stage: 1
 
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
 
@@ -1518,6 +1520,7 @@ steps:
   - id: 1
     name: "Spec-to-RTL"
     stage: stage1
+    execution_stage: 2
     required_inputs:
       - from: D1
         outputs: all
@@ -1631,9 +1634,72 @@ steps:
     # now correctly reds every descendant of Step 1.
     blocks_on: [D1]
 
+  - id: P0
+    name: "Structural-RTL pre-flight (chip-AGNOSTIC structural gates)"
+    stage: stage1
+    execution_stage: 2
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
+    # vibe-ic#923 — the ORDERING edge, written down to match the DATA edge one
+    # line below. P0 reads step 1's RTL, so it cannot precede step 1, and step
+    # 1 blocks on D1; without this edge P0 was a stage1 step whose ancestry did
+    # not reach Phase 1, so a FAILED Phase 1 would not have redded it. This was
+    # invisible while `stages[].steps` was a second membership declaration:
+    # that roster never listed P0, so the guard that checks stage1 ancestry
+    # never looked at it. Deleting the roster made the guard see it.
+    blocks_on: [1]
+    required_inputs:
+      - from: 1
+        path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+    # NO required_outputs — DELIBERATE, and NOT the same case as a step whose
+    # declaration is merely missing (vibe-ic#983 ruling 3). P0 owns no artefact
+    # at all: it is a SYNTHETIC preflight whose verdict is emitted directly by
+    # `flow_compliance_check._run_structural_rtl_gates(...)` into the audit's
+    # own `reports/audit/phase23_completion_audit.json`, under the `gates:`
+    # array (see `notes:` below).
+    #
+    # That file belongs to the AUDIT, not to P0. Declaring it here would make
+    # P0's dimension-3 cell judge a file P0 does not produce — the step would
+    # be certified by an artefact whose producer is the very program doing the
+    # certifying. That is the same pathology vibe-ic#984 names for the Step 9
+    # netlist split, and the one the withdrawn FS1 closure demonstrated (see
+    # the FS1 comment above, where declaring an auditor-produced path was
+    # MEASURED to stop the producer from ever running).
+    #
+    # So the 63x8 matrix must publish P0 as NA for the artefact dimensions
+    # rather than as a gap awaiting a declaration. It already does: d3, d7 and
+    # d8 all read NA today, and d3's NA branch asserts the precondition LIVE
+    # (`assert not F.declares_required_outputs(sid)`), so if anyone ever adds
+    # required_outputs here the NA self-invalidates and the suite goes red
+    # instead of silently re-grading the cell. This comment is that ruling
+    # written down at the point of decision, which is the only place a future
+    # reader looks.
+    gate:
+      # BLOCKING: the synthetic umbrella evaluates this clause in-process.
+      program_exit_zero: "flow_step_output_content_check . --mode rtl"
+    notes: |
+      Synthetic preflight stage; the verdict is emitted directly by
+      flow_compliance_check.py's `_run_structural_rtl_gates(...)` and
+      surfaces in reports/audit/phase23_completion_audit.json under the
+      `gates:` array. Individual gate names (e.g. `cdc_async_input_check`,
+      `bram_pdob_combinational_check`) appear there with PASS/FAIL.
+
+# Final gate — runs after all 41 main-track integer steps + A1-A9
+# + M1-M4 (54 entities total) + P0 structural-RTL umbrella.
+#
+# `--json reports/flow_compliance.json` IS LOAD-BEARING, not a convenience.
+# Every `on_pass_review:` gate above reads this exact path with `--compliance`
+# to establish the stage verdict it fires on. Until v1.13.40 this ran with no
+# `--json` at all and the six gates named no verdict source, so
+# `stage_on_pass_review.stage_passed()` returned UNESTABLISHED and the review
+# exited 2 NOT CHECKED before consulting a rule — on every input, forever.
+# Nine rules across six stages had therefore never refused anything.
+# `on_pass_review_answerable_check.py` keeps the two halves in agreement: it
+# FAILS if a gate names a report this line does not write, or names none.
   - id: 2
     name: "🔁 RTL validation (rewrite fidelity + lint + Quartus-unsafe patterns + RTL-bug claim schema)"
     stage: stage1
+    execution_stage: 2
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -2172,6 +2238,7 @@ steps:
   - id: 3
     name: "🔁 CDC / RDC check"
     stage: stage1
+    execution_stage: 2
     # prose credits Step 2, but Step 2 declares no RTL output — the path it
     #  names is Step 1's.
     required_inputs:
@@ -2216,6 +2283,7 @@ steps:
   - id: 4
     name: "🔁 Simulation (testbench-based + L10/L12 coverage + Verilator coverage)"
     stage: stage1
+    execution_stage: 2
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -2542,6 +2610,7 @@ steps:
   - id: 5
     name: "🔁 Formal verification (assertions proved + bit-level full-stack phase2/stage1/tb)"
     stage: stage1
+    execution_stage: 2
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -2640,6 +2709,7 @@ steps:
   - id: 6
     name: "FPGA early prototype + verification report audit"
     stage: stage1
+    execution_stage: 2
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -2841,6 +2911,7 @@ steps:
   - id: 7
     name: "Constraint setup (SDC + PVT matrix)"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: D1
         path: "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
@@ -2983,6 +3054,7 @@ steps:
   - id: 8
     name: "🔁 SDC validation"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 7
         path: "phase2/stage2/constraints/*.sdc"
@@ -3085,6 +3157,7 @@ steps:
   - id: 9
     name: "Synthesis (Yosys → mapped netlist)"
     stage: stage2
+    execution_stage: 3
     # THE AREA AXIS HAD NEITHER A COMPARISON NOR AN EDGE — it had no metric at
     # all. This step emitted `area.rpt` / `stats.json` and no step in the
     # canonical flow read the number; the four steps that dominate area (9, 12,
@@ -3294,6 +3367,7 @@ steps:
   - id: 10
     name: "🔁 Pre-layout STA (multi-corner)"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 9
         path: "phase2/stage2/synth/netlist.v"
@@ -3427,6 +3501,7 @@ steps:
   - id: 11
     name: "DFT insertion (scan chain + ATPG + at-speed + BSDL)"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 9
         path: "phase2/stage2/synth/netlist.v"
@@ -3631,6 +3706,7 @@ steps:
   - id: FS1
     name: "ISO-26262 FMEDA diagnostic-coverage (fault-injection; safety designs only)"
     stage: stage2
+    execution_stage: 3
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
     # no flow.html prose exists for FS1. Resolved instead from this step's
@@ -3683,6 +3759,7 @@ steps:
   - id: DT1
     name: "Transition-delay-fault (at-speed LOC) ATPG"
     stage: stage2
+    execution_stage: 3
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
     condition_kind: design_dependent
@@ -3787,6 +3864,7 @@ steps:
   - id: 12
     name: "Post-DFT optimization (resynth / buffering)"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 11
         path: "phase2/stage2/dft/scan_netlist.v"
@@ -3849,6 +3927,7 @@ steps:
   - id: 13
     name: "🔁 Equivalence check (RTL ≡ post-DFT netlist)"
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -4537,6 +4616,7 @@ steps:
     # gate, which is why it sits in Synthesis and not in Physical Design; the
     # per-stage roster deleted in vibe-ic#923 had it the other way round.
     stage: stage2
+    execution_stage: 3
     required_inputs:
       - from: 9
         path: "phase2/stage2/synth/netlist.v"
@@ -4666,6 +4746,7 @@ steps:
   - id: 15
     name: "Floorplan + PDN"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 12
         path: "phase2/stage2/synth/post_dft_netlist.v"
@@ -4824,6 +4905,7 @@ steps:
   - id: 15.5ic
     name: "Pad Ring (chip/IC path only)"
     stage: stage3
+    execution_stage: 4
     condition:
       # THE CHIP PATH, NOT THE SHUTTLE TEMPLATE — and the difference is the
       # whole of vibe-ic#1410/cpath. This condition used to read
@@ -4990,6 +5072,7 @@ steps:
   - id: 16
     name: "Clock planning"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 15
         path: "phase3/stage3/pnr/floorplan.def"
@@ -5021,6 +5104,7 @@ steps:
   - id: 17
     name: "Placement (global + detailed)"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 15
         path: "phase3/stage3/pnr/floorplan.def"
@@ -5144,6 +5228,7 @@ steps:
   - id: 18
     name: "Spare-cell + ECO-prep insertion (Design-for-ECO)"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 17
         path: "phase3/stage3/pnr/placed.def"
@@ -5224,6 +5309,7 @@ steps:
   - id: 19
     name: "CTS (Clock Tree Synthesis)"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 18
         path: "phase3/stage3/pnr/post_spare.def"
@@ -5255,6 +5341,7 @@ steps:
   - id: 20
     name: "🔁 Post-CTS hold fixing"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 19
         path: "phase3/stage3/pnr/post_cts.def"
@@ -5295,6 +5382,7 @@ steps:
   - id: 21
     name: "Routing (global + detailed)"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 20
         path: "phase3/stage3/pnr/post_hold.def"
@@ -5452,6 +5540,7 @@ steps:
   - id: 22
     name: "Parasitic Extraction (RC → SPEF)"
     stage: stage3
+    execution_stage: 4
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -5505,6 +5594,7 @@ steps:
   - id: DT2
     name: "Path-delay-fault (at-speed, timing-graded) ATPG"
     stage: stage2
+    execution_stage: 5
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
     # A missing trigger is N/A only when the design's own DFT layer says so.
@@ -5682,6 +5772,7 @@ steps:
   - id: DT3
     name: "Small-delay-defect (SDD) at-speed grade"
     stage: stage2
+    execution_stage: 5
 
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
 
@@ -5829,6 +5920,7 @@ steps:
   - id: 32
     name: "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)"
     stage: stage3
+    execution_stage: 5
     closed_loop:
       fallback_to: 32
       trigger: "Aggregator: re-measure #22-#30 on the repaired route (the runner's pre-stream pass) after post-route timing repair"
@@ -5905,6 +5997,7 @@ steps:
   - id: 23
     name: "🔁 Post-route STA (multi-corner multi-mode sign-off)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 22
         path: "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
@@ -6413,6 +6506,7 @@ steps:
   - id: 24
     name: "🔁 IR Drop (static + dynamic)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -6502,6 +6596,7 @@ steps:
   - id: 25
     name: "🔁 EM check (electromigration lifetime)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -6632,6 +6727,7 @@ steps:
   - id: 26
     name: "🔁 Antenna check (gate-oxide protection)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -6640,8 +6736,8 @@ steps:
       trigger: "Antenna violation; insert diode or re-route"
     programs:
       - antenna_report_check
-      - gds_antenna_deck_check
     required_outputs:
+      - "reports/phase3/prestream_route_census.json"
       - "reports/phase3/antenna.rpt"
       # The MEASUREMENT (net_violations / pin_violations / clean / verdict) the
       # runner reads back as this step's evidence —
@@ -6658,19 +6754,6 @@ steps:
       - "reports/phase3/antenna_signoff.json"
     gate:
       all_of:
-        # Substance gate (was presence-only) — parses the OpenROAD check_antennas
-        # violation count; FAILs on net/pin violations > 0, mirroring the EM (25)
-        # and IR (24) report_check siblings. PDK-waiver aware; clean reports PASS.
-        # This is a ROUTER-REPORT consumer: it can only repeat what the router
-        # already believed. PRESERVED unchanged — the deck below ADDS a second
-        # opinion, it does not replace this one.
-        # OUTPUT-PATH COLLISION, same shape as steps 24/25: this declared
-        # `--json reports/phase3/antenna.json`, the PRODUCER's measurement file
-        # (and now this step's required_output above). The audit verdict goes to
-        # a separate file. `eda_report_audit` also globs `*antenna*.json`, so
-        # `_discover` was taught to skip its own verdict documents — measured
-        # before that guard, a second run of this gate re-ingested its own
-        # output and files_found went 1 -> 2.
         - program_exit_zero: "antenna_report_check . --mode antenna --under reports/phase3/antenna.rpt --json reports/phase3/antenna_signoff.json"
         # INDEPENDENT GDS-geometry antenna sign-off (the authoritative second
         # opinion the flow never had). A PDK-native KLayout deck measures its
@@ -6689,17 +6772,6 @@ steps:
         # a NAMED disclosure -> VACUOUS-PASS, never a bare PASS earned by a
         # checker that did not run. (`gds_antenna_deck_check --strict` turns
         # that disclosure into a hard FAIL for a production tapeout.)
-        - optional_program_exit_zero:
-            command: "gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json"
-            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json", "phase3/librelane_pdk_root.provenance.json"]
-            absent_condition_reason: >-
-              Both triggers are PDK-PROVIDED sign-off decks -- inputs to this
-              step, not results of it. Without a gate-oxide deck there is no
-              geometry target to measure against and step 26 keeps exactly its
-              previous verdict; no fill of the gap is being claimed. WITH a
-              deck the gate always reports: an unavailable KLayout or deck
-              engine exits 2 with a NAMED disclosure (VACUOUS-PASS), never a
-              bare PASS earned by a checker that did not run.
     blocks_on: [32]
 
   # ── Step 27: Signal Integrity ────────────────────────────
@@ -6708,130 +6780,10 @@ steps:
   # coupling capacitance between adjacent nets causes functional
   # failures or timing degradation.
   # ── chip/IC path only ────────────────────────────────────────────────
-  - id: 26.5ic
-    name: "Die Finishing — seal ring + die identification (chip/IC path only)"
-    stage: stage3
-    condition:
-      # THE CHIP PATH, NOT THE SHUTTLE TEMPLATE. Same change and same reason as
-      # 15.5ic above: this read `files_exist:
-      # [input/submission_template/slots/*.yaml]`, the shuttle OPERATOR'S
-      # template, so a chip doing its own tape-out skipped die finishing as
-      # "not applicable" and shipped WITH NO SEAL RING. A seal ring is what
-      # dicing damage and moisture get into a die through; it is a property of
-      # being a DIE, not of being on a shuttle. Measured by the external
-      # authority rather than by this repository's opinion: an open-MPW
-      # precheck container refused a layout this flow published at ladder step
-      # 3 of 16 with "requires a seal ring (guard ring) around the die", and
-      # stages 4-16 never executed.
-      #
-      # `any_of`, and the entries are 37.5ic's chip-path marker verbatim — two
-      # mutually exclusive router files, never both on one tree.
-      any_of: true
-      files_exist:
-        - "input/submission_template/slots/*.yaml"
-        - "input/submission_template/SELF_TAPEOUT.txt"
-      # THE DELIVERY THE DESIGN DECLARED, ahead of the router's leftovers
-      # (vibe-ic#2277). MEASURED: since 0.5ic's fetch was wired, a PDK with a
-      # LIVE shuttle in the registry has the operator's whole CATALOGUE
-      # ingested as `slots/*.yaml` whether or not the design bought a slot,
-      # and no `NO_TEMPLATE.txt` is written. So a delivery that declares
-      # `deliverable=HARDMACRO` and binds no slot matched the `any_of` above,
-      # this row was judged APPLICABLE, every output was owed, the producers
-      # correctly wrote nothing, and the row read MISSING — a pad ring, a
-      # seal ring and an operator precheck demanded of a macro somebody else
-      # PLACES inside their die (RULINGS R12, 2026-09-07).
-      #
-      # Evaluated BEFORE `files_exist`, and conservative in the same direction
-      # as `l_doc_declares`: a missing or unparseable declaration, a
-      # `deliverable` that is not listed here, NOT_DETERMINED, DIE, or ANY
-      # affirmative `operator_template.path`/`.slot` binding in the design's
-      # own `input/step_0_5ic_answers.json` all RUN the step. See
-      # `flow_compliance_check._delivery_declares_absence`, which asks
-      # `submission_template_check.slot_rules_are_owed` — the same reader the
-      # run itself uses, so the run and the audit cannot disagree about one
-      # design's route.
-      delivery_declares:
-        declaration: "input/submission_template/tapeout_declaration.json"
-        field: "answers.deliverable"
-        absent_when: ["HARDMACRO"]
-    # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
-    # condition tests WHICH PATH the design is on, and step 0.5ic's
-    # required_outputs is the OR of exactly the three router artefacts, so on
-    # any run where 0.5ic itself passed, precisely one of them exists. The two
-    # named above are the CHIP ones; the third (`NO_TEMPLATE.txt`) is the
-    # IP/hardmacro terminal 37.5ip owns, and a hardmacro is placed inside
-    # somebody else's die — it has no die edge of its own to seal — so a
-    # design-derived N/A is correct ONLY after 0.5ic passed. A missing,
-    # conflicting or failed owner remains a hard upstream blocker.
-    condition_kind: design_dependent
-    condition_owner:
-      step: 0.5ic
-      declaration: delivery_route
-    required_inputs:
-      - from: 21
-        path: "phase3/stage3/pnr/routed.def"
-      # WHERE THE SEAL-RING INPUTS COME FROM WHEN THERE IS NO OPERATOR. 0.5ic
-      # writes this declaration on every route. Its section 2C is the three
-      # inputs this step already takes — whether a ring is required, which PDK
-      # script builds it, and which marker layer must carry geometry — and
-      # `_tapeout_declaration.py` was written to supply exactly them. Until this
-      # edge, nothing read them: `die_finishing_gen` resolved its script and its
-      # marker layer from the PDK bridge config and the environment only, so a
-      # self-tape-out that had ANSWERED all three was driven as though it had
-      # answered none.
-      - from: 0.5ic
-        path: "input/submission_template/tapeout_declaration.json"
-    # AFTER THE ANTENNA CHECK AND BEFORE PHYSICAL VERIFICATION, and the order
-    # is the whole point. A seal ring is real metal. Adding it after step 31
-    # would mean the die step 31 signed off is not the die that ships — the
-    # ring would reach a foundry having passed no DRC or LVS. That is this
-    # repository's own worst failure shape: the artefact changed after the
-    # evidence. LibreLane places SealRing after Checker.KLayoutAntenna for
-    # the same reason.
-    #
-    # TWO COMPONENTS, TWO SOURCES, REPORTED SEPARATELY. The gate must never
-    # collapse them into one verdict:
-    #   seal ring  the PDK ships its own generator and this step CALLS it,
-    #              never reimplements it — sky130A, gf180mcuD and ihp-sg13g2
-    #              each carry one. A PDK with no generator SKIPS with a
-    #              stated reason (LibreLane does exactly this when
-    #              KLAYOUT_SEALRING_SCRIPT is unset).
-    #   die id     four shuttle-owned cells whose provenance is NOT YET
-    #              DETERMINED — gf180mcu_ws_ip__{qrcode_id,shuttle_id,
-    #              project_id,marker}, at coordinates their generate_id.py
-    #              pins exactly. Until the source is established this half
-    #              reports NOT DETERMINED; it must not report clean, and it
-    #              must not fail the seal ring for its own absence.
-    programs:
-      - die_finishing_gen
-      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
-      # This step's own gate clause below invokes the program with
-      # `--json <path>` and `<path>` is one of this step's `required_outputs`
-      # -- the flow already says in TWO places that the run writes that
-      # document. It did not say it in the third, `programs:`, which is the
-      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
-      # the AUDIT's evaluation of the gate wrote it, and the audit then
-      # correctly refused its own output:
-      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
-      #   no pre-audit producer supplied these paths; wire them into the
-      #   owning runner before claiming this step complete.
-      # Naming the producer here is that wiring: it makes the three
-      # declarations agree, and `flow_declared_producer_run` (invoked by the
-      # phase-3 runner, never by the auditor) then executes the clause when
-      # -- and only when -- the document is absent or the audit's own
-      # authorship note claims it. A document the run already produced is
-      # left byte-for-byte alone.
-      - die_finishing_check
-    required_outputs:
-      - "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt"
-      - "reports/phase3/die_finishing.json"
-    gate:
-      program_exit_zero: "die_finishing_check . --json reports/phase3/die_finishing.json"
-    # 0.5ic writes the template this step's condition reads.
-    blocks_on: [26, 0.5ic]
   - id: 27
     name: "🔁 Signal Integrity (Crosstalk / Noise / Glitch + MCF crosstalk-delay)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 22
         path: "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
@@ -7034,6 +6986,7 @@ steps:
   - id: 28
     name: "🔁 PERC / Reliability sign-off (ESD + latch-up + cross-domain)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -7098,6 +7051,7 @@ steps:
   - id: 29
     name: "Post-Layout Gate-Level Simulation (Post-Sim + SDF)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       - from: 12
         path: "phase2/stage2/synth/post_dft_netlist.v"
@@ -7157,6 +7111,7 @@ steps:
   - id: 30
     name: "Post-Layout SPICE Verification (critical-path correlation + analog)"
     stage: stage3
+    execution_stage: 5
     required_inputs:
       # The current SPICE producer consumes the preceding extracted STA
       # record and SPEF. Declare them in the same list used by preparation,
@@ -7194,6 +7149,7 @@ steps:
   - id: 33
     name: "Power analysis (pre/post-layout)"
     stage: stage4
+    execution_stage: 5
     # THE POWER AXIS HAD A COMPARISON AND NO EDGE.
     # `power_total_vs_budget_check` (below) computes the verdict and, until this
     # declaration, handed it to nobody: 19 closed_loop edges existed in this
@@ -7310,146 +7266,14 @@ steps:
   # fill, spare_cell_preservation_check re-confirms every spare from
   # phase3/stage3/pnr/spare_cells.json survives in filled.def / GDS
   # with its keep attribute intact.
-  - id: 34
-    name: "Metal Fill (ECO-aware density fill insertion)"
-    stage: stage4
-    required_inputs:
-      - from: 21
-        path: "phase3/stage3/pnr/routed.def"
-      - from: 18
-        path: "phase3/stage3/pnr/spare_cells.json"
-    mcp_tools: [eda_pnr]
-    programs:
-      - metal_fill_density_check
-      # ECO-aware: re-confirm spares survive fill (no overlap / removal).
-      - spare_cell_preservation_check
-      # Per-layer DENSITY-TARGETED metal fill on the streamed GDS. The
-      # checks above only MEASURE density; OpenROAD filler_placement fills
-      # std-cell ROWS. Neither computes how much metal a sparse LAYER needs,
-      # so a die under the foundry CMP floor was flagged and left sparse.
-      # The emitter runs inside streamout (phase3_one_shot_runner.step_gds),
-      # before the density checks and sign-off DRC consume the GDS; the gate
-      # below only VERIFIES its report so an audit never mutates the layout.
-      - metal_fill_emit
-    required_outputs:
-      - "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
-      # The density report is STEP 34's artefact — `_emit_metal_fill` writes
-      # reports/density.{rpt,json} on the same success path that produces
-      # filled.def, and returns False (writing neither) on every failure path.
-      # Two gates READ it — metal_fill_density_check here and erc_density_check
-      # at Step 31 — and until now NO step declared it, so a run that lost the
-      # density report would have both gates degrade silently instead of any
-      # step reporting MISSING. `report_path` routes the canonical name to
-      # reports/phase3/ while the runner writes reports/ root, and BOTH readers
-      # accept either location, so both are accepted here too.
-      - "reports/density.json OR reports/phase3/density.json"
-      - "reports/density.rpt OR reports/phase3/density.rpt"
-      # `reports/spare_preservation.json` IS NOT DECLARED HERE, and the attempt
-      # to declare it is what this note replaces. It was added on 2026-08-25
-      # because a newly-wired consumer at step 37.5ic began READING it and d7
-      # named the pair (`W2:produced_consumed_undeclared`). The declaration
-      # cannot stand: this step's only producer of that file is the
-      # `optional_program_exit_zero` clause below, which runs only when
-      # `phase3/stage3/pnr/spare_cells.json` is present, while
-      # `required_outputs` is UNCONDITIONAL — `flow_compliance_check` returns
-      # MISSING for a declared entry that is absent, on every project, with no
-      # escape. Declaring it asserts a production the same gate denies four
-      # lines down, and reds every spare-less design over an artefact nobody
-      # owes. Step 7's `.upf` note above refuses the identical shape.
-      #
-      # The consumer went with it rather than the declaration being kept: this
-      # step's own sign-off notes name "declare an undeclared artefact and
-      # relocate the red" as a shape to refuse, and that is exactly what the
-      # pair amounted to. See the step-37.5ic note for what is required before
-      # that consumer can be wired again.
-    gate:
-      all_of:
-        - files_exist: ["phase3/stage3/pnr/filled.def", "phase3/stage3/pnr/metal_fill.done"]
-          any_of: true
-        - program_exit_zero: "metal_fill_density_check . --json reports/phase2/gates/metal_fill_density.json"
-        # Spares must survive ECO-aware fill (fillers swappable, no
-        # overlap / removal of dont_touch spares). No-op when Step 18
-        # was skipped (no spare_cells.json).
-        - optional_program_exit_zero:
-            command: "spare_cell_preservation_check . --json reports/phase2/gates/spare_preservation_postfill.json"
-            condition_files_exist: ["phase3/stage3/pnr/spare_cells.json"]
-            absent_condition_reason: >-
-              Scoped to a design that inserted spares at step 18: with no
-              spare_cells.json there is no spare pool for ECO-aware fill to
-              preserve. A design that DID insert spares carries the manifest,
-              because step 18's gate hard-requires it through files_exist, so
-              this clause cannot be silenced on the runs it is about.
-        # Density-targeted fill VERDICT. `--verify-only` re-reports what the
-        # streamout emitter already wrote — it never re-runs the fill, so
-        # auditing a finished project cannot mutate its GDS. PARTIAL (a layer
-        # that never reached its target) FAILs with the achieved worst-window
-        # density disclosed; a missing report exits 2 with a NAMED disclosure
-        # (VACUOUS-PASS), never a silent "filled". Opt-in per PDK, same as the
-        # Step-26 geometry deck: no fill config, no claim.
-        - optional_program_exit_zero:
-            command: "metal_fill_emit . --verify-only --json reports/phase2/gates/cmp_fill_emit.json"
-            condition_files_exist: ["signoff/cmp_fill_targets.json", "input/pdk/bridge/cmp_fill_targets.json"]
-            absent_condition_reason: >-
-              Both triggers are PDK-PROVIDED fill-target decks -- opt-in
-              inputs, not results of this step: no fill config, no claim. A
-              filled design is still judged without them by the UNCONDITIONAL
-              metal_fill_density_check clause in this same gate. When the deck
-              IS present and the report is missing, this gate exits 2 with a
-              NAMED disclosure (VACUOUS-PASS), never a silent 'filled'.
-    # R-0929-TAIL-CONTINUES (review wave 58): the tape-out tail enters here,
-    # and the runner streams (37) and fills (34) only after the pre-stream pass
-    # has measured sign-off 23-30 on the route Step 32 hands on. Those edges
-    # used to reach the tail through 32's inverted `blocks_on [23..30]`; they
-    # are declared here so a sign-off FAIL still voids / attributes the tail
-    # (34, 35, 37, 37.x, 38, 39, 40-44, M1-M4) exactly as before the flip.
-    blocks_on: [32, 23, 24, 25, 26, 27, 29, 30]
-
-  # ── Step 35: DFM screen ──────────────────────────────────────────
-  # v2.3 — Design-for-Manufacturability, scoped HONESTLY for an
-  # open-source 130-180nm flow: the designer-side measurables run
-  # (per-layer CMP density window, redundant-via ratio counted from
-  # the routed DEF, litho/min-width margins cross-referenced to the
-  # Step-31 DRC deck); the foundry-side mask-synthesis items
-  # (OPC / RET / SRAF / PSM) are NAMED FOUNDRY_SIDE disclosure items —
-  # they appear at their correct flow position without pretending the
-  # designer executes them. At <=28nm they become designer-collaboration
-  # items (conditional note in the report).
-  - id: 35
-    name: "DFM screen (CMP density + redundant-via ratio + foundry-side OPC/RET disclosure)"
-    stage: stage4
-    required_inputs:
-      - from: 34
-        outputs: all
-    programs:
-      - dfm_screen_check
-    program_outputs:
-      - program: dfm_screen_check
-        path: "reports/phase3/dfm_screen.json"
-        verdict_field: verdict
-        producer_command: "dfm_screen_check . --json reports/phase3/dfm_screen.json"
-        enforcement: advisory
-    required_outputs:
-      - "reports/phase3/dfm_screen.json"
-    gate:
-      all_of:
-        # The producer remains advisory; the content gate validates its
-        # emitted document's shape without promoting yield advice to FAIL.
-        # BLOCKING half: the screen must have produced its artefact. A step
-        # that never ran cannot be certified done.
-        - files_exist: ["reports/phase3/dfm_screen.json"]
-        - program_exit_zero: "flow_step_output_content_check . --mode dfm"
-        # dfm_screen_check is a producer/classifier with PASS,
-        # PASS_WITH_ADVISORIES and SKIP outputs but no refusal predicate.
-        # Issue #1980 keeps its structured output above and excludes it from
-        # the gate denominator. Presence remains the blocking predicate.
-    blocks_on: [34]
-
   - id: 37
     name: "GDSII output (after routed-layout pre-stream admission)"
     stage: stage4
+    execution_stage: 6
     required_inputs:
-      - from: 34
-        path: "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
+      - from: 21
+        path: "phase3/stage3/pnr/routed.def"
+
     mcp_tools: [eda_gds]
     programs:
       # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
@@ -7469,7 +7293,7 @@ steps:
       # -- and only when -- the document is absent or the audit's own
       # authorship note claims it. A document the run already produced is
       # left byte-for-byte alone.
-      - stage3_compliance
+      - gds_antenna_deck_check
     required_outputs:
       - "phase3/stage4/gds/*.gds"
       # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
@@ -7523,8 +7347,6 @@ steps:
       # "produced by the flow and read by a gate, but no step's required_outputs
       # names it".
       - "reports/phase3/pad_ring_route_evidence.json"
-      - "reports/phase3/gates/stage3_compliance.json"
-      - "reports/phase3/layout_receipts.json"
     # THE ROUTE ATTESTATION IS OWED ONLY BY A DELIVERY WITH A PAD RING
     # (FX_SPM_GATES_2). Its only producer, `step_pad_ring_final_evidence`,
     # runs under `_chip_path_requests_pad_ring` -- the condition step 15.5ic
@@ -7547,40 +7369,6 @@ steps:
           absent_when: ["HARDMACRO"]
     gate:
       all_of:
-        - program_exit_zero: "layout_receipt_identity_check . --json reports/phase3/layout_receipt_identity.json"
-        # ── ON-PASS REVIEW of stage3 ─────────────────────────────────
-        # Declared on the stage (`stages[].on_pass_review`), DISPATCHED here:
-        # the step that already carries `stage3_compliance .`.
-        # `advisory_`, NOT `program_exit_zero`, and that is the whole point:
-        # the block declares `verdict: advisory` and the program declares
-        # `DECLARED_ENFORCEMENT = "advisory"`. The blocking slot would make a
-        # rejection stop the step -- turning "unverified" into "blocking",
-        # which #1253 refuses -- and would additionally read the program's
-        # rc=2 NOT CHECKED as VACUOUS_PASS. The advisory slot RUNS it and
-        # RECORDS the verdict without changing the step's tier.
-        # THE VERDICT SOURCE, PRODUCED HERE AND READ ON THE NEXT LINE.
-        # It used to be `--compliance reports/flow_compliance.json`, which
-        # ONLY the flow's `final_gate:` block declares -- and NOTHING
-        # EXECUTES `final_gate`. Both runners invoke this program without
-        # `--json` (design_one_shot_runner._build_final_audit_cmd,
-        # phase3_one_shot_runner), `--json` has no default, and even when a
-        # caller does pass it the report is written AFTER the step loop that
-        # hosts these clauses. MEASURED: the review returned rc=2 NOT CHECKED
-        # -- "[Errno 2] No such file or directory" -- on every real run, which
-        # is v1.13.42's outcome reached through a different door.
-        # A scoped pass run as the clause BEFORE the review is a verdict
-        # source with an executed producer AND a defined order: `_evaluate_gate`
-        # walks `all_of` in sequence, so the report exists when the next
-        # clause reads it.
-        # `stage3_compliance` was ALREADY in this `all_of`, last, with no `--json`.
-        # It is the same clause, moved to the front and asked to write what
-        # it measured. Nothing new runs.
-        - advisory_program_exit_zero:
-              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: STRUCTURAL MEASUREMENT: registered=null invoked=null no_verdict=null — the structural-RTL umbrella was NOT ASKED to run in this invocation, so this re"
-        - advisory_program_exit_zero:
-              command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
-              advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
         - files_exist: ["phase3/stage4/gds/*.gds"]
         # THE TRANSCRIPT, ASSERTED BY THE STEP THAT OWES IT. Declaring an artefact
         # whose own gate never looks at it is an unchecked claim, and dimension 4
@@ -7707,49 +7495,271 @@ steps:
         # steps only, and step 37 is stage4 — outside the filter, so this
         # clause cannot re-enter itself. It would recurse without bound if
         # wired onto any stage3 step, which is why it is not.
+        - optional_program_exit_zero:
+            command: "gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json"
+            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json", "phase3/librelane_pdk_root.provenance.json"]
+            absent_condition_reason: >-
+              Both triggers are PDK-PROVIDED sign-off decks -- inputs to this
+              step, not results of it. Without a gate-oxide deck there is no
+              geometry target to measure against and step 26 keeps exactly its
+              previous verdict; no fill of the gap is being claimed. WITH a
+              deck the gate always reports: an unavailable KLayout or deck
+              engine exits 2 with a NAMED disclosure (VACUOUS-PASS), never a
+              bare PASS earned by a checker that did not run.
+    blocks_on: [32, 23, 24, 25, 26, 27, 28, 29, 30, 33]
+  - id: 26.5ic
+    name: "Die Finishing — seal ring + die identification (chip/IC path only)"
+    stage: stage4
+    execution_stage: 6
+
+    condition:
+      # THE CHIP PATH, NOT THE SHUTTLE TEMPLATE. Same change and same reason as
+      # 15.5ic above: this read `files_exist:
+      # [input/submission_template/slots/*.yaml]`, the shuttle OPERATOR'S
+      # template, so a chip doing its own tape-out skipped die finishing as
+      # "not applicable" and shipped WITH NO SEAL RING. A seal ring is what
+      # dicing damage and moisture get into a die through; it is a property of
+      # being a DIE, not of being on a shuttle. Measured by the external
+      # authority rather than by this repository's opinion: an open-MPW
+      # precheck container refused a layout this flow published at ladder step
+      # 3 of 16 with "requires a seal ring (guard ring) around the die", and
+      # stages 4-16 never executed.
+      #
+      # `any_of`, and the entries are 37.5ic's chip-path marker verbatim — two
+      # mutually exclusive router files, never both on one tree.
+      any_of: true
+      files_exist:
+        - "input/submission_template/slots/*.yaml"
+        - "input/submission_template/SELF_TAPEOUT.txt"
+      # THE DELIVERY THE DESIGN DECLARED, ahead of the router's leftovers
+      # (vibe-ic#2277). MEASURED: since 0.5ic's fetch was wired, a PDK with a
+      # LIVE shuttle in the registry has the operator's whole CATALOGUE
+      # ingested as `slots/*.yaml` whether or not the design bought a slot,
+      # and no `NO_TEMPLATE.txt` is written. So a delivery that declares
+      # `deliverable=HARDMACRO` and binds no slot matched the `any_of` above,
+      # this row was judged APPLICABLE, every output was owed, the producers
+      # correctly wrote nothing, and the row read MISSING — a pad ring, a
+      # seal ring and an operator precheck demanded of a macro somebody else
+      # PLACES inside their die (RULINGS R12, 2026-09-07).
+      #
+      # Evaluated BEFORE `files_exist`, and conservative in the same direction
+      # as `l_doc_declares`: a missing or unparseable declaration, a
+      # `deliverable` that is not listed here, NOT_DETERMINED, DIE, or ANY
+      # affirmative `operator_template.path`/`.slot` binding in the design's
+      # own `input/step_0_5ic_answers.json` all RUN the step. See
+      # `flow_compliance_check._delivery_declares_absence`, which asks
+      # `submission_template_check.slot_rules_are_owed` — the same reader the
+      # run itself uses, so the run and the audit cannot disagree about one
+      # design's route.
+      delivery_declares:
+        declaration: "input/submission_template/tapeout_declaration.json"
+        field: "answers.deliverable"
+        absent_when: ["HARDMACRO"]
+    # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
+    # condition tests WHICH PATH the design is on, and step 0.5ic's
+    # required_outputs is the OR of exactly the three router artefacts, so on
+    # any run where 0.5ic itself passed, precisely one of them exists. The two
+    # named above are the CHIP ones; the third (`NO_TEMPLATE.txt`) is the
+    # IP/hardmacro terminal 37.5ip owns, and a hardmacro is placed inside
+    # somebody else's die — it has no die edge of its own to seal — so a
+    # design-derived N/A is correct ONLY after 0.5ic passed. A missing,
+    # conflicting or failed owner remains a hard upstream blocker.
+    condition_kind: design_dependent
+    condition_owner:
+      step: 0.5ic
+      declaration: delivery_route
+    required_inputs:
+      - from: 21
+        path: "phase3/stage3/pnr/routed.def"
+      # WHERE THE SEAL-RING INPUTS COME FROM WHEN THERE IS NO OPERATOR. 0.5ic
+      # writes this declaration on every route. Its section 2C is the three
+      # inputs this step already takes — whether a ring is required, which PDK
+      # script builds it, and which marker layer must carry geometry — and
+      # `_tapeout_declaration.py` was written to supply exactly them. Until this
+      # edge, nothing read them: `die_finishing_gen` resolved its script and its
+      # marker layer from the PDK bridge config and the environment only, so a
+      # self-tape-out that had ANSWERED all three was driven as though it had
+      # answered none.
+      - from: 0.5ic
+        path: "input/submission_template/tapeout_declaration.json"
+    # AFTER THE ANTENNA CHECK AND BEFORE PHYSICAL VERIFICATION, and the order
+    # is the whole point. A seal ring is real metal. Adding it after step 31
+    # would mean the die step 31 signed off is not the die that ships — the
+    # ring would reach a foundry having passed no DRC or LVS. That is this
+    # repository's own worst failure shape: the artefact changed after the
+    # evidence. LibreLane places SealRing after Checker.KLayoutAntenna for
+    # the same reason.
+    #
+    # TWO COMPONENTS, TWO SOURCES, REPORTED SEPARATELY. The gate must never
+    # collapse them into one verdict:
+    #   seal ring  the PDK ships its own generator and this step CALLS it,
+    #              never reimplements it — sky130A, gf180mcuD and ihp-sg13g2
+    #              each carry one. A PDK with no generator SKIPS with a
+    #              stated reason (LibreLane does exactly this when
+    #              KLAYOUT_SEALRING_SCRIPT is unset).
+    #   die id     four shuttle-owned cells whose provenance is NOT YET
+    #              DETERMINED — gf180mcu_ws_ip__{qrcode_id,shuttle_id,
+    #              project_id,marker}, at coordinates their generate_id.py
+    #              pins exactly. Until the source is established this half
+    #              reports NOT DETERMINED; it must not report clean, and it
+    #              must not fail the seal ring for its own absence.
+    programs:
+      - die_finishing_gen
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - die_finishing_check
+    required_outputs:
+      - "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt"
+      - "reports/phase3/die_finishing.json"
+    gate:
+      program_exit_zero: "die_finishing_check . --json reports/phase3/die_finishing.json"
+    # 0.5ic writes the template this step's condition reads.
+    blocks_on: [37, "0.5ic"]
+  - id: 34
+    name: "Metal Fill (ECO-aware density fill insertion)"
+    stage: stage4
+    execution_stage: 6
+    required_inputs:
+      - from: 37
+        path: "phase3/stage4/gds/*.gds"
+      - from: 18
+        path: "phase3/stage3/pnr/spare_cells.json"
+
+    mcp_tools: [eda_pnr]
+    programs:
+      - metal_fill_density_check
+      # ECO-aware: re-confirm spares survive fill (no overlap / removal).
+      - spare_cell_preservation_check
+      # Per-layer DENSITY-TARGETED metal fill on the streamed GDS. The
+      # checks above only MEASURE density; OpenROAD filler_placement fills
+      # std-cell ROWS. Neither computes how much metal a sparse LAYER needs,
+      # so a die under the foundry CMP floor was flagged and left sparse.
+      # The emitter runs inside streamout (phase3_one_shot_runner.step_gds),
+      # before the density checks and sign-off DRC consume the GDS; the gate
+      # below only VERIFIES its report so an audit never mutates the layout.
+      - metal_fill_emit
+    required_outputs:
+      - "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
+      # The density report is STEP 34's artefact — `_emit_metal_fill` writes
+      # reports/density.{rpt,json} on the same success path that produces
+      # filled.def, and returns False (writing neither) on every failure path.
+      # Two gates READ it — metal_fill_density_check here and erc_density_check
+      # at Step 31 — and until now NO step declared it, so a run that lost the
+      # density report would have both gates degrade silently instead of any
+      # step reporting MISSING. `report_path` routes the canonical name to
+      # reports/phase3/ while the runner writes reports/ root, and BOTH readers
+      # accept either location, so both are accepted here too.
+      - "reports/density.json OR reports/phase3/density.json"
+      - "reports/density.rpt OR reports/phase3/density.rpt"
+      # `reports/spare_preservation.json` IS NOT DECLARED HERE, and the attempt
+      # to declare it is what this note replaces. It was added on 2026-08-25
+      # because a newly-wired consumer at step 37.5ic began READING it and d7
+      # named the pair (`W2:produced_consumed_undeclared`). The declaration
+      # cannot stand: this step's only producer of that file is the
+      # `optional_program_exit_zero` clause below, which runs only when
+      # `phase3/stage3/pnr/spare_cells.json` is present, while
+      # `required_outputs` is UNCONDITIONAL — `flow_compliance_check` returns
+      # MISSING for a declared entry that is absent, on every project, with no
+      # escape. Declaring it asserts a production the same gate denies four
+      # lines down, and reds every spare-less design over an artefact nobody
+      # owes. Step 7's `.upf` note above refuses the identical shape.
+      #
+      # The consumer went with it rather than the declaration being kept: this
+      # step's own sign-off notes name "declare an undeclared artefact and
+      # relocate the red" as a shape to refuse, and that is exactly what the
+      # pair amounted to. See the step-37.5ic note for what is required before
+      # that consumer can be wired again.
+    gate:
+      all_of:
+        - files_exist: ["phase3/stage3/pnr/filled.def", "phase3/stage3/pnr/metal_fill.done"]
+          any_of: true
+        - program_exit_zero: "metal_fill_density_check . --json reports/phase2/gates/metal_fill_density.json"
+        # Spares must survive ECO-aware fill (fillers swappable, no
+        # overlap / removal of dont_touch spares). No-op when Step 18
+        # was skipped (no spare_cells.json).
+        - optional_program_exit_zero:
+            command: "spare_cell_preservation_check . --json reports/phase2/gates/spare_preservation_postfill.json"
+            condition_files_exist: ["phase3/stage3/pnr/spare_cells.json"]
+            absent_condition_reason: >-
+              Scoped to a design that inserted spares at step 18: with no
+              spare_cells.json there is no spare pool for ECO-aware fill to
+              preserve. A design that DID insert spares carries the manifest,
+              because step 18's gate hard-requires it through files_exist, so
+              this clause cannot be silenced on the runs it is about.
+        # Density-targeted fill VERDICT. `--verify-only` re-reports what the
+        # streamout emitter already wrote — it never re-runs the fill, so
+        # auditing a finished project cannot mutate its GDS. PARTIAL (a layer
+        # that never reached its target) FAILs with the achieved worst-window
+        # density disclosed; a missing report exits 2 with a NAMED disclosure
+        # (VACUOUS-PASS), never a silent "filled". Opt-in per PDK, same as the
+        # Step-26 geometry deck: no fill config, no claim.
+        - optional_program_exit_zero:
+            command: "metal_fill_emit . --verify-only --json reports/phase2/gates/cmp_fill_emit.json"
+            condition_files_exist: ["signoff/cmp_fill_targets.json", "input/pdk/bridge/cmp_fill_targets.json"]
+            absent_condition_reason: >-
+              Both triggers are PDK-PROVIDED fill-target decks -- opt-in
+              inputs, not results of this step: no fill config, no claim. A
+              filled design is still judged without them by the UNCONDITIONAL
+              metal_fill_density_check clause in this same gate. When the deck
+              IS present and the report is missing, this gate exits 2 with a
+              NAMED disclosure (VACUOUS-PASS), never a silent 'filled'.
+    # R-0929-TAIL-CONTINUES (review wave 58): the tape-out tail enters here,
+    # and the runner streams (37) and fills (34) only after the pre-stream pass
+    # has measured sign-off 23-30 on the route Step 32 hands on. Those edges
+    # used to reach the tail through 32's inverted `blocks_on [23..30]`; they
+    # are declared here so a sign-off FAIL still voids / attributes the tail
+    # (34, 35, 37, 37.x, 38, 39, 40-44, M1-M4) exactly as before the flip.
+    blocks_on: [37]
+  - id: 35
+    name: "DFM screen (CMP density + redundant-via ratio + foundry-side OPC/RET disclosure)"
+    stage: stage4
+    execution_stage: 7
+    required_inputs:
+      - from: 34
+        outputs: all
+    programs:
+      - dfm_screen_check
+    program_outputs:
+      - program: dfm_screen_check
+        path: "reports/phase3/dfm_screen.json"
+        verdict_field: verdict
+        producer_command: "dfm_screen_check . --json reports/phase3/dfm_screen.json"
+        enforcement: advisory
+    required_outputs:
+      - "reports/phase3/dfm_screen.json"
+    gate:
+      all_of:
+        # The producer remains advisory; the content gate validates its
+        # emitted document's shape without promoting yield advice to FAIL.
+        # BLOCKING half: the screen must have produced its artefact. A step
+        # that never ran cannot be certified done.
+        - files_exist: ["reports/phase3/dfm_screen.json"]
+        - program_exit_zero: "flow_step_output_content_check . --mode dfm"
+        # dfm_screen_check is a producer/classifier with PASS,
+        # PASS_WITH_ADVISORIES and SKIP outputs but no refusal predicate.
+        # Issue #1980 keeps its structured output above and excludes it from
+        # the gate denominator. Presence remains the blocking predicate.
     blocks_on: [34]
 
-  # ── the sign-off SUMMARY, and why it is its own step ─────────────────
-  # MEASURED at v1.16.2: `phase3/final/metrics.json` had FIVE readers
-  # (tapeout_docs_gen, ic_release_docs_gen, _ic_release_artefacts,
-  # release_docs_check, and a comment in this file) and ZERO writers, and
-  # `phase3/final/` was not a directory `_path_layout` defined. Its 18 keys are
-  # OpenLane-2/LibreLane metric names; this flow drives OpenROAD, magic, netgen,
-  # KLayout and OpenSTA directly and never runs LibreLane's Classic flow, which
-  # is what would have written that file. So step 37.5ic could not produce ONE
-  # of its six document outputs for ANY design, and no completed route could
-  # change that: the missing artefact is not a layout, it is the summary of the
-  # checks run ON the layout.
-  #
-  # It is its OWN step and not a clause of 37.5ic because it runs on EVERY
-  # route: the IP arm's documents and the `_ic_release_artefacts` substance
-  # check read the same record, and a summary of a run belongs to the run, not
-  # to one of the two ways it can be delivered.
-  # R-0915-129 metric 2 — STREAM-OUT / FINISHING FIDELITY, measured.
-  #
-  # `design__xor_difference__count` was NOT_MEASURED for every design on this
-  # flow, and the ruling refused the structural excuse: KLayout in the pinned
-  # image has `xor`, so the flow CAN produce the number and calling it
-  # inapplicable would be laundering. What there was no producer for is the
-  # comparison itself -- the shipped GDS against the same routed database before
-  # finishing touched it, on the DESIGN layers, with the layers each finishing
-  # step DECLARES it added subtracted and disclosed separately.
-  #
-  # Its own step, before 37.4, because 37.4 READS this receipt: the aggregator's
-  # `--check` refuses a record that no longer states what the run's own reports
-  # state, so the XOR must have written its answer first.
-  #
-  # BLOCKING via program_exit_zero. A design-layer difference is rc=1, and a
-  # REFUSAL IS ALSO rc=1 -- not rc=2, which this flow maps onto VACUOUS_PASS, a
-  # non-FAIL tier. An earlier draft of this step exited 2 on a refusal and the
-  # matrix's dimension 2 caught it in the words of its own question: "step 37.3
-  # gate CANNOT FAIL on anything a project DID". An unrun XOR is not a zero, so
-  # the refusal blocks; the receipt's `verdict` field keeps NOT_DETERMINED
-  # distinguishable from a measured FAIL for the readers that need the
-  # difference. Only a measured 0 on every design layer is rc=0.
   - id: "37.3"
     name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
     stage: stage4
+    execution_stage: 7
     # ITS SUBJECT NEEDS TWO GDS FILES, NOT A CLEAN PV. Whether the shipped GDS
     # differs from this run's own pre-finishing boundary on the design layers is
     # answerable from those two artefacts alone; step 37's PV-clean condition is
@@ -7869,6 +7879,7 @@ steps:
   - id: 31
     name: "🔁 Physical Verification (DRC + LVS + ERC + Density)"
     stage: stage4
+    execution_stage: 7
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -8167,7 +8178,7 @@ steps:
         # (invocation > declared > on_disk; `none` is rc 1).
         # BLAST RADIUS over the 13 published runs carrying this artefact: 0.
         # All 6 runs green on this gate today stay green.
-        - program_exit_zero: "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --json reports/phase3/drc_signoff.json"
+        - program_exit_zero: "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --under reports/phase3/drc_signoff.log --json reports/phase3/drc_signoff.json"
         # W2.3 — THE EXTRACTOR'S OWN ERROR CHANNEL, READ BEFORE ITS OUTPUT IS
         # BELIEVED. Placed HERE, above the two LVS clauses, because that is the
         # order the question has to be asked in: magic files every rectangle it
@@ -8422,9 +8433,29 @@ steps:
               them, are what evidence a tool run on that path.
     blocks_on: [23, 24, 25, 26, 27, 29, 30, 34, 37]
 
+  - id: "37.4"
+    name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"
+    stage: stage4
+    execution_stage: 8
+    required_inputs:
+      - from: 37
+        path: "phase3/stage4/gds/*.gds"
+    required_outputs:
+      - "phase3/final/metrics.json"
+      - "reports/phase3/signoff_metrics_aggregate.json"
+    gate:
+      all_of:
+        # BLOCKING, and it can really fail: `--check` refuses a tree with no
+        # record and a tree whose record no longer states what its own reports
+        # state. A clause that answered the same way for every design would be
+        # the vacuous shape `test_step_37_5ic_gate_is_not_vacuous` refuses.
+        - program_exit_zero: "signoff_metrics_aggregate . --check"
+    blocks_on: [31, 34, 35, "37.3"]
   - id: 36
     name: "Tapeout checklist (final sign-off confirmation)"
     stage: stage4
+    execution_stage: 8
+    prepares: [38]  # Existing package writer only; full handoff remains last.
     skills: [tapeout-checklist]
     programs:
       # R-0915-141 — THE PRODUCER, not the checker. `tapeout_signoff_check` is a
@@ -8433,8 +8464,11 @@ steps:
       # is the shape the ruling forbids. `tapeout_checklist_gen` assembles the
       # checklist from the sign-off results the run already holds.
       - tapeout_checklist_gen
+      - stage3_compliance
     required_outputs:
       - "reports/audit/tapeout_checklist.json"
+      - "reports/phase3/gates/stage3_compliance.json"
+      - "reports/phase3/layout_receipts.json"
     # #651 — `tapeout_signoff_check` (= signoff_audit --mode tapeout) carries
     # the PASS_WITH_WAIVERS verdict tier in its EXIT CODE, not only inside the
     # summary JSON: rc 0 = bare/absolute PASS, rc 1 = FAIL, rc 3 (+ a
@@ -8486,21 +8520,40 @@ steps:
     # advisory ones after a failure (#306/#297).
     gate:
       all_of:
-        # R-0915-141 — THE GATE'S VERDICT GOES TO THE GATE'S OWN PATH.
-        #
-        # This clause used to write `--json reports/audit/tapeout_checklist.json`,
-        # which is THIS STEP'S DECLARED REQUIRED OUTPUT. So the document the run was
-        # supposed to produce was the file the gate wrote its verdict to, and the
-        # audit refused it for exactly what it was: "present, but written by this
-        # step's own gate rather than by the run … holding a verdict document only
-        # this step's gate emits". No ordering could fix that -- whoever wrote it,
-        # the third criterion matched by CONSTRUCTION.
-        #
-        # The checklist is an ASSEMBLY of sign-off results the run already holds,
-        # and `tapeout_checklist_gen` is the program that assembles it (MEASURED on
-        # spm run22: the document on disk carries `program: tapeout_checklist_gen`).
-        # It is now this step's declared producer, and this gate READS the checklist
-        # and writes its own verdict beside it.
+        - program_exit_zero: "layout_receipt_identity_check . --json reports/phase3/layout_receipt_identity.json"
+        # ── ON-PASS REVIEW of stage3 ─────────────────────────────────
+        # Declared on the stage (`stages[].on_pass_review`), DISPATCHED here:
+        # the step that already carries `stage3_compliance .`.
+        # `advisory_`, NOT `program_exit_zero`, and that is the whole point:
+        # the block declares `verdict: advisory` and the program declares
+        # `DECLARED_ENFORCEMENT = "advisory"`. The blocking slot would make a
+        # rejection stop the step -- turning "unverified" into "blocking",
+        # which #1253 refuses -- and would additionally read the program's
+        # rc=2 NOT CHECKED as VACUOUS_PASS. The advisory slot RUNS it and
+        # RECORDS the verdict without changing the step's tier.
+        # THE VERDICT SOURCE, PRODUCED HERE AND READ ON THE NEXT LINE.
+        # It used to be `--compliance reports/flow_compliance.json`, which
+        # ONLY the flow's `final_gate:` block declares -- and NOTHING
+        # EXECUTES `final_gate`. Both runners invoke this program without
+        # `--json` (design_one_shot_runner._build_final_audit_cmd,
+        # phase3_one_shot_runner), `--json` has no default, and even when a
+        # caller does pass it the report is written AFTER the step loop that
+        # hosts these clauses. MEASURED: the review returned rc=2 NOT CHECKED
+        # -- "[Errno 2] No such file or directory" -- on every real run, which
+        # is v1.13.42's outcome reached through a different door.
+        # A scoped pass run as the clause BEFORE the review is a verdict
+        # source with an executed producer AND a defined order: `_evaluate_gate`
+        # walks `all_of` in sequence, so the report exists when the next
+        # clause reads it.
+        # `stage3_compliance` was ALREADY in this `all_of`, last, with no `--json`.
+        # It is the same clause, moved to the front and asked to write what
+        # it measured. Nothing new runs.
+        - advisory_program_exit_zero:
+              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"
+              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: STRUCTURAL MEASUREMENT: registered=null invoked=null no_verdict=null — the structural-RTL umbrella was NOT ASKED to run in this invocation, so this re"
+        - advisory_program_exit_zero:
+              command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
+              advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
         - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
         - advisory_program_exit_zero:
               command: "report_belongs_to_project_check . --json reports/audit/report_belongs_to_project.json"
@@ -8796,40 +8849,11 @@ steps:
               case here, not the defect. The glob is the checker's OWN record
               glob, so a record that exists is always judged: there is no state
               in which a claim was filed and this clause did not look at it.
-    blocks_on: [31, 32, 33, 34]
-
-  - id: "37.4"
-    name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"
-    stage: stage4
-    required_inputs:
-      - from: 37
-        path: "phase3/stage4/gds/*.gds"
-    required_outputs:
-      - "phase3/final/metrics.json"
-      - "reports/phase3/signoff_metrics_aggregate.json"
-    gate:
-      all_of:
-        # BLOCKING, and it can really fail: `--check` refuses a tree with no
-        # record and a tree whose record no longer states what its own reports
-        # state. A clause that answered the same way for every design would be
-        # the vacuous shape `test_step_37_5ic_gate_is_not_vacuous` refuses.
-        - program_exit_zero: "signoff_metrics_aggregate . --check"
-    blocks_on: [37]
-
-  # ── cell/IP path — TERMINAL ──────────────────────────────────────────
-  # Where the two paths part. An IP is delivered, not fabricated: it needs a
-  # LEF so somebody else can place it, a Liberty so they can time it, and a
-  # Verilog view so they can simulate it. It needs no pad ring, no seal ring
-  # and no die id, because it is not a die. It therefore does NOT continue to
-  # step 38 (foundry handoff) or to stage 5 (fabrication onwards).
-  #
-  # The analog path already had this terminal — A8 "Hardmacro Generation
-  # (LEF + Liberty + GDS + Verilog)" — and the digital path never did, which
-  # is why step 15 can place an analog hard macro and nothing this flow
-  # produces digitally can be placed by anyone.
+    blocks_on: [31, 32, 33, 34, "37.4"]
   - id: 37.5ip
     name: "Digital Hardmacro Generation — LEF + Liberty + GDS + Verilog (delivered on EVERY route)"
     stage: stage4
+    execution_stage: 8
     condition:
       # `any_of` over ALL THREE routers — this step runs on every route a
       # design can take. OWNER RULING 2026-09-02: "an IC runs BOTH 37.5ic and
@@ -8975,52 +8999,11 @@ steps:
         # distinction is why this is a second clause and not a `files_exist`.
         - program_exit_zero: "release_docs_check . --arm ip --json reports/phase3/release_docs.json"
     # 0.5ic writes the NO_TEMPLATE.txt this step's condition reads.
-    blocks_on: [37, 0.5ic]
-
-  # ── chip/IC path only ────────────────────────────────────────────────
-  # THE STEP WITH TWO ARMS, AND ONE OF THEM IS NOT OURS. Every other gate in
-  # this tree we wrote, and a gate we wrote can be made to pass by editing it.
-  # `tapeout_readiness_check` runs the SHUTTLE OPERATOR's own container and
-  # reports its exit code — that is the one interface where somebody else's
-  # refusal is the verdict.
-  #
-  # 2026-08-20 — `37.5self` IS RETIRED AS A STEP AND FOLDED IN HERE.
-  # It used to be a THIRD ROUTE: `general_precheck`, our own ladder, reached
-  # only by a design carrying `SELF_TAPEOUT.txt`. That made the two checks
-  # ALTERNATIVES, and a design routed to one was never shown the other. It is
-  # not an alternative. It is an ARM:
-  #
-  #   * OUR ladder (`general_precheck`) runs on EVERY design that reaches this
-  #     step — shuttle or self tape-out, always, no condition.
-  #   * The OPERATOR's container runs IN ADDITION, whenever the PDK ships a
-  #     shuttle precheck AND that operator's template was actually fetched.
-  #
-  # This is strictly MORE checking than the three-route shape: a shuttle design
-  # used to get only the operator's verdict, and now it gets two independent
-  # authorities on the same GDS. A PDK with no shuttle precheck is NOT a
-  # different route — it is this same step with one fewer arm.
-  #
-  # THE CONDITION IS `any_of`, AND THE REASON IS STRUCTURAL. `files_exist`
-  # cannot express "and not", and `NO_TEMPLATE.txt` is ALREADY 37.5ip's
-  # condition (the IP/hardmacro terminal), so this step cannot condition on
-  # "chip and not IP" directly. `slots/*.yaml` OR `SELF_TAPEOUT.txt` — the two
-  # chip-path router files 0.5ic writes — together ARE the chip-path marker.
-  # `SELF_TAPEOUT.txt` survives as a FILE and keeps its meaning; only the STEP
-  # that read it in isolation is gone.
-  #
-  # DISAGREEMENT IS THE MOST VALUABLE OUTCOME AND IT FAILS THIS STEP. When both
-  # arms judge the same ladder step and reach opposite conclusive verdicts, one
-  # of the two checks is wrong. `tapeout_precheck` records that as a finding of
-  # its own and refuses; it never resolves it by preferring an arm, because
-  # preferring one is how the wrong one survives.
-  #
-  # EVERY FINDING NAMES ITS AUTHORITY. The whole point of the operator's arm is
-  # that its verdict is NOT one we wrote. Merging the arms into one step must
-  # not blur that, so every line of the merged report carries the authority
-  # that produced it and an `authority_is_ours` boolean beside it.
+    blocks_on: [36, "0.5ic"]
   - id: 37.5ic
     name: "Tape-out Precheck — our general ladder, plus the operator's own refusal where the PDK ships one (chip/IC path only)"
     stage: stage4
+    execution_stage: 8
     condition:
       # `any_of`, not the default ALL-of: these are two MUTUALLY EXCLUSIVE
       # router files and no tree ever carries both (`tapeout_declaration_check`
@@ -9349,7 +9332,8 @@ steps:
     # the layout to.
     # 37.4 writes `phase3/final/metrics.json`, which THIS step's document
     # generators read and refuse without.
-    blocks_on: [37, 0.5ic, "37.4"]
+    blocks_on: [36, "0.5ic", "37.4"]
+
     notes: >-
       Three verdicts and no fourth, and the merge inherits them unchanged from
       both arms: PASS only when every arm that ran carries passing evidence for
@@ -9363,6 +9347,7 @@ steps:
   - id: 38
     name: "Foundry Handoff (mask spec + WAT plan + scribe layout + corner test kit)"
     stage: stage4
+    execution_stage: 8
     required_inputs:
       - from: 37
         path: "phase3/stage4/gds/*.gds"
@@ -9398,7 +9383,8 @@ steps:
     # R-0929-TAIL-CONTINUES: 38 packages the antenna sign-off record (26's
     # output); it used to reach 26 through 32, whose inverted edges now point
     # the runner's way (26 is downstream of 32), so the read is declared.
-    blocks_on: [37, 26]
+    blocks_on: [36, "37.5ic", "37.5ip"]
+
     notes: |
       Final foundry-deliverable kit: mask reticle spec, WAT
       (Wafer Acceptance Test) probe plan, scribe-line PCM
@@ -9409,6 +9395,7 @@ steps:
   - id: 39
     name: "FPGA final sign-off (recompile + on-board test)"
     stage: stage4
+    execution_stage: 8
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
@@ -10088,67 +10075,6 @@ steps:
   # emitted live at runtime from len(_STRUCTURAL_RTL_GATES) — see the
   # umbrella's own step name in the report, or
   # `flow_compliance_check.py --list-structural-gates`.
-  - id: P0
-    name: "Structural-RTL pre-flight (chip-AGNOSTIC structural gates)"
-    stage: stage1
-    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
-    phase_scope: agnostic
-    # vibe-ic#923 — the ORDERING edge, written down to match the DATA edge one
-    # line below. P0 reads step 1's RTL, so it cannot precede step 1, and step
-    # 1 blocks on D1; without this edge P0 was a stage1 step whose ancestry did
-    # not reach Phase 1, so a FAILED Phase 1 would not have redded it. This was
-    # invisible while `stages[].steps` was a second membership declaration:
-    # that roster never listed P0, so the guard that checks stage1 ancestry
-    # never looked at it. Deleting the roster made the guard see it.
-    blocks_on: [1]
-    required_inputs:
-      - from: 1
-        path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
-    # NO required_outputs — DELIBERATE, and NOT the same case as a step whose
-    # declaration is merely missing (vibe-ic#983 ruling 3). P0 owns no artefact
-    # at all: it is a SYNTHETIC preflight whose verdict is emitted directly by
-    # `flow_compliance_check._run_structural_rtl_gates(...)` into the audit's
-    # own `reports/audit/phase23_completion_audit.json`, under the `gates:`
-    # array (see `notes:` below).
-    #
-    # That file belongs to the AUDIT, not to P0. Declaring it here would make
-    # P0's dimension-3 cell judge a file P0 does not produce — the step would
-    # be certified by an artefact whose producer is the very program doing the
-    # certifying. That is the same pathology vibe-ic#984 names for the Step 9
-    # netlist split, and the one the withdrawn FS1 closure demonstrated (see
-    # the FS1 comment above, where declaring an auditor-produced path was
-    # MEASURED to stop the producer from ever running).
-    #
-    # So the 63x8 matrix must publish P0 as NA for the artefact dimensions
-    # rather than as a gap awaiting a declaration. It already does: d3, d7 and
-    # d8 all read NA today, and d3's NA branch asserts the precondition LIVE
-    # (`assert not F.declares_required_outputs(sid)`), so if anyone ever adds
-    # required_outputs here the NA self-invalidates and the suite goes red
-    # instead of silently re-grading the cell. This comment is that ruling
-    # written down at the point of decision, which is the only place a future
-    # reader looks.
-    gate:
-      # BLOCKING: the synthetic umbrella evaluates this clause in-process.
-      program_exit_zero: "flow_step_output_content_check . --mode rtl"
-    notes: |
-      Synthetic preflight stage; the verdict is emitted directly by
-      flow_compliance_check.py's `_run_structural_rtl_gates(...)` and
-      surfaces in reports/audit/phase23_completion_audit.json under the
-      `gates:` array. Individual gate names (e.g. `cdc_async_input_check`,
-      `bram_pdob_combinational_check`) appear there with PASS/FAIL.
-
-# Final gate — runs after all 41 main-track integer steps + A1-A9
-# + M1-M4 (54 entities total) + P0 structural-RTL umbrella.
-#
-# `--json reports/flow_compliance.json` IS LOAD-BEARING, not a convenience.
-# Every `on_pass_review:` gate above reads this exact path with `--compliance`
-# to establish the stage verdict it fires on. Until v1.13.40 this ran with no
-# `--json` at all and the six gates named no verdict source, so
-# `stage_on_pass_review.stage_passed()` returned UNESTABLISHED and the review
-# exited 2 NOT CHECKED before consulting a rule — on every input, forever.
-# Nine rules across six stages had therefore never refused anything.
-# `on_pass_review_answerable_check.py` keeps the two halves in agreement: it
-# FAILS if a gate names a report this line does not write, or names none.
 final_gate:
   program: flow_compliance_check
   args: ". --flow phase1_phase2_phase3 --strict --json reports/flow_compliance.json"

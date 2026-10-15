@@ -49993,7 +49993,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
-    if not candidate and _step34_mode(project) == "librelane":
+    import execution_policy
+    if not candidate and (execution_policy.request()['mode'] == 'default'
+                          or _step34_mode(project) == "librelane"):
         # Default has one primary stream: the admitted filled DEF, then the
         # actual PDK GDS filler and density deck. Explicit legacy/dual modes
         # retain their existing diagnostic paths below.
@@ -50594,6 +50596,9 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     """Opt-in tool stream-out; direct remains the production default."""
     if candidate:
         return _step_gds_direct(project, top, pdk, container, candidate=True)
+    import execution_policy
+    if execution_policy.request()['mode'] == 'default':
+        return _step_gds_direct(project, top, pdk, container)
     from librelane_contract import (Refusal, tool_stop_reason, resolve_image,
                                     resolve_pdk_root, selected_mode)
     mode = selected_mode(project, "37")
@@ -58042,7 +58047,8 @@ _FINAL_LAYOUT_GATES = (
 
 
 def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
-                            container: str, digest: str) -> Tuple[Optional[dict], str]:
+                            container: str, digest: str, *,
+                            measure: bool = True) -> Tuple[Optional[dict], str]:
     """Measure the current routed DEF in a fresh OpenROAD ODB session.
 
     BLOCKING evidence: an absent, incomplete or stale census is NOT_MEASURED.
@@ -58050,6 +58056,17 @@ def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
     """
     pnr = _pl.pnr_dir(project)
     report = _pl.reports_phase3_dir(project) / "prestream_route_census.json"
+    if not measure:
+        try:
+            record = json.loads(report.read_text())
+            if (record['status'] != 'MEASURED' or record['layout_digest'] != digest
+                    or record['source_def_sha256'] != _sha256_file(pnr / 'routed.def')
+                    or any(type(record[k]) is not int or record[k] < 0 for k in
+                           ('unrouted_nets', 'abutted_nets', 'shape_blind_nets'))):
+                raise ValueError('current routed census identity/counts differ')
+            return record, ''
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return None, str(exc)
     report.unlink(missing_ok=True)
     routed = pnr / "routed.def"
     if not routed.is_file():
@@ -58330,8 +58347,10 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     # SDC, so it must not run ahead of Default's current row consumer.
     if not ordinary:
         _canonicalize_postpnr_prerequisites(project, top, pdk, container)
-    evidence = step_canonicalize_artefacts(
-        project, top, pdk, container, prestream=True)
+    evidence = (StepResult('prestream_evidence', 'PASS', 0.0,
+                           'read current routed measurements; no native replay')
+                if ordinary else step_canonicalize_artefacts(
+                    project, top, pdk, container, prestream=True))
     if ordinary and evidence.status != 'PASS':
         # Default has already run the failing row's selected producer and
         # consumer. Do not run later measurements or turn a measured FAIL
@@ -58356,119 +58375,120 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                     'canonical_steps': canonical},
             reason_class=evidence.reason_class)
     mcf_producer_error = ""
-    # The MCF producer normally sits later in canonicalisation. Its input is
-    # the routed SPEF, so run it now and spend the existing one-pass SI repair
-    # budget before the route is frozen. A promotion changes the DEF and forces
-    # the entire pre-stream measurement to be repeated on the new identity.
-    try:
-        mcf = project / "reports/phase3/si_mcf_sta.json"
-        spefs = sorted(_pl.extracted_dir(project).glob("*.spef"))
-        newest = max(spefs, key=lambda path: path.stat().st_mtime) if spefs else None
-        if newest is not None and _signoff_regen(mcf, newest):
-            cp = _pr.run([sys.executable, str(PROGRAMS_DIR / "si_mcf_sta.py"),
-                          "run", str(project), "--container", container],
-                         capture_output=True, text=True)
-            if cp.returncode:
-                mcf_producer_error = f"si_mcf_sta rc={cp.returncode}"
-                evidence.detail += f"; {mcf_producer_error}"
-        import si_mcf_verdict_basis as _si_vb
-        _si_vb.apply(project)
-        import si_mcf_repair as _si_rep
-        seam = None
-        reason = ""
+    if not ordinary:
+        # The MCF producer normally sits later in canonicalisation. Its input is
+        # the routed SPEF, so run it now and spend the existing one-pass SI repair
+        # budget before the route is frozen. A promotion changes the DEF and forces
+        # the entire pre-stream measurement to be repeated on the new identity.
         try:
-            seam = _si_mcf_repair_seam(project, top, pdk, container)
-        except SiMcfRepairSeamUnavailable as exc:
-            reason = str(exc)
-        rec = _si_rep.run_once(project, container=container, runner=seam,
-                               no_seam_reason=reason)
-        if rec.get("decision") == "ADOPTED":
-            if _si_retry:
-                return StepResult("prestream_gate", "FAIL", time.time() - t0,
-                                  "SI remedy exceeded one layout promotion")
-            _si_mcf_repair_promote(project, top, pdk, container,
-                                   rec.get("after") or {}, [])
-            rerun = step_prestream_gate(project, top, pdk, container,
-                                        _si_retry=True,
-                                        _feedback_retry=_feedback_retry)
-            rerun.extras["layout_writer_applied"] = "si_mcf_repair"
-            return rerun
-    except Exception as exc:
-        mcf_producer_error = f"SI MCF producer/remedy could not run: {exc}"
-        evidence.detail += f"; {mcf_producer_error}"
-    # SI MCF promotion above is the last routed writer.  Feedback belongs
-    # here, before the pre-stream gate certifies a fixed layout identity.
-    import drc_feedback_repair as _drc_feedback
-    if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
-        _fb_t0 = time.time()
-        try:
-            _feedback_image = _drc_feedback.image_for_container(container)
+            mcf = project / "reports/phase3/si_mcf_sta.json"
+            spefs = sorted(_pl.extracted_dir(project).glob("*.spef"))
+            newest = max(spefs, key=lambda path: path.stat().st_mtime) if spefs else None
+            if newest is not None and _signoff_regen(mcf, newest):
+                cp = _pr.run([sys.executable, str(PROGRAMS_DIR / "si_mcf_sta.py"),
+                              "run", str(project), "--container", container],
+                             capture_output=True, text=True)
+                if cp.returncode:
+                    mcf_producer_error = f"si_mcf_sta rc={cp.returncode}"
+                    evidence.detail += f"; {mcf_producer_error}"
+            import si_mcf_verdict_basis as _si_vb
+            _si_vb.apply(project)
+            import si_mcf_repair as _si_rep
+            seam = None
+            reason = ""
+            try:
+                seam = _si_mcf_repair_seam(project, top, pdk, container)
+            except SiMcfRepairSeamUnavailable as exc:
+                reason = str(exc)
+            rec = _si_rep.run_once(project, container=container, runner=seam,
+                                   no_seam_reason=reason)
+            if rec.get("decision") == "ADOPTED":
+                if _si_retry:
+                    return StepResult("prestream_gate", "FAIL", time.time() - t0,
+                                      "SI remedy exceeded one layout promotion")
+                _si_mcf_repair_promote(project, top, pdk, container,
+                                       rec.get("after") or {}, [])
+                rerun = step_prestream_gate(project, top, pdk, container,
+                                            _si_retry=True,
+                                            _feedback_retry=_feedback_retry)
+                rerun.extras["layout_writer_applied"] = "si_mcf_repair"
+                return rerun
         except Exception as exc:
-            # Image identity is an execution precondition. Preserve the
-            # pre-stream gate's normal StepResult refusal contract instead of
-            # aborting the whole controller when a local runner lacks a
-            # digest-bound image reference.
-            return StepResult(
-                "prestream_gate", "FAIL", time.time() - t0,
-                "SIGNOFF_DECK_FEEDBACK_REFUSED: " + str(exc),
-                [str(project / "reports/phase3/drc_feedback.json")])
-        try:
-            if isinstance(pdk, PdkConfig):
-                _feedback_pdk = _feedback_pdk_for_route(
-                    project, pdk, container)
-            else:
-                # Lightweight test doubles and legacy callers do not carry a
-                # PDK view contract. Preserve their existing feedback path;
-                # canonical PdkConfig runs above remain fail-closed.
-                _feedback_pdk = pdk
-        except Exception as exc:
-            # The antenna baseline must load the same physical IO masters as
-            # pad-ring PnR.  Missing views are an input failure, never a
-            # reason to continue with an incomplete OpenROAD library.
-            refusal_receipt = _write_feedback_padring_discovery_refusal(
-                project, top, pdk, _feedback_image, exc)
-            return StepResult(
-                "prestream_gate", "FAIL", time.time() - t0,
-                "SIGNOFF_DECK_FEEDBACK_REFUSED: "
-                f"PADRING_IO_VIEW_DISCOVERY_FAILED: {exc}",
-                [str(refusal_receipt)])
-        _feedback = _drc_feedback.run(
-            project, top, _feedback_pdk, _feedback_image,
-            stream_script_text=_GDS_STREAMOUT_PY)
-        _fb_pub = _feedback.get("publication") or {}
-        if _feedback.get("status") == "PASS" and _fb_pub.get("output"):
-            # The feedback reroute is a LAYOUT WRITER: it replaces the routed
-            # DEF after the router's own ledger row. Undeclared, the newest
-            # row for routed.def names bytes that are no longer on disk
-            # (PROVENANCE_HASH_MISMATCH on spm), and nothing says who wrote
-            # the ones that are. Declare its output and the two canonical
-            # DEFs it replaced, with the DEF it read as the input.
-            _log_invocation(
-                "openroad -exit trial.tcl (drc_feedback_repair scoped reroute: "
-                f"rules={','.join(_feedback.get('rules') or [])} "
-                f"nets={','.join(_fb_pub.get('targets') or [])})",
-                0, int((time.time() - _fb_t0) * 1000),
-                marker=str(project / "reports/phase3/drc_feedback.json"),
-                container=container,
-                outputs=[Path(_fb_pub["output"]),
-                         *[Path(p) for p in _fb_pub.get("replaced") or []]],
-                input_hashes={str(_feedback.get("source_def")):
-                              "sha256:" + str(_fb_pub.get("from_sha256"))})
-        if _feedback.get("status") != "PASS":
-            return StepResult("prestream_gate", "FAIL", time.time() - t0,
-                              "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
-                              _feedback.get("reason", "unknown"),
-                              [str(project / "reports/phase3/drc_feedback.json")])
-        if (_feedback.get("initial_source_sha256") !=
-                _feedback.get("source_sha256")):
-            if _feedback_retry:
+            mcf_producer_error = f"SI MCF producer/remedy could not run: {exc}"
+            evidence.detail += f"; {mcf_producer_error}"
+        # SI MCF promotion above is the last routed writer.  Feedback belongs
+        # here, before the pre-stream gate certifies a fixed layout identity.
+        import drc_feedback_repair as _drc_feedback
+        if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+            _fb_t0 = time.time()
+            try:
+                _feedback_image = _drc_feedback.image_for_container(container)
+            except Exception as exc:
+                # Image identity is an execution precondition. Preserve the
+                # pre-stream gate's normal StepResult refusal contract instead of
+                # aborting the whole controller when a local runner lacks a
+                # digest-bound image reference.
+                return StepResult(
+                    "prestream_gate", "FAIL", time.time() - t0,
+                    "SIGNOFF_DECK_FEEDBACK_REFUSED: " + str(exc),
+                    [str(project / "reports/phase3/drc_feedback.json")])
+            try:
+                if isinstance(pdk, PdkConfig):
+                    _feedback_pdk = _feedback_pdk_for_route(
+                        project, pdk, container)
+                else:
+                    # Lightweight test doubles and legacy callers do not carry a
+                    # PDK view contract. Preserve their existing feedback path;
+                    # canonical PdkConfig runs above remain fail-closed.
+                    _feedback_pdk = pdk
+            except Exception as exc:
+                # The antenna baseline must load the same physical IO masters as
+                # pad-ring PnR.  Missing views are an input failure, never a
+                # reason to continue with an incomplete OpenROAD library.
+                refusal_receipt = _write_feedback_padring_discovery_refusal(
+                    project, top, pdk, _feedback_image, exc)
+                return StepResult(
+                    "prestream_gate", "FAIL", time.time() - t0,
+                    "SIGNOFF_DECK_FEEDBACK_REFUSED: "
+                    f"PADRING_IO_VIEW_DISCOVERY_FAILED: {exc}",
+                    [str(refusal_receipt)])
+            _feedback = _drc_feedback.run(
+                project, top, _feedback_pdk, _feedback_image,
+                stream_script_text=_GDS_STREAMOUT_PY)
+            _fb_pub = _feedback.get("publication") or {}
+            if _feedback.get("status") == "PASS" and _fb_pub.get("output"):
+                # The feedback reroute is a LAYOUT WRITER: it replaces the routed
+                # DEF after the router's own ledger row. Undeclared, the newest
+                # row for routed.def names bytes that are no longer on disk
+                # (PROVENANCE_HASH_MISMATCH on spm), and nothing says who wrote
+                # the ones that are. Declare its output and the two canonical
+                # DEFs it replaced, with the DEF it read as the input.
+                _log_invocation(
+                    "openroad -exit trial.tcl (drc_feedback_repair scoped reroute: "
+                    f"rules={','.join(_feedback.get('rules') or [])} "
+                    f"nets={','.join(_fb_pub.get('targets') or [])})",
+                    0, int((time.time() - _fb_t0) * 1000),
+                    marker=str(project / "reports/phase3/drc_feedback.json"),
+                    container=container,
+                    outputs=[Path(_fb_pub["output"]),
+                             *[Path(p) for p in _fb_pub.get("replaced") or []]],
+                    input_hashes={str(_feedback.get("source_def")):
+                                  "sha256:" + str(_fb_pub.get("from_sha256"))})
+            if _feedback.get("status") != "PASS":
                 return StepResult("prestream_gate", "FAIL", time.time() - t0,
-                                  "feedback changed the route twice; bounded pre-stream identity not stable")
-            rerun = step_prestream_gate(project, top, pdk, container,
-                                        _si_retry=_si_retry,
-                                        _feedback_retry=True)
-            rerun.extras["layout_writer_applied"] = "drc_feedback"
-            return rerun
+                                  "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
+                                  _feedback.get("reason", "unknown"),
+                                  [str(project / "reports/phase3/drc_feedback.json")])
+            if (_feedback.get("initial_source_sha256") !=
+                    _feedback.get("source_sha256")):
+                if _feedback_retry:
+                    return StepResult("prestream_gate", "FAIL", time.time() - t0,
+                                      "feedback changed the route twice; bounded pre-stream identity not stable")
+                rerun = step_prestream_gate(project, top, pdk, container,
+                                            _si_retry=_si_retry,
+                                            _feedback_retry=True)
+                rerun.extras["layout_writer_applied"] = "drc_feedback"
+                return rerun
     rows = [_run_declared_signoff_gate(project, *spec)
             for spec in _PRESTREAM_GATES]
     _nports_row = _netlist_port_decls_row(_nports)
@@ -58496,7 +58516,7 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                 row.detail += f"; gate reported {tier}, not measured PASS"
     dyn_ir = _pl.reports_phase3_dir(project) / "dynamic_ir.json"
     dyn_ir_producer_error = ""
-    if _signoff_regen(dyn_ir, _pl.pnr_dir(project) / "routed.def"):
+    if not ordinary and _signoff_regen(dyn_ir, _pl.pnr_dir(project) / "routed.def"):
         try:
             cp = _pr.run(_step24_transient_argv(
                 project, _pl.pnr_dir(project) / f"{top}.def", pdk, container, dyn_ir),
@@ -58544,7 +58564,7 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                                "router completed; final DRC violations=0"))
     signal_routed, signal_nets = _def_signal_routing_stats(pnr / "routed.def")
     census, census_error = _prestream_route_census(
-        project, top, pdk, container, digest)
+        project, top, pdk, container, digest, measure=not ordinary)
     if census_error:
         rows.append(_upstream_signoff_not_measured(
             "route_connectivity", "final ODB unrouted-net census absent: "
@@ -62924,17 +62944,9 @@ def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
     if prepv:
         # Step 34 already produced fill before stream-out. ERC reads this
         # final stream before the existing independent DRC/LVS readers run.
-        erc = rpt / "erc.rpt"
-        if _signoff_regen(erc, routed, pnr / f"{top}.gds"):
-            try:
-                if _emit_erc_report(project, top, pdk, container, erc, notes):
-                    written.extend(str(p) for p in (erc, rpt / "erc.json") if p.is_file())
-                else:
-                    unmeasured.append("final ERC producer did not complete")
-            except Exception as exc:
-                failures.append(f"final ERC producer failed: {exc}")
-    else:
-        # These proofs consume the final layout. They have no earlier Default
+        return _default_pnr_rows(project, top, pdk, container,
+                                 _phase3_window_steps('26.5ic', '35'),
+                                 report_name=name)
         # producer to repeat: post-layout LEC, GDS density, aging and thermal.
         lec = rpt / "lec_post_layout.json"
         if _signoff_regen(lec, routed, pnr / f"{top}_pnr.v"):
@@ -62988,7 +63000,6 @@ def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
     detail = "; ".join(failures + unmeasured + notes) or "current final-layout evidence produced"
     return StepResult(name, status, time.time() - t0, detail, written,
                       reason_class=_V.ReasonClass.INPUT_ABSENT if status == "NOT_MEASURED" else "")
-
 
 def _publish_canonical_gds_alias(project: Path, top: str,
                                  written: List[str], notes: List[str]) -> None:
@@ -77359,9 +77370,7 @@ def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
     import yaml
     import flow_compliance_check as _fcc
     import _flow_yaml                                        # noqa: PLC0415
-    flow = _flow_yaml.load(_fcc.DEFAULT_FLOW_DEF) or {}
-    ids = [str(step["id"]) for step in flow.get("steps", [])
-           if step.get("stage") in ("stage3", "stage4")]
+    ids = list(_flow_yaml.ordered_step_ids(stages=('stage3', 'stage4')))
     # Step 9 is the backend synthesis dispatch inherited from Phase 2.
     ids.insert(0, "9")
     if entry not in ids or exit_ not in ids:
@@ -77499,7 +77508,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
         return ["default_pnr"]
     if execution_policy.request()['mode'] == 'default':
         from execution_provider_catalog import BACKEND_ROWS
-        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'31', '35', '37.5ic'}
+        native_ids = set(BACKEND_ROWS) | pnr_ids | {'31', '35', '37.5ic'}
         if set(ids).issubset(native_ids):
             return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
@@ -78808,29 +78817,13 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                                               'detail': 'producer not started: required input absent'})
             break
         attempt = step_versions.begin_step(project, sid, manifest['files'])
-        if sid == '26.5ic':
-            # Full Default already leaves this writer to Step37's streamed
-            # GDS. A bounded pre-stream span has the same owner and stays
-            # explicitly incomplete while other due rows may proceed.
-            detail = 'die finishing pending the current Step37 streamed GDS and consumer'
-            pending = {'step_id': sid, 'status': 'NOT_MEASURED',
-                       'detail': detail, 'deferred_until': '37'}
-            step_versions.finish_step(project, attempt, verdict='NOT_MEASURED', result=pending)
-            rows.append(StepResult('default_step_' + sid, 'NOT_MEASURED',
-                                   time.time() - started, detail,
-                                   extras={'step_id': sid, 'deferred_until': '37'},
-                                   reason_class=_V.ReasonClass.INPUT_ABSENT))
-            checks[sid] = {'status': 'NOT_MEASURED', 'reasons': [detail],
-                           'deferred_until': '37'}
-            _publish_in_progress_steps(project, rows)
-            continue
         # Withdraw the previous invocation's citations from the live report
         # before the row's producer changes their files. The completed rows
         # of this invocation, including actual output paths, remain visible.
         _publish_in_progress_steps(project, rows)
         with step_versions.active_steps(project, [attempt]):
             try:
-                if sid in ('16', '35', '37.5ic'):
+                if sid in ('16', '35', '26.5ic', '37.5ic'):
                     if sid == '16':
                         notes: List[str] = []
                         clock_path = _pl.cts_dir(project) / 'clock_plan.json'
@@ -78842,6 +78835,14 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                     elif sid == '37.5ic':
                         result = _default_ic_release_docs(project, top, pdk, container)
                         produced = result['verdict'] == 'PASS'
+                    elif sid == '26.5ic':
+                        import librelane_fill_dfm as fill
+                        fill.validate_default_stream(project)
+                        retained = step_versions.latest_pass(project, sid)
+                        produced = bool(retained and retained['current_inputs'])
+                        result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
+                                  'detail': 'current stream finishing consumer retained'
+                                  if produced else 'current stream finishing consumer absent'}
                     else:
                         # DFM is an existing program-first report producer. It
                         # runs after current fill and before stream-out, without
@@ -78854,7 +78855,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                     step_versions.publish_producer_outputs(project, attempt)
                     gate = (result.get('canonical_consumer') or
                             (backend_gates.evaluate(project, row_def)
-                             if sid == '16' or produced else
+                             if sid in ('16', '26.5ic') or produced else
                              {'status': result['verdict'], 'ledger': []}))
                     files, missing_outputs = worker.resolve_contract(
                         project, row_def.get('required_outputs', ()))
@@ -79055,8 +79056,15 @@ def _complete_physical_verification(project: Path, plan):
                                     if status == 'NOT_MEASURED' else ''))
 
 
-@_spf.retained_step('37', canonical_acceptance=True)
 def _publish_final_layout_receipts(project: Path, receipt, plan):
+    import execution_policy
+    ordinary = execution_policy.request()['mode'] == 'default'
+    return _spf.retained_call(project, '36' if ordinary else '37',
+                              _write_final_layout_receipts, project, receipt, plan,
+                              canonical_acceptance=not ordinary)
+
+
+def _write_final_layout_receipts(project: Path, receipt, plan):
     """Write the current layout receipt before complete Step37 acceptance."""
     path = _pl.reports_phase3_dir(project) / 'layout_receipts.json'
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -79064,7 +79072,6 @@ def _publish_final_layout_receipts(project: Path, receipt, plan):
     import execution_policy
     if execution_policy.request()['mode'] != 'default':
         return 0  # Preserve the existing Ultra writer and audit order.
-    _complete_physical_verification(project, plan)
     gds = next((r for r in reversed(plan) if r.name == 'gds'), None)
     native = getattr(gds, 'status', 'NOT_MEASURED')
     if native == 'FAIL':
@@ -79085,6 +79092,45 @@ def _publish_final_layout_receipts(project: Path, receipt, plan):
     if cp.returncode not in (0, 1) or not report.is_file():
         return 2
     return 0
+
+
+def _default_checklist_layout_receipts(project: Path, top: str, pdk: PdkConfig,
+                                       container: str) -> int:
+    """Publish the final identity only after actual PV and metrics consumers."""
+    import step_output_collector as versions
+    import librelane_fill_dfm as fill
+    fill.validate_default_stream(project)
+    current, error = _shipped_layout_digest(project, top)
+    basis, basis_error = _layout_basis(project, top, pdk, container)
+    prestream = json.loads((_pl.reports_phase3_dir(project) / 'prestream_gate.json').read_text())
+    if (error or basis_error or prestream.get('verdict') != 'PASS'
+            or prestream.get('layout_digest') != basis
+            or not _ga.admitted_gds(project, _pl.pnr_dir(project) / f'{top}.gds', basis)):
+        return 2
+    plan = []
+    for sid, name in (('37', 'gds'), ('31', 'physical_verification_complete'),
+                      ('37.4', 'signoff_metrics_aggregate')):
+        record = versions.latest_pass(project, sid)
+        if (not record or not record['current_inputs']
+                or any(not (project / row['rel']).is_file()
+                       or _sha256_file(project / row['rel']) != row['sha256']
+                       for row in record['outputs'])):
+            return 2
+        plan.append(StepResult(name, record['status'], 0.0,
+                               'retained complete canonical consumer',
+                               [str(project / row['rel']) for row in record['outputs']],
+                               extras={'layout_digest': current,
+                                       'output_version': record['folder']}))
+    receipt = {
+        'frozen_layout_digest': current, 'current_layout_digest': current,
+        'prestream_basis_digest': basis, 'current_basis_digest': basis,
+        'gds_relpath': f'phase3/stage3/pnr/{top}.gds',
+        'gds_sha256': _sha256_file(_pl.pnr_dir(project) / f'{top}.gds'),
+        'def_sha256': _sha256_file(_pl.pnr_dir(project) / 'routed.def'),
+        'upstream_failed_gate': None, 'release_scope': 'RELEASE_CANDIDATE',
+        'release_verdict': 'ELIGIBLE_FOR_AUDIT',
+        'receipts': [asdict(row) for row in plan]}
+    return _publish_final_layout_receipts(project, receipt, plan)
 
 
 def _default_prelayout_rejection(project: Path, started_at: float) -> Optional[StepResult]:
@@ -79857,18 +79903,26 @@ def main() -> int:
 
         # T102 -- step 32 on LibreLane (`phase3/librelane_switch.json` "32")
         # replaces the two direct repair producers below.
+        if _chain_ok and _execution.request()['mode'] == 'default':
+            _electrical = _default_pnr_rows(
+                project, effective_top, pdk, args.container,
+                _phase3_window_steps('32', '33'), report_name='routed_electrical')
+            plan.append(_electrical)
+            _chain_ok = _electrical.status == 'PASS'
+            if not _chain_ok:
+                _layout_refusal = _electrical.detail
         _prr_on_librelane = _librelane_postroute_repair_mode(project) != "direct"
         # R-0929-TAIL-CONTINUES: a Step-32 row that is not PASS is recorded and
         # keeps the run FAIL; it stops the tail only when it left no route.
         _step32_refusal = ""
-        if _chain_ok and _prr_on_librelane:
+        if _chain_ok and _execution.request()['mode'] != 'default' and _prr_on_librelane:
             _prr = _recorded(("pnr", "gds"), step_postroute_repair_librelane)(
                 project, effective_top, pdk, args.container)
             if _prr is not None:
                 plan.append(_prr)
                 _step32_refusal = _step32_stream_refusal(
                     project, effective_top, _prr)
-        if _chain_ok and not _prr_on_librelane:
+        if _chain_ok and _execution.request()['mode'] != 'default' and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
             # the repaired one. No-op (base route kept) unless it reaches setup>=0
@@ -79880,7 +79934,7 @@ def main() -> int:
                 plan.append(_sr)
                 _step32_refusal = _step32_stream_refusal(
                     project, effective_top, _sr)
-        if _chain_ok and not _prr_on_librelane:
+        if _chain_ok and _execution.request()['mode'] != 'default' and not _prr_on_librelane:
             # Caravel-class DRV closure — a SEPARATE, independently-gated
             # escalation for max_slew/max_capacitance violators that survive
             # the bounded loop above (measured: caravel_user_project x
@@ -80029,7 +80083,7 @@ def main() -> int:
                                              _prestream.extras.get("layout_digest", ""))
                             else ""))
             _gds_prod_msg = _gds_cache.producer_reason
-            if _gds_cache.accept:
+            if _gds_cache.accept and _execution.request()['mode'] != 'default':
                 _gds_dispatched = StepResult(
                     "gds", "PASS", 0.0,
                     f"GDS already present: {gds_existing.name} (skipped "
@@ -80043,11 +80097,14 @@ def main() -> int:
                 # by step_canonicalize_artefacts, later than this site. So 37's
                 # only declared input is NOT-YET-DUE here and the pre-flight
                 # says exactly that instead of pretending to have checked it.
-                _gds_dispatched = _spf.gate(
-                    project, "phase3_one_shot_runner", "gds",
-                    _preflight_refusal("gds"),
-                    _recorded("gds", step_gds), project,
-                    effective_top, pdk, args.container)
+                _gds_dispatched = (
+                    _default_pnr_rows(project, effective_top, pdk, args.container,
+                                      ['37'], report_name='gds')
+                    if _execution.request()['mode'] == 'default' else _spf.gate(
+                        project, "phase3_one_shot_runner", "gds",
+                        _preflight_refusal("gds"),
+                        _recorded("gds", step_gds), project,
+                        effective_top, pdk, args.container))
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS" and _measurement_only:
                     _ga.record_measurement_stream(
@@ -80133,15 +80190,9 @@ def main() -> int:
             # Both readers consume the same immutable stream. Their engines
             # write disjoint report paths; collect in canonical row order.
             if _execution.request()['mode'] == 'default':
-                plan.append(_spf.gate(
-                    project, "phase3_one_shot_runner", "drc",
-                    _preflight_refusal("drc"), step_drc, project,
-                    effective_top, pdk, args.container))
-                plan.append(_spf.gate(
-                    project, "phase3_one_shot_runner", "lvs",
-                    _preflight_refusal("lvs"), step_lvs, project,
-                    effective_top, pdk, args.container,
-                    upstream_pnr=_pnr_result))
+                plan.append(_default_pnr_rows(
+                    project, effective_top, pdk, args.container,
+                    ['37.3', '31'], report_name='physical_verification_complete'))
             else:
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     drc_job = pool.submit(

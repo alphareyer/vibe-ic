@@ -2301,20 +2301,18 @@ def _main() -> int:
         f"--{n} {v}" for n, v in (("entry-step", getattr(args, "entry_step", None)),
                                   ("exit-step", getattr(args, "exit_step", None))) if v)
     _fd_bounded = False
-    _p3_exit_cut = None
-    if args.exit_step:
-        try:
-            from decimal import Decimal
-            _p3_exit_cut = Decimal(str(args.exit_step))
-        except Exception:
-            pass
-    # A canonical exit before physical design suppresses Phase 3 altogether.
-    # An exit inside physical design is forwarded to its runner; only a child
-    # report from THIS invocation may make the front door call that bounded.
-    _p3_skip_by_exit = (_p3_exit_cut is not None and _p3_exit_cut < 15)
-    _p3_forward_window = (not args.skip_phase3 and
-                          _p3_exit_cut is not None and
-                          15 <= _p3_exit_cut < 37)
+    import _flow_yaml
+    _canonical_order = _flow_yaml.ordered_step_ids()
+    _physical_order = _flow_yaml.ordered_step_ids(stages=('stage3', 'stage4'))
+    _exit_label = str(args.exit_step) if args.exit_step else None
+    # IDs survive reordering. In particular final PV31 follows stream37;
+    # comparing their numbers would launch a whole backend for a narrow exit.
+    _p3_skip_by_exit = bool(
+        _exit_label in _canonical_order and _physical_order
+        and _canonical_order.index(_exit_label)
+        < _canonical_order.index(_physical_order[0]))
+    _p3_forward_window = bool(not args.skip_phase3
+                              and _exit_label in _physical_order)
     _p3_window_ran = False
     if _fd_window_flags:
         try:

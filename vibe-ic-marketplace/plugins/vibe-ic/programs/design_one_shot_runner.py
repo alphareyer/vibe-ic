@@ -26392,9 +26392,14 @@ def main() -> int:
         spans = dict(sites)
         entry_span = spans.get(_entry_site, ())
         exit_span = spans.get(str(args.exit_step), ())
-        return ((not entry_span or int(step_id) >= int(entry_span[0]))
-                and (not args.exit_step or int(step_id) <= int(
-                    exit_span[-1] if exit_span else args.exit_step)))
+        import _flow_yaml
+        order = _flow_yaml.ordered_step_ids()
+        sid = str(step_id)
+        low = str(entry_span[0]) if entry_span else None
+        high = str(exit_span[-1] if exit_span else args.exit_step) if args.exit_step else None
+        return (sid in order
+                and (low is None or order.index(sid) >= order.index(low))
+                and (high is None or high in order and order.index(sid) <= order.index(high)))
 
     def _window_step_ids() -> set:
         """Report the sites this run recorded, including any dispatch mistake.

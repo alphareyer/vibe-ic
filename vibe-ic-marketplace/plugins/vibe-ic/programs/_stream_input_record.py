@@ -123,6 +123,7 @@ def all_entries(rec: Mapping[str, Any]) -> List[Dict[str, Any]]:
         out.extend((rec.get("inputs") or {}).get(k) or [])
     if rec.get("rcfile"):
         out.append(rec["rcfile"])
+    out.extend((rec.get('native_cli') or {}).get('inputs') or [])
     return out
 
 
