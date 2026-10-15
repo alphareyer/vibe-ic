@@ -55,14 +55,22 @@ def _project(tmp_path: Path) -> Path:
 
 def _pdk(monkeypatch, drv=None):
     pdk = PL._corner_pdk(monkeypatch, "/foss/pdks/x/nom.lib")
-    # These tests own SDC authoring/hand-off, not STA execution. Supply the
-    # native edge's current report contract so the real Step-10 compose and
-    # sta_report_check CLI can still judge it. The old helper returned False
-    # (no report) while _step7 below asserted the whole step was measured.
-    monkeypatch.setattr(R, "_emit_multi_corner_sta", _fixture_corner_sta)
     if drv is not None:
         monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: dict(drv))
     return pdk
+
+
+@pytest.fixture(autouse=True)
+def _complete_corner_fixture_contract(monkeypatch):
+    # Some legacy cases call PL._corner_pdk directly to select another
+    # Liberty. Complete that shared fixture edge, including those callers,
+    # without changing their input setup or acceptance assertions.
+    corner_pdk = PL._corner_pdk
+    def complete(*args, **kwargs):
+        pdk = corner_pdk(*args, **kwargs)
+        monkeypatch.setattr(R, "_emit_multi_corner_sta", _fixture_corner_sta)
+        return pdk
+    monkeypatch.setattr(PL, "_corner_pdk", complete)
 
 
 def _fixture_corner_sta(project, top, pdk, container, libs, out, notes,
