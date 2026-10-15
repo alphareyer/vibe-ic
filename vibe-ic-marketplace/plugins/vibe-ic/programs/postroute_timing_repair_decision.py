@@ -460,6 +460,7 @@ def decide(stance: Union["Path", str, dict, None],
            signoff_reports: Optional[Dict[str, Any]] = None,
            single_corner_evidence: Optional[str] = None,
            producer_receipt: Optional[Dict[str, Any]] = None,
+           timing_basis: Optional[str] = None,
            ) -> Dict[str, Any]:
     """Return the post-route timing-repair trigger decision.
 
@@ -480,6 +481,9 @@ def decide(stance: Union["Path", str, dict, None],
         and withholds the no-repair certificate. The multi-corner OCV basis,
         when authoritative, replaces it. Echoed as ``timing_basis_status``
         ("LEGACY_BOOLEAN" when omitted).
+      timing_basis: OPTIONAL description of an explicitly supplied measured
+        timing state. The legacy single-corner label remains the default;
+        this label changes no timing or non-timing decision policy.
       producer_receipt: OPTIONAL bound Step-32 PRODUCER receipt (a decision
         record that `verify_receipt` accepted and that the canonical recorder
         did not write). R-0929-STEP32-RECORD: its ``repair_needed=true`` is
@@ -519,7 +523,7 @@ def decide(stance: Union["Path", str, dict, None],
         IR-drop / EM / SI / PV sign-off (v1.7.64).
     """
     out: Dict[str, Any] = {
-        "basis": "single_corner_tt",
+        "basis": timing_basis or "single_corner_tt",
         "mc_ocv_available": False,
         "timing_repair_needed": not single_corner_clean,
         "repair_needed": not single_corner_clean,

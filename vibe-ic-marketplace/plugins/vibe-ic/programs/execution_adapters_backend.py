@@ -792,7 +792,10 @@ def backend_project_input_contract(project: Path, step_id: str, *,
                 or not constraint_rel.name.endswith(".asic.sdc")):
             raise ValueError(f"Step-7 constraint path is unsafe: {issued_constraint!r}")
         for raw in (
-            "provenance.jsonl",
+            # Step32 reads and appends this promotion audit journal; it is
+            # not immutable design input to its native measurement/consumer.
+            # Retain the existing journal dependency for other backend rows.
+            *(("provenance.jsonl",) if step_id != "32" else ()),
             "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
             "phase2/stage2/constraints/asic_sdc.json",
             issued_constraint,

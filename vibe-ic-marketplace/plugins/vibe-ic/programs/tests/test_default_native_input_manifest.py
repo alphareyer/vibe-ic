@@ -26,12 +26,13 @@ def test_default_current_native_manifest_reaches_the_consumer(tmp_path, monkeypa
     _write(project, "input/step_0_5ic_answers.json", '{"route":"DIE"}\n')
     _write(project, "input/submission_template/tapeout_declaration.json", '{"route":"DIE"}\n')
     route = _write(project, "phase3/stage3/pnr/routed.def", "original routed layout\n")
-    source = project / "provenance.jsonl"
+    source = project / "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
     original_source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     child = "phase2/stage1/sim/tb/source_control.v"
     if case == "directory":
         _write(project, child, "module source_control; endmodule\n")
-    missing = ["provenance.jsonl", "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"]
+    missing = ["phase2/stage2/constraints/spm.asic.sdc",
+               "phase3/librelane/prelayout/gates/step8_sdc_opensta.json"]
     if case == "missing":
         for raw in missing:
             (project / raw).unlink()
@@ -65,10 +66,16 @@ def test_default_current_native_manifest_reaches_the_consumer(tmp_path, monkeypa
         else:
             _write(root, "phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
                    "neutral instrument found no repair needed\n")
-        decision = json.dumps({"repair_needed": case == "updated_route"})
-        for suffix in (".json", ".canonical.json"):
-            _write(root, "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision" + suffix,
-                   decision)
+        # This instrument emits only its native report and bound raw decision.
+        # The real Step32 producer must publish the canonical policy record.
+        native_source = _write(root, "reports/phase3/librelane_postroute_repair.json", json.dumps({
+            "final": {"setup_ws_min": 0.5, "hold_ws_min": 0.2, "drv_count": 0},
+            "adopted": None}))
+        decision = {"repair_needed": case == "updated_route",
+                    "source_report": str(native_source.relative_to(root)),
+                    "source_report_sha256": hashlib.sha256(native_source.read_bytes()).hexdigest()}
+        _write(root, "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+               json.dumps(decision))
         return runner.StepResult("postroute_repair_librelane",
             "FAIL" if case == "measured_fail" else "PASS", 0,
             "controlled native failure" if case == "measured_fail" else "neutral instrument complete")
@@ -94,11 +101,11 @@ def test_default_current_native_manifest_reaches_the_consumer(tmp_path, monkeypa
         assert receipt["verdict"] == expected, receipt
         if case != "measured_fail":
             current = receipt["current_step_declared_producers"]
-            assert seen["manifest"]["files"]["provenance.jsonl"] == original_source_sha
+            assert seen["manifest"]["files"]["phase3/librelane/prelayout/gates/step8_sdc_opensta.json"] == original_source_sha
             if case == "changed":
-                assert current["reason"] == "NATIVE_CURRENT_INPUT_CHANGED: provenance.jsonl"
+                assert current["reason"] == "NATIVE_CURRENT_INPUT_CHANGED: phase3/librelane/prelayout/gates/step8_sdc_opensta.json"
             else:
-                assert current["inputs"]["provenance.jsonl"]["sha256"] == original_source_sha
+                assert current["inputs"]["phase3/librelane/prelayout/gates/step8_sdc_opensta.json"]["sha256"] == original_source_sha
                 assert current["verdict"] == "PRODUCED"
                 assert receipt["canonical_step_result"]["status"] == "PASS", receipt
                 assert {r["gate"] for r in receipt["gate_ledger"]} >= {

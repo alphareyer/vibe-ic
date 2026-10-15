@@ -1395,6 +1395,32 @@ def produce_signoff(project, params):
             return {'verdict': result.get('verdict', 'NOT_MEASURED'), 'detail': str(result.get('reason', ''))}
     elif sid == '32':
         row = R.step_postroute_repair_librelane(project, top, pdk, container)
+        if row.status == 'PASS':
+            # The current receipt is checked before the legacy all-step
+            # canonicalizer runs. Publish this row's existing canonical
+            # decision now, from its bound native measurement, without
+            # replacing the producer's raw decision or rerunning STA.
+            out = project / 'phase3/stage3/postroute_timing_repair'
+            producer = R._step32_producer_receipt(project, out)
+            if producer is None:
+                return {'verdict': 'NOT_MEASURED',
+                        'detail': 'current Step-32 bound producer decision absent'}
+            import librelane_postroute_repair as repair
+            source = project / producer['source_report']
+            report = json.loads(source.read_text())
+            trigger = repair.measured_repair_trigger(report.get('final') or {})
+            timing = ('NOT_MEASURED' if any(key in trigger['missing'] for key in
+                                          ('setup_ws_min', 'hold_ws_min'))
+                      else 'VIOLATED' if any(key in trigger['violated'] for key in
+                                            ('setup_ws_min', 'hold_ws_min'))
+                      else 'CLEAN')
+            decision = R._repair_dec.decide(
+                None, timing == 'CLEAN', project=project,
+                single_corner_evidence=timing, producer_receipt=producer,
+                timing_basis='current Step-32 STAPostPNR per-corner census')
+            if R._publish_step32_decision(
+                    project, decision, source, source, out, producer, written, notes):
+                return {'verdict': 'NOT_MEASURED', 'detail': '; '.join(notes)}
         return {'verdict': row.status, 'detail': row.detail}
     elif sid == '33':
         # Run OpenSTA's native report_power on the selected current SPEFs.
