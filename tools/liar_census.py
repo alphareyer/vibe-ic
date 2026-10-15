@@ -615,6 +615,10 @@ def population_report(flow_yaml: Path) -> Dict[str, Any]:
                 if key in _NON_PROGRAM_CLAUSE_KEYS:
                     non_program[key] = non_program.get(key, 0) + 1
                     continue                     # runs no program: not our subject
+                # This typed flag changes AND evaluation order, not its clause
+                # population. Children under all_of must still all be swept.
+                if key == "all_of_eager" and type(val) is bool:
+                    continue
                 if key not in _GATE_STRUCTURE_KEYS:
                     unrecognised[key] = unrecognised.get(key, 0) + 1
                 in_gate(val)

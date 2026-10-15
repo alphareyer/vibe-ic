@@ -3900,3 +3900,27 @@ def test_a_shipped_rename_spelled_the_old_way_again_is_MISSING(tmp_path, row):
     short = lc.clause_floor_shortfall(flow, lc.CLAUSE_FLOOR)
     assert short["missing"] == [row["to"]], short["missing"]
     assert row["from"] in short["surplus"], short["surplus"]
+
+
+def test_eager_all_of_metadata_keeps_both_programs_in_the_census(tmp_path):
+    """Recognize the actual typed flag without hiding unknown gate shapes."""
+    flow = tmp_path / "eager.yaml"
+    template = """steps:
+  - id: 99
+    gate:
+      FLAG: VALUE
+      all_of:
+        - program_exit_zero: "alpha ."
+        - program_exit_zero: "beta ."
+"""
+    for value in ("true", "false"):
+        flow.write_text(template.replace("FLAG", "all_of_eager").replace("VALUE", value))
+        pop = lc.population_report(flow)
+        assert pop["declared"] == pop["swept"] == 2
+        assert pop["unrecognised"] == {}
+        assert {row.program for row in lc.discover_clauses(flow)} == {"alpha", "beta"}
+    for flag, value in (("all_of_eager", '"true"'), ("all_of_eagre", "true")):
+        flow.write_text(template.replace("FLAG", flag).replace("VALUE", value))
+        pop = lc.population_report(flow)
+        assert pop["declared"] == pop["swept"] == 2
+        assert pop["unrecognised"] == {flag: 1}
