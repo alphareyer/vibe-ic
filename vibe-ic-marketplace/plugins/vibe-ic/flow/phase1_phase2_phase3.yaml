@@ -8191,7 +8191,7 @@ steps:
         # (invocation > declared > on_disk; `none` is rc 1).
         # BLAST RADIUS over the 13 published runs carrying this artefact: 0.
         # All 6 runs green on this gate today stay green.
-        - program_exit_zero: "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --under reports/phase3/drc_signoff.log --json reports/phase3/drc_signoff.json"
+        - program_exit_zero: "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --under reports/phase3/drc_signoff.log --subject reports/phase3/drc_signoff.rpt --json reports/phase3/drc_signoff.json"
         # W2.3 — THE EXTRACTOR'S OWN ERROR CHANNEL, READ BEFORE ITS OUTPUT IS
         # BELIEVED. Placed HERE, above the two LVS clauses, because that is the
         # order the question has to be asked in: magic files every rectangle it
