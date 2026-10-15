@@ -209,6 +209,9 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         assert result and result["canonical_pass"] is True
         assert len(observation["required_outputs"]) == 9
         assert all(observation["required_outputs"].values())
+        perc = json.loads((project / "reports/phase3/perc_sweep.json").read_text())
+        assert perc["program"] == perc["sweep"] == "perc_corpus_sweep"
+        assert perc["invoked_as"] == "producer"
     else:
         assert rc != 0
         assert result is None or result["current_inputs"] is not True
