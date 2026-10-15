@@ -113,7 +113,7 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
         "path": str(root), "derivation": {"image_id": image_id}}))
     refs = {}
     for kind, rc in (("setup", "nom"), ("hold", "max")):
-        spef = put(project, f"phase3/stage3/rcx/{rc}/top.{rc}.spef", "*SPEF neutral\n")
+        spef = put(project, f"phase3/stage3/rcx/{rc}/top.{rc}.spef", f"*SPEF neutral {rc}\n")
         refs[f"{rc}/top.{rc}.spef"] = sha(spef)
         put(project, f"phase3/stage3/sta/sta_mcorner_ocv_{kind}.tcl",
             f"read_liberty {lib}\n"
