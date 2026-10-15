@@ -463,7 +463,8 @@ def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
             "registers": registers}
 
 
-def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
+def _transition_pair(mod: dict, reset_bit: int,
+                     payload_by_q: Optional[dict] = None) -> Tuple[dict, List[dict]]:
     """Two native combinational next-state models sharing every Q/data bit.
 
     Only the selected top reset differs (0 versus 1). Original combinational
@@ -546,17 +547,25 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
         signed = _param_bit(cell.get("parameters", {}).get(pin + "_SIGNED"))
         return values[-1] if signed and values else "0"
 
-    def mask_control(bit, seen=frozenset()):
-        """A data-branch result is not a reset control merely by cone reach.
+    def mask_control(bit, q, seen=frozenset()):
+        """A control cannot be selected by a shared cofactor payload value.
 
-        Preserve original mux provenance all the way through the candidate
-        mask predicate. A select between two variable data expressions must
-        stay data even when another AND/OR surrounds it. Literal branches
-        retain their explicit force provenance. Other native Boolean control
-        expressions keep their original gate semantics; no data cube is mined.
+        The native, reset-normalized next-state cofactors identify data/Q
+        support common to both arms. Reading that payload to obtain a convenient
+        zero/one is data selection, including when an ordinary mux has been
+        lowered to Boolean gates. This test applies to every operator uniformly;
+        no mux/gate spelling is blacklisted and no SAT cube is mined. Support is
+        conservative, so an unclosed data/control distinction remains refused.
         """
-        if not isinstance(bit, int) or bit in free or bit == reset_bit:
+        payload = (payload_by_q or {}).get(q)
+        if payload is None:
+            return False
+        if bit == reset_bit:
+            return True
+        if not isinstance(bit, int):
             return bit not in {"x", "z"}
+        if bit in free:
+            return bit not in payload
         if bit in seen:
             return False
         cell = drivers.get(bit)
@@ -564,15 +573,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
             return False
         conn = cell.get("connections") or {}
         seen = seen | {bit}
-        if cell.get("type") in {"$mux", "$bwmux"}:
-            try:
-                index = conn["Y"].index(bit)
-                a, b = input_bit(cell, "A", index), input_bit(cell, "B", index)
-            except (IndexError, KeyError, ValueError):
-                return False
-            if a != b and a not in {"0", "1"} and b not in {"0", "1"}:
-                return False
-        return all(mask_control(value, seen)
+        return all(mask_control(value, q, seen)
                    for pin, values in conn.items()
                    if cell.get("port_directions", {}).get(pin) == "input"
                    for value in values)
@@ -605,7 +606,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
     def reduced_roles(kind, values, arm, q, seen):
         control = [v for v in values if isinstance(v, int) and v in cone]
         data = [v for v in values if not (isinstance(v, int) and v in cone)]
-        if control and data and all(mask_control(v) for v in control):
+        if control and data and all(mask_control(v, q) for v in control):
             role_provenance.append({"kind": "native vector reduction",
                 "control_bits": control, "branch_roles": "dominating Boolean mask / unchanged vector data"})
             return masked_roles(kind, reduced_roles(kind, data, arm, q, seen),
@@ -656,7 +657,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 left, right = input_bit(cell, "A", i), input_bit(cell, "B", i)
                 a, b = d_roles(left, arm, q, seen), d_roles(right, arm, q, seen)
                 controls = [v for v in (left, right) if isinstance(v, int) and v in cone]
-                if len(controls) == 1 and kind in {"$and", "$or"} and mask_control(controls[0]):
+                if len(controls) == 1 and kind in {"$and", "$or"} and mask_control(controls[0], q):
                     control = controls[0]
                     data = b if control == left else a
                     select = remap(control, arm)
@@ -669,7 +670,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 elif kind == "$and":
                     if len(controls) == 1:
                         role_provenance.append({"output_bit": bit, "kind": kind,
-                            "control_bits": [], "branch_roles": "data-mux result is not a mask control"})
+                            "control_bits": [], "branch_roles": "shared cofactor payload is not a mask control"})
                     answer = combine_roles(kind, a, b)
                 elif kind == "$or":
                     answer = combine_roles(kind, a, b)
@@ -686,7 +687,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 dependent = [values for values in (left, right) if any(
                     isinstance(v, int) and v in cone for v in values)]
                 op = "$and" if kind == "$logic_and" else "$or"
-                if len(dependent) == 1 and all(mask_control(v) for v in dependent[0]):
+                if len(dependent) == 1 and all(mask_control(v, q) for v in dependent[0]):
                     control = dependent[0]
                     data = b if control is left else a
                     answer = masked_roles(op, data, native_reduce("$or", control, arm))
@@ -843,6 +844,90 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
     return {"modules": {"transition_pair": module}}, rows
 
 
+def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
+                              container: Optional[str] = None) -> Tuple[dict, dict]:
+    """Native cofactor support, conservatively bounding shared payload roots.
+
+    Only combinational constant propagation/cleanup runs here. Q and data are
+    shared free inputs, and the two reset values were already substituted by
+    the existing paired producer. No data assignment or assumption is added.
+    A remaining structural dependency may overapproximate functional support;
+    it can refuse an ambiguous mask, never supply a lucky-data force proof.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    initial = work_dir / "cofactor_support_input.json"
+    normalized = work_dir / "cofactor_support_normalized.json"
+    ys, log_path = work_dir / "cofactor_support.ys", work_dir / "cofactor_support.log"
+    _aa.write_json(initial, model)
+    _aa.write_text(ys, f"read_json {initial.resolve()}\nhierarchy -top transition_pair\n"
+                   f"opt_expr\nopt_clean\nwrite_json {normalized.resolve()}\n")
+    if container:
+        import _container_exec as ce
+        argv = ce.exec_argv(container, f"yosys -Q -T -s {ys.resolve()}", tag="formal_structural_check")
+    else:
+        argv = ["yosys", "-Q", "-T", "-s", str(ys.resolve())]
+    try:
+        process = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        rc, log = process.returncode, process.stdout + process.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        rc, log = 127, str(exc)
+    _aa.write_text(log_path, log)
+    info = {"native_exit_code": rc, "status": "UNAVAILABLE", "rows": [],
+            "input_sha256": file_sha256(initial), "script_sha256": file_sha256(ys),
+            "log_sha256": file_sha256(log_path), "scope": "native normalized structural support; conservative"}
+    payloads = {}
+    try:
+        if rc:
+            return info, payloads
+        mod = json.loads(normalized.read_text())["modules"]["transition_pair"]
+        info["normalized_sha256"] = file_sha256(normalized)
+        roots = {port["bits"][0]: int(name[len("input_"):])
+                 for name, port in mod["ports"].items()
+                 if port["direction"] == "input" and name.startswith("input_")
+                 and len(port["bits"]) == 1}
+        drivers, memo = _drivers(mod), {}
+
+        def support(bit, seen=frozenset()):
+            if not isinstance(bit, int):
+                return set()
+            if bit in roots:
+                return {roots[bit]}
+            if bit in memo:
+                return memo[bit]
+            if bit in seen or bit not in drivers:
+                return None
+            cell = drivers[bit]
+            found = set()
+            for pin, values in (cell.get("connections") or {}).items():
+                if cell.get("port_directions", {}).get(pin) == "input":
+                    for value in values:
+                        below = support(value, seen | {bit})
+                        if below is None:
+                            memo[bit] = None
+                            return None
+                        found.update(below)
+            memo[bit] = found
+            return found
+
+        for row in rows:
+            if row.get("unsupported"):
+                continue
+            pair = [support(mod["ports"][row["query_ports"][f"n{arm}"]]["bits"][0])
+                    for arm in (0, 1)]
+            if any(value is None for value in pair):
+                info["rows"].append({"q": row["q"], "status": "UNAVAILABLE"})
+                continue
+            shared = pair[0] & pair[1]
+            payloads[row["q"]] = shared
+            info["rows"].append({"q": row["q"], "status": "NATIVE_NORMALIZED_COFACTOR_SUPPORT",
+                "cofactor0_bits": sorted(pair[0]), "cofactor1_bits": sorted(pair[1]),
+                "shared_payload_bits": sorted(shared)})
+        info["status"] = "NATIVE_NORMALIZED_COFACTOR_SUPPORT"
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+        info["reason"] = str(exc)
+    return info, payloads
+
+
 def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                           signal: str, work_dir: Path,
                           container: Optional[str] = None) -> dict:
@@ -899,7 +984,16 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     unsupported = census["latch"] + census["memory"] + census["unclassified"]
     if unsupported:
         return dict(result, unresolved=unsupported)
-    model, rows = _transition_pair(mod, bit)
+    value_model, value_rows = _transition_pair(mod, bit)
+    payload_analysis, payload_by_q = _cofactor_payload_support(
+        value_model, value_rows, work_dir, container)
+    result["payload_analysis"] = payload_analysis
+    payload_rows = {r["q"]: r for r in payload_analysis["rows"]}
+    model, rows = _transition_pair(mod, bit, payload_by_q)
+    for row in rows:
+        row["payload_support"] = payload_rows.get(row["q"], {"status": "UNAVAILABLE"})
+        if not row.get("unsupported") and row["q"] not in payload_by_q:
+            result["unresolved"].append(f"{row['cell']}.Q[{row['bit_index']}]: shared cofactor payload support unavailable")
     result["rows"] = rows
     # Map every raw Q bit into current Q using an exact common alias/index.
     identities = []
