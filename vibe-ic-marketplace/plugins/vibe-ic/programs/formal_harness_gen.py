@@ -402,7 +402,7 @@ KIND_MIXED = "MIXED"
 # subset of registers (review round 4, H2).
 _STRUCTURAL_CLAIMS = {"clock_edge", "reset_port", "reset_sync", "reset_polarity",
                       "state_covered"}
-_TEMPORAL_CLAIMS = {"reset_state_zero"}
+_TEMPORAL_CLAIMS = {"reset_state_zero", "state_sync"}
 
 _CR_PATH_RE = re.compile(
     r"(?:^|\.)(?P<group>clocks|resets)\.(?P<idx>\d+)\.(?P<field>[A-Za-z_]\w*)$")
@@ -1338,6 +1338,7 @@ class L8Prop:
     obligation: str  # the obligation id it answers
     reset: str = ""  # the declared reset the guard follows
     active_low: bool = False  # its DECLARED polarity
+    global_step: bool = False
 
 
 def _obs_wire(net: str) -> str:
@@ -1352,7 +1353,8 @@ def _obs_wire(net: str) -> str:
 
 def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
                   container: Optional[str], resets: List[str] = (),
-                  clock: str = "", simdef: str = "") -> Tuple[Optional[dict], str]:
+                  clock: str = "", simdef: str = "", declared_edge: str = ""
+                  ) -> Tuple[Optional[dict], str]:
     """The design's state, from the NETLIST of the DUT read exactly as the
     chip's synthesis reads it (R-0915-157) — never from RTL text (review round
     4, M4), never from a FORMAL variant. If the DUT does not elaborate under
@@ -1382,7 +1384,26 @@ def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
     if klass:
         # R-0915-155: outside the class the program proves soundly. Nothing
         # is claimed — the caller refuses EVERY ruled obligation with this.
-        return {"ok": False, "outside_class": klass}, (
+        # Observe before cleanup can discard an unused state element. The
+        # default proof binds these same aliases before its own prep/cleanup.
+        rc, _log, full_path = _fsc.run_yosys(
+            rtl_files, top, work_dir, container, simdef,
+            tag="_sync_census", passes="proc; flatten")
+        try:
+            full_raw = json.loads(full_path.read_text()) if rc == 0 else None
+        except (OSError, ValueError):
+            full_raw = None
+        sync = [_fsc.sync_state_facts(full_raw, top, clock)]
+        full_sync = sync[0]
+        if any(s != full_sync for s in sync):
+            full_sync = {"ok": False, "why": "current full state elaborations disagree"}
+        if declared_edge not in ("posedge", "negedge"):
+            full_sync = {"ok": False, "why": "no unique declared clock edge"}
+        elif full_sync.get("ok"):
+            full_sync = dict(full_sync, state_clock_edge=full_sync["clock_edge"],
+                             clock_edge=declared_edge)
+        return {"ok": False, "outside_class": klass,
+                "sync_state": full_sync}, (
             "outside the class the program proves soundly (R-0915-155): "
             + "; ".join(klass))
     if any(not f["ok"] for f in facts):
@@ -1425,6 +1446,38 @@ def derive_l8_props(facts: Optional[dict], facts_why: str,
     refused: Dict[str, str] = {}
     for ob in obligations:
         rule = ob.get("program_rule") or {}
+        sync_claims = [c for c in rule.get("claims") or []
+                       if c.get("rule") == "reset_sync"
+                       and c.get("value") == "synchronous"]
+        # Extend only the formerly refused class. Existing reset/value
+        # constructors and their admission conditions are unchanged.
+        if sync_claims and facts and facts.get("outside_class"):
+            oid = str(ob["id"])
+            full = facts.get("sync_state") or {}
+            other_temporal = [c for c in rule.get("claims") or []
+                              if c.get("rule") in _TEMPORAL_CLAIMS]
+            if not full.get("ok") or other_temporal:
+                refused[oid] = full.get("why") or facts_why
+                continue
+            regs = full["registers"]
+            # Encode every alias, including plain ones, injectively. Dots
+            # are passed unchanged in @observe, never mangled in the target.
+            wires = {r["name"]: OBSERVER_PREFIX + "q_" + r["name"].encode().hex()
+                     for r in regs}
+            for reg in regs:
+                wire = wires[reg["name"]]
+                width = f"[{reg['width']-1}:0]" if reg["width"] > 1 else ""
+                observers[wire] = Observer(wire, reg["name"], width)
+            state = "{" + ", ".join(wires[r["name"]] for r in regs) + "}"
+            clk = full["clock"]
+            edge = f"(!$past({clk}) && {clk})" if full["clock_edge"] == "posedge" else f"($past({clk}) && !{clk})"
+            name = "p_l8_state_sync_" + str(len(props))
+            props.append(L8Prop(name, f"f_sync_past_valid && !{edge}",
+                                f"({state} == $past({state}))", oid,
+                                global_step=True))
+            answered[oid] = {"properties": [name], "sync_claims": sync_claims,
+                             "full_state_census": full}
+            continue
         temporal = [c for c in rule.get("claims") or []
                     if c.get("rule") in _TEMPORAL_CLAIMS]
         if not temporal:
@@ -1712,6 +1765,8 @@ def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
             body_parts.append(f"    (* keep *) wire {w}{ob.wire};")
         seen_rst: List[str] = []
         for p in l8_props:
+            if p.global_step:
+                continue
             tag = f"{p.reset}_{'al' if p.active_low else 'ah'}"
             if tag in seen_rst:
                 continue
@@ -1723,7 +1778,16 @@ def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
                 f"    always @(posedge {clock}) "
                 f"l8_{tag}_active_q <= l8_{tag}_active;",
             ]
+        if any(p.global_step for p in l8_props):
+            body_parts += ["    reg f_sync_past_valid = 1'b0;",
+                           "    always @($global_clock) f_sync_past_valid <= 1'b1;"]
         for p in l8_props:
+            if p.global_step:
+                body_parts += [
+                    f"    always @($global_clock) if ({p.guard})",
+                    f"        a_{p.name[2:]}: assert ({p.expr});",
+                ]
+                continue
             if assertion_form == "immediate":
                 body_parts.append(
                     f"    always @(posedge {clock}) if ({p.guard})\n"
@@ -2358,14 +2422,25 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                         f"staged yet, so the chip's -DSIMULATION decision "
                         f"cannot be known at Step 5; the program closes "
                         f"nothing on a read that may not be the chip's"))
+        _decl_edges = {c.get("value") for o in declared
+                       for c in (o.get("program_rule") or {}).get("claims") or []
+                       if c.get("rule") == "clock_edge" and c.get("signal") == clock}
         _facts, _facts_why = netlist_state(
             rtl_files, _subj_name, _pl.formal_dir(project) / "l8_netlist",
-            container, _resets, clock, _simdef)
+            container, _resets, clock, _simdef,
+            next(iter(_decl_edges)) if len(_decl_edges) == 1 else "")
         if _facts is not None and _facts.get("outside_class"):
             # R-0915-155: EVERY ruled obligation — structural and temporal —
             # goes to the expert with the failing preconditions named.
             for o in declared:
-                if o.get("program_rule"):
+                claims = (o.get("program_rule") or {}).get("claims") or []
+                has_sync = any(c.get("rule") == "reset_sync" and
+                               c.get("value") == "synchronous" for c in claims)
+                reset_mapping_only = (claims and all(c.get("rule") in {
+                    "reset_port", "reset_polarity", "reset_sync"} for c in claims)
+                    and all(f.startswith(("C2 ", "C3 ", "C6 "))
+                            for f in _facts["outside_class"]))
+                if o.get("program_rule") and not has_sync and not reset_mapping_only:
                     _pre_refused.setdefault(str(o["id"]), _facts_why)
     l8_props, l8_obs, l8_answered, l8_refused = derive_l8_props(
         _facts, _facts_why, [o for o in declared if o.get("program_rule")
@@ -2411,6 +2486,15 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         ans = l8_answered.get(oid)
         if ans:
             row["properties"] = ans["properties"]
+            if ans.get("sync_claims"):
+                # The same declared obligation is now proved temporally;
+                # other structural claims in a mixed declaration stay open.
+                claims = [dict(c, rule="state_sync", source_rule="reset_sync")
+                          if c in ans["sync_claims"] else c for c in rule["claims"]]
+                rule = _rule(claims)
+                row["program_rule"] = rule
+                row["kind"] = rule["kind"]
+                row["full_state_census"] = ans["full_state_census"]
             if ans.get("state_registers"):
                 # "ALL internal state" is only as true as the register list:
                 # the netlist check confirms no flop lies outside it. That is

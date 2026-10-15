@@ -404,7 +404,407 @@ def _state_census(mod: dict, netlist: dict) -> Dict[str, List[str]]:
     return census
 
 
-def check_claim(netlist: dict, top: str, claim: dict) -> dict:
+def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
+    """Full raw Q census for the global-timestep SYNC constructor only.
+
+    Async flops remain in the observation set: they are a counterexample to
+    prove, never a reason to silently choose a smaller synchronous subset.
+    Reset/value claims continue to use their own applicability conditions.
+    """
+    tm = _top_module(netlist, top) if isinstance(netlist, dict) else None
+    if tm is None:
+        return {"ok": False, "why": "the current raw netlist is unavailable"}
+    _, mod = tm
+    census = _state_census(mod, netlist)
+    other = census["latch"] + census["memory"] + census["unclassified"]
+    if other:
+        return {"ok": False, "why": "unsupported storage: " + ", ".join(other)}
+    cbit, why = _port_bit(mod, clock)
+    if cbit is None:
+        return {"ok": False, "why": "unknown clock: " + why}
+    drivers = _drivers(mod)
+    flops = [(n, c) for n, c, k in _cells(mod) if k == "ff"]
+    identities, state = [], set()
+    for name, cell in flops:
+        q = _bits(cell, "Q")
+        clk = _bits(cell, "CLK")
+        edge = _param_bit((cell.get("parameters") or {}).get("CLK_POLARITY"))
+        source = (_chain_source(drivers, clk[0], False)[0]
+                  if len(clk) == 1 else None)
+        if not q or edge is None or source != cbit:
+            return {"ok": False, "why": f"unknown Q/clock/edge for {name}"}
+        if state.intersection(q):
+            return {"ok": False, "why": f"multiply driven state at {name}"}
+        identities.append({"cell": name, "type": cell["type"], "q": q,
+                           "clock_edge": "posedge" if edge else "negedge"})
+        state.update(q)
+    if not state:
+        return {"ok": False, "why": "the design has no state"}
+    if len({x["clock_edge"] for x in identities}) != 1:
+        return {"ok": False, "why": "state samples on different clock edges"}
+    names = []
+    for name, net in (mod.get("netnames") or {}).items():
+        bits = net.get("bits") or []
+        # Exactly the dotted grammar the existing default runner binds.
+        if (re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", name)
+                and bits and all(isinstance(b, int) and b in state for b in bits)):
+            names.append((name, bits))
+    names.sort(key=lambda x: ("." in x[0], len(x[0]), x[0]))
+    covered, registers = set(), []
+    for name, bits in names:
+        if set(bits) - covered:
+            registers.append({"name": name, "width": len(bits), "q": bits})
+            covered.update(bits)
+    if covered != state:
+        return {"ok": False, "why": f"missing exact alias for {len(state-covered)} Q bit(s)"}
+    return {"ok": True, "why": "", "clock": clock,
+            "clock_edge": identities[0]["clock_edge"],
+            "identities": identities, "q_bits": sorted(state),
+            "registers": registers}
+
+
+def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
+    """Two native combinational next-state models sharing every Q/data bit.
+
+    Only the selected top reset differs (0 versus 1). Original combinational
+    cells and literal undef bits are retained. The coarse FF priority below
+    follows Yosys simlib: sdffe resets before enable; sdffce enables before
+    reset; asynchronous controls precede enable; CLR precedes SET.
+    """
+    import copy
+    flops = [(n, c) for n, c, k in _cells(mod) if k == "ff"]
+    qbits = {b for _, c in flops for b in _bits(c, "Q")}
+    free = qbits | {b for p in (mod.get("ports") or {}).values()
+                    if p.get("direction") == "input" for b in p["bits"]
+                    if isinstance(b, int) and b != reset_bit}
+    nxt, maps, shared, cells, ports = 2, [{}, {}], {}, {}, {}
+
+    def allocate():
+        nonlocal nxt
+        b = nxt
+        nxt += 1
+        return b
+
+    for bit in sorted(free):
+        shared[bit] = allocate()
+        ports[f"input_{bit}"] = {"direction": "input", "bits": [shared[bit]]}
+
+    def remap(bit, arm):
+        if not isinstance(bit, int):
+            return bit
+        if bit == reset_bit:
+            return str(arm)
+        if bit in shared:
+            return shared[bit]
+        if bit not in maps[arm]:
+            maps[arm][bit] = allocate()
+        return maps[arm][bit]
+
+    def gate(kind, a, b=None, select=None):
+        y = allocate()
+        conn = {"A": [a], "Y": [y]}
+        params = {"A_SIGNED": 0, "A_WIDTH": 1, "Y_WIDTH": 1}
+        if b is not None:
+            conn["B"] = [b]
+            params.update(B_SIGNED=0, B_WIDTH=1)
+        if select is not None:
+            conn["S"] = [select]
+            params = {"WIDTH": 1}
+        cells[f"transition_{y}"] = {"type": kind, "parameters": params,
+            "port_directions": {p: "output" if p == "Y" else "input" for p in conn},
+            "connections": conn}
+        return y
+
+    def mux(a, b, s):
+        return gate("$mux", a, b, s)
+
+    drivers = _drivers(mod)
+    cone = _cone(mod, reset_bit)
+    for arm in (0, 1):
+        for i, (_name, cell, kind) in enumerate(_cells(mod)):
+            if kind == "comb":
+                copied = copy.deepcopy(cell)
+                copied["connections"] = {p: [remap(b, arm) for b in bits]
+                                          for p, bits in cell["connections"].items()}
+                cells[f"comb_{arm}_{i}"] = copied
+
+    def d_force(bit, arm, seen=frozenset()):
+        # Preserve mux branch structure. A Q branch is retention, never force.
+        if bit in ("0", "1"):
+            return "1"
+        if not isinstance(bit, int) or bit in qbits or bit in seen:
+            return "0"
+        cell = drivers.get(bit) or {}
+        if cell.get("type") != "$mux":
+            return "0"
+        conn = cell["connections"]
+        try:
+            i = conn["Y"].index(bit)
+            return mux(d_force(conn["A"][i], arm, seen | {bit}),
+                       d_force(conn["B"][i], arm, seen | {bit}),
+                       remap(conn["S"][0], arm))
+        except (IndexError, KeyError, ValueError):
+            return "0"
+
+    rows = []
+    for name, cell in flops:
+        kind = cell["type"]
+        conn, params = cell.get("connections") or {}, cell.get("parameters") or {}
+        hit = [p for p, bits in conn.items() if p != "Q" and cone.intersection(
+            b for b in bits if isinstance(b, int))]
+        clk = _bits(cell, "CLK")
+        source = _chain_source(drivers, clk[0], False)[0] if len(clk) == 1 else None
+        input_clocks = {b for p in (mod.get("ports") or {}).values()
+                        if p.get("direction") == "input" and len(p["bits"]) == 1
+                        for b in p["bits"]}
+        for i, q in enumerate(conn.get("Q") or []):
+            row = {"cell": name, "type": kind, "q": q, "bit_index": i,
+                   "clock": conn.get("CLK"), "clock_polarity": params.get("CLK_POLARITY"),
+                   "controls": {p: conn[p] for p in ("D", "EN", "SRST", "ARST", "SET", "CLR") if p in conn},
+                   "parameters": params, "reset_reaches": hit}
+            rows.append(row)
+            if (kind not in {"$dff", "$dffe", "$sdff", "$sdffe", "$sdffce", "$adff", "$adffe", "$dffsr", "$dffsre"}
+                    or not isinstance(q, int) or i >= len(conn.get("D") or [])
+                    or source not in input_clocks or "CLK" in hit
+                    or _param_bit(params.get("CLK_POLARITY")) is None):
+                row["unsupported"] = "unmodelled storage, clock or D/Q identity"
+                continue
+
+            def active(pin, arm, index=0):
+                values = conn.get(pin) or []
+                polarity = _param_bit(params.get(pin + "_POLARITY"))
+                if index >= len(values) or polarity is None:
+                    raise ValueError("unknown " + pin + " polarity/width")
+                v = remap(values[index], arm)
+                return v if polarity else gate("$not", v)
+
+            def reset_value(pin):
+                value = params.get(pin + "_VALUE")
+                if isinstance(value, int):
+                    return str((value >> i) & 1)
+                if not isinstance(value, str) or len(value) <= i or value[-1-i] not in "01xz":
+                    raise ValueError("unknown " + pin + " value/width")
+                return value[-1-i]
+
+            outputs = []
+            try:
+                for arm in (0, 1):
+                    d, held = remap(conn["D"][i], arm), shared[q]
+                    force = d_force(conn["D"][i], arm)
+                    if "EN" in conn and kind != "$sdffce":
+                        en = active("EN", arm)
+                        d, force = mux(held, d, en), mux("0", force, en)
+                    if "SRST" in conn or "ARST" in conn:
+                        pin = "SRST" if "SRST" in conn else "ARST"
+                        rst = active(pin, arm)
+                        d, force = mux(d, reset_value(pin), rst), mux(force, "1", rst)
+                    if kind == "$sdffce":
+                        en = active("EN", arm)
+                        d, force = mux(held, d, en), mux("0", force, en)
+                    if kind in {"$dffsr", "$dffsre"}:
+                        st, cl = active("SET", arm, i), active("CLR", arm, i)
+                        d = mux(mux(d, "1", st), "0", cl)
+                        force = mux(mux(force, "1", st), "1", cl)
+                    outputs.append((d, force))
+            except ValueError as exc:
+                row["unsupported"] = str(exc)
+                continue
+            n0, f0 = outputs[0]
+            n1, f1 = outputs[1]
+            names = {"n0": n0, "n1": n1,
+                "retain0": gate("$eq", n0, shared[q]),
+                "retain1": gate("$eq", n1, shared[q]),
+                "equal": gate("$eq", n0, n1),
+                "high_violation": gate("$and", f0, gate("$not", f1)),
+                "low_violation": gate("$and", f1, gate("$not", f0))}
+            row["query_ports"] = {k: f"q{len(rows)-1}_{k}" for k in names}
+            for key, bit in names.items():
+                ports[row["query_ports"][key]] = {"direction": "output", "bits": [bit]}
+            row["priority"] = ("EN > SRST > D" if kind == "$sdffce" else
+                               "CLR > SET > EN > D" if kind in {"$dffsr", "$dffsre"} else
+                               "ARST > EN > D" if "ARST" in conn else
+                               "SRST > EN > D" if "SRST" in conn else "EN > D")
+    module = {"attributes": {"top": 1}, "ports": ports, "cells": cells,
+              "netnames": {n: {"hide_name": 0, "bits": p["bits"], "attributes": {}}
+                           for n, p in ports.items()}}
+    return {"modules": {"transition_pair": module}}, rows
+
+
+def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
+                          signal: str, work_dir: Path,
+                          container: Optional[str] = None) -> dict:
+    """Classify all current identities using native paired-cofactor queries.
+
+    This is the reset mapping of this existing owner, not a new flow gate.
+    UNSUPPORTED/UNKNOWN identities remain named and prevent full polarity PASS.
+    SAT countermodels classify functions; they are not a DUT formal FAIL.
+    """
+    result = {"signal": signal, "rows": [], "unresolved": [], "complete": False,
+              "shared_current_q_and_data": True}
+    tm = _top_module(netlist, top)
+    if tm is None:
+        return dict(result, unresolved=["missing current netlist"])
+    _, mod = tm
+    bit, why = _port_bit(mod, signal)
+    if bit is None:
+        return dict(result, unresolved=[why])
+    census = _state_census(mod, netlist)
+    unsupported = census["latch"] + census["memory"] + census["unclassified"]
+    if unsupported:
+        return dict(result, unresolved=unsupported)
+    model, rows = _transition_pair(mod, bit)
+    result["rows"] = rows
+    # Map every raw Q bit into current Q using an exact common alias/index.
+    raw_tm = _top_module(raw, top) if isinstance(raw, dict) else None
+    identities = []
+    current_q = {r["q"] for r in rows}
+    if raw_tm is None:
+        result["unresolved"].append("missing raw state census")
+    else:
+        raw_mod = raw_tm[1]
+        raw_census = _state_census(raw_mod, raw)
+        result["unresolved"] += raw_census["latch"] + raw_census["memory"] + raw_census["unclassified"]
+        aliases = {}
+        raw_drivers = _drivers(raw_mod)
+        raw_q = {q for _, c, k in _cells(raw_mod) if k == "ff" for q in _bits(c, "Q")}
+
+        def literal_undef(bit, seen=frozenset()):
+            if isinstance(bit, str):
+                return bit.lower() in {"x", "z"}
+            if bit in seen or bit in raw_q:
+                return False
+            driver = raw_drivers.get(bit)
+            if driver is None:
+                return False
+            return any(literal_undef(b, seen | {bit})
+                       for p, bits in (driver.get("connections") or {}).items()
+                       if (driver.get("port_directions") or {}).get(p) == "input"
+                       for b in bits)
+
+        undef_q = set()
+        for _name, cell, kind in _cells(raw_mod):
+            if kind == "ff":
+                bad_value = any(isinstance(v, str) and any(x in v.lower() for x in "xz")
+                                for p, v in (cell.get("parameters") or {}).items()
+                                if p.endswith("_VALUE"))
+                if bad_value or any(literal_undef(b) for p, bits in cell["connections"].items()
+                                    if p != "Q" for b in bits):
+                    undef_q.update(_bits(cell, "Q"))
+        for name, net in (raw_mod.get("netnames") or {}).items():
+            other = (mod.get("netnames") or {}).get(name, {}).get("bits") or []
+            for i, qb in enumerate(net.get("bits") or []):
+                if isinstance(qb, int) and i < len(other) and other[i] in current_q:
+                    aliases.setdefault(qb, set()).add(other[i])
+        for name, cell, kind in _cells(raw_mod):
+            if kind == "ff":
+                for i, qb in enumerate(cell.get("connections", {}).get("Q") or []):
+                    mapped = aliases.get(qb, set())
+                    identities.append({"cell": name, "q_index": i,
+                                       "raw_q": qb, "current_q": sorted(mapped),
+                                       "literal_undef_in_transition": qb in undef_q})
+                    if qb in undef_q:
+                        for row in rows:
+                            if row["q"] in mapped:
+                                row["unsupported"] = "literal-X/undef retained from raw next-state transition"
+                    if len(mapped) != 1:
+                        result["unresolved"].append(f"{name}.Q[{i}]: missing/ambiguous current Q identity")
+    result["raw_identities"] = identities
+    work_dir.mkdir(parents=True, exist_ok=True)
+    model_path = work_dir / "transition_pair.json"
+    _aa.write_json(model_path, model)
+    script = [f"read_json {model_path.resolve()}", "hierarchy -top transition_pair",
+              "log VIBEIC_TRANSITION_QUERY domain",
+              "sat -timeout 10 -enable_undef -set-def-inputs -show-inputs"]
+    specs = {}
+    for i, row in enumerate(rows):
+        if row.get("unsupported"):
+            continue
+        ports = row["query_ports"]
+        queries = {"undef0": ("n0", None), "undef1": ("n1", None),
+            "zero0": ("n0", "0"), "one0": ("n0", "1"),
+            "zero1": ("n1", "0"), "one1": ("n1", "1"),
+            "retain0": ("retain0", "1"), "retain1": ("retain1", "1"),
+            "equal": ("equal", "1"), "high": ("high_violation", "0"),
+            "low": ("low_violation", "0")}
+        for key, (port, value) in queries.items():
+            ident = f"{i}_{key}"
+            specs[ident] = (i, key)
+            script.append("log VIBEIC_TRANSITION_QUERY " + ident)
+            option = f"-set-any-undef {ports[port]}" if value is None else f"-prove {ports[port]} {value}"
+            script.append(f"sat -timeout 10 -enable_undef -set-def-inputs {option} -show-inputs -show-outputs")
+    ys = work_dir / "transition_pair.ys"
+    _aa.write_text(ys, "\n".join(script) + "\n")
+    inner = f"yosys -Q -T -s {ys.resolve()}"
+    if container:
+        import _container_exec as ce
+        argv = ce.exec_argv(container, inner, tag="formal_structural_check")
+    else:
+        argv = ["yosys", "-Q", "-T", "-s", str(ys.resolve())]
+    try:
+        process = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        rc, log = process.returncode, process.stdout + process.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        rc, log = 127, str(exc)
+    _aa.write_text(work_dir / "transition_pair.log", log)
+    domain = log.split("VIBEIC_TRANSITION_QUERY domain", 1)[-1].split(
+        "VIBEIC_TRANSITION_QUERY 0_", 1)[0]
+    domain_reachable = "SAT solving finished - model found:" in domain
+    if not domain_reachable:
+        result["unresolved"].append("paired current-Q/data domain has no measured reachable witness")
+    sections = re.split(r"(?m)^VIBEIC_TRANSITION_QUERY (\d+_\w+)\s*$", log)
+    answers = {}
+    for ident, body in zip(sections[1::2], sections[2::2]):
+        if "SAT proof finished - no model found: SUCCESS!" in body:
+            answers[ident] = "PROVED"
+        elif "SAT proof finished - model found: FAIL!" in body:
+            answers[ident] = "REFUTED"
+        elif "SAT solving finished - no model found." in body:
+            answers[ident] = "NO_UNDEF"
+        elif "SAT solving finished - model found:" in body:
+            answers[ident] = "HAS_UNDEF"
+        else:
+            answers[ident] = "UNKNOWN"
+    for i, row in enumerate(rows):
+        a = {key: answers.get(f"{i}_{key}", "UNKNOWN") for j, key in specs.values() if j == i}
+        row["native_queries"] = a
+        row["classification"] = "UNSUPPORTED"
+        if row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
+            row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
+        elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):
+            row["reason"] = "literal-X or undefined next-state cofactor"
+        elif a["equal"] == "PROVED":
+            row["classification"] = ("LOCAL_CLEAR" if not row["reset_reaches"] and
+                any(p in row["controls"] for p in ("SRST", "ARST", "SET", "CLR")) else "NO_DEPENDENCE")
+        elif set(row["reset_reaches"]) <= {"EN"}:
+            row["classification"] = "RETENTION_CONTROL"
+        elif (a["zero0"] == "PROVED" or a["one0"] == "PROVED") and (
+                a["zero1"] == "PROVED" or a["one1"] == "PROVED"):
+            row["classification"] = "DATA_VALUE"
+        else:
+            high = a["high"] == "PROVED" and a["low"] == "REFUTED"
+            low = a["low"] == "PROVED" and a["high"] == "REFUTED"
+            constant_high = a["zero1"] == "PROVED" or a["one1"] == "PROVED"
+            constant_low = a["zero0"] == "PROVED" or a["one0"] == "PROVED"
+            if high or low or constant_high != constant_low:
+                row["classification"] = "RESET_FORCE"
+                row["polarity"] = "active_high" if high or (not low and constant_high) else "active_low"
+                row["total_force"] = constant_high if row["polarity"] == "active_high" else constant_low
+                row["timing"] = "asynchronous" if any(p in row["reset_reaches"] for p in _ASYNC_PINS) else "synchronous"
+            else:
+                row["classification"] = "UNRESOLVED_DATA_DEPENDENCE"
+                row["reason"] = "paired dependence has no closed reset-force sense/priority"
+        if row["classification"] in {"UNSUPPORTED", "UNRESOLVED_DATA_DEPENDENCE"}:
+            result["unresolved"].append(f"{row['cell']}.Q[{row['bit_index']}]: {row.get('reason')}")
+    result.update(complete=not result["unresolved"], native_exit_code=rc,
+                  paired_domain_reachable=domain_reachable,
+                  model_sha256=file_sha256(model_path), script_sha256=file_sha256(ys),
+                  log_sha256=file_sha256(work_dir / "transition_pair.log"),
+                  work_dir=str(work_dir), query_count=len(specs))
+    return result
+
+
+def check_claim(netlist: dict, top: str, claim: dict,
+                reset_mapping: Optional[dict] = None) -> dict:
     """Answer ONE structural claim from a yosys JSON netlist. Pure.
 
     Only what was SEEN passes. Every answer is read from the netlist, never
@@ -496,6 +896,36 @@ def check_claim(netlist: dict, top: str, claim: dict) -> dict:
                              f"no state is clocked through logic or an "
                              f"internal net"))
     rm = _reset_map(mod, bit)
+    if reset_mapping is not None and rule in {"reset_port", "reset_sync", "reset_polarity"}:
+        rows = reset_mapping.get("rows") or []
+        force = [r for r in rows if r.get("classification") == "RESET_FORCE"]
+        unresolved = reset_mapping.get("unresolved") or []
+        out["reset_control_mapping"] = reset_mapping
+        wrong = [r for r in force if rule == "reset_polarity" and r.get("polarity") != value]
+        if wrong:
+            return dict(out, verdict=REFUTED, cells=sorted({r["cell"] for r in wrong}),
+                        finding="native paired next-state force sense contradicts declared polarity")
+        if rule == "reset_sync":
+            opposite = "asynchronous" if value == "synchronous" else "synchronous"
+            bad = [r for r in force if r.get("timing") == opposite]
+            # Preserve the existing structural timing counterevidence even
+            # when a literal-X value prevents full function classification.
+            old_bad = (rm["async"] + rm["async_x"] if value == "synchronous" else
+                       rm["sync"] if value == "asynchronous" else [])
+            if bad or old_bad:
+                return dict(out, verdict=REFUTED,
+                            cells=sorted({r["cell"] for r in bad + old_bad}),
+                            finding="actual reset timing contradicts the declared timing")
+        if rule == "reset_port" and force:
+            return dict(out, verdict=PASS,
+                        finding=f"native paired model identifies {len(force)} reset-forced Q bit(s)")
+        if unresolved or not force or (rule == "reset_polarity" and value not in {"active_high", "active_low"}) or (
+                rule == "reset_sync" and value not in {"synchronous", "asynchronous"}):
+            return dict(out, verdict=NOT_DISCHARGED,
+                        finding="reset-force identity/sense/priority is not fully closed: " +
+                        ("; ".join(unresolved) or "no reset-forced state or unsupported claim value"))
+        return dict(out, verdict=PASS,
+                    finding=f"complete current-Q paired reset mapping closes {rule}={value} for every reset-force group")
     forced = rm["sync"] + rm["async"] + rm["async_x"]
     out["sync_reset_flops"] = len(rm["sync"])
     out["async_reset_flops"] = len(rm["async"]) + len(rm["async_x"])
@@ -829,8 +1259,8 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
     # R-0915-155 — the applicability gate, on EVERY elaboration, before any
     # claim is answered. Outside the class every claim is NOT_DISCHARGED with
     # the failing precondition(s) named; nothing is PASS or REFUTED there.
+    fails: List[str] = []
     if klass is not None:
-        fails: List[str] = []
         for e in elabs:
             if e["netlist"] is None:
                 fails.append(f"no netlist for defines {e['defines']!r}")
@@ -841,22 +1271,34 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
                     fails.append(f)
         record["applicability"] = {"class": "R-0915-155", "inside": not fails,
                                    "failed_preconditions": fails}
-        if fails:
-            record["claims"] = [dict(c, verdict=NOT_DISCHARGED, finding=(
-                "outside the class the program proves soundly (R-0915-155): "
-                + "; ".join(fails))) for c in claims]
-            record["verdict"] = NOT_DISCHARGED
-            return record
+    mappings = {}
+    for i, e in enumerate(elabs):
+        if e["netlist"] is not None:
+            for signal in sorted({c.get("signal", "") for c in claims if c.get("rule") in
+                                  {"reset_port", "reset_sync", "reset_polarity"}}):
+                mappings[i, signal] = reset_control_mapping(
+                    e["netlist"], e["raw"], top, signal,
+                    work_dir / f"reset_transition_{i}_{signal.encode().hex()}", container)
     results = []
     for claim in claims:
         answers = []
-        for e in elabs:
+        for i, e in enumerate(elabs):
+            reset_claim = claim.get("rule") in {"reset_port", "reset_sync", "reset_polarity"}
+            # The new reset mapper owns its C2/C3/C6 extension only. Clock,
+            # unknown-storage and raw-census failures retain their old guard.
+            blocked = fails and (not reset_claim or any(
+                not f.startswith(("C2 ", "C3 ", "C6 ")) for f in fails))
+            if blocked:
+                answers.append(dict(claim, verdict=NOT_DISCHARGED, finding=(
+                    "outside the claim's supported class: " + "; ".join(fails))))
+                continue
             if e["netlist"] is None:
                 answers.append(dict(claim, verdict=NOT_DISCHARGED, finding=(
                     f"yosys did not produce a netlist (rc={e['rc']}, defines "
                     f"{e['defines']!r}); nothing was measured")))
             else:
-                answers.append(check_claim(e["netlist"], top, claim))
+                answers.append(check_claim(e["netlist"], top, claim,
+                    mappings.get((i, claim.get("signal", ""))) if reset_claim else None))
         verdicts = {a["verdict"] for a in answers}
         if len(verdicts) == 1:
             results.append(answers[0])
