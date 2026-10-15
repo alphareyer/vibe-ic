@@ -76,6 +76,9 @@ def _drive_step_pnr(tmp_path, monkeypatch, switch, *, stop_at_builder=True, call
     if declared:
         _l19(project)
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    # Complete the unit PDK input instead of staging an image's real Liberty.
+    pdk.liberty = str(write(tmp_path / 'neutral.lib',
+                            'library(neutral) { time_unit : "1ns"; }\n'))
     netlist = write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
 
     def docker(container, cmd, *a, **k):
@@ -92,6 +95,7 @@ def _drive_step_pnr(tmp_path, monkeypatch, switch, *, stop_at_builder=True, call
             '_resolve_staged_silicon_sdc': lambda *a: None,
             '_liberty_drv_limits': lambda *a: {},
             '_build_auto_silicon_sdc': lambda *a, **k: '',
+            '_container_mounts': lambda c: [],
             '_docker_exec': docker,
             '_docker_exec_raw': lambda *a, **k: (1, '', 'no container in this test')}.items():
         monkeypatch.setattr(runner, name, value)
@@ -472,7 +476,9 @@ def _run_split(tmp_path, monkeypatch, *, switch=None, hold=None, arm_hold=None, 
         runner,
         project=project, pdk=SimpleNamespace(name='pdkX'), container='c', out_dir=out_dir,
         out_dir_c=str(out_dir), pnr_tcl=pnr_tcl, modes=modes, cmd=cmd, spare_plan=None,
-        overlay={'CTS_DISTANCE_BETWEEN_BUFFERS': (10.0, 'policy')}, exec_kwargs={})
+        overlay={'CTS_DISTANCE_BETWEEN_BUFFERS': (10.0, 'policy'),
+                 'MAX_FANOUT_CONSTRAINT': (4, 'neutral CTS caller fixture declaration')},
+        exec_kwargs={})
     return SimpleNamespace(rc=rc, out=out, project=project, out_dir=out_dir, seen=seen,
                            execs=execs)
 
