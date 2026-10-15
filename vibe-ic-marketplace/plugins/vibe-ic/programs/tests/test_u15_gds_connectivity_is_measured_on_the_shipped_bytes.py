@@ -18,6 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import gds_xor_check as G  # noqa: E402
+import _physical_current as current  # noqa: E402
+import _default_backend_fixtures as retained  # noqa: E402
 
 SHIPPED = b"GDS-shipped-bytes"
 LIVE = hashlib.sha256(SHIPPED).hexdigest()
@@ -57,6 +59,40 @@ def _put(project: Path, rel: str, doc) -> Path:
 def _receipt(project: Path, **over) -> None:
     doc = dict(_SPMIC2_RECEIPT)
     doc.update(over)
+    # Neutral retained-process fixture, not native EDA evidence. Supply the
+    # current subject contract so these controls reach connectivity adjudication
+    # rather than stopping at the unrelated missing-record guard.
+    paths = {
+        'shipped': project / 'phase3/stage4/gds/spm.gds',
+        'reference': project / 'phase3/stage3/pnr/reference.gds',
+        'def': project / G.CANONICAL_DEF_REL,
+        'technology': project / 'reports/phase3/technology_units.json',
+        'recipe': project / 'reports/phase3/unit_xor.rb',
+        'log': project / 'reports/phase3/unit_xor.log',
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    paths['shipped'].write_bytes(SHIPPED)
+    paths['reference'].write_bytes(b'SOURCE_FIXTURE independent reference bytes')
+    paths['def'].write_text('VERSION 5.8 ;\nDESIGN spm ;\nEND DESIGN\n')
+    paths['technology'].write_text(json.dumps({'pdk': 'neutral'}))
+    paths['recipe'].write_text('# SOURCE_FIXTURE parser/receipt control only\n')
+    paths['log'].write_text('SOURCE_FIXTURE substituted process output\n'
+        'XOR_TOOL klayout\nXOR_TOP shipped=spm reference=spm\n' +
+        ''.join(f'XOR_LAYER {n}/0 0\n' for n in range(45)) + 'XOR_DONE\n')
+    doc['current'] = current.build(project, '37.3', 'stage4', 'spm', 'neutral',
+        'klayout', {k: current.entry(project, p) for k, p in paths.items() if k != 'log'},
+        {'log': current.entry(project, paths['log'])},
+        {'rc': 0, 'argv': ['klayout', '-b', '-r', str(paths['recipe'])],
+         'scope': 'SOURCE_FIXTURE receipt parser; no native measurement'})
+    doc.setdefault('finishing_layer_differences', [])
+    conn = doc.get('connectivity') or {}
+    if conn.get('basis') == 'lvs_extracted_from_shipped_gds':
+        _put(project, G.LVS_VERDICT_REL, _gds_lvs(
+            status=conn['verdict'], sha=conn['subject_sha256']))
+    elif conn.get('basis') == 'magic_vs_klayout_stream_xor':
+        _librelane_xor(project, 0 if conn['verdict'] == 'PASS' else 3,
+                       promoted=conn['subject_sha256'])
     _put(project, G.REPORT_REL, doc)
 
 
@@ -199,9 +235,27 @@ def _librelane_project(project: Path) -> None:
     d = project / G.CANONICAL_DEF_REL
     d.parent.mkdir(parents=True, exist_ok=True)
     d.write_text("VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n")
-    folder = project / "phase3/librelane/37.3-magic/state"
-    _put(project, str((folder / "state_out.json").relative_to(project)),
-         {"metrics": {"vibeic__finishing_xor__design_pair__count": 40}})
+    technology = project / 'reports/phase3/technology_units.json'
+    _put(project, str(technology.relative_to(project)), {'pdk': 'neutral'})
+    pre = project / 'phase3/stage3/pnr/pre.gds'
+    pre.write_bytes(b'SOURCE_FIXTURE independent pre-finishing bytes')
+    key = 'vibeic__finishing_xor__defect__count'
+    folder, _ = retained.producer(project, 'Vibeic.FinishingXOR',
+        {'gds': str(gds), 'metrics': {}},
+        {'gds': str(gds), 'metrics': {key: 0,
+         'vibeic__finishing_xor__design_pair__count': 40}},
+        lane='37.3-magic/state', config_folder='37.3-magic-config', name='chip_top')
+    config = project / 'phase3/librelane/37.3-magic-config/Vibeic.FinishingXOR.json'
+    cfg = json.loads(config.read_text())
+    cfg['VIBEIC_FINISHING_PRE_GDS'] = str(pre)
+    retained.put(config, cfg)
+    retained.put(folder / 'config.json', cfg)
+    fingerprint = json.loads((folder / 'input_fingerprint.json').read_text())
+    fingerprint.update(config=retained.LC.digest(config),
+                       config_files={str(pre): retained.LC.digest(pre)})
+    retained.put(folder / 'input_fingerprint.json', fingerprint)
+    from test_default_finishing import refresh_receipt
+    refresh_receipt(folder)
     _put(project, G.LIBRELANE_PROMOTION_REL,
          {"selection": "magic", "canonical_sha256": LIVE})
     _put(project, "phase3/librelane/37.3-magic-finishing-xor.json",
