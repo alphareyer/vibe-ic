@@ -1628,3 +1628,51 @@ def test_unbounded_row_still_reads_only_its_canonical_report(project, canonical,
     verdict, _ = V._row_verdict(project, "phase3_one_shot.json", 0, 0.0,
                                "phase3", _acceptance=[])
     assert verdict == expected
+
+
+@pytest.mark.parametrize("route", ["entry", "forwarded"])
+@pytest.mark.parametrize("consumer_status", ["FAIL", "NOT_MEASURED"])
+def test_bounded_terminal_preserves_current_consumer_rejection(
+        project, monkeypatch, route, consumer_status):
+    """Peer3169 counterexample through real main and real retained consumer."""
+    def publish(token):
+        _save_complete_acceptance(project, "15", consumer_status,
+                                  runner="phase3_one_shot_runner")
+        return _bounded_terminal(token, route=route)
+    obs = _drive_bounded_phase3_receiver(V, project, monkeypatch, route=route,
+                                        child_document=publish)
+    assert any(r["id"] == "15" and r["status"] == consumer_status
+               for r in V._current_default_acceptance(project, 0)), obs
+    phase = next(r for r in obs["summary"]["phases"] if r["name"] == "phase3")
+    assert phase["verdict"] == consumer_status, obs
+    assert obs["summary"]["dispatched_verdict"] == consumer_status, obs
+    assert obs["rc"] != 0, obs
+    assert obs["summary"]["verdict"] == consumer_status, obs
+    assert obs["summary"]["whole_flow_verdict"] == "NOT_MEASURED", obs
+    assert obs["published"]["canonical_before"] == obs["published"]["canonical_after"]
+    assert obs["published"]["scoped_before"] == obs["published"]["scoped_after"]
+
+
+@pytest.mark.parametrize("route", ["entry", "forwarded"])
+@pytest.mark.parametrize("verdict", ["UNRECOGNIZED", ["PASS"]])
+def test_bounded_invalid_verdict_is_unmeasured_non_success(
+        project, monkeypatch, route, verdict):
+    obs = _drive_bounded_phase3_receiver(V, project, monkeypatch, route=route,
+        child_document=lambda token: _bounded_terminal(token, verdict=verdict, route=route))
+    assert obs["rc"] != 0, obs
+    assert obs["summary"]["dispatched_verdict"] == "NOT_MEASURED", obs
+    assert next(r for r in obs["summary"]["phases"]
+                if r["name"] == "phase3")["verdict"] == "NOT_MEASURED", obs
+
+
+@pytest.mark.parametrize("route", ["entry", "forwarded"])
+@pytest.mark.parametrize("verdict", ["PASS", "PASS_WITH_WAIVERS"])
+def test_bounded_success_keeps_whole_flow_unmeasured_without_stale_rows(
+        project, monkeypatch, route, verdict):
+    obs = _drive_bounded_phase3_receiver(V, project, monkeypatch, route=route,
+        child_document=lambda token: _bounded_terminal(token, verdict=verdict,
+                                                       route=route, stale=False))
+    assert obs["rc"] == 0, obs
+    assert obs["summary"]["dispatched_verdict"] == verdict, obs
+    assert obs["summary"]["verdict"] == "NOT_MEASURED", obs
+    assert obs["summary"]["whole_flow_verdict"] == "NOT_MEASURED", obs

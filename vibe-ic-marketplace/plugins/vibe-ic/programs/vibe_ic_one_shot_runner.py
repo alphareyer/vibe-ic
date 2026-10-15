@@ -1262,6 +1262,11 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
             f"finish is a FAIL, not a PASS carried over from before the audit")
     verdict = rep.get("verdict")
     verdict = str(verdict) if verdict else ('PASS' if rc == 0 else 'FAIL')
+    if (expected_window_run_id is not None
+            and _roll_up([(phase, verdict, 0)])[0] == 'NOT_MEASURED'):
+        return 'NOT_MEASURED', (
+            f"{phase}'s scoped report states {verdict!r}; the existing phase "
+            "roll-up does not accept it as a measured success")
     if verdict == 'FAIL':
         return verdict, None
     if blocked:
@@ -2242,7 +2247,10 @@ def _main() -> int:
         if not (isinstance(p3, dict) and p3.get("bounded")
                 and p3.get("window_run_id") == window_run_id and p3.get("verdict")):
             p3 = {}
-        phase3_verdict = p3.get("verdict", "NOT_MEASURED")
+        phase3_verdict, _fresh_why = (_row_verdict(
+            project, "phase3_one_shot.json", rc, phase3_started, "phase3",
+            report_path=phase3_report, expected_window_run_id=window_run_id)
+            if p3 else ("NOT_MEASURED", "child report absent or invalid"))
         p3_stale = p3.get("stale_downstream") or {}
         summary = {"program": "vibe_ic_one_shot_runner", "bounded": bool(p3),
                    **_delivery_route.report_label(project),
@@ -2252,8 +2260,9 @@ def _main() -> int:
                    "phases": [{"name": "phase3", "verdict": phase3_verdict,
                                "rc": rc}],
                    "dispatched_verdict": phase3_verdict,
-                   "verdict": ("FAIL" if phase3_verdict == "FAIL" else
-                               "NOT_MEASURED" if p3_stale else phase3_verdict),
+                   "verdict": ("FAIL" if phase3_verdict == "FAIL" else "NOT_MEASURED"),
+                   "whole_flow_verdict": "NOT_MEASURED",
+                   "verdict_reasons": [_fresh_why] if _fresh_why else [],
                    "audit_verdict": "NOT_MEASURED",
                    "audit_scope": ("bounded; whole-flow audit not refreshed"
                                    if p3 else "not measured; child report absent"),
@@ -2263,7 +2272,8 @@ def _main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_runner_summary(out, summary, project)
         lock.release()
-        return rc if p3 else (rc or 2)
+        return (rc or (0 if phase3_verdict in _PHASE_PASS | _PHASE_PASS_WITH_NOTE else 1)
+                if p3 else (rc or 2))
 
     # An entry owned by Phase 2 means Phase 1 is not this run's work: its
     # artefacts were supplied, not produced here. Force the skip through the
@@ -3030,7 +3040,9 @@ def _main() -> int:
         # They cannot run and still claim the same narrow window.
         p3_window = reports["phase3"]
         stale = p3_window.get("stale_downstream") or {}
-        window_verdict = p3_window.get("verdict", "NOT_MEASURED")
+        # The phase row already includes current canonical consumer acceptance.
+        # A raw child account cannot replace its measured FAIL or nonmeasurement.
+        window_verdict = next(v for n, v, _ in reversed(plan) if n == "phase3")
         summary = {
             "program": "vibe_ic_one_shot_runner", "bounded": True,
             **_delivery_route.report_label(project),
@@ -3040,8 +3052,8 @@ def _main() -> int:
             "phases": [{"name": n, "verdict": v, "rc": rc}
                        for n, v, rc in plan],
             "dispatched_verdict": window_verdict,
-            "verdict": ("FAIL" if window_verdict == "FAIL" else
-                        "NOT_MEASURED" if stale else window_verdict),
+            "verdict": ("FAIL" if window_verdict == "FAIL" else "NOT_MEASURED"),
+            "whole_flow_verdict": "NOT_MEASURED",
             "audit_verdict": "NOT_MEASURED",
             "audit_scope": "bounded; whole-flow audit not refreshed",
             "stale_downstream": stale,
@@ -3052,7 +3064,8 @@ def _main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_runner_summary(out, summary, project)
         lock.release()
-        return next(rc for name, _, rc in reversed(plan) if name == "phase3")
+        phase3_rc = next(rc for name, _, rc in reversed(plan) if name == "phase3")
+        return phase3_rc or (0 if window_verdict in _PHASE_PASS | _PHASE_PASS_WITH_NOTE else 1)
 
     # ---------------- Mixed-signal M1 (A+D top merge + top-level LVS) ------
     # M1-d4. `mixed_signal_top_lvs_run` is the ONLY writer of
