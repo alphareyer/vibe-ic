@@ -19,9 +19,12 @@ python3 plugins/vibe-ic/programs/phase3_verify_aggregate.py \
     --out-json /tmp/phase3_verify.json --strict
 ```
 
-The aggregator runs `phase23_completion_audit`, `drc_zero_violations_check`,
-`lvs_pass_check`, and `sta_report_check`; parses DRC count + WNS/TNS;
-and checks 6 required-file presence. **Refuse to claim tape-out-ready
+The aggregator runs the shipped `phase23_completion_self_audit_check --json`,
+`drc_report_check --mode drc --signoff --under reports/phase3/drc_signoff.rpt`,
+`lvs_report_check --mode lvs --under reports/phase3/lvs.rpt`, and
+`sta_report_check --mode sta --under phase3/stage3/sta/post_route_timing.rpt`.
+It retains child stderr and unmeasured outcomes, reads canonical artifacts
+before legacy aliases, and checks six required files. **Refuse to claim tape-out-ready
 without DRC=0 AND WNS≥0 AND all backing checks PASS.**
 
 **Purpose**: phase3 runner is a thin orchestrator over yosys / OpenROAD / KLayout / Netgen. PASS just means the tools didn't error. Whether the resulting silicon is FAB-ready is a separate question.

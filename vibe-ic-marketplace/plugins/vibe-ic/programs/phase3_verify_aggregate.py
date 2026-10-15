@@ -47,11 +47,29 @@ REQUIRED_FILES = (
 
 
 BACKING_CHECKS = (
-    "phase23_completion_audit.py",
-    "drc_zero_violations_check.py",
-    "lvs_pass_check.py",
+    "phase23_completion_self_audit_check.py",
+    "drc_report_check.py",
+    "lvs_report_check.py",
     "sta_report_check.py",
 )
+
+CHECK_ARGS = {
+    "phase23_completion_self_audit_check.py": ["--json"],
+    "drc_report_check.py": ["--mode", "drc", "--signoff", "--under",
+                            "reports/phase3/drc_signoff.rpt"],
+    "lvs_report_check.py": ["--mode", "lvs", "--under", "reports/phase3/lvs.rpt"],
+    "sta_report_check.py": ["--mode", "sta", "--under",
+                            "phase3/stage3/sta/post_route_timing.rpt"],
+}
+
+CANONICAL_FILES = {
+    "synth_netlist": ("phase2/stage2/synth/*_synth.v", "phase2/stage2/synth/netlist.v"),
+    "final_gds": ("phase3/stage4/gds/*.gds", "phase3/stage3/pnr/*.gds"),
+    "final_def": ("phase3/stage3/pnr/routed.def", "phase3/stage3/pnr/*.def"),
+    "sta_rpt": ("phase3/stage3/sta/post_route_timing.rpt",),
+    "drc_rpt": ("reports/phase3/drc_signoff.rpt",),
+    "lvs_rpt": ("reports/phase3/lvs.rpt",),
+}
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 
@@ -68,6 +86,15 @@ class CheckResult:
     name: str
     exit_code: int
     stdout_tail: str
+    stderr_tail: str = ""
+    argv: list = field(default_factory=list)
+    payload: dict = field(default_factory=dict)
+
+    @property
+    def status(self) -> str:
+        if self.exit_code == 0:
+            return "PASS"
+        return "NOT_MEASURED" if self.exit_code in (2, 127) else "FAIL"
 
     @property
     def passed(self) -> bool:
@@ -80,15 +107,15 @@ class Phase3Report:
     artifacts: List[ArtifactPresence]
     checks: List[CheckResult]
     drc_violations: int  # parsed from drc.rpt if present
-    sta_wns_ns: float
-    sta_tns_ns: float
+    sta_wns_ns: float | None
+    sta_tns_ns: float | None
     verdict: str
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "project_dir": self.project_dir,
             "artifacts": [asdict(a) for a in self.artifacts],
-            "checks": [asdict(c) | {"passed": c.passed}
+            "checks": [asdict(c) | {"passed": c.passed, "status": c.status}
                         for c in self.checks],
             "drc_violations": self.drc_violations,
             "sta_wns_ns": self.sta_wns_ns,
@@ -101,7 +128,11 @@ class Phase3Report:
 def scan_artifacts(project_dir: Path) -> List[ArtifactPresence]:
     out: List[ArtifactPresence] = []
     for name, rel in REQUIRED_FILES:
-        p = project_dir / rel
+        candidates = [p for pattern in CANONICAL_FILES[name]
+                      for p in sorted(project_dir.glob(pattern))
+                      if p.is_file() and (name != "final_def" or p.stem not in
+                          {"floorplan", "placed", "cts", "global_route", "globalroute"})]
+        p = candidates[0] if candidates else project_dir / rel
         out.append(ArtifactPresence(name=name, path=str(p),
                                        present=p.exists()))
     return out
@@ -141,15 +172,21 @@ def parse_sta_margins(rpt_path: Path) -> tuple:
 
 
 def _run_check(name: str, project_dir: Path) -> CheckResult:
-    cmd = [sys.executable, str(PROGRAMS_DIR / name), str(project_dir)]
+    cmd = [sys.executable, str(PROGRAMS_DIR / name), str(project_dir),
+           *CHECK_ARGS.get(name, [])]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=180, check=False)
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError:
+            payload = {}
         return CheckResult(name=name, exit_code=proc.returncode,
-                             stdout_tail=proc.stdout[-500:])
+                           stdout_tail=proc.stdout[-500:], stderr_tail=proc.stderr[-2000:],
+                           argv=cmd, payload=payload if isinstance(payload, dict) else {})
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return CheckResult(name=name, exit_code=127,
-                             stdout_tail=f"error: {e}")
+                           stdout_tail="", stderr_tail=f"error: {e}", argv=cmd)
 
 
 def aggregate(project_dir: Path,
@@ -158,8 +195,8 @@ def aggregate(project_dir: Path,
               drc_violations: int,
               wns: float, tns: float) -> Phase3Report:
     missing = [a for a in artifacts if not a.present]
-    failed = [c for c in checks if not c.passed]
-    timing_fail = wns < 0 or tns < 0
+    failed = [c for c in checks if c.status == "FAIL"]
+    timing_fail = any(value is not None and value < 0 for value in (wns, tns))
     drc_fail = drc_violations > 0
     # NOT MEASURED IS NOT NOT-FAILING (vibe-ic#727). This line used to read
     #
@@ -182,7 +219,8 @@ def aggregate(project_dir: Path,
     drc_unmeasured = drc_violations < 0
     if missing or failed or timing_fail or drc_fail:
         verdict = "FAIL"
-    elif drc_unmeasured:
+    elif drc_unmeasured or wns is None or tns is None or any(
+            c.status == "NOT_MEASURED" for c in checks):
         verdict = "UNMEASURED"
     else:
         verdict = "PASS"
@@ -197,9 +235,20 @@ def aggregate(project_dir: Path,
 
 def verify(project_dir: Path) -> Phase3Report:
     artifacts = scan_artifacts(project_dir)
-    drc_n = parse_drc_count(project_dir / "phase3/drc.rpt")
-    wns, tns = parse_sta_margins(project_dir / "phase3/sta.rpt")
+    paths = {row.name: Path(row.path) for row in artifacts}
+    drc_n = parse_drc_count(paths["drc_rpt"])
+    import re
+    sta_text = paths["sta_rpt"].read_text(errors="replace") if paths["sta_rpt"].is_file() else ""
+    margins = [re.search(r"\b" + metric + r"\s+(-?\d+\.?\d*)", sta_text, re.I)
+               for metric in ("wns", "tns")]
+    wns, tns = [float(match.group(1)) if match else None for match in margins]
     checks = [_run_check(name, project_dir) for name in BACKING_CHECKS]
+    # The canonical consumer owns XML/report dialects and the measured count.
+    drc = next(c for c in checks if c.name == "drc_report_check.py")
+    summary = drc.payload.get("summary") or {}
+    total, determined = summary.get("real_violation_total"), summary.get("determined_files")
+    if isinstance(total, int) and not isinstance(total, bool) and isinstance(determined, int) and determined > 0:
+        drc_n = total
     return aggregate(project_dir, artifacts, checks, drc_n, wns, tns)
 
 
@@ -225,8 +274,9 @@ def report_to_markdown(rep: Phase3Report) -> str:
     out.append("| Check | Exit | Verdict |")
     out.append("|---|---|---|")
     for c in rep.checks:
-        out.append(f"| `{c.name}` | {c.exit_code} | "
-                   f"{'PASS' if c.passed else 'FAIL'} |")
+        out.append(f"| `{c.name}` | {c.exit_code} | {c.status} |")
+        if c.stderr_tail:
+            out.extend(["", f"{c.name} stderr:", "```text", c.stderr_tail, "```", ""])
     out.append("")
     return "\n".join(out)
 

@@ -174,7 +174,7 @@ def emit_prelayout_config(project: Path, pdk: str, top: str, sdc: Optional[Path]
     if sdc is not None:
         for key in ("PNR_SDC_FILE", "SIGNOFF_SDC_FILE"):
             config[key] = str(sdc.resolve())
-            sources[key] = "step 7 spec-derived SDC (phase3/stage3/pnr/constraint.sdc)"
+            sources[key] = f"step 7 spec-derived SDC ({sdc.resolve()})"
     else:
         percent, where = _declared_io_delay_percent(project)
         if percent is not None:

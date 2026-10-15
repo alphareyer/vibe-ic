@@ -34,6 +34,55 @@ def entry(project, path, *, external=False):
     return {"path": name, "sha256": digest(path), "bytes": path.stat().st_size}
 
 
+def native_image(project, tool):
+    """The namespace selected by the existing native-tool launcher."""
+    import shutil
+    if shutil.which(tool):
+        return None
+    from librelane_contract import resolve_image
+    return resolve_image(Path(project))
+
+
+def lef_entries(project, paths, *, image=None):
+    """Hash image-owned LEFs in that image, and mounted project LEFs locally.
+
+    A same-named host file is not evidence about an image-owned PDK. Read
+    raw bytes without copying or rewriting the PDK into the host namespace.
+    """
+    project = Path(project).resolve()
+    paths = [Path(path).resolve() for path in paths]
+    external = [path for path in paths if image and not path.is_relative_to(project)]
+    measured = {}
+    if external:
+        from librelane_contract import run_container
+        code = ("import hashlib,json,sys; from pathlib import Path; rows=[]\n"
+                "for name in sys.argv[1:]:\n"
+                " p=Path(name); data=p.read_bytes()\n"
+                " if not data: raise ValueError('CURRENT_FILE_EMPTY: '+name)\n"
+                " rows.append({'path':name,'sha256':hashlib.sha256(data).hexdigest(),"
+                "'bytes':len(data)})\n"
+                "print(json.dumps(rows))\n")
+        argv = native_argv(project, "python3", ["-c", code, *map(str, external)], image=image)
+        cp = run_container(argv, probe_deadline_s=60)
+        if cp.returncode:
+            raise ValueError(f"CURRENT_IMAGE_LEF_UNAVAILABLE: {image}: {cp.stderr[-1000:]}")
+        try:
+            # The image's normal --skip entry point emits startup diagnostics
+            # before the program's single JSON line. Keep that front door.
+            rows = json.loads(cp.stdout.strip().splitlines()[-1])
+            if not isinstance(rows, list) or [row["path"] for row in rows] != list(map(str, external)):
+                raise ValueError("image LEF readback does not match requested paths")
+            for row in rows:
+                if (not isinstance(row.get("bytes"), int) or row["bytes"] <= 0
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", "")))):
+                    raise ValueError("image LEF readback has no measured bytes/hash")
+                measured[row["path"]] = dict(row, image=image)
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise ValueError(f"CURRENT_IMAGE_LEF_UNAVAILABLE: {image}: {exc}") from exc
+    return [measured[str(path)] if str(path) in measured else
+            entry(project, path, external=True) for path in paths]
+
+
 def design_of(path):
     match = re.search(r"(?m)^\s*DESIGN\s+(\S+)\s*;", Path(path).read_text())
     if not match:
@@ -76,6 +125,21 @@ def validate(project, record, *, step, stage, tools, required_inputs,
             raise ValueError("CURRENT_TOOL_MISMATCH")
         if not record.get("pdk") or not record.get("design"):
             raise ValueError("CURRENT_CONTEXT_EMPTY")
+        lef_rows = {}
+        if step == "16" and isinstance(record.get("inputs"), dict):
+            roles = [role for role in record["inputs"] if role.startswith("pdk_lef_")]
+            selected = native_image(project, "openroad")
+            # Compare the current pin before opening an old image. A valid old
+            # hash cannot authorize reuse after the selected runtime changes.
+            for role in roles:
+                row = record["inputs"][role]
+                if not isinstance(row, dict):
+                    raise ValueError(f"CURRENT_HASH_MISSING: {role}")
+                if row.get("image") and row["image"] != selected:
+                    raise ValueError(f"CURRENT_IMAGE_CHANGED: {role}")
+            lef_rows = dict(zip(roles, lef_entries(project,
+                [record["inputs"][role]["path"] if Path(record["inputs"][role]["path"]).is_absolute()
+                 else Path(project) / record["inputs"][role]["path"] for role in roles], image=selected)))
         for field, required in (("inputs", required_inputs),
                                 ("outputs", required_outputs)):
             rows = record.get(field)
@@ -90,7 +154,8 @@ def validate(project, record, *, step, stage, tools, required_inputs,
                 if path.is_absolute() and not external:
                     raise ValueError(f"CURRENT_PATH_ESCAPES: {role}")
                 path = path if path.is_absolute() else Path(project) / path
-                if entry(project, path, external=external) != row:
+                actual = lef_rows[role] if role in lef_rows else entry(project, path, external=external)
+                if actual != row:
                     raise ValueError(f"CURRENT_BYTES_CHANGED: {role}")
                 if role in ("floorplan", "def") and design_of(path) != record["design"]:
                     raise ValueError("CURRENT_DESIGN_MISMATCH")
@@ -102,31 +167,37 @@ def validate(project, record, *, step, stage, tools, required_inputs,
             raise ValueError('CURRENT_EXECUTION_MISSING' + f": validate.record.execution requires an object with rc=0; step={step!r}, stage={stage!r}")
         if not isinstance(execution.get("argv"), list) or not execution["argv"]:
             raise ValueError('CURRENT_ARGV_MISSING' + f": validate.record.execution.argv must be a nonempty list; step={step!r}, stage={stage!r}")
+        images = {row.get("image") for row in lef_rows.values() if row.get("image")}
+        if images:
+            argv = execution["argv"]
+            if (len(images) != 1 or execution.get("image") not in images
+                    or "--skip" not in argv or argv[argv.index("--skip") - 1] not in images):
+                raise ValueError("CURRENT_EXECUTION_IMAGE_MISMATCH")
         log = record["outputs"].get("log")
         if log is None:
             raise ValueError('CURRENT_LOG_MISSING' + f": validate.record.outputs.log binding is absent; step={step!r}, stage={stage!r}; no execution log opened")
         if marker and marker not in (Path(project) / log["path"]).read_text():
             raise ValueError('CURRENT_EXECUTION_MARKER_MISSING' + f": {Path(project) / log['path']}: execution log lacks required marker {marker!r}")
         return ""
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         return str(exc)
 
 
-def native_argv(project, tool, args):
+def native_argv(project, tool, args, *, image=None):
     """Use the local native tool in an image, or the pinned docker-run wrapper."""
     import shutil
-    if shutil.which(tool):
+    if image is None and shutil.which(tool):
         return [tool, *args]
     from librelane_contract import resolve_image
     from _docker_memory import docker_memory_flags
-    image = resolve_image(Path(project))
+    image = image or resolve_image(Path(project))
     return ["docker", "run", *docker_memory_flags(), "--rm", "--network", "none",
             "-v", f"{Path(project).resolve()}:{Path(project).resolve()}",
             image, "--skip", tool, *args]
 
 
-def run_native(project, tool, args, log):
-    argv = native_argv(project, tool, args)
+def run_native(project, tool, args, log, *, image=None):
+    argv = native_argv(project, tool, args, image=image)
     if argv[0] == "docker":
         from librelane_contract import run_container
         cp = run_container(argv, supervised=True, log=log)
@@ -136,7 +207,10 @@ def run_native(project, tool, args, log):
         cp = run_host_supervised(argv, stall_grace_s=300)
         rc, stdout, stderr = cp.rc, cp.out, cp.err
     Path(log).write_text((stdout or "") + "\n" + (stderr or ""))
-    return rc, {"rc": rc, "argv": argv}
+    execution = {"rc": rc, "argv": argv}
+    if image:
+        execution["image"] = image
+    return rc, execution
 
 
 def clock_plan_lef_paths(pdk, *, io_context=None):
@@ -207,8 +281,9 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
     # The runner already supplied any required IO views in macro_lefs. Use
     # the same normalized load set that validates reuse of this measurement.
     lefs = clock_plan_lef_paths(pdk)
-    for i, path in enumerate(lefs):
-        inputs[f"pdk_lef_{i}"] = entry(project, path, external=True)
+    image = native_image(project, "openroad")
+    for i, row in enumerate(lef_entries(project, lefs, image=image)):
+        inputs[f"pdk_lef_{i}"] = row
     plan.parent.mkdir(parents=True, exist_ok=True)
     script, log = plan.with_suffix(".tcl"), plan.with_suffix(".log")
     def quote(path):
@@ -230,7 +305,9 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
         'if {[llength [all_clocks]] == 0} {error "CLOCK_PLAN_NO_CLOCKS"}',
         'puts "CLOCK_PLAN_DONE"', ""]))
     inputs["recipe"] = entry(project, script)
-    rc, execution = run_native(project, "openroad", ["-exit", str(script)], log)
+    native_args = ["-exit", str(script)]
+    rc, execution = (run_native(project, "openroad", native_args, log, image=image)
+                     if image else run_native(project, "openroad", native_args, log))
     text = log.read_text()
     clocks = []
     for name, period, source in re.findall(r"(?m)^CLOCK_PLAN_NATIVE ([^|\n]+)\|([^|\n]+)\|([^\n]+)$", text):
@@ -240,8 +317,11 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
         clocks.append({"name": name, "period_ns": period, "source": source})
     if rc or not clocks or "CLOCK_PLAN_DONE" not in text or re.search(r"\[ERROR\]|^Error:", text, re.M):
         raise ValueError(f"CLOCK_PLAN_NATIVE_REFUSED: rc={rc}; {text[-500:]}")
+    current_lefs = lef_entries(project, lefs, image=image)
     for role, row in inputs.items():
-        if entry(project, project / row["path"], external=role.startswith("pdk_")) != row:
+        actual = (current_lefs[int(role.rsplit("_", 1)[1])] if role.startswith("pdk_lef_")
+                  else entry(project, project / row["path"]))
+        if actual != row:
             raise ValueError(f"CLOCK_PLAN_INPUT_CHANGED: {role}")
     current = build(project, "16", "stage3", design, pdk.name, "openroad",
                     inputs, {"log": entry(project, log)}, execution)

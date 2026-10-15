@@ -60662,9 +60662,11 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     import librelane_contract as _llc
     _ll_modes = {s: _llc.selected_mode(project, s) for s in ("7", "8", "10")}
     _ll: Dict[str, Any] = {}
-    if any(m != "direct" for m in _ll_modes.values()) and runner_sdc.is_file():
+    if any(m != "direct" for m in _ll_modes.values()) and canon_sdc.is_file():
         try:
-            _ll = _prelayout_librelane(project, top, pdk, runner_sdc,
+            # Step 8 certifies Step 7's immutable output. Step 15 owns the
+            # separate PnR deck and may later apply its named DRV derivation.
+            _ll = _prelayout_librelane(project, top, pdk, canon_sdc,
                                        design_staged, _ll_modes, notes)
         except (_llc.Refusal, OSError, ValueError) as exc:
             stopped = (_llc.tool_stop_reason(exc.code)
