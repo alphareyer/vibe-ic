@@ -26600,14 +26600,12 @@ def main() -> int:
     # that ran no cross-layer search leaves a NOT_APPLICABLE record rather than
     # a silence. This runs before the remaining Step-2 checks so a refuted
     # candidate is rejected at the first deterministic RTL-validation step.
-    if _bounded:
-        _disclose_runs_anyway(
-            "crosslayer_rewrite_fidelity",
-            "reports/crosslayer/rewrite_equivalence_check.json (a step-2 clause)",
-            "The judge is unconditional by its own documented contract, so that a "
-            "design which ran no cross-layer search leaves a NOT_APPLICABLE RECORD "
-            "rather than a silence; gating it is a separate decision.")
-    plan.append(step_crosslayer_rewrite_fidelity(project))
+    if _before_entry("rtl_validate", _entry_site):
+        plan.append(_entry_sentinel("crosslayer_rewrite_fidelity"))
+    elif _after_exit("rtl_validate"):
+        plan.append(_exit_sentinel("crosslayer_rewrite_fidelity"))
+    else:
+        plan.append(step_crosslayer_rewrite_fidelity(project))
 
     # Fixed Step 2 call: selected_mode owns the production default and opt-out.
     if _before_entry("rtl_validate", _entry_site):
@@ -26624,7 +26622,12 @@ def main() -> int:
     # gate is that "this interface cannot be bonded out on any purchasable
     # slot" is arithmetic over files already on disk, and five of nine
     # benchmark ICs learned it instead by building until they hit a wall.
-    plan.append(step_slot_pad_budget(project, args.top_name))
+    if _before_entry("rtl_validate", _entry_site):
+        plan.append(_entry_sentinel("slot_pad_budget"))
+    elif _after_exit("rtl_validate"):
+        plan.append(_exit_sentinel("slot_pad_budget"))
+    else:
+        plan.append(step_slot_pad_budget(project, args.top_name))
 
     # Step 2a — design-complexity advisory (ADVISORY-ONLY, NON-GATING).
     # Runs right after RTL is available so the estimator can scan it.
@@ -27276,16 +27279,18 @@ def main() -> int:
     # chained by phase23_one_shot_runner.py.
     # Emit plugin_output/declaration.json from the now-final RTL + the
     # oracle TB's measured framing, BEFORE the manifests/audit read it.
-    if _bounded:
-        _disclose_runs_anyway(
-            "arith_declaration_emit",
-            "plugin_output/declaration.json and its .provenance.json",
-            "It is derived from the design's own RTL and the oracle TB's measured "
-            "framing, not from any step's state, and the manifests this run does "
-            "owe read it.")
-    plan.append(step_arith_declaration_emit(project))
-    plan[-1] = _refuse_a_disagreeing_declaration(
-        plan[-1], _early_declaration, project)
+    if not _bounded or {"2", "3", "4"}.intersection(_window_step_ids()):
+        # This serializer feeds the frontend manifests below. Keep its actual
+        # declaration comparison when that frontend is selected.
+        plan.append(step_arith_declaration_emit(project))
+        plan[-1] = _refuse_a_disagreeing_declaration(
+            plan[-1], _early_declaration, project)
+    else:
+        plan.append(StepResult(
+            "arith_declaration_emit", "NOT_APPLICABLE", 0.0,
+            "the frontend consumers of this declaration are outside the "
+            "declared site window; the serializer was not dispatched.",
+            declared_by=" ".join(_window_flags)))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
     if _before_entry("sim", _entry_site):
