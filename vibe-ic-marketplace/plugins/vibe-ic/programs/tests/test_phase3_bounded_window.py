@@ -189,7 +189,7 @@ def test_publication_uses_enclosing_window_id_when_clock_advances(tmp_path, monk
     assert receipt["window_run_id"] == "started"
 
 
-def test_every_canonical_phase3_step_is_accepted_from_yaml():
+def test_every_canonical_phase3_step_is_accepted_from_yaml(tmp_path, monkeypatch):
     import yaml
     import flow_compliance_check as fcc
     flow = yaml.safe_load(fcc.DEFAULT_FLOW_DEF.read_text())
@@ -204,7 +204,9 @@ def test_every_canonical_phase3_step_is_accepted_from_yaml():
     assert p3._phase3_window_sites("37.4", "37.4") == [
         "signoff_metrics_aggregate"]
     assert p3._phase3_window_sites("37", "37") == ["gds"]
-    assert p3._phase3_window_sites("31", "31") == ["drc", "lvs"]
+    assert p3._phase3_window_sites("31", "31") == ["default_backend"]
+    import test_default_step31_owner as current31
+    current31.current_window(tmp_path, monkeypatch)
     assert p3._phase3_window_sites("36", "36") == ["tapeout_checklist"]
     assert p3._phase3_window_sites("37.3", "37.3") == ["gds_xor"]
     assert p3._phase3_window_sites("38", "38") == ["foundry_handoff"]

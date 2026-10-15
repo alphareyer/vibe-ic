@@ -308,6 +308,8 @@ def test_default_step15_direct_invocation_binds_backend_receipt_before_consumer(
         pnr.mkdir(parents=True, exist_ok=True)
         (pnr / "floorplan.def").write_text("floorplan\n")
         (pnr / "pdn.done").write_text("pdn\n")
+        (pnr / "constraint.sdc").write_text(
+            "create_clock -name clk -period 10 [get_ports clk]\n")
         return RUNNER.StepResult("pnr", "PASS", 0.0, "fixture")
 
     def fake_declared(current_project, step_id):

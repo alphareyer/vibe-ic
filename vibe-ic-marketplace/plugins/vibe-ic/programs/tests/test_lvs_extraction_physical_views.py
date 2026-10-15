@@ -73,6 +73,15 @@ def _window(tmp_path, monkeypatch, *, sha_ok=True):
     container query and the site's EDA dispatch -- each captures the PDK
     object it is handed."""
     project, pdk = _recorded_run(tmp_path, sha_ok=sha_ok)
+    # Reuse the current caller's original-input fixture. Only dependency
+    # selection and the expensive native transport are substituted.
+    _default_reroute_control(project, pdk, monkeypatch, '31')
+    import copy
+    import execution_backend_producers as producers
+    import librelane_contract as ll
+    producer_pdk = copy.deepcopy(pdk)
+    monkeypatch.setattr(producers, '_parameters', lambda *_:
+                        (mod, ll, producer_pdk, 'SOURCE_CONTROL_NOT_EXECUTED'))
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "lvsfix31")
     monkeypatch.setattr(mod, "_discover_padring_io_views",
                         lambda pdk, container: ([_IO_LEF], [_IO_GDS]))
@@ -93,7 +102,8 @@ def _window(tmp_path, monkeypatch, *, sha_ok=True):
 
     monkeypatch.setattr(mod, "_layout_basis", basis)
     monkeypatch.setattr(mod, "_direct_flow_window", dispatch)
-    args = SimpleNamespace(entry_step="31", exit_step="31", container="c")
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="c",
+                           die_um=None, util=None, spare_density=None)
     mod._run_phase3_window(project, "spm", pdk, args,
                            mod._phase3_window_sites("31", "31"))
     seen["project"] = project
@@ -306,6 +316,8 @@ def _default_reroute_control(project, pdk, monkeypatch, first, *, missing=False)
     monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
     sdc = 'create_clock -name clk -period 10 [get_ports clk]\n'
     files = {
+        'input/step_0_5ic_answers.json': '{}\n',
+        'input/submission_template/neutral.json': '{}\n',
         'phase2/stage2/synth/post_dft_netlist.v':
             'module view_unit(input clk); endmodule\n',
         'phase2/stage2/synth/view_unit_synth.v':
@@ -314,6 +326,7 @@ def _default_reroute_control(project, pdk, monkeypatch, first, *, missing=False)
         'phase3/stage3/pnr/constraint.sdc': sdc,
         'phase3/stage3/pnr/step15.constraint.sdc': sdc,
         'phase3/stage3/pnr/floorplan.def': 'VERSION 5.8 ;\nDESIGN view_unit ;\nEND DESIGN\n',
+        'phase3/stage3/pnr/routed.def': 'VERSION 5.8 ;\nDESIGN view_unit ;\nEND DESIGN\n',
         'phase3/stage3/pnr/pdn.done': '{"scope":"SOURCE_CONTROL predecessor"}\n',
         'phase3/stage3/pnr/post_cts.def': 'VERSION 5.8 ;\nDESIGN view_unit ;\nEND DESIGN\n',
         'source_control_state.json': '{"scope":"SOURCE_CONTROL predecessor"}\n',
@@ -345,6 +358,8 @@ def _default_reroute_control(project, pdk, monkeypatch, first, *, missing=False)
         'image_id': 'SOURCE_CONTROL_NOT_EXECUTED',
         'state_in': str(project / 'source_control_state.json')})
     monkeypatch.setattr(mod, '_detect_pdk', lambda *args: pdk)
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (mod, ll, pdk, 'SOURCE_CONTROL_NOT_EXECUTED'))
     produce = producers.produce
     def observed_produce(proj, params):
         seen['producer_steps'].append(str(params['step_id']))

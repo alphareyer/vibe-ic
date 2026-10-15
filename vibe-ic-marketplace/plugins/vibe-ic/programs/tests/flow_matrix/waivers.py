@@ -28,7 +28,7 @@ it, or a decision reference.
     GOOD  reason:   "The artefact is emitted on only one branch of a real PDK
                      condition, so an unconditional declaration converts every
                      honest run of the other branch into MISSING."
-          evidence: "programs/mixed_signal_top_lvs_run.py::`(rpt_dir / "top_lvs.json").write_text(`"
+          evidence: "programs/mixed_signal_top_lvs_run.py::`_aa.write_text(rpt_dir / "top_lvs.json",`"
 
                     (a CONTENT anchor. The example a reader copies decides how
                      the next waiver is written, and a `path:line` here rots the

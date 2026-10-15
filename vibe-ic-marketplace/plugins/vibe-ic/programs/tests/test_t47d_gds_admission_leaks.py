@@ -226,31 +226,22 @@ def test_handoff_refuses_an_unrecorded_extra_mask(tmp_path):
 
 
 def test_window_after_pnr_keeps_existing_routed_layout(tmp_path, monkeypatch):
-    project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    import test_default_step31_owner as current31
+    project, pdk, calls, observed, args = current31.current_window(tmp_path, monkeypatch)
     pnr = R._pl.pnr_dir(project)
-    before = (pnr / "routed.def").read_bytes()
-    calls = []
-
-    def fake_drc(proj, *args):
-        calls.append("drc")
-        out = proj / "phase3/reports/drc.rpt"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("<report-database><items/></report-database>\n")
-        return R.StepResult("drc", "PASS", 0.0, "deck clean", [str(out)])
-
-    def fake_lvs(proj, *args, **kwargs):
-        calls.append("lvs")
-        out = proj / "phase3/reports/lvs.rpt"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("LVS MATCH\n")
-        return R.StepResult("lvs", "PASS", 0.0, "match", [str(out)])
-
-    monkeypatch.setattr(R, "step_drc", fake_drc)
-    monkeypatch.setattr(R, "step_lvs", fake_lvs)
-    args = SimpleNamespace(entry_step="31", exit_step="31", container="",
-                           die_um=NEW_DIE, util=NEW_UTIL, spare_density=0.02)
-    assert R._phase3_window_sites("31", "31") == ["drc", "lvs"]
-    R._run_phase3_window(project, TOP, _pdk(project), args, ["drc", "lvs"])
-    assert calls == ["drc", "lvs"]
-    assert (pnr / "routed.def").read_bytes() == before
-    assert (pnr / f"{TOP}.gds").is_file()
+    before = (pnr / 'routed.def').read_bytes()
+    gds_before = (pnr / 'chip_top.gds').read_bytes()
+    measured = list(calls)
+    admission = R._ga.admission_path(project)
+    record = json.loads(admission.read_text())
+    record['layout_digest'] = '0' * 64
+    admission.write_text(json.dumps(record))
+    rc = R._run_phase3_window(project, 'chip_top', pdk, args,
+                              R._phase3_window_sites('31', '31'))
+    assert rc != 0, 'a mismatched layout admission must refuse before native PV'
+    assert calls == measured, 'the refused invocation must not execute DRC/LVS/ERC'
+    assert (pnr / 'routed.def').read_bytes() == before
+    assert (pnr / 'chip_top.gds').read_bytes() == gds_before
+    receipt = json.loads((project / 'reports/phase3/default_steps/31/backend_result.json').read_text())
+    assert receipt['verdict'] == 'NOT_MEASURED'
+    assert 'unadmitted routed GDS' in receipt['detail']

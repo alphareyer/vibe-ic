@@ -172,8 +172,41 @@ def fixture(tmp_path, monkeypatch, case):
     for name in row["required_outputs"]:
         (project / name).unlink(missing_ok=True)
     assert all(not (project / name).exists() for name in row["required_outputs"])
+    # Use the unchanged layout identity and admission contract on these
+    # source-control inputs; the selected native transports remain neutral.
+    basis, error = R._layout_basis(project, 'chip_top', pdk, 'SOURCE_CONTROL_ONLY')
+    assert not error, error
+    put(project, 'reports/phase3/prestream_gate.json', json.dumps({
+        'verdict': 'PASS', 'layout_digest': basis,
+        'scope': 'SOURCE_CONTROL existing pre-stream transport'}))
+    R._ga.admit_gds(project, pnr / 'chip_top.gds', basis,
+                    R._layout_basis_paths(project, 'chip_top'))
     calls.clear()
     return project, pdk, calls, observed, row
+
+
+def current_window(tmp_path, monkeypatch):
+    """Real current Default owner/declared writers/full nine-output consumer."""
+    project, pdk, calls, observed, row = fixture(tmp_path, monkeypatch, 'current')
+    before = {name: (R._pl.pnr_dir(project) / name).read_bytes()
+              for name in ('routed.def', 'chip_top.gds')}
+    selected = R._phase3_window_sites('31', '31')
+    assert selected == ['default_backend']
+    args = SimpleNamespace(entry_step='31', exit_step='31',
+                           container='SOURCE_CONTROL_ONLY', die_um=None,
+                           util=None, spare_density=None)
+    rc = R._run_phase3_window(project, 'chip_top', pdk, args, selected)
+    assert rc == 0
+    assert [value[:2] for value in observed] == [('declared', '31'), ('consumer', '31')]
+    assert calls.count('erc') == calls.count('extraction') == calls.count('netgen') == 1
+    assert observed[0][2]['verdict'] == 'PRODUCED'
+    current = V.latest_pass(project, '31')
+    assert current and current['canonical_pass'] and current['current_inputs']
+    assert len(row['required_outputs']) == 9
+    assert all((project / name).is_file() for name in row['required_outputs'])
+    for name, payload in before.items():
+        assert (R._pl.pnr_dir(project) / name).read_bytes() == payload
+    return project, pdk, calls, observed, args
 
 
 @pytest.mark.parametrize("case", ["current", "missing_erc", "changed_perc", "lvs_fail"])

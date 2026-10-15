@@ -225,8 +225,13 @@ def test_the_new_channel_adopted_exactly_one_entry():
                 for st in doc["steps"]
                 for e in (st.get("program_outputs") or [])
                 if isinstance(e, dict) and e.get("producer_command")]
-    assert carrying == [("17", "placement_legality_check"),
+    # Step35's reviewed advisory writer and FS1's two existing producer
+    # commands use this same declared channel. Pin their identities, not a count.
+    assert carrying == [("FS1", "fmeda_fault_injection_coverage"),
+                        ("FS1", "fmeda_coverage_check"),
+                        ("17", "placement_legality_check"),
                         ("22", "spef_extraction_check"),
+                        ("35", "dfm_screen_check"),
                         ("31", "perc_corpus_sweep")]
     for st in doc["steps"]:
         for e in (st.get("program_outputs") or []):

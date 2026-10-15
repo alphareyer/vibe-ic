@@ -943,6 +943,8 @@ PINNED_OUTPUT_MEMBERS = frozenset({
     ('M3', 'phase3/mixed_signal/cosim/mixed_signal_results.json'),
     ('M3', 'reports/analog/mixed_signal/interface_si.json'),
     ('M4', 'reports/analog/mixed_signal/signoff.json'),
+    # 61b7c4f54 (#3066) made the Step23 native STA record a canonical output.
+    ('23', 'reports/phase3/sta_postpnr_signoff.json'),
 })
 
 
@@ -1448,7 +1450,8 @@ def test_output_entries_classify_into_the_four_kinds():
     # One FILE added against e1c961d6ac: Step23 current achieved-period output.
     # Three FILEs added against 31665933c7: fresh DRV plan, bundle and verdict.
     # Step15 publishes the physical SDC before any downstream consumer (+1 FILE).
-    assert seen[F.FILE] == 167, (seen, REDERIVE)
+    # 61b7c4f54 declares the native Step23 STA handoff (+1 FILE, no removals).
+    assert seen[F.FILE] == 168, (seen, REDERIVE)
     assert seen[F.GLOB] == 30, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
@@ -1618,7 +1621,7 @@ def test_waiver_validator_actually_rejects_a_placeholder():
             "run of the other branch into MISSING."
         ),
         evidence=(
-            'programs/mixed_signal_top_lvs_run.py::`(rpt_dir / "top_lvs.json").write_text(`'
+            'programs/mixed_signal_top_lvs_run.py::`_aa.write_text(rpt_dir / "top_lvs.json",`'
         ),
     )
     assert W.validate(good) == ()
@@ -1710,7 +1713,7 @@ def test_a_citation_whose_line_has_moved_is_rejected():
     further down; `:256` read `chosen_path, chosen, chosen_ref = parsed[0]`.
     Pre-fix, `validate()` returned `()` for that.
     """
-    true_line = _line_holding(_M1_FILE, '(rpt_dir / "top_lvs.json").write_text(')
+    true_line = _line_holding(_M1_FILE, '_aa.write_text(rpt_dir / "top_lvs.json",')
     stale_line = _line_holding_none_of(_M1_FILE, ("top_lvs", "rpt_dir", "write_text"))
     assert stale_line != true_line
 
@@ -1796,7 +1799,7 @@ def test_the_citation_check_leaves_a_resolving_citation_alone():
     derived, so this stays a statement about the CHECK and not about where a
     sibling agent last left an unrelated file.
     """
-    m1 = _line_holding(_M1_FILE, '(rpt_dir / "top_lvs.json").write_text(')
+    m1 = _line_holding(_M1_FILE, '_aa.write_text(rpt_dir / "top_lvs.json",')
     merge_rel = "programs/mixed_signal_merge_check.py"
     merge_lo = _line_holding(merge_rel, 'for rel in ("reports/analog/mixed_signal/')
     merge_pass = _line_holding(merge_rel, 'str(top_lvs.get("verdict")) == "PASS"')

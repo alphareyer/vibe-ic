@@ -23580,12 +23580,12 @@ FMEDA_PRODUCER = "fmeda_fault_injection_coverage"
 
 def fmeda_producer_command(flow_yaml: Optional[Path] = None, *,
                            program: str = FMEDA_PRODUCER) -> Optional[str]:
-    """Step FS1's producer command, exactly as the flow's gate states it.
+    """Step FS1's producer command from its declared producer channel.
 
     Read from the flow YAML instead of repeated here, so the run and the
-    audit invoke the producer with the same arguments. None when the flow no
-    longer lists the producer under FS1's `programs:` or no gate clause of
-    FS1 runs it with a `--json` report.
+    producer invokes the stated command before the audit. Legacy flow documents
+    may still declare that command in the gate. None when FS1 does not list the
+    producer or neither channel declares its `--json` report.
     """
     import flow_declared_producer_run as _fdp
     import yaml
@@ -23600,6 +23600,14 @@ def fmeda_producer_command(flow_yaml: Optional[Path] = None, *,
             continue
         if program not in (step.get("programs") or []):
             return None
+        for output in step.get('program_outputs') or []:
+            if not isinstance(output, dict) or output.get('program') != program:
+                continue
+            cmd = output.get('producer_command')
+            if isinstance(cmd, str):
+                parts = cmd.split()
+                if parts and parts[0] == program and _fdp._JSON_RE.search(cmd):
+                    return cmd
         for cmd in _fdp._iter_commands(step.get("gate") or {}, []):
             parts = cmd.split()
             if parts and parts[0] == program and _fdp._JSON_RE.search(cmd):
@@ -23614,10 +23622,9 @@ def step_fmeda_fault_injection(project: Path,
                                ) -> StepResult:
     """Flow step FS1: run the FMEDA fault-injection producer.
 
-    The flow's FS1 gate names `fmeda_fault_injection_coverage` as its first
-    clause. This runs the same command the gate states, from the project
-    directory, so the report is run evidence before the audit reads it. The
-    gate still re-runs the producer and keeps its own verdict.
+    The flow's FS1 producer declarations name the injection and independent
+    recomputation commands. Both run from the project directory before the
+    canonical consumer reads their reports and writes its separate verdict.
 
     `not_applicable` is the CALLER's own applicability reason -- the runner's
     `_analog_rtl_track_absent` predicate, the same one it hands

@@ -391,10 +391,12 @@ def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
     assert runner._phase3_window_sites('23', '24') == ['enclosing_canonicalize']
 
 
-def test_default_retains_the_existing_individual_layout_release_producers(monkeypatch):
+def test_default_retains_the_existing_individual_layout_release_producers(tmp_path, monkeypatch):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
     assert runner._phase3_window_sites('37', '37') == ['gds']
-    assert runner._phase3_window_sites('31', '31') == ['drc', 'lvs']
+    assert runner._phase3_window_sites('31', '31') == ['default_backend']
+    import test_default_step31_owner as current31
+    current31.current_window(tmp_path, monkeypatch)
     assert runner._phase3_window_sites('37.3', '37.3') == ['gds_xor']
 
 
@@ -420,6 +422,9 @@ def test_default_signoff_window_runs_only_current_row_and_consumer(tmp_path, mon
 def test_default_sta_publishes_the_selected_tool_without_a_second_sta(tmp_path, monkeypatch):
     import librelane_signoff as signoff
     pdk = SimpleNamespace(name='unit')
+    requirements = tmp_path / 'input/docs/requirements.md'
+    requirements.parent.mkdir(parents=True)
+    requirements.write_text('No power network requirement is stated.\n')
     monkeypatch.setattr(producers, '_parameters', lambda *args:
                         (runner, None, pdk, ''))
     monkeypatch.setattr(runner, '_emit_spef_sta', lambda *args:
@@ -989,18 +994,39 @@ def test_default_placement_publishes_its_native_handoff_for_the_consumer(tmp_pat
     folder = tmp_path / 'native/current-placement'
     receipt = {'state': str(folder / 'state_out.json'),
                'views': {'def': {'dest_sha256': 'current-placed-def'}}}
+    # The selected native chain also owns its post-GPL timing subject.
+    # Bind its real fixture bytes through the unchanged publication validator.
+    import hashlib
+    folder.mkdir(parents=True)
+    config = folder / 'config.json'
+    config.write_text('{"scope":"neutral selected native transport"}\n')
+    subject = folder / 'pnr_postgpl_timing.tcl'
+    subject.write_text('puts "neutral selected post-GPL subject"\n')
+    commands = folder / 'COMMANDS'
+    commands.write_text('openroad ' + str(subject) + '\n')
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    script_record = folder / 'pnr_postgpl_timing.json'
+    script_record.write_text(json.dumps({
+        'script': subject.name, 'sha256': digest(subject),
+        'commands_sha256': digest(commands)}))
     ll = SimpleNamespace(flow_segment=lambda *a: [
         'OpenROAD.GlobalPlacement', 'OpenROAD.RepairDesignPostGPL',
         'OpenROAD.DetailedPlacement'],
-        handoff_to_direct=lambda *a: receipt)
+        handoff_to_direct=lambda *a: receipt,
+        validate_step_receipt=lambda *a: {
+            'input': {'image': 'fixture', 'config': digest(config)},
+            'sha256': {script_record.name: digest(script_record)}})
     monkeypatch.setattr(producers, '_parameters', lambda *args: (None, ll, None, ''))
     monkeypatch.setattr(producers, '_state_chain', lambda *args:
-                        (ll, {}, {'OpenROAD.DetailedPlacement': folder}))
+                        (ll, {'Vibeic.PostGPLFanoutClosure': config},
+                         {'OpenROAD.DetailedPlacement': folder,
+                          'Vibeic.PostGPLFanoutClosure': folder}))
     monkeypatch.setattr(producers, '_logs', lambda *args: None)
     result = producers.produce_pnr(tmp_path, {
         'step_id': '17', 'top': 'unit', 'image_id': 'fixture'})
     assert result['verdict'] == 'PASS'
     assert json.loads(canonical.read_text()) == receipt
+    assert (tmp_path / producers.PNR / subject.name).read_bytes() == subject.read_bytes()
 
 
 @pytest.mark.parametrize('role', ['producer', 'audit'])

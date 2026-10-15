@@ -3650,6 +3650,10 @@ steps:
     program_outputs:
       - program: fmeda_fault_injection_coverage
         path: "reports/phase2/safety/fmeda_coverage.json"
+        producer_command: "fmeda_fault_injection_coverage . --rtl-dir phase2/stage1/rtl --asil D --json reports/phase2/safety/fmeda_coverage.json"
+      - program: fmeda_coverage_check
+        path: "reports/phase2/safety/fmeda_coverage_gate.json"
+        producer_command: "fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_gate.json"
     required_outputs:
       - "reports/phase2/safety/fmeda_coverage.json"
       - "reports/phase2/safety/fmeda_coverage_gate.json"
@@ -3658,8 +3662,7 @@ steps:
     # output still blocks the audit; the audit is not the first producer.
     gate:
       all_of:
-        - program_exit_zero: "fmeda_fault_injection_coverage . --rtl-dir phase2/stage1/rtl --asil D --json reports/phase2/safety/fmeda_coverage.json"
-        - program_exit_zero: "fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_gate.json"
+        - program_exit_zero: "fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_verdict.json"
     blocks_on: [11]
     notes: |
       Real iverilog fault-injection: inject single stuck-at bit-flips on a

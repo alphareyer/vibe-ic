@@ -366,6 +366,9 @@ def test_a_fail_that_names_no_step_cannot_decide_an_unplaced_window(
 def test_a_sign_off_row_of_the_windows_step_decides_it(project, monkeypatch):
     """Window 22..23 (enclosing): post-route STA is step 23's own gate. Its
     FAIL is the window's FAIL, named, never "no row of their own"."""
+    import execution_policy
+    assert p3._phase3_window_sites("22", "23") == ["default_backend"]
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
     assert p3._phase3_window_sites("22", "23") == ["enclosing_phase3"]
     report = _rows(("pnr", "PASS", "", ""),
                    ("sta_signoff", "FAIL", "WNS -0.42ns", ""))
@@ -765,7 +768,7 @@ def _rows_main_emits():
     return (names | {g[0] for g in p3._PHASE3_GATE_TABLES()}) - pre_audit
 
 
-def test_every_phase3_step_is_answered_for_by_a_row_main_emits():
+def test_every_phase3_step_is_answered_for_by_a_row_main_emits(monkeypatch):
     """One map: dispatch and verdict read the same canonicalizer set, and
     every canonical Phase-3 step 9..38 but the pre-audit producers' has a
     report row that answers for it. Steps 36, 37.3 and 38 (their rows never
@@ -774,6 +777,9 @@ def test_every_phase3_step_is_answered_for_by_a_row_main_emits():
     INCONCLUSIVE, which the test above pins."""
     assert p3._phase3_steps_of_row("canonicalize_artefacts") == \
         p3._PHASE3_CANONICALIZER_IDS
+    import execution_policy
+    assert p3._phase3_window_sites("24", "25") == ["default_backend"]
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
     assert p3._phase3_window_sites("24", "25") == ["enclosing_canonicalize"]
     covered = set().union(*(p3._phase3_steps_of_row(n) for n in _rows_main_emits()))
     ids = p3._phase3_window_steps("9", "39")
