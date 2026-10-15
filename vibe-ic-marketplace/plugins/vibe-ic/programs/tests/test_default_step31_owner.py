@@ -381,6 +381,10 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         assert rc == 0
         assert result and result["canonical_pass"] is True
         assert len(observation["required_outputs"]) == 12
+        assert calls.count("drv_measure.tcl") == 2
+        assert calls.count("drv_positive_control.tcl") == 2
+        plan = json.loads((project / "reports/phase3/sta/drv_capture_plan.json").read_text())
+        assert plan["identity"]["capture_point"] == "post_stream"
         assert all(observation["required_outputs"].values())
         perc = json.loads((project / "reports/phase3/perc_sweep.json").read_text())
         assert perc["program"] == perc["sweep"] == "perc_corpus_sweep"
