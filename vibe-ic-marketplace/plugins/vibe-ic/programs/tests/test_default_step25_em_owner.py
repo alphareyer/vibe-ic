@@ -133,7 +133,8 @@ def _current_ir(tmp_path, monkeypatch, *, stress=False, ir_fail=False):
         log = _write(root, folder + "/openroad-irdropreport.log",
             "Reading timing library for the 'unit' corner at '" + pdk.liberty + "'\n"
             "[INFO PSM-0040] All shapes on net PWR are connected.\n")
-        _write(root, folder + "/irdrop.rpt", "neutral IR native report\n")
+        _write(root, folder + "/irdrop.rpt", "OpenROAD PSM neutral IR drop report\n" +
+            "".join(f"IR drop at PWR:neutral_node_{i}: {drop} V\n" for i in range(48)))
         assets.update(state=state, log=log, odb=odb)
         return {"tool_state": str(state), "tool_state_sha256": digest(state),
             "def_sha256": digest(kw["routed_def"]), "spef_sha256": digest(kw["spef"]),
