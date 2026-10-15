@@ -550,15 +550,56 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     if row is None:
         raise Refusal('UNKNOWN_CANONICAL_STEP', step_id)
     declarations = list(row.get('required_inputs') or ())
-    declarations.extend(('input/step_0_5ic_answers.json', 'input/submission_template'))
-    if step_id == '0.5ic':
-        # Derived answers cite these original documents; their consumer must
-        # receive the same frozen bytes as the declaration producers.
-        declarations.append('input/docs')
-    if step_id == '0.5ic' and (parameters or {}).get('template'):
-        # Freeze only this invocation's declared template source. A missing
-        # searched directory remains valid for explicit absence routes.
-        declarations.append(parameters['template'])
+    if step_id == '0.5ic' and runtime.get('policy', {}).get('mode', 'default') == 'default':
+        import _submission_template as template_contract
+        import submission_template_fetch as template_fetch
+        import area_budget_basis_gen as area_basis
+        # These are the original owner inputs. The ingest/declaration tree
+        # is this row's mutable output, not an input to freeze before it runs.
+        declarations.append(template_contract.DESIGN_ANSWERS_REL)
+        declarations.extend(template_fetch._FAMILY_SEARCH_ROOTS)
+        declarations.extend(rel for rel, _path, _text in area_basis.design_docs(root))
+        # The producer's auto-PDK fallback may read a declared layer/config.
+        # Bind that reader's selected file, not the entire generated-doc tree.
+        import declared_pdk_is_the_pdk_used_check as pdk_declaration
+        _target, source = pdk_declaration.declared_target(root)
+        if source:
+            rel = source.rsplit(':', 1)[0]
+            declarations.extend(candidate for candidate in (rel, 'run/' + rel)
+                                if (root / candidate).is_file())
+        template = (parameters or {}).get('template')
+        if template is None:
+            try:
+                own = json.loads((root / template_contract.DESIGN_ANSWERS_REL).read_text())
+            except (OSError, ValueError):
+                own = None  # The existing producer still refuses unreadable answers.
+            operator = own.get('operator_template') if isinstance(own, dict) else None
+            template = operator.get('path') if isinstance(operator, dict) else None
+        if template:
+            # An explicitly staged operator source is an input; the default
+            # fetch destination is not invented as a pre-existing input.
+            path = Path(template)
+            try:
+                path = (path if path.is_absolute() else root / path).resolve().relative_to(root.resolve())
+            except ValueError:
+                # Preserve Default's existing external-template producer
+                # route, including relative/symlink spellings. The local
+                # collector cannot snapshot external files safely, so this
+                # keeps historical acceptance with unmeasured freshness.
+                if parameters is not None:
+                    parameters['resolved_input_manifest'] = {
+                        'files': {}, 'declarations': declarations, 'missing': [],
+                        'input_freshness': 'NOT_MEASURED',
+                        'input_freshness_reason': 'EXTERNAL_TEMPLATE_OUTSIDE_PROJECT',
+                    }
+                return {}
+            declarations.append(str(path))
+    else:
+        declarations.extend(('input/step_0_5ic_answers.json', 'input/submission_template'))
+        if step_id == '0.5ic':
+            declarations.append('input/docs')
+            if (parameters or {}).get('template'):
+                declarations.append(parameters['template'])
     registry = runtime.get('registry')
     for arm in registry.adapters(step_id) if registry is not None else ():
         # String declarations are required by default.  A caller that intends

@@ -1150,12 +1150,32 @@ def retained_steps(step_ids, *, canonical_acceptance: bool = False):
 
 def _begin_retained_rows(project: Path, dec: Decision) -> list:
     import _flow_yaml
+    import execution_policy
     import execution_backend_worker as worker
     import step_output_collector as versions
     canonical = {str(row['id']): row for row in _flow_yaml.load()['steps']}
-    return versions.begin_steps(project, [
-        (sid, worker._declared_input_files(project, canonical[sid].get('required_inputs', ())))
-        for sid in dec.flow_steps if sid in canonical])
+    rows = []
+    freshness = {}
+    for sid in dec.flow_steps:
+        if sid not in canonical:
+            continue
+        if sid == '0.5ic':
+            parameters = {}
+            execution_policy._fixed_inputs(
+                {'project': project, 'registry': None}, sid, parameters=parameters)
+            manifest = parameters['resolved_input_manifest']
+            inputs = manifest['files']
+            if manifest.get('input_freshness') == 'NOT_MEASURED':
+                freshness[sid] = {key: manifest[key] for key in
+                                  ('input_freshness', 'input_freshness_reason')}
+        else:
+            inputs = worker._declared_input_files(
+                project, canonical[sid].get('required_inputs', ()))
+        rows.append((sid, inputs))
+    attempts = versions.begin_steps(project, rows)
+    for attempt in attempts:
+        attempt.update(freshness.get(attempt['id'], {}))
+    return attempts
 
 
 def _retain_preflight_refusal(project: Path, dec: Decision, flow_def: Any,
