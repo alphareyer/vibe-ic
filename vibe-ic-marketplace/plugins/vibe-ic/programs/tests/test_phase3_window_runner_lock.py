@@ -325,6 +325,8 @@ def test_reportless_host_shortfall_is_found_beyond_the_display_tail():
 
 
 def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     report = _rows(("pnr", "FAIL", "global route diverged", ""),
                    ("drc", "NOT_MEASURED", "upstream", "upstream_failed"))
     row = _enclose_with(project, monkeypatch, _unit(report), "ownfail",
@@ -336,6 +338,8 @@ def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatc
 
 
 def test_a_fail_outside_the_window_is_not_the_windows_fail(project, monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     """The unit ran every site. Its PnR FAILed and an unplaceable row
     FAILed, but both rows of the window's own step 31 passed: the window
     PASSes and the other rows are named."""
@@ -380,13 +384,16 @@ def test_a_sign_off_row_of_the_windows_step_decides_it(project, monkeypatch):
 
 def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
         project, monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     """The front door's `--exit-step 30` window: every row of steps 9..30
     passes and only DRC (31, outside it) fails. The window PASSes."""
     steps = p3._phase3_window_steps("9", "30")
     assert p3._phase3_window_sites("9", "30") == ["enclosing_phase3"]
     names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
              "sta_signoff", "sta_corner", "sta_record", "em_signoff",
-             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs",
+             "path_delay_fault_atpg_run", "sdd_atpg_run"]
     report = _rows(*[(n, "PASS", "", "") for n in names],
                    ("drc", "FAIL", "12 violations", ""))
     row = _enclose_with(project, monkeypatch,
@@ -783,7 +790,14 @@ def test_every_phase3_step_is_answered_for_by_a_row_main_emits(monkeypatch):
     assert p3._phase3_window_sites("24", "25") == ["enclosing_canonicalize"]
     covered = set().union(*(p3._phase3_steps_of_row(n) for n in _rows_main_emits()))
     ids = p3._phase3_window_steps("9", "39")
-    assert {i for i in ids if i not in covered} == {"36", "37.3", "38", "39"}
+    assert {i for i in ids if i not in covered} == {"36", "37.3", "38", "39", "DT2", "DT3"}
+    # Default and Ultra share order, but their native-unit ownership differs.
+    assert "22" in p3._phase3_steps_of_row("pnr")
+    with monkeypatch.context() as default:
+        default.setattr(execution_policy, "request", lambda: {"mode": "default"})
+        assert "22" not in p3._phase3_steps_of_row("pnr")
+        assert p3._phase3_steps_of_row("default_step_DT2") == frozenset({"DT2"})
+    assert "22" in p3._phase3_steps_of_row("pnr")
 
 
 def test_every_row_main_emits_has_a_step_or_cannot_let_a_window_pass():
@@ -799,6 +813,12 @@ def test_every_row_main_emits_has_a_step_or_cannot_let_a_window_pass():
         own = sorted(n for n in _rows_main_emits()
                      if p3._phase3_steps_of_row(n) & ids)
         passing = [{"name": n, "status": "PASS"} for n in own]
+        # These independent DFT producers moved after final extraction. Their
+        # named rows are required evidence, even though the legacy main's AST
+        # emits no literal row for them. Do not credit an incomplete fixture.
+        for name in ("path_delay_fault_atpg_run", "sdd_atpg_run"):
+            if p3._phase3_steps_of_row(name) & ids:
+                passing.append({"name": name, "status": "PASS"})
         assert p3._enclosing_report_outcome(
             {"verdict": "FAIL", "steps": passing}, 1, ids, True)[0] == "PASS"
         for name in unplaced:
@@ -809,6 +829,15 @@ def test_every_row_main_emits_has_a_step_or_cannot_let_a_window_pass():
             assert got[:2] == ("NOT_MEASURED", p3._V.ReasonClass.INCONCLUSIVE), \
                 (entry, exit_, name, got)
             assert f"{name} (no step) FAIL: boom" in got[2]
+        for name, sid in (("path_delay_fault_atpg_run", "DT2"),
+                          ("sdd_atpg_run", "DT3")):
+            if sid in ids:
+                failed = [dict(row, status="FAIL", detail="measured DFT failure")
+                          if row["name"] == name else row for row in passing]
+                got = p3._enclosing_report_outcome(
+                    {"verdict": "FAIL", "steps": failed}, 1, ids, True)
+                assert got[0] == "FAIL", got
+                assert f"{name} ({sid}) FAIL: measured DFT failure" in got[2]
 
 
 @pytest.mark.parametrize("window, row, step", [
@@ -833,13 +862,16 @@ def test_a_row_the_flow_places_by_clause_or_output_decides_its_window(
 
 
 def test_an_unplaced_fail_keeps_window_9_to_30_from_passing(project, monkeypatch):
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     """Through the real window: every placed row of 9..30 passes and only
     `pad_side_constraint` (placed by no map) FAILs. It may be this window's:
     INCONCLUSIVE, by name -- no longer PASS."""
     steps = p3._phase3_window_steps("9", "30")
     names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
              "sta_signoff", "sta_corner", "sta_record", "em_signoff",
-             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs",
+             "path_delay_fault_atpg_run", "sdd_atpg_run"]
     report = _rows(*[(n, "PASS", "", "") for n in names],
                    ("pad_side_constraint", "FAIL", "pad on the wrong side", ""))
     row = _enclose_with(project, monkeypatch,

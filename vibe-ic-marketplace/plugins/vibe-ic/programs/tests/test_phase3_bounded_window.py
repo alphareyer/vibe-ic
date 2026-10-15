@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import phase3_one_shot_runner as p3
+import pytest
 
 
 def _window_record(project: Path, category: str, name: str) -> Path:
@@ -56,6 +57,9 @@ def test_front_door_refusal_does_not_write_into_window_project(tmp_path):
 
 
 def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monkeypatch):
+    # Exercise the original direct/enclosing publisher; Default has its own row driver.
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
     pnr = p3._pl.pnr_dir(project)
@@ -190,26 +194,30 @@ def test_publication_uses_enclosing_window_id_when_clock_advances(tmp_path, monk
 
 
 def test_every_canonical_phase3_step_is_accepted_from_yaml(tmp_path, monkeypatch):
-    import yaml
-    import flow_compliance_check as fcc
-    flow = yaml.safe_load(fcc.DEFAULT_FLOW_DEF.read_text())
-    ids = [str(step["id"]) for step in flow["steps"]
-           if step.get("stage") in ("stage3", "stage4")]
-    assert ids
+    import _flow_yaml
+    import execution_policy
+    ids = _flow_yaml.ordered_step_ids(execution_stages=range(4, 9),
+                                      execution_tracks=("default",))
+    assert ids and "39" not in ids
     for sid in ids:
         assert p3._phase3_window_sites(sid, sid), sid
+    with pytest.raises(ValueError, match="unknown canonical Phase-3 step"):
+        p3._phase3_window_sites("39", "39")
     assert p3._phase3_window_sites("18", "18") == ["default_pnr"]
     assert p3._phase3_window_sites("15.5ic", "15.5ic") == ["default_pnr"]
-    assert p3._phase3_window_sites("24", "24") == ["default_backend"]
-    assert p3._phase3_window_sites("37.4", "37.4") == [
-        "signoff_metrics_aggregate"]
-    assert p3._phase3_window_sites("37", "37") == ["gds"]
-    assert p3._phase3_window_sites("31", "31") == ["default_backend"]
+    for sid in ("24", "31", "36", "37", "37.4", "38", "DT2", "DT3"):
+        assert p3._phase3_window_sites(sid, sid) == ["default_backend"]
     import test_default_step31_owner as current31
     current31.current_window(tmp_path, monkeypatch)
-    assert p3._phase3_window_sites("36", "36") == ["tapeout_checklist"]
+    with monkeypatch.context() as legacy:
+        legacy.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
+        for sid in _flow_yaml.ordered_step_ids(stages=("stage3", "stage4")):
+            assert p3._phase3_window_sites(sid, sid), sid
+        assert p3._phase3_window_sites("37.4", "37.4") == ["signoff_metrics_aggregate"]
+        assert p3._phase3_window_sites("37", "37") == ["gds"]
+        assert p3._phase3_window_sites("36", "36") == ["tapeout_checklist"]
+        assert p3._phase3_window_sites("38", "38") == ["foundry_handoff"]
     assert p3._phase3_window_sites("37.3", "37.3") == ["gds_xor"]
-    assert p3._phase3_window_sites("38", "38") == ["foundry_handoff"]
 
 
 def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
@@ -256,6 +264,9 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
 
 
 def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, monkeypatch):
+    # Exercise the original direct/enclosing publisher; Default has its own row driver.
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
     # This fixture exercises the existing direct KLayout recipe publisher.

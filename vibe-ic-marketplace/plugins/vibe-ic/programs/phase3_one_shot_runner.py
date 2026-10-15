@@ -77440,7 +77440,8 @@ def _phase3_steps_of_row(name: str) -> FrozenSet[str]:
         `required_outputs` name its report;
       * any other row named after a program: the flow steps naming it.
     Empty when nothing places the row (it may belong to any step)."""
-    return (_phase3_row_step_map().get(name)
+    import execution_policy
+    return (_phase3_row_step_map(execution_policy.request()["mode"]).get(name)
             or _phase3_flow_steps_naming(
                 name, str(Path("reports") / "phase3" / f"{name}.json")))
 
@@ -77451,8 +77452,9 @@ def _PHASE3_GATE_TABLES() -> Tuple[Tuple[Any, ...], ...]:
             + _PRE_AUDIT_PRODUCERS + (_DRV_PROMOTION_GATE,))
 
 
-@functools.lru_cache(maxsize=1)
-def _phase3_row_step_map() -> Dict[str, FrozenSet[str]]:
+@functools.lru_cache(maxsize=2)
+def _phase3_row_step_map(_execution_mode: str) -> Dict[str, FrozenSet[str]]:
+    # runner_plan now depends on the selected mode; cache its row map by mode.
     rows: Dict[str, Set[str]] = {
         name: {str(sid) for sid in span}
         for name, span in _spf.runner_plan("phase3_one_shot_runner").sites}
@@ -78111,9 +78113,10 @@ def _enclosing_report_outcome(report: Dict[str, Any], rc: int,
            ("PASS", "PASS_WITH_WAIVERS", "NOT_APPLICABLE")]
 
     def _name(r: Dict[str, Any]) -> str:
+        import _flow_yaml
+        positions = {sid: i for i, sid in enumerate(_flow_yaml.ordered_step_ids())}
         where = sorted(steps_of.get(str(r.get("name")), ()),
-                       key=lambda sid: (float(re.match(r"\d+(?:\.\d+)?", sid)
-                                              .group()), sid))
+                       key=lambda sid: (positions.get(sid, len(positions)), sid))
         return (f"{r.get('name')} ({','.join(where) or 'no step'}) "
                 f"{r.get('status')}")
 

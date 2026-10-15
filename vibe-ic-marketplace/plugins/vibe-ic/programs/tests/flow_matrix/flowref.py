@@ -69,11 +69,11 @@ OR a sim ``*.log`` OR a ``pass.flag``; a ``drc_clean.flag`` OR a ``.lyrdb``).
 The consumer splits on the literal ``" OR "`` (spaces included) and strips each
 alternative — :func:`split_any_of` reproduces exactly that.
 
-Live entry census — 224<!--figure:required_output_entries--> entries over
+Live entry census — 226<!--figure:required_output_entries--> entries over
 69<!--figure:required_output_steps--> steps, classified by
 :func:`classify_output` (digits derived; see the anchor note in §1):
 
-    FILE          167<!--figure:required_outputs_file-->
+    FILE          169<!--figure:required_outputs_file-->
         plain relative path, no wildcard, no " OR "
     GLOB          30<!--figure:required_outputs_glob-->
         wildcard, no " OR " (e.g. ``phase1/generated_docs/L13_*.json``)
@@ -85,7 +85,7 @@ Live entry census — 224<!--figure:required_output_entries--> entries over
 
 **Contradiction with the brief, reported deliberately**: there is NO
 ``program_exit_zero: "<cmd>"`` form anywhere in ``required_outputs``. All
-224<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
+226<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
 That form exists only inside ``gate`` clauses (§3). :data:`PROGRAM_EXIT` is
 still returned by :func:`classify_output` for forward compatibility, but on the
 current yaml it never fires — a sibling that branches on it is writing dead
@@ -109,8 +109,8 @@ either call the real helper or document that it is using the strict form.
 Top-level shapes over 70<!--figure:gated_steps--> gates — how many gates carry
 each key (a gate may carry more than one, so these do not partition):
 
-    {'all_of': [...]}                 57<!--figure:gate_shape_all_of-->
-    {'program_exit_zero': <str|dict>} 13<!--figure:gate_shape_program_exit_zero-->
+    {'all_of': [...]}                 58<!--figure:gate_shape_all_of-->
+    {'program_exit_zero': <str|dict>} 12<!--figure:gate_shape_program_exit_zero-->
                                       (dict form once, on step 16:
                                        {'command': '...'} )
     {'files_exist': [...]}             0<!--figure:gate_shape_files_exist-->
@@ -121,14 +121,14 @@ replaces a hand-counted table of raw ``all_of`` members: the raw table counted
 a different population from the accessor this module tells you to use, so the
 two could not be reconciled by a reader and only one of them was derived.
 
-    program_exit_zero          145<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
+    program_exit_zero          144<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
     advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
     files_exist                37<!--figure:gate_clauses_files_exist-->
     optional_program_exit_zero 27<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     287<!--figure:gate_clauses_total-->, of which
-                              210<!--figure:blocking_clauses--> block
+    total                     286<!--figure:gate_clauses_total-->, of which
+                              209<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
   * ``program_exit_zero``          — blocking.
@@ -143,8 +143,8 @@ Use :func:`gate_clauses` (typed) rather than re-walking the dict.
 4. Program resolution
 --------------------------------------------------------------------
 A gate command's FIRST whitespace token is the program basename. Of the
-227<!--figure:gate_program_tokens_distinct--> distinct tokens across the
-249<!--figure:gate_commands_total--> gate commands, all but
+226<!--figure:gate_program_tokens_distinct--> distinct tokens across the
+248<!--figure:gate_commands_total--> gate commands, all but
 0<!--figure:gate_programs_unresolved--> resolve to ``programs/<token>.py``, and
 zero commands shell out via ``python3 <file>``. This figure is the live count
 of gates naming a program that does not exist. It went 0 -> 3 when the
@@ -166,8 +166,8 @@ other gated steps already resolved at least one program.
 --------------------------------------------------------------------
 5. ``blocks_on``
 --------------------------------------------------------------------
-116<!--figure:blocks_on_edges--> edges, mixed types
-(92<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
+124<!--figure:blocks_on_edges--> edges, mixed types
+(96<!--figure:blocks_on_edges_int--> int, 28<!--figure:blocks_on_edges_str--> str),
 every target resolving to a declared step id — no dangling references at time of writing. Compare with
 :func:`normalize_id` on both sides; the real consumers stringify
 (``{str(id): [str(e) for e in blocks_on]}``).
