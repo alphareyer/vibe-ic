@@ -29,7 +29,7 @@ import step_preflight as spf              # noqa: E402
 import vibe_ic_one_shot_runner as runner  # noqa: E402
 
 PHASE12_STEPS = ['D1', '2', '4', '9', '11']
-PHASE3_STEPS = ['15', '31', '37']
+PHASE3_STEPS = [str(sid) for sid in range(15, 23)] + ['31', '37']
 ELSEWHERE_STEPS = ['A1']
 
 
@@ -75,7 +75,7 @@ def test_the_help_describes_the_entries_the_CLI_actually_accepts(tmp_path):
     assert re.search(r'Analog \(A1\.\.A9\).*?REFUSED', txt), txt
     for step in PHASE3_STEPS:
         assert _observe(tmp_path, step), f'Phase-3 step {step} was refused'
-    assert re.search(r'Phase-3 \(15/31/37\).*?--exit-step', txt), txt
+    assert re.search(r'Phase-3 \(15\.\.22/31/37\).*?--exit-step', txt), txt
 
 
 def test_every_step_the_help_calls_enterable_really_is():
@@ -104,7 +104,7 @@ def test_the_help_does_not_promise_that_a_refused_step_routes():
         assert spf.runner_for_step(step) in runner.ENTRY_STEP_ENTERABLE_RUNNERS
     for step in ELSEWHERE_STEPS:
         assert spf.runner_for_step(step) not in runner.ENTRY_STEP_ENTERABLE_RUNNERS
-    assert re.search(r'Phase-3 \(15/31/37\).*?--exit-step', txt), txt
+    assert re.search(r'Phase-3 \(15\.\.22/31/37\).*?--exit-step', txt), txt
     assert re.search(r'Analog \(A1\.\.A9\).*?REFUSED', txt), txt
 
 

@@ -205,7 +205,7 @@ def test_every_canonical_phase3_step_is_accepted_from_yaml(tmp_path, monkeypatch
         p3._phase3_window_sites("39", "39")
     assert p3._phase3_window_sites("18", "18") == ["default_pnr"]
     assert p3._phase3_window_sites("15.5ic", "15.5ic") == ["default_pnr"]
-    for sid in ("24", "31", "36", "37", "37.4", "38", "DT2", "DT3"):
+    for sid in ("24", "31", "36", "37", "37.3", "37.4", "38", "DT2", "DT3"):
         assert p3._phase3_window_sites(sid, sid) == ["default_backend"]
     import test_default_step31_owner as current31
     current31.current_window(tmp_path, monkeypatch)
@@ -217,7 +217,7 @@ def test_every_canonical_phase3_step_is_accepted_from_yaml(tmp_path, monkeypatch
         assert p3._phase3_window_sites("37", "37") == ["gds"]
         assert p3._phase3_window_sites("36", "36") == ["tapeout_checklist"]
         assert p3._phase3_window_sites("38", "38") == ["foundry_handoff"]
-    assert p3._phase3_window_sites("37.3", "37.3") == ["gds_xor"]
+        assert p3._phase3_window_sites("37.3", "37.3") == ["gds_xor"]
 
 
 def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
