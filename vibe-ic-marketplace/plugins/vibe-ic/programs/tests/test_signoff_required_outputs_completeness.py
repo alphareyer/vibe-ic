@@ -649,6 +649,31 @@ def test_the_table_is_dispatched_over_every_row():
         _RUNNER_SRC), (
         f"nothing iterates {_SIGNOFF_TABLE}, so its rows are declarations "
         f"with no dispatch behind them")
+    # The two newly recognized tables must likewise pass each actual row to
+    # the same writer, not merely mention their names in source or comments.
+    import ast
+    tree = ast.parse(_RUNNER_SRC)
+    for table in ("_PRESTREAM_GATES", "_FINAL_LAYOUT_GATES"):
+        dispatched = False
+        for comp in ast.walk(tree):
+            if not isinstance(comp, (ast.ListComp, ast.DictComp)):
+                continue
+            for gen in comp.generators:
+                if not (isinstance(gen.iter, ast.Name) and gen.iter.id == table
+                        and isinstance(gen.target, ast.Name)):
+                    continue
+                for call in ast.walk(comp):
+                    if (isinstance(call, ast.Call)
+                            and isinstance(call.func, ast.Name)
+                            and call.func.id == "_run_declared_signoff_gate"
+                            and len(call.args) == 2
+                            and isinstance(call.args[0], ast.Name)
+                            and call.args[0].id == "project"
+                            and isinstance(call.args[1], ast.Starred)
+                            and isinstance(call.args[1].value, ast.Name)
+                            and call.args[1].value.id == gen.target.id):
+                        dispatched = True
+        assert dispatched, f"{table} has no complete row dispatch to the writer"
 
 
 def test_an_entry_with_no_producer_anywhere_still_fails():
