@@ -367,6 +367,12 @@ def test_actual_main_publishes_current_rows_before_complete_board_consumer(tmp_p
     env = dict(vars(D), project=tmp_path, plan=plan, ic_class='digital_arithmetic_primitive',
                evidence='neutral inline INPUT', _dispatch_invocation_context=None,
                args=SimpleNamespace(top_name='neutral_arithmetic', container=None), _bounded=False)
+    # The real frontend call site is now guarded by its real local window
+    # predicate. Execute that definition with this fixture's unbounded state.
+    requested = next(n for n in main.body if isinstance(n, ast.FunctionDef)
+                     and n.name == '_step_requested')
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[requested], type_ignores=[])),
+                 D.__file__, 'exec'), env)
     for node in main.body:
         if any(isinstance(n, ast.Call) and getattr(n.func, 'id', '') == '_complete_phase2_frontend' for n in ast.walk(node)):
             exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), D.__file__, 'exec'), env)

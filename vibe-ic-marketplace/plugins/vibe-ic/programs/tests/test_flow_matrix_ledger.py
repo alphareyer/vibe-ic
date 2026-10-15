@@ -807,6 +807,7 @@ PINNED_OUTPUT_MEMBERS = frozenset({
     ('30', 'phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json'),
     ('31', 'reports/phase2/gates/erc_density.json'),
     ('31', 'reports/phase3/drc_signoff.json'),
+    ('31', 'reports/phase3/drc_signoff.log'),
     ('31', 'reports/phase3/drc_signoff.rpt'),
     ('31', 'reports/phase3/erc.rpt'),
     ('31', 'reports/phase3/lvs.json'),
@@ -1451,7 +1452,8 @@ def test_output_entries_classify_into_the_four_kinds():
     # Three FILEs added against 31665933c7: fresh DRV plan, bundle and verdict.
     # Step15 publishes the physical SDC before any downstream consumer (+1 FILE).
     # 61b7c4f54 declares the native Step23 STA handoff (+1 FILE, no removals).
-    assert seen[F.FILE] == 169, (seen, REDERIVE)
+    # Step31 native DRC transcript is also a final-metrics input (+1 FILE).
+    assert seen[F.FILE] == 170, (seen, REDERIVE)
     assert seen[F.GLOB] == 30, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief

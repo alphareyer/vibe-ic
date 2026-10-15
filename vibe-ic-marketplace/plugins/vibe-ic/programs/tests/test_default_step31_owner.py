@@ -330,7 +330,7 @@ def fixture(tmp_path, monkeypatch, case):
 
 
 def current_window(tmp_path, monkeypatch):
-    """Real current Default owner/declared writers/full twelve-output consumer."""
+    """Real current Default owner/declared writers/full thirteen-output consumer."""
     project, pdk, calls, observed, row = fixture(tmp_path, monkeypatch, 'current')
     before = {name: (R._pl.pnr_dir(project) / name).read_bytes()
               for name in ('routed.def', 'chip_top.gds')}
@@ -346,7 +346,7 @@ def current_window(tmp_path, monkeypatch):
     assert observed[0][2]['verdict'] == 'PRODUCED'
     current = V.latest_pass(project, '31')
     assert current and current['canonical_pass'] and current['current_inputs']
-    assert len(row['required_outputs']) == 12
+    assert len(row['required_outputs']) == 13
     assert all((project / name).is_file() for name in row['required_outputs'])
     for name, payload in before.items():
         assert (R._pl.pnr_dir(project) / name).read_bytes() == payload
@@ -392,7 +392,7 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         assert census["verdict"] == "PRODUCED", census
         assert rc == 0
         assert result and result["canonical_pass"] is True
-        assert len(observation["required_outputs"]) == 12
+        assert len(observation["required_outputs"]) == 13
         assert calls.count("drv_measure.tcl") == 2
         assert calls.count("drv_positive_control.tcl") == 2
         plan = json.loads((project / "reports/phase3/sta/drv_capture_plan.json").read_text())
