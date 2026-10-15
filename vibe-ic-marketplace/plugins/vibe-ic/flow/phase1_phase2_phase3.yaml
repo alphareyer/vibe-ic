@@ -8560,7 +8560,7 @@ steps:
         # It is the same clause, moved to the front and asked to write what
         # it measured. Nothing new runs.
         - advisory_program_exit_zero:
-              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"
+              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance_verdict.json"
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: STRUCTURAL MEASUREMENT: registered=null invoked=null no_verdict=null — the structural-RTL umbrella was NOT ASKED to run in this invocation, so this re"
         - advisory_program_exit_zero:
               command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
@@ -9416,6 +9416,7 @@ steps:
     name: "FPGA final sign-off (recompile + on-board test)"
     stage: stage4
     execution_stage: 8
+    execution_track: hardware
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"

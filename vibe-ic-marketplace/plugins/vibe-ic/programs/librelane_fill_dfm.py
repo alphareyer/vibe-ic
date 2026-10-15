@@ -1231,8 +1231,7 @@ def validate_default_stream(project: Path) -> dict:
             row.get('rc') != 0 or digest(Path(row['report'])) != row.get('sha256')
             or _load(Path(row['report'])).get('verdict') != 'PASS' for row in gates.values()):
         raise Refusal('LL_FINISHING_OUTPUT_GATE_CHANGED', str(gates))
-    for key in ('filled_def', 'stream', 'sealed', 'finishing_report',
-                'prefill', 'source', 'pnr_gds', 'canonical'):
+    for key in ('filled_def', 'stream', 'sealed', 'prefill', 'source', 'pnr_gds', 'canonical'):
         path, sha = Path(record[key]), record[key + '_sha256']
         if not re.fullmatch('[0-9a-f]{64}', str(sha)) or digest(path) != sha:
             raise Refusal('LL_FINISHING_BYTES_CHANGED', key)
@@ -1281,20 +1280,59 @@ def validate_default_stream(project: Path) -> dict:
             raise Refusal('LL_DENSITY_TOPUP_WRONG_INPUT', str(topup))
     elif arm['subject_sha256'] != filler['filled_sha256']:
         raise Refusal('LL_DENSITY_NOT_FILLED_SUBJECT', str(arm))
-    finishing = _load(Path(record['finishing_report']))
-    if (Path(record['finishing_report']).resolve() !=
-            (project / 'reports/phase3/die_finishing.json').resolve()
-            or record['finishing_stream_sha256'] != record['stream_sha256']):
-        raise Refusal('LL_SEAL_WRONG_STREAM', str(finishing))
-    seal = finishing.get('seal_ring') or {}
-    if seal.get('state') == 'PASS' and (
-            seal.get('consumed_into') != str(Path(record['sealed']).relative_to(project))
-            or seal.get('staged_sha256') != record['sealed_sha256']):
-        raise Refusal('LL_SEAL_NOT_CONSUMED', str(seal))
+    if record.get('finishing_status') == 'NOT_APPLICABLE':
+        import _flow_yaml
+        import flow_compliance_check as compliance
+        row = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '26.5ic')
+        if (not compliance._delivery_declares_absence(project, row['condition']['delivery_declares'])
+                or record['sealed_sha256'] != record['stream_sha256']):
+            raise Refusal('LL_FINISHING_WRONG_APPLICABILITY', str(record))
+    else:
+        import die_finishing_check
+        report = Path(record['finishing_report'])
+        finishing = die_finishing_check._unwrap(_load(report))
+        if (report.resolve() != (project / 'reports/phase3/die_finishing.json').resolve()
+                or digest(report) != record['finishing_report_sha256']
+                or record['finishing_stream_sha256'] != record['stream_sha256']
+                or not finishing):
+            raise Refusal('LL_SEAL_WRONG_STREAM', str(finishing))
+        seal = finishing.get('seal_ring') or {}
+        if (seal.get('state') != 'PASS'
+                or seal.get('consumed_into') != str(Path(record['sealed']).relative_to(project))
+                or seal.get('staged_sha256') != record['sealed_sha256']):
+            raise Refusal('LL_SEAL_NOT_CONSUMED', str(seal))
     import _stream_input_record as sir
     inputs = sir.record_path(pnr / f'{top}.gds')
     if digest(inputs) != record['stream_inputs_sha256']:
         raise Refusal('LL_STREAM_INPUTS_CHANGED', str(inputs))
+    readset, why = sir.read(inputs)
+    if (readset is None or readset['engine'] != 'klayout'
+            or readset['def'] != {'project_rel': str(filled.relative_to(project)),
+                                  'sha256': digest(filled)}
+            or readset['recipe']['sha256'] != digest(project / readset['recipe']['project_rel'])):
+        raise Refusal('LL_STREAM_READSET_CHANGED', why or str(inputs))
+    cli = readset.get('native_cli') or {}
+    commands = Path(cli.get('commands') or '')
+    argv = cli.get('argv') or []
+    if (not commands.is_file() or digest(commands) != cli.get('commands_sha256')
+            or argv not in [shlex.split(line) for line in commands.read_text().splitlines() if line.strip()]
+            or len(argv) < 3 or Path(argv[2]).resolve() != filled.resolve()
+            or not cli.get('inputs')):
+        raise Refusal('LL_STREAM_COMMAND_UNBOUND', str(cli))
+    native_receipt = validate_step_receipt(stream_state.parent, 'KLayout.StreamOut')
+    import librelane_signoff_evidence as native
+    switch = _load(project / 'phase3/librelane_switch.json')
+    mounts = native._pdk_mounts(project, switch, stream_state.parent, record['image'])
+    for entry in cli['inputs']:
+        path = Path(entry['path'])
+        for host, guest in mounts:
+            if path.is_relative_to(guest):
+                path = Path(host) / path.relative_to(guest)
+                break
+        if (not entry.get('sha256') or entry['argv_index'] >= len(argv)
+                or argv[entry['argv_index']] != entry['path']
+                or native_receipt['input']['config_files'].get(str(path)) != entry['sha256']):
+            raise Refusal('LL_STREAM_NATIVE_MATERIAL_CHANGED', str(path))
     current = validate_density_result(project, arm, layout=Path(record['canonical']))
     if current.get('value') != _count(arm.get(DENSITY_METRIC)) or current.get('value') == 'NOT_MEASURED':
         raise Refusal('LL_FINISHING_DENSITY_NOT_MEASURED', str(current))
@@ -1499,16 +1537,19 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     record = {'file_top': top, 'design_name': _def_design_name(filled),
               'image': image, 'pdk': pdk.name, 'gates': gates,
               'prior_promotion_refusal': reuse_refusal,
+              'finishing_status': finishing.status,
               'finishing_stream_sha256': digest(stream),
               'stream_inputs_sha256': digest(pnr / f'{top}.stream_inputs.json'),
               'stream_state': str(folder / 'state_out.json'),
               'stream_state_sha256': digest(folder / 'state_out.json')}
     for key, path in {'filled_def': filled, 'stream': stream, 'sealed': sealed,
-                      'finishing_report': project / 'reports/phase3/die_finishing.json',
                       'prefill': project / 'phase3/tool_arms/34/prefill.gds',
                       'source': Path(arm['subject']), 'pnr_gds': pnr_gds,
                       'canonical': canonical}.items():
         record[key], record[key + '_sha256'] = str(path), digest(path)
+    if finishing.status == 'PASS':
+        report = project / 'reports/phase3/die_finishing.json'
+        record.update(finishing_report=str(report), finishing_report_sha256=digest(report))
     write_json(project / DEFAULT_STREAM_REL, record)
     update_record(project, 'default_stream', record)
     publish_metal_density(project, arm.get('ratios') or {}, canonical, pdk.name)

@@ -107,7 +107,7 @@ def test_actual_cold_main_visits_each_stage_once_and_stops_all_later_writers(
         stages = {int(row['execution_stage']) for row in flow.load()['steps'] if str(row['id']) in ids}
         assert len(stages) == 1, ids
         stage = stages.pop()
-        assert ids == list(flow.ordered_step_ids(execution_stages=(stage,)))
+        assert ids == list(flow.ordered_step_ids(execution_stages=(stage,), execution_tracks=('default',)))
         calls.append((stage, list(ids)))
         if stage == 4:
             for target in (pnr / 'routed.def', pnr / f'{TOP}.def'):
@@ -166,3 +166,25 @@ def test_final_handoff_produces_package_then_checklist_once(tmp_path, monkeypatc
     result = runner._default_final_handoff(tmp_path, '')
     assert calls == (['foundry_handoff', 'tapeout_checklist'] if first_status == 'PASS' else ['foundry_handoff'])
     assert result.status == first_status
+
+
+def test_pinned_native_stream_recipe_accepts_the_recorded_cli_flags():
+    import subprocess
+    import sys
+    from librelane.common import get_script_dir
+    recipe = Path(get_script_dir()) / 'klayout/stream_out.py'
+    result = subprocess.run([sys.executable, str(recipe), '--help'],
+                            text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    for flag in ('--input-lef', '--output', '--top', '--lyp', '--lyt', '--lym', '--with-gds-file'):
+        assert flag in result.stdout, (flag, result.stdout)
+
+
+def test_hardware_final_remains_visible_without_dispatch_to_unknown_backend():
+    assert '39' in flow.ordered_step_ids(execution_stages=(8,))
+    ids = flow.ordered_step_ids(execution_stages=(8,), execution_tracks=('default',))
+    assert ids == ('37.4', '36', '37.5ip', '37.5ic', '38')
+    assert 'default_step_39' not in dict(preflight.runner_plan('phase3_one_shot_runner').sites)
+    row = next(row for row in flow.load()['steps'] if str(row['id']) == '39')
+    assert row['execution_track'] == 'hardware'
+    assert 'reports/phase2/fpga/on_board_pass.json' in row['required_outputs']

@@ -98,10 +98,12 @@ def clear_cache() -> None:
     PARSES.clear()
 
 
-def ordered_step_ids(*, stages=None, execution_stages=None) -> tuple[str, ...]:
+def ordered_step_ids(*, stages=None, execution_stages=None, execution_tracks=None) -> tuple[str, ...]:
     """The declared execution order; step labels are never numeric ranks."""
     selected = None if stages is None else frozenset(stages)
     execution = None if execution_stages is None else frozenset(execution_stages)
+    tracks = None if execution_tracks is None else frozenset(execution_tracks)
     return tuple(str(row['id']) for row in load()['steps']
                  if (selected is None or row.get('stage') in selected)
-                 and (execution is None or row.get('execution_stage') in execution))
+                 and (execution is None or row.get('execution_stage') in execution)
+                 and (tracks is None or row.get('execution_track', 'default') in tracks))

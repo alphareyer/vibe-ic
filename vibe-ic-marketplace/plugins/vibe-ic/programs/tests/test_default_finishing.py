@@ -118,6 +118,44 @@ def subject(tmp_path):
     for key, path in dict(filled_def=filled, stream=stream, prefill=prefill,
                           source=source, pnr_gds=pnr_gds, canonical=canonical).items():
         record[key], record[key + '_sha256'] = str(path), LC.digest(path)
+    # The historical fixture includes the same raw -> separate sealed ->
+    # prefill chain as the Default owner. No native execution is claimed here.
+    sealed = p / 'phase3/tool_arms/26.5ic/default-stream/sealed.gds'
+    sealed.parent.mkdir(parents=True, exist_ok=True)
+    sealed.write_bytes(stream.read_bytes())
+    finishing = BF.put(p / 'reports/phase3/die_finishing.json', {
+        'producer': 'die_finishing_gen',
+        'seal_ring': {'state': 'PASS', 'consumed_into': str(sealed.relative_to(p)),
+                      'staged_sha256': LC.digest(sealed)},
+        'evidence_kind': 'SOURCE_FIXTURE'})
+    recipe = pnr / 'stream_out.py'
+    recipe.write_text('# SOURCE_FIXTURE native stream recipe\n')
+    material = p / 'fixture_pdk/neutral/stream.lef'
+    material.write_text('SOURCE_FIXTURE native material\n')
+    cfg = json.loads((folder / 'config.json').read_text())
+    cfg['TECH_LEFS'] = ['/pdk/neutral/stream.lef']
+    BF.put(folder / 'config.json', cfg)
+    BF.put(p / 'phase3/librelane/34-config/KLayout.StreamOut.json', cfg)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(config=LC.digest(folder / 'config.json'),
+              config_files={str(material): LC.digest(material)})
+    BF.put(folder / 'input_fingerprint.json', fp)
+    argv = ['python3', '/native/stream_out.py', str(filled), '--input-lef', '/pdk/neutral/stream.lef']
+    import shlex
+    (folder / 'COMMANDS').write_text(shlex.join(argv) + '\n')
+    refresh_receipt(folder)
+    import _stream_input_record as sir
+    readset = sir.build(engine='klayout', output=stream, top='top', project=p,
+        project_c=str(p), recipe=recipe, def_file=filled, files={}, scalars={}, rcfile=None, hashes={})
+    readset['native_cli'] = {'argv': argv, 'commands': str(folder / 'COMMANDS'),
+        'commands_sha256': LC.digest(folder / 'COMMANDS'),
+        'inputs': [{'path': '/pdk/neutral/stream.lef', 'project_rel': None,
+                    'sha256': LC.digest(material), 'argv_index': 4}]}
+    readset_path = sir.write(pnr_gds, readset)
+    record.update(finishing_status='PASS', sealed=str(sealed), sealed_sha256=LC.digest(sealed),
+        finishing_report=str(finishing), finishing_report_sha256=LC.digest(finishing),
+        finishing_stream_sha256=LC.digest(stream), stream_inputs_sha256=LC.digest(readset_path))
+    record['stream_state_sha256'] = LC.digest(folder / 'state_out.json')
     record['gates'] = {}
     for name in ('substance', 'port_labels'):
         report = BF.put(p / 'phase3/librelane' / f'37-default-{name}.json',

@@ -327,10 +327,10 @@ def runner_plan(name: str) -> Optional[RunnerPlan]:
         return plan
     import _flow_yaml
     order = _flow_yaml.ordered_step_ids()
-    pnr = _flow_yaml.ordered_step_ids(execution_stages=(4,))
+    pnr = _flow_yaml.ordered_step_ids(execution_stages=(4,), execution_tracks=('default',))
     sites = [(site, pnr if site == 'pnr' else span) for site, span in plan.sites]
     known = {site for site, _ in sites}
-    sites.extend((f'default_step_{sid}', (sid,)) for sid in _flow_yaml.ordered_step_ids(execution_stages=range(4, 9))
+    sites.extend((f'default_step_{sid}', (sid,)) for sid in _flow_yaml.ordered_step_ids(execution_stages=range(4, 9), execution_tracks=('default',))
                  if f'default_step_{sid}' not in known)
     sites.sort(key=lambda item: min((order.index(str(sid)) for sid in item[1]
                                     if str(sid) in order), default=len(order)))

@@ -62955,7 +62955,7 @@ def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
         # Finishing owns these rows after its one primary native stream.
         return _default_pnr_rows(
             project, top, pdk, container,
-            [sid for sid in _flow_yaml.ordered_step_ids(execution_stages=(6,))
+            [sid for sid in _flow_yaml.ordered_step_ids(execution_stages=(6,), execution_tracks=('default',))
              if sid != '37'], report_name=name)
     # Produce remaining final-layout evidence without restarting route rows.
     # producer to repeat: post-layout LEC, GDS density, aging and thermal.
@@ -63120,7 +63120,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # Step 32 has run before this site. The existing GDS producer owns
         # 26.5ic's stream finishing, so that writer stays at stream-out.
         import _flow_yaml
-        rows = list(_flow_yaml.ordered_step_ids(execution_stages=(5,)))
+        rows = list(_flow_yaml.ordered_step_ids(execution_stages=(5,), execution_tracks=('default',)))
         return _default_pnr_rows(
             project, top, pdk, container, rows,
             report_name='prestream_evidence')
@@ -77382,7 +77382,7 @@ def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
     import flow_compliance_check as _fcc
     import _flow_yaml                                        # noqa: PLC0415
     import execution_policy
-    ids = list(_flow_yaml.ordered_step_ids(execution_stages=range(4, 9))
+    ids = list(_flow_yaml.ordered_step_ids(execution_stages=range(4, 9), execution_tracks=('default',))
                if execution_policy.request()['mode'] == 'default' else
                _flow_yaml.ordered_step_ids(stages=('stage3', 'stage4')))
     # Step 9 is the backend synthesis dispatch inherited from Phase 2.
@@ -78892,7 +78892,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                         produced = result['verdict'] == 'PASS'
                     else:
                         # DFM is an existing program-first report producer. It
-                        # runs after current fill and before stream-out, without
+                        # runs after the finished stream and current fill, without
                         # constructing a release candidate or another scheduler.
                         current = producers._run_current_step_declared_producers(project, sid)
                         produced, detail, verdict = producers._current_step_producer_authority(
@@ -78999,7 +78999,7 @@ def _default_step15_with_backend_receipt(
         pad_ring_results: Optional[List[StepResult]] = None,
         em_floor_for_resize: Optional[Dict[str, Any]] = None,
         density_from_tool_default: bool = False) -> StepResult:
-    """Run Default's canonical 15--22 rows on one project, in order.
+    """Run Default's canonical PnR rows through routing on one project.
 
     Each producer and its current consumer complete before the next row.
     The legacy enclosing session below remains for the existing Ultra path.
@@ -79011,7 +79011,7 @@ def _default_step15_with_backend_receipt(
     if execution_policy.request()['mode'] == 'default':
         import _flow_yaml
         return _default_pnr_rows(
-            project, top, pdk, container, list(_flow_yaml.ordered_step_ids(execution_stages=(4,))),
+            project, top, pdk, container, list(_flow_yaml.ordered_step_ids(execution_stages=(4,), execution_tracks=('default',))),
             die_um=die_um, util=util, spare_density=spare_density)
 
     started_ns = time.time_ns()
@@ -79969,7 +79969,7 @@ def main() -> int:
             import _flow_yaml
             _electrical = _default_pnr_rows(
                 project, effective_top, pdk, args.container,
-                list(_flow_yaml.ordered_step_ids(execution_stages=(5,))),
+                list(_flow_yaml.ordered_step_ids(execution_stages=(5,), execution_tracks=('default',))),
                 report_name='routed_electrical')
             plan.append(_electrical)
             _chain_ok = _electrical.status == 'PASS'
@@ -80163,7 +80163,7 @@ def main() -> int:
                 # says exactly that instead of pretending to have checked it.
                 _gds_dispatched = (
                     _default_pnr_rows(project, effective_top, pdk, args.container,
-                                      list(_flow_yaml.ordered_step_ids(execution_stages=(6,))),
+                                      list(_flow_yaml.ordered_step_ids(execution_stages=(6,), execution_tracks=('default',))),
                                       report_name='gds')
                     if _execution.request()['mode'] == 'default' else _spf.gate(
                         project, "phase3_one_shot_runner", "gds",
@@ -80261,7 +80261,7 @@ def main() -> int:
             if _execution.request()['mode'] == 'default':
                 _physical = _default_pnr_rows(
                     project, effective_top, pdk, args.container,
-                    list(_flow_yaml.ordered_step_ids(execution_stages=(7,))),
+                    list(_flow_yaml.ordered_step_ids(execution_stages=(7,), execution_tracks=('default',))),
                     report_name='physical_verification_complete')
                 plan.append(_physical)
                 if _physical.status != 'PASS':
@@ -80383,7 +80383,7 @@ def main() -> int:
         else:
             _release = _default_pnr_rows(
                 project, effective_top, pdk, args.container,
-                list(_flow_yaml.ordered_step_ids(execution_stages=(8,))),
+                list(_flow_yaml.ordered_step_ids(execution_stages=(8,), execution_tracks=('default',))),
                 report_name='final_checklist_and_release')
             plan.append(_release)
             if _release.status != 'PASS':
