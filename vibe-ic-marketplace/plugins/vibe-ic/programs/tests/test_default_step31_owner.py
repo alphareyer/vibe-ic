@@ -56,7 +56,8 @@ def fixture(tmp_path, monkeypatch, case):
     # Reuse the shipped neutral DRC transport and its calibrated report grammar.
     _, _, _, calls, project = _step31_control(tmp_path, monkeypatch, "clean")
     import shutil
-    shutil.copytree(_project(tmp_path / "dependencies"), project, dirs_exist_ok=True)
+    shutil.copytree(_project(tmp_path / "dependencies"), project,
+                    dirs_exist_ok=True, ignore=shutil.ignore_patterns("provenance.jsonl"))
     pnr = R._pl.pnr_dir(project)
     pdk = R._detect_pdk(project)
     for name in ("chip_top.def", "routed.def"):
