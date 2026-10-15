@@ -67,7 +67,8 @@ def _project(tmp_path: Path, *, rtl: bool, l_docs: bool = True) -> Path:
     docs = proj / "phase1" / "generated_docs"
     docs.mkdir(parents=True, exist_ok=True)
     if l_docs:
-        for name in ("L10_TEST_CASES.json", "L12_BEHAVIORAL_SEQUENCES.json"):
+        for name in ("L9_INTEGRATION_SPEC.json", "L10_TEST_CASES.json",
+                     "L12_BEHAVIORAL_SEQUENCES.json"):
             (docs / name).write_text("{}\n")
     if rtl:
         _write_rtl(proj)

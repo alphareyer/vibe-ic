@@ -120,6 +120,8 @@ def test_one_clean_engine_beside_a_dirty_one_is_a_named_disagreement(tmp_path):
 # ── run_half through the real contract, the tool faked at docker run ─────────
 def _fake_tool(monkeypatch, writes):
     """Fake ``docker run``: resolution, bridge conversion and step runs."""
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     calls = []
 
     def run(cmd, **kwargs):
@@ -322,13 +324,23 @@ def runner(monkeypatch):
 
 def test_direct_mode_never_touches_the_tool(tmp_path, runner, monkeypatch):
     seen = []
+    direct_calls = []
     monkeypatch.setattr(runner, "_step31_librelane",
                         lambda *a, **k: seen.append(a) or _row("drc", "PASS"))
+    def direct():
+        direct_calls.append('drc')
+        return _row('drc', 'NOT_MEASURED', 'SOURCE_FIXTURE_ONLY: no native DRC invocation')
+    # Direct mode now owns its producer/current-subject binding. It still
+    # never invokes the LibreLane arm; absent native proof remains unmeasured.
     row = runner._step31_dispatch(tmp_path, "chip", None, "drc",
-                                  lambda: pytest.fail("direct mode calls no arm"))
-    assert (row, seen) == (None, [])
+                                  direct)
+    assert row.status == 'NOT_MEASURED' and seen == []
+    assert direct_calls == ['drc']
+    assert json.loads((tmp_path / 'reports/phase3/direct_current_drc.json').read_text())['verdict'] == 'NOT_MEASURED'
     _switch(tmp_path, "direct")
-    assert runner._step31_dispatch(tmp_path, "chip", None, "drc", lambda: None) is None
+    row = runner._step31_dispatch(tmp_path, "chip", None, "drc", direct)
+    assert row.status == 'NOT_MEASURED' and seen == []
+    assert direct_calls == ['drc', 'drc']
 
 
 def test_librelane_mode_is_the_tools_verdict(tmp_path, runner, monkeypatch):
@@ -387,7 +399,8 @@ def test_librelane_drc_publishes_the_deck_report_where_the_gates_read(tmp_path, 
         "klayout__drc_error__count": {"step": "KLayout.DRC", "status": "MEASURED", "value": 0,
                                       "folder": str(tmp_path / "p" / folder)}}}
     project, row = _published_half(tmp_path, runner, monkeypatch, "drc", record,
-                                   {f"{folder}/reports/drc.klayout.lyrdb": _DECK_LYRDB})
+                                   {f"{folder}/reports/drc.klayout.lyrdb": _DECK_LYRDB,
+                                    f"{folder}/invocation.log": 'SOURCE_FIXTURE_ONLY KLayout publication transport\n'})
     assert row.status == "PASS"
     assert (project / "reports/phase3/drc_signoff.rpt").read_text() == _DECK_LYRDB
     assert (project / "phase3/reports/drc.rpt").read_text() == _DECK_LYRDB
@@ -719,6 +732,7 @@ def test_the_stream_checks_need_the_stream_and_nothing_else(tmp_path, step):
 
 # ── 37.3: the receipt of a LibreLane-promoted stream ────────────────────────
 def _promoted(tmp_path, verdict="PASS", defect=0, pairs=None, bytes_=b"finished stream"):
+    import _default_backend_fixtures as retained
     xor = importlib.import_module("gds_xor_check")
     project = tmp_path / "p"
     gds = project / "phase3/stage4/gds/chip.gds"
@@ -732,7 +746,27 @@ def _promoted(tmp_path, verdict="PASS", defect=0, pairs=None, bytes_=b"finished 
                "vibeic__finishing_xor__design_pair__count": 38}
     metrics.update({f"vibeic__finishing_xor__defect__count__pair:{k}": v
                     for k, v in (pairs or {}).items()})
-    _put(folder / "state_out.json", {"metrics": metrics})
+    # This source-only receipt fixture supplies the strict reader's actual
+    # State/config/material population, not a bare promoted PASS document.
+    before = {'gds': str(gds.resolve()), 'metrics': {}}
+    folder, _ = retained.producer(
+        project, 'Vibeic.FinishingXOR', before, dict(before, metrics=metrics),
+        lane='37.3-klayout/01-vibeic-finishingxor',
+        config_folder='37.3-klayout-config', name='chip')
+    pre = routed.parent / 'chip.prefinish.gds'
+    pre.write_bytes(b'SOURCE_FIXTURE_ONLY unsealed stream')
+    config = project / 'phase3/librelane/37.3-klayout-config/Vibeic.FinishingXOR.json'
+    cfg = json.loads(config.read_text())
+    cfg['VIBEIC_FINISHING_PRE_GDS'] = str(pre)
+    _put(config, cfg)
+    _put(folder / 'config.json', cfg)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(config=contract.digest(config), config_files={str(pre): contract.digest(pre)})
+    _put(folder / 'input_fingerprint.json', fp)
+    _put(folder / 'vibeic_receipt.json', {
+        'input': fp, 'sha256': {str(p.relative_to(folder)): contract.digest(p)
+        for p in folder.rglob('*') if p.is_file() and p.name != 'vibeic_receipt.json'}})
+    _put(project / 'reports/phase3/technology_units.json', {'pdk': 'neutral'})
     _put(project / "phase3/librelane/37.3-klayout-finishing-xor.json", {
         "verdict": verdict, "reasons": [] if verdict != "NOT_MEASURED" else ["no core"],
         "metrics": {"vibeic__finishing_xor__defect__count": {
