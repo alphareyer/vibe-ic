@@ -3227,3 +3227,77 @@ def test_fresh_sta_launch_error_still_refuses_and_retains_cid(tmp_path, monkeypa
     assert 'rc=17' in observed['reason'], observed
     assert observed['cid_retained'] is True, observed
     assert observed['child_rcs'] == [17], observed
+
+@pytest.mark.parametrize('case', ['sourced', 'direct', 'missing', 'changed',
+                                  'after_plan_missing', 'after_plan_changed',
+                                  'unexecuted', 'threshold'])
+def test_recorded_abc_graph_survives_plan_to_complete_judge(
+        tmp_path, monkeypatch, case):
+    """Synthetic executed ABC graph through real receipt, plan and full judge."""
+    import drv_capture_plan as planner
+    import drv_stage_receipts as stages
+
+    project, adopted = _librelane_final_sta(tmp_path / 'plan', monkeypatch)
+    stages.claim(project)
+    synth = project / 'phase2/stage2/synth'
+    temp = synth / '_tmp_yosys-abc-neutral'
+    temp.mkdir(parents=True)
+    recipe = temp / 'mapping.abc'
+    recipe.write_text('strash\nbuffer -N ' + ('8' if case == 'threshold' else '4')
+                      + ' -S 3000\n')
+    wrapper = temp / 'abc.script'
+    wrapper.write_text('buffer -N 4\n' if case == 'direct' else
+                       'strash\n' if case == 'unexecuted' else f'source {recipe}\n')
+    script = stages.keep_abc_script(project, synth,
+                                    f'Running ABC script: {wrapper}\n')
+    index = script.with_name('abc_sources.json')
+    graph = json.loads(index.read_text())
+    if case == 'unexecuted':
+        # A bound but unexecuted recipe must not supply a buffer operation.
+        unused = script.with_name('unused.script')
+        unused.write_text('buffer -N 4\n')
+        graph.append({'source': 'unused.abc', 'script': {
+            'path': str(unused), 'sha256': drv._sha(unused)}})
+        index.write_text(json.dumps(graph))
+    leaf = Path(graph[0]['script']['path']) if graph else None
+    if case == 'missing':
+        leaf.unlink()
+    elif case == 'changed':
+        leaf.write_text('buffer -N 100\n')
+    netlist = synth / 'top_synth.v'
+    netlist.write_text('module top; endmodule\n')
+    sdc = project / 'constraint.sdc'
+    sdc.write_text('set_max_fanout 4 [current_design]\n')
+    behavior = script.with_name('behavior.rpt')
+    behavior.write_text('clocks 1\nclock clk is_propagated=0\n' + drv._COMMAND
+                        + '\n' + ''.join(f'{kind} violators=0\n' for kind in drv.KINDS))
+    stages.record_synth(project, abc_script=script, behavior=behavior,
+                        netlist=netlist, sdc=sdc)
+    published = planner.publish(project, final_state=_step32_report(project, adopted))
+    plan = json.loads(published.read_text())
+    measured = next(row for row in plan['stages'] if row['name'] == 'synth')
+    if case == 'after_plan_missing':
+        leaf.unlink()
+    elif case == 'after_plan_changed':
+        leaf.write_text('buffer -N 100\n')
+    bundle_root = tmp_path / 'judge'
+    bundle = _bundle(bundle_root)
+    bundle['stages'] = [measured if row['name'] == 'synth' else row
+                        for row in bundle['stages']]
+    _install_test_freeze(bundle, bundle_root, monkeypatch)
+    result = drv.judge(bundle)
+    (tmp_path / 'abc-graph.observation.json').write_text(json.dumps({
+        'case': case, 'scope': 'SOURCE_CONTROL: no ABC/EDA/native execution',
+        'plan': str(published), 'stage': measured, 'judge': result}, indent=2) + '\n')
+    if case in ('sourced', 'direct', 'threshold'):
+        assert measured['ran'] and measured['applied']['fanout'] == (
+            8 if case == 'threshold' else 4)
+        assert result['verdict'] == 'PASS', result
+        if case == 'threshold':
+            # A broader implementation limit remains a disclosed flow defect
+            # when final sign-off uses the declared limit and measures clean.
+            assert 'implementation constraint broader than declared; open flow-defect issue' \
+                in result['flow_defects']
+    else:
+        assert result['verdict'] == 'FAIL', result
+        assert any('synth:' in text or 'ABC' in text for text in result['failures']), result

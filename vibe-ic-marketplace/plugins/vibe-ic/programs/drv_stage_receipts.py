@@ -334,6 +334,30 @@ def abc_source_names(script: str) -> List[str]:
     return names
 
 
+def abc_script_graph(script: str, sources: List[dict], read_text) -> List[str]:
+    """Read only the executed script's reachable, hash-checked source graph.
+
+    The caller supplies its evidence reader so both the plan and the judge
+    verify the same recorded bytes at the time they consume them. An absent
+    source invalidates the graph; an unreferenced recipe supplies no commands.
+    """
+    scripts = [script]
+    refs = {item["source"]: item.get("script") for item in sources}
+    pending = abc_source_names(script)
+    seen = set()
+    while pending:
+        source = pending.pop(0)
+        if source in seen:
+            continue
+        seen.add(source)
+        text = read_text(refs.get(source))
+        if not text:
+            return []
+        scripts.append(text)
+        pending.extend(abc_source_names(text))
+    return scripts
+
+
 def keep_abc_script(project: Path, synth_dir: Path, log_text: str) -> Optional[Path]:
     """Copy the script the mapping ABC call ran (the last one the yosys log
     names) into the run's evidence and drop yosys's kept temp folders."""

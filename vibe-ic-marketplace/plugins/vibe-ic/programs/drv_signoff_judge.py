@@ -976,11 +976,17 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 fails.append(f"{name}: declared-value DRV behavior census absent")
         applied = stage.get("applied") or {}
         if name == "synth":
+            from drv_stage_receipts import abc_script_graph
             script = _evidence(stage.get("abc_script") or {}, fails, "ABC script")
-            match = re.search(r"\bbuffer\s+-N\s+(" + _NUM + r")\b", script)
-            if not stage.get("synth_abc_buffering") or not match:
+            scripts = abc_script_graph(
+                script, stage.get("abc_sources", []),
+                lambda ref: _evidence(ref or {}, fails, "ABC source"))
+            buffers = re.findall(
+                rf"(?:^|[;\n])\s*buffer\s+-N\s+({_NUM})"
+                rf"(?:\s+-S\s+{_NUM})?\s*(?=;|\n|$)", "\n".join(scripts))
+            if not stage.get("synth_abc_buffering") or not buffers:
                 fails.append("synth: fanout buffering absent")
-            elif float(match.group(1)) != applied.get("fanout"):
+            elif any(float(value) != applied.get("fanout") for value in buffers):
                 fails.append("synth: applied fanout differs from ABC buffer -N")
         else:
             snapshot = _evidence(stage.get("sdc_snapshot") or {}, fails,

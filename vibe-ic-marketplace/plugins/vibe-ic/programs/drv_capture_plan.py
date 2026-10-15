@@ -330,23 +330,14 @@ def _stages(project: Path, postroute_repair_ran: bool,
             name != "synth" or bool(_recorded_text(row.get("abc_script"))))
         if name == "synth":
             script = _recorded_text(row.get("abc_script"))
-            scripts = [script]
-            sources = {item["source"]: item.get("script")
-                       for item in doc.get("abc_sources", [])}
-            pending = drv_stage_receipts.abc_source_names(script)
-            seen = set()
-            while pending:
-                source = pending.pop(0)
-                if source in seen:
-                    continue
-                seen.add(source)
-                text = _recorded_text(_recorded_ref(project, sources.get(source)))
-                if not text:
-                    row["ran"] = False
-                    scripts = []
-                    break
-                scripts.append(text)
-                pending.extend(drv_stage_receipts.abc_source_names(text))
+            row["abc_sources"] = [
+                {"source": item["source"],
+                 "script": _recorded_ref(project, item.get("script"))}
+                for item in doc.get("abc_sources", [])]
+            scripts = drv_stage_receipts.abc_script_graph(
+                script, row["abc_sources"], _recorded_text)
+            if not scripts:
+                row["ran"] = False
             buffers = [float(v) for v in re.findall(
                 rf"(?:^|[;\n])\s*buffer\s+-N\s+({_NUM})"
                 rf"(?:\s+-S\s+{_NUM})?\s*(?=;|\n|$)", "\n".join(scripts))]
