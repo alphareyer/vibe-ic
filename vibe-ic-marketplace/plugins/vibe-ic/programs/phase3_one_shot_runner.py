@@ -77499,7 +77499,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
         return ["default_pnr"]
     if execution_policy.request()['mode'] == 'default':
         from execution_provider_catalog import BACKEND_ROWS
-        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'31', '35'}
+        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'31', '35', '37.5ic'}
         if set(ids).issubset(native_ids):
             return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
@@ -78680,6 +78680,49 @@ def _publish_in_progress_steps(project: Path, plan: List[StepResult]) -> None:
     _aa.write_json(project / _ca.REPORT_REL, record)
 
 
+def _default_ic_release_docs(project: Path, top: str, pdk: PdkConfig,
+                             container: str) -> Dict[str, Any]:
+    """Resume the existing IC document producers on the admitted current die.
+
+    Their existing retained call owns the complete canonical consumer. Read
+    that invocation's result instead of dispatching the enclosing Phase3 or
+    accepting the document producer's exit code as release acceptance.
+    """
+    import step_output_collector as versions
+    started = time.time()
+    restored = _restore_recorded_physical_views(project, pdk, container)
+    if restored.get('refused'):
+        return {'verdict': 'NOT_MEASURED', 'detail': str(restored['refused'])}
+    basis, error = _layout_basis(project, top, pdk, container)
+    if error or not _ga.admitted_gds(project, _pl.pnr_dir(project) / f'{top}.gds', basis):
+        return {'verdict': 'NOT_MEASURED',
+                'detail': f'IC release refused unadmitted current layout: {error or basis}'}
+    metrics = _run_declared_signoff_gate(
+        project, 'signoff_metrics_aggregate', 'signoff_metrics_aggregate.py',
+        'reports/phase3/signoff_metrics_aggregate.json', ('--check',))
+    if metrics.status != 'PASS':
+        return {'verdict': metrics.status, 'detail': metrics.detail}
+    precheck = _run_declared_signoff_gate(
+        project, 'tapeout_precheck', 'tapeout_precheck.py',
+        'reports/phase3/tapeout_precheck.json',
+        ('--pdk', pdk.name, *(('--pdk-container', container) if container else ())))
+    if precheck.status != 'PASS':
+        return {'verdict': precheck.status, 'detail': precheck.detail}
+    rows = [step_tapeout_docs_gen(project)]
+    if rows[-1].status == 'PASS':
+        rows.append(step_ic_release_docs_gen(project))
+    failed = next((row for row in rows if row.status != 'PASS'), None)
+    consumers = [record['result']['canonical_consumer']
+                 for record in versions.current_acceptance(project, started)
+                 if str(record['id']) == '37.5ic'
+                 and isinstance(record['result'].get('canonical_consumer'), dict)]
+    consumer = consumers[-1] if consumers else None
+    return {'verdict': (failed.status if failed else consumer['status'] if consumer
+                        else 'NOT_MEASURED'),
+            'detail': '; '.join(row.detail for row in rows),
+            'canonical_consumer': consumer}
+
+
 def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                       step_ids: List[str], *, die_um: Optional[str] = None,
                       util: Optional[float] = None,
@@ -78712,7 +78755,10 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
     for sid in step_ids:
         row_def = flow_rows[sid]
         if not compliance._check_condition(project, row_def.get('condition')):
-            dependency_gap = row_def.get('condition_kind') == 'dependency_required'
+            route_unresolved = (sid == '37.5ic' and not compliance._delivery_declares_absence(
+                project, (row_def.get('condition') or {}).get('delivery_declares')))
+            dependency_gap = (row_def.get('condition_kind') == 'dependency_required'
+                              or route_unresolved)
             condition_status = 'NOT_MEASURED' if dependency_gap else 'NOT_APPLICABLE'
             condition_detail = ('canonical upstream dependency condition is not ready'
                                 if dependency_gap else
@@ -78784,7 +78830,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
         _publish_in_progress_steps(project, rows)
         with step_versions.active_steps(project, [attempt]):
             try:
-                if sid in ('16', '35'):
+                if sid in ('16', '35', '37.5ic'):
                     if sid == '16':
                         notes: List[str] = []
                         clock_path = _pl.cts_dir(project) / 'clock_plan.json'
@@ -78793,6 +78839,9 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                             _pl.pnr_dir(project), notes, pdk=pdk)
                         result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
                                   'detail': '; '.join(notes)}
+                    elif sid == '37.5ic':
+                        result = _default_ic_release_docs(project, top, pdk, container)
+                        produced = result['verdict'] == 'PASS'
                     else:
                         # DFM is an existing program-first report producer. It
                         # runs after current fill and before stream-out, without
@@ -78803,9 +78852,10 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                         result = {'verdict': verdict, 'detail': detail,
                                   'current_step_declared_producers': current}
                     step_versions.publish_producer_outputs(project, attempt)
-                    gate = (backend_gates.evaluate(project, row_def)
-                            if sid == '16' or produced else
-                            {'status': result['verdict'], 'ledger': []})
+                    gate = (result.get('canonical_consumer') or
+                            (backend_gates.evaluate(project, row_def)
+                             if sid == '16' or produced else
+                             {'status': result['verdict'], 'ledger': []}))
                     files, missing_outputs = worker.resolve_contract(
                         project, row_def.get('required_outputs', ()))
                     status = ('FAIL' if gate['status'] == 'FAIL' or result['verdict'] == 'FAIL' else
