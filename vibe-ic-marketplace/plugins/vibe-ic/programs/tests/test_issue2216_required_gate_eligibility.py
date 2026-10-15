@@ -202,11 +202,16 @@ def test_documented_nonblocking_statuses_accept(status):
 
 def test_an_unorderable_exit_scopes_nothing_and_says_so():
     ledger = BD._required_gate_ledger(_solve(
-        exit_step="37.5ic", ran={"rtl_gen": "PASS", "rtl_validate": "FAIL"}))
+        exit_step="not_a_canonical_step", ran={"rtl_gen": "PASS", "rtl_validate": "FAIL"}))
     assert ledger["in_scope"] == {}
     assert ledger["failed_required"] == []
     assert ledger["eligibility"] == BD._NOT_MEASURED
     assert "not an orderable flow step" in ledger["why"]
+
+    # Fractional IC delivery is a valid boundary in the shared canonical order.
+    known = BD._required_gate_ledger(_solve(
+        exit_step="37.5ic", ran={"rtl_gen": "PASS", "rtl_validate": "FAIL"}))
+    assert known["in_scope"]["rtl_validate"] == "FAIL"
 
 
 def test_a_missing_gate_record_is_not_measured_not_eligible():
