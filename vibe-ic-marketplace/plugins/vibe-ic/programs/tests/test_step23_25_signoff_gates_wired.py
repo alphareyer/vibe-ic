@@ -319,7 +319,21 @@ def test_runner_actually_calls_the_gates_in_its_plan():
         branch_nodes = [n for stmt in body for n in ast.walk(stmt)]
         branch_calls = [call for call in calls if call in branch_nodes]
         assert len(branch_calls) == 1, f"{mode} must append sign-off gates exactly once"
-        assert ast.unparse(branch_calls[0].func.value) == "plan", ast.unparse(branch_calls[0])
+        target = ast.unparse(branch_calls[0].func.value)
+        if mode == "default":
+            # Default checks these rows before dispatching release. The same
+            # rows must still reach the final plan, rather than being discarded
+            # after the local decision.
+            assert target == "_final_readers", ast.unparse(branch_calls[0])
+            plan_copies = [n for n in branch_nodes if isinstance(n, ast.Call)
+                           and isinstance(n.func, ast.Attribute)
+                           and ast.unparse(n.func) == "plan.extend"
+                           and len(n.args) == 1
+                           and ast.unparse(n.args[0]) == target]
+            assert len(plan_copies) == 1, "Default reader verdicts must enter plan exactly once"
+            assert branch_calls[0].lineno < plan_copies[0].lineno
+        else:
+            assert target == "plan", ast.unparse(branch_calls[0])
         covered.extend(branch_calls)
     assert set(covered) == set(calls), "sign-off gates must not also run outside the mode split"
 

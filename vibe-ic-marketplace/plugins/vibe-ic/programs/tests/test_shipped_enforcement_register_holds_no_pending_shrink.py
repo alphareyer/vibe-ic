@@ -77,13 +77,42 @@ _A8_CLAUSE = (
 )
 
 
-def _run(*extra, flow=None, baseline=None):
+def _run(*extra, flow=None, baseline=None, programs=None):
     cmd = [sys.executable, str(_AUDIT)]
     if flow is not None:
         cmd += ["--flow", str(flow)]
     if baseline is not None:
         cmd += ["--baseline", str(baseline)]
+    if programs is not None:
+        cmd += ["--programs", str(programs)]
     return _pr.run(cmd + list(extra), capture_output=True, text=True)
+
+
+def _unwired_programs(root):
+    """Remove the remaining A8 launch in a copy, retaining all other venues.
+
+    The audit now also reaches the analog runner through its transitive source
+    graph. Removing only the YAML clause leaves its real inline A8 launch, so
+    that mutation no longer describes an orphan.
+    """
+    programs = root / "programs"
+    programs.mkdir()
+    for source in _PROGRAMS.glob("*.py"):
+        shutil.copy2(source, programs / source.name)
+    runner = programs / "analog_one_shot_runner.py"
+    text = runner.read_text()
+    launch = '"analog_topology_behaviour_check.py"'
+    assert text.count(launch) == 1
+    runner.write_text(text.replace(launch, '"fixture_unwired_a8.py"'))
+    # The audit derives these two venues from the tree under review. Preserve
+    # them so unrelated repository/skill gates do not become artificial orphans.
+    for dirname in ("tools/ci", "skills"):
+        for base in (_PROGRAMS, *_PROGRAMS.parents[:4]):
+            source = base / dirname
+            if source.is_dir():
+                shutil.copytree(source, programs / dirname)
+                break
+    return programs
 
 
 def _tightened_lines(out: str):
@@ -175,12 +204,12 @@ def test_the_gate_is_wired_where_the_audit_can_see_it(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_negative_arm_unwiring_the_gate_restores_the_orphan(tmp_path):
-    """Delete the A8 clause and the audit must refuse again."""
+    """Delete both A8 routes and the audit must refuse again."""
     text = _FLOW.read_text()
     assert _A8_CLAUSE in text, "the A8 clause moved; update _A8_CLAUSE"
     mutated = tmp_path / "flow.yaml"
     mutated.write_text(text.replace(_A8_CLAUSE + "\n", ""))
-    r = _run(flow=mutated)
+    r = _run(flow=mutated, programs=_unwired_programs(tmp_path))
     assert r.returncode == 1, r.stdout + r.stderr
     both = r.stdout + r.stderr
     assert "ORPHANED" in both, both
@@ -213,7 +242,8 @@ def test_negative_arm_recording_the_orphan_is_refused_by_this_file(tmp_path):
     doc["previous_size"] = 1
     laundered = tmp_path / "baseline.json"
     laundered.write_text(json.dumps(doc, ensure_ascii=False))
-    r = _run(flow=mutated_flow, baseline=laundered)
+    r = _run(flow=mutated_flow, baseline=laundered,
+             programs=_unwired_programs(tmp_path))
     # The audit is satisfied: recorded debt is not NEW debt.
     assert r.returncode == 0, r.stdout + r.stderr
     # This file is not.

@@ -80414,24 +80414,17 @@ def main() -> int:
         # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
         # BEFORE the derived-artefact generators build the hand-off pack and
         # tape-out checklist on top of a sign-off nobody checked.
-        if _execution.request()['mode'] == 'default':
+        # This is already the Ultra arm of the enclosing mode split.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # Ultra retains the existing independent diagnostic readers.
+            xor_job = (pool.submit(run_pre_audit_producers, project,
+                                   args.container, only_names=("gds_xor",))
+                       if not _layout_refusal else None)
             plan.extend(step_declared_signoff_gates(
                 project, pdk.name, args.container,
                 upstream_refusal=_layout_refusal))
-            if not _layout_refusal:
-                _xor_rows = run_pre_audit_producers(
-                    project, args.container, only_names=("gds_xor",))
-        else:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                # Ultra retains the existing independent diagnostic readers.
-                xor_job = (pool.submit(run_pre_audit_producers, project,
-                                       args.container, only_names=("gds_xor",))
-                           if not _layout_refusal else None)
-                plan.extend(step_declared_signoff_gates(
-                    project, pdk.name, args.container,
-                    upstream_refusal=_layout_refusal))
-                if xor_job is not None:
-                    _xor_rows = xor_job.result()
+            if xor_job is not None:
+                _xor_rows = xor_job.result()
         # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
         # declare their own gate as their only producer, so without this the only
         # writer of their documents is the audit's own clause and the audit refuses

@@ -457,7 +457,10 @@ def _plant_signoff_evidence(proj: Path):
     report = proj / "reports" / "phase3" / "drc_signoff.rpt"
     if report.is_file():
         transcript = report.with_suffix(".log")
-        transcript.write_text("KLayout completed deck execution\n")
+        # Both the RDB and its transcript are now in the declared sign-off
+        # scope. Give the transcript its own readable count, preserving the
+        # real gate's refusal of an undetermined file beside a clean report.
+        transcript.write_text("KLayout completed deck execution\n" + _CLEAN_DRC)
         gds_file = gds / "chip_top.gds"
         _sha = lambda q: "sha256:" + hashlib.sha256(q.read_bytes()).hexdigest()
         rel = lambda q: q.relative_to(proj).as_posix()

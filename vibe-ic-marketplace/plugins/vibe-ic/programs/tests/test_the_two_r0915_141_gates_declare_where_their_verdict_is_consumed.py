@@ -17,8 +17,10 @@ WHICH SIDE IS WRONG: the gates. Their verdict was never a runner decision -- the
 runner's own docstring for that loop said "a refusal here is disclosed and does
 not withhold the release -- these steps' own yaml clauses already decide them
 in the audit". It is consumed where it always was: the `program_exit_zero`
-clauses of step 36 (`tapeout_signoff_check . --mode tapeout ...`) and step 38
-(`foundry_handoff_package_check . ...`) in flow_compliance_check. So each gate
+clauses of the final delivery step (`tapeout_signoff_check . --mode tapeout ...`
+and `foundry_handoff_package_check . ...`) in flow_compliance_check. The fixed
+execution order places both consumers at step 38, after package generation;
+step 36 now checks physical layout receipts. So each gate
 DECLARES `ENFORCEMENT: advisory` and says where its verdict is consumed.
 Recording them in the baseline register would be a baseline, not a decision.
 
@@ -38,7 +40,7 @@ _FLOW = _PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 _AUDIT = _PROGRAMS / "flow_gate_enforcement_audit.py"
 
 #: (gate, flow step whose gate clause consumes its verdict)
-_GATES = (("tapeout_signoff_check", 36), ("foundry_handoff_package_check", 38))
+_GATES = (("tapeout_signoff_check", 38), ("foundry_handoff_package_check", 38))
 
 
 def _audit(tmp_path):

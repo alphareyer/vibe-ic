@@ -89,11 +89,25 @@ def test_the_flow_yaml_declares_the_same_invocation():
     """The other declaration surface. The two must agree on the --json target:
     the runner re-probes a step's own gate `--json` output, so a divergence
     means the yaml credits a file the runner never writes."""
-    text = _FLOW.read_text(errors="replace")
-    clause = (f'program_exit_zero: "sta_assumed_clock_disclosure_check . '
-              f'--json {GATE_OUT_REL}"')
-    assert text.count(clause) == 1, (
-        f"the flow declares {clause!r} {text.count(clause)} times; the flow "
+    import yaml
+    clause = f"sta_assumed_clock_disclosure_check . --json {GATE_OUT_REL}"
+    commands = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "program_exit_zero":
+                    commands.append(value if isinstance(value, str)
+                                    else value.get("command"))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(yaml.safe_load(_FLOW.read_text(errors="replace")))
+    assert commands.count(clause) == 1, (
+        f"the flow declares {clause!r} {commands.count(clause)} times; the flow "
         "and phase3_one_shot_runner must declare one identical invocation")
 
 
