@@ -107,6 +107,17 @@ def pdk(lib):
     return SimpleNamespace(name='neutral', liberty=str(lib), macro_libs=[], macro_lefs=[],
                            tech_lef='', cell_lef='')
 
+def current_row_inputs(project, monkeypatch):
+    # The real Default issuer binds these original inputs in addition to the
+    # row's STA/SPEF contract. They are neutral source documents, not verdicts.
+    put(project / 'input/step_0_5ic_answers.json', {})
+    put(project / 'input/submission_template/neutral.json', {'scope': 'SOURCE_FIXTURE_ONLY'})
+    # This module substitutes native process transport and states a synthetic
+    # image. Do not ask the actual LOCAL CID to attest that invented image.
+    monkeypatch.setattr(R, '_backend_parameter_values', lambda *_: {
+        'pdk_root': str(project / 'fixture_pdk'), 'image_id': BF.IMAGE})
+
+
 def test_step30_copied_correlation_cannot_certify_without_execution(tmp_path):
     p, folder, lib = project(tmp_path)
     write(p / 'phase3/stage3/spice/correlation.spice', '* copied deck\n.end\n')
@@ -405,6 +416,7 @@ def test_default_row_loop_consumes_current_step30_and_stops_on_failure(
     import flow_compliance_check as compliance
     import test_step30_r4_current_failures as current_fixture
     p, folder, lib = project(tmp_path)
+    current_row_inputs(p, monkeypatch)
     current_fixture.correlation_tool(p, folder, lib, monkeypatch,
                                      mismatch='CORRELATED' if kind == 'REFUSED' else kind,
                                      companion='success')
@@ -466,6 +478,7 @@ def test_default_row_loop_consumes_current_step30_and_stops_on_failure(
 def test_default_step30_missing_current_input_stops_before_producer(tmp_path, monkeypatch, missing):
     import execution_backend_producers as backend
     p, folder, lib = project(tmp_path)
+    current_row_inputs(p, monkeypatch)
     (p / missing).unlink()
     def forbidden(*_args, **_kwargs):
         raise AssertionError('missing current input must be reported before the native tool starts')
@@ -523,6 +536,7 @@ def test_step23_native_output_follows_the_current_producer(tmp_path, monkeypatch
 def test_legacy_direct_sta_does_not_excuse_step30_current_input(tmp_path, monkeypatch):
     import execution_backend_producers as backend
     p, folder, lib = project(tmp_path)
+    current_row_inputs(p, monkeypatch)
     switch = p / 'phase3/librelane_switch.json'
     declaration = json.loads(switch.read_text())
     declaration.setdefault('steps', {})['23'] = 'direct'
