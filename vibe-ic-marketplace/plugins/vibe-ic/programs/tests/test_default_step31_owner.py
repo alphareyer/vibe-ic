@@ -18,6 +18,7 @@ import step_output_collector as V
 import flow_declared_producer_run as D
 from test_backend_input_contract_sdc import _project
 from test_default_physical_composed import _step31_control
+from test_lvs_report_check import _PRIMARY_MATCH
 
 
 def put(root, name, text):
@@ -98,7 +99,11 @@ def fixture(tmp_path, monkeypatch, case):
             report = project / "reports/phase3/lvs.rpt"
             text = ("Final result: Circuits do NOT match.\n" if case == "lvs_fail" else
                     "Final result: Circuits match uniquely.\n")
-            report.write_text("Netgen LVS SOURCE_CONTROL\n" + text)
+            body = _PRIMARY_MATCH.replace("user_project_wrapper", "chip_top")
+            if case == "lvs_fail":
+                body = body.replace("Final result: Circuits match uniquely.",
+                    "Netlists do not match.\nFinal result: Top level cell failed pin matching.")
+            report.write_text(body)
             log = report.with_suffix(".log")
             log.write_text("Netgen source-control instrument completed\n" + text)
             provenance("netgen", [report, log])

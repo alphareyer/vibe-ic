@@ -523,8 +523,11 @@ def main(argv=None) -> int:
             print(json.dumps(r))
         print("\n" + summarize(rows), file=sys.stderr)
     if args.report:
-        doc: Dict[str, Any] = {"sweep": "perc_corpus_sweep", "rows": rows}
+        import _gate_authorship as _ga
+        doc: Dict[str, Any] = {"program": "perc_corpus_sweep",
+                               "sweep": "perc_corpus_sweep", "rows": rows}
         _sr.attach(doc, reach)
+        _ga.stamp(doc)
         Path(args.report).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
     # A sweep that entered the PERC chain on NOTHING is not a clean corpus
