@@ -35,6 +35,7 @@ def resolve(project, original):
     import mixed_signal_power_domain_run as m2
     import librelane_contract as lc
     import librelane_postroute as postroute
+    from _container_exec import localise_mounted_paths
     import path_spice_tool as spice
     from _analog_a_check_common import load_block_list
     from l_doc_consumer_contract import load_l_doc, l_doc_fields
@@ -107,8 +108,34 @@ def resolve(project, original):
         refuse("M1 and current timing consume different netlists")
     if data["digital"]["netlist"] != str(netlist.relative_to(project)):
         refuse("the digital wrapper is not M1's current netlist")
-    logical_sources = [Path(p) if Path(p).is_absolute() else n.local(project, p)
-                       for p in config.get("CELL_VERILOG_MODELS", [])]
+    retained_inputs = set()
+
+    def model_paths(values, fingerprint_key="config_files"):
+        paths = []
+        for value in values:
+            path = Path(value) if Path(value).is_absolute() else n.local(project, value)
+            if not path.resolve().is_relative_to(project.resolve()):
+                # The step's guest namespace names the retained host material;
+                # a conventional /pdk name alone does not identify that root.
+                try:
+                    receipt = lc.validate_step_receipt(folder, "OpenROAD.STAPostPNR")
+                except lc.Refusal as exc:
+                    refuse(str(exc))
+                if receipt["sha256"].get("config.json") != n.api().digest(folder / "config.json"):
+                    refuse("current PDK config is not bound by the retained STA receipt")
+                roots = n.api().read(folder / "pdk_root.json")
+                mapping = [(guest, host) for host, guest in roots["mounts_under_it"]]
+                mapped = localise_mounted_paths(value, mapping)
+                path = Path(mapped)
+                expected = receipt["input"].get(fingerprint_key, {}).get(value)
+                if mapped == value or not path.is_file() or expected != n.api().digest(path):
+                    refuse("current PDK model differs from the retained STA mount/input")
+                retained_inputs.update(folder / name for name in (
+                    "vibeic_receipt.json", "input_fingerprint.json", "pdk_root.json", "invocation.log"))
+            paths.append(path)
+        return paths
+
+    logical_sources = model_paths(config.get("CELL_VERILOG_MODELS", []))
     pdk_dir = Path(record["pdk_root"]) / record["pdk"]
     if not logical_sources or any(not p.is_file() or not p.resolve().is_relative_to(pdk_dir.resolve()) or
                                   not p.resolve().is_relative_to(project.resolve()) for p in logical_sources):
@@ -118,7 +145,7 @@ def resolve(project, original):
     if set(supplied_sources) != {p.resolve() for p in expected_sources}:
         refuse("wrapper simulation must consume exactly the current PDK/A8 logical models")
     data["digital"]["extra_sources"] = [str(p.relative_to(project)) for p in expected_sources]
-    libs = [Path(p) if Path(p).is_absolute() else n.local(project, p) for p in timing["liberties"]]
+    libs = model_paths(timing["liberties"], "liberty_files")
     for p in libs:
         if not p.resolve().is_relative_to(project.resolve()):
             refuse("the first supported canonical shape requires staged current PDK views")
@@ -191,8 +218,7 @@ def resolve(project, original):
     pin_roles = {"driver": pin(c["driver_instance"] + "/" + c["driver_output"]),
                  "drive": pin(instance + "/" + c["macro_drive"]),
                  "sense": pin(instance + "/" + c["macro_sense"])}
-    sources = [Path(p) if Path(p).is_absolute() else n.local(project, p)
-               for p in config.get("CELL_SPICE_MODELS", [])]
+    sources = model_paths(config.get("CELL_SPICE_MODELS", []))
     if not sources or any(not p.is_file() or not p.resolve().is_relative_to(pdk_dir.resolve()) or
                           not p.resolve().is_relative_to(project.resolve()) for p in sources):
         refuse("current same-PDK driver SPICE material is unavailable")
@@ -262,7 +288,7 @@ def resolve(project, original):
         step / "state_out.json", step / "pdk_root.json", step / "invocation.log", manifest_path,
         project / "phase3/mixed_signal/m1_merge_receipt.json", project / "reports/analog/mixed_signal/top_lvs.json",
         project / "reports/analog/mixed_signal/power_domain_run.json", project / "reports/analog/mixed_signal/power_domain_tool/netlist.json",
-        project / postroute.STEP23_RECORD, folder / "config.json", folder / c["sta_corner"] / "sta.log", *libs, *model_inputs, *logical_sources]}
+        project / postroute.STEP23_RECORD, folder / "config.json", folder / c["sta_corner"] / "sta.log", *libs, *model_inputs, *logical_sources, *retained_inputs]}
     inputs.update(timing[k] for k in ("sta_netlist", "sdc", "spef", "state"))
     data["si"] = {**data["si"], "netlist": timing["sta_netlist"], "sdc": timing["sdc"],
                   "spef": timing["spef"], "liberties": [str(p.relative_to(project)) for p in libs]}
