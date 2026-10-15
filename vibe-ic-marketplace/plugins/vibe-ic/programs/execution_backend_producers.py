@@ -1349,6 +1349,11 @@ def produce_signoff(project, params):
             basis, refusal = R._layout_basis(project, top, pdk, container)
             census, error = (R._prestream_route_census(project, top, pdk, container, basis)
                              if not refusal else (None, refusal))
+            if not error:
+                # Consume the persisted current record at this same boundary;
+                # the existing reader binds its DEF/hash/count population.
+                census, error = R._prestream_route_census(
+                    project, top, pdk, container, basis, measure=False)
             if error:
                 return {'verdict': 'NOT_MEASURED', 'detail': error}
             if census['unrouted_nets']:

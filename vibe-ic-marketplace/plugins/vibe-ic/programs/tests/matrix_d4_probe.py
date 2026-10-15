@@ -167,6 +167,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import inspect
 import os
 import re
 import shlex
@@ -519,7 +520,8 @@ def gate_declared_paths(step_id) -> Tuple[Tuple[str, str], ...]:
                         _normalise(token), f"gate command `{clause.program}`"
                     )
         for entry in clause.files:
-            seen.setdefault(_normalise(entry), "gate files_exist clause")
+            for alternative in F.split_any_of(entry):
+                seen.setdefault(_normalise(alternative), "gate files_exist clause")
         # `condition_files_exist` is DELIBERATELY NOT a grounding source.
         # WITHDRAWN 2026-07-28 at the convergence merge, with the measurement
         # that forced it. A `files_exist` clause ASSERTS the artefact; a
@@ -774,6 +776,9 @@ def inline_report_grounding(step_id, alternative: str) -> Optional[Grounding]:
 
     owners = [row for row in runner._DECLARED_SIGNOFF_GATES
               if _normalise(row[2]) == _normalise(alternative)]
+    if not owners:
+        owners = [row for row in runner._PRESTREAM_GATES
+                  if _normalise(row[2]) == _normalise(alternative)]
     if len(owners) != 1:
         return None
     name, program, out_rel, extra = owners[0]
@@ -796,13 +801,121 @@ def inline_report_grounding(step_id, alternative: str) -> Optional[Grounding]:
             return text
 
         with patch.object(Path, "read_text", observe_read):
-            result = runner._run_declared_signoff_gate(
-                project, name, program, out_rel, extra)
+            if name == "drv_signoff":
+                # This probe measures the existing report reader, not native
+                # capture. Leave the bundle absent: the real judge must write
+                # its own REFUSED/NM report, never a fabricated scientific P.
+                with patch("drv_capture_plan.capture_and_publish", return_value=None):
+                    result = runner._run_declared_signoff_gate(
+                        project, name, program, out_rel, extra)
+                if result.status == "PASS":
+                    return None
+            else:
+                result = runner._run_declared_signoff_gate(
+                    project, name, program, out_rel, extra)
         if (not read_report or not report.is_file()
                 or str(report) not in result.output_files):
             return None
     return Grounding(alternative, alternative, out_rel, "INLINE",
                      f"phase3_one_shot_runner: {name} ({program}), observed report read")
+
+
+def program_output_grounding(step_id, alternative: str) -> Optional[Grounding]:
+    """Observe the canonical reader of an actual declared producer record.
+
+    Required-output presence is not evidence of this read. The independent
+    program_outputs declaration and the real FCC JSON reader must both reach
+    this exact path. This does not qualify the report as a scientific PASS.
+    """
+    import flow_compliance_check as fcc
+    from unittest.mock import patch
+
+    owners = [(program, path) for program, path in F.program_output_paths(step_id)
+              if _normalise(path) == _normalise(alternative)]
+    if len(owners) != 1:
+        return None
+    program, path = owners[0]
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        return None
+    # Keep the observed reader attached to the real canonical entry point;
+    # a dormant helper is not a consumer merely because it exists.
+    entry = ast.parse(inspect.getsource(fcc.check_step)).body[0]
+    if not any(isinstance(node, ast.Assign) and
+               isinstance(node.value, ast.Call) and
+               isinstance(node.value.func, ast.Name) and
+               node.value.func.id == "_collect_program_output_records" and
+               [ast.unparse(arg) for arg in node.value.args] == ["project", "step"]
+               for node in entry.body):
+        return None
+    with tempfile.TemporaryDirectory(prefix="d4_producer_read_") as scratch:
+        project = Path(scratch)
+        report = project / path
+        report.parent.mkdir(parents=True)
+        report.write_text('{"verdict":"NOT_MEASURED","reason":"D4_READ_PATH_ONLY"}\n')
+        observed = []
+        read_text = Path.read_text
+
+        def observe_read(target, *args, **kwargs):
+            text = read_text(target, *args, **kwargs)
+            if target == report:
+                observed.append(target)
+            return text
+
+        with patch.object(Path, "read_text", observe_read):
+            records = fcc._collect_program_output_records(project, F.step_by_id(step_id))
+        if not observed or not any(row["program"] == program and row["path"] == path
+                                   and row["produced"] is True
+                                   and row["enforcement"] == "NOT_A_GATE"
+                                   for row in records):
+            return None
+    return Grounding(alternative, alternative, path, "PRODUCER_RECORD",
+                     "flow_compliance_check.check_step: observed declared producer JSON read")
+
+
+def route_census_grounding(step_id, alternative: str) -> Optional[Grounding]:
+    """Observe Step26's existing persisted-record reader without native work."""
+    if str(step_id) != "26" or alternative != "reports/phase3/prestream_route_census.json":
+        return None
+    import execution_backend_producers as producers
+    import phase3_one_shot_runner as runner
+    from unittest.mock import patch
+
+    owner = ast.parse(inspect.getsource(producers.produce_signoff)).body[0]
+    branch = next((node for node in ast.walk(owner) if isinstance(node, ast.If)
+                   and ast.unparse(node.test) == "sid == '26'"), None)
+    if branch is None or not any(
+            isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            and ast.unparse(node.targets[0]) == "(census, error)"
+            and ast.unparse(node.value.func) == "R._prestream_route_census"
+            and [ast.unparse(arg) for arg in node.value.args] ==
+                ["project", "top", "pdk", "container", "basis"]
+            and any(keyword.arg == "measure" and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False for keyword in node.value.keywords)
+            for statement in branch.body for node in ast.walk(statement)):
+        return None
+    with tempfile.TemporaryDirectory(prefix="d4_census_read_") as scratch:
+        project = Path(scratch)
+        report = project / alternative
+        report.parent.mkdir(parents=True)
+        # An unmeasured record exercises the real read/refusal path; it is
+        # neither a native receipt nor a claim of measured routed geometry.
+        report.write_text('{"status":"NOT_MEASURED"}\n')
+        observed = []
+        read_text = Path.read_text
+
+        def observe_read(target, *args, **kwargs):
+            text = read_text(target, *args, **kwargs)
+            if target == report:
+                observed.append(target)
+            return text
+
+        with patch.object(Path, "read_text", observe_read):
+            census, error = runner._prestream_route_census(
+                project, "source_fixture", None, "", "unmeasured", measure=False)
+        if not observed or census is not None or not error:
+            return None
+    return Grounding(alternative, alternative, alternative, "CURRENT_RECORD",
+                     "produce_signoff sid26: observed existing persisted census read/refusal")
 
 
 # ---------- the public entry point --------------------------------------------
@@ -853,6 +966,12 @@ def ground(step_id, entry: str) -> Optional[Grounding]:
             )
     for alternative in F.split_any_of(entry):
         hit = inline_report_grounding(step_id, alternative)
+        if hit is not None:
+            return Grounding(entry, hit.alternative, hit.pattern,
+                             hit.channel, hit.source)
+        hit = program_output_grounding(step_id, alternative)
+        if hit is None:
+            hit = route_census_grounding(step_id, alternative)
         if hit is not None:
             return Grounding(entry, hit.alternative, hit.pattern,
                              hit.channel, hit.source)
