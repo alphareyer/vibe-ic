@@ -1145,8 +1145,13 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             if doc.get(key) != fresh["report"].get(key) or fresh["report"].get(key) is None:
                 return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_LIBRELANE_RECORD_CHANGED", doc
         conn = gds_connectivity(project, _sha256(shipped))
+        if conn.get("verdict") == "FAIL":
+            return 1, (
+                f"FAIL: current connectivity failed — {conn.get('reason') or 'measured connectivity failure'}"), doc
         if conn.get("verdict") != "PASS":
-            return (1 if conn.get("verdict") == "FAIL" else 2), "NOT_MEASURED: current connectivity absent or failed", doc
+            return 2, (
+                f"NOT_MEASURED [{_stated_class(conn, _CONNECTIVITY_UNMEASURED_CLASS)}]: "
+                f"current connectivity unmeasured — {conn.get('reason') or 'no connectivity measurement recorded'}"), doc
         return 0, "PASS: current LibreLane finishing XOR and current connectivity", doc
 
     # A zero is credit only for the current, separately produced subjects.
