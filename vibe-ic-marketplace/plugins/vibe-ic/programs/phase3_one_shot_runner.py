@@ -78598,6 +78598,8 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
     import execution_backend_worker as worker
     import execution_backend_gates as backend_gates
     import execution_modes as modes
+    import execution_policy
+    from execution_provider_catalog import BACKEND_IDS
     import librelane_contract as ll
     import _flow_yaml
     import flow_compliance_check as compliance
@@ -78633,14 +78635,24 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
             continue
         started = time.time()
         print(f'[default] step {sid} START: {row_def["name"]}', flush=True)
-        manifest = {
-            'declarations': row_def.get('required_inputs', []),
-            'files': worker._declared_input_files(
-                project, row_def.get('required_inputs', ())),
-            'missing': [],
-        }
-        missing = worker.resolve_input_contract(
-            project, row_def.get('required_inputs', ()), manifest)
+        if sid in BACKEND_IDS:
+            # Reuse the issuer's current producer dependencies, including
+            # checkpoint directory contents. Row gate inputs alone can be
+            # empty; copying the entire PnR tree would bind mutable outputs.
+            issued = {}
+            execution_policy._fixed_inputs(
+                {'project': project}, sid, parameters=issued)
+            manifest = issued['resolved_input_manifest']
+            missing = manifest['missing']
+        else:
+            manifest = {
+                'declarations': row_def.get('required_inputs', []),
+                'files': worker._declared_input_files(
+                    project, row_def.get('required_inputs', ())),
+                'missing': [],
+            }
+            missing = worker.resolve_input_contract(
+                project, row_def.get('required_inputs', ()), manifest)
         if missing:
             rows.append(StepResult(
                 f'default_step_{sid}', 'NOT_MEASURED', time.time() - started,
