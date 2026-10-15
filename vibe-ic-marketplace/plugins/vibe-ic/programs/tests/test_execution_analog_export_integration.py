@@ -31,6 +31,14 @@ def normal_export(setup_export, monkeypatch, tmp_path):
         path = binary / tool
         path.write_text('#!' + sys.executable + '\nprint("correctness fixture; NOT_NATIVE_EDA")\n')
         path.chmod(0o755)
+    # Admission resolves the transport executable before the supervised seam.
+    # Supply its explicit fixture identity without borrowing a host daemon or
+    # giving an unsupervised Docker invocation any chance to succeed.
+    docker = binary / 'docker'
+    docker.write_text('#!' + sys.executable +
+                      '\nraise SystemExit("UNSUPERVISED_FIXTURE_DOCKER_REFUSED")\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv('PATH', str(binary) + os.pathsep + os.environ.get('PATH', ''))
     image = dict(image_ref=IMAGE_REF, image_id=IMAGE_ID,
         image_manifest_digest=MANIFEST, image_repo_digests=[IMAGE_REF])
     monkeypatch.setattr(installation, 'inspect_image', lambda ref, **kw: image)
@@ -162,6 +170,10 @@ def test_ordinary_controller_without_deployment_json_enters_existing_producer_an
         fixture = PROGRAMS / 'tests/fixtures/analog_correctness_process.py'
         sources = dict(arm.source_files, **{str(fixture): em.digest(fixture)})
         sources.update({str(p): em.digest(p) for p in em._source_closure(sources)})
+        # Match this existing fixture producer's complete frozen-input contract;
+        # its worker checks the parent-bound source digest and every source byte.
+        (project / 'input/correctness_sources.json').write_text(
+            json.dumps(sources, sort_keys=True))
         arm = replace(arm, available=True, qualified=False,
             qualification_evidence='SUPPORTED_CORRECTNESS_PROCESS_ONLY; NO_NATIVE_CREDIT',
             source_files=sources,
@@ -169,7 +181,8 @@ def test_ordinary_controller_without_deployment_json_enters_existing_producer_an
             components=(em.Component('correctness-producer', (str(Path(sys.executable).resolve()),
                 str(fixture), '--inputs', '{inputs}', '--outputs', '{outputs}'), 30),
                 *analog.gate_components('A6')),
-            input_contract=(*arm.input_contract, 'input/correctness.json'))
+            input_contract=(*arm.input_contract, 'input/correctness.json',
+                            'input/correctness_sources.json'))
         installed = em.Registry()
         installed.register(arm)
         controller = em.Controller(installed, em.Budget(1, 512))
