@@ -90,7 +90,17 @@ def test_real_issuer_fixture_teardown_leaves_unissued_default_inert(tmp_path):
     assert policy._CAPABILITY_FD_ENV not in os.environ
     assert 'VIBEIC_EXECUTION_AUTH_SOCKET' not in os.environ
     assert policy._ordinary_runtime is None
-    assert policy.bootstrap(tmp_path) is None
+    # Unissued Default has a local producer runtime; teardown must not revive
+    # the closed candidate authority or construct an Ultra scheduler.
+    runtime = policy.bootstrap(tmp_path)
+    assert runtime['project'] == tmp_path.resolve()
+    assert runtime['policy']['mode'] == 'default'
+    assert runtime['contexts'] == runtime['bindings'] == runtime['runs'] == {}
+    assert not {'controller', 'registry'} & runtime.keys()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(policy.ENV, json.dumps({'mode': 'ultra'}))
+        with pytest.raises(em.Refusal):
+            policy.bootstrap(tmp_path)
 
 
 def real_entry(path='IC', execution_mode='default', project=None):
@@ -752,8 +762,13 @@ def test_explicit_ultra_keeps_mixed_child_argv_and_live_capability(monkeypatch, 
     front._configure_execution_policy(types.SimpleNamespace())
     argv = ['--project', 'design']
     observed = []
+    real_run = front.subprocess.run
 
     def spy_run(command, *, env=None, pass_fds=(), **kwargs):
+        # Keep real source-identity / capability checks. Only the explicitly
+        # substituted mixed-signal child is this fixture's transport boundary.
+        if len(command) < 2 or str(command[1]) != str(runner):
+            return real_run(command, env=env, pass_fds=pass_fds, **kwargs)
         observed.append((list(command), None if env is None else dict(env), tuple(pass_fds)))
         return types.SimpleNamespace(returncode=0)
 

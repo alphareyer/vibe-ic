@@ -166,7 +166,10 @@ def test_imported_main_catches_capability_refusal_and_preserves_route_input(tmp_
     path = tmp_path / 'input/step_0_5ic_answers.json'
     path.parent.mkdir()
     path.write_text(json.dumps({'answers': {'other': 'keep'}}))
-    monkeypatch.setattr(sys, 'argv', [str(Path(front.__file__)), str(tmp_path), '--route', 'ip'])
+    # Default deliberately uses its local producer without candidate authority.
+    # The capability refusal belongs to an explicitly requested Ultra run.
+    monkeypatch.setattr(sys, 'argv', [str(Path(front.__file__)), str(tmp_path),
+                                   '--route', 'ip', '--execution-mode', 'ultra'])
     monkeypatch.delenv(policy._CAPABILITY_FD_ENV, raising=False)
     assert front.main() == 2
     document = json.loads(path.read_text())
