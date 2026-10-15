@@ -26355,21 +26355,37 @@ def main() -> int:
               f"this run carries the FULL proof burden and every whole-flow "
               f"document is written as it would be without the flag.")
 
-    def _window_step_ids() -> set:
-        """The canonical flow step ids this run's window actually dispatches.
-
-        Read off the SAME declaration the dispatcher reads -- step_preflight's
-        ordered (site, span) table, filtered by the same two predicates that
-        decide whether a site is dispatched at all. No second notion of "which
-        steps are in the window" is introduced here, because two notions is how
-        a view comes to disagree with the run that produced it."""
+    def _step_requested(step_id):
+        """Read declared ownership before a supplementary producer can run."""
+        if not _bounded:
+            return True
         _wplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
-        # Ownership must be known BEFORE dispatch. A producer that accidentally
-        # ran outside the window cannot enlarge the requested proof burden.
-        # The same predicates guard each site and its later consumers below.
+        sites = _wplan.sites if _wplan else ()
+        for name, span in sites:
+            if str(step_id) in span:
+                return not (_before_entry(name, _entry_site) or _after_exit(name))
+        # Supplementary numeric steps (including FPGA 6) have no gated site.
+        # They still belong to a declared numeric interval such as 4..9.
+        # A named exit denotes its whole existing span, as exit pruning does.
+        spans = dict(sites)
+        entry_span = spans.get(_entry_site, ())
+        exit_span = spans.get(str(args.exit_step), ())
+        return ((not entry_span or int(step_id) >= int(entry_span[0]))
+                and (not args.exit_step or int(step_id) <= int(
+                    exit_span[-1] if exit_span else args.exit_step)))
+
+    def _window_step_ids() -> set:
+        """Report the sites this run recorded, including any dispatch mistake.
+
+        Requested ownership is checked before execution. This later account
+        reads the actual window sentinels so an accidental dispatch cannot be
+        hidden by recomputing the requested window for the report.
+        """
+        _wplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
         _sentinelled = {
-            name for name, _ in (_wplan.sites if _wplan else ())
-            if _before_entry(name, _entry_site) or _after_exit(name)}
+            _s.name for _s in plan
+            if _s.status == "NOT_APPLICABLE"
+            and str(getattr(_s, "declared_by", "") or "").startswith("--")}
         return dispatched_step_ids(_wplan.sites if _wplan else (), _sentinelled)
 
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
@@ -27090,7 +27106,7 @@ def main() -> int:
 
     # QSF / FPGA SDC belong to Step 6. Full runs retain their existing
     # --skip-hardware behavior; a bounded site window must own that step.
-    if not _bounded or "6" in _window_step_ids():
+    if _step_requested("6"):
         plan.append(step_qsf_gen(project, args.top_name, ic_class))
         plan.append(step_sdc_gen(project, args.top_name, ic_class))
     else:
@@ -27100,7 +27116,7 @@ def main() -> int:
                 "FPGA Step 6 is outside this run's declared site window; "
                 "the producer was not dispatched.",
                 declared_by=" ".join(_window_flags)))
-    if not args.skip_hardware and (not _bounded or "6" in _window_step_ids()):
+    if not args.skip_hardware and (_step_requested("6")):
         otp_sr = step_otp_image_check(project)
         plan.append(otp_sr)
         if otp_sr.status == "FAIL":
@@ -27279,7 +27295,7 @@ def main() -> int:
     # chained by phase23_one_shot_runner.py.
     # Emit plugin_output/declaration.json from the now-final RTL + the
     # oracle TB's measured framing, BEFORE the manifests/audit read it.
-    if not _bounded or {"2", "3", "4"}.intersection(_window_step_ids()):
+    if any(_step_requested(s) for s in ("2", "3", "4")):
         # This serializer feeds the frontend manifests below. Keep its actual
         # declaration comparison when that frontend is selected.
         plan.append(step_arith_declaration_emit(project))
@@ -27300,7 +27316,7 @@ def main() -> int:
     else:
         plan.append(step_verilator_coverage(project, args.top_name,
                                             args.container))
-    if _bounded and {"2", "3", "4"}.intersection(_window_step_ids()):
+    if _bounded and any(_step_requested(s) for s in ("2", "3", "4")):
         _disclose_runs_anyway(
             "emit_phase2_manifests",
             "the declared outputs of steps 2, 3 and 6",
@@ -27313,16 +27329,15 @@ def main() -> int:
         _publish_record_before_audit(
             project, plan, ic_class, evidence,
             invocation_context=_dispatch_invocation_context)
-    if not _bounded or {"2", "3", "4"}.intersection(_window_step_ids()):
+    if any(_step_requested(s) for s in ("2", "3", "4")):
         plan.append(_complete_phase2_frontend(project, plan, args.top_name,
                                                args.container))
     else:
         plan.append(StepResult(
             "phase2_manifests", "NOT_APPLICABLE", 0.0,
-            _disclose_whole_flow_skip(
-                "complete_phase2_frontend",
-                "frontend manifests, supplementary Step 2 producers and "
-                "complete Step 2/3/4 consumers; none is selected"),
+            "frontend manifests, supplementary Step 2 producers and "
+            "complete Step 2/3/4 consumers are outside the declared window; "
+            "none was dispatched.",
             declared_by=" ".join(_window_flags)))
     # v0.1.58 capture: regenerate final_summary.md BEFORE the audit so the
     # attestation table reflects the SHA256 of every artefact emitted

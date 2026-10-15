@@ -975,7 +975,7 @@ def test_main_dispatch_respects_selected_frontend_ownership(
         'step_slot_pad_budget': 'pad_budget', 'step_arith_declaration_emit': 'arith_decl',
     }
     helper_names = {'_site_order', '_before_entry', '_after_exit',
-                    '_exit_sentinel', '_entry_sentinel', '_window_step_ids'}
+                    '_exit_sentinel', '_entry_sentinel', '_window_step_ids', '_step_requested'}
     nodes = []
     for node in _main_node().body:
         if isinstance(node, ast.FunctionDef):
@@ -1012,6 +1012,17 @@ def test_main_dispatch_respects_selected_frontend_ownership(
         '_V': dsr._V,
         '_refuse_a_disagreeing_declaration': dsr._refuse_a_disagreeing_declaration,
     }
+    # The fixture executes supplementary call sites only. Stage the canonical
+    # site-head sentinels from the real helpers first; those earlier site heads
+    # are outside this extraction and the report now reads their actual rows.
+    helpers = [n for n in nodes if isinstance(n, ast.FunctionDef)]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[])),
+                 str(RUNNER), 'exec'), env)
+    for site, _ in sites:
+        if env['_before_entry'](site, entry_site):
+            plan.append(env['_entry_sentinel'](site))
+        elif env['_after_exit'](site):
+            plan.append(env['_exit_sentinel'](site))
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
                  str(RUNNER), 'exec'), env)
     assert called == expected
@@ -1024,3 +1035,39 @@ def test_main_dispatch_respects_selected_frontend_ownership(
 def test_main_window_omits_board_dispatch_even_when_hardware_is_requested(tmp_path):
     test_main_dispatch_respects_selected_frontend_ownership(
         tmp_path, '7', '9', [], board_requested=True)
+
+
+@pytest.mark.parametrize("entry,exit_step,expected", [
+    ("4", "9", ["reference", "functional", "qsf", "fpga_sdc", "arith_decl", "coverage", "frontend"]),
+    ("4", "sim", ["reference", "functional", "arith_decl", "coverage", "frontend"]),
+])
+def test_declared_numeric_gap_retains_fpga_preparation(tmp_path, entry, exit_step, expected):
+    test_main_dispatch_respects_selected_frontend_ownership(
+        tmp_path, entry, exit_step, expected)
+
+
+@pytest.mark.parametrize("entry,exit_step,expected", [
+    ("4", "9", ["reference", "functional", "qsf", "fpga_sdc", "otp", "board_test", "arith_decl", "coverage", "frontend"]),
+    ("4", "4", ["reference", "functional", "arith_decl", "coverage", "frontend"]),
+    ("7", "9", []),
+])
+def test_declared_numeric_gap_honors_hardware_request(tmp_path, entry, exit_step, expected):
+    test_main_dispatch_respects_selected_frontend_ownership(
+        tmp_path, entry, exit_step, expected, board_requested=True)
+
+
+def test_recorded_window_does_not_hide_an_accidental_dispatch():
+    """A missing sentinel is observable even when the requested entry is later."""
+    from types import SimpleNamespace
+    import step_preflight as spf
+    dsr = _load("design_one_shot_runner")
+    fn = next(n for n in ast.walk(_main_node()) if isinstance(n, ast.FunctionDef)
+              and n.name == '_window_step_ids')
+    env = {'_spf': spf, 'dispatched_step_ids': dsr.dispatched_step_ids,
+           'plan': [dsr.StepResult('rtl_gen', 'NOT_APPLICABLE', 0, '', declared_by='--entry-step 9'),
+                    dsr.StepResult('rtl_validate', 'NOT_APPLICABLE', 0, '', declared_by='--entry-step 9')],
+           '_entry_site': 'yosys_synth', '_before_entry': lambda *_: True,
+           '_after_exit': lambda *_: False}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])),
+                 str(RUNNER), 'exec'), env)
+    assert env['_window_step_ids']() == {'4', '7', '9', '11', '12', '13'}
