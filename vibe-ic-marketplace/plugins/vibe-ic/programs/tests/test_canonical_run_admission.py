@@ -226,3 +226,112 @@ def test_direct_phase_runners_refuse_before_expensive_dispatch(tmp_path, monkeyp
     monkeypatch.setattr(sys, "argv", ["phase3_one_shot_runner.py", str(project)])
     assert phase3.main() == 2
     assert "canonical Phase-3 admission" in capsys.readouterr().err
+
+
+_EXPERT_TB = ('import cocotb\n@cocotb.test()\nasync def test_value(dut):\n'
+              '    assert int(dut.q.value) == 0\n'
+              '    print("PROFESSIONAL_TB PASS")\n')
+
+
+def _authored_professional_project(tmp_path):
+    project = _project(tmp_path / "project")
+    (project / "phase2/stage1/rtl/core.v").write_text(
+        "module core(input clk, input d, output reg q); "
+        "always @(posedge clk) q <= d; endmodule\n")
+    (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
+        json.dumps({"fields": {"top_module": "core", "top_ports": [
+            {"name": "clk", "dir": "input", "width": 1},
+            {"name": "d", "dir": "input", "width": 1},
+            {"name": "q", "dir": "output", "width": 1}],
+            "clocks": [{"name": "clk", "period_ns": 10}]}}))
+    hook = project / "phase2/stage1/sim_professional/core/expert_reference_tb.py"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(_EXPERT_TB)
+    return project, hook
+
+
+def _recognized_hook(hook):
+    import professional_tb_gen as producer
+    assert producer._load_expert_reference_tb(hook.parent) == hook.read_text()
+
+
+def test_unchanged_persistent_hook_remains_duplicate(tmp_path):
+    project, hook = _authored_professional_project(tmp_path)
+    _recognized_hook(hook)
+    first = _admit(project)
+    assert first.admitted
+    ledger = cra.ledger_path(project).read_bytes()
+    again = _admit(project)
+    assert not again.admitted and again.identity_sha256 == first.identity_sha256
+    assert cra.ledger_path(project).read_bytes() == ledger
+
+
+def test_changed_recognized_persistent_hook_reopens_phase2(tmp_path):
+    project, hook = _authored_professional_project(tmp_path)
+    initial = _admit(project)
+    ledger = cra.ledger_path(project).read_bytes()
+    hook.write_text(_EXPERT_TB.replace("== 0", "== 1"))
+    _recognized_hook(hook)
+    changed = _admit(project)
+    assert changed.admitted and changed.identity_sha256 != initial.identity_sha256
+    assert cra.ledger_path(project).read_bytes().startswith(ledger)
+    assert len(cra.ledger_path(project).read_text().splitlines()) == 2
+
+
+def test_hook_reversal_with_changed_rtl_is_a_new_combination(tmp_path):
+    project, hook = _authored_professional_project(tmp_path)
+    _admit(project)
+    hook.write_text(_EXPERT_TB.replace("== 0", "== 1"))
+    _admit(project)
+    rtl = project / "phase2/stage1/rtl/core.v"
+    rtl.write_text(rtl.read_text().replace("q <= d", "q <= ~d"))
+    changed_rtl = _admit(project)
+    assert changed_rtl.admitted
+    before = cra.ledger_path(project).read_bytes()
+    hook.write_text(_EXPERT_TB)
+    _recognized_hook(hook)
+    reversed_hook = _admit(project)
+    assert reversed_hook.admitted
+    assert reversed_hook.identity_sha256 != changed_rtl.identity_sha256
+    assert cra.ledger_path(project).read_bytes().startswith(before)
+
+
+def test_exact_hook_reversal_reuses_prior_identity_without_erasing_history(tmp_path):
+    project, hook = _authored_professional_project(tmp_path)
+    initial = _admit(project)
+    hook.write_text(_EXPERT_TB.replace("== 0", "== 1"))
+    assert _admit(project).admitted
+    before = cra.ledger_path(project).read_bytes()
+    hook.write_text(_EXPERT_TB)
+    same = _admit(project)
+    assert not same.admitted and same.identity_sha256 == initial.identity_sha256
+    assert cra.ledger_path(project).read_bytes() == before
+
+
+def test_generated_professional_outputs_do_not_reopen_authored_hook_identity(tmp_path):
+    import professional_tb_gen as producer
+    project, hook = _authored_professional_project(tmp_path)
+    first = _admit(project)
+    generated = producer.generate(project)
+    assert generated["reference_model_tier"] == "expert_filled", generated
+    assert (hook.parent / "tb_core.py").read_text() == hook.read_text()
+    for name in ("results.xml", "wave.vcd", "report.json", "tb_core.py"):
+        (hook.parent / name).write_text("generated output rewrite\n")
+    generated = producer.generate(project)
+    assert generated["reference_model_tier"] == "expert_filled"
+    assert hook.read_text() == _EXPERT_TB
+    same = _admit(project)
+    assert not same.admitted and same.identity_sha256 == first.identity_sha256
+
+
+def test_phase3_span_does_not_reopen_for_phase2_professional_hook_only(tmp_path):
+    project, hook = _authored_professional_project(tmp_path)
+    kw = {"container_image": "sha256:" + "c" * 64,
+          "config": {"top_name": "core"},
+          "program_paths": cra.canonical_program_paths(PROGRAMS)}
+    first = cra.admit(project, "phase3", **kw)
+    assert first.admitted
+    hook.write_text(_EXPERT_TB.replace("== 0", "== 1"))
+    _recognized_hook(hook)
+    same = cra.admit(project, "phase3", **kw)
+    assert not same.admitted and same.identity_sha256 == first.identity_sha256
