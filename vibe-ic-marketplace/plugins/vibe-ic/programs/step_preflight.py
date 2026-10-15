@@ -541,7 +541,8 @@ def window_is_effective(entry_step=None, exit_step=None,
         plan = runner_plan(runner)
         plans = [plan] if plan is not None else []
     else:
-        plans = list(RUNNER_PLANS.values())
+        # Default's per-row sites are resolved here, not in the legacy table.
+        plans = [runner_plan(name) for name in RUNNER_PLANS]
     for plan in plans:
         if exit_step and exit_pruned_sites(plan.sites, str(exit_step)):
             return True

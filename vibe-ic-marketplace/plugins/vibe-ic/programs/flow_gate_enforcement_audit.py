@@ -1461,6 +1461,9 @@ class _RunnerModule:
             if not after < n.lineno < self._next_store(
                     scope, name, after, skip, n):
                 continue
+            # A store in the opposite arm of the binding's own conditional
+            # cannot overwrite that binding. Independent conditional writes
+            # still join values and remain unproven below.
             if any((after < store.lineno < n.lineno
                     or (store.lineno < after < n.lineno
                         and any(branch in bound_arms
@@ -1471,7 +1474,10 @@ class _RunnerModule:
                    and any(branch not in read_arms
                            and bound_arms.get(branch) != arm
                            for branch, arm in self._if_arms(store).items())
-                   for store in stores):
+                   for store in stores
+                   if not any(branch in bound_arms
+                              and bound_arms[branch] != arm
+                              for branch, arm in self._if_arms(store).items())):
                 # A joined value is read, but does not prove that this
                 # particular producer can block the flow.
                 self.joined_load_ids.add(id(n))
