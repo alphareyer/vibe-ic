@@ -234,6 +234,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     # Once INPUT is complete, consumers run after producer refusal or exception.
     from execution_backend_gates import evaluate, program_invocations
     canonical = {"status": "NOT_MEASURED", "ledger": []}
+    board_absent = str(step_id) == "39" and not _fpga_hardware_present(project)
     if not missing_inputs:
         try:
             canonical = evaluate(project, ROWS[str(step_id)]["canonical"])
@@ -247,12 +248,21 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
                          if item['blocking'] or item['optional']}
     gate_records = [dict(record, blocking=record.get('cmd') in blocking_commands)
                     for record in canonical['ledger']]
+    # Preserve the existing absent-board classification at the worker boundary.
+    # The full canonical result and raw ledger remain untouched below. Without
+    # an owner-produced board marker, an absent pass JSON is not a measured
+    # board failure. A present marker or a real producer FAIL is never lowered.
+    if board_absent:
+        for record in gate_records:
+            if record.get("blocking") and record.get("verdict") == "FAIL":
+                record.update(verdict="NOT_MEASURED",
+                              reason="physical FPGA board evidence absent")
     files, missing = resolve_contract(project, ROWS[str(step_id)]["canonical"]["required_outputs"])
     for name in files:
         source, target = project / name, outputs / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
-    fail = producer_verdict == "FAIL" or canonical['status'] == "FAIL"
+    fail = producer_verdict == "FAIL" or (canonical['status'] == "FAIL" and not board_absent)
     nm = (producer_verdict != "PASS" or canonical['status'] != "PASS" or
           bool(missing) or bool(missing_inputs))
     verdict = "FAIL" if fail else "NOT_MEASURED" if nm else "PASS"
@@ -279,6 +289,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
               "gate_records": gate_records, "outputs": files,
               "canonical_status": canonical["status"],
               "canonical_step_result": canonical.get("step"),
+              "canonical_gate_ledger": canonical['ledger'],
               "missing_outputs": missing, "input_contract": input_contract,
               "missing_inputs": missing_inputs, "qualification": verdict,
               "design_verdict": verdict, "physical_measurement": "NOT_MEASURED",

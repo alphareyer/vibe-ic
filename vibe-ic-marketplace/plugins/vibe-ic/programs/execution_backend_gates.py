@@ -56,7 +56,20 @@ def required_programs(row: dict) -> tuple[str, ...]:
                          for cmd in required_commands(row)}))
 
 
-def canonical_family_row(step_id: str) -> dict | None:
+def canonical_family_row(step_id: str, *, adapters=None) -> dict | None:
+    # A familiar step ID alone does not make another provider this fixed-step
+    # family. Use the same bound component/source ownership at context issue
+    # and Controller admission; callers inspecting only a row keep the lookup.
+    if adapters is not None:
+        family_workers = {'producer': 'execution_backend_worker.py',
+                          'release-producer': 'execution_release_worker.py'}
+        if not adapters or not all(
+                len(arm.components) == 1 and
+                arm.components[0].name in family_workers and
+                str(Path(__file__).resolve().parent /
+                    family_workers[arm.components[0].name]) in arm.source_files
+                for arm in adapters):
+            return None
     from execution_provider_catalog import BACKEND_ROWS, RELEASE_ROWS
     step_id = str(step_id)
     if step_id in BACKEND_ROWS:

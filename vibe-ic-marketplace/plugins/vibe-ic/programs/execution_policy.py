@@ -1159,7 +1159,7 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
     if frontend:
         objective.setdefault('metric', 'source_boundary')
     from execution_backend_gates import canonical_family_row, required_programs
-    canonical = canonical_family_row(step_id)
+    canonical = canonical_family_row(step_id, adapters=adapters)
     required = (required_programs(canonical) if canonical is not None
                 else tuple(row['mandatory_gate_programs']))
     context = em.Context(step_id, runtime['route']['source_sha'], files, objective,
