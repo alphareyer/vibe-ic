@@ -1628,8 +1628,8 @@ def test_waiver_validator_actually_rejects_a_placeholder():
     # ...and the docstring says the same thing. Pinned, because the example a
     # reader copies is the one that decides how the next waiver is written, and
     # the old one pointed at `programs/rtl_dispatch.py`, which does not exist.
-    assert ('programs/mixed_signal_top_lvs_run.py::`(rpt_dir / '
-            '"top_lvs.json").write_text(`') in (W.__doc__ or ""), (
+    assert ('programs/mixed_signal_top_lvs_run.py::`_aa.write_text(rpt_dir / '
+            '"top_lvs.json",`') in (W.__doc__ or ""), (
         "the waivers module docstring no longer carries the GOOD example this "
         "probe validates; if the cited line moved, update BOTH"
     )
@@ -1668,7 +1668,7 @@ def test_waiver_validator_actually_rejects_a_placeholder():
 #: hour when a sibling agent edited that file.) The one place a literal line
 #: number is still correct is the registry itself, and the docstring example
 #: the probe above pins.
-_M1_CLAIM = "(rpt_dir / 'top_lvs.json').write_text(...)"
+_M1_CLAIM = "_aa.write_text(rpt_dir / 'top_lvs.json', ...)"
 _M1_FILE = "programs/mixed_signal_top_lvs_run.py"
 
 

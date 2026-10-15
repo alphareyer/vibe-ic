@@ -159,6 +159,9 @@ def main(argv=None) -> int:
 
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        import _gate_authorship as _ga
+        res['program'] = 'fmeda_coverage_check'
+        _ga.stamp(res)
         Path(args.json).write_text(json.dumps(res, indent=2) + "\n")
     _absence = _sa.evidence_of(res)
     if _absence is not None:

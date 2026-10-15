@@ -4564,6 +4564,19 @@ steps:
       # document during the RUN, every time, so the race has no side to land
       # on. Same shape as the thirteen of #2261.
       - flow_compliance_check
+    # The Default synthesis handoff dispatches these existing producers
+    # before its audit. Gate recomputations write independent verdicts.
+    program_outputs:
+      - program: yosys_hilomap_required_check
+        path: "reports/phase2/gates/yosys_hilomap.json"
+        producer_command: "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json"
+      - program: yosys_script_template_check
+        path: "reports/phase2/gates/yosys_script_template.json"
+        producer_command: "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json"
+      - program: yosys_tiecell_recipe_order_check
+        path: "reports/phase2/gates/yosys_tiecell_recipe_order.json"
+        producer_command: "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json"
+        enforcement: advisory
     required_outputs:
       - "reports/phase2/gates/yosys_hilomap.json"
       - "reports/phase2/gates/yosys_script_template.json"
@@ -4604,7 +4617,7 @@ steps:
               command: "stage_on_pass_review . --stage stage_analog --json reports/analog/stage_analog_on_pass_review.json --compliance reports/analog/stage_analog_compliance.json"
               advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 0 on that invocation, unchanged in class."
         - optional_program_exit_zero:
-            command: "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json"
+            command: "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap_verdict.json"
             condition_files_exist: ["phase2/stage2/synth"]
             absent_condition_reason: >-
               Scoped to the presence of a synthesis directory. Step 14
@@ -4613,7 +4626,7 @@ steps:
               reports are Step 14 outputs; the input netlist remains owned
               by Step 9.
         - optional_program_exit_zero:
-            command: "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json"
+            command: "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template_verdict.json"
             condition_files_exist: ["phase2/stage2/synth"]
             absent_condition_reason: >-
               Scoped to the presence of a synthesis directory. Step 14
@@ -4639,7 +4652,7 @@ steps:
         # without failing the step — the slot that exists precisely so a gate
         # that declares itself advisory can be wired at all.
         - advisory_program_exit_zero:
-            command: "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json"
+            command: "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order_verdict.json"
             advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
             condition_files_exist: ["phase2/stage2/synth"]
             absent_condition_reason: >-

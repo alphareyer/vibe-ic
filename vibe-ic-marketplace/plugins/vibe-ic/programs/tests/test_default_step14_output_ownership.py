@@ -148,6 +148,15 @@ def test_default_phase2_caller_produces_step14_before_its_consumer(
     reused = producers.run_for_step(project, '14', timeout=30)
     assert reused['verdict'] == 'PRODUCED' and reused['executed'] == 0
     assert reused['already_produced_by_the_run'] == 4
+    produced_bytes = {relative: (project / relative).read_bytes() for relative in REPORTS}
+    repeated = gates.evaluate(project, handoff())
+    assert repeated['status'] == 'PASS', repeated
+    assert produced_bytes == {relative: (project / relative).read_bytes()
+                              for relative in REPORTS}
+    for relative in REPORTS:
+        verdict = project / relative.replace('.json', '_verdict.json')
+        assert verdict.is_file()
+        assert json.loads(verdict.read_text())['invoked_as'] == 'audit'
 
 
 def test_default_phase2_caller_does_not_create_step14_from_absent_netlist(

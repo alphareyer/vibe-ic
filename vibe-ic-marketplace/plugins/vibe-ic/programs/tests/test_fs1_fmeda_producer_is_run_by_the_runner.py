@@ -88,6 +88,18 @@ def test_the_runner_writes_the_report_on_a_design_without_a_mechanism(tmp_path, 
     raw = project / REPORT
     original = raw.read_bytes()
     original_check = recomputed.read_bytes()
+    # The actual declared channel must recognize both actual writers. It may
+    # preserve their explicit structural N/A, never call it a measured PASS.
+    import flow_declared_producer_run as declared
+    import _gate_authorship as authorship
+    assert authorship.role_of(json.loads(original)) == 'producer'
+    assert authorship.role_of(json.loads(original_check)) == 'producer'
+    census = declared.run_for_step(project, 'FS1')
+    assert census['population'] == 2, census
+    assert len(census['results']) == 2, census
+    assert all(item.get('target_content_valid') is True
+               and item.get('authorship') == 'producer'
+               for item in census['results']), census
     corrupt = json.loads(original)
     corrupt.update(applicable=True, asil='D', injected_faults=112,
                    detected_faults=0, baseline_valid=True, verdict='PASS')
@@ -107,6 +119,7 @@ def test_the_runner_writes_the_report_on_a_design_without_a_mechanism(tmp_path, 
     assert recomputed.read_bytes() == original_check
     (project / 'FS1_SOURCE_OBSERVATION.json').write_text(json.dumps({
         'actual_producer_programs': called[:2], 'original_raw_bytes': len(original),
+        'declared_producer_census': census,
         'bad_coverage_consumer': failed, 'missing_raw_consumer': missing,
         'required_report_unchanged_by_consumer': True,
         'scope': 'neutral source producer/consumer; no native fault-injection measurement'}, indent=2))

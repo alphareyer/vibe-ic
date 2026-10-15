@@ -1440,6 +1440,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     out_path = _report_path(project, args.json)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    import _gate_authorship as _ga
+    rep['program'] = 'fmeda_fault_injection_coverage'
+    _ga.stamp(rep)
     out_path.write_text(json.dumps(rep, indent=2) + "\n")
 
     _absence = _sa.evidence_of(rep)

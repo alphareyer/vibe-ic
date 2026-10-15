@@ -70,6 +70,8 @@ def fixture(tmp_path, monkeypatch, case):
     _write_gds(pnr / "chip_top.gds", n_shapes=12, cell="chip_top")
     put(project, "phase3/stage3/pnr/chip_top_pnr.v",
         "module chip_top(input a, output b); assign b = a; endmodule\n")
+    put(project, "phase2/stage2/synth/chip_top_synth.v",
+        "module chip_top(input a, output b); assign b = a; endmodule\n")
     put(project, "input/step_0_5ic_answers.json", "{}\n")
     put(project, "input/submission_template/neutral.json", "{}\n")
     put(project, "phase2/stage2/constraints/pvt_matrix.json", "{}\n")
