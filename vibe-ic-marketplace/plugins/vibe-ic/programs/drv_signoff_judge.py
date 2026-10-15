@@ -271,9 +271,13 @@ def _owner_records(project: Path | None, identity: dict, current: dict,
     try:
         signers = _OWNER_SIGNERS.read_text()
     except OSError:
+        return [], "OWNER_SIGNATURE_UNREADABLE"
+    entries = [line.strip() for line in signers.splitlines()
+               if line.strip() and not line.lstrip().startswith("#")]
+    if not entries:
         return [], "OWNER_SIGNATURE_UNAVAILABLE"
     if not any(line.strip().startswith("owner ") for line in signers.splitlines()):
-        return [], "OWNER_SIGNATURE_UNAVAILABLE"
+        return [], "OWNER_SIGNATURE_INVALID"
     if project is None:
         return [], "OWNER_PROJECT_UNBOUND"
     expected = {
@@ -331,8 +335,9 @@ def _approved_before_run(record: dict, identity: dict) -> bool:
 
 def _check_threshold_freeze(identity: dict, frozen: dict,
                             owner_records: list[dict],
-                            fails: list[str], missing: list[str]) -> dict:
-    """Reconcile the plan with committed values and a signed, prior-run receipt.
+                            fails: list[str], missing: list[str], *,
+                            owner_status: str = "OWNER_APPROVAL_ABSENT") -> dict:
+    """Reconcile the plan with committed values and any required owner signature.
 
     The data file is independent of the capture plan.  Its PDK defaults and
     design declarations are pinned by source hashes; the signed receipt binds
@@ -425,7 +430,10 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
               and record.get("standard_sha256") == standard_sha
               and record.get("thresholds") == frozen
               and _approved_before_run(record, identity)]
-    if not signed:
+    # R-0929-DRV-FREEZE: the committed standard is the approval until the
+    # owner registers a key. Unreadable/malformed registries never imply that
+    # state, and an unsigned standard is never labelled signature-verified.
+    if not signed and owner_status != "OWNER_SIGNATURE_UNAVAILABLE":
         (fails if supplied else missing).append(
             "threshold source changed: signed threshold_freeze" if supplied else
             "validated threshold_freeze owner record absent before run")
@@ -734,7 +742,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     freeze_evidence = {}
     if project is not None:
         freeze_evidence = _check_threshold_freeze(
-            identity, frozen, owner_records, fails, missing)
+            identity, frozen, owner_records, fails, missing, owner_status=owner_status)
         if Path(str(identity.get("project") or "")).resolve() != project.resolve():
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):

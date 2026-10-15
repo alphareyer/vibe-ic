@@ -1440,6 +1440,17 @@ def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
     assert [row["pin"] for row in restored["unresolved"]] == ["u/VDD"]
 
 
+def _neutral_registered_owner_key(root):
+    """Public fixture only; no owner key or private key is read or created."""
+    import base64
+    import struct
+    public = b'ssh-ed25519'
+    blob = struct.pack('>I', len(public)) + public + struct.pack('>I', 32) + bytes(range(32))
+    path = root / 'neutral_allowed_signers'
+    path.write_text('owner ssh-ed25519 ' + base64.b64encode(blob).decode() + '\n')
+    return path
+
+
 def _project_clean_opensta_census_bundle(tmp_path, monkeypatch, producer_image=None):
     from drv_signoff_census import derive
     bundle = _bundle(tmp_path)
@@ -1529,6 +1540,7 @@ def test_original_run_start_reaches_the_complete_project_judge(
     import drv_capture_plan as planner
     import drv_run_identity as runs
 
+    owner_reader = drv._owner_records
     project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
     _file(project, 'phase1/generated_docs/L1_DATASHEET.json', '{"ic_name": "unit"}\n')
     plugin = tmp_path / 'installed-plugin'
@@ -1564,8 +1576,8 @@ def test_original_run_start_reaches_the_complete_project_judge(
             freeze['designs'][0]['values']['fanout'] = 5
         static.write_text(json.dumps(freeze))
     elif case == 'unverified_owner':
-        monkeypatch.setattr(drv, '_owner_records',
-                            lambda *args: ([], 'OWNER_SIGNATURE_UNAVAILABLE'))
+        monkeypatch.setattr(drv, '_OWNER_SIGNERS', _neutral_registered_owner_key(tmp_path))
+        monkeypatch.setattr(drv, '_owner_records', owner_reader)
     result = drv.judge(bundle, project=project)
     (tmp_path / 'run-start.observation.json').write_text(json.dumps({
         'case': case, 'scope': 'SOURCE_CONTROL only; no native EDA/IC execution',
@@ -1586,6 +1598,69 @@ def test_original_run_start_reaches_the_complete_project_judge(
             'changed_freeze': 'threshold source changed: declared values',
         }
         assert expected[case] in reasons, result
+
+
+@pytest.mark.parametrize('case', ['no_key', 'registered_missing', 'registered_bad',
+                                  'malformed', 'unreadable', 'late_issued', 'changed_values'])
+def test_committed_freeze_uses_the_configured_owner_key_policy(
+        tmp_path, monkeypatch, case):
+    """R-0929-DRV-FREEZE: committed approval precedes optional key registration."""
+    from datetime import datetime, timedelta
+    owner_reader = drv._owner_records
+    bundle, *_ = _project_clean_opensta_census_bundle(tmp_path, monkeypatch)
+    # Keep the independently modelled committed standard; use the actual
+    # registry/signature reader instead of the fixture's verified-owner seam.
+    monkeypatch.setattr(drv, '_owner_records', owner_reader)
+    registry = tmp_path / 'allowed_signers'
+    registry.write_text('# no registered owner key\n')
+    if case in ('registered_missing', 'registered_bad'):
+        registry = _neutral_registered_owner_key(tmp_path)
+    elif case == 'malformed':
+        registry.write_text('not an allowed-signers entry\n')
+    elif case == 'unreadable':
+        registry = tmp_path / 'registry_directory'
+        registry.mkdir()
+    monkeypatch.setattr(drv, '_OWNER_SIGNERS', registry)
+    if case == 'registered_bad':
+        identity, current, frozen = bundle['identity'], bundle['current'], bundle['frozen']
+        binding = {'run_id': identity['run_id'], 'tree_sha': identity['tree_sha'],
+                   'sdc_sha256': current['sources']['signoff_sdc']['sha256'],
+                   'l7_sha256': frozen['sources']['l7'], 'l9_sha256': frozen['sources']['l9'],
+                   'pdk_config_sha256': frozen['sources']['pdk_config'],
+                   'spec_version': identity['spec_version']}
+        record = _file(tmp_path, 'owner_approvals/drv/neutral.json', json.dumps({
+            'type': 'threshold_freeze', 'identity': binding, 'thresholds': frozen,
+            'standard_sha256': drv._sha(drv._THRESHOLD_FREEZES),
+            'owner_timestamp': '2026-09-27T00:00:00+00:00',
+            'owner_quote': 'neutral invalid-signature control'}))
+        Path(record['path'] + '.sig').write_text('invalid neutral signature\n')
+    if case in ('late_issued', 'changed_values'):
+        standard = json.loads(drv._THRESHOLD_FREEZES.read_text())
+        if case == 'late_issued':
+            standard['designs'][0]['issued_at'] = (
+                datetime.fromisoformat(bundle['identity']['run_started_at'])
+                + timedelta(seconds=1)).isoformat()
+        else:
+            standard['designs'][0]['values']['fanout'] = 5
+        drv._THRESHOLD_FREEZES.write_text(json.dumps(standard))
+    result = drv.judge(bundle, project=tmp_path)
+    (tmp_path / 'freeze-key-policy.observation.json').write_text(json.dumps({
+        'case': case, 'scope': 'SOURCE_CONTROL only; no EDA/IC qualification',
+        'judge': result}, indent=2) + '\n')
+    assert result['threshold_freeze']['signed_owner_record_verified'] is False
+    if case == 'no_key':
+        assert result['verdict'] == 'PASS', result
+    else:
+        assert result['verdict'] != 'PASS', result
+        reasons = result['failures'] + result['not_measured']
+        expected = ('threshold freeze record was not issued before run'
+                    if case == 'late_issued' else
+                    'threshold source changed: declared values'
+                    if case == 'changed_values' else
+                    'validated threshold_freeze owner record absent before run')
+        assert expected in reasons, result
+        if case == 'changed_values':
+            assert result['verdict'] == 'FAIL', result
 
 
 def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
