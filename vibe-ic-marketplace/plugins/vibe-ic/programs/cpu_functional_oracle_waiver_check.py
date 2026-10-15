@@ -964,11 +964,44 @@ def _coverage_goal_summary(project: Path) -> dict:
     import professional_tb_gen as professional
     for goal, measured in zip(goals, summary['rows']):
         actual = professional.random_pair_goal_measurement(project, goal)
-        if actual is not None:
+        if actual is not None and measured['verdict'] != _cgc.FAIL:
             measured.update(actual)
             measured.update(achieved_pct=actual.get('achieved_pct'),
                             achieved_source=actual.get('achieved_source'),
                             instrument='arithmetic_random_pairs')
+    # The same L10-derived arithmetic scenarios may have been measured through
+    # the required pad top. Reuse the owning Step-5 consumer's current native
+    # evidence checks rather than rerunning a valid comparison population.
+    # A current failure in either population continues to block acceptance.
+    if any(row['verdict'] == _cgc.NOT_MEASURED for row in summary['rows']):
+        import bit_level_full_stack_tb_check as full_stack
+        native_rc, native, _ = full_stack.functional_full_stack_verdict(project)
+        if native_rc == 0 and native.get('pass') is True and not native.get('vacuous_pass', True):
+            from collections import Counter
+            declared_names = Counter(str(row.get('name') or row.get('id') or '') for row in rows)
+            native_names = Counter(row['case'] for row in native.get('population', []))
+            population = {row['case']: row for row in native.get('population', [])}
+            for measured in summary['rows']:
+                row = population.get(measured['case']) or {}
+                counts = row.get('checks') or {}
+                if (measured['verdict'] == _cgc.NOT_MEASURED
+                        and declared_names[measured['case']] == 1
+                        and native_names[measured['case']] == 1
+                        and not any(name != measured['case'] for name in measured.get('bound_cases', []))
+                        and not measured.get('dimensions')
+                        and measured.get('dimension') is None
+                        and measured.get('instrument') in (_cgc.SCENARIO_PASS_RATE,
+                                                           'arithmetic_random_pairs')
+                        and row.get('family') == 'declared_arithmetic_scenario'
+                        and row.get('state') == 'passed'
+                        and type(counts.get('total')) is int and counts['total'] > 0
+                        and counts.get('passed') == counts['total']
+                        and counts.get('errors') == 0):
+                    measured.update(verdict=_cgc.PASS, achieved_pct=100.0,
+                                    achieved_source=native['functional_record'],
+                                    instrument='full_stack_arithmetic_scenarios',
+                                    native_comparisons=counts,
+                                    why='the current L10-derived scenario passed through the required full-stack top')
     for state, key in ((_cgc.PASS, 'passed_count'), (_cgc.FAIL, 'failed_count'),
                        (_cgc.NOT_MEASURED, 'not_measured_count')):
         summary[key] = sum(row['verdict'] == state for row in summary['rows'])

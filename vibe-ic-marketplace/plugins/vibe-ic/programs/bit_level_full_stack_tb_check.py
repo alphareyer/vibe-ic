@@ -1048,6 +1048,8 @@ def functional_full_stack_verdict(project: Path):
                             f"the record")
             continue
         text = tb.read_text(errors="replace")
+        # Publish the family the measured TB owns, rather than a record label.
+        row['family'] = _fsf._family_of(text)
         if _fsf.instance_count(text, required["module"]) != 1:
             problems.append(f"{c.get('name')}: testbench does not instantiate "
                             f"the required top `{required['module']}` once")
@@ -1064,8 +1066,8 @@ def functional_full_stack_verdict(project: Path):
             continue
         got = _fsf.score_transcript(str(c.get("name")), c.get("run_rc"),
                                     log.read_text(errors="replace"))
-        arithmetic_contract = _fsf._family_of(text) == 'declared_arithmetic_scenario'
-        if (_fsf._family_of(text) == 'declared_function_golden'
+        arithmetic_contract = row['family'] == 'declared_arithmetic_scenario'
+        if (row['family'] == 'declared_function_golden'
                 and got['state'] == _fsf.PASSED):
             # Current INPUT owns random framing even when an older TB carries
             # the retired search-family marker. A count-correct old receipt
