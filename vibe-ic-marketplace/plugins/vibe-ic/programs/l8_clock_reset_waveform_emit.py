@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -105,6 +106,28 @@ def _clock_edges(l9: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def _described_clock_edges(l9: Dict[str, Any]) -> Dict[str, str]:
+    """Return only unambiguous, affirmative clock edges from L9 port text."""
+    candidates: Dict[str, set[str]] = {}
+    for scope in _scopes(l9):
+        for key in ("ports", "top_ports", "top_module_pins"):
+            rows = scope.get(key, [])
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                name, text = row.get("name"), row.get("description")
+                if not isinstance(name, str) or not isinstance(text, str):
+                    continue
+                low = text.lower()
+                rise = bool(re.search(r"\b(rising|positive|posedge)\s+edge\b", low) or "上升沿" in text)
+                fall = bool(re.search(r"\b(falling|negative|negedge)\s+edge\b", low) or "下降沿" in text)
+                negated = bool(re.search(r"\b(not|without)\s+(a\s+)?(rising|falling|positive|negative)\s+edge\b", low) or "非上升沿" in text or "非下降沿" in text)
+                if not negated and rise != fall:
+                    candidates.setdefault(name, set()).add("posedge" if rise else "negedge")
+    return {name: next(iter(edges)) for name, edges in candidates.items()
+            if len(edges) == 1}
+
+
 def _project(l8: Dict[str, Any], l9: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Return the typed join, or ``None`` when either side is absent."""
     clocks = _records(l8, "clocks", "clock_domains")
@@ -113,6 +136,9 @@ def _project(l8: Dict[str, Any], l9: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
 
     edges = _clock_edges(l9)
+    for name, edge in _described_clock_edges(l9).items():
+        if name not in edges:
+            edges[name] = edge
     descriptions = _port_descriptions(l9)
     clock_rows: List[Dict[str, Any]] = []
     for row in clocks:
@@ -163,7 +189,25 @@ def run(project: Path) -> Dict[str, Any]:
                 "emitted_count": 0}
 
     for scope in _scopes(l8):
-        if _nonempty(scope.get(L8_KEY)):
+        existing = scope.get(L8_KEY)
+        if _nonempty(existing):
+            projected = _project(l8, l9)
+            if isinstance(existing, dict) and isinstance(projected, dict):
+                old, fresh = existing.get("clocks"), projected.get("clocks")
+                if isinstance(old, list) and isinstance(fresh, list):
+                    by_name = {r.get("name"): r for r in fresh if isinstance(r, dict)}
+                    changed = False
+                    for row in old:
+                        if isinstance(row, dict) and "edge" not in row:
+                            candidate = by_name.get(row.get("name"))
+                            if candidate and candidate.get("edge"):
+                                row["edge"] = candidate["edge"]
+                                row["edge_derived_from"] = L9_REL
+                                changed = True
+                    if changed:
+                        _stamp.dump(l8_path, l8)
+                        return {"tool": TOOL, "status": "OK", "emitted_count": 1,
+                                "reason": "existing waveform refreshed from L9 authority"}
             return {"tool": TOOL, "status": "OK", "emitted_count": 0,
                     "reason": "existing clock_and_reset_waveform preserved"}
 

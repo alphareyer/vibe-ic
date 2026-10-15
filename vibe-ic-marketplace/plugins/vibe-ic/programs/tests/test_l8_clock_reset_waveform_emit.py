@@ -111,6 +111,38 @@ def test_protocol_specific_existing_waveform_wins(tmp_path):
     assert _l8(tmp_path)["clock_and_reset_waveform"] == existing
 
 
+@pytest.mark.parametrize(("description", "edge"), [
+    ("all data is sampled on the rising edge", "posedge"),
+    ("all data is sampled on the falling edge", "negedge"),
+])
+def test_retained_waveform_refreshes_missing_edge_from_named_l9_description(
+        tmp_path, description, edge):
+    _write(tmp_path, existing={"clocks": [{"name": "clk", "period_ns": 24}],
+                               "resets": [{"name": "rst", "sync": "synchronous"}]})
+    l9_path = tmp_path / EMIT.L9_REL
+    l9 = json.loads(l9_path.read_text())
+    l9["clocks"] = []
+    l9["ports"] = [{"name": "clk", "description": description}]
+    l9_path.write_text(json.dumps(l9))
+    assert getattr(RUNNER, HELPER)(tmp_path) == 1
+    row = _l8(tmp_path)["clock_and_reset_waveform"]["clocks"][0]
+    assert row["edge"] == edge and row["edge_derived_from"] == EMIT.L9_REL
+
+
+@pytest.mark.parametrize("description", ["clock input", "not a rising edge",
+                                          "rising edge and falling edge"])
+def test_missing_or_negated_description_does_not_guess_edge(tmp_path, description):
+    existing = {"clocks": [{"name": "clk", "period_ns": 24}],
+                "resets": [{"name": "rst", "sync": "synchronous"}]}
+    _write(tmp_path, existing=existing)
+    l9_path = tmp_path / EMIT.L9_REL
+    l9 = json.loads(l9_path.read_text()); l9["clocks"] = []
+    l9["ports"] = [{"name": "clk", "description": description}]
+    l9_path.write_text(json.dumps(l9))
+    assert getattr(RUNNER, HELPER)(tmp_path) == 0
+    assert _l8(tmp_path)["clock_and_reset_waveform"] == existing
+
+
 def test_empty_primary_lists_fall_through_to_typed_aliases(tmp_path):
     _write(tmp_path)
     l8 = _l8(tmp_path)
