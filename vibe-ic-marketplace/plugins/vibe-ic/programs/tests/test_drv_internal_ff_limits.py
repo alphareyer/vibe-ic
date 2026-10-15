@@ -147,3 +147,29 @@ def test_internal_ff_rows_keep_the_declared_limit(tmp_path, monkeypatch, case):
     else:
         assert result["verdict"] == "PASS", result
         assert result["not_measured"] == [], result
+
+
+@pytest.mark.parametrize("case", ["quoted_ff", "description_latch"])
+def test_ff_state_membership_requires_a_real_cell_group(tmp_path, monkeypatch, case):
+    if case == "quoted_ff":
+        model = _LIB.replace("ff (IQ1, IQN1)", 'ff ("IQ1", "IQN1")')
+    else:
+        model = _LIB.replace('ff (IQ1, IQN1) { clocked_on : "CLK"; next_state : "D"; }',
+            'description : "example \\"quoted\\" ff (IQ1, IQN1) { ... } and {";\n'
+            '  latch (IQ1, IQN1) { enable : "CLK"; data_in : "D"; }')
+    monkeypatch.setitem(globals(), "_LIB", model)
+    bundle = _complete_scene(tmp_path, monkeypatch, "core_scope")
+    result = drv.judge(bundle)
+    states = drv._liberty_limits(model)["ff_states"]["reg"]
+    fixtures._file(tmp_path, "LEXICAL_API_OBSERVATION.json", json.dumps({
+        "case": case, "ff_states": sorted(states), "pins": bundle["pins"],
+        "population": bundle["scenes"][0]["population"], "judge": result}, indent=2))
+    assert len(bundle["pins"]) == 8
+    assert bundle["scenes"][0]["population"] == {"max_slew": 5, "max_capacitance": 3, "max_fanout": 3}
+    if case == "quoted_ff":
+        assert states == {"IQ1", "IQN1"}
+        assert result["verdict"] == "PASS", result
+    else:
+        assert states == set()
+        assert result["verdict"] == "NOT_MEASURED", result
+        assert len(result["not_measured"]) == 2, result

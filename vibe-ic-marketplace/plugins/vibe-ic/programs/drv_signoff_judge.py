@@ -140,13 +140,15 @@ def _balanced_block(text: str, start: int) -> str:
     if opening < 0:
         return ""
     depth = 1
-    for index in range(opening + 1, len(text)):
-        if text[index] == "{":
+    # Liberty strings/comments may contain braces without opening a group.
+    for token in re.finditer(r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*|[{}]',
+                             text[opening + 1:], flags=re.S):
+        if token[0] == "{":
             depth += 1
-        elif text[index] == "}":
+        elif token[0] == "}":
             depth -= 1
             if depth == 0:
-                return text[opening + 1:index]
+                return text[opening + 1:opening + 1 + token.start()]
     return ""
 
 
@@ -208,12 +210,25 @@ def _liberty_limits(body: str) -> dict:
                 bool(re.search(r"\btiming\s*\(", pin_body)) or
                 any(pin_name in value.split() for value in related))
         cells[cell.group(1).strip()] = pins
-        live_cell = re.sub(r"/\*.*?\*/|//[^\n]*", "", cell_body, flags=re.S)
         states = set()
-        for ff in re.finditer(r"\bff\s*\(([^()]+)\)\s*\{", live_cell):
-            names = [part.strip().strip('"') for part in ff[1].split(",")]
-            if len(names) in (1, 2) and all(re.fullmatch(r"[A-Za-z_]\w*", name) for name in names):
-                states.update(names)
+        # Only direct cell groups declare FF state; quoted descriptions,
+        # comments and child-group bodies cannot supply model authority.
+        depth = 0
+        tokens = re.finditer(
+            r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*'
+            r'|(?P<ff>\bff\s*\((?P<names>[^()]+)\)\s*\{)'
+            r'|[A-Za-z_][\w.-]*|(?P<brace>[{}])', cell_body, flags=re.S)
+        for token in tokens:
+            if token["ff"] is not None:
+                names = [re.fullmatch(r'\s*(?:"([A-Za-z_]\w*)"|([A-Za-z_]\w*))\s*', part)
+                         for part in token["names"].split(",")]
+                if depth == 0 and len(names) in (1, 2) and all(names):
+                    states.update(name[1] or name[2] for name in names)
+                depth += 1
+            elif token["brace"] == "{":
+                depth += 1
+            elif token["brace"] == "}":
+                depth -= 1
         ff_states[cell.group(1).strip()] = states
     return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells,
             "default_fanout_load": default_fanout_load, "ff_states": ff_states}
