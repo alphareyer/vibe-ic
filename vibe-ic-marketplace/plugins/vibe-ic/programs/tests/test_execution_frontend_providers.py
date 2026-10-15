@@ -537,7 +537,7 @@ def test_05ic_public_controller_eligible_and_adopted(tmp_path):
                    {'template':'input/submission_template_source','slot':'s1',
                     'metric':'source_boundary'},
                    tuple(row['mandatory_gate_programs'])), project)
-    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,1024,1),portfolio)
     result=controller.run(ctx,run)
     assert result['candidate_statuses']['frontend_0_5ic']=='ELIGIBLE'
     receipt=json.loads((run/'frontend_0_5ic/receipt.json').read_text())
@@ -585,7 +585,7 @@ def test_05ic_declared_absence_routes_public_production_and_adopts_with_typed_na
                     'no_template_reason':reason,
                     'metric':'source_boundary'},
                    tuple(row['mandatory_gate_programs'])), project)
-    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,1024,1),portfolio)
     result=controller.run(ctx,run)
     assert result['candidate_statuses']['frontend_0_5ic']=='ELIGIBLE'
     receipt=json.loads((run/'frontend_0_5ic/receipt.json').read_text())
@@ -817,7 +817,7 @@ def _authority_project(tmp_path, *, top_cell=None):
 def _authority_controller():
     registry = em.Registry()
     p.register_factories(registry, step_ids=('0.5ic',))
-    return em.Controller(registry, em.Budget(1, 512, 1))
+    return em.Controller(registry, em.Budget(1, 1024, 1))
 
 
 def _authority_cli(project, output, env):
