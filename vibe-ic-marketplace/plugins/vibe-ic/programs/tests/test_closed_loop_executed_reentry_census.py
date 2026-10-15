@@ -34,7 +34,10 @@ DESIGN = PROGRAMS / "design_one_shot_runner.py"
 #: The re-entry the flow's area edge actually executes, quoted from the runner.
 AREA_REENTRY = ("                    _area_retry = step_synth(\n"
                 "                        project, top, pdk, container,\n"
-                "                        period_relax=AREA_RETRY_PERIOD_RELAX)")
+                "                        period_relax=AREA_RETRY_PERIOD_RELAX,\n"
+                "                        area_receipt=area_receipt,\n"
+                "                        area_run_manifest=area_run_manifest,\n"
+                "                        _fallback_handoff=_fallback_handoff)")
 #: Its measurement — the line that reads back what the re-entry produced.
 AREA_MEASURE = "                    _after = _synth_chip_area(project)"
 
