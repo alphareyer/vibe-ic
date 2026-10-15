@@ -225,8 +225,10 @@ def test_default_step25_keeps_current_ir_owned_by_step24(tmp_path, monkeypatch, 
         commands = [call for call in calls if "check_current_density -net PWR" in call]
         assert len(commands) == 1, calls
         assert validation["valid"] is True
-        expected = ("FAIL" if case in {"ir_fail", "em_fail"} else
-                    "NOT_MEASURED" if case == "em_basis_changed" else "PASS")
+        # The native basis reader discloses NOT_MEASURED below. The existing
+        # declared report producer returns rc1 for this incomplete record, so
+        # the complete canonical row honestly records FAIL, not physical PASS.
+        expected = "FAIL" if case in {"ir_fail", "em_fail", "em_basis_changed"} else "PASS"
         assert row.status == expected, row.detail
         if case == "em_basis_changed":
             invalid_basis = E.validate_native_density(project)
