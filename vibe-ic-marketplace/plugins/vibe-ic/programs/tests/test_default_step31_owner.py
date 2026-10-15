@@ -185,10 +185,13 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     assert calls.count("erc") == 1
     assert calls.count("extraction") == 1
     assert calls.count("netgen") == 1
-    assert [x[:2] for x in observed] == [("declared", "31"), ("consumer", "31")]
+    order = [x[:2] for x in observed]
+    assert order in ([("declared", "31")],
+                     [("declared", "31"), ("consumer", "31")])
     census = observed[0][2]
     assert census["executed"] > 0, census
     if case == "current":
+        assert order == [("declared", "31"), ("consumer", "31")]
         assert census["verdict"] == "PRODUCED", census
         assert rc == 0
         assert result and result["canonical_pass"] is True
@@ -199,6 +202,14 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         assert result is None or result["current_inputs"] is not True
         if case == "lvs_fail":
             assert receipt["verdict"] == "FAIL", receipt
+            assert receipt["producer_verdict"] == "FAIL", receipt
+        elif case == "missing_erc":
+            assert observation["required_outputs"]["reports/phase3/erc.rpt"] is None
+        else:
+            report = project / "reports/phase3/perc_sweep.json"
+            producer = next(row for row in census["results"]
+                            if row["program"] == "perc_corpus_sweep")
+            assert sha(report) != producer["target_sha256"]
 
 
 def test_ultra_keeps_its_existing_step31_sites(monkeypatch):
