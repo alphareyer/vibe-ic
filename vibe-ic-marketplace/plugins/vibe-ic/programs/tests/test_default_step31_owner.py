@@ -87,8 +87,9 @@ def fixture(tmp_path, monkeypatch, case):
         with (project / "provenance.jsonl").open("a") as stream:
             stream.write(json.dumps({"record": "invocation", "tool": tool,
                 "measured": True, "exit_code": 0, "scope": "SOURCE_CONTROL",
-                "inputs": {str((pnr / "chip_top.def").relative_to(project)):
-                           "sha256:" + sha(pnr / "chip_top.def")},
+                "inputs": {str((pnr / name).relative_to(project)):
+                           "sha256:" + sha(pnr / name)
+                           for name in ("chip_top.def", "chip_top.gds")},
                 "outputs": files}) + "\n")
 
     def transport(container, command, **kwargs):
@@ -98,7 +99,9 @@ def fixture(tmp_path, monkeypatch, case):
             text = ("Final result: Circuits do NOT match.\n" if case == "lvs_fail" else
                     "Final result: Circuits match uniquely.\n")
             report.write_text("Netgen LVS SOURCE_CONTROL\n" + text)
-            provenance("netgen", [report])
+            log = report.with_suffix(".log")
+            log.write_text("Netgen source-control instrument completed\n" + text)
+            provenance("netgen", [report, log])
             return 0, text, ""
         if "/erc_chip_top.tcl" in command:
             calls.append("erc")
