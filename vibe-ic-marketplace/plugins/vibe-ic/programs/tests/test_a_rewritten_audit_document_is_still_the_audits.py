@@ -226,12 +226,13 @@ def test_run22s_real_shape_does_not_credit_the_producers_document(project):
 
 def test_the_shipped_step_36_credits_the_producers_document(project):
     """THE SPLIT, on the SHIPPED step: the same producer's document, the same tree,
-    and now it IS run evidence — because step 36 declares the program that writes
-    it. Reddens on any tree where that declaration is reverted."""
+    and now it IS run evidence — because current owner 38 declares its writer.
+    The historical test name stays stable; reverting that declaration reddens it.
+    """
     _producer_wrote_the_checklist(project)
-    result = FCC.check_step(project, _live_step("36"), {})
+    result = FCC.check_step(project, _live_step("38"), {})
     assert CHECKLIST_REL in (result.evidence or []), (
-        f"step 36 does not credit its producer's document; reasons: "
+        f"step 38 does not credit its producer's document; reasons: "
         f"{[str(r)[:160] for r in (result.reasons or [])]}")
     assert not _refused(result), [str(r)[:160] for r in (result.reasons or [])]
 
