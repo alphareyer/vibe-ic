@@ -271,10 +271,13 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
     resolved = []
     unresolved = []
     for name in names:
-        pin = pins.get(name)
+        # OpenSTA's report spelling escapes hierarchy separators; the census
+        # uses get_full_name. Preserve exact keys and the raw report evidence.
+        census_name = name if name in pins else _unescape(name)
+        pin = pins.get(census_name)
         if pin is None:
             unresolved.append({"pin": name, "reason": "not_in_pin_census"})
-        elif name in pg_names:
+        elif census_name in pg_names:
             resolved.append({"pin": name, "reason": "lef_pg_no_liberty_arc"})
         elif not pin["net"]:
             resolved.append({"pin": name, "reason": "unconnected_no_net"})
