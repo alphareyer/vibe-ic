@@ -59,7 +59,10 @@ def fixture(tmp_path, monkeypatch, case):
     shutil.copytree(_project(tmp_path / "dependencies"), project,
                     dirs_exist_ok=True, ignore=shutil.ignore_patterns("provenance.jsonl"))
     pnr = R._pl.pnr_dir(project)
-    pdk = R._detect_pdk(project)
+    pdk_root = project / "input/pdk"
+    pdk = R.PdkConfig("open_fixture", str(pdk_root / "cells.lib"),
+        str(pdk_root / "tech.lef"), str(pdk_root / "cell.lef"),
+        None, "neutral", str(pdk_root / "neutral.lydrc"))
     for name in ("chip_top.def", "routed.def"):
         put(project, "phase3/stage3/pnr/" + name, LAYOUT)
     put(project, "phase3/stage3/pnr/chip_top_pnr.v",
@@ -69,6 +72,9 @@ def fixture(tmp_path, monkeypatch, case):
     put(project, "phase2/stage2/constraints/pvt_matrix.json", "{}\n")
     lib = put(project, "input/pdk/cells.lib", 'library(neutral) { time_unit : "1ns"; }\n')
     pdk.liberty = str(lib)
+    pdk.bridge_magicrc = str(pdk_root / "neutral.magicrc")
+    pdk.bridge_netgen_setup = str(put(project, "input/pdk/neutral_setup.tcl",
+                                    "# neutral native comparison setup\n"))
     put(project, "reports/density.json", json.dumps({
         "tool": "klayout neutral density instrument",
         "layers": [{"name": "met1", "density_pct": 45.0}]}))
@@ -159,8 +165,10 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
                            die_um=None, util=None, spare_density=None)
     rc = R._run_phase3_window(project, "chip_top", pdk, args, selected)
     result = V.latest_pass(project, "31")
+    receipt_path = project / "reports/phase3/default_steps/31/backend_result.json"
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else None
     observation = {"case": case, "rc": rc, "selected": selected, "calls": calls,
-        "observed": observed, "latest": result,
+        "observed": observed, "latest": result, "receipt": receipt,
         "required_outputs": {name: sha(project / name) if (project / name).is_file() else None
                              for name in definition["required_outputs"]},
         "scope": "source-only neutral native instruments; complete real Default31 consumer"}
@@ -181,6 +189,8 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     else:
         assert rc != 0
         assert result is None or result["current_inputs"] is not True
+        if case == "lvs_fail":
+            assert receipt["verdict"] == "FAIL", receipt
 
 
 def test_ultra_keeps_its_existing_step31_sites(monkeypatch):
