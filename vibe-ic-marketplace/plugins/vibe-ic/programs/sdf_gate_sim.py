@@ -1425,6 +1425,7 @@ def _docker(container: str, cmd: str, budget_s: float = 600):
         return _pr.run(
             _ce.exec_argv(container, _TOOL_PATH + cmd, tag="sdf_gate_sim"),
             capture_output=True, text=True, errors="replace",
+            start_new_session=True,
             hard_ceiling_s=float(budget_s),
             ceiling_notice=_ce.default_ceiling_notice("local", budget_s))
     # R-0915-86(3) — THE GATE-SIM SUPERVISOR'S PROGRESS DETECTOR, calibrated
