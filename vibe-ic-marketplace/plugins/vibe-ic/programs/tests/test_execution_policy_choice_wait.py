@@ -47,25 +47,63 @@ def _dispatch_in_thread(project, response, outcome):
         outcome['error'] = exc
 
 
-def _wait_request(runtime, timeout=5):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        runs = runtime['runs']
-        if runs:
-            request = runs['1'][0] / 'selection-request.json'
-            if request.is_file():
-                return request
-        time.sleep(.01)
-    raise AssertionError('selection request was not published')
+def _dispatch_with_choice_writer(project, response, runtime, monkeypatch, respond):
+    """Observe the real request; do not time source validation with a test join."""
+    request_ready = threading.Event()
+    completed = threading.Event()
+    outcome = {}
+    original_request = policy._selection_request
+
+    def published(*args, **kwargs):
+        request = original_request(*args, **kwargs)
+        outcome['request_path'] = Path(request['request_path'])
+        request_ready.set()
+        return request
+
+    monkeypatch.setattr(policy, '_selection_request', published)
+
+    def writer():
+        # As in the existing staged-writer controls, terminal dispatch wakes
+        # the observer even when a producer refuses before publishing.
+        while not request_ready.is_set() and not completed.wait(.001):
+            pass
+        if not request_ready.is_set():
+            outcome['writer_error'] = AssertionError(
+                f'selection request was not published: {outcome!r}')
+            return
+        try:
+            choice = respond(outcome['request_path'])
+            pending = response.with_name(response.name + '.pending')
+            pending.write_text(json.dumps(choice))
+            pending.replace(response)
+        except BaseException as exc:
+            outcome['writer_error'] = exc
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        # The real Controller/worker/adoption chain completes synchronously.
+        # The product's external-choice deadline and finite polls are intact.
+        _dispatch_in_thread(project, response, outcome)
+    finally:
+        completed.set()
+        thread.join()
+    if 'writer_error' in outcome:
+        raise AssertionError(f'choice writer failed: {outcome!r}') from outcome['writer_error']
+    return outcome, thread
 
 
 def test_delayed_core_choice_is_adopted_and_imported_in_same_dispatch(tmp_path, monkeypatch, capsys):
     response = tmp_path / 'choice.json'
     project, controller, _, runtime = _runtime(tmp_path, monkeypatch, response=response)
-    outcome = {}
-    thread = threading.Thread(target=_dispatch_in_thread, args=(project, response, outcome))
-    thread.start()
-    request_path = _wait_request(runtime)
+    def respond(request_path):
+        ctx = runtime['contexts']['1']
+        run = runtime['runs']['1'][0]
+        return H.choice(ctx, run, 'b')
+
+    outcome, thread = _dispatch_with_choice_writer(
+        project, response, runtime, monkeypatch, respond)
+    request_path = outcome['request_path']
     request = json.loads(request_path.read_text())
     assert request['step_id'] == '1'
     assert request['response_path'] == str(response.resolve())
@@ -74,8 +112,6 @@ def test_delayed_core_choice_is_adopted_and_imported_in_same_dispatch(tmp_path, 
                for row in request['eligible_arms'])
     ctx = runtime['contexts']['1']
     run = runtime['runs']['1'][0]
-    response.write_text(json.dumps(H.choice(ctx, run, 'b')))
-    thread.join(timeout=5)
     assert not thread.is_alive()
     assert 'error' not in outcome
     assert outcome['result']['status'] == 'ADOPTED'
@@ -185,16 +221,15 @@ def test_unchanged_previous_step_response_is_ignored(tmp_path, monkeypatch):
 def test_new_wrong_receipt_digest_is_refused_by_core(tmp_path, monkeypatch):
     response = tmp_path / 'choice.json'
     project, _, _, runtime = _runtime(tmp_path, monkeypatch, response=response)
-    outcome = {}
-    thread = threading.Thread(target=_dispatch_in_thread, args=(project, response, outcome))
-    thread.start()
-    _wait_request(runtime)
-    ctx = runtime['contexts']['1']
-    run = runtime['runs']['1'][0]
-    bad = H.choice(ctx, run, 'b')
-    bad['receipt_sha256'] = '0' * 64
-    response.write_text(json.dumps(bad))
-    thread.join(timeout=5)
+    def respond(request_path):
+        ctx = runtime['contexts']['1']
+        run = runtime['runs']['1'][0]
+        bad = H.choice(ctx, run, 'b')
+        bad['receipt_sha256'] = '0' * 64
+        return bad
+
+    outcome, thread = _dispatch_with_choice_writer(
+        project, response, runtime, monkeypatch, respond)
     assert not thread.is_alive()
     assert isinstance(outcome.get('error'), em.Refusal)
     assert outcome['error'].code == 'AI_RECEIPT_DIGEST_MISMATCH'
@@ -206,19 +241,19 @@ def test_external_choice_must_acknowledge_current_comparison(
         tmp_path, monkeypatch, field, damage):
     response = tmp_path / 'choice.json'
     project, _, _, runtime = _runtime(tmp_path, monkeypatch, response=response)
-    outcome = {}
-    thread = threading.Thread(target=_dispatch_in_thread, args=(project, response, outcome))
-    thread.start()
-    _wait_request(runtime)
-    ctx = runtime['contexts']['1']
+    def respond(request_path):
+        ctx = runtime['contexts']['1']
+        run = runtime['runs']['1'][0]
+        choice = H.choice(ctx, run, 'b')
+        if damage == 'missing':
+            choice.pop(field)
+        else:
+            choice[field] = '0' * 64
+        return choice
+
+    outcome, thread = _dispatch_with_choice_writer(
+        project, response, runtime, monkeypatch, respond)
     run = runtime['runs']['1'][0]
-    choice = H.choice(ctx, run, 'b')
-    if damage == 'missing':
-        choice.pop(field)
-    else:
-        choice[field] = '0' * 64
-    response.write_text(json.dumps(choice))
-    thread.join(timeout=5)
     assert not thread.is_alive()
     observed = (outcome['error'].code if isinstance(outcome.get('error'), em.Refusal)
                 else outcome['result']['status'])

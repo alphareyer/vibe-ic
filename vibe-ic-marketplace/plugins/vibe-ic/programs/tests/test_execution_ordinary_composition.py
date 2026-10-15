@@ -161,8 +161,14 @@ def test_ordinary_ultra_reuses_controller_and_refuses_unmeasured_selection(tmp_p
             assert evidence['producer_verdict']=='NOT_MEASURED'
             assert evidence['producer'][0]['program']=='phase3_one_shot_runner.emit_clock_plan'
             assert evidence['producer'][0]['rc']==2
-            assert evidence['gate_records'][0]['reason']=='REQUIRED_INPUT_ABSENT'
-            assert evidence['gate_records'][0]['rc'] is None
+            # Missing current inputs defer consumers; no gate ran merely to
+            # manufacture an absence record or an eligible arm.
+            assert evidence['gate_records']==[]
+            assert evidence['canonical_gate_ledger']==[]
+            assert evidence['canonical_status']=='NOT_MEASURED'
+            assert evidence['qualification']=='NOT_MEASURED'
+            assert receipt['status']=='NOT_MEASURED'
+    assert not (root/'adoption.json').exists()
     ctx=runtime['contexts']['16']
     arm=plan['arms'][0]
     with pytest.raises(em.Refusal,match='AI_CHOICE_INELIGIBLE'):

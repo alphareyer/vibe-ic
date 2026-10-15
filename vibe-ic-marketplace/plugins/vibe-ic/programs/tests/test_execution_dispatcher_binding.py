@@ -75,7 +75,15 @@ def controller(*arms, fixture_root=None):
 
 
 def issued_context16(tmp_path):
-    return backend.context16(tmp_path)
+    declaration = tmp_path / 'declared_pdk.json'
+    # Bind the current input document, but keep the unresolved-PDK negative.
+    # The genuine producer refuses this identity before native execution;
+    # its actual clock-plan consumer must still report the missing plan.
+    declaration.write_text(json.dumps({
+        'fields': {'pdk_target': 'source_fixture_unresolved_pdk'}}))
+    ctx = backend.context16(tmp_path)
+    return replace(ctx, inputs={**ctx.inputs,
+        'project/phase1/generated_docs/L19_CONSTRAINTS_PDK.json': declaration})
 
 
 def record(tmp_path, **facts):
@@ -95,7 +103,7 @@ def test_actual_dispatcher_alias_cannot_create_another_eligible_arm(tmp_path, mo
     record(tmp_path, style=style, plan=plan, result=result, receipt=receipt)
     assert len(plan['arms']) == 1
     assert plan['arms'] == ['release_16'], plan['arms']
-    # This source-only fixture intentionally has no declared/resolved PDK, so
+    # This source-only fixture intentionally has no resolvable PDK, so
     # the canonical clock-plan gate remains a measured FAIL.  Alias admission
     # is the contract under test: one source-bound arm runs, and the alias may
     # neither create a second arm nor mask the real gate failure.
