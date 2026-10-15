@@ -582,6 +582,19 @@ def _materialize(project: Path, step: Dict[str, Any],
         _write(project, TD.SELF_TAPEOUT_REL,
                TD.SELF_TAPEOUT_MARKER + "\n")
 
+    # Exercise each typed native-mode output as actually owed. An unspecified
+    # legacy direct route legitimately owes no native record and cannot be the
+    # positive tree for a missing-native-output probe. No runtime or verdict is
+    # synthesized: the real selection reader and output catcher still run.
+    modes = {}
+    for cond in (step.get("output_conditions") or {}).values():
+        selection = cond.get("librelane_step_mode") or {}
+        if selection.get("step") and selection.get("modes"):
+            modes[str(selection["step"])] = selection["modes"][0]
+    if modes:
+        _write(project, "phase3/librelane_switch.json",
+               json.dumps({"steps": modes}))
+
     # ── ENTRIES MAY SHARE AN ALTERNATIVE, AND A DROP HAS TO REACH ALL OF THEM
     # `" OR "` inside one entry is any-of and the entry list is all-of, so
     # `(A OR C) AND (B OR C)` is the flow's way of spelling `(A AND B) OR C` —
@@ -918,44 +931,12 @@ PLATFORM_CAPABILITY_GAPS_AS_MEASURED: Dict[Any, str] = {}
 #:           is that answer. The recomputation also says, as a by-product, that
 #:           no other member had gone stale in the meantime.
 SINGLE_ENTRY_STEPS_AS_MEASURED: Tuple[str, ...] = (
-    # 2026-09-23: 24 -> 25 members. Step 37.3 (GDS stream-out / finishing
-    # fidelity) ARRIVED declaring ONE required_output
-    # (reports/phase3/gds_xor.json), so it is single-entry by the same
-    # measure every other member is.
-    #
-    # RE-DERIVED A FIFTH TIME rather than appended to — appending is how
-    # v1.10.38 shipped a 28-entry pin over a 27-step population, which this
-    # file's own sibling assertion exists to catch. The tuple below IS the
-    # answer to `[k for k in step_ids() if len(required_outputs(k)) < 2]`
-    # recomputed on this tree: 25 members. The recomputation's by-product is
-    # recorded too, and the gate itself measured it: 'pinned but NO LONGER
-    # single-entry: []' — no other member had gone stale in the meantime.
-    # 2026-09-25: re-derived from the live required_outputs accessor after
-    # Steps 17 and 22 declared the gate JSON files their runner consumes.
-    # Both now have two entries and leave the single-entry population.
-    "1",
-    "8",
-    "FS1",
-    "DT1",
-    "12",
-    "A1",
-    "A2",
-    "A3",
-    "A4",
-    "A5",
-    "A7",
-    "A9",
-    "16",
-    "20",
-    "DT2",
-    "DT3",
-    "35",
-    "36",
-    "37.3",
-    "M4",
-    "42",
-    "44",
-    "P0",
+    # 2026-10-16: exact canonical-order re-derivation, 21 members. FS1 now
+    # declares both its raw injection and independent coverage records; 36
+    # owns both physical layout receipts and raw stage3 compliance. Neither
+    # remains a single-entry step. The bidirectional population guard remains.
+    "1", "P0", "8", "DT1", "12", "A1", "A2", "A3", "A4", "A5",
+    "A7", "A9", "16", "20", "DT2", "DT3", "35", "37.3", "M4", "42", "44",
 )
 
 
@@ -1659,7 +1640,10 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
     # catalog gate reads the declaration and reports DESIGN_DECLARED_NA, and
     # dropping the RTL output still moves the step off the tier (the survivor
     # check below). Remove the seeded declaration and step 1 is FAIL again.
-    "1", "38",
+    # 2026-10-16: 38 now also owns the former 36 full tapeout signoff.
+    # Its generic seed is rejected, not credited as a completed signoff.
+    # Keep the exact tier below and the historical pack-only gate test.
+    "1",
 )
 
 #: The steps whose real gate USED to reach a PASS tier on the seeded fixture
@@ -1792,6 +1776,10 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     # This is a stronger refusal on this fixture, not a claim of design PASS.
     "32": "FAIL",
     "35": "FAIL",
+    # Fixed-order relocation: the unchanged full tapeout signoff gate moved
+    # from 36 to 38. The old generic pack seed never supplied its scientific
+    # signoff inputs; the complete current 38 is therefore FAIL, not waived.
+    "38": "FAIL",
     # 2026-09-26 (F9), PASS -> FAIL: "1" was recorded here because the seeded
     # tree carried none of step 1's declared INPUT (D1's L-docs), so its
     # catalog gate refused "declaration missing". 2026-09-27 (F27): it LEFT
@@ -1956,6 +1944,33 @@ def test_d8_downgrade_is_reachable_through_each_steps_own_real_gate():
         f"acceptable — FAIL means the gate itself noticed, which is stronger — "
         f"but a PASS tier means the artefact vanished with no consequence."
     )
+
+
+def test_d8_historical_pack_only_gate_retains_positive_and_negative_reachability(tmp_path):
+    """Public 63d19's pack-only contract is historical, not current 38 PASS.
+
+    The current full row remains in both the all-row missing sweep and the
+    exact FAIL-tier assertion above. Retain the former pack gate's real
+    positive, missing and wrong-content arms separately from that full row.
+    """
+    historical = dict(F.step_by_id("38"))
+    historical["required_outputs"] = [
+        "phase3/stage4/foundry_handoff/mask_spec.json",
+        "phase3/stage4/foundry_handoff/wat_plan.json",
+        "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR "
+        "phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",
+        "phase3/stage4/foundry_handoff/corner_test_vectors.json",
+    ]
+    historical["gate"] = {"program_exit_zero":
+        "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"}
+    positive, missing, wrong = (tmp_path / name for name in ("positive", "missing", "wrong"))
+    entry = historical["required_outputs"][0]
+    _materialize(positive, historical)
+    _materialize(missing, historical, drop_entries=(entry,))
+    _materialize(wrong, historical, wrong_entries=(entry,))
+    assert FCC.check_step(positive, historical, {}).status in _PASS_TIER_LABELS
+    assert FCC.check_step(missing, historical, {}).status not in _PASS_TIER_LABELS
+    assert FCC.check_step(wrong, historical, {}).status not in _PASS_TIER_LABELS
 
 
 # ══════════════════════════════════════════════════════════════════════

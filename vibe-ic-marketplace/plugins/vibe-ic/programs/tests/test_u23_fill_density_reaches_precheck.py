@@ -14,6 +14,7 @@ is not taught a second path.
 """
 import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import general_precheck as GP  # noqa: E402
 import librelane_fill_dfm as fill  # noqa: E402
 import librelane_step37 as step37  # noqa: E402
+import _default_backend_fixtures as BF  # noqa: E402
 from test_die_density_finish import _pdk, _put  # noqa: E402
 
 MEASURED = json.loads(
@@ -71,8 +73,11 @@ def _promote(tmp_path, monkeypatch, ratios_for=None, mode="librelane",
     state = _put(project / "state.json", {"gds": str(source)})
     if stale is not None:
         _put(project / fill.METAL_DENSITY_REL, stale)
+    # The consumer reopens the selected mode and retained State receipt. A
+    # parent-only selector stub is not a declaration for that real reader.
+    _put(project / "phase3/librelane_switch.json", {"steps": {"37": mode}})
     monkeypatch.setattr(contract, "selected_mode", lambda *_a: mode)
-    monkeypatch.setattr(contract, "resolve_image", lambda *_a: "image")
+    monkeypatch.setattr(contract, "resolve_image", lambda *_a: BF.IMAGE)
     monkeypatch.setattr(contract, "resolve_pdk_root", lambda *_a, **_k: root)
     monkeypatch.setattr(runner, "_layout_basis", lambda *_a: ("basis", None))
     monkeypatch.setattr(runner._ga, "gate_passed", lambda *_a: True)
@@ -134,7 +139,12 @@ def _promote(tmp_path, monkeypatch, ratios_for=None, mode="librelane",
                 nxt["gds"] = str(filled)
             if name == "KLayout.Density":
                 nxt["metrics"] = {"klayout__density_error__count": 0}
-            _put(folder / "state_out.json", nxt)
+            # Existing neutral process boundary: material State/config/input
+            # and PDK receipt bindings, explicitly SOURCE_FIXTURE, not a native
+            # tool claim or a stubbed consumer verdict.
+            folder, _ = BF.producer(project, name, parent, nxt,
+                lane=str(folder.relative_to(project / "phase3/librelane")),
+                config_folder="37-config", name="chip_top")
             parent = nxt
             folders.append(folder)
         return folders
@@ -143,6 +153,17 @@ def _promote(tmp_path, monkeypatch, ratios_for=None, mode="librelane",
     row = runner.step_gds(project, "chip_top",
                           SimpleNamespace(name="gf180mcuD", drc_deck=None), "unused")
     assert row.status == "PASS", row.detail
+    # Model the caller's declared delivery alias with the exact selected bytes.
+    # The real precheck reader must bind that finished subject and its producer
+    # State, rather than infer currentness from the presence of a pnr file.
+    shipped = project / "phase3/stage4/gds/chip_top.gds"
+    shipped.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(pnr / "chip_top.gds", shipped)
+    if mode == "librelane":
+        path = project / "phase3/librelane/37-promotion.json"
+        promotion = json.loads(path.read_text())
+        promotion.update(canonical=str(shipped), canonical_sha256=_sha(shipped))
+        _put(path, promotion)
     return project, pnr / "chip_top.gds", row
 
 

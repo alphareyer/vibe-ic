@@ -1226,6 +1226,7 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                 'Checker.KLayoutDRC': ('drc', 'klayout__drc_error__count'),
                 'Checker.KLayoutAntenna': ('antenna', 'klayout__antenna_error__count'),
                 'Checker.KLayoutDensity': ('density', 'klayout__density_error__count')}
+    density_native = None
     if step.step_id in physical:
         kind, key = physical[step.step_id]
         measured = native.obligation(project, kind, layout)
@@ -1245,7 +1246,13 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                                selected_gds_sha256=measured.get('gds_sha256'))
             ev.evidence = row.get('reason') or measured['reason']
             ev.note = 'producer State receipt; no delegate or operator verdict is substituted'
-            return
+            if kind != 'density':
+                return
+            # The producer's count and the per-layer density rules are
+            # independent obligations. Keep the current State authority and
+            # run the original report delegate before combining their verdicts.
+            density_native = (ev.verdict, ev.evidence, dict(ev.measured))
+            ev.verdict = NOT_DETERMINED
     d = step.delegate
     assert d is not None
     if step.step_id == "General.SealRing":
@@ -1323,6 +1330,10 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                        f"{programs_dir}; this step was never run. A rule of "
                        "our own invented in its place would be worse than not "
                        "knowing")
+        if density_native is not None:
+            if density_native[0] == FAIL:
+                ev.verdict = FAIL
+            ev.evidence = density_native[1] + '; ' + ev.evidence
         return
     positional = (str(project) if d.positional == "project"
                   else str(project / "reports" / "phase3"))
@@ -1378,6 +1389,13 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
     else:
         ev.evidence = (f"{d.program} exited rc={rc}, which is neither a pass "
                        f"nor a refusal: {_undouble(d.program, tail)}")
+    if density_native is not None:
+        state_verdict, state_evidence, state_measurement = density_native
+        ev.measured['native_state'] = state_measurement
+        ev.evidence = state_evidence + '; ' + ev.evidence
+        ev.verdict = (FAIL if FAIL in (state_verdict, ev.verdict) else
+                      PASS if state_verdict == ev.verdict == PASS else
+                      NOT_DETERMINED)
 
 
 # --------------------------------------------------------------------------- #
