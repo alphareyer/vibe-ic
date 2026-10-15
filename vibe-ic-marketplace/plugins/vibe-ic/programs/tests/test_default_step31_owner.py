@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import execution_backend_producers as B
-import execution_backend_gates as G
+import execution_backend_worker as W
 import execution_policy as P
 import phase3_one_shot_runner as R
 import step_output_collector as V
@@ -19,6 +19,7 @@ import flow_declared_producer_run as D
 from test_backend_input_contract_sdc import _project
 from test_default_physical_composed import _step31_control
 from test_lvs_report_check import _PRIMARY_MATCH
+from test_drc_vacuous_pass_check import _write_gds
 
 
 def put(root, name, text):
@@ -66,6 +67,7 @@ def fixture(tmp_path, monkeypatch, case):
         None, "neutral", str(pdk_root / "neutral.lydrc"))
     for name in ("chip_top.def", "routed.def"):
         put(project, "phase3/stage3/pnr/" + name, LAYOUT)
+    _write_gds(pnr / "chip_top.gds", n_shapes=12, cell="chip_top")
     put(project, "phase3/stage3/pnr/chip_top_pnr.v",
         "module chip_top(input a, output b); assign b = a; endmodule\n")
     put(project, "input/step_0_5ic_answers.json", "{}\n")
@@ -137,7 +139,7 @@ def fixture(tmp_path, monkeypatch, case):
     monkeypatch.setattr(B, "_parameters", lambda *_: (R, None, pdk, "SOURCE_CONTROL_ONLY"))
     monkeypatch.setattr(P, "request", lambda: {"mode": "default"})
     monkeypatch.setattr(P, "_ordinary_runtime", None)
-    real_declared, real_gate = D.run_for_step, G.evaluate
+    real_declared, real_gate = D.run_for_step, W.evaluate
 
     def declared(root, sid, *args, **kwargs):
         result = real_declared(root, sid, *args, **kwargs)
@@ -154,7 +156,7 @@ def fixture(tmp_path, monkeypatch, case):
         return real_gate(root, row)
 
     monkeypatch.setattr(D, "run_for_step", declared)
-    monkeypatch.setattr(G, "evaluate", consume)
+    monkeypatch.setattr(W, "evaluate", consume)
     import _flow_yaml
     row = next(r for r in _flow_yaml.load()["steps"] if str(r["id"]) == "31")
     for name in row["required_outputs"]:
