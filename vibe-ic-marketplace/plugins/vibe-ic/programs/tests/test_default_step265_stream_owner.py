@@ -1,6 +1,7 @@
 """Neutral Default dispatch/consumer controls; no native IC measurement."""
 import hashlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,33 +118,13 @@ def selected_native_stream(project):
 ])
 def test_real_stream_owner_uses_selected_seal_and_keeps_the_final_fill(
         tmp_path, monkeypatch, defect, expected):
-    # This control owns the retained Ultra two-engine selector. Default's
-    # one primary stream is measured by test_default_stream_epoch_order.
-    monkeypatch.setattr(policy, 'request', lambda: {'mode': 'ultra'})
-    import drc_feedback_repair
-    import librelane_contract as ll
-    import librelane_fill_dfm as fill
-    import librelane_step37 as native37
-
+    # Exercise the selected-seal retained owner directly. Default now has
+    # one primary stream; its cold/retry path has separate controls. The
+    # selected seal must still be verified without changing the final fill.
     owner_inputs(tmp_path)
-    put(tmp_path, 'phase3/stage3/pnr/neutral.def', b'current routed layout')
     result = selected_native_stream(tmp_path)
     final_before = result['gds'].read_bytes()
     pdk = SimpleNamespace(name='neutral', drc_deck=None)
-    monkeypatch.setattr(ll, 'selected_mode', lambda *a: 'librelane')
-    monkeypatch.setattr(ll, 'resolve_image', lambda *a: 'neutral image boundary')
-    monkeypatch.setattr(ll, 'resolve_pdk_root', lambda *a, **k: tmp_path)
-    monkeypatch.setattr(runner, '_layout_basis', lambda *a: ('neutral current layout', ''))
-    monkeypatch.setattr(runner._ga, 'stream_refusal', lambda *a: '')
-    monkeypatch.setattr(runner, '_vacuous_on_unrouted', lambda *a: None)
-    monkeypatch.setattr(drc_feedback_repair, 'has_reviewed_rule', lambda *a: False)
-    monkeypatch.setattr(runner, '_streamout_top', lambda *a: ('neutral', ''))
-    monkeypatch.setattr(runner, 'publish_database_unit_declaration', lambda *a: None)
-    monkeypatch.setattr(runner, 'publish_tapeout_declarations', lambda *a: None)
-    monkeypatch.setattr(runner, '_gds_substance_gate', lambda *a: None)
-    monkeypatch.setattr(native37, 'run', lambda *a: result)
-    monkeypatch.setattr(fill, 'publish_metal_density', lambda *a: None)
-    monkeypatch.setattr(runner, '_log_invocation', lambda *a, **k: None)
     calls = []
 
     def verify_native(project, top, pdk, target, container, *, sealed_by, sealed_by_record):
@@ -169,15 +150,19 @@ def test_real_stream_owner_uses_selected_seal_and_keeps_the_final_fill(
         doc = json.loads(result['promotion'].read_text())
         doc['selection'] = 'klayout'
         result['promotion'].write_text(json.dumps(doc))
-    streamed = runner.step_gds(tmp_path, 'neutral', pdk, '')
-    assert streamed.status == 'PASS', 'component stream verdict stays separate from the child consumer'
+    started = time.time()
+    produced = runner._step37_die_finishing_record(tmp_path, 'neutral', pdk, '', result)
+    assert produced.status == ('PASS' if defect in ('none', 'consumer_fail') else 'NOT_MEASURED'), (
+        'native verifier verdict stays separate from the retained child consumer')
     assert result['gds'].read_bytes() == final_before
     record = next(r for r in versions._read_index(tmp_path)['steps'] if r['id'] == '26.5ic')
     saved = json.loads((tmp_path / 'steps' / record['folder'] / 'outputs.json').read_text())
     assert saved['status'] == expected, saved.get('result')
     assert saved['canonical_pass'] is (expected == 'PASS')
-    assert streamed.extras['die_finishing'] is (expected == 'PASS')
-    assert streamed.extras['die_finishing_status'] == expected
+    accepted = [row for row in versions.current_acceptance(tmp_path, started)
+                if row['id'] == '26.5ic']
+    assert (accepted[-1]['canonical_pass'] if accepted else False) is (expected == 'PASS')
+    assert (accepted[-1]['status'] if accepted else produced.status) == expected
     assert bool(calls) is (defect in ('none', 'consumer_fail'))
     if expected == 'PASS':
         assert versions.latest_pass(tmp_path, '26.5ic')['canonical_pass'] is True
