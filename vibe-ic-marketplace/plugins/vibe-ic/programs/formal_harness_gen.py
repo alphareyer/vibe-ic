@@ -1366,6 +1366,7 @@ def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
     elabs = _fsc.elaborations(rtl_files, top, work_dir, container, simdef)
     facts = []
     klass: List[str] = []
+    clock_edge_klass: List[str] = []
     temporal: List[str] = []
     for e in elabs:
         if e["netlist"] is None:
@@ -1377,6 +1378,9 @@ def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
         for f in _fsc.applicability(e["netlist"], top, clock, list(resets), e["raw"]):
             if f not in klass:
                 klass.append(f)
+        for f in _fsc.clock_edge_applicability(e["netlist"], e["raw"], top, clock):
+            if f not in clock_edge_klass:
+                clock_edge_klass.append(f)
         for f in _fsc.temporal_applicability(e["netlist"], top):
             if f not in temporal:
                 temporal.append(f)
@@ -1403,6 +1407,7 @@ def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
             full_sync = dict(full_sync, state_clock_edge=full_sync["clock_edge"],
                              clock_edge=declared_edge)
         return {"ok": False, "outside_class": klass,
+                "clock_edge_outside_class": clock_edge_klass,
                 "sync_state": full_sync}, (
             "outside the class the program proves soundly (R-0915-155): "
             + "; ".join(klass))
@@ -2430,17 +2435,24 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             container, _resets, clock, _simdef,
             next(iter(_decl_edges)) if len(_decl_edges) == 1 else "")
         if _facts is not None and _facts.get("outside_class"):
-            # R-0915-155: EVERY ruled obligation — structural and temporal —
-            # goes to the expert with the failing preconditions named.
+            # Reset/value and temporal obligations retain R-0915-155.  A
+            # clock-only obligation may instead use the structural check's
+            # complete-state direct-clock route; it never borrows the reset
+            # exception and is still refused if that route cannot census every
+            # state identity in both reads.
             for o in declared:
                 claims = (o.get("program_rule") or {}).get("claims") or []
                 has_sync = any(c.get("rule") == "reset_sync" and
                                c.get("value") == "synchronous" for c in claims)
+                clock_edge_only = (claims and all(c.get("rule") == "clock_edge"
+                                                  for c in claims))
                 reset_mapping_only = (claims and all(c.get("rule") in {
                     "reset_port", "reset_polarity", "reset_sync"} for c in claims)
                     and all(f.startswith(("C2 ", "C3 ", "C6 "))
                             for f in _facts["outside_class"]))
-                if o.get("program_rule") and not has_sync and not reset_mapping_only:
+                if (o.get("program_rule") and not has_sync and not reset_mapping_only
+                        and not (clock_edge_only and not _facts.get(
+                            "clock_edge_outside_class"))):
                     _pre_refused.setdefault(str(o["id"]), _facts_why)
     l8_props, l8_obs, l8_answered, l8_refused = derive_l8_props(
         _facts, _facts_why, [o for o in declared if o.get("program_rule")

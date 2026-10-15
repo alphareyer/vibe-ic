@@ -463,6 +463,38 @@ def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
             "registers": registers}
 
 
+def clock_edge_applicability(netlist: dict, raw_netlist: Optional[dict],
+                             top: str, clock: str) -> List[str]:
+    """Claim-specific admission for a ``clock_edge`` observation.
+
+    Clock polarity is independent of reset/value semantics.  In particular, a
+    reset used in D or EN must not make a directly-clocked state bit's edge
+    unknowable.  This route deliberately does *not* relax R-0915-155 for any
+    other claim: it requires a complete, direct-clocked state census in both
+    the optimized and no-``opt_dff`` reads, and refuses if their observable
+    identities or edge differ.
+    """
+    optimized = sync_state_facts(netlist, top, clock)
+    if not optimized.get("ok"):
+        return ["clock_edge complete optimized-state census unavailable: "
+                + str(optimized.get("why") or "unknown reason")]
+    raw = sync_state_facts(raw_netlist, top, clock)
+    if not raw.get("ok"):
+        return ["clock_edge complete raw-state census unavailable: "
+                + str(raw.get("why") or "unknown reason")]
+
+    def observed(facts: dict) -> List[Tuple[str, int]]:
+        return sorted((str(r["name"]), int(r["width"]))
+                      for r in facts.get("registers") or [])
+
+    fails = []
+    if observed(raw) != observed(optimized):
+        fails.append("clock_edge raw/optimized complete-state identities disagree")
+    if raw.get("clock_edge") != optimized.get("clock_edge"):
+        fails.append("clock_edge raw/optimized observed edges disagree")
+    return fails
+
+
 def _transition_pair(mod: dict, reset_bit: int,
                      payload_by_q: Optional[dict] = None) -> Tuple[dict, List[dict]]:
     """Two native combinational next-state models sharing every Q/data bit.
@@ -1709,9 +1741,11 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
         "yosys_passes": YOSYS_PASSES,
         "yosys_rc": max(e["rc"] for e in elabs),
     }
-    # R-0915-155 — the applicability gate, on EVERY elaboration, before any
-    # claim is answered. Outside the class every claim is NOT_DISCHARGED with
-    # the failing precondition(s) named; nothing is PASS or REFUTED there.
+    # R-0915-155 — the shared applicability gate, on EVERY elaboration, before
+    # any reset/value or temporal claim is answered.  ``clock_edge`` has its
+    # own complete-state route below: knowing a directly observed clock edge
+    # does not require a reset to be used only as a reset, nor plain observer
+    # spelling.  The shared record remains intact for its existing consumers.
     fails: List[str] = []
     if klass is not None:
         for e in elabs:
@@ -1724,6 +1758,21 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
                     fails.append(f)
         record["applicability"] = {"class": "R-0915-155", "inside": not fails,
                                    "failed_preconditions": fails}
+    clock_fails: List[str] = []
+    if klass is not None and any(c.get("rule") == "clock_edge" for c in claims):
+        for e in elabs:
+            if e["netlist"] is None:
+                clock_fails.append(f"no netlist for defines {e['defines']!r}")
+                continue
+            for f in clock_edge_applicability(e["netlist"], e["raw"], top,
+                                              klass.get("clock", "")):
+                if f not in clock_fails:
+                    clock_fails.append(f)
+        record["clock_edge_applicability"] = {
+            "class": "complete-state direct-clock observation",
+            "inside": not clock_fails,
+            "failed_preconditions": clock_fails,
+        }
     mappings = {}
     for i, e in enumerate(elabs):
         if e["netlist"] is not None:
@@ -1742,13 +1791,16 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
         answers = []
         for i, e in enumerate(elabs):
             reset_claim = claim.get("rule") in {"reset_port", "reset_sync", "reset_polarity"}
-            # The new reset mapper owns its C2/C3/C6 extension only. Clock,
-            # unknown-storage and raw-census failures retain their old guard.
-            blocked = fails and (not reset_claim or any(
-                not f.startswith(("C2 ", "C3 ", "C6 ")) for f in fails))
+            clock_claim = claim.get("rule") == "clock_edge"
+            # Each exception is owned by a claim-specific complete-state
+            # constructor.  No claim borrows another claim's exception.
+            blocked = (bool(clock_fails) if clock_claim else
+                       fails and (not reset_claim or any(
+                           not f.startswith(("C2 ", "C3 ", "C6 ")) for f in fails)))
             if blocked:
+                blocked_fails = clock_fails if clock_claim else fails
                 answers.append(dict(claim, verdict=NOT_DISCHARGED, finding=(
-                    "outside the claim's supported class: " + "; ".join(fails))))
+                    "outside the claim's supported class: " + "; ".join(blocked_fails))))
                 continue
             if e["netlist"] is None:
                 answers.append(dict(claim, verdict=NOT_DISCHARGED, finding=(
