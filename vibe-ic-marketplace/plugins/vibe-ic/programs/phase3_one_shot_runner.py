@@ -58717,7 +58717,7 @@ def run_pre_audit_producers(project: Path, container: str = "", *,
     these steps' own yaml clauses already decide them in the audit.
     """
     rows: List[StepResult] = []
-    step_ids = {'foundry_handoff': '38', 'tapeout_checklist': '36',
+    step_ids = {'foundry_handoff': '38', 'tapeout_checklist': '38',
                 'gds_xor': '37.3'}
     for name, program, out_rel, extra_argv in _PRE_AUDIT_PRODUCERS:
         if (only_names is not None and name not in only_names
@@ -77279,7 +77279,7 @@ def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
             continue
         sid = {'postroute_timing_repair_status_gen.py': '32',
                'foundry_handoff_pack_gen.py': '38',
-               'tapeout_checklist_gen.py': '36'}[gen]
+               'tapeout_checklist_gen.py': '38'}[gen]
         outcomes.append(_spf.retained_call(
             project, sid, _run_derived_artefact_generator,
             project, effective_top, gen, kind,

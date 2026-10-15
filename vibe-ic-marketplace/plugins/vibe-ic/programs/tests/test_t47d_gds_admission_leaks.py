@@ -92,8 +92,9 @@ def test_pre_audit_handoff_refuses_unadmitted_explicit_source(tmp_path):
 
 
 def test_prior_shipped_gds_is_quarantined_with_record(tmp_path, monkeypatch):
+    # Legacy geometry/cache/admission unit; no completed Default finishing receipt.
     project = _project(tmp_path / "run", cached_die=OLD_DIE, cached_util=OLD_UTIL)
-    _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL, execution_mode="ultra")
     monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
                         R.StepResult("prestream_gate", "FAIL", 0.0,
                                      "antenna refused", extras={
@@ -129,12 +130,13 @@ def test_prior_shipped_gds_is_quarantined_with_record(tmp_path, monkeypatch):
 
 
 def test_stale_digest_quarantines_gds_without_rerunning_pnr(tmp_path, monkeypatch):
+    # Legacy geometry/cache/admission unit; no completed Default finishing receipt.
     project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
     admission = R._ga.admission_path(project)
     record = json.loads(admission.read_text())
     record["layout_digest"] = "0" * 64
     admission.write_text(json.dumps(record) + "\n")
-    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL, execution_mode="ultra")
     R.main()
     assert "pnr" not in drive.called
     assert "gds" in drive.called
@@ -143,11 +145,12 @@ def test_stale_digest_quarantines_gds_without_rerunning_pnr(tmp_path, monkeypatc
 
 
 def test_matching_digest_and_pass_gate_reuses_both_caches(tmp_path, monkeypatch):
+    # Legacy geometry/cache/admission unit; no completed Default finishing receipt.
     project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
     gds = R._pl.pnr_dir(project) / f"{TOP}.gds"
     gate = json.loads((project / "reports/phase3/prestream_gate.json").read_text())
     assert R._ga.admitted_gds(project, gds, gate["layout_digest"])
-    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL, execution_mode="ultra")
     R.main()
     assert "pnr" not in drive.called
     assert "gds" not in drive.called
@@ -155,12 +158,13 @@ def test_matching_digest_and_pass_gate_reuses_both_caches(tmp_path, monkeypatch)
 
 
 def test_matching_digest_without_pass_gate_cannot_ship(tmp_path, monkeypatch):
+    # Legacy geometry/cache/admission unit; no completed Default finishing receipt.
     project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
     gate = project / "reports/phase3/prestream_gate.json"
     record = json.loads(gate.read_text())
     record["verdict"] = "FAIL"
     gate.write_text(json.dumps(record) + "\n")
-    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL, execution_mode="ultra")
     monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
                         R.StepResult("prestream_gate", "FAIL", 0.0,
                                      "same digest, no PASS", extras={

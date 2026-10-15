@@ -281,11 +281,20 @@ def _pad_ring_evidence(project: Path) -> Path:
     return path
 
 
-def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
+def _drive(monkeypatch, project: Path, *, die: str, util: float, execution_mode=None) -> _Drive:
     """Neutralise everything main() does that is not the cache decision, and
     record the steps it invokes. `_pnr_cache_valid_for` and the geometry
     sidecar are LEFT REAL — the cache verdict is what is under test."""
     d = _Drive()
+    if execution_mode is not None:
+        import execution_policy
+        original_request = execution_policy.request
+        monkeypatch.setattr(execution_policy, 'request',
+                            lambda: dict(original_request(), mode=execution_mode))
+        if execution_mode == 'ultra':
+            # Explicit legacy-unit context, not a Default checkpoint claim.
+            monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+            monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
 
     def _fake_pnr(proj, top, pdk, container, die_um, u, **kw):
         d.called.append("pnr")
@@ -322,10 +331,44 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     # This fixture owns geometry-cache decisions. Stub the new Default
     # native dispatch at its transport boundary; the real per-row behavior
     # and producer/consumer order are covered by test_default_pnr_row_boundaries.
-    def _fake_default_rows(proj, top, pdk, container, step_ids, *, die_um, util,
+    def _fake_default_rows(proj, top, pdk, container, step_ids, *, die_um=None, util=None,
                            **kwargs):
-        assert step_ids == ['15', '15.5ic', '16', '17', '18', '19', '20', '21', '22']
-        return R.step_pnr(proj, top, pdk, container, die_um, util, **kwargs)
+        import _flow_yaml
+        stage = next((number for number in range(4, 9)
+                      if list(step_ids) == list(_flow_yaml.ordered_step_ids(
+                          execution_stages=(number,), execution_tracks=('default',)))), None)
+        assert stage is not None, step_ids
+        if stage == 4:
+            assert list(step_ids) == ['15', '15.5ic', '16', '17', '18', '19', '20', '21']
+            assert die_um is not None and util is not None
+            return R.step_pnr(proj, top, pdk, container, die_um, util, **kwargs)
+        if stage == 5:
+            # Preserve the repair controls at the actual selected transport;
+            # a measured FAIL/NM must stop this grouped Default row.
+            if R._librelane_postroute_repair_mode(proj) == 'librelane':
+                repair = R.step_postroute_repair_librelane(proj, top, pdk, container)
+            else:
+                repair = R.step_signoff_spef_repair(proj, top, pdk, container)
+            return R.StepResult('routed_electrical', repair.status if repair else 'PASS', 0,
+                                repair.detail if repair else
+                                'SOURCE_CONTROL geometry transport, no electrical measurement')
+        if stage == 6:
+            result = R.step_gds(proj, top, pdk, container)
+            if result.status == 'PASS':
+                pnr = R._pl.pnr_dir(proj)
+                (pnr / 'filled.def').write_bytes((pnr / f'{top}.def').read_bytes())
+                alias = R._pl.gds_dir(proj) / f'{top}.gds'
+                alias.parent.mkdir(parents=True, exist_ok=True)
+                alias.write_bytes((pnr / f'{top}.gds').read_bytes())
+            return result
+        if stage == 7:
+            rows = [R.step_drc(proj, top, pdk, container),
+                    R.step_lvs(proj, top, pdk, container)]
+            return R.StepResult('physical_verification', R._aggregate_verdict(rows), 0,
+                                'SOURCE_CONTROL sequential DRC/LVS transports')
+        return R.StepResult('final_checklist_and_release', 'NOT_MEASURED', 0,
+                            'SOURCE_CONTROL geometry transport has no native release evidence',
+                            reason_class=R._V.ReasonClass.NOT_EXECUTED)
     monkeypatch.setattr(R, "_default_pnr_rows", _fake_default_rows)
     monkeypatch.setattr(R, "step_gds", _fake_gds)
     monkeypatch.setattr(R, "step_synth", _step("synth"))
@@ -337,6 +380,7 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     monkeypatch.setattr(R, "step_canonicalize_artefacts",
                         _step("canonicalize_artefacts"))
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
+    monkeypatch.setattr(R, "step_postroute_repair_librelane", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
     # This suite owns the geometry-cache decision. Its synthetic DEF has no

@@ -61,6 +61,9 @@ def prior_bytes(folder, relative):
 @pytest.mark.parametrize('name,sid', [
     ('foundry_handoff', '38'), ('tapeout_checklist', '36'), ('gds_xor', '37.3')])
 def test_real_pre_audit_refusal_preserves_the_file_it_invalidates(tmp_path, monkeypatch, name, sid):
+    # Keep the historical parameter ID; the checklist now belongs to the
+    # declared handoff row, not the separate Step36 layout/checklist gate.
+    sid = '38' if name == 'tapeout_checklist' else sid
     entry = next(e for e in phase3._PRE_AUDIT_PRODUCERS if e[0] == name)
     original = tmp_path / entry[2]
     original.parent.mkdir(parents=True)
@@ -92,19 +95,30 @@ def test_producer_success_is_not_a_canonical_pass(tmp_path, monkeypatch):
         'status': 'FAIL', 'step': {'id': row['id'], 'status': 'FAIL'},
         'ledger': [{'gate': 'tapeout_signoff_check', 'rc': 1, 'verdict': 'FAIL'}]})
     assert phase3.run_pre_audit_producers(tmp_path, only_names=['tapeout_checklist'])[0].status == 'PASS'
-    _, record = saved(tmp_path, '36')
+    _, record = saved(tmp_path, '38')
     assert record['status'] == 'FAIL'
     assert record['result']['canonical_consumer']['ledger'][0]['rc'] == 1
     assert not record['canonical_pass']
-    assert versions.latest_pass(tmp_path, '36') is None
+    assert versions.latest_pass(tmp_path, '38') is None
 
 
 def test_consumer_acceptance_and_failed_retry_keep_distinct_versions(tmp_path, monkeypatch):
     output = tmp_path / 'reports/audit/tapeout_checklist.json'
     content = [b'{"attempt":1}', b'{"attempt":2}']
+    import _flow_yaml
+    owner = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '38')
     def produce(project, name, *_args):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(content.pop(0))
+        # This retention-only control stubs its scientific consumer explicitly.
+        # Produce every newly co-owned contract document before real contracts()
+        # re-hashes it; the pending text alternative supplies no invented GDS.
+        for spec in owner['required_outputs']:
+            path = project / spec.split(' OR ')[-1]
+            if path == output:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"scope":"SOURCE_CONTROL retention companion"}\n')
         return phase3.StepResult(name, 'PASS', 0.0, 'producer completed', [str(output)])
     outcomes = iter(['PASS', 'FAIL'])
     def consume(project, row):
@@ -114,19 +128,21 @@ def test_consumer_acceptance_and_failed_retry_keep_distinct_versions(tmp_path, m
     monkeypatch.setattr(phase3, '_run_declared_signoff_gate', produce)
     monkeypatch.setattr(gates, 'evaluate', consume)
     phase3.run_pre_audit_producers(tmp_path, only_names=['tapeout_checklist'])
-    folder, record = saved(tmp_path, '36')
+    folder, record = saved(tmp_path, '38')
     assert record['canonical_pass'] is True
     relative = str(output.relative_to(tmp_path))
-    assert record['result']['canonical_consumer']['outputs'] == {
-        relative: {relative: hashlib.sha256(b'{"attempt":1}').hexdigest()}}
-    accepted = versions.latest_pass(tmp_path, '36')
+    bound_outputs = record['result']['canonical_consumer']['outputs']
+    assert bound_outputs[relative] == {
+        relative: hashlib.sha256(b'{"attempt":1}').hexdigest()}
+    assert set(bound_outputs) == set(owner['required_outputs'])
+    accepted = versions.latest_pass(tmp_path, '38')
     assert accepted['folder'] == str(folder.relative_to(tmp_path / 'steps'))
     phase3.run_pre_audit_producers(tmp_path, only_names=['tapeout_checklist'])
-    newer, failed = saved(tmp_path, '36')
+    newer, failed = saved(tmp_path, '38')
     assert newer != folder and failed['status'] == 'FAIL' and not failed['canonical_pass']
     assert (folder / 'files/reports/audit/tapeout_checklist.json').read_bytes() == b'{"attempt":1}'
     assert (newer / 'files/reports/audit/tapeout_checklist.json').read_bytes() == b'{"attempt":2}'
-    assert versions.latest_pass(tmp_path, '36')['folder'] == accepted['folder']
+    assert versions.latest_pass(tmp_path, '38')['folder'] == accepted['folder']
 
 
 def test_unknown_input_identity_does_not_claim_current_pass(tmp_path):
