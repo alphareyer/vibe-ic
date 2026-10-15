@@ -44622,7 +44622,9 @@ def _die_finishing_record(project: Path, top: str, pdk: PdkConfig,
 
 def _die_finishing_native(project: Path, top: str, pdk: PdkConfig,
                           gds_path: Path,
-                          container: Optional[str] = None) -> Tuple[bool, str, str]:
+                          container: Optional[str] = None, *,
+                          sealed_by: Optional[Path] = None,
+                          sealed_by_record: Optional[Path] = None) -> Tuple[bool, str, str]:
     """Step 26.5ic — die finishing: the PDK's OWN seal ring on the streamed GDS.
 
     Delegates to the `die_finishing_gen` plugin program, which locates the PDK's
@@ -44656,6 +44658,9 @@ def _die_finishing_native(project: Path, top: str, pdk: PdkConfig,
             "--gds", str(gds_path), "--in-place",
             "--pdk-root", str(Path(pdk_dir).parent),
             "--pdk", Path(pdk_dir).name]
+    if sealed_by is not None:
+        argv += ["--sealed-by", str(sealed_by),
+                 "--sealed-by-record", str(sealed_by_record)]
     # === fix 3a — SEAL THE SLOT RECTANGLE, NOT THE ROUTED DIE ===============
     # `die_finishing_gen` falls back to the streamed GDS's own DIEAREA when it
     # is told no size. Since fix 1 that bbox is the slot's CORE_AREA — the
@@ -44702,7 +44707,7 @@ def _die_finishing_native(project: Path, top: str, pdk: PdkConfig,
     import die_finishing_gen as _dfg
     _ll_m265 = _ll_selected_mode(project, "26.5ic")
     _ll_seal: Dict[str, Any] = {}
-    if _ll_m265 != "direct":
+    if _ll_m265 != "direct" and sealed_by is None:
         _ll_decl, _ll_decl_why = _dfg._declaration(project)
         _ll_owed = not (_dfg._hardmacro_skip(_ll_decl)
                         or _ll_decl.get(_dfg._DECL_REQUIRED) is False)
@@ -50528,6 +50533,62 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                               "stream_tail": (out or "")[-600:]})
 
 
+@_spf.retained_step('26.5ic', canonical_acceptance=True)
+def _step37_die_finishing_record(project: Path, top: str, pdk: PdkConfig,
+                                  container: str, result: Dict[str, Any]) -> StepResult:
+    """Verify the selected native seal on a private copy; keep filled GDS intact."""
+    t0 = time.time()
+    try:
+        handoff = result['sealring']
+        promotion = json.loads(Path(result['promotion']).read_text())
+        state = Path(handoff['state'])
+        unsealed, sealed = Path(handoff['gds_in']), Path(handoff['sealed_gds'])
+        final = Path(result['gds'])
+        if (promotion['selection'] != result['engine']
+                or promotion['sealring'] != handoff
+                or promotion['canonical'] != str(final)
+                or promotion['canonical_sha256'] != _sha256_file(final)
+                or promotion['streams'][result['engine']] != str(unsealed)
+                or promotion['finished'][result['engine']] != promotion['source']
+                or json.loads(Path(result['state']).read_text())['gds'] != promotion['source']
+                or _sha256_file(Path(promotion['source'])) != promotion['source_sha256']
+                or promotion['source_sha256'] != promotion['canonical_sha256']
+                or _sha256_file(unsealed) != handoff['gds_in_sha256']
+                or _sha256_file(sealed) != handoff['sealed_sha256']
+                or _sha256_file(state) != handoff['state_sha256']
+                or json.loads(state.read_text())['gds'] != str(sealed)):
+            raise ValueError('selected SealRing stage differs from the current stream promotion')
+        # --sealed-by copies its input into the --gds target. Only a private
+        # pre-finishing copy can be that target; final density/fill stays intact.
+        target = project / 'phase3/tool_arms/26.5ic/step37/unsealed.gds'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(unsealed, target)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return StepResult('die_finishing', 'NOT_MEASURED', time.time() - t0,
+                          f'current Step37 seal-ring handoff absent or changed: {exc}',
+                          reason_class=_V.ReasonClass.MISSING_ARTEFACT)
+    completed, detail, status = _die_finishing_native(
+        project, top, pdk, target, container, sealed_by=sealed, sealed_by_record=state)
+    return StepResult('die_finishing', status, time.time() - t0, detail,
+                      extras={'completed': completed})
+
+
+def _step37_record_selected_finishing(project: Path, top: str, pdk: PdkConfig,
+                                       container: str, result: Dict[str, Any]) -> str:
+    """Return this invocation's retained consumer status, not the GDS label."""
+    import execution_policy
+    if execution_policy.request()['mode'] != 'default':
+        return 'NOT_MEASURED'
+    started = time.time()
+    produced = _step37_die_finishing_record(project, top, pdk, container, result)
+    if produced.status == 'FAIL':
+        return 'FAIL'
+    import step_output_collector as versions
+    rows = [row for row in versions.current_acceptance(project, started)
+            if str(row['id']) == '26.5ic']
+    return rows[-1]['status'] if rows else 'NOT_MEASURED'
+
+
 def step_gds(project: Path, top: str, pdk: PdkConfig,
              container: str, *, candidate: bool = False) -> StepResult:
     """Opt-in tool stream-out; direct remains the production default."""
@@ -50660,6 +50721,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         _lf.publish_metal_density(project, result.get("density_ratios") or {},
                                   gds_out, pdk.name)
         if dual["selection"] != "openroad":
+            _step37_record_selected_finishing(project, top, pdk, container, result)
             _log_invocation(
                 "klayout LibreLane step37 selected-stream finishing",
                 0, int((time.time() - t0) * 1000),
@@ -50670,6 +50732,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                           [str(gds_out), str(direct_gds)],
                           extras={"streamout_engine": result["engine"],
                                   "dual_selection": dual["selection"]})
+    finishing_status = _step37_record_selected_finishing(
+        project, top, pdk, container, result)
     import librelane_fill_dfm as _lf
     _lf.publish_metal_density(project, result.get("density_ratios") or {},
                               gds_out, pdk.name)
@@ -50683,7 +50747,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                       + (f" [{top_note}]" if top_note else ""), [str(gds_out)],
                       extras={"streamout_engine": result["engine"],
                               "librelane_promotion": str(result["promotion"]),
-                              "die_finishing": True, "density_fill": True})
+                              "die_finishing": finishing_status == "PASS",
+                              "die_finishing_status": finishing_status, "density_fill": True})
 
 
 # ---------------------------------------------------------------------------
@@ -78665,6 +78730,22 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                                               'detail': 'producer not started: required input absent'})
             break
         attempt = step_versions.begin_step(project, sid, manifest['files'])
+        if sid == '26.5ic':
+            # Full Default already leaves this writer to Step37's streamed
+            # GDS. A bounded pre-stream span has the same owner and stays
+            # explicitly incomplete while other due rows may proceed.
+            detail = 'die finishing pending the current Step37 streamed GDS and consumer'
+            pending = {'step_id': sid, 'status': 'NOT_MEASURED',
+                       'detail': detail, 'deferred_until': '37'}
+            step_versions.finish_step(project, attempt, verdict='NOT_MEASURED', result=pending)
+            rows.append(StepResult('default_step_' + sid, 'NOT_MEASURED',
+                                   time.time() - started, detail,
+                                   extras={'step_id': sid, 'deferred_until': '37'},
+                                   reason_class=_V.ReasonClass.INPUT_ABSENT))
+            checks[sid] = {'status': 'NOT_MEASURED', 'reasons': [detail],
+                           'deferred_until': '37'}
+            _publish_in_progress_steps(project, rows)
+            continue
         # Withdraw the previous invocation's citations from the live report
         # before the row's producer changes their files. The completed rows
         # of this invocation, including actual output paths, remain visible.
@@ -78769,7 +78850,8 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
             # It is the current routing producer's bytes, never a prior DEF.
             shutil.copy2(_pl.pnr_dir(project) / 'routed.def',
                          _pl.pnr_dir(project) / f'{top}.def')
-    failed = next((row for row in rows if row.status not in ('PASS', 'NOT_APPLICABLE')), None)
+    failed = (next((row for row in rows if row.status == 'FAIL'), None) or
+              next((row for row in rows if row.status not in ('PASS', 'NOT_APPLICABLE')), None))
     return StepResult(
         report_name, failed.status if failed else 'PASS', time.time() - t0,
         (f'canonical step {failed.extras["step_id"]}: {failed.detail}' if failed

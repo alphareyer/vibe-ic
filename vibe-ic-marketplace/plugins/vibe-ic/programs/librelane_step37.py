@@ -149,6 +149,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     density_fill = {}
     density_ratios = {}
     final_states = {}
+    sealring_states = {}
     for arm, path in paths.items():
         state_path = _gds_state(compare[-1] / "state_out.json", path,
                                 root / f"37-{arm}-finish-state.json")
@@ -156,6 +157,13 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                       ["KLayout.SealRing", "KLayout.Filler", "KLayout.Density"],
                       state_path, f"37-{arm}-finish", configs)
         finished = finish[-1]
+        seal_state = finish[0] / "state_out.json"
+        sealed_gds = Path(json.loads(seal_state.read_text())["gds"])
+        sealring_states[arm] = {
+            "gds_in": str(path), "gds_in_sha256": digest(path),
+            "sealed_gds": str(sealed_gds), "sealed_sha256": digest(sealed_gds),
+            "state": str(seal_state), "state_sha256": digest(seal_state),
+        }
         initial = judge_step(finished, ["klayout__density_error__count"],
                              root / f"37-{arm}-pdk-density.json")
         initial_value = initial["metrics"]["klayout__density_error__count"].get("value")
@@ -234,7 +242,8 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     # these exact bytes.  Preserve the LibreLane source and SHA in the receipt.
     shutil.copy2(final_gds, canonical_gds)
     write_json(root / "37-promotion.json", {"selection": winner,
-               "selection_detail": selection, "streams": {k: str(v) for k, v in paths.items()},
+               "selection_detail": selection, "sealring": sealring_states[winner],
+               "streams": {k: str(v) for k, v in paths.items()},
                "finished": {k: str(v) for k, v in final_paths.items()},
                "drc": counts, "xor": 0, "density": density_errors, "gates": gates,
                "density_fill": density_fill,
@@ -246,6 +255,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     # here: in `dual` the runner may still ship the direct stream. The runner
     # publishes it once the shipped bytes are decided (in `step_gds`, after the selection).
     return {"engine": winner, "gds": canonical_gds, "drc": counts,
+            "sealring": sealring_states[winner],
             "state": final_states[winner],
             "density_ratios": density_ratios[winner],
             "promotion": root / "37-promotion.json"}
