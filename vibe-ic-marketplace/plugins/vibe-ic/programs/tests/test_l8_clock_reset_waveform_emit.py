@@ -165,6 +165,14 @@ def test_description_with_non_immediate_negation_does_not_guess_edge(tmp_path):
     assert "edge" not in _l8(tmp_path)["clock_and_reset_waveform"]["clocks"][0]
 
 
+def test_shared_prose_negation_vocabulary_blocks_never_samples_edge(tmp_path):
+    _write(tmp_path, existing={"clocks": [{"name": "clk"}], "resets": [{"name": "rst"}]})
+    p = tmp_path / EMIT.L9_REL
+    p.write_text(json.dumps({"ports": [{"name": "clk", "description": "This clock never samples on the rising edge."}]}))
+    assert getattr(RUNNER, HELPER)(tmp_path) == 0
+    assert "edge" not in _l8(tmp_path)["clock_and_reset_waveform"]["clocks"][0]
+
+
 def test_empty_primary_lists_fall_through_to_typed_aliases(tmp_path):
     _write(tmp_path)
     l8 = _l8(tmp_path)

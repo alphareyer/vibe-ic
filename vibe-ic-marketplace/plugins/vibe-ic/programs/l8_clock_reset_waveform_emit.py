@@ -43,6 +43,7 @@ import l_doc_generator_stamp as _stamp  # noqa: E402
 #: the timing gate's non-protocol allowlist is the emitter's own spelling.
 L8_KEY = "clock_and_reset_waveform"
 import _atomic_artefact as _aa  # noqa: E402
+from _prose_polarity import is_denied, sentence_scope  # noqa: E402
 
 TOOL = "l8_clock_reset_waveform_emit"
 L8_REL = "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
@@ -119,9 +120,11 @@ def _described_clock_edges(l9: Dict[str, Any]) -> Dict[str, str]:
                 if not isinstance(name, str) or not isinstance(text, str):
                     continue
                 low = text.lower()
+                tokens = list(re.finditer(r"\b(rising|positive|posedge|falling|negative|negedge)\s+edge\b", low))
+                denied = any(is_denied(text[sentence_scope(text, m.start(), m.end())[0]:sentence_scope(text, m.start(), m.end())[1]]) for m in tokens)
                 rise = bool(re.search(r"\b(rising|positive|posedge)\s+edge\b", low) or "上升沿" in text)
                 fall = bool(re.search(r"\b(falling|negative|negedge)\s+edge\b", low) or "下降沿" in text)
-                negated = bool(re.search(r"\b(?:does\s+)?not\b[^.]*\b(rising|falling|positive|negative)\s+edge\b", low) or re.search(r"\bwithout\b[^.]*\b(rising|falling|positive|negative)\s+edge\b", low) or "非上升沿" in text or "非下降沿" in text)
+                negated = bool(denied or "非上升沿" in text or "非下降沿" in text)
                 if not negated and rise != fall:
                     candidates.setdefault(name, set()).add("posedge" if rise else "negedge")
     return {name: next(iter(edges)) for name, edges in candidates.items()
