@@ -60,8 +60,8 @@ def test_default_current_step_produces_all_three_reports_and_keeps_failure(tmp_p
                 assert importlib.import_module(program).main(args) == 0
                 assert json.loads(open(args[output]).read())['invoked_as'] == 'audit'
         assert before == {r: (project / r).read_bytes() for r in REPORTS.values()}
-        # This source fixture has no per-pin DRV capture. Exercise the real
-        # complete consumer and retain that missing measurement, never mock P.
+        # Typed report production alone is not complete canonical STA proof.
+        # Exercise the real full consumer; retain its actual reasons, never infer P.
         import execution_backend_gates as gates
         full = gates.evaluate(project, definition)
         assert full['status'] != 'PASS', full
@@ -69,7 +69,7 @@ def test_default_current_step_produces_all_three_reports_and_keeps_failure(tmp_p
         (project / 'STEP23_SOURCE_OBSERVATION.json').write_text(json.dumps({
             'producer_census': result, 'complete_canonical_consumer': full,
             'producer_reports_unchanged': True,
-            'full_IC_positive': 'NOT_MEASURED: no complete native DRV capture in this source fixture',
+            'full_IC_positive': 'NOT_MEASURED: typed report controls do not establish complete canonical/native closure',
             'scope': 'actual typed producers and audit checkers; no native IC measurement'}, indent=2))
     else:
         failed = {'hold': 'hold_corner_coverage_check',
@@ -109,7 +109,7 @@ def test_drv_audit_uses_its_own_verdict_without_replacing_producer_evidence(tmp_
     assert producer_rc == 1
     assert json.loads(raw.read_text())['verdict'] == 'NOT_MEASURED'
     original = raw.read_bytes()
-    row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '23')
+    row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '31')
     command = next(c['program_exit_zero'] for c in row['gate']['all_of']
                    if str(c.get('program_exit_zero', '')).startswith('drv_signoff_judge '))
     args = shlex.split(command)[1:]

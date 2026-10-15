@@ -58,17 +58,24 @@ def test_default_refuses_when_the_fresh_drv_capture_is_not_pass(tmp_path, monkey
     assert result['verdict'] == verdict
 
 
-def test_default_current_consumer_uses_in_flow_without_changing_the_final_row(tmp_path, monkeypatch):
+def test_default_current_consumer_does_not_borrow_final_drv_credit(tmp_path, monkeypatch):
     canonical = copy.deepcopy(worker.ROWS['23']['canonical_row'])
+    final_row = copy.deepcopy(worker.ROWS['31']['canonical_row'])
     observed = []
 
     def controlled_in_flow_instrument(project, row, waivers, **kwargs):
-        point = _capture_point(row)
+        if str(row['id']) == '23':
+            commands = [c.get('program_exit_zero', '')
+                        for c in row['gate']['all_of']]
+            assert not any(c.startswith('drv_signoff_judge ') for c in commands)
+            point = None
+        else:
+            point = _capture_point(row)
         observed.append(point)
-        # The controlled instrument has a complete in-flow measurement and
-        # no final GDS/LVS. It refuses a request for final post-stream credit.
-        status = 'PASS' if point == 'in_flow' else 'NOT_MEASURED'
-        return compliance.StepResult(id=23, name=row['name'], stage=row['stage'], status=status)
+        # The controlled instrument has no final GDS/LVS. Step23 no longer
+        # owns final DRV acceptance; Step31 must still require that identity.
+        status = 'PASS' if point is None else 'NOT_MEASURED'
+        return compliance.StepResult(id=row['id'], name=row['name'], stage=row['stage'], status=status)
 
     monkeypatch.setattr(compliance, 'check_step', controlled_in_flow_instrument)
     monkeypatch.setattr(worker, '_current_step_producer_authority',
@@ -76,11 +83,12 @@ def test_default_current_consumer_uses_in_flow_without_changing_the_final_row(tm
     monkeypatch.setattr(worker, 'resolve_contract', lambda *a: ({}, []))
     result = worker.execute_current_step(tmp_path, step_id='23', producer={'verdict': 'PASS'})
     assert result['verdict'] == 'PASS', result
-    assert observed == ['in_flow']
+    assert observed == [None]
     assert worker.ROWS['23']['canonical_row'] == canonical
-    final = gates.evaluate(tmp_path, canonical)
-    assert observed == ['in_flow', 'post_stream']
+    final = gates.evaluate(tmp_path, final_row)
+    assert observed == [None, 'post_stream']
     assert final['status'] == 'NOT_MEASURED'
+    assert worker.ROWS['31']['canonical_row'] == final_row
 
 
 def test_final_capture_table_still_requires_post_stream_identity():
