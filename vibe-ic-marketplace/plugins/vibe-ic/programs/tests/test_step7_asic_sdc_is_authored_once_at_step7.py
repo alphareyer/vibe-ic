@@ -60,6 +60,44 @@ def _pdk(monkeypatch, drv=None):
     return pdk
 
 
+def _fixture_corner_sta(project, top, pdk, container, libs, out, notes,
+                        *, force_prelayout=False, setup_slack=0.4):
+    """Native-edge test double; no simulator/STA qualification is claimed.
+
+    Keep real report composition and the normal scoped audit subprocess.
+    Two complete setup/hold paths supply the report contract naturally;
+    neither the audit verdict nor StepResult is mocked.
+    """
+    assert force_prelayout is True
+    assert len(libs) >= 2
+    out.mkdir(parents=True, exist_ok=True)
+    for corner in ("SS", "TT"):
+        sections = ["# STA_BASIS: PRE_LAYOUT_ESTIMATE\n"
+                    "# STA_TIME_UNIT: ns\n"
+                    f"# corner: {corner}\nOpenSTA report_checks\n"]
+        for kind, arrival, required, slack in (
+                ("max", 2.5, 2.5 + setup_slack, setup_slack),
+                ("min", 0.35, 0.10, 0.25)):
+            sections.append(
+                "Startpoint: source_reg (rising edge-triggered flip-flop clocked by clk)\n"
+                "Endpoint: sink_reg (rising edge-triggered flip-flop clocked by clk)\n"
+                f"Path Group: clk\nPath Type: {kind}\n\n"
+                "  Delay    Time   Description\n"
+                "---------------------------------------------------------\n"
+                "   0.00    0.00   clock clk (rise edge)\n"
+                "   0.00    0.00   clock network delay (ideal)\n"
+                f"   {arrival:.2f}    {arrival:.2f}   source_reg/Q -> sink_reg/D\n"
+                f"           {arrival:.2f}   data arrival time\n"
+                f"           {required:.2f}   data required time\n"
+                "---------------------------------------------------------\n"
+                f"           {slack:.2f}   slack ({'MET' if slack >= 0 else 'VIOLATED'})\n\n")
+        sections.append(f"wns max {setup_slack:.2f}\ntns max {min(setup_slack, 0):.2f}\n"
+                        "wns min 0.25\ntns min 0.00\n")
+        (out / f"sta_{corner}.rpt").write_text("".join(sections))
+    notes.append("unit fixture supplied native-edge pre-layout reports; not a native run")
+    return True
+
+
 def _step7(proj, pdk):
     res = R.step_prelayout_signoff(proj, TOP, pdk, "some-container")
     assert res.status == "PASS", res.detail
@@ -965,3 +1003,29 @@ def test_default_backend_preserves_the_step7_staged_liberty_role(
         assert refusal or why.startswith('SDC_SEAM_PENDING:'), observation
     assert (proj / CONS / T.ASIC_SDC_RECORD).read_bytes() == original_record
     assert (proj / _record(proj)['path']).read_bytes() == original_sdc
+
+
+# The migrated native-edge fixture must not bypass the current consumer.
+def test_sdc_fixture_still_refuses_an_absent_native_sta_report(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    monkeypatch.setattr(R, "_emit_multi_corner_sta", lambda *a, **k: False)
+    result = R.step_prelayout_signoff(proj, TOP, pdk, "some-container")
+    assert result.status == "NOT_MEASURED", result.detail
+    assert "PRELAYOUT_STA_REPORT_ABSENT" in result.detail
+    assert not (proj / "reports/phase3/sta/pre_pnr_summary.json").exists()
+
+
+def test_sdc_fixture_real_summary_consumer_rejects_negative_slack(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    def violated(*args, **kwargs):
+        return _fixture_corner_sta(*args, **kwargs, setup_slack=-0.5)
+    monkeypatch.setattr(R, "_emit_multi_corner_sta", violated)
+    result = R.step_prelayout_signoff(proj, TOP, pdk, "some-container")
+    assert result.status == "FAIL", result.detail
+    assert "PRELAYOUT_STA_SUMMARY_FAILED" in result.detail
+    summary = json.loads((proj / "reports/phase3/sta/pre_pnr_summary.json").read_text())
+    assert summary["passed"] is False
+    assert any(row["rule"] == "STA_REAL_VIOLATION_FOUND"
+               for row in summary["findings"])
