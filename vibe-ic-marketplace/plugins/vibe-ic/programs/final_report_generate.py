@@ -510,25 +510,48 @@ def _audit_snapshot_token(path: Path) -> Optional[Tuple[int, int, str]]:
 def _load_fresh_audit_snapshot(
     project: Path,
     before: Optional[Tuple[int, int, str]],
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    audit_text: str = "",
+    rechecks_before: Optional[Dict[Path, Optional[Tuple[int, int, str]]]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[Path]]:
     """Load the snapshot written by THIS audit invocation.
 
-    Returns `(snapshot, problem)`.  A problem is a named non-measurement, never
+    Returns `(snapshot, problem, actual_path)`.  A problem is a named non-measurement, never
     permission to fall back to parsing stdout: that fallback is the second
     definition removed by #1969.
     """
     path = _audit_snapshot_path(project)
+    publication = None
+    for line in audit_text.splitlines():
+        if line.startswith("flow_compliance_check: AUDIT_SNAPSHOT "):
+            try:
+                publication = json.loads(line.split("AUDIT_SNAPSHOT ", 1)[1])
+            except ValueError:
+                return None, "current audit publication identity is unreadable", None
+    if publication is not None:
+        if not isinstance(publication, dict):
+            return None, "current audit publication identity is not an object", None
+        candidate = Path(str(publication.get("path", ""))).resolve()
+        if (candidate.parent != path.resolve().parent or not re.fullmatch(
+                r"phase23_completion_audit(?:\.[0-9a-f]{64})?\.json", candidate.name)):
+            return None, "current audit publication does not name an audit snapshot", None
+        if candidate != path.resolve():
+            before = (rechecks_before or {}).get(candidate)
+        path = candidate
     after = _audit_snapshot_token(path)
     if after is None:
-        return None, f"canonical audit JSON was not written at {path}"
+        return None, f"canonical audit JSON was not written at {path}", None
     if before is not None and after == before:
         return None, (
             "canonical audit JSON was not refreshed by this audit invocation; "
-            "the on-disk file may be stale")
+            "the on-disk file may be stale"), None
+    if publication is not None and after[2] != publication.get("sha256"):
+        return None, "current audit publication SHA-256 does not match its snapshot", None
     raw = _safe_json(path)
     if not isinstance(raw, dict):
-        return None, f"canonical audit JSON is unreadable or not an object: {path}"
-    return raw, None
+        return None, f"canonical audit JSON is unreadable or not an object: {path}", None
+    if publication is not None and raw.get("invocation") != publication.get("invocation"):
+        return None, "current audit publication invocation does not match its snapshot", None
+    return raw, None, path
 
 
 def _audit_bucket(raw: Any) -> str:
@@ -2075,6 +2098,9 @@ def _render(project: Path, run_audit: bool = True,
         prior_marker = _previous_snapshot_marker(project)
     audit_before = (_audit_snapshot_token(_audit_snapshot_path(project))
                     if run_audit else None)
+    rechecks_before = ({path.resolve(): _audit_snapshot_token(path)
+        for path in _audit_snapshot_path(project).parent.glob(
+            "phase23_completion_audit.*.json")} if run_audit else {})
     if run_audit:
         audit_text, overall = _run_audit(project, timeout_s=audit_timeout_s,
                                          prior_marker=prior_marker)
@@ -2103,6 +2129,7 @@ def _render(project: Path, run_audit: bool = True,
     # snapshot to load at all when the audit timed out or never ran.
     audit_snapshot: Optional[Dict[str, Any]] = None
     snapshot_problem: Optional[str] = None
+    snapshot_path: Optional[Path] = None
     counts_withheld: Optional[str] = None
     if overall == AUDIT_DID_NOT_CERTIFY_VERDICT:
         counts_withheld = (
@@ -2111,8 +2138,8 @@ def _render(project: Path, run_audit: bool = True,
             "names what it withdrew")
     if run_audit and overall not in {
             AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT}:
-        audit_snapshot, snapshot_problem = _load_fresh_audit_snapshot(
-            project, audit_before)
+        audit_snapshot, snapshot_problem, snapshot_path = _load_fresh_audit_snapshot(
+            project, audit_before, audit_text, rechecks_before)
     elif not run_audit:
         snapshot_problem = "audit was skipped by request"
     else:
@@ -2657,10 +2684,12 @@ def _render(project: Path, run_audit: bool = True,
     # which is false in the did-not-certify state: nothing is quoted up there, because the
     # audit withdrew those numbers and the fence drops every line carrying them. A reader sent
     # to compare against a tally that is not on the page would conclude the report had lost it.
-    _tally_ref = ("as `reports/audit/phase23_completion_audit.json[step_counts]`"
+    _snapshot_ref = (str(snapshot_path.resolve().relative_to(project.resolve()))
+                     if snapshot_path else "reports/audit/phase23_completion_audit.json")
+    _tally_ref = (f"as `{_snapshot_ref}[step_counts]`"
                   if counts_withheld else
                   "as the `flow_compliance_check.py` tally quoted under **Verdict** above and "
-                  "as `reports/audit/phase23_completion_audit.json[step_counts]`")
+                  f"as `{_snapshot_ref}[step_counts]`")
     md.append(f"_Same {total_steps}-step universe, same audit run, and the "
               f"same bucket definitions {_tally_ref}. "
               + ("The audit's own tally is NOT quoted under **Verdict**: it withdrew those "

@@ -23277,6 +23277,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         # ever wrote. See `_stamp_publication` for the one write that does need it.
         _aw.publish(audit_path,
                     json.dumps(audit, indent=2, ensure_ascii=False), lock=False)
+        # The cited canonical file can be immutable. Tell this invocation's
+        # caller which completed publication owns the measurement it just ran.
+        print("flow_compliance_check: AUDIT_SNAPSHOT " + json.dumps({
+            "path": str(audit_path.resolve()),
+            "sha256": _ca.digest(audit_path),
+            "invocation": _this_invocation,
+        }, sort_keys=True))
         # Printed, not only serialised: the reader who acts on the tally reads
         # the log, and a refusal that only exists in a JSON field is a refusal
         # nobody sees. Advisory — it never moves the verdict or the exit code,
