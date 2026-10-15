@@ -138,7 +138,7 @@ def subject(tmp_path):
     BF.put(p / 'phase3/librelane/34-config/KLayout.StreamOut.json', cfg)
     fp = json.loads((folder / 'input_fingerprint.json').read_text())
     fp.update(config=LC.digest(folder / 'config.json'),
-              config_files={str(material): LC.digest(material)})
+              config_files={'/pdk/neutral/stream.lef': LC.digest(material)})
     BF.put(folder / 'input_fingerprint.json', fp)
     argv = ['python3', '/native/stream_out.py', str(filled), '--input-lef', '/pdk/neutral/stream.lef']
     import shlex
@@ -167,6 +167,7 @@ def subject(tmp_path):
     LF.update_record(p, 'default_stream', record)
     BF.put(p / 'reports/phase3/density.json', {'filler_instances': 7, 'row_utilization_pct': 100})
     assert LF.publish_metal_density(p, arm['ratios'], canonical, 'neutral') is not None
+    LF.validate_default_stream(p)
     return p, record, arm
 
 

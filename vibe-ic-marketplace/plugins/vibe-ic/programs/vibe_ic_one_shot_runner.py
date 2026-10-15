@@ -2303,7 +2303,9 @@ def _main() -> int:
     _fd_bounded = False
     import _flow_yaml
     _canonical_order = _flow_yaml.ordered_step_ids()
-    _physical_order = _flow_yaml.ordered_step_ids(stages=('stage3', 'stage4'))
+    _physical_order = (_flow_yaml.ordered_step_ids(execution_stages=range(4, 9), execution_tracks=('default',))
+                       if _execution.request()['mode'] == 'default' else
+                       _flow_yaml.ordered_step_ids(stages=('stage3', 'stage4')))
     _exit_label = str(args.exit_step) if args.exit_step else None
     # IDs survive reordering. In particular final PV31 follows stream37;
     # comparing their numbers would launch a whole backend for a narrow exit.

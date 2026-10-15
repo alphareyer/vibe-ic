@@ -5803,9 +5803,6 @@ steps:
       - "reports/phase3/sta/assumed_clock_disclosure.json"
       - "reports/phase3/clock_target_record_agreement.json"
       - "reports/phase3/achievable_fmax.json"
-      - "reports/phase3/sta/drv_capture_plan.json"
-      - "reports/phase3/sta/drv_signoff_bundle.json"
-      - "reports/phase3/sta/drv_signoff.json"
       # WITHDRAWN, NOT FORGOTTEN — the two multi-corner STANCE files
       # (`reports/phase3/multi_corner_spef_stance.json`,
       # `reports/phase3/mcorner_ocv_stance.json`) belong here on the merits:
@@ -6016,7 +6013,6 @@ steps:
         # R-0929-DRV-IDENTITY: only the FINAL post-stream capture counts toward
         # IC PASS; the clause names it, so an in-flow bundle left on disk
         # (one that binds no GDS / LVS) is NOT_MEASURED here, never a PASS.
-        - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff_verdict.json --capture-point post_stream"
         # vibe-ic#2081 — A SIGN-OFF VIOLATION THAT NO PHYSICAL REMEDY CAN
         # CLOSE IS A RE-AUTHORING REQUEST, AND IT MUST BE ROUTED AS ONE.
         # This step's own `closed_loop.fallback_to` is 32 (post-route timing
@@ -6190,7 +6186,7 @@ steps:
 
   - id: DT2
     name: "Path-delay-fault (at-speed, timing-graded) ATPG"
-    stage: stage2
+    stage: stage3
     execution_stage: 5
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
@@ -6369,7 +6365,7 @@ steps:
 
   - id: DT3
     name: "Small-delay-defect (SDD) at-speed grade"
-    stage: stage2
+    stage: stage3
     execution_stage: 5
 
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
@@ -7936,6 +7932,7 @@ steps:
       # left byte-for-byte alone.
       - drc_report_check
       - lvs_report_check
+      - drv_signoff_judge
     program_outputs:
       - program: phase3_one_shot_runner
         path: "reports/phase3/erc_current.json"
@@ -7977,6 +7974,9 @@ steps:
       - program: lvs_triage_classify
         path: "reports/phase3/lvs_triage.json"
     required_outputs:
+      - "reports/phase3/sta/drv_capture_plan.json"
+      - "reports/phase3/sta/drv_signoff_bundle.json"
+      - "reports/phase3/sta/drv_signoff.json"
       - "reports/phase3/drc_signoff.rpt"
       - "reports/phase3/lvs.rpt"
       - "reports/phase3/erc.rpt"
@@ -8134,6 +8134,7 @@ steps:
       - "reports/phase3/perc_sweep.json"
     gate:
       all_of:
+        - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff_verdict.json --capture-point post_stream"
         # vibe-ic#584 — SCOPED to the subtree this step DECLARES.
         #
         # Discovery in `eda_report_audit` is a project-wide `rglob` and

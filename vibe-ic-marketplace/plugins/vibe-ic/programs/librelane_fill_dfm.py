@@ -1320,19 +1320,13 @@ def validate_default_stream(project: Path) -> dict:
             or not cli.get('inputs')):
         raise Refusal('LL_STREAM_COMMAND_UNBOUND', str(cli))
     native_receipt = validate_step_receipt(stream_state.parent, 'KLayout.StreamOut')
-    import librelane_signoff_evidence as native
-    switch = _load(project / 'phase3/librelane_switch.json')
-    mounts = native._pdk_mounts(project, switch, stream_state.parent, record['image'])
+    # _current_stage already re-hashed these guest-side configuration paths
+    # through its declared mounts; the CLI must name exactly those materials.
     for entry in cli['inputs']:
-        path = Path(entry['path'])
-        for host, guest in mounts:
-            if path.is_relative_to(guest):
-                path = Path(host) / path.relative_to(guest)
-                break
         if (not entry.get('sha256') or entry['argv_index'] >= len(argv)
                 or argv[entry['argv_index']] != entry['path']
-                or native_receipt['input']['config_files'].get(str(path)) != entry['sha256']):
-            raise Refusal('LL_STREAM_NATIVE_MATERIAL_CHANGED', str(path))
+                or native_receipt['input']['config_files'].get(entry['path']) != entry['sha256']):
+            raise Refusal('LL_STREAM_NATIVE_MATERIAL_CHANGED', entry['path'])
     current = validate_density_result(project, arm, layout=Path(record['canonical']))
     if current.get('value') != _count(arm.get(DENSITY_METRIC)) or current.get('value') == 'NOT_MEASURED':
         raise Refusal('LL_FINISHING_DENSITY_NOT_MEASURED', str(current))

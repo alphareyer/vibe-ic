@@ -80372,7 +80372,7 @@ def main() -> int:
         if not _layout_refusal:
             _final_readers = [step_drv_promotion_corroboration(project)]
             _final_readers.extend(step_declared_signoff_gates(
-                project, pdk.name, args.container, skip_names=('tapeout_precheck',)))
+                project, pdk.name, args.container, skip_names=('tapeout_precheck', 'drv_signoff')))
             plan.extend(_final_readers)
             _reader_status = _aggregate_verdict(_final_readers)
             if _reader_status != 'PASS':

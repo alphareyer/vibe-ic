@@ -1514,7 +1514,13 @@ def produce_signoff(project, params):
         import perc_corpus_sweep as sweep
         sweep.main([str(project), '--report', str(rpt / 'perc_sweep.json')])
         statuses = [drc.status, lvs.status]
-        return {'verdict': 'FAIL' if 'FAIL' in statuses else 'PASS' if statuses == ['PASS', 'PASS'] else 'NOT_MEASURED',
+        if params.get('execution_mode') == 'default':
+            # The final capture binds the finished GDS and actual LVS output.
+            # It belongs after these producers, before the full row consumer.
+            spec = next(row for row in R._DECLARED_SIGNOFF_GATES if row[0] == 'drv_signoff')
+            drv = R._run_declared_signoff_gate(project, *spec)
+            statuses.append(drv.status)
+        return {'verdict': 'FAIL' if 'FAIL' in statuses else 'PASS' if all(status == 'PASS' for status in statuses) else 'NOT_MEASURED',
                 'detail': 'DRC: ' + drc.detail + '\nLVS: ' + lvs.detail}
     else:
         raise em.Refusal('BACKEND_UNKNOWN_SIGNOFF_STEP', sid)
