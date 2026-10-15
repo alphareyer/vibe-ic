@@ -531,5 +531,100 @@ def test_auto_mode_is_gone():
     assert not hasattr(D, "_AUTO_FULL_CACHE")
 
 
+def _step4_public_outputs(project):
+    """Neutral bytes at the real flow's required paths, never field data."""
+    _doc, steps = D._load_flow()
+    step = next(s for s in steps if str(s.get("id")) == "4")
+    for spec in step["required_outputs"]:
+        rel = D._split_alts(spec)[0].replace("**/", "neutral/").replace("*", "neutral")
+        _write(project / rel, "{}\n")
+    return step
+
+
+_FUNCTIONAL_PASS = {"name": "step4_functional_evidence", "status": "PASS"}
+_FUNCTIONAL_FAIL = {"name": "step4_functional_evidence", "status": "FAIL",
+                    "detail": "required neutral case NOT_EXECUTED"}
+_PROFESSIONAL_PASS = {"name": "professional_tb_gen", "status": "PASS"}
+_PROFESSIONAL_PENDING = {
+    "name": "professional_tb_gen", "status": "NOT_MEASURED",
+    "program_status": "PASS", "reason_class": "awaiting_signed_judgement",
+    "detail": "awaiting current signed judgement"}
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([_FUNCTIONAL_FAIL, _PROFESSIONAL_PENDING], "fail"),
+    ([_PROFESSIONAL_PENDING, _FUNCTIONAL_FAIL], "fail"),
+    ([_FUNCTIONAL_PASS, _PROFESSIONAL_PENDING], "pending"),
+    ([_FUNCTIONAL_PASS, _PROFESSIONAL_PASS], "pass"),
+    ([_FUNCTIONAL_FAIL, _FUNCTIONAL_PASS, _PROFESSIONAL_PASS], "pass"),
+    ([_PROFESSIONAL_PENDING, _PROFESSIONAL_PASS, _FUNCTIONAL_PASS], "pass"),
+    ([_PROFESSIONAL_PASS, _PROFESSIONAL_PENDING, _FUNCTIONAL_PASS], "pending"),
+    ([_FUNCTIONAL_PASS, _FUNCTIONAL_FAIL, _PROFESSIONAL_PASS], "fail"),
+    ([{"name": "unrelated_step4_functional_evidence", "status": "FAIL"}], "pass"),
+    ([{"name": "sim", "status": "PASS"}, _FUNCTIONAL_FAIL], "fail"),
+], ids=["functional-fail", "pending-before-failure", "pending-judgement",
+        "completed-pass", "functional-retry-pass", "judgement-retry-pass",
+        "current-pending", "current-failure",
+        "unrelated-substring", "dispatch-pass-cannot-clear-owner-fail"])
+def test_step4_semantic_verdict_reaches_collector(tmp_path, rows, expected):
+    import step_output_collector as collector
+
+    project = tmp_path / "neutral"
+    _step4_public_outputs(project)
+    assert _find_step(D.collect(project, live=False), "4")[0]["status"] == "pass"
+    report = project / "reports/orchestrator/phase2_one_shot.json"
+    _write(report, json.dumps({"verdict": "FAIL", "steps": rows,
+                              "declared_window": {"entry_step": "4", "exit_step": "4",
+                                                  "dispatched_step_ids": ["4"]}}))
+    original_report = report.read_bytes()
+    # A bounded observation must carry an unrelated existing row and its bytes.
+    prior = {"id": "9", "name": "Prior synthesis", "status": "pass",
+             "folder": "phase2/stage2/prior", "n_outputs": 1, "versioned": True}
+    frozen = project / "steps" / prior["folder"] / "outputs.json"
+    _write(frozen, '{"status":"pass","historical":true}\n')
+    original_frozen = frozen.read_bytes()
+    _write(project / "steps/index.json", json.dumps({"steps": [prior]}))
+
+    data = D.collect(project, live=False)
+    assert _find_step(data, "4")[0]["status"] == expected
+    assert ("fail" not in data["summary_unavailable"]) == (expected == "fail")
+    assert collector.main([str(project), "--only-steps", "4"]) == 0
+    index = json.loads((project / "steps/index.json").read_text())
+    current = next(r for r in index["steps"] if r["id"] == "4")
+    saved = json.loads((project / "steps" / current["folder"] / "outputs.json").read_text())
+    assert current["status"] == saved["status"] == expected
+    assert current["refreshed_here"] is True
+    assert next(r for r in index["steps"] if r["id"] == "9") == dict(
+        prior, refreshed_here=False)
+    assert frozen.read_bytes() == original_frozen
+    assert report.read_bytes() == original_report
+
+
+def test_step4_does_not_inherit_unrelated_multistep_failure(tmp_path):
+    _step4_public_outputs(tmp_path)
+    _write(tmp_path / "reports/orchestrator/phase3_one_shot.json", json.dumps({
+        "verdict": "FAIL", "steps": [{"name": "pnr", "status": "FAIL"}]}))
+    data = D.collect(tmp_path, live=False)
+    assert _find_step(data, "4")[0]["status"] == "pass"
+    for sid in ("15", "16", "17", "18", "19", "20", "21", "22"):
+        assert _find_step(data, sid)[0]["status"] != "fail"
+    assert [r["name"] for r in data["orchestrator_failures"]] == ["pnr"]
+
+
+def test_step4_producer_pass_cannot_replace_absent_outputs(tmp_path):
+    report = tmp_path / "reports/orchestrator/phase2_one_shot.json"
+    _write(report, json.dumps({"steps": [_FUNCTIONAL_PASS, _PROFESSIONAL_PASS]}))
+    assert _find_step(D.collect(tmp_path, live=False), "4")[0]["status"] == "pending"
+
+
+def test_step4_pending_judgement_cannot_clear_full_gate_failure(tmp_path, monkeypatch):
+    _step4_public_outputs(tmp_path)
+    _write(tmp_path / "reports/orchestrator/phase2_one_shot.json",
+           json.dumps({"steps": [_FUNCTIONAL_PASS, _PROFESSIONAL_PENDING]}))
+    monkeypatch.setattr(D, "_run_compliance", lambda _p: [
+        {"id": "4", "status": "FAIL", "reasons": ["measured functional failure"]}])
+    assert _find_step(D.collect(tmp_path, full=True), "4")[0]["status"] == "fail"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

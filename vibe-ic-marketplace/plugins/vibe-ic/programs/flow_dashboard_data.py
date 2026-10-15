@@ -570,12 +570,13 @@ _UNEXPRESSIBLE = {
 #      painting one verdict across eight rows sends the reader somewhere
 #      specific and wrong. Those spans stay unattributed, exactly as before.
 #   2. NAME IDENTITY IS REQUIRED, NOT ASSUMED. A site participates only if its
-#      name appears verbatim as a `steps[].name` in that runner's report. The
+#      name, or an explicitly owned subproducer below, appears verbatim as a
+#      `steps[].name` in that runner's report. The
 #      analog runner's sites are named "A1".."A9" while its StepResults are
 #      "A1_spec_extract".., so nothing of its is joined -- self-limiting, with
-#      no allowlist to keep in sync.
-#   3. FAILURE VERDICTS ONLY, and only the site's FINAL one. A runner PASS does
-#      not license this record to claim pass when the artefacts are absent, so
+#      no inferred prefix or substring match.
+#   3. NON-SUCCESS VERDICTS ONLY, and only each producer's FINAL one. A runner
+#      PASS does not license this record to claim pass when artefacts are absent, so
 #      the asymmetry is fail-closed: the executing process is the only witness
 #      that a step FAILED, while file existence remains the honest witness that
 #      it delivered. "Final" matters -- the RTL repair/retry loop re-dispatches `rtl_gen`,
@@ -591,6 +592,17 @@ _ORCHESTRATOR_REPORT_RUNNERS: Tuple[Tuple[str, str], ...] = (
     ("analog_one_shot.json", "analog_one_shot_runner"),
     ("phase3_one_shot.json", "phase3_one_shot_runner"),
 )
+
+# Step 4's `sim` dispatch expands into these named semantic producers in
+# design_one_shot_runner.main(). The flow declares professional_tb_gen at 4;
+# step_step4_functional_evidence enforces that same step's final acceptance.
+# Bind to the existing site, so a multi-step site can never acquire a row here.
+_RUNNER_SUBPRODUCER_SITES = {
+    "design_one_shot_runner": {
+        "professional_tb_gen": "sim",
+        "step4_functional_evidence": "sim",
+    },
+}
 
 
 def _is_failure_verdict(raw: str) -> bool:
@@ -611,7 +623,7 @@ def _is_failure_verdict(raw: str) -> bool:
 
 
 def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
-    """Flow step id -> the runner's OWN failure verdict for that step.
+    """Flow step id -> the runner's OWN non-success verdict for that step.
 
     Empty when nothing is joinable (no report, no plan, no name match). Never
     raises: a status pipeline that crashes on a malformed report is worse than
@@ -628,6 +640,9 @@ def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
             continue
         # Site name -> the ONE flow step it executes (limit 1 above).
         solo = {site: ids[0] for site, ids in plan.sites if len(ids) == 1}
+        subproducers = _RUNNER_SUBPRODUCER_SITES.get(runner, {})
+        solo.update({name: solo[site] for name, site in subproducers.items()
+                     if site in solo})
         if not solo:
             continue
         try:
@@ -637,7 +652,7 @@ def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
             continue
         if not isinstance(doc, dict):
             continue
-        # Each site's FINAL record in this report (limit 3 above).
+        # Each producer's FINAL record in this report (limit 3 above).
         final: Dict[str, dict] = {}
         for st in doc.get("steps") or []:
             if not isinstance(st, dict):
@@ -659,8 +674,17 @@ def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
             if not _is_failure_verdict(raw):
                 this_report.setdefault(sid, None)
                 continue
+            # An unmeasured semantic producer is still pending, including a
+            # program PASS awaiting its signed judgement. A measured failure
+            # from a sibling must win in either report order.
+            status = ("pending" if name in subproducers
+                      and raw.upper() == _V.Verdict.NOT_MEASURED.value
+                      else "fail")
+            if (status == "pending" and this_report.get(sid)
+                    and this_report[sid]["status"] == "fail"):
+                continue
             this_report[sid] = {
-                "status": "fail",
+                "status": status,
                 "detail": (f"{runner}:{name} {raw}"
                            + (f" - {st.get('detail')}" if st.get("detail")
                               else "")),
@@ -901,13 +925,14 @@ def _reclassify_inapplicable_lane(sid, step, status, detail, project_path,
 def _unavailable_statuses(mode: str, verdicts: Dict[str, dict]) -> set:
     """Statuses whose 0 in this collect is structural rather than measured.
 
-    Lightweight's `fail` leaves the set exactly when a runner verdict was
+    Lightweight's `fail` leaves the set exactly when a runner failure was
     attributable to a flow step: at that point the mode CAN say fail, so the
-    count is a real one. With nothing joined it stays in, because a 0 that only
+    count is a real one. A pending judgement is not a measured failure.
+    With no failure joined it stays in, because a 0 that only
     means "this classifier has no fail branch" must not be read as "nothing
     failed" -- the defect this set was introduced to remove."""
     out = set(_UNEXPRESSIBLE.get(mode, frozenset()))
-    if verdicts:
+    if any(rec["status"] == "fail" for rec in verdicts.values()):
         out.discard("fail")
     return out
 
@@ -1000,7 +1025,7 @@ def collect(project, full: bool = False, live: bool = True) -> dict:
         # was reached. Applying the join last is what makes it impossible for
         # steps/index.json to publish "pass" over the runner's own FAIL.
         vd = verdicts.get(sid)
-        if vd is not None:
+        if vd is not None and not (vd["status"] == "pending" and status == "fail"):
             status = vd["status"]
             detail = vd["detail"]
 
