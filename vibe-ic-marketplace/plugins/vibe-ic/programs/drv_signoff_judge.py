@@ -893,7 +893,11 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             missing.append("installed PDK root provenance unavailable")
     sdc = (current.get("sources") or {}).get("signoff_sdc") or {}
     sdc_text = _evidence(sdc, fails, "signoff_sdc")
-    if _FORBIDDEN_SDC.search(sdc_text) and not bundle.get("owner_exclusion_declaration"):
+    from sdc_environment import PAD_OPERATING_SCENE_TCL
+    # Exports embed the same producer literal in the saved variable and body.
+    # Only its exact copies are known; changed or additional commands remain.
+    sdc_exclusions = sdc_text.replace(PAD_OPERATING_SCENE_TCL, "")
+    if _FORBIDDEN_SDC.search(sdc_exclusions) and not bundle.get("owner_exclusion_declaration"):
         missing.append("DRV exclusions in sign-off SDC lack prior owner declaration")
     for field, command in (("fanout", "set_max_fanout"),
                            ("slew_ns", "set_max_transition"),

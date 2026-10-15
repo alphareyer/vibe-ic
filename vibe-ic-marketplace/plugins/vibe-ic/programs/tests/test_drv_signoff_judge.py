@@ -317,6 +317,56 @@ def _mock_verified_owner_record(monkeypatch, waiver, extra=()):
                                        "TEST_VERIFIED"))
 
 
+@pytest.mark.parametrize('case', ['plain', 'single', 'embedded_twice', 'modified',
+                                  'external_disable', 'external_ideal_network',
+                                  'external_ideal_net', 'external_case', 'unknown_proc'])
+def test_canonical_pad_mode_is_not_an_owner_authored_sdc_exclusion(
+        tmp_path, case):
+    """Real pad-scene producer into the complete neutral DRV judge."""
+    import sdc_environment as sdc
+    project = tmp_path / 'pad-producer'
+    core = _file(tmp_path, 'core.lib', 'library(core) { time_unit : "1ns"; }')
+    io = _file(tmp_path, 'io.lib', 'library(io) { time_unit : "1ns"; '
+               'cell(pad) { pin(PAD) { max_transition : 25; } } }')
+    _file(project, str(sdc.IO_PAD_RECORD), json.dumps({
+        'verdict': 'WROTE', 'io_library_liberty': [io['path']],
+        'pad_instances': {'u_pad': {'master': 'pad', 'terminal': 'PAD', 'port': 'clk'}}}))
+    emitted = sdc.pad_operating_scene(project, core['path'])
+    assert emitted['complete_pin_limits']
+    assert emitted['tcl'].count('\n        set_disable_timing $edge\n') == 2
+    fragment = '' if case == 'plain' else (
+        emitted['scope_tcl'] if case == 'single' else emitted['tcl'])
+    if case == 'modified':
+        fragment = fragment.replace('is_disabled_constant', 'is_disabled_constanx', 1)
+    additions = {
+        'external_disable': 'set_disable_timing [get_pins u/Y]\n',
+        'external_ideal_network': 'set_ideal_network [get_nets n]\n',
+        'external_ideal_net': 'set_ideal_net [get_nets n]\n',
+        'external_case': 'set_case_analysis 0 [get_ports mode]\n',
+        'unknown_proc': 'proc unrelated_mode {} {set_disable_timing [get_pins u/Y]}\n',
+    }
+    fragment += additions.get(case, '')
+    root = tmp_path / 'judge'
+    bundle = _bundle(root)
+    source = Path(bundle['current']['sources']['signoff_sdc']['path'])
+    bound = _file(root, source.name, source.read_text() + fragment)
+    bundle['current']['sources']['signoff_sdc'] = bound
+    bundle['frozen']['sources']['signoff_sdc'] = bound['sha256']
+    _refresh_scripts(bundle, root)
+    result = drv.judge(bundle)
+    (tmp_path / 'pad-mode-exclusion.observation.json').write_text(json.dumps({
+        'case': case, 'scope': 'SOURCE_CONTROL only; real producer, no EDA/native IC',
+        'producer_tcl': emitted['tcl'], 'producer_tcl_sha256': hashlib.sha256(
+            emitted['tcl'].encode()).hexdigest(), 'sdc': bound, 'judge': result}, indent=2) + '\n')
+    assert not bundle.get('owner_exclusion_declaration')
+    if case in ('plain', 'single', 'embedded_twice'):
+        assert result['verdict'] == 'PASS', result
+    else:
+        assert result['verdict'] == 'NOT_MEASURED', result
+        assert 'DRV exclusions in sign-off SDC lack prior owner declaration' \
+            in result['not_measured']
+
+
 def test_complete_measured_bundle_passes(tmp_path):
     assert drv.judge(_bundle(tmp_path))["verdict"] == "PASS"
 

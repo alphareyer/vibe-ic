@@ -398,6 +398,49 @@ def _pdk_io_input_transition(project: Path, container: str = "",
     return bracket, basis
 
 
+# Existing report wrapper; exports preserve these exact bytes.
+PAD_OPERATING_SCENE_TCL = r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
+  rename ::report_check_types ::vibeic_native_report_check_types
+  rename ::sta::max_slew_violation_count ::vibeic_native_max_slew_violation_count
+  proc ::vibeic_with_pad_mode {command args} {
+    worst_slack -max
+    set removed {}
+    foreach edge [concat {*}[get_timing_edges -of_objects [get_cells $::vibeic_scene_pads]]] {
+      if {[$edge is_disabled_constant] && [$edge cond] ne "" && ![$edge is_disabled_constraint]} {
+        set_disable_timing $edge
+        lappend removed $edge
+      }
+    }
+    try {
+      puts "VIBEIC_PAD_STATIC_MODE [llength $removed] already-disabled conditional edges"
+      uplevel 1 [linsert $args 0 $command]
+    } finally {
+      foreach edge $removed {unset_disable_timing $edge}
+    }
+  }
+  proc ::report_check_types {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_report_check_types]
+  }
+  proc ::sta::max_slew_violation_count {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_max_slew_violation_count]
+  }
+}
+if {[llength [info commands ::vibeic_native_write_sdc]] == 0} {
+  rename ::write_sdc ::vibeic_native_write_sdc
+  proc ::write_sdc {args} {
+    uplevel 1 [linsert $args 0 ::vibeic_native_write_sdc]
+    set handle [open [lindex $args end] a]
+    try {
+      puts $handle "set ::vibeic_scene_sdc [list $::vibeic_scene_sdc]"
+      puts $handle $::vibeic_scene_sdc
+    } finally {
+      close $handle
+    }
+  }
+}
+'''
+
+
 def render_pad_scene_sdc(scope: str) -> str:
     """Keep the same scene when a native tool exports and reloads its SDC."""
     return "set ::vibeic_scene_sdc {" + scope + "}\n" + scope
@@ -457,46 +500,7 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
     # Edge objects cannot survive OpenDB edits: keep them only while the
     # immutable timing measurement runs, then remove those temporary constraints.
     # Preserve the procedure in native SDC exports for the next fixed row.
-    scope = f"set ::vibeic_scene_pads [list {selector}]\n" + r'''if {[llength [info commands ::vibeic_native_report_check_types]] == 0} {
-  rename ::report_check_types ::vibeic_native_report_check_types
-  rename ::sta::max_slew_violation_count ::vibeic_native_max_slew_violation_count
-  proc ::vibeic_with_pad_mode {command args} {
-    worst_slack -max
-    set removed {}
-    foreach edge [concat {*}[get_timing_edges -of_objects [get_cells $::vibeic_scene_pads]]] {
-      if {[$edge is_disabled_constant] && [$edge cond] ne "" && ![$edge is_disabled_constraint]} {
-        set_disable_timing $edge
-        lappend removed $edge
-      }
-    }
-    try {
-      puts "VIBEIC_PAD_STATIC_MODE [llength $removed] already-disabled conditional edges"
-      uplevel 1 [linsert $args 0 $command]
-    } finally {
-      foreach edge $removed {unset_disable_timing $edge}
-    }
-  }
-  proc ::report_check_types {args} {
-    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_report_check_types]
-  }
-  proc ::sta::max_slew_violation_count {args} {
-    uplevel 1 [linsert $args 0 ::vibeic_with_pad_mode ::vibeic_native_max_slew_violation_count]
-  }
-}
-if {[llength [info commands ::vibeic_native_write_sdc]] == 0} {
-  rename ::write_sdc ::vibeic_native_write_sdc
-  proc ::write_sdc {args} {
-    uplevel 1 [linsert $args 0 ::vibeic_native_write_sdc]
-    set handle [open [lindex $args end] a]
-    try {
-      puts $handle "set ::vibeic_scene_sdc [list $::vibeic_scene_sdc]"
-      puts $handle $::vibeic_scene_sdc
-    } finally {
-      close $handle
-    }
-  }
-}
-'''
+    scope = f"set ::vibeic_scene_pads [list {selector}]\n" + PAD_OPERATING_SCENE_TCL
     return {"tcl": render_pad_scene_sdc(scope), "scope_tcl": scope,
             "core_cells": sorted({name for name, _ in _liberty_blocks(core_text or "", "cell")}),
             "core_liberty_sha256": hashlib.sha256(core_text.encode()).hexdigest() if core_text else None,
