@@ -567,7 +567,7 @@ def test_single_default_driver_routes_the_full_existing_pnr_order(tmp_path, monk
     monkeypatch.setattr(runner, '_default_pnr_rows', drive)
     result = runner._default_step15_with_backend_receipt(
         tmp_path, 'unit', SimpleNamespace(name='unit'), '', 'auto', 0.4)
-    assert captured == ['15', '15.5ic', '16', '17', '18', '19', '20', '21', '22']
+    assert captured == ['15', '15.5ic', '16', '17', '18', '19', '20', '21']
     assert result.status == 'FAIL' and result.detail == 'canonical step 19'
 
 
@@ -590,12 +590,13 @@ def test_full_default_prestream_uses_the_existing_canonical_row_driver(tmp_path,
     monkeypatch.setattr(runner._pl, 'sta_dir', old_enclosing_path)
     result = runner.step_canonicalize_artefacts(
         tmp_path, 'unit', SimpleNamespace(name='unit'), '', prestream=True)
-    # Read the actual shipped YAML order, including the IC finishing row.
-    # That row already has a GDS writer owner and is completed at stream-out.
-    expected = [sid for sid in runner._phase3_window_steps('23', '35')
-                if sid != '26.5ic']
-    assert captured == expected == ['23', '24', '25', '26', '27', '28',
-                                   '29', '30', '33', '34', '35']
+    # The complete electrical stage follows repair -> final extraction ->
+    # STA. Finishing/fill/final DFM belong after stream-out, not here.
+    import _flow_yaml
+    expected = list(_flow_yaml.ordered_step_ids(
+        execution_stages=(5,), execution_tracks=('default',)))
+    assert captured == expected == ['32', '22', '23', 'DT2', 'DT3', '24',
+                                   '25', '26', '27', '28', '29', '30', '33']
     assert result.status == 'FAIL' and result.detail == 'canonical step 23'
 
 
@@ -631,15 +632,19 @@ def test_full_default_prestream_stops_on_the_actual_failed_row(
     monkeypatch.setattr(runner, '_canonicalize_postpnr_prerequisites', forbidden)
     monkeypatch.setattr(runner._pl, 'sta_dir', forbidden)
     monkeypatch.setattr(runner._pr, 'run', forbidden)
-    result = runner.step_prestream_gate(
-        tmp_path, 'unit', SimpleNamespace(name='unit'), '')
-    assert calls == [('producer', '23'), ('consumer', '23')]
+    # The pre-stream gate now only reads due route evidence. Execute the
+    # actual electrical row owner first; a failing first row must prevent all
+    # later rows and the pre-stream gate itself, for FAIL and NM alike.
+    result = runner.step_canonicalize_artefacts(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', prestream=True)
+    assert calls == [('producer', '32'), ('consumer', '32')]
     assert result.status == status
-    assert 'canonical step 23' in result.detail
-    receipt = json.loads((tmp_path / 'reports/phase3/prestream_gate.json').read_text())
+    assert 'canonical step 32' in result.detail
+    receipt = json.loads((tmp_path / 'reports/phase3/default_steps/32/backend_result.json').read_text())
     assert receipt['verdict'] == status
-    assert receipt['layout_digest'] == 'current-layout'
-    assert receipt['evidence']['extras']['canonical_steps'][0]['extras']['step_id'] == '23'
+    assert receipt['canonical_step_result']['status'] == status
+    assert result.extras['canonical_steps'][0]['extras']['step_id'] == '32'
+    assert not (tmp_path / 'reports/phase3/prestream_gate.json').exists()
 
 
 @pytest.mark.parametrize('status', ['FAIL', 'NOT_MEASURED'])
@@ -680,11 +685,25 @@ def test_default_poststream_keeps_completed_rows_and_runs_final_evidence(
     original_request = execution_policy.request
     monkeypatch.setattr(execution_policy, 'request',
                         lambda: dict(original_request(), mode='default'))
-    pnr = runner._pl.pnr_dir(tmp_path)
-    rpt = runner._pl.reports_phase3_dir(tmp_path)
-    pnr.mkdir(parents=True)
-    rpt.mkdir(parents=True)
-    inputs = {
+    project, top, pdk = tmp_path, 'unit', SimpleNamespace(name='unit')
+    if prepv:
+        from test_default_stream_epoch_order import _transport
+        import librelane_fill_dfm as fill
+        import librelane_contract as ll
+        import metal_fill_density_check as density
+        import step_output_collector as versions
+        project, pdk, native_calls, _ = _transport(tmp_path, monkeypatch)
+        top = 'top'
+        promotion = fill.default_stream(project, top, pdk, '')
+        assert versions.latest_pass(project, '26.5ic')['current_inputs']
+        completed_native_calls = list(native_calls)
+    pnr = runner._pl.pnr_dir(project)
+    rpt = runner._pl.reports_phase3_dir(project)
+    pnr.mkdir(parents=True, exist_ok=True)
+    rpt.mkdir(parents=True, exist_ok=True)
+    inputs = ({path: path.read_bytes() for path in (
+        pnr / 'top.def', pnr / 'routed.def', pnr / 'filled.def', pnr / 'top.gds')}
+        if prepv else {
         pnr / 'unit.def': b'CURRENT ROUTED DEF\n',
         pnr / 'routed.def': b'CURRENT ROUTED DEF\n',
         pnr / 'pdn.done': b'ACTUAL STEP 15 PDN\n',
@@ -694,11 +713,48 @@ def test_default_poststream_keeps_completed_rows_and_runs_final_evidence(
         pnr / 'filled.def': b'ACTUAL STEP 34 FILL\n',
         pnr / 'unit.gds': b'CURRENT STREAM\n',
         runner._pl.constraints_dir(tmp_path) / 'pvt_matrix.json': b'{}\n',
-    }
+    })
+    if prepv:
+        # Keep every original retained-input category under the byte guard,
+        # including the prior clock/PDN/extraction/constraint artefacts.
+        for path, body in {
+            pnr / 'pdn.done': b'ACTUAL STEP 15 PDN\n',
+            pnr / 'constraint.sdc': b'CURRENT SDC\n',
+            runner._pl.extracted_dir(project) / f'{top}.spef': b'ACTUAL STEP 22 SPEF\n',
+            runner._pl.cts_dir(project) / 'clock_plan.json': b'ACTUAL STEP 16 PLAN\n',
+            runner._pl.constraints_dir(project) / 'pvt_matrix.json': b'{}\n',
+        }.items():
+            inputs[path] = path.read_bytes() if path.is_file() else body
     for path, body in inputs.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(body)
     calls = []
+    if prepv:
+        if failed_evidence:
+            # Change the actual bound finishing proof, not the row result.
+            report = Path(promotion['finishing_report'])
+            report.write_text(report.read_text() + '\n')
+
+        def read_completed(proj, selected_top, selected_pdk, container, step_ids, **kwargs):
+            # This unit transport models no new tool/consumer execution. Its
+            # acceptance is obtained from the real completed finishing version
+            # and existing stream/fill readers, never a mocked scientific PASS.
+            assert proj == project and selected_top == top
+            assert step_ids == ['26.5ic', '34']
+            assert kwargs['report_name'] == 'prefill_evidence'
+            calls.append('26.5ic')
+            try:
+                fill.validate_default_stream(proj)
+                retained = versions.latest_pass(proj, '26.5ic')
+                assert retained and retained['current_inputs']
+            except (ll.Refusal, OSError, ValueError) as exc:
+                return runner.StepResult('prefill_evidence', 'NOT_MEASURED', 0, str(exc),
+                    reason_class=runner._V.ReasonClass.INPUT_ABSENT)
+            calls.append('34')
+            findings, _ = density.tool_arm_findings(proj)
+            return runner.StepResult('prefill_evidence', 'FAIL' if findings else 'PASS',
+                                     0, repr(findings))
+        monkeypatch.setattr(runner, '_default_pnr_rows', read_completed)
 
     def repeated(*a, **k):
         pytest.fail('post-stream restarted a completed canonical row')
@@ -745,13 +801,16 @@ def test_default_poststream_keeps_completed_rows_and_runs_final_evidence(
     monkeypatch.setattr(runner, 'run_at_speed_atpg_producers',
                         lambda *a: calls.append('atpg'))
     result = runner.step_canonicalize_artefacts(
-        tmp_path, 'unit', SimpleNamespace(name='unit'), '', prepv=prepv)
-    assert calls == (['erc'] if prepv else ['lec', 'density', 'aging', 'thermal', 'perc', 'atpg'])
+        project, top, pdk, '', prepv=prepv)
+    assert calls == ((['26.5ic'] if failed_evidence else ['26.5ic', '34'])
+                     if prepv else ['lec', 'density', 'aging', 'thermal', 'perc', 'atpg'])
+    if prepv:
+        assert native_calls == completed_native_calls, 'readback must not restart the completed stream/seal/fill'
     expected = ('NOT_MEASURED' if prepv else 'FAIL') if failed_evidence else 'PASS'
     assert result.status == expected, result.detail
     for path, body in inputs.items():
         assert path.read_bytes() == body, path
-    assert (runner._pl.gds_dir(tmp_path) / 'unit.gds').read_bytes() == inputs[pnr / 'unit.gds']
+    assert (runner._pl.gds_dir(project) / f'{top}.gds').read_bytes() == inputs[pnr / f'{top}.gds']
 
 
 def test_default_main_runs_final_readers_sequentially(tmp_path, monkeypatch):
@@ -842,7 +901,8 @@ def test_default_main_stops_after_failed_repair_even_when_a_route_remains(tmp_pa
     assert later == []
     assert 'gds' not in transport.called
     rows = _plan(project)
-    assert rows['postroute_repair_librelane']['status'] == 'FAIL'
+    assert rows['routed_electrical']['status'] == 'FAIL'
+    assert 'selected repair measured a remaining violation' in rows['routed_electrical']['detail']
     assert rows['gds']['status'] == 'NOT_MEASURED'
 
 

@@ -175,8 +175,10 @@ def test_the_one_program_outputs_clause_sits_with_its_own_step():
 
 @pytest.fixture()
 def clause():
+    # Stage 3 now has a distinct raw producer and audit verdict. Exercise the
+    # same current canonical compliance-producer shape at its stage-2 target.
     got = [c for c in FDP.declared_producer_clauses()
-           if "stage3_compliance" in c.get("target", "")]
+           if c.get("target") == "reports/phase2/gates/stage2_compliance.json"]
     assert got, "the flow no longer declares that clause; re-measure this arm's premise"
     return got[0]
 
@@ -194,7 +196,7 @@ def _staged(tmp_path: Path, clause: dict, doc) -> Path:
     return target
 
 
-_BASE = {"program": "flow_compliance_check", "steps": [{"id": "37"}]}
+_BASE = {"program": "flow_compliance_check", "steps": [{"id": "14"}]}
 
 
 def test_an_audit_stamped_document_is_still_owed(tmp_path, clause):

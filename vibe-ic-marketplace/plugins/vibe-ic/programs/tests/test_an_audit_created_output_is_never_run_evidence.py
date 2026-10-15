@@ -238,9 +238,10 @@ def test_the_narrow_class_is_the_six_steps_measured():
     (`test_a_declared_output_is_not_its_gates_verdict_target.py`): steps 36 and 38
     no longer declare an output that is one of their own gate clauses' receipt
     targets at all, so they are outside `self_written_outputs()` entirely — not
-    merely covered by a mechanism. 36 declares the checklist its
-    `tapeout_checklist_gen` producer assembles while its gate writes its verdict
-    to `reports/audit/tapeout_signoff.json`; 38 declares the four package
+    merely covered by a mechanism. Historically 36 declared the checklist its
+    `tapeout_checklist_gen` producer assembled; fixed order now assigns that
+    complete package/checklist/sign-off sequence to 38. 36 declares the raw
+    stage3 report and uses an independent verdict target. 38 declares the package
     artefacts `foundry_handoff_pack_gen` assembles and no longer declares the
     gate's own `foundry_handoff_audit.json`. This test was renamed from
     `..._is_the_nine_steps_measured` in the same change, because a name that says
@@ -248,11 +249,34 @@ def test_the_narrow_class_is_the_six_steps_measured():
     """
     steps = _flow()["steps"]
     by_id = {str(s.get("id")): s for s in steps if isinstance(s, dict)}
-    narrow = sorted(
-        sid for sid, writers in self_written_outputs(steps).items()
-        if (by_id[sid].get("programs") or []) and all(
-            [q for q in (by_id[sid].get("programs") or []) if q != prog] == []
-            for prog in writers.values()))
+    def measured_class(rows):
+        owners = {str(row.get("id")): row for row in rows if isinstance(row, dict)}
+        return sorted(
+            sid for sid, writers in self_written_outputs(rows).items()
+            if (owners[sid].get("programs") or []) and all(
+                [q for q in (owners[sid].get("programs") or []) if q != prog] == []
+                for prog in writers.values()))
+
+    current = measured_class(steps)
+    assert current == ["10", "21", "24", "26", "28", "29"], current
+    assert {"36", "37", "38"}.isdisjoint(current), current
+    # Reconstruct the two historical owner shapes through the SAME predicate:
+    # 26 formerly declared both router and GDS checkers; 37 formerly declared
+    # stage3's raw report as its own gate target. Keep that six-member history
+    # explicit rather than treating a membership exchange as unchanged coverage.
+    import copy
+    historical = copy.deepcopy(steps)
+    for row in historical:
+        if str(row.get("id")) == "26":
+            row["programs"] = ["antenna_report_check", "gds_antenna_deck_check"]
+        elif str(row.get("id")) == "37":
+            row["programs"] = ["stage3_compliance"]
+            row["required_outputs"] = ["reports/phase3/gates/stage3_compliance.json"]
+            row["gate"] = {"program_exit_zero":
+                "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"}
+    narrow = measured_class(historical)
+    assert set(current) - set(narrow) == {"26"}
+    assert set(narrow) - set(current) == {"37"}
     # MEASURED 2026-09-23 on this tree. Step 23 is NOT a member and the reason is
     # worth the line: it declares three self-written outputs but only ONE of them
     # is written by the program its `programs:` names (`sta_report_check`); the

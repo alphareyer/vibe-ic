@@ -62952,6 +62952,7 @@ def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
     failures: List[str] = []
     _publish_canonical_gds_alias(project, top, written, notes)
     if prepv:
+        import _flow_yaml
         # Finishing owns these rows after its one primary native stream.
         return _default_pnr_rows(
             project, top, pdk, container,

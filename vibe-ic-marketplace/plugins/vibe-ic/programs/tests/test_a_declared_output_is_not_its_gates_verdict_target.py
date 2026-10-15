@@ -157,7 +157,8 @@ _RESIDUAL = {
     "31": ["reports/phase2/gates/erc_density.json",
            "reports/phase3/drc_signoff.json",
            "reports/phase3/lvs.json"],
-    "37": ["reports/phase3/gates/stage3_compliance.json"],
+    # Step 37's raw stage-3 compliance moved to 36. Its audit writes the
+    # independent stage3_compliance_verdict.json, so neither remains here.
     "37.5ic": ["reports/phase3/tapeout_precheck.json"],
     "37.5ip": ["reports/phase3/digital_hardmacro.json"],
     "M1": ["reports/analog/mixed_signal/merge.json"],
@@ -180,10 +181,12 @@ def test_the_two_steps_declare_a_real_producer():
     """The other half of the split: the step's `programs:` must name the program
     that ASSEMBLES the document, not the checker that judges it."""
     by_id = {str(s.get("id")): s for s in _flow()["steps"] if isinstance(s, dict)}
-    assert by_id["36"].get("programs") == ["tapeout_checklist_gen"], (
+    assert by_id["36"].get("programs") == ["stage3_compliance"], (
         by_id["36"].get("programs"))
-    assert by_id["38"].get("programs") == ["foundry_handoff_pack_gen"], (
+    assert by_id["38"].get("programs") == ["foundry_handoff_pack_gen", "tapeout_checklist_gen"], (
         by_id["38"].get("programs"))
+    assert "reports/phase3/gates/stage3_compliance.json" in by_id["36"]["required_outputs"]
+    assert "reports/audit/tapeout_checklist.json" in by_id["38"]["required_outputs"]
 
 
 def test_the_gates_still_run_and_write_their_verdict_somewhere():
@@ -191,9 +194,13 @@ def test_the_gates_still_run_and_write_their_verdict_somewhere():
     are still invoked, and each names its own receipt path."""
     by_id = {str(s.get("id")): s for s in _flow()["steps"] if isinstance(s, dict)}
     c36 = " ".join(_clause_commands(by_id["36"].get("gate")))
-    assert "tapeout_signoff_check . --mode tapeout --json " in c36, c36[:200]
-    assert "reports/audit/tapeout_signoff.json" in c36
+    assert "stage3_compliance . --json " in c36, c36[:200]
+    assert "reports/phase3/gates/stage3_compliance_verdict.json" in c36
     c38 = " ".join(_clause_commands(by_id["38"].get("gate")))
+    # Complete tapeout sign-off follows precheck/docs and package preparation;
+    # its original command and independent verdict target remain mandatory.
+    assert "tapeout_signoff_check . --mode tapeout --json " in c38, c38[:200]
+    assert "reports/audit/tapeout_signoff.json" in c38
     assert "foundry_handoff_package_check . --json " in c38, c38[:200]
     assert "reports/phase3/foundry_handoff_check.json" in c38
 
