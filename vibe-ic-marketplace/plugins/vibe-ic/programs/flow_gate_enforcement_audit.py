@@ -1452,6 +1452,13 @@ class _RunnerModule:
         stores = self.stores.get((scope, name), ())
         binding = next((n for n in stores if n.lineno == after), None)
         bound_arms = self._if_arms(binding) if binding is not None else {}
+        repeatable_binding = False
+        ancestor = binding
+        while ancestor is not None:
+            ancestor = self.parent.get(id(ancestor))
+            if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)):
+                repeatable_binding = True
+                break
         out = []
         for n in self.loads.get((scope, name), ()):
             read_arms = self._if_arms(n)
@@ -1462,8 +1469,9 @@ class _RunnerModule:
                     scope, name, after, skip, n):
                 continue
             # A store in the opposite arm of the binding's own conditional
-            # cannot overwrite that binding. Independent conditional writes
-            # still join values and remain unproven below.
+            # cannot overwrite that binding within one execution. Across loop
+            # iterations either arm can overwrite the prior value, so retain
+            # the original conservative join for repeatable bindings.
             if any((after < store.lineno < n.lineno
                     or (store.lineno < after < n.lineno
                         and any(branch in bound_arms
@@ -1475,7 +1483,7 @@ class _RunnerModule:
                            and bound_arms.get(branch) != arm
                            for branch, arm in self._if_arms(store).items())
                    for store in stores
-                   if not any(branch in bound_arms
+                   if repeatable_binding or not any(branch in bound_arms
                               and bound_arms[branch] != arm
                               for branch, arm in self._if_arms(store).items())):
                 # A joined value is read, but does not prove that this
