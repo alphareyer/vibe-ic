@@ -1090,7 +1090,8 @@ _RUNNER_WRITTEN_SUFFIXES = (".json",)
 
 
 def _check_tool_authenticity(files: List[Path], mode: str,
-                              result: AuditResult) -> bool:
+                              result: AuditResult, *,
+                              measured_rdb_files: Optional[set[Path]] = None) -> bool:
     """Append findings for missing tool signature + undersized reports.
 
     Returns True only if at least one candidate passed both checks — but a
@@ -1145,6 +1146,12 @@ def _check_tool_authenticity(files: List[Path], mode: str,
         strong = _has_strong_signature(text, mode)
         ok_size = size >= MIN_REPORT_BYTES.get(mode, 1024) or strong
         ok_sig, matched = _has_tool_signature(text, mode)
+        # Native KLayout RDBs need not spell the engine's name. The DRC
+        # caller supplies only parsed, countable RDBs with the same file's
+        # measured KLayout invocation and current physical subject proved.
+        # This supplies identity only; the byte floor still applies.
+        if mode == "drc" and fp in (measured_rdb_files or ()):
+            ok_sig = True
         if ok_size and ok_sig:
             if fp.suffix in _RUNNER_WRITTEN_SUFFIXES and tool_written_present:
                 # Judged, and its findings kept — but it does not get to answer
@@ -1960,6 +1967,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
     receipt_corroborated = 0
     contradictions: List[dict] = []
     measured_receipts = _measured_klayout_receipt_files(project_dir, files)
+    measured_rdb_files: set[Path] = set()
 
     for fp in files:
         try:
@@ -2030,6 +2038,12 @@ def _check_drc(project_dir: Path) -> AuditResult:
             determined_files += 1
             if fp in measured_receipts:
                 receipt_corroborated += 1
+                if (_p.kind == _sdf.KLAYOUT and _p.is_signoff_deck
+                        and _p.evidence == "klayout <report-database>"
+                        and re.match(r'(?:<\?xml\s[^?]*\?>\s*)?<report-database\b',
+                                     _strip_leading_comment_block(text).lstrip())
+                        and not _has_tool_signature(text, "drc")[0]):
+                    measured_rdb_files.add(fp)
             _user_n, _std_n = n
             stdcell_excluded += _std_n
             summary_total += _user_n
@@ -2203,8 +2217,32 @@ def _check_drc(project_dir: Path) -> AuditResult:
                     f"{determined_files} report(s) with a determinable count",
             file=worst_file))
 
+    # RDB grammar and a count alone cannot identify a measured engine. The
+    # set above already intersects the SAME report's digest-bound KLayout
+    # invocation (including its transcript and GDS). Reuse the current
+    # physical reader as well; a generic DRC obligation cannot supply engine
+    # identity, and an incomplete LibreLane obligation never falls back.
+    if measured_rdb_files:
+        try:
+            import librelane_signoff_evidence as _native
+            current = _native.obligation(project_dir, "drc")
+            if current is None:
+                import _physical_current as _pc
+                direct = _pc.read_direct_half(project_dir, "drc")
+                if direct.get("verdict") == "CURRENT" and direct.get("tool") == "klayout":
+                    report = (project_dir / direct["outputs"]["report"]["path"]).resolve()
+                    measured_rdb_files = {fp for fp in measured_rdb_files
+                                          if fp.resolve() == report}
+                else:
+                    measured_rdb_files.clear()
+            elif current.get("verdict") != "PASS":
+                measured_rdb_files.clear()
+        except (OSError, ValueError, TypeError, KeyError):
+            measured_rdb_files.clear()
+
     # Tool-authenticity check — rejects hand-typed stubs (added 2026-04-22)
-    authentic = _check_tool_authenticity(files, "drc", result)
+    authentic = _check_tool_authenticity(
+        files, "drc", result, measured_rdb_files=measured_rdb_files)
     own_design, design_binding = _check_report_design_binding(
         files, project_dir, "drc", result)
 
