@@ -1418,6 +1418,15 @@ _IVERILOG_FLAGS = "-g2012 -ginterconnect -gspecify"
 
 
 def _docker(container: str, cmd: str, budget_s: float = 600):
+    # In-image runners read the PDK and execute tools on this filesystem.
+    # Reuse the same route predicate/argv seam as the phase runners; a nested
+    # Docker client is neither required nor available in the official image.
+    if _ce.local_exec_mode("sdf_gate_sim"):
+        return _pr.run(
+            _ce.exec_argv(container, _TOOL_PATH + cmd, tag="sdf_gate_sim"),
+            capture_output=True, text=True, errors="replace",
+            hard_ceiling_s=float(budget_s),
+            ceiling_notice=_ce.default_ceiling_notice("local", budget_s))
     # R-0915-86(3) — THE GATE-SIM SUPERVISOR'S PROGRESS DETECTOR, calibrated
     # before it judges. This is the call site R-0915-71/72 was written about:
     # it ran `vvp ... > log` through a bare `_progress_run.run`, every byte went
