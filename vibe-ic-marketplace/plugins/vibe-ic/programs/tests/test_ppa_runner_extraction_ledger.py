@@ -99,6 +99,12 @@ def ppa_functions_in(path: Path):
 # v1.11.18. It may SHRINK freely. Growing it is a decision, not a diff.
 # ======================================================================
 _LEDGER = frozenset({
+    # Recorded for the selected Step37 handoff: this adapter verifies the
+    # current native state and hashes, makes a private verification copy,
+    # then calls the existing finishing producer and retained consumer.
+    # It introduces no PPA metric, geometry calculation or rule threshold;
+    # the same orchestration rationale covers _die_finishing_record below.
+    "_step37_die_finishing_record",
     # These split the existing _die_finishing orchestration: the native body
     # still calls die_finishing_gen with the same arguments; the record adapter
     # retains its actual return code and invokes the unchanged canonical gate.

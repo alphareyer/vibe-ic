@@ -337,7 +337,13 @@ RECORD_ADJUDICATION = _ra.declare(
     # otherwise); it neither emits nor removes VIA_*_NOT_FOUND and leaves a
     # plain `verdict: PASS` beside them exactly as it was, so no published
     # record changes adjudication.
-    decision_digest="cd5f8fee13c8be4070e7bfda8fc5e77d3e70280221ae3bbf60964f7e407a251f",
+    # Re-reviewed for the measured-density changes in 77bd34a19 and
+    # 2e0a84ec0: per-layer density and ABSENT fallback alter only density
+    # reference findings. The two VIA_*_NOT_FOUND categories and the
+    # verdict/findings preconditions of the vacuity rule remain unchanged.
+    # This unreviewed digest predated the Step35 main authorship wiring;
+    # main is outside the audit decision closure.
+    decision_digest="3f9eaf91c65602c7f8e6b6ced8a12cade8167e332cfb2d61f4de00f90142ad4e",
     rules=(
         _ra.Rule(
             rule_id="dfm_screen_check.via-screen-did-not-run",
