@@ -54,6 +54,13 @@ def _drive(tmp_path: Path, monkeypatch, *, need_analog: bool,
     def fake_run_phase(label, runner, args, env=None):
         cap["order"].append(Path(runner).name)
         stem = Path(runner).name.split("_")[0]
+        # A substituted phase child must publish its own current account.
+        # The real row reader still refuses rc0 without a fresh report.
+        report = orch._phase_report_path(
+            project, runner.name.removesuffix('_runner.py') + '.json')
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({"verdict": verdicts.get(stem, "PASS"),
+            "scope": "SOURCE_FIXTURE_ONLY phase-order transport; no native measurement"}))
         return 0 if verdicts.get(stem, "PASS") != "FAIL" else 1
 
     def fake_read_report(_p):

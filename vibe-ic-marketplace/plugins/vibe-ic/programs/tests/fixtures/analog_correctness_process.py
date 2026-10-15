@@ -11,12 +11,11 @@ import sys
 
 P = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(P))
-import execution_modes as em
-import execution_analog_worker as worker
-from execution_adapters_analog import write_json, component_sources
 
 
 def fixture_produce(inputs, project, spec, records):
+    import execution_modes as em
+    from execution_adapters_analog import write_json
     import analog_a6_native_pv as pv
     records.mkdir(parents=True, exist_ok=True)
     processes = records / 'native-processes.jsonl'
@@ -62,8 +61,10 @@ def main():
     args = parser.parse_args()
     # This is an explicit source fixture of the production worker's producer
     # boundary. No Controller/issuer/validator is replaced or fabricated.
+    import execution_analog_worker as worker
+    sources = json.loads((args.inputs / 'input/correctness_sources.json').read_text())
     worker.native_produce = fixture_produce
-    worker.execute(args.inputs, args.outputs, source_files=component_sources((Path(__file__).resolve(),)))
+    worker.execute(args.inputs, args.outputs, source_files=sources)
     return 0
 
 if __name__ == '__main__':

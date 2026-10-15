@@ -291,6 +291,11 @@ class AnalogLiveReachabilityReview(unittest.TestCase):
         fixture = PROGRAMS / 'tests/fixtures/analog_correctness_process.py'
         sources = dict(arm.source_files, **{str(fixture): em.digest(fixture)})
         sources.update({str(p): em.digest(p) for p in em._source_closure(sources)})
+        # The parent already resolved and bound this complete source closure.
+        # Carry it as a frozen input; the real worker still checks its digest
+        # and every source byte instead of re-parsing the closure under 30 s.
+        source_map = self.project / 'input/correctness_sources.json'
+        source_map.write_text(json.dumps(sources, sort_keys=True))
         objective = dict(arm.objective, source_manifest_sha256=em._hash(sources))
         arm = replace(arm, tool_id='analog-correctness-fixture', qualified=False, available=True,
             qualification_evidence='NO_NATIVE_PASS; supported finite correctness fixture',
@@ -298,7 +303,8 @@ class AnalogLiveReachabilityReview(unittest.TestCase):
             components=(em.Component('correctness-producer', (str(Path(sys.executable).resolve()),
                 str(fixture), '--inputs', '{inputs}', '--outputs', '{outputs}'), 30),
                          *analog.gate_components('A6')),
-            input_contract=(*arm.input_contract, 'input/correctness.json'))
+            input_contract=(*arm.input_contract, 'input/correctness.json',
+                            'input/correctness_sources.json'))
         registry = em.Registry()
         registry.register(arm)
         controller = em.Controller(registry, em.Budget(1, 512))
