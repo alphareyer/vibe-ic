@@ -5722,6 +5722,17 @@ steps:
       - program: execution_backend_producers
         path: "reports/phase3/no_disconnected_ports.json"
         verdict_field: "verdict"
+      # Retain the current-step producer commands at their original raw
+      # paths; the audit recomputes to independent verdict files below.
+      - program: hold_corner_coverage_check
+        path: "reports/phase3/sta/hold_corner_coverage.json"
+        producer_command: "hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage.json"
+      - program: sta_assumed_clock_disclosure_check
+        path: "reports/phase3/sta/assumed_clock_disclosure.json"
+        producer_command: "sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure.json"
+      - program: clock_target_record_agreement_check
+        path: "reports/phase3/clock_target_record_agreement.json"
+        producer_command: "clock_target_record_agreement_check . --json reports/phase3/clock_target_record_agreement.json"
     required_outputs:
       - "phase3/stage3/sta/post_route_timing.rpt"
       # Emitted by Step 23's SPEF-backed STA pass and mirrored here.  Step
@@ -5916,7 +5927,7 @@ steps:
         #     returns 6 PASS and 5 rc=2.
         # So no published run changes its step VERDICT, and the one true
         # finding surfaces on a live run rather than on the pruned tree.
-        - program_exit_zero: "hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage.json"
+        - program_exit_zero: "hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage_verdict.json"
         - files_exist: ["phase3/stage3/sta/post_route_timing.rpt"]
         # `--mode` is a report CLASS, not a directory — see step 10. The
         # declared `phase3/stage3/sta` is not an eda_report_audit choice and
@@ -6005,7 +6016,7 @@ steps:
         # R-0929-DRV-IDENTITY: only the FINAL post-stream capture counts toward
         # IC PASS; the clause names it, so an in-flow bundle left on disk
         # (one that binds no GDS / LVS) is NOT_MEASURED here, never a PASS.
-        - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json --capture-point post_stream"
+        - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff_verdict.json --capture-point post_stream"
         # vibe-ic#2081 — A SIGN-OFF VIOLATION THAT NO PHYSICAL REMEDY CAN
         # CLOSE IS A RE-AUTHORING REQUEST, AND IT MUST BE ROUTED AS ONE.
         # This step's own `closed_loop.fallback_to` is 32 (post-route timing
@@ -6059,7 +6070,7 @@ steps:
         # IT NEVER TOUCHES A TIMING VERDICT. It reads no slack, compares no
         # period against anything, and cannot move a PASS or a FAIL; its only
         # opinion is whether an ASSUMED period was disclosed in the record.
-        - program_exit_zero: "sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure.json"
+        - program_exit_zero: "sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure_verdict.json"
         # vibe-ic#2159 — ONE RUN, ONE CLOCK-TARGET ANSWER. Measured on
         # `subservient`: the run's own provenance record read
         # `pdk=gf180mcuD, tier=declared_pdk_table, 20.0 ns` citing the design's
@@ -6085,7 +6096,7 @@ steps:
         # say. It reads two records and nothing else — no slack, no verdict, no
         # SDC — and it is silent on a run whose L19 records an explicit absence
         # or names no technology at all.
-        - program_exit_zero: "clock_target_record_agreement_check . --json reports/phase3/clock_target_record_agreement.json"
+        - program_exit_zero: "clock_target_record_agreement_check . --json reports/phase3/clock_target_record_agreement_verdict.json"
         # vibe-ic#306 — a route promoted on its OWN in-session re-measurement
         # must be corroborated by the sign-off report it claims to improve
         # (#293: the promotion read 330->178 while this step's own

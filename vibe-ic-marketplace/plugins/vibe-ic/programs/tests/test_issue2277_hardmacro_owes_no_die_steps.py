@@ -225,7 +225,7 @@ def test_the_new_channel_adopted_exactly_one_entry():
                 for st in doc["steps"]
                 for e in (st.get("program_outputs") or [])
                 if isinstance(e, dict) and e.get("producer_command")]
-    # Existing FS1, Step14 and Step35 writers use this declared producer
+    # Existing FS1, Step14/23 and Step35 writers use this declared producer
     # channel. Pin every identity; each gate keeps its own verdict path.
     assert carrying == [("FS1", "fmeda_fault_injection_coverage"),
                         ("FS1", "fmeda_coverage_check"),
@@ -234,6 +234,9 @@ def test_the_new_channel_adopted_exactly_one_entry():
                         ("14", "yosys_tiecell_recipe_order_check"),
                         ("17", "placement_legality_check"),
                         ("22", "spef_extraction_check"),
+                        ("23", "hold_corner_coverage_check"),
+                        ("23", "sta_assumed_clock_disclosure_check"),
+                        ("23", "clock_target_record_agreement_check"),
                         ("35", "dfm_screen_check"),
                         ("31", "perc_corpus_sweep")]
     for st in doc["steps"]:
