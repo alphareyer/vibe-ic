@@ -72,6 +72,7 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
     import drv_run_identity
     import drv_signoff_capture as capture
     import drv_signoff_judge as drv
+    import flow_compliance_check as fcc
     import librelane_contract as ll
     from test_drv_signoff_judge import _report, _stage_receipts, _install_test_freeze
 
@@ -164,6 +165,7 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
 
     monkeypatch.setattr(capture, "_run_fresh", fresh)
     real_process = R._pr.run
+    real_supervised = fcc._watchdog.run_host_supervised
 
     def process(argv, **kwargs):
         if len(argv) > 1 and Path(str(argv[1])).name == "drv_signoff_judge.py":
@@ -171,6 +173,8 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
             # the explicit synthetic PDK/owner I/O boundaries local to this test.
             stdout, stderr = io.StringIO(), io.StringIO()
             with monkeypatch.context() as env:
+                if kwargs.get("cwd") is not None:
+                    env.chdir(kwargs["cwd"])
                 for name, value in (kwargs.get("env") or {}).items():
                     env.setenv(name, value)
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -178,7 +182,15 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
             return subprocess.CompletedProcess(argv, rc, stdout.getvalue(), stderr.getvalue())
         return real_process(argv, **kwargs)
 
+    def supervised(argv, **kwargs):
+        if len(argv) > 1 and Path(str(argv[1])).name == "drv_signoff_judge.py":
+            done = process(argv, **kwargs)
+            return fcc._watchdog.SupervisedResult(
+                done.returncode, done.stdout, done.stderr, "natural", 0)
+        return real_supervised(argv, **kwargs)
+
     monkeypatch.setattr(R._pr, "run", process)
+    monkeypatch.setattr(fcc._watchdog, "run_host_supervised", supervised)
 
 
 def fixture(tmp_path, monkeypatch, case):
