@@ -136,7 +136,7 @@ def test_375ic_and_step39_keep_canonical_condition_semantics():
 def test_release_component_runs_through_public_controller_and_preserves_nm(tmp_path):
     source = tmp_path / "seed.txt"
     source.write_text("source-only\n")
-    context, route = _issued_context("36", {"project/input/seed.txt": source}, tmp_path)
+    context, route = _issued_context("38", {"project/input/seed.txt": source}, tmp_path)
     declaration = json.loads((tmp_path / "input/step_0_5ic_answers.json").read_text())
     registry = register_release_adapters(
         em.Registry(), source_sha=BASE, available=True,
@@ -144,14 +144,14 @@ def test_release_component_runs_through_public_controller_and_preserves_nm(tmp_p
     controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
     plan = controller.plan(context, "default-mode")
     root = tmp_path / "run"
-    assert plan["arms"] == ["release_36"]
+    assert plan["arms"] == ["release_38"]
     controller.run(context, root, "default-mode")
-    adapter = registry.adapters("36")[0]
+    adapter = registry.adapters("38")[0]
     receipt = json.loads((root / adapter.arm_id / "receipt.json").read_text())
     assert receipt["processes"][0]["rc"] == 0
     assert receipt["status"] in {"NOT_MEASURED", "FAIL"}
     assert (root / adapter.arm_id / "outputs" / "release-evidence.json").is_file()
-    # tapeout_checklist_gen is the actual Step-36 producer.  A component
+    # tapeout_checklist_gen is the actual final Step-38 producer. A component
     # process with rc0 is insufficient when its canonical file is absent.
     assert (root / adapter.arm_id / "outputs" / "reports/audit/tapeout_checklist.json").is_file()
 

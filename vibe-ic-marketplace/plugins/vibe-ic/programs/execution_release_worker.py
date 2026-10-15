@@ -107,6 +107,13 @@ def produce(step: str, project: Path, params: dict) -> list[dict]:
     if step == "14":
         records.append(_call("flow_compliance_check", [project, "--stage-id", "stage_analog", "--strict", "--json", project / "reports/analog/stage_analog_compliance.json"]))
         records.append(_call("synth_handoff_netlist_check", [project]))
+        from execution_backend_producers import _run_current_step_declared_producers
+        declared = _run_current_step_declared_producers(project, step)
+        # Producer authorship is not a scientific verdict. The unchanged
+        # canonical consumers below judge the three raw reports independently.
+        records.append({"program": "flow_declared_producer_run",
+                        "rc": 0 if declared.get("verdict") == "PRODUCED" else 2,
+                        "current_step_producers": declared})
     elif step == "16":
         import phase3_one_shot_runner as runner
         notes: list[str] = []
@@ -116,7 +123,14 @@ def produce(step: str, project: Path, params: dict) -> list[dict]:
     elif step == "35":
         records.append(_call("dfm_screen_check", [project, "--json", project / "reports/phase3/dfm_screen.json"]))
     elif step == "36":
-        records.append(_call("tapeout_checklist_gen", [project]))
+        import phase3_one_shot_runner as runner
+        top = params.get("design_name")
+        pdk = runner._detect_pdk(project, params.get("pdk_name") or "auto")
+        rc = (runner._default_checklist_layout_receipts(
+            project, top, pdk, str(params.get("container") or ""))
+            if top and pdk is not None else 2)
+        records.append({"program": "phase3_one_shot_runner._default_checklist_layout_receipts",
+                        "rc": rc})
     elif step == "37.4":
         records.append(_call("signoff_metrics_aggregate", [project]))
     elif step == "37.5ip":
@@ -168,6 +182,7 @@ def produce(step: str, project: Path, params: dict) -> list[dict]:
         records.append(_call("ic_release_docs_gen", [project]))
     elif step == "38":
         records.append(_call("foundry_handoff_pack_gen", [project]))
+        records.append(_call("tapeout_checklist_gen", [project]))
     elif step == "39":
         records.append({"program": "fpga_on_board_attestation", "rc": None,
                         "verdict": "NOT_MEASURED",

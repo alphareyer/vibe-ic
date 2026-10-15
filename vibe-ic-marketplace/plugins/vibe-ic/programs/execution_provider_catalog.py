@@ -25,14 +25,30 @@ BACKEND_ROWS = BACKEND_POLICY["rows"]
 # come from the canonical flow used by the runner and input preparation.
 # A stored policy snapshot must not make the consumer check older outputs.
 import _flow_yaml
+from execution_modes import _canonical_flow_requirements
 _canonical_rows = {str(row["id"]): row for row in _flow_yaml.load()["steps"]}
+_, _current_requirements = _canonical_flow_requirements()
 for _sid, _backend in BACKEND_ROWS.items():
     _backend["canonical_row"] = _canonical_rows[_sid]
+    _backend["portfolio_policy"] = {
+        **_backend["portfolio_policy"],
+        "mandatory_gate_programs": sorted(_current_requirements[_sid]["gates"]),
+    }
 
 try:
     from execution_release_rows import ROWS as RELEASE_ROWS
 except ModuleNotFoundError:  # backend-first commit remains independently importable
     RELEASE_ROWS = {}
+
+# Keep the original collected policy/harvest records, but bind every live
+# release consumer/export to the same executable flow as the backend family.
+# Adapters and the worker import this catalogue before sharing these ROWS.
+for _sid, _release_row in RELEASE_ROWS.items():
+    _release_row["canonical"] = _canonical_rows[_sid]
+    _release_row["policy"] = {
+        **_release_row["policy"],
+        "mandatory_gate_programs": sorted(_current_requirements[_sid]["gates"]),
+    }
 
 
 @lru_cache(maxsize=1)
@@ -731,14 +747,15 @@ BACKEND_SITES = {
 }
 
 RELEASE_SITES = {
-    "14": ("flow_compliance_check.py:main", "synth_handoff_netlist_check.py:main"),
+    "14": ("flow_compliance_check.py:main", "synth_handoff_netlist_check.py:main",
+           "flow_declared_producer_run.py:run_for_step"),
     "16": ("phase3_one_shot_runner.py:emit_clock_plan",),
     "35": ("dfm_screen_check.py:main",),
-    "36": ("tapeout_checklist_gen.py:main",),
+    "36": ("phase3_one_shot_runner.py:_default_checklist_layout_receipts",),
     "37.4": ("signoff_metrics_aggregate.py:aggregate",),
     "37.5ip": ("digital_hardmacro_gen.py:run", "phase3_one_shot_runner.py:step_ip_release_docs_gen"),
     "37.5ic": ("tapeout_precheck.py:main", "tapeout_docs_gen.py:main", "ic_release_docs_gen.py:main"),
-    "38": ("foundry_handoff_pack_gen.py:main",),
+    "38": ("foundry_handoff_pack_gen.py:main", "tapeout_checklist_gen.py:main"),
     # 39 has a checker but no software producer when FPGA hardware is absent.
     "39": (),
     # 40--44 are physical handoffs.  They are intentionally not represented

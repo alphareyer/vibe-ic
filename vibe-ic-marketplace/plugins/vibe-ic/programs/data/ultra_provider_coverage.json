@@ -16,10 +16,11 @@
         "reports/phase2/gates/stage2_compliance.json"
       ],
       "consumer_gates": [
-        "stage2_compliance",
-        "stage_on_pass_review",
         "floorplan_pdn_check",
-        "macro_obs_load_parity_check"
+        "ip_integration_check",
+        "macro_obs_load_parity_check",
+        "stage2_compliance",
+        "stage_on_pass_review"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -191,8 +192,8 @@
         "reports/phase3/placement_legality.json"
       ],
       "consumer_gates": [
-        "pnr_timing_repair_completeness_check",
-        "placement_legality_check"
+        "placement_legality_check",
+        "pnr_timing_repair_completeness_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -441,11 +442,11 @@
         "reports/phase3/drc_router.json"
       ],
       "consumer_gates": [
-        "drc_report_check",
         "def_stage_progression_check",
+        "drc_report_check",
+        "macro_obs_geometry_intersect_check",
         "provenance_check",
-        "route_congestion_trade_disclosure",
-        "macro_obs_geometry_intersect_check"
+        "route_congestion_trade_disclosure"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -530,8 +531,8 @@
         "reports/phase2/gates/spef_extraction.json"
       ],
       "consumer_gates": [
-        "spef_extraction_check",
-        "provenance_check"
+        "provenance_check",
+        "spef_extraction_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -606,21 +607,19 @@
         "reports/phase3/sta/hold_corner_coverage.json",
         "reports/phase3/sta/assumed_clock_disclosure.json",
         "reports/phase3/clock_target_record_agreement.json",
-        "reports/phase3/achievable_fmax.json",
-        "reports/phase3/sta/drv_capture_plan.json",
-        "reports/phase3/sta/drv_signoff_bundle.json",
-        "reports/phase3/sta/drv_signoff.json"
+        "reports/phase3/achievable_fmax.json"
       ],
       "consumer_gates": [
         "achieved_period_recorded_check",
+        "clock_target_record_agreement_check",
+        "drv_promotion_corroboration_check",
         "hold_corner_coverage_check",
-        "sta_report_check",
-        "sta_corner_record_completeness_check",
         "pad_input_drive_check",
-        "drv_signoff_judge",
+        "post_route_signoff_corner_check",
         "sta_architectural_residual_check",
         "sta_assumed_clock_disclosure_check",
-        "clock_target_record_agreement_check"
+        "sta_corner_record_completeness_check",
+        "sta_report_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -707,8 +706,8 @@
         "reports/phase3/dynamic_ir.json"
       ],
       "consumer_gates": [
-        "ir_drop_report_check",
-        "dynamic_ir_drop_check"
+        "dynamic_ir_drop_check",
+        "ir_drop_report_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -779,8 +778,8 @@
         "reports/phase3/em_current_authority.json"
       ],
       "consumer_gates": [
-        "em_report_check",
-        "em_peak_current_authority_check"
+        "em_peak_current_authority_check",
+        "em_report_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -841,6 +840,7 @@
       },
       "arm_id": "backend_26",
       "canonical_outputs": [
+        "reports/phase3/prestream_route_census.json",
         "reports/phase3/antenna.rpt",
         "reports/phase3/antenna.json",
         "reports/phase3/antenna_signoff.json"
@@ -980,8 +980,9 @@
         "reports/phase3/si_mcf_sta.rpt"
       ],
       "consumer_gates": [
+        "flow_step_output_content_check",
         "si_crosstalk_check",
-        "flow_step_output_content_check"
+        "si_mcf_sta_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -1373,7 +1374,9 @@
         "reports/density.rpt OR reports/phase3/density.rpt"
       ],
       "consumer_gates": [
-        "metal_fill_density_check"
+        "metal_fill_density_check",
+        "metal_fill_emit",
+        "spare_cell_preservation_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -1449,22 +1452,18 @@
         "phase3/stage3/pnr/*stream_out.log",
         "phase3/stage3/pnr/*.stream_inputs.json",
         "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py",
-        "reports/phase3/pad_ring_route_evidence.json",
-        "reports/phase3/gates/stage3_compliance.json",
-        "reports/phase3/layout_receipts.json"
+        "reports/phase3/pad_ring_route_evidence.json"
       ],
       "consumer_gates": [
-        "layout_receipt_identity_check",
-        "stage3_compliance",
-        "stage_on_pass_review",
-        "gds_size_check",
-        "gds_substance_check",
-        "gds_port_label_check",
-        "reported_figure_artifact_backing_check",
-        "provenance_check",
         "flow_stage_check",
         "gate_evidence_completeness_check",
-        "gds_ip_attribution"
+        "gds_antenna_deck_check",
+        "gds_ip_attribution",
+        "gds_port_label_check",
+        "gds_size_check",
+        "gds_substance_check",
+        "provenance_check",
+        "reported_figure_artifact_backing_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -1609,7 +1608,11 @@
       },
       "arm_id": "backend_31",
       "canonical_outputs": [
+        "reports/phase3/sta/drv_capture_plan.json",
+        "reports/phase3/sta/drv_signoff_bundle.json",
+        "reports/phase3/sta/drv_signoff.json",
         "reports/phase3/drc_signoff.rpt",
+        "reports/phase3/drc_signoff.log",
         "reports/phase3/lvs.rpt",
         "reports/phase3/erc.rpt",
         "reports/phase3/lvs.json",
@@ -1620,19 +1623,19 @@
         "reports/phase3/perc_sweep.json"
       ],
       "consumer_gates": [
-        "drc_vacuous_pass_check",
         "drc_report_check",
-        "magic_illegal_overlap_record_check",
-        "magic_illegal_overlap_check",
+        "drc_vacuous_pass_check",
+        "drv_signoff_judge",
+        "erc_density_check",
         "lvs_report_check",
         "lvs_signoff_guard",
+        "magic_illegal_overlap_check",
+        "magic_illegal_overlap_record_check",
+        "mcp_execution_verify",
         "pg_rail_geometry_check",
         "provenance_check",
-        "provenance_check",
-        "erc_density_check",
-        "waiver_growth_check",
         "sweep_reach_check",
-        "mcp_execution_verify"
+        "waiver_growth_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -1722,14 +1725,17 @@
       },
       "arm_id": "release_14",
       "canonical_outputs": [
-        "phase2/stage2/synth/netlist.v",
+        "reports/phase2/gates/yosys_hilomap.json",
+        "reports/phase2/gates/yosys_script_template.json",
+        "reports/phase2/gates/yosys_tiecell_recipe_order.json",
         "reports/analog/stage_analog_compliance.json"
       ],
       "consumer_gates": [
-        "flow_step_output_content_check",
-        "flow_step_output_content_check",
         "flow_compliance_check",
+        "flow_step_output_content_check",
         "stage_on_pass_review",
+        "yosys_hilomap_required_check",
+        "yosys_script_template_check",
         "yosys_tiecell_recipe_order_check"
       ],
       "default_rank": 0,
@@ -1768,7 +1774,8 @@
       "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
       "producer_sites": [
         "flow_compliance_check.py:main",
-        "synth_handoff_netlist_check.py:main"
+        "synth_handoff_netlist_check.py:main",
+        "flow_declared_producer_run.py:run_for_step"
       ],
       "runtime_status": "NOT_MEASURED",
       "step_id": "14",
@@ -1887,13 +1894,17 @@
       },
       "arm_id": "release_36",
       "canonical_outputs": [
-        "reports/audit/tapeout_checklist.json"
+        "reports/phase3/gates/stage3_compliance.json",
+        "reports/phase3/layout_receipts.json"
       ],
       "consumer_gates": [
-        "tapeout_signoff_check",
+        "declared_pdk_is_the_pdk_used_check",
+        "layout_receipt_identity_check",
+        "ppa_head_to_head_check",
         "report_belongs_to_project_check",
-        "step_internal_fail_bubble_up_check",
-        "declared_pdk_is_the_pdk_used_check"
+        "stage3_compliance",
+        "stage_on_pass_review",
+        "step_internal_fail_bubble_up_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -1925,7 +1936,7 @@
       ],
       "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
       "producer_sites": [
-        "tapeout_checklist_gen.py:main"
+        "phase3_one_shot_runner.py:_default_checklist_layout_receipts"
       ],
       "runtime_status": "NOT_MEASURED",
       "step_id": "36",
@@ -2074,12 +2085,12 @@
         "phase3/stage4/documentation/ic/*/documentation_manifest.yaml"
       ],
       "consumer_gates": [
-        "tapeout_precheck",
-        "tapeout_docs_gen",
-        "release_docs_check",
-        "every_required_metric_key_has_a_producer",
+        "closed_loop_executed_reentry_census",
         "closed_loop_metric_reaches_its_producer",
-        "closed_loop_executed_reentry_census"
+        "every_required_metric_key_has_a_producer",
+        "release_docs_check",
+        "tapeout_docs_gen",
+        "tapeout_precheck"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -2136,13 +2147,15 @@
       },
       "arm_id": "release_38",
       "canonical_outputs": [
+        "reports/audit/tapeout_checklist.json",
         "phase3/stage4/foundry_handoff/mask_spec.json",
         "phase3/stage4/foundry_handoff/wat_plan.json",
         "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",
         "phase3/stage4/foundry_handoff/corner_test_vectors.json"
       ],
       "consumer_gates": [
-        "foundry_handoff_package_check"
+        "foundry_handoff_package_check",
+        "tapeout_signoff_check"
       ],
       "default_rank": 0,
       "disposition": "implemented",
@@ -2174,7 +2187,8 @@
       ],
       "notes": "Source-owned release composition; runtime qualification remains receipt-bound.",
       "producer_sites": [
-        "foundry_handoff_pack_gen.py:main"
+        "foundry_handoff_pack_gen.py:main",
+        "tapeout_checklist_gen.py:main"
       ],
       "runtime_status": "NOT_MEASURED",
       "step_id": "38",
@@ -2191,10 +2205,10 @@
         "reports/phase2/fpga/on_board_pass.json"
       ],
       "consumer_gates": [
-        "stage4_compliance",
-        "stage_on_pass_review",
         "fpga_on_board_attestation_check",
-        "hw_vs_rtl_verdict_check"
+        "hw_vs_rtl_verdict_check",
+        "stage4_compliance",
+        "stage_on_pass_review"
       ],
       "default_rank": 0,
       "disposition": "unavailable",
