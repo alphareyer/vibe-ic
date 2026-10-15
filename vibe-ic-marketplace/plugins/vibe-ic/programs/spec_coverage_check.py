@@ -1705,7 +1705,8 @@ def _requirement_text(text: str) -> str:
     def requirements(value, path=()):
         if isinstance(value, dict):
             return {key: requirements(item, path + (key,)) for key, item in value.items()
-                    if key != "provenance" and not key.endswith("_provenance")}
+                    if key != "provenance" and not key.endswith("_provenance")
+                    and item is not None and item != [] and item != {}}
         if isinstance(value, list):
             return [requirements(item, path) for item in value]
         if isinstance(value, str):
@@ -1743,13 +1744,14 @@ def _modulo_unsigned_selection(text: str):
     choice = re.search(
         r'(?:\b(?:chosen|declared|selected)\s+interpretation\s*[:=]\s*'
         r'|["\']integer_encoding["\']\s*:\s*["\'])(unsigned)\b', text, re.I)
-    equivalent = re.search(
+    equivalent = re.compile(
         r"\bsigned\s+(?:and|or)\s+unsigned\b[^\n]{0,120}\bidentical\b"
         r"[^\n]{0,80}\bmodulo[- ]?2\s*\^\s*(?:[A-Za-z_]\w*|\d+)"
-        r"[^\n]{0,40}\b(?:product\s+)?bit\s+patterns\b", text, re.I)
-    if choice is None or equivalent is None:
+        r"[^\n]{0,40}\b(?:product\s+)?bit\s+patterns\b", re.I)
+    if choice is None or not equivalent.search(text):
         return None
-    other = text[:equivalent.start()] + text[equivalent.end():]
+    # The same permission may be repeated at several stations.
+    other = equivalent.sub("", text)
     if _mention_present_unnegated(other, r"\bsigned\b"):
         return None  # an independent signed requirement still owns its obligation
     return choice
@@ -2020,11 +2022,20 @@ def extract_chain(stations: dict) -> List[ChecklistItem]:
     last_station + STATION_ROUTE at attribution time.
     """
     merged: "dict[tuple, ChecklistItem]" = {}
+    # A permitted modulo interpretation and its declared choice can live at
+    # different input-chain stations. Read their joint context before merging;
+    # an independent signed requirement still prevents this selection.
+    selected = _modulo_unsigned_selection("\n".join(
+        stations.get(st) or "" for st in STATION_ORDER))
     for st in STATION_ORDER:
         text = stations.get(st)
         if not text:
             continue
         for it in extract_checklist(text):
+            if selected is not None and it.kind == "signedness":
+                it.requirement = "signed-ness: unsigned"
+                it.coverage_tokens = ["unsigned"]
+                it.evidence += "; " + selected.group(0)
             k = _item_key(it)
             if k in merged:
                 if st not in merged[k].stations:
@@ -3367,6 +3378,9 @@ _LDOC_UNEXTRACTED_STATUS = "NOT_YET_EXTRACTED"
 def _strip_scaffold(node, path=()):
     """Recursively drop `_LDOC_SCAFFOLD_KEYS` from a parsed L-doc."""
     if isinstance(node, dict):
+        if str(node.get("status", "")).strip().lower() in {
+                "not-applicable", "not_applicable", "not applicable", "n/a"}:
+            return {}  # this typed subtree contributes no feature obligations
         return {k: _strip_scaffold(v, path + (k,)) for k, v in node.items()
                 if k not in _LDOC_SCAFFOLD_KEYS
                 and not (k == "source" and "integration" in path
@@ -3416,6 +3430,39 @@ def _read(path: str, what: str) -> str:
     return _ldoc_design_text(p.read_text(errors="replace"))
 
 
+def _canonical_integer_choice(ldocs: Optional[str]):
+    """Read the existing spec-declared choice from the canonical L-doc project.
+
+    This is an input, never a choice inferred from RTL or a neighboring file.
+    Noncanonical exports and missing/ambiguous declarations keep the ordinary
+    input-only interpretation; this consumer does not mint a default.
+    """
+    if not ldocs:
+        return None
+    import _path_layout as layout
+    import spec_declaration_emit as declarations
+    docs = Path(ldocs).resolve()
+    if len(docs.parents) < 2:
+        return None
+    project = docs.parent.parent
+    if docs != layout.generated_docs_dir(project).resolve():
+        return None
+    contract, _, _ = declarations.select_contract(project)
+    if not contract or not any(field["name"] == "integer_encoding"
+                               for field in contract["fields"]):
+        return None
+    try:
+        path = declarations._contained_artifact_path(project, contract["artifact_path"])
+        raw = path.read_bytes()
+        choice = json.loads(raw).get("integer_encoding")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(choice, str) or choice not in {"signed", "unsigned"}:
+        return None
+    return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+            "integer_encoding": choice}
+
+
 def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(
         description="Spec-first coverage attribution gate across the whole "
@@ -3460,7 +3507,13 @@ def main(argv: List[str]) -> int:
         print(f"[ERROR] cannot read input: {e}", file=sys.stderr)
         return 2
 
+    choice = _canonical_integer_choice(args.ldocs)
+    if choice is not None:
+        stations["l_docs"] += "\n" + json.dumps({
+            "integer_encoding": choice["integer_encoding"]})
     report = run(stations, rtl_text, tb_text, args.failure, args.strict)
+    if choice is not None:
+        report["declared_choice_source"] = choice
 
     if args.json:
         out = Path(args.json)
