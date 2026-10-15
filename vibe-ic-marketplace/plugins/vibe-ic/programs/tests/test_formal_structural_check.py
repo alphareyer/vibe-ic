@@ -234,3 +234,32 @@ def test_guarded_boolean_roles_normal_cli_has_actual_feasible_domains(tmp_path, 
     if case == "mixed-sense":
         assert all(row["native_queries"]["high"] == "REFUTED" and
                    row["native_queries"]["low"] == "REFUTED" for row in mapping["rows"]), mapping
+    if case == "qualified-retain":
+        assert mapping["state_model"] == "raw_pre_cleanup_current_source", mapping
+        assert mapping["optimized_projection_explained"] is True, mapping
+        assert len(mapping["rows"]) == len(mapping["raw_identities"]) == 2, mapping
+        assert all(not p["optimized_q"] and p["optimized_constants"] == ["0"]
+                   for p in mapping["optimized_identity_projection"]), mapping
+        binding = mapping["source_binding"]
+        assert binding["rtl_sha256"] == rec["rtl_sha256"], rec
+        assert binding["raw_netlist_sha256"] and binding["optimized_netlist_sha256"], rec
+        assert binding["scope"].endswith("not optimized-state coverage"), rec
+
+
+def test_data_mux_value_cannot_be_promoted_to_outer_mask_control(tmp_path):
+    """A native true implication under data=0 is not reset-role provenance."""
+    _yosys()
+    rtl, output = tmp_path / "m.v", tmp_path / "mapping.json"
+    rtl.write_text("module m(input clk,rst,d,en,clear,output reg q);\n"
+                   " always @(posedge clk) q <= (rst ? d : (d | en)) & clear;\nendmodule\n")
+    rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+        "reset_polarity:rst:active_high", "--work-dir", str(tmp_path), "--json", str(output)])
+    rec = json.loads(output.read_text())
+    assert rc == 1 and rec["verdict"] == fsc.NOT_DISCHARGED, rec
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert len(mapping["raw_identities"]) == len(mapping["rows"]) == 1, mapping
+    assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+    assert mapping["unresolved"] and not mapping["complete"], mapping
+    assert all(row["classification"] == "UNRESOLVED_DATA_DEPENDENCE" for row in mapping["rows"]), mapping
+    assert not any(role["reachable"] and role["role"] in {"FORCE_ZERO", "FORCE_ONE"}
+                   for row in mapping["rows"] for role in row["conditional_roles"]), mapping

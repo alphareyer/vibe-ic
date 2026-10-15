@@ -546,6 +546,37 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
         signed = _param_bit(cell.get("parameters", {}).get(pin + "_SIGNED"))
         return values[-1] if signed and values else "0"
 
+    def mask_control(bit, seen=frozenset()):
+        """A data-branch result is not a reset control merely by cone reach.
+
+        Preserve original mux provenance all the way through the candidate
+        mask predicate. A select between two variable data expressions must
+        stay data even when another AND/OR surrounds it. Literal branches
+        retain their explicit force provenance. Other native Boolean control
+        expressions keep their original gate semantics; no data cube is mined.
+        """
+        if not isinstance(bit, int) or bit in free or bit == reset_bit:
+            return bit not in {"x", "z"}
+        if bit in seen:
+            return False
+        cell = drivers.get(bit)
+        if cell is None:
+            return False
+        conn = cell.get("connections") or {}
+        seen = seen | {bit}
+        if cell.get("type") in {"$mux", "$bwmux"}:
+            try:
+                index = conn["Y"].index(bit)
+                a, b = input_bit(cell, "A", index), input_bit(cell, "B", index)
+            except (IndexError, KeyError, ValueError):
+                return False
+            if a != b and a not in {"0", "1"} and b not in {"0", "1"}:
+                return False
+        return all(mask_control(value, seen)
+                   for pin, values in conn.items()
+                   if cell.get("port_directions", {}).get(pin) == "input"
+                   for value in values)
+
     def d_roles(bit, arm, q, seen=frozenset()):
         """Conditional source roles, without solving for convenient data values.
 
@@ -587,7 +618,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 left, right = input_bit(cell, "A", i), input_bit(cell, "B", i)
                 a, b = d_roles(left, arm, q, seen), d_roles(right, arm, q, seen)
                 controls = [v for v in (left, right) if isinstance(v, int) and v in cone]
-                if len(controls) == 1 and kind in {"$and", "$or"}:
+                if len(controls) == 1 and kind in {"$and", "$or"} and mask_control(controls[0]):
                     control = controls[0]
                     data = b if control == left else a
                     select = remap(control, arm)
@@ -603,6 +634,9 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                         "control_bits": [control],
                         "branch_roles": "dominating Boolean mask / unchanged data"})
                 elif kind == "$and":
+                    if len(controls) == 1:
+                        role_provenance.append({"output_bit": bit, "kind": kind,
+                            "control_bits": [], "branch_roles": "data-mux result is not a mask control"})
                     answer = (either(a[0], b[0]), both(a[1], b[1]),
                               either(both(a[2], b[1]), both(b[2], a[1])))
                 elif kind == "$or":
@@ -772,6 +806,40 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     if tm is None:
         return dict(result, unresolved=["missing current netlist"])
     _, mod = tm
+    # opt_dff can replace a reset-only Q by a constant, or merge source Q
+    # identities. That optimized representation cannot supply the complete
+    # independent current-state denominator. Use the SAME invocation's raw
+    # proc/flatten twin as one whole model in that case; do not invent an
+    # optimized Q, drop the identity, or combine unrelated state snapshots.
+    raw_tm = _top_module(raw, top) if isinstance(raw, dict) else None
+    result["state_model"] = "optimized_current_source"
+    if raw_tm is not None:
+        raw_mod = raw_tm[1]
+        raw_q_bits = {q for _, c, k in _cells(raw_mod) if k == "ff" for q in _bits(c, "Q")}
+        optimized_q = {q for _, c, k in _cells(mod) if k == "ff" for q in _bits(c, "Q")}
+        projection = {q: set() for q in raw_q_bits}
+        values = {q: set() for q in raw_q_bits}
+        for name, net in (raw_mod.get("netnames") or {}).items():
+            other = (mod.get("netnames") or {}).get(name, {}).get("bits") or []
+            for index, q in enumerate(net.get("bits") or []):
+                if q in raw_q_bits and index < len(other):
+                    target = other[index]
+                    if target in optimized_q:
+                        projection[q].add(target)
+                    elif isinstance(target, str):
+                        values[q].add(target)
+        targets = [next(iter(bits)) for bits in projection.values() if len(bits) == 1]
+        result["optimized_identity_projection"] = [
+            {"raw_q": q, "optimized_q": sorted(projection[q]),
+             "optimized_constants": sorted(values[q])} for q in sorted(raw_q_bits)]
+        explained = all((len(projection[q]) == 1 and not values[q]) or
+                        (not projection[q] and len(values[q]) == 1 and values[q] <= {"0", "1"})
+                        for q in raw_q_bits)
+        result["optimized_projection_explained"] = explained
+        if explained and (any(values.values()) or len(set(targets)) != len(targets)):
+            mod = raw_mod
+            result["state_model"] = "raw_pre_cleanup_current_source"
+            result["state_model_reason"] = "optimization eliminated or merged original current-Q identities"
     bit, why = _port_bit(mod, signal)
     if bit is None:
         return dict(result, unresolved=[why])
@@ -782,7 +850,6 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     model, rows = _transition_pair(mod, bit)
     result["rows"] = rows
     # Map every raw Q bit into current Q using an exact common alias/index.
-    raw_tm = _top_module(raw, top) if isinstance(raw, dict) else None
     identities = []
     current_q = {r["q"] for r in rows}
     if raw_tm is None:
@@ -1394,7 +1461,8 @@ def elaborations(rtl_files: List[Path], top: str, work_dir: Path,
     rrc, _rl, rpath = run_yosys(rtl_files, top, work_dir, container, simdef,
                                 tag="_raw", passes=RAW_PASSES)
     return [{"defines": f"chip read ({simdef.strip() or 'no -D'})", "rc": rc,
-             "path": path, "netlist": _load(rc, path), "raw": _load(rrc, rpath)}]
+             "path": path, "netlist": _load(rc, path), "raw": _load(rrc, rpath),
+             "raw_path": rpath, "raw_rc": rrc}]
 
 
 def check(rtl_files: List[Path], top: str, claims: List[dict],
@@ -1442,6 +1510,11 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
                 mappings[i, signal] = reset_control_mapping(
                     e["netlist"], e["raw"], top, signal,
                     work_dir / f"reset_transition_{i}_{signal.encode().hex()}", container)
+                mappings[i, signal]["source_binding"] = {
+                    "rtl_sha256": record["rtl_sha256"], "defines": e["defines"],
+                    "optimized_netlist_sha256": file_sha256(e["path"]),
+                    "raw_netlist_sha256": file_sha256(e["raw_path"]),
+                    "scope": "same-invocation source next-state roles; not optimized-state coverage"}
     results = []
     for claim in claims:
         answers = []
