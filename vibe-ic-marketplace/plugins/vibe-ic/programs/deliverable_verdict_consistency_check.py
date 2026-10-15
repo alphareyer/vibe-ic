@@ -392,7 +392,8 @@ def _prose_success_claim(text: str) -> Optional[str]:
             if (not adjective_tail or
                     re.match(r"\s*(?:claim|assert|declar|state)\w*\b", tail, re.I) or
                     (claim_after and not re.search(
-                        r"\b(?:is|are|was|were|has|have|remains?)\b", tail, re.I))):
+                        r"\b(?:is|are|was|were|has|have|remains?|"
+                        r"(?:claim|assert|declar|state)\w*)\b", tail, re.I))):
                 denied = True
                 break
         # Also accept the ordinary passive disclaimer "ready is not claimed".
