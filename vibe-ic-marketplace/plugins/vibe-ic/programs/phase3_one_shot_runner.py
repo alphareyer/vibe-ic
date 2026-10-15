@@ -59017,6 +59017,8 @@ def step_declared_signoff_gates(project: Path,
     except Exception as _exc:
         print(f"[phase3] clock-target provenance emit non-fatal: {_exc}")
     out: List[StepResult] = []
+    # Default reads every gate in table order on its single local owner.
+    # Ultra retains the independent first wave below.
     # These readers have disjoint outputs AND per-step metric writers.
     # sta_signoff and sta_corner both write Step-23 metrics, so corner follows
     # the first wave. sta_record then reads corner's report. Clock disclosure
@@ -59024,13 +59026,15 @@ def step_declared_signoff_gates(project: Path,
     parallel_names = {"sta_signoff", "sta_architectural_residual",
                       "em_signoff"}
     parallel_rows = {}
-    with ThreadPoolExecutor(max_workers=len(parallel_names)) as pool:
-        jobs = {}
-        for spec in _DECLARED_SIGNOFF_GATES:
-            if spec[0] in parallel_names and spec[0] not in skip_names:
-                jobs[spec[0]] = pool.submit(
-                    _run_declared_signoff_gate, project, *spec)
-        parallel_rows = {name: job.result() for name, job in jobs.items()}
+    import execution_policy
+    if execution_policy.request()['mode'] != 'default':
+        with ThreadPoolExecutor(max_workers=len(parallel_names)) as pool:
+            jobs = {}
+            for spec in _DECLARED_SIGNOFF_GATES:
+                if spec[0] in parallel_names and spec[0] not in skip_names:
+                    jobs[spec[0]] = pool.submit(
+                        _run_declared_signoff_gate, project, *spec)
+            parallel_rows = {name: job.result() for name, job in jobs.items()}
     for name, program, out_rel, extra_argv in _DECLARED_SIGNOFF_GATES:
         if name in skip_names:
             continue

@@ -404,6 +404,9 @@ def test_default_retains_the_existing_individual_layout_release_producers(tmp_pa
     assert runner._phase3_window_sites('31', '31') == ['default_backend']
     import test_default_step31_owner as current31
     current31.current_window(tmp_path, monkeypatch)
+    assert runner._phase3_window_sites('37.3', '37.3') == ['default_backend']
+    # The legacy individual XOR site belongs to the explicit Ultra context.
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
     assert runner._phase3_window_sites('37.3', '37.3') == ['gds_xor']
 
 
@@ -897,13 +900,15 @@ def test_default_main_stops_after_failed_repair_even_when_a_route_remains(tmp_pa
         return original_gate(*args, **kwargs)
 
     monkeypatch.setattr(runner, 'step_prestream_gate', subsequent_gate)
-    runner.main()
+    assert runner.main() != 0
     assert later == []
     assert 'gds' not in transport.called
     rows = _plan(project)
     assert rows['routed_electrical']['status'] == 'FAIL'
     assert 'selected repair measured a remaining violation' in rows['routed_electrical']['detail']
-    assert rows['gds']['status'] == 'NOT_MEASURED'
+    # Default aborts before stream dispatch. An unexecuted site has no result
+    # row; the measured repair FAIL remains the run's evidence.
+    assert 'gds' not in rows
 
 
 def test_default_main_preserves_completed_inputs_before_repair(tmp_path, monkeypatch):
