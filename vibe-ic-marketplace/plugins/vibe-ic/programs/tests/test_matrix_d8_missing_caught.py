@@ -571,6 +571,15 @@ def _materialize(project: Path, step: Dict[str, Any],
     if consumes_declaration(step):
         declare_no_reuse(project)
 
+    # The synthesis netlist moved from Step 14's outputs to its actual
+    # upstream owner, Step 9. Keep that declared input present when probing
+    # Step 14's own outputs; a drop must not remove another step's input.
+    if F.normalize_id(step.get("id")) == "14":
+        handoff = [item for item in step.get("required_inputs", [])
+                   if str(item.get("from")) == "9" and item.get("path")]
+        assert len(handoff) == 1, handoff
+        _write(project, handoff[0]["path"], fixture_body(handoff[0]["path"]))
+
     for pat in _condition_patterns(step):
         _write(project, concretize(pat), _COND_BODY)
 
@@ -1771,7 +1780,12 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     "A6": "NOT_MEASURED",
     "A8": "NOT_MEASURED",
     "28": "NOT_MEASURED",
-    "30": "NOT_MEASURED",
+    # R3 observed FAIL on the same generic output seed. The current Step-30
+    # reader now requires validate_current_step30's producer/execution binding;
+    # generic correlation JSON is not that receipt. Its missing-current
+    # SPICE_CURRENT_INPUTS_UNBOUND refusal is stronger than the old no_spef NM.
+    # No native positive is fabricated and no PASS-tier member is removed.
+    "30": "FAIL",
     # The real SI and DFM content gates reject the seeded placeholder files.
     # This is a stronger refusal on this fixture, not a claim of design PASS.
     "32": "FAIL",
@@ -1815,6 +1829,9 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
 _PASS_TIER_LABELS = frozenset({"PASS", "PASS_WITH_WAIVERS"})
 
 
+_REAL_GATE_SEEDED_DIAGNOSTICS: Dict[str, Dict[str, Any]] = {}
+
+
 @lru_cache(maxsize=1)
 def _real_gate_seeded_status() -> Dict[str, str]:
     """``{step: seeded status}`` through each step's OWN gate, for EVERY step
@@ -1841,7 +1858,12 @@ def _real_gate_seeded_status() -> Dict[str, str]:
                 _materialize(full, step)
             except AssertionError:
                 continue
-            out[key] = FCC.check_step(full, step, {}).status
+            result = FCC.check_step(full, step, {})
+            out[key] = result.status
+            _REAL_GATE_SEEDED_DIAGNOSTICS[key] = {
+                "status": result.status, "reason_class": result.reason_class,
+                "reasons": list(result.reasons), "gate_output": result.gate_output,
+            }
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     return out
@@ -1929,7 +1951,8 @@ def test_d8_downgrade_is_reachable_through_each_steps_own_real_gate():
         f"INTO a PASS tier is the repair this map exists to make visible — "
         f"return the step to REAL_GATE_PASS_TIER_STEPS in the change that "
         f"earns it. Any other move is a new fact about that step's own gate "
-        f"and must be recorded with its cause."
+        f"and must be recorded with its cause. Current gate details: "
+        f"{ {k: _REAL_GATE_SEEDED_DIAGNOSTICS.get(k) for k in moved}!r}"
     )
     assert not (set(REAL_GATE_LEFT_THE_PASS_TIER) & set(measured)), (
         f"a step is in BOTH pins: "

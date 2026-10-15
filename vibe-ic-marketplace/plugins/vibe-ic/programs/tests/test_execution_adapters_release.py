@@ -406,7 +406,7 @@ def test_canonical_release_gate_argv_preserves_duplicate_and_mode_arguments(tmp_
     assert commands.count("flow_step_output_content_check . --mode netlist") == 1
     assert "flow_compliance_check . --stage-id stage_analog --strict --json reports/analog/stage_analog_compliance.json" in commands
     assert "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json" in [
-        item["command"] for item in _canonical_gate_invocations("36", tmp_path)]
+        item["command"] for item in _canonical_gate_invocations("38", tmp_path)]
     assert "digital_hardmacro_check . --json reports/phase3/digital_hardmacro.json" in [
         item["command"] for item in _canonical_gate_invocations("37.5ip", tmp_path)]
     assert "release_docs_check . --arm ip --json reports/phase3/release_docs.json" in [

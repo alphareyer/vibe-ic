@@ -158,14 +158,14 @@ _EXPECTED_CALL_ARGS = ("project", "pdk.name", "args.container")
 
 
 def _signoff_gate_call_args():
-    """The wired call's argument expressions, re-derived from the checkout."""
+    """Both Default and Ultra calls, with every argument re-derived."""
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     calls = [n for n in ast.walk(ast.parse(src))
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Name)
              and n.func.id == "step_declared_signoff_gates"]
-    assert len(calls) == 1, [ast.unparse(c) for c in calls]
-    return tuple(ast.unparse(a) for a in calls[0].args)
+    assert len(calls) == 2, [ast.unparse(c) for c in calls]
+    return tuple(tuple(ast.unparse(a) for a in call.args) for call in calls)
 
 
 def test_the_call_site_passes_the_runs_pdk():
@@ -177,13 +177,12 @@ def test_the_call_site_passes_the_runs_pdk():
     a positional swap, a renamed source, or a second argument replaced by
     another expression all leave the COUNT true and this assertion false.
     """
-    got = _signoff_gate_call_args()
-    assert got == _EXPECTED_CALL_ARGS, (
-        f"the wired call forwards {got!r}, expected {_EXPECTED_CALL_ARGS!r}")
-    assert len(got) == len(_EXPECTED_CALL_ARGS)
-    # Kept explicitly: the SECOND argument is the load-bearing one, and a
-    # reader of a failure should not have to count tuple positions to see it.
-    assert got[1] == "pdk.name"
+    for got in _signoff_gate_call_args():
+        assert got == _EXPECTED_CALL_ARGS, (
+            f"the wired call forwards {got!r}, expected {_EXPECTED_CALL_ARGS!r}")
+        assert len(got) == len(_EXPECTED_CALL_ARGS)
+        # Check the load-bearing second argument at EVERY wired call.
+        assert got[1] == "pdk.name"
 
 
 def test_a_same_count_substitution_is_caught():
@@ -194,15 +193,15 @@ def test_a_same_count_substitution_is_caught():
     comparison separates them, which is the entire claim of the rule this
     repairs.
     """
-    real = _signoff_gate_call_args()
-    assert real == _EXPECTED_CALL_ARGS, "the fixture must start from the truth"
-    for mutant in (("project", "args.pdk", "args.container"),   # the REQUEST
-                   ("project", "pdk", "args.container"),        # not its name
-                   ("pdk.name", "project", "args.container"),   # swapped
-                   ("run_dir", "pdk.name", "args.container"),   # first replaced
-                   ("project", "pdk.name", "args.image")):      # third replaced
-        assert len(mutant) == len(_EXPECTED_CALL_ARGS), mutant
-        assert mutant != _EXPECTED_CALL_ARGS, mutant
+    for real in _signoff_gate_call_args():
+        assert real == _EXPECTED_CALL_ARGS, "the fixture must start from the truth"
+        for mutant in (("project", "args.pdk", "args.container"),   # the REQUEST
+                       ("project", "pdk", "args.container"),        # not its name
+                       ("pdk.name", "project", "args.container"),   # swapped
+                       ("run_dir", "pdk.name", "args.container"),   # first replaced
+                       ("project", "pdk.name", "args.image")):      # third replaced
+            assert len(mutant) == len(_EXPECTED_CALL_ARGS), mutant
+            assert mutant != _EXPECTED_CALL_ARGS, mutant
 
 
 def _code_of(module_name: str, func_name: str) -> str:
