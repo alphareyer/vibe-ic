@@ -579,22 +579,28 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
             # An explicitly staged operator source is an input; the default
             # fetch destination is not invented as a pre-existing input.
             path = Path(template)
-            try:
-                source = Path(os.path.abspath(path if path.is_absolute() else root / path))
-                source.resolve().relative_to(root.resolve())
-                # Keep the contained lexical alias: its target may change
-                # later, and current-input checks must reopen that same name.
-                path = source.relative_to(root.resolve())
-            except ValueError:
-                # Preserve Default's existing external-template producer
-                # route, including relative/symlink spellings. The local
-                # collector cannot snapshot external files safely, so this
-                # keeps historical acceptance with unmeasured freshness.
+            unbound_reason = None
+            if '..' in path.parts:
+                # Parent traversal after a symlink has producer-specific
+                # semantics; preserve execution with unknown freshness.
+                unbound_reason = 'TEMPLATE_PARENT_COMPONENT_UNBOUND'
+            else:
+                try:
+                    source = path if path.is_absolute() else root / path
+                    source.resolve().relative_to(root.resolve())
+                    # Keep the contained lexical alias: its target may change
+                    # later, and current-input checks must reopen that same name.
+                    path = source.relative_to(root.resolve())
+                except ValueError:
+                    unbound_reason = 'EXTERNAL_TEMPLATE_OUTSIDE_PROJECT'
+            if unbound_reason:
+                # Preserve the existing producer route when its source cannot
+                # be bound by the collector's safe project-local namespace.
                 if parameters is not None:
                     parameters['resolved_input_manifest'] = {
                         'files': {}, 'declarations': declarations, 'missing': [],
                         'input_freshness': 'NOT_MEASURED',
-                        'input_freshness_reason': 'EXTERNAL_TEMPLATE_OUTSIDE_PROJECT',
+                        'input_freshness_reason': unbound_reason,
                     }
                 return {}
             declarations.append(str(path))

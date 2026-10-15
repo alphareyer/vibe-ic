@@ -196,3 +196,43 @@ def test_contained_operator_alias_tracks_the_template_the_producer_reads(tmp_pat
         "original_owner_and_A_unchanged": True,
     }, indent=2))
     assert current["current_inputs"] is (not retarget), current
+
+
+def test_parent_component_operator_alias_preserves_producer_and_unknown_freshness(tmp_path, monkeypatch):
+    import submission_template_ingest as ingest
+
+    project = _project(tmp_path)
+    template = "DIE_AREA: [0, 0, 100, 100]\nCORE_AREA: [10, 10, 90, 90]\nSEAL_RING_WIDTH: 10\nFP_SIZING: absolute\npads: [neutral_pad]\n"
+    a = _write(project, "sub/operator_A/neutral.yaml", template)
+    actual = _write(project, "sub/operator_B/neutral.yaml", template)
+    decoy = _write(project, "operator_B/neutral.yaml", template + "# Different lexical parent.\n")
+    alias = project / "operator_link"
+    alias.symlink_to(a.parent, target_is_directory=True)
+    spelling = "operator_link/../operator_B"
+    answers = project / "input/step_0_5ic_answers.json"
+    own = json.loads(answers.read_text())
+    own["operator_template"].update(path=spelling, slot="neutral")
+    answers.write_text(json.dumps(own))
+    owner_before, decoy_before = answers.read_bytes(), decoy.read_bytes()
+    _external_fetch_boundary(monkeypatch)
+    assert phase1._run_step_0_5ic(project, pdk="gf180mcuD") == 0
+    original = versions.latest_pass(project, "0.5ic")
+    assert original is not None and original["canonical_pass"]
+    actual.write_text(actual.read_text() + "# Actual producer source changed.\n")
+    readback = ingest.build_record(project, str(project / spelling), "neutral", "Neutral declared operator source.")
+    assert Path(readback["lookup"]["template_root"]) == actual.parent.resolve()
+    assert readback["slots"] and Path(readback["slots"][0]["source_file"]) == actual
+    current = versions.latest_pass(project, "0.5ic")
+    assert answers.read_bytes() == owner_before and decoy.read_bytes() == decoy_before
+    _write(project, "API_OBSERVATION_PARENT_ALIAS.json", json.dumps({
+        "bound_inputs": current["inputs"], "current_inputs": current["current_inputs"],
+        "original_current_inputs": original["current_inputs"],
+        "input_freshness": current.get("input_freshness"),
+        "input_freshness_reason": current.get("input_freshness_reason"),
+        "real_ingest_template_root": readback["lookup"]["template_root"],
+        "real_ingest_source_file": readback["slots"][0]["source_file"],
+        "owner_and_decoy_unchanged": True,
+    }, indent=2))
+    assert current["current_inputs"] is False, current
+    assert current["input_freshness"] == "NOT_MEASURED"
+    assert current["input_freshness_reason"] == "TEMPLATE_PARENT_COMPONENT_UNBOUND"
