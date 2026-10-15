@@ -902,13 +902,20 @@ def _query_result(body: str) -> str:
 
 def _transition_query_progress(log: str, planned: List[str]) -> dict:
     """Read only terminal-marked queries; started/truncated work remains UNKNOWN."""
-    starts = list(re.finditer(r"(?m)^VIBEIC_TRANSITION_QUERY ([^\s]+)\s*$", log))
-    terminals = {m.group(1) for m in re.finditer(
-        r"(?m)^VIBEIC_TRANSITION_COMPLETE ([^\s]+)\s*$", log)}
     bodies = {}
-    for index, match in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(log)
-        bodies[match.group(1)] = log[match.end():end]
+    terminals = set()
+    current = None
+    for line in log.splitlines(keepends=True):
+        record, separator, identifier = line.rstrip().partition(" ")
+        if (separator and identifier and len(identifier.split()) == 1 and
+                record in {"VIBEIC_TRANSITION_QUERY", "VIBEIC_TRANSITION_COMPLETE"}):
+            if record == "VIBEIC_TRANSITION_QUERY":
+                current = identifier
+                bodies[current] = ""
+            else:
+                terminals.add(identifier)
+        elif current is not None:
+            bodies[current] += line
     by_identity = {}
     for ident in planned:
         if ident in terminals and ident in bodies:
