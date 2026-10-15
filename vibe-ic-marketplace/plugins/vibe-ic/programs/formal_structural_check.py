@@ -844,6 +844,87 @@ def _transition_pair(mod: dict, reset_bit: int,
     return {"modules": {"transition_pair": module}}, rows
 
 
+def _native_text(value) -> str:
+    """Return a stable text form for subprocess streams, including timeout bytes."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _native_query_run(argv: List[str], timeout: int = 120) -> Tuple[int, str, str, dict]:
+    """Run one native query batch without discarding a timeout's partial streams.
+
+    A timeout is not a successful native result.  Its output is nevertheless
+    evidence for query markers which completed before the process was killed.
+    """
+    try:
+        process = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return process.returncode, _native_text(process.stdout), _native_text(process.stderr), {
+            "termination": "COMPLETED", "native_exit_code": process.returncode}
+    except subprocess.TimeoutExpired as exc:
+        stdout = getattr(exc, "stdout", None)
+        if stdout is None:
+            stdout = exc.output
+        return 124, _native_text(stdout), _native_text(exc.stderr), {
+            "termination": "TIMEOUT", "native_exit_code": 124,
+            "timeout_seconds": timeout, "error": str(exc)}
+    except OSError as exc:
+        return 127, "", "", {"termination": "TOOL_UNAVAILABLE", "native_exit_code": 127,
+                               "error": str(exc)}
+
+
+def _native_artifacts(work_dir: Path, stem: str, stdout: str, stderr: str, run: dict) -> dict:
+    """Persist distinct native streams and return compact readback metadata."""
+    stdout_path = work_dir / f"{stem}.stdout"
+    stderr_path = work_dir / f"{stem}.stderr"
+    log_path = work_dir / f"{stem}.log"
+    _aa.write_text(stdout_path, stdout)
+    _aa.write_text(stderr_path, stderr)
+    _aa.write_text(log_path, stdout + stderr)
+    return dict(run, stdout_sha256=file_sha256(stdout_path), stderr_sha256=file_sha256(stderr_path),
+                log_sha256=file_sha256(log_path), stdout_bytes=len(stdout.encode("utf-8")),
+                stderr_bytes=len(stderr.encode("utf-8")))
+
+
+def _query_result(body: str) -> str:
+    if "SAT proof finished - no model found: SUCCESS!" in body:
+        return "PROVED"
+    if "SAT proof finished - model found: FAIL!" in body:
+        return "REFUTED"
+    if "SAT solving finished - no model found." in body:
+        return "NO_UNDEF"
+    if "SAT solving finished - model found:" in body:
+        return "HAS_UNDEF"
+    return "UNKNOWN"
+
+
+def _transition_query_progress(log: str, planned: List[str]) -> dict:
+    """Read only terminal-marked queries; started/truncated work remains UNKNOWN."""
+    starts = list(re.finditer(r"(?m)^VIBEIC_TRANSITION_QUERY ([^\s]+)\s*$", log))
+    terminals = {m.group(1) for m in re.finditer(
+        r"(?m)^VIBEIC_TRANSITION_COMPLETE ([^\s]+)\s*$", log)}
+    bodies = {}
+    for index, match in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(log)
+        bodies[match.group(1)] = log[match.end():end]
+    by_identity = {}
+    for ident in planned:
+        if ident in terminals and ident in bodies:
+            by_identity[ident] = {"status": "COMPLETED", "result": _query_result(bodies[ident])}
+        elif ident in bodies:
+            by_identity[ident] = {"status": "UNKNOWN", "result": "UNKNOWN",
+                                  "reason": "query started without native terminal marker"}
+        else:
+            by_identity[ident] = {"status": "NOT_STARTED", "result": "UNKNOWN"}
+    return {"planned": len(planned), "started": sum(k in bodies for k in planned),
+            "completed": sum(v["status"] == "COMPLETED" for v in by_identity.values()),
+            "unknown": sorted(k for k, v in by_identity.items() if v["status"] == "UNKNOWN"),
+            "not_started": sorted(k for k, v in by_identity.items() if v["status"] == "NOT_STARTED"),
+            "by_identity": by_identity}
+
+
 def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
                               container: Optional[str] = None) -> Tuple[dict, dict]:
     """Native cofactor support, conservatively bounding shared payload roots.
@@ -866,15 +947,13 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
         argv = ce.exec_argv(container, f"yosys -Q -T -s {ys.resolve()}", tag="formal_structural_check")
     else:
         argv = ["yosys", "-Q", "-T", "-s", str(ys.resolve())]
-    try:
-        process = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-        rc, log = process.returncode, process.stdout + process.stderr
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        rc, log = 127, str(exc)
-    _aa.write_text(log_path, log)
+    rc, stdout, stderr, run = _native_query_run(argv)
+    log = stdout + stderr
+    native = _native_artifacts(work_dir, "cofactor_support", stdout, stderr, run)
     info = {"native_exit_code": rc, "status": "UNAVAILABLE", "rows": [],
             "input_sha256": file_sha256(initial), "script_sha256": file_sha256(ys),
-            "log_sha256": file_sha256(log_path), "scope": "native normalized structural support; conservative"}
+            "log_sha256": native["log_sha256"], "native_run": native,
+            "scope": "native normalized structural support; conservative"}
     payloads = {}
     try:
         if rc:
@@ -1054,7 +1133,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     _aa.write_json(model_path, model)
     script = [f"read_json {model_path.resolve()}", "hierarchy -top transition_pair",
               "log VIBEIC_TRANSITION_QUERY domain",
-              "sat -timeout 10 -enable_undef -set-def-inputs -show-inputs"]
+              "sat -timeout 10 -enable_undef -set-def-inputs -show-inputs",
+              "log VIBEIC_TRANSITION_COMPLETE domain"]
     specs = {}
     for i, row in enumerate(rows):
         if row.get("unsupported"):
@@ -1083,6 +1163,7 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             script.append("log VIBEIC_TRANSITION_QUERY " + ident)
             option = f"-set-any-undef {ports[port]}" if value is None else f"-prove {ports[port]} {value}"
             script.append(f"sat -timeout 10 -enable_undef -set-def-inputs {option} -show-inputs -show-outputs")
+            script.append("log VIBEIC_TRANSITION_COMPLETE " + ident)
     ys = work_dir / "transition_pair.ys"
     _aa.write_text(ys, "\n".join(script) + "\n")
     inner = f"yosys -Q -T -s {ys.resolve()}"
@@ -1091,30 +1172,17 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         argv = ce.exec_argv(container, inner, tag="formal_structural_check")
     else:
         argv = ["yosys", "-Q", "-T", "-s", str(ys.resolve())]
-    try:
-        process = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-        rc, log = process.returncode, process.stdout + process.stderr
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        rc, log = 127, str(exc)
-    _aa.write_text(work_dir / "transition_pair.log", log)
-    domain = log.split("VIBEIC_TRANSITION_QUERY domain", 1)[-1].split(
-        "VIBEIC_TRANSITION_QUERY 0_", 1)[0]
-    domain_reachable = "SAT solving finished - model found:" in domain
+    rc, stdout, stderr, run = _native_query_run(argv)
+    log = stdout + stderr
+    native = _native_artifacts(work_dir, "transition_pair", stdout, stderr, run)
+    progress = _transition_query_progress(log, ["domain", *specs])
+    domain = progress["by_identity"]["domain"]
+    domain_reachable = (domain["status"] == "COMPLETED" and
+                        domain["result"] == "HAS_UNDEF")
     if not domain_reachable:
         result["unresolved"].append("paired current-Q/data domain has no measured reachable witness")
-    sections = re.split(r"(?m)^VIBEIC_TRANSITION_QUERY (\d+_\w+)\s*$", log)
-    answers = {}
-    for ident, body in zip(sections[1::2], sections[2::2]):
-        if "SAT proof finished - no model found: SUCCESS!" in body:
-            answers[ident] = "PROVED"
-        elif "SAT proof finished - model found: FAIL!" in body:
-            answers[ident] = "REFUTED"
-        elif "SAT solving finished - no model found." in body:
-            answers[ident] = "NO_UNDEF"
-        elif "SAT solving finished - model found:" in body:
-            answers[ident] = "HAS_UNDEF"
-        else:
-            answers[ident] = "UNKNOWN"
+    answers = {ident: detail["result"] for ident, detail in progress["by_identity"].items()
+               if ident != "domain"}
     for i, row in enumerate(rows):
         a = {key: answers.get(f"{i}_{key}", "UNKNOWN") for j, key in specs.values() if j == i}
         row["native_queries"] = a
@@ -1172,9 +1240,10 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         if row["classification"] in {"UNSUPPORTED", "UNRESOLVED_DATA_DEPENDENCE"}:
             result["unresolved"].append(f"{row['cell']}.Q[{row['bit_index']}]: {row.get('reason')}")
     result.update(complete=not result["unresolved"], native_exit_code=rc,
+                  native_run=native, query_progress=progress,
                   paired_domain_reachable=domain_reachable,
                   model_sha256=file_sha256(model_path), script_sha256=file_sha256(ys),
-                  log_sha256=file_sha256(work_dir / "transition_pair.log"),
+                  log_sha256=native["log_sha256"],
                   work_dir=str(work_dir), query_count=len(specs))
     return result
 

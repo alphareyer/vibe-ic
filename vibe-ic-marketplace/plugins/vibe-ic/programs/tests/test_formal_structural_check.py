@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -95,6 +96,47 @@ def test_the_cli_both_ways(tmp_path, capsys):
         assert json.loads(out.read_text())["verdict"] == (fsc.PASS if rc == 0 else fsc.REFUTED)
 
 
+def test_timeout_retains_completed_query_progress_and_marks_truncation_unknown(tmp_path, monkeypatch):
+    """Software control: a timeout transcript is evidence, never a complete mapping."""
+    transcript = (b"VIBEIC_TRANSITION_QUERY domain\n"
+                  b"SAT solving finished - model found:\n"
+                  b"VIBEIC_TRANSITION_COMPLETE domain\n"
+                  b"VIBEIC_TRANSITION_QUERY 0_zero1\n"
+                  b"SAT proof finished - no model found: SUCCESS!\n"
+                  b"VIBEIC_TRANSITION_COMPLETE 0_zero1\n"
+                  b"VIBEIC_TRANSITION_QUERY 0_one1\npartial body\n")
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["yosys"], 120, output=transcript, stderr=b"timed out\n")
+
+    monkeypatch.setattr(fsc.subprocess, "run", timeout)
+    rc, stdout, stderr, native = fsc._native_query_run(["yosys"])
+    info, _ = fsc._cofactor_payload_support(
+        {"modules": {"transition_pair": {"ports": {}}}}, [], tmp_path / "cofactor")
+    progress = fsc._transition_query_progress(stdout + stderr,
+                                              ["domain", "0_zero1", "0_one1", "0_high"])
+    assert rc == 124 and native["termination"] == "TIMEOUT", native
+    assert "0_zero1" in stdout and stderr == "timed out\n"
+    assert info["native_run"]["termination"] == "TIMEOUT", info
+    assert (tmp_path / "cofactor" / "cofactor_support.stdout").read_bytes().startswith(
+        b"VIBEIC_TRANSITION_QUERY domain")
+    assert (tmp_path / "cofactor" / "cofactor_support.stderr").read_bytes() == b"timed out\n"
+    assert progress["completed"] == 2 and progress["started"] == 3, progress
+    assert progress["by_identity"]["0_zero1"] == {"status": "COMPLETED", "result": "PROVED"}
+    assert progress["by_identity"]["0_one1"]["status"] == "UNKNOWN", progress
+    assert progress["by_identity"]["0_high"]["status"] == "NOT_STARTED", progress
+
+
+def test_missing_native_tool_is_not_reported_as_timeout(monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("yosys")
+
+    monkeypatch.setattr(fsc.subprocess, "run", missing)
+    rc, stdout, stderr, native = fsc._native_query_run(["yosys"])
+    assert (rc, stdout, stderr) == (127, "", "")
+    assert native["termination"] == "TOOL_UNAVAILABLE" and "yosys" in native["error"]
+
+
 # Paired next-state controls use free, shared current Q/data in native Yosys.
 import pytest  # noqa: E402
 
@@ -135,6 +177,10 @@ def test_complete_reset_mapping_normal_cli_preserves_force_priority_and_unknowns
     mapping = rec["claims"][0].get("reset_control_mapping") or {}
     assert mapping.get("shared_current_q_and_data") is True, rec
     assert mapping.get("paired_domain_reachable") is True, rec
+    progress = mapping["query_progress"]
+    assert progress["planned"] == mapping["query_count"] + 1, mapping
+    assert progress["completed"] == progress["planned"] and not progress["unknown"], mapping
+    assert mapping["native_run"]["termination"] == "COMPLETED", mapping
     assert len(mapping.get("raw_identities") or []) == 2, mapping
     assert all(len(r["current_q"]) == 1 for r in mapping["raw_identities"]), mapping
     assert role in {r["classification"] for r in mapping["rows"]}, mapping
