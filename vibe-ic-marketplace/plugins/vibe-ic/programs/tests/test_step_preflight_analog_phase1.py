@@ -322,7 +322,13 @@ def test_the_analog_runner_gates_every_a_step_of_every_block(tmp_path,
     """The nine call sites are written out, so drift between them,
     `_AI_STEP_NAMES` and `RUNNER_PLANS` is possible. This observes the DISPATCH
     rather than the source text: every A-step of every block must pass through
-    `gate`, at its own site, in `_AI_STEP_NAMES` order."""
+    `gate`, at its own site, in `_AI_STEP_NAMES` order.
+
+    Exercise the supported single-block component entry for each declared block.
+    The spy authors no outputs, so a full-population Default request must stop
+    after A1's real canonical consumer refuses it; that behavior is covered by
+    test_analog_one_shot_runner. This control measures dispatch, not acceptance.
+    """
     import analog_one_shot_runner as A
     import execution_policy as execution
     # main() bootstraps a process-wide runtime; restore it after this
@@ -342,8 +348,11 @@ def test_the_analog_runner_gates_every_a_step_of_every_block(tmp_path,
         return A.StepResult(a[2], a[1].get("name"), "PASS", 0.0, "spy")
 
     monkeypatch.setattr(A._spf, "gate", _spy_gate)
-    monkeypatch.setattr(sys, "argv", ["analog_one_shot_runner", str(p)])
-    A.main()
+    for block in ("blk_a", "blk_b"):
+        monkeypatch.setattr(execution, '_ordinary_runtime', None)
+        monkeypatch.setattr(sys, "argv", [
+            "analog_one_shot_runner", str(p), "--blocks", block])
+        A.main()
 
     sites = [s for _r, s, _n, _b in seen]
     steps = [n for _r, _s, n, _b in seen]
