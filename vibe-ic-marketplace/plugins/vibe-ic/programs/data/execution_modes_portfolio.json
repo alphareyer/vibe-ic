@@ -6425,7 +6425,7 @@
       "id": "DT2",
       "title_en": "Path-delay-fault (at-speed, timing-graded) ATPG",
       "phase": "phase2",
-      "canonical_stage": "stage2",
+      "canonical_stage": "stage3",
       "current_default": {
         "mode": "direct_adapter",
         "tool_ids": [
@@ -6544,7 +6544,7 @@
       "id": "DT3",
       "title_en": "Small-delay-defect (SDD) at-speed grade",
       "phase": "phase2",
-      "canonical_stage": "stage2",
+      "canonical_stage": "stage3",
       "current_default": {
         "mode": "direct_adapter",
         "tool_ids": [
@@ -7930,7 +7930,7 @@
       "id": "26.5ic",
       "title_en": "Die Finishing — seal ring + die identification (chip/IC path only)",
       "phase": "phase3",
-      "canonical_stage": "stage3",
+      "canonical_stage": "stage4",
       "current_default": {
         "mode": "direct_adapter",
         "tool_ids": [
