@@ -36,8 +36,8 @@ CASES = {
         "tie_off": {"tied_off": True, "inputs": [
             {"inst": "s0", "pin": "A", "use": "SIGNAL", "net": "t0"},
             {"inst": "s1", "pin": "CLK", "use": "CLOCK", "net": "t1"}]},
-        "instances": [{"name": "s0", "llx": 0, "lly": 0, "keep": True},
-                      {"name": "s1", "llx": 10, "lly": 10, "keep": True}]}, ""),
+        "instances": [{"name": "s0", "cell": "INV", "llx": 0, "lly": 0, "keep": True},
+                      {"name": "s1", "cell": "INV", "llx": 10, "lly": 10, "keep": True}]}, ""),
     "27": ("reports/phase3/si_crosstalk.json", {
         "max_crosstalk_noise": 0.02, "violations_count": 0}, ""),
     "32": ("phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
@@ -51,6 +51,49 @@ CASES = {
 }
 
 
+def _current_si_inputs(root: Path) -> None:
+    """Author neutral content/identity fixtures, not native OpenSTA evidence.
+
+    Keep the real current-input writer and both CLI readers. The script/log
+    below are explicitly substituted transport, as in the existing current-SI
+    source controls; no simulator, image identity or final verdict is mocked.
+    """
+    import _opensta_current as current
+    from test_default_current_power import NETLIST, SPEF
+
+    _write(root, "phase3/stage3/pnr/neutral_pnr.v", NETLIST)
+    spef = _write(root, "phase3/stage3/extracted/neutral.spef", SPEF)
+    _write(root, "phase3/stage3/pnr/constraint.sdc",
+           "create_clock -name c -period 10\n")
+    lib = _write(root, "input/pdk/neutral.lib", "library(neutral) {}\n")
+    timing = _write(root, "phase3/stage3/extracted/neutral_si_timing.json",
+                    {"pins": {"u0:Z": {"arr_rise_min": 1.0,
+                                          "arr_rise_max": 1.2}}})
+    script = root / "reports/phase3/si_source_fixture.tcl"
+    log = script.with_suffix(".log")
+    receipt = current.new_execution(
+        current.basis(root, "neutral", [lib], coupling=True), "27", script, log,
+        ["SOURCE_FIXTURE_ONLY", str(script)])
+    marker = current.marker(receipt)
+    _write(root, str(script.relative_to(root)),
+           f"# SOURCE_FIXTURE_ONLY; no native execution\nputs {{{marker}}}\n")
+    _write(root, str(log.relative_to(root)),
+           f"SOURCE_FIXTURE_ONLY; substituted transport\n{marker}\n")
+    current.finish(receipt, 0, [("timing_windows", timing)],
+                   timing.with_suffix(".current.json"))
+    receipt["inputs"] += [current.file_record(timing, "timing_windows", root),
+        current.file_record(timing.with_suffix(".current.json"), "timing_receipt", root)]
+    result = root / "reports/phase3/si_crosstalk.json"
+    data = json.loads(result.read_text())
+    data.update(spef=str(spef), timing_aware_advisory={
+        "spef": str(spef), "timing_json": str(timing)})
+    _write(root, str(result.relative_to(root)), data)
+    report = _write(root, "reports/phase3/si_crosstalk.rpt",
+                    "SOURCE_FIXTURE_ONLY content report\n")
+    current.finish(receipt, 0, [("si_report", report), ("si_result", result)],
+                   report.with_suffix(".current.json"))
+
+
 def _declare_inputs(root: Path, step_id: str) -> None:
     """A step that declares D1's declaration as its input gets it (F27).
 
@@ -62,6 +105,15 @@ def _declare_inputs(root: Path, step_id: str) -> None:
     """
     if consumes_declaration(_steps()[step_id]):
         declare_no_reuse(root)
+    if step_id == "18":
+        # Match the original two-cell/two-pin plan against the real DEF reader.
+        _write(root, "phase3/stage3/pnr/post_spare.def", "\n".join([
+            "VERSION 5.8 ;", "DESIGN neutral ;", "COMPONENTS 2 ;",
+            "- s0 INV + FIXED ( 0 0 ) N ;", "- s1 INV + FIXED ( 10000 10000 ) N ;",
+            "END COMPONENTS", "NETS 2 ;", "- t0 ( s0 A ) ;",
+            "- t1 ( s1 CLK ) ;", "END NETS", "END DESIGN", ""]))
+    elif step_id == "27":
+        _current_si_inputs(root)
 
 
 @pytest.mark.parametrize("step_id", CASES)
@@ -204,7 +256,7 @@ def test_content_gate_declares_runner_advisory_and_required_step_clauses():
     ("1", ("flow_step_output_content_check . --mode rtl",)),
     ("14", ("flow_step_output_content_check . --mode netlist",
             "flow_step_output_content_check . --mode stage_analog")),
-    ("18", ("spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json",)),
+    ("18", ("spare_cell_coverage_check . --post-spare-def --json reports/phase2/gates/spare_cell_coverage.json",)),
     ("27", ("flow_step_output_content_check . --mode si",)),
     ("32", ("flow_step_output_content_check . --mode repair",)),
     ("35", ("flow_step_output_content_check . --mode dfm",)),
