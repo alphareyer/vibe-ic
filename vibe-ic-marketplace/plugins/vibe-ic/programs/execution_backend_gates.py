@@ -64,10 +64,10 @@ def canonical_family_row(step_id: str, *, adapters=None) -> dict | None:
         family_workers = {'producer': 'execution_backend_worker.py',
                           'release-producer': 'execution_release_worker.py'}
         if not adapters or not all(
-                len(arm.components) == 1 and
-                arm.components[0].name in family_workers and
+                len(getattr(arm, 'components', ())) == 1 and
+                getattr(arm.components[0], 'name', None) in family_workers and
                 str(Path(__file__).resolve().parent /
-                    family_workers[arm.components[0].name]) in arm.source_files
+                    family_workers[arm.components[0].name]) in (getattr(arm, 'source_files', None) or {})
                 for arm in adapters):
             return None
     from execution_provider_catalog import BACKEND_ROWS, RELEASE_ROWS
