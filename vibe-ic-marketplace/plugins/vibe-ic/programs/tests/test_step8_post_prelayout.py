@@ -524,3 +524,68 @@ def test_retained_prelayout_publishes_summary_before_first_complete_consumer(tmp
     assert not accepted[0]['result']['canonical_consumer']['step'].get('missing_before_consumer')
     assert doc['passed'] is True and doc['subject']['basis'] == 'content'
     assert D._aggregate_verdict(plan) == 'PASS'
+
+
+def _step7_owned_postcheck_fixture(tmp_path, monkeypatch, *, design_staged=False):
+    """Run the real Step7 emitter; only its authored neutral text is supplied."""
+    from _ppa import timing
+    gate, pnr, netlist = project(tmp_path)
+    text = pnr.read_text()
+    # Start before Step7 has an output. This is fixture construction, not a
+    # change to the original helper or any retained production run.
+    (tmp_path / 'phase2/stage2/constraints/top.asic.sdc').unlink()
+    liberty = put(tmp_path / 'input/pdk/liberty/neutral.lib', 'library(neutral) {}\n')
+    pdk = SimpleNamespace(name='neutral', liberty=str(liberty), macro_libs=[])
+    monkeypatch.setattr(timing, 'author_asic_sdc', lambda *_a, **_k: {
+        'text': text, 'design_staged': design_staged, 'staged_sdc': None})
+    emitted = timing.emit_step7_asic_sdc(P, tmp_path, 'top', pdk, 'LOCAL')
+    canonical = tmp_path / emitted['path']
+    record = canonical.parent / timing.ASIC_SDC_RECORD
+    judged = LP.judge_sdc(tmp_path / 'phase3/librelane/prelayout/design_sdc',
+                         {'PNR_SDC_FILE': str(canonical)}, canonical, gate)
+    assert judged['verdict'] == 'PASS'
+    assert timing.owned_step7_outputs(P, tmp_path)[emitted['path']] == LC.digest(canonical)
+    return gate, canonical, pnr, record
+
+
+@pytest.mark.parametrize('design_staged,pnr_state', [
+    (False, 'absent'), (False, 'derived'), (True, 'derived')])
+def test_postcheck_consumes_the_step7_producers_selected_deck(
+        tmp_path, monkeypatch, design_staged, pnr_state):
+    gate, canonical, pnr, record = _step7_owned_postcheck_fixture(
+        tmp_path, monkeypatch, design_staged=design_staged)
+    if pnr_state == 'absent':
+        pnr.unlink()
+    else:
+        pnr.write_text(pnr.read_text() + 'set_max_fanout 4 [current_design]\n')
+    before = {p: p.read_bytes() for p in (gate, canonical, record)}
+    row = D.step_sdc_validation_post_prelayout(tmp_path, 'top')
+    assert row.status == 'PASS', row.detail
+    receipt = json.loads(Path(row.output_files[0]).read_text())
+    assert [r['rc'] for r in receipt['records']] == [0, 0]
+    inputs = receipt['binding']['inputs']
+    assert inputs['canonical_sdc']['path'] == str(canonical)
+    assert inputs['canonical_sdc']['sha256'] == LC.digest(canonical)
+    assert inputs['step7_sdc_record']['sha256'] == LC.digest(record)
+    assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize('changed', ['canonical', 'record', 'wrong_gate_deck'])
+def test_postcheck_keeps_selected_step7_deck_binding_strict(tmp_path, monkeypatch, changed):
+    gate, canonical, pnr, record = _step7_owned_postcheck_fixture(tmp_path, monkeypatch)
+    if changed == 'canonical':
+        canonical.write_text(canonical.read_text() + 'set_max_transition 0.25 [current_design]\n')
+    elif changed == 'record':
+        payload = json.loads(record.read_text())
+        payload['sha256'] = '0' * 64
+        record.write_text(json.dumps(payload))
+    else:
+        # This is a genuine wrong-owner gate even when both decks are valid
+        # syntax: Step7 selected canonical, but this gate timed the PnR deck.
+        LP.judge_sdc(tmp_path / 'phase3/librelane/prelayout/design_sdc',
+                     {'PNR_SDC_FILE': str(pnr)}, pnr, gate)
+    row = D.step_sdc_validation_post_prelayout(tmp_path, 'top')
+    assert row.status == 'NOT_MEASURED', row.detail
+    assert 'STALE' in row.detail
+    receipt = json.loads(Path(row.output_files[0]).read_text())
+    assert receipt['records'] == []
