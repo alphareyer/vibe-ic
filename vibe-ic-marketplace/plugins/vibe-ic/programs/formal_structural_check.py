@@ -1046,6 +1046,59 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
     return info, payloads
 
 
+def _reset_row_cone_eligibility(model: dict) -> dict:
+    """Off-cone removal is exact only when every input assignment extends.
+
+    A single-driver DAG of total native Boolean functions has that property,
+    including undef sources. Feedback, multiple drivers or other cell kinds
+    retain the original whole-module SAT queries, which may constrain shared
+    inputs outside a row's cone. This selects an optimization, never credit.
+    """
+    mod = model["modules"]["transition_pair"]
+    total = {"$and", "$or", "$xor", "$xnor", "$not", "$mux", "$eq", "$ne",
+             "$eqx", "$nex", "$logic_not", "$logic_and", "$logic_or",
+             "$reduce_and", "$reduce_or", "$reduce_xor", "$reduce_xnor",
+             "$reduce_bool"}
+    cells = mod.get("cells") or {}
+    if any(p.get("direction") not in {"input", "output"} for p in mod["ports"].values()):
+        return {"eligible": False, "reason": "unknown-native-pin-direction"}
+    inputs = {b for p in mod["ports"].values() if p["direction"] == "input"
+              for b in p["bits"] if isinstance(b, int)}
+    drivers = {}
+    for name, cell in cells.items():
+        if cell["type"] not in total:
+            return {"eligible": False, "reason": "non-total-or-unsupported-cell"}
+        if any(cell.get("port_directions", {}).get(pin) not in {"input", "output"}
+               for pin in cell["connections"]):
+            return {"eligible": False, "reason": "unknown-native-pin-direction"}
+        for pin, bits in cell["connections"].items():
+            if cell["port_directions"][pin] == "output":
+                for bit in bits:
+                    if not isinstance(bit, int) or bit in inputs or bit in drivers:
+                        return {"eligible": False, "reason": "non-unique-output-driver"}
+                    drivers[bit] = name
+    dependencies, users = {}, {name: set() for name in cells}
+    for name, cell in cells.items():
+        dependencies[name] = {drivers[b]
+            for pin, bits in cell["connections"].items()
+            if cell["port_directions"][pin] == "input"
+            for b in bits if b in drivers}
+        for driver in dependencies[name]:
+            users[driver].add(name)
+    pending = [name for name, deps in dependencies.items() if not deps]
+    visited = 0
+    while pending:
+        driver = pending.pop()
+        visited += 1
+        for user in users[driver]:
+            dependencies[user].remove(driver)
+            if not dependencies[user]:
+                pending.append(user)
+    return {"eligible": visited == len(cells),
+            "reason": "single-driver-total-boolean-dag" if visited == len(cells)
+                      else "combinational-feedback"}
+
+
 def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                           signal: str, work_dir: Path,
                           container: Optional[str] = None) -> dict:
@@ -1178,6 +1231,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     work_dir.mkdir(parents=True, exist_ok=True)
     model_path = work_dir / "transition_pair.json"
     _aa.write_json(model_path, model)
+    row_cone = _reset_row_cone_eligibility(model)
+    result["native_row_cone"] = row_cone
     script = [f"read_json {model_path.resolve()}", "hierarchy -top transition_pair",
               "log VIBEIC_TRANSITION_QUERY domain",
               "sat -timeout 10 -enable_undef -set-def-inputs -show-inputs",
@@ -1187,6 +1242,18 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         if row.get("unsupported"):
             continue
         ports = row["query_ports"]
+        # Import the complete fan-in of every value/guard observed for this
+        # storage bit. Union all roots before expanding Yosys's selection
+        # stack; expanding only its last root leaves other drivers unmodeled.
+        # Shared current-Q/data inputs remain module inputs, with the same
+        # defined-input constraints. Counterexamples show all shared inputs
+        # and this row's modeled outputs, never unmodeled unrelated outputs.
+        observed = sorted(set(ports.values()))
+        if row_cone["eligible"]:
+            script += ["select -module transition_pair",
+                       "select " + " ".join("w:" + p for p in observed) + " %% %ci*"]
+        row["native_witness_scope"] = {"shared_inputs": "all module inputs",
+            "outputs": observed if row_cone["eligible"] else "all module outputs"}
         queries = {"undef0": ("n0", None), "undef1": ("n1", None),
             "zero0": ("n0", "0"), "one0": ("n0", "1"),
             "zero1": ("n1", "0"), "one1": ("n1", "1"),
@@ -1209,8 +1276,12 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             specs[ident] = (i, key)
             script.append("log VIBEIC_TRANSITION_QUERY " + ident)
             option = f"-set-any-undef {ports[port]}" if value is None else f"-prove {ports[port]} {value}"
-            script.append(f"sat -timeout 10 -enable_undef -set-def-inputs {option} -show-inputs -show-outputs")
+            shown = (" ".join("-show " + p for p in observed)
+                     if row_cone["eligible"] else "-show-outputs")
+            script.append(f"sat -timeout 10 -enable_undef -set-def-inputs {option} -show-inputs {shown}")
             script.append("log VIBEIC_TRANSITION_COMPLETE " + ident)
+        if row_cone["eligible"]:
+            script.append("select -clear")
     ys = work_dir / "transition_pair.ys"
     _aa.write_text(ys, "\n".join(script) + "\n")
     inner = f"yosys -Q -T -s {ys.resolve()}"
