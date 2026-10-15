@@ -88,9 +88,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Flat sibling modules must also resolve when this leaf is loaded by path.
+_PROGRAMS = str(Path(__file__).resolve().parent)
+if _PROGRAMS not in sys.path:
+    sys.path.insert(0, _PROGRAMS)
 
 import _flow_reason_taxonomy as _reason_taxonomy
 import verdict as _verdict

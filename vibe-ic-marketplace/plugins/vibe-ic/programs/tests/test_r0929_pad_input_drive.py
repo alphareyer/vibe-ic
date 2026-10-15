@@ -487,6 +487,9 @@ def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monk
     marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
     assert TD.requests_pad_ring(proj) is True
     pdk = S7._pdk(monkeypatch)
+    core_liberty = tmp_path / "neutral_core.lib"
+    core_liberty.write_text('library(neutral) { time_unit : "1ns"; }\n')
+    pdk.liberty = str(core_liberty)
     # step 7: no pad ring yet -> no drive can be resolved
     T.emit_step7_asic_sdc(p3, proj, S7.TOP, pdk, "some-container")
     assert _record(proj)["verdict"] == "NOT_MEASURED"
@@ -539,7 +542,11 @@ def test_step7_with_a_staged_sdc_on_a_die_resolves_and_rewrites_the_record(tmp_p
     _io_record(proj, [_io_lib(tmp_path, "ss")])
     stale = proj / _REPORT
     stale.write_text(json.dumps({"verdict": "DECLARED", "sdc_lines": ["x"]}))
-    T.emit_step7_asic_sdc(p3, proj, S7.TOP, S7._pdk(monkeypatch), "some-container")
+    pdk = S7._pdk(monkeypatch)
+    core_liberty = tmp_path / "neutral_core.lib"
+    core_liberty.write_text('library(neutral) { time_unit : "1ns"; }\n')
+    pdk.liberty = str(core_liberty)
+    T.emit_step7_asic_sdc(p3, proj, S7.TOP, pdk, "some-container")
     rec = _record(proj)
     assert rec["verdict"] == "PDK_IO_TIER"
     deck = (proj / S7._record(proj)["path"]).read_text().splitlines()

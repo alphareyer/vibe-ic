@@ -71,6 +71,8 @@ def test_a_declaring_gate_is_given_somewhere_to_say_it(tmp_path, gate):
 #: registered gate must SAY what it declares here rather than inherit a class
 #: it does not mean.
 _CLASS_ON_THE_EMPTY_FIXTURE = {
+    # This conditional leaf receives its valid, claim-free subject below.
+    "deliverable_verdict_consistency_check": R.DESIGN_DECLARED_NA,
     "waiver_staleness_check": R.DESIGN_DECLARED_NA,
     "analog_flow_compliance_check": R.DESIGN_DECLARED_NA,
     "l24_signoff_evidence_backed_check": R.ASKED_BEFORE_PRODUCER,
@@ -95,6 +97,12 @@ def test_a_declaring_gate_actually_writes_a_class(tmp_path, gate):
     (proj / "waivers.json").write_text(json.dumps({"waived_steps": [
         {"id": 39, "reason": "ENV_UNAVAILABLE", "ticket": "T",
          "auto_synthesized": True}]}))
+    if gate == "deliverable_verdict_consistency_check":
+        (proj / "RESULT.md").write_text("STATUS: NOT_MEASURED\n")
+        orchestrator = proj / "reports" / "orchestrator"
+        orchestrator.mkdir()
+        (orchestrator / "vibe_ic_one_shot.json").write_text(
+            json.dumps({"verdict": "NOT_MEASURED"}))
     scratch = proj / "scratch"
     argv = F._structural_gate_argv(gate, proj, rtl_dir=proj,
                                    scratch_dir=scratch)
