@@ -317,8 +317,11 @@ def test_signoff_steps_are_downstream_of_step32():
     for sid in ("23", "24", "25", "26", "27", "28", "29", "30"):
         assert "32" in _ancestors(sid, bo), f"step {sid} is not downstream of 32"
         assert sid not in _ancestors("32", bo), f"32 still waits on {sid}"
-    # 32 repairs the route using the post-PnR extraction
-    assert {"21", "22"} <= _ancestors("32", bo)
+    # Repair the routed checkpoint first, then extract its final parasitics.
+    # The provisional repair estimate is not the final Step-22 product.
+    assert "21" in _ancestors("32", bo)
+    assert "32" in _ancestors("22", bo)
+    assert "22" not in _ancestors("32", bo)
 
 
 # ── review wave 58: the tape-out tail keeps sign-off 23-30 as ancestors ───

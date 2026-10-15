@@ -23,7 +23,11 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
          verify_xor_parallel: bool = False):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
-    if verify_parallel or verify_xor_parallel:
+    if verify_parallel or verify_xor_parallel or diagnostic or mutate_after_freeze:
+        # These controls exercise the original monolithic native transport,
+        # including its final receipt and post-freeze mutation hook. Default
+        # stops at its canonical failing row and publishes layout receipts at
+        # Step 36 instead; the unselected controls below retain Default.
         # Parallel diagnostic readers are retained on the Ultra transport.
         # Default's same-project readers run sequentially; the dedicated
         # Default control rejects every concurrent executor in main().
@@ -231,7 +235,8 @@ def test_flow_dependency_declares_the_delivered_layout():
     order = {str(step["id"]): i for i, step in enumerate(flow["steps"])}
     assert {"34", "37"} <= {str(v) for v in steps["31"]["blocks_on"]}
     assert "37" in {str(v) for v in steps["37.3"]["blocks_on"]}
-    assert order["34"] < order["37"] < order["31"] < order["36"]
+    # Stream the design before GDS fill; inspect that finished layout only.
+    assert order["37"] < order["34"] < order["31"] < order["36"]
 
 
 @pytest.mark.parametrize("top", ["chip_top", "subservient"])

@@ -100,11 +100,16 @@ def _declared_signoff_outputs() -> set:
     except SyntaxError:                                    # pragma: no cover
         return set()
     out = set()
+    primary = set()
+    # The same real dispatcher writes the pre-stream and final-layout tables.
+    # Raw Step-23 products moved here when independent verdict paths were split;
+    # their consumer --json targets must not be mistaken for their producers.
+    tables = {_SIGNOFF_TABLE, "_PRESTREAM_GATES", "_FINAL_LAYOUT_GATES"}
     for node in tree.body:
         targets = (node.targets if isinstance(node, ast.Assign)
                    else [node.target] if isinstance(node, ast.AnnAssign)
                    else [])
-        if not any(isinstance(x, ast.Name) and x.id == _SIGNOFF_TABLE
+        if not any(isinstance(x, ast.Name) and x.id in tables
                    for x in targets):
             continue
         value = getattr(node, "value", None)
@@ -113,8 +118,11 @@ def _declared_signoff_outputs() -> set:
             if len(elts) >= 3 and isinstance(elts[2], ast.Constant) \
                     and isinstance(elts[2].value, str):
                 out.add(elts[2].value)
+                if any(isinstance(x, ast.Name) and x.id == _SIGNOFF_TABLE
+                       for x in targets):
+                    primary.add(elts[2].value)
     # Keep an absent table a refusal; delegated writes must not mask its loss.
-    return out | _delegated_signoff_outputs() if out else out
+    return out | _delegated_signoff_outputs() if primary else set()
 
 
 def _delegated_signoff_outputs() -> set:
