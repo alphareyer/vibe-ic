@@ -2103,6 +2103,8 @@ def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkey
     import subprocess
     from types import SimpleNamespace
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     script = tmp_path / "measure.tcl"
     script.write_text("puts ready\n")
     seen = []
@@ -2165,6 +2167,8 @@ def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch
     import subprocess
     from types import SimpleNamespace
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     script = tmp_path / "measure.tcl"
     script.write_text("puts ready\n")
 
@@ -2190,6 +2194,8 @@ def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch
 def test_fresh_opensta_refuses_error_in_middle_of_raw_log(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     script = tmp_path / "measure.tcl"
     script.write_text("puts ready\n")
     raw = script.with_suffix(".tool.log")
@@ -2226,6 +2232,8 @@ def test_fresh_opensta_refuses_error_in_middle_of_raw_log(tmp_path, monkeypatch)
 def test_fresh_opensta_refuses_log_at_byte_ceiling(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     script = tmp_path / "measure.tcl"
     script.write_text("puts ready\n")
     raw = script.with_suffix(".tool.log")
