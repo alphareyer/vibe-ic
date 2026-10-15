@@ -929,3 +929,95 @@ def test_refresh_only_dispatches_no_step():
             f"--refresh-only dispatches {forbidden}; it must refresh documents "
             f"only")
     assert '"dispatched_steps": []' in body
+
+
+@pytest.mark.parametrize("entry,exit_step,expected", [
+    ("7", "9", []),
+    ("9", "9", []),
+    ("2", "2", ["lint", "frontend"]),
+    ("4", "4", ["reference", "functional", "coverage", "frontend"]),
+    (None, None, ["lint", "reference", "functional", "qsf", "fpga_sdc", "coverage", "frontend"]),
+    ("1", "13", ["lint", "reference", "functional", "qsf", "fpga_sdc", "coverage", "frontend"]),
+])
+def test_main_dispatch_respects_selected_frontend_ownership(
+        tmp_path, entry, exit_step, expected, board_requested=False):
+    """Execute the actual main call sites, with failing upstream callbacks.
+
+    Native tools are replaced here; the real window predicates, dispatched
+    statements, result objects and aggregate consumer are retained. The normal
+    public-input CLI separately measures native execution of the fixed window.
+    """
+    from types import SimpleNamespace
+    import step_preflight as spf
+
+    dsr = _load("design_one_shot_runner")
+    sites = spf.RUNNER_PLANS['design_one_shot_runner'].sites
+    entry_site = spf.site_for_step('design_one_shot_runner', entry) if entry else None
+    pruned = dsr._exit_pruned_sites(sites, exit_step) if exit_step else []
+    called = []
+
+    def producer(name):
+        def run(*_args, **_kwargs):
+            called.append(name)
+            # A selected failing producer must survive the aggregate. A tool
+            # outside the window must never get the chance to fail this run.
+            return dsr.StepResult(name, 'FAIL', 0.0, 'measured callback failure')
+        return run
+
+    callbacks = {
+        'step_rtl_lint_tool': 'lint', 'step_reference_tb': 'reference',
+        'step_step4_functional_evidence': 'functional',
+        'step_qsf_gen': 'qsf', 'step_sdc_gen': 'fpga_sdc',
+        'step_verilator_coverage': 'coverage', '_complete_phase2_frontend': 'frontend',
+        'step_otp_image_check': 'otp', 'step_fpga_compile': 'compile',
+        'step_fpga_burn': 'burn', 'step_usb_hid_tester_verify': 'board_test',
+    }
+    helper_names = {'_site_order', '_before_entry', '_after_exit',
+                    '_exit_sentinel', '_entry_sentinel', '_window_step_ids'}
+    nodes = []
+    for node in _main_node().body:
+        if isinstance(node, ast.FunctionDef):
+            if node.name in helper_names:
+                nodes.append(node)
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id in (
+                    'rtl_repair_retry', 'last_rtl_hash',
+                    'rtl_repair_remediation_attempted', '_early_declaration') for t in targets):
+                nodes.append(node)
+                continue
+        names = {n.func.id for n in ast.walk(node) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)}
+        if names.intersection(callbacks):
+            nodes.append(node)
+    assert nodes, 'main has no executable dispatch statements'
+    plan = []
+    env = {
+        **{name: producer(label) for name, label in callbacks.items()},
+        '_spf': spf, '_entry_site': entry_site, '_exit_pruned': pruned,
+        '_bounded': dsr.run_is_bounded(entry_site, pruned, [n for n, _ in sites]),
+        'dispatched_step_ids': dsr.dispatched_step_ids,
+        '_window_flags': dsr.declared_window_flags(entry, exit_step),
+        'StepResult': dsr.StepResult, 'project': tmp_path, 'plan': plan,
+        'args': SimpleNamespace(entry_step=entry, exit_step=exit_step,
+                                top_name='unit_top', container='LOCAL', pdk='unit_pdk',
+                                skip_hardware=not board_requested, max_rtl_repair_retries=0),
+        'ic_class': {}, '_rtl_dir_sha256': lambda *_: 'unchanged input',
+        '_rtl_gen_handoff': lambda *_: {}, 'declaration_before_step4': lambda *_: {},
+        '_disclose_whole_flow_skip': lambda *args: 'outside declared ownership',
+        '_disclose_runs_anyway': lambda *_: None,
+        '_V': dsr._V,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                 str(RUNNER), 'exec'), env)
+    assert called == expected
+    assert dsr._aggregate_verdict(plan) == ('FAIL' if expected else 'NOT_MEASURED')
+    if entry in ('7', '9'):
+        assert env['_window_step_ids']().isdisjoint({'2', '3', '4', '6'})
+        assert all(row.status == 'NOT_APPLICABLE' for row in plan)
+
+
+def test_main_window_omits_board_dispatch_even_when_hardware_is_requested(tmp_path):
+    test_main_dispatch_respects_selected_frontend_ownership(
+        tmp_path, '7', '9', [], board_requested=True)

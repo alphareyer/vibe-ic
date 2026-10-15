@@ -26284,6 +26284,13 @@ def main() -> int:
             f"span starts after it and was not dispatched. Its artefacts "
             f"are outside this run's declared proof burden, not missing.", declared_by=f"--exit-step {args.exit_step}")
 
+    def _entry_sentinel(site_name):
+        return StepResult(
+            site_name, "NOT_APPLICABLE", 0.0,
+            f"run declared --entry-step {args.entry_step}; this site's whole "
+            "span is upstream of it and was not dispatched.",
+            declared_by=f"--entry-step {args.entry_step}")
+
     # ── ENTRY ADMISSION (2026-08-25) ─────────────────────────────────────
     # Asked BEFORE the lock, because a run that cannot legally start should not
     # take a lock, and before ANY dispatch, because the point is to refuse with
@@ -26357,27 +26364,12 @@ def main() -> int:
         steps are in the window" is introduced here, because two notions is how
         a view comes to disagree with the run that produced it."""
         _wplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
-        # READ OFF WHAT THE RUN RECORDED, not off the site table (review
-        # w6wr2g6di, MEDIUM 2). The table says a site upstream of the entry is
-        # not dispatched; the dispatch code only asks that for `rtl_gen` and
-        # `rtl_validate` (the only two `_before_entry` guards). MEASURED: with
-        # `--entry-step 9` the entry site is `yosys_synth`, so the table excludes
-        # step 4 -- while the `sim` site guards on `_after_exit` ALONE and
-        # dispatches. The table's answer was therefore a false statement about
-        # this run, in the two places that quote it: `declared_window
-        # .dispatched_step_ids` and the steps view's `only_steps`, which would
-        # have left step 4's row unrefreshed after running it.
-        #
-        # A site was not dispatched exactly when this run booked a WINDOW
-        # SENTINEL for it: both sentinels are named for the site, status
-        # NOT_APPLICABLE, and carry `declared_by="--entry-step N"` or
-        # `"--exit-step N"`. Deriving from that cannot disagree with the run,
-        # because it IS the run's own record. (Closing the guard gap itself is a
-        # change to what DISPATCHES and is not this change's to make.)
+        # Ownership must be known BEFORE dispatch. A producer that accidentally
+        # ran outside the window cannot enlarge the requested proof burden.
+        # The same predicates guard each site and its later consumers below.
         _sentinelled = {
-            _s.name for _s in plan
-            if _s.status == "NOT_APPLICABLE"
-            and str(getattr(_s, "declared_by", "") or "").startswith("--")}
+            name for name, _ in (_wplan.sites if _wplan else ())
+            if _before_entry(name, _entry_site) or _after_exit(name)}
         return dispatched_step_ids(_wplan.sites if _wplan else (), _sentinelled)
 
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
@@ -26618,9 +26610,14 @@ def main() -> int:
     plan.append(step_crosslayer_rewrite_fidelity(project))
 
     # Fixed Step 2 call: selected_mode owns the production default and opt-out.
-    _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk)
-    if _tool_lint is not None:
-        plan.append(_tool_lint)
+    if _before_entry("rtl_validate", _entry_site):
+        plan.append(_entry_sentinel("rtl_lint_tool"))
+    elif _after_exit("rtl_validate"):
+        plan.append(_exit_sentinel("rtl_lint_tool"))
+    else:
+        _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk)
+        if _tool_lint is not None:
+            plan.append(_tool_lint)
 
     # Flow step 2 — pad-budget feasibility. Placed HERE, right after the RTL is
     # stable and long before synthesis/DFT/PnR, because the whole point of the
@@ -26862,10 +26859,12 @@ def main() -> int:
     rtl_repair_retry = 0
     last_rtl_hash = _rtl_dir_sha256(project)
     rtl_repair_remediation_attempted = False  # v1.6.181 (#72 P1-4)
-    if _after_exit("sim"):
+    if _before_entry("sim", _entry_site):
+        plan.append(_entry_sentinel("reference_tb"))
+    elif _after_exit("sim"):
         plan.append(_exit_sentinel("reference_tb"))
     while True:
-        if _after_exit("sim"):
+        if _before_entry("sim", _entry_site) or _after_exit("sim"):
             break
         sr = step_reference_tb(project, args.top_name, ic_class,
                                args.container,
@@ -26982,7 +26981,9 @@ def main() -> int:
     # before synthesis/backend work can be mistaken for a certified Phase-2
     # result. The StepResult is blocking in the aggregate verdict.
     _early_declaration: Optional[Dict[str, Any]] = None
-    if _after_exit("sim"):
+    if _before_entry("sim", _entry_site):
+        plan.append(_entry_sentinel("step4_functional_evidence"))
+    elif _after_exit("sim"):
         plan.append(_exit_sentinel("step4_functional_evidence"))
     else:
         # FX_P2_DECLARATION_BEFORE_STEP4 — the design's selection, if the
@@ -27084,11 +27085,19 @@ def main() -> int:
             if _pls.status == 'PASS':
                 plan.append(step_sdc_validation_post_prelayout(project, _prelayout_top))
 
-    # Step 4b — QSF / SDC auto-gen (Wave 72). Runs even when --skip-hardware
-    # so the QSF/SDC artefacts are present for downstream lints/audits.
-    plan.append(step_qsf_gen(project, args.top_name, ic_class))
-    plan.append(step_sdc_gen(project, args.top_name, ic_class))
-    if not args.skip_hardware:
+    # QSF / FPGA SDC belong to Step 6. Full runs retain their existing
+    # --skip-hardware behavior; a bounded site window must own that step.
+    if not _bounded or "6" in _window_step_ids():
+        plan.append(step_qsf_gen(project, args.top_name, ic_class))
+        plan.append(step_sdc_gen(project, args.top_name, ic_class))
+    else:
+        for _name in ("qsf_gen", "sdc_gen"):
+            plan.append(StepResult(
+                _name, "NOT_APPLICABLE", 0.0,
+                "FPGA Step 6 is outside this run's declared site window; "
+                "the producer was not dispatched.",
+                declared_by=" ".join(_window_flags)))
+    if not args.skip_hardware and (not _bounded or "6" in _window_step_ids()):
         otp_sr = step_otp_image_check(project)
         plan.append(otp_sr)
         if otp_sr.status == "FAIL":
@@ -27279,12 +27288,14 @@ def main() -> int:
         plan[-1], _early_declaration, project)
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
-    if _after_exit("sim"):
+    if _before_entry("sim", _entry_site):
+        plan.append(_entry_sentinel("verilator_coverage"))
+    elif _after_exit("sim"):
         plan.append(_exit_sentinel("verilator_coverage"))
     else:
         plan.append(step_verilator_coverage(project, args.top_name,
                                             args.container))
-    if _bounded:
+    if _bounded and {"2", "3", "4"}.intersection(_window_step_ids()):
         _disclose_runs_anyway(
             "emit_phase2_manifests",
             "the declared outputs of steps 2, 3 and 6",
@@ -27297,8 +27308,17 @@ def main() -> int:
         _publish_record_before_audit(
             project, plan, ic_class, evidence,
             invocation_context=_dispatch_invocation_context)
-    plan.append(_complete_phase2_frontend(project, plan, args.top_name,
-                                           args.container))
+    if not _bounded or {"2", "3", "4"}.intersection(_window_step_ids()):
+        plan.append(_complete_phase2_frontend(project, plan, args.top_name,
+                                               args.container))
+    else:
+        plan.append(StepResult(
+            "phase2_manifests", "NOT_APPLICABLE", 0.0,
+            _disclose_whole_flow_skip(
+                "complete_phase2_frontend",
+                "frontend manifests, supplementary Step 2 producers and "
+                "complete Step 2/3/4 consumers; none is selected"),
+            declared_by=" ".join(_window_flags)))
     # v0.1.58 capture: regenerate final_summary.md BEFORE the audit so the
     # attestation table reflects the SHA256 of every artefact emitted
     # earlier in this phase2 run (e.g. phase2/stage2/synth/netlist.v from
