@@ -27,6 +27,14 @@ def _synthetic_scene_profile(tmp_path, monkeypatch):
                         if image == "synthetic:test" else None)
 
 
+@pytest.fixture
+def _unavailable_installed_pdk(monkeypatch):
+    """These unit controls have no installed synthetic PDK image to probe."""
+    from unittest.mock import Mock
+    monkeypatch.setattr(drv, "image_pdk_anchor", Mock(side_effect=OSError(
+        "synthetic source-control fixture has no installed PDK image")))
+
+
 def _file(root: Path, name: str, body: str) -> dict:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -985,8 +993,30 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     assert gate.waiver_rows[0]["owner"] == "reyerchu"
 
 
-def test_flow_step_refuses_unsigned_owner_ledger(tmp_path):
+def test_flow_step_refuses_unsigned_owner_ledger(
+        tmp_path, monkeypatch, _unavailable_installed_pdk):
+    import contextlib
+    import io
     import flow_compliance_check as flow
+    real_supervised = flow._watchdog.run_host_supervised
+
+    def supervised(argv, **kwargs):
+        if len(argv) > 1 and Path(str(argv[1])).name == "drv_signoff_judge.py":
+            # Keep the real CLI, judge, owner reader and FCC receipt consumer;
+            # only the child-process edge is local to the synthetic fixture.
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with monkeypatch.context() as child:
+                if kwargs.get("cwd") is not None:
+                    child.chdir(kwargs["cwd"])
+                for key, value in (kwargs.get("env") or {}).items():
+                    child.setenv(key, value)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = drv.main([str(value) for value in argv[2:]])
+            return flow._watchdog.SupervisedResult(
+                rc, stdout.getvalue(), stderr.getvalue(), "natural", 0)
+        return real_supervised(argv, **kwargs)
+
+    monkeypatch.setattr(flow._watchdog, "run_host_supervised", supervised)
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     bundle = _bundle(tmp_path)
     _violate(bundle, tmp_path, "max_fanout", value=5, limit=4)
@@ -1239,6 +1269,8 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
         tmp_path, monkeypatch):
     import subprocess
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     plan = _bundle(tmp_path)
     _capture_rcx_fixture(plan, tmp_path)
     plan["top"] = "top"
@@ -1284,6 +1316,8 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
 def test_capture_replaces_plan_pin_classes_with_opensta_and_liberty(tmp_path, monkeypatch):
     import subprocess
     import drv_signoff_capture as capture
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     plan = _bundle(tmp_path)
     _capture_rcx_fixture(plan, tmp_path)
     plan["top"] = "top"
@@ -2044,7 +2078,7 @@ def test_runner_cannot_reuse_stale_pass_receipt_after_judge_crash(tmp_path, monk
     assert not output.exists()
 
 
-def test_step32_adoption_requires_applied_drv_stage(tmp_path):
+def test_step32_adoption_requires_applied_drv_stage(tmp_path, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     _file(tmp_path, "reports/phase3/librelane_postroute_repair.json",
           json.dumps({"adopted": "repair_candidate"}))
@@ -2054,7 +2088,7 @@ def test_step32_adoption_requires_applied_drv_stage(tmp_path):
                for item in result["failures"])
 
 
-def test_step32_in_chain_receipt_must_match_route_handoff(tmp_path):
+def test_step32_in_chain_receipt_must_match_route_handoff(tmp_path, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     _file(tmp_path, "reports/phase3/librelane_postroute_repair.json",
           json.dumps({"site": "after_route", "adopted": "repair_candidate"}))
@@ -2087,7 +2121,7 @@ def test_plan_override_flag_cannot_authorize_wider_slew(tmp_path):
     assert any("design override" in error for error in result["failures"])
 
 
-def test_directory_judge_binds_project_to_argument(tmp_path):
+def test_directory_judge_binds_project_to_argument(tmp_path, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     other = tmp_path / "other_project"
     l9 = other / "phase1/generated_docs/L9.md"
@@ -2107,7 +2141,7 @@ def test_directory_judge_binds_project_to_argument(tmp_path):
     assert any("project" in reason for reason in result["not_measured"])
 
 
-def test_project_judge_refuses_pdk_config_outside_installed_root(tmp_path):
+def test_project_judge_refuses_pdk_config_outside_installed_root(tmp_path, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     root = tmp_path / "installed_pdks"
     (root / "synthetic").mkdir(parents=True)
@@ -2229,7 +2263,8 @@ def test_unmatched_l9_fanout_scope_cannot_fall_back_to_pdk_ten(tmp_path):
     assert any("L9 fanout scope" in reason for reason in result["not_measured"])
 
 
-def test_independent_pre_run_freeze_rejects_plan_value_edit(tmp_path, monkeypatch):
+def test_independent_pre_run_freeze_rejects_plan_value_edit(
+        tmp_path, monkeypatch, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     profile = tmp_path / "scene_profile.json"
     profile.write_text(json.dumps({"synthetic": {
@@ -2251,7 +2286,8 @@ def test_independent_pre_run_freeze_rejects_plan_value_edit(tmp_path, monkeypatc
                for reason in edited["failures"]), edited
 
 
-def test_missing_committed_threshold_freeze_is_not_measured(tmp_path, monkeypatch):
+def test_missing_committed_threshold_freeze_is_not_measured(
+        tmp_path, monkeypatch, _unavailable_installed_pdk):
     bundle = _bundle(tmp_path)
     monkeypatch.setattr(drv, "_THRESHOLD_FREEZES",
                         tmp_path / "absent.json", raising=False)
@@ -2337,6 +2373,8 @@ def test_fresh_opensta_refuses_when_the_ceiling_is_opted_out(tmp_path, monkeypat
 def test_image_pdk_anchor_probe_carries_the_ceiling(monkeypatch):
     import subprocess
     import drv_signoff_anchor as anchor
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     seen = []
     monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
     monkeypatch.setattr(anchor.subprocess, "run", lambda argv, **kw: (
