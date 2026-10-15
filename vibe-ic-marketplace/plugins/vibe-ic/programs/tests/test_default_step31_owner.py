@@ -5,6 +5,7 @@ are not a native physical-verification result or an IC PASS claim.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,13 +38,15 @@ LAYOUT = """VERSION 5.8 ;
 DESIGN chip_top ;
 UNITS DISTANCE MICRONS 1000 ;
 DIEAREA ( 0 0 ) ( 100000 100000 ) ;
-COMPONENTS 0 ;
+COMPONENTS 1 ;
+- u logic + PLACED ( 2000 2000 ) N ;
 END COMPONENTS
 PINS 2 ;
 - a + NET signal + DIRECTION INPUT + USE SIGNAL ;
 - b + NET signal + DIRECTION OUTPUT + USE SIGNAL ;
 END PINS
-NETS 1 ;
+NETS 2 ;
+- n ( u Y ) ;
 - signal ( PIN a ) ( PIN b ) + ROUTED met1 ( 1000 1000 ) ( 9000 1000 ) ;
 END NETS
 SPECIALNETS 2 ;
@@ -52,6 +55,130 @@ SPECIALNETS 2 ;
 END SPECIALNETS
 END DESIGN
 """
+
+
+
+def post_stream_transport(project, pdk, monkeypatch, calls):
+    """Real plan/capture/census/judge; only tool and synthetic-PDK I/O is neutral.
+
+    LOCAL identity is the launcher's actual current-CID proof. No fixture CID,
+    image digest, plan identity, census classification or verdict is supplied.
+    """
+    import contextlib
+    import io
+    import subprocess
+    import _eda_image
+    import drv_capture_plan as planner
+    import drv_run_identity
+    import drv_signoff_capture as capture
+    import drv_signoff_judge as drv
+    import librelane_contract as ll
+    from test_drv_signoff_judge import _report, _stage_receipts, _install_test_freeze
+
+    image = os.environ["VIBEIC_EDA_IMAGE"]
+    image_id = ll.local_image_attestation(image)["image_id"]
+    root = project / "input/pdk"
+    lib = put(root, "open_fixture/libs.ref/neutral/lib/std_typ.lib", '''library(std) {
+ time_unit : "1ns"; capacitive_load_unit (1,pf);
+ nom_process : 1; nom_voltage : 5; nom_temperature : 25;
+ default_max_transition : 20; default_max_capacitance : 20;
+ cell (logic) { pin (Y) { direction : output;
+ max_transition : 20; max_capacitance : 20; } }
+}''')
+    pdk.liberty = str(lib)
+    put(root, "open_fixture/libs.ref/neutral/lef/std.lef",
+        "MACRO logic\n CLASS CORE ;\n PIN Y\n DIRECTION OUTPUT ;\n USE SIGNAL ;\n END Y\nEND logic\n")
+    config = put(root, "open_fixture/libs.tech/librelane/neutral/config.tcl",
+        "set ::env(MAX_FANOUT_CONSTRAINT) 4\n"
+        "set ::env(MAX_TRANSITION_CONSTRAINT) 3\n"
+        "set ::env(MAX_CAPACITANCE_CONSTRAINT) 0.2\n")
+    put(project, "input/docs/L7_design.md", "neutral source-control verification plan\n")
+    put(project, "input/docs/L9_constraints_floorplan.md", "| SYNTH_MAX_FANOUT | 4 |\n")
+    sdc = put(project, "phase3/stage3/sta/signoff.sdc",
+        "create_clock -name clk -period 24 [get_ports a]\n"
+        "set_input_delay 4.8 -clock clk [all_inputs]\n"
+        "set_output_delay 4.8 -clock clk [all_outputs]\n"
+        "set_max_fanout 4 [current_design]\n"
+        "set_max_transition 3 [current_design]\n"
+        "set_max_capacitance 0.2 [current_design]\n")
+    profile = put(project, "input/neutral_drv_scenes.json", json.dumps({
+        "open_fixture": {"pvt": {"typ": {"nom_voltage": 5,
+         "nom_temperature": 25}}, "rc_corners": ["nom", "max"]}}))
+    monkeypatch.setattr(planner, "_SCENE_PROFILES", profile)
+    monkeypatch.setattr(drv, "_SCENE_PROFILES", profile)
+    monkeypatch.setattr(_eda_image, "resolve", lambda: image)
+    monkeypatch.setattr(ll, "resolve_image", lambda *a, **k: image)
+    monkeypatch.setattr(ll, "resolve_pdk_root", lambda *a, **k: str(root))
+    put(project, "phase3/librelane_pdk_root.provenance.json", json.dumps({
+        "path": str(root), "derivation": {"image_id": image_id}}))
+    refs = {}
+    for kind, rc in (("setup", "nom"), ("hold", "max")):
+        spef = put(project, f"phase3/stage3/rcx/{rc}/top.{rc}.spef", "*SPEF neutral\n")
+        refs[f"{rc}/top.{rc}.spef"] = sha(spef)
+        put(project, f"phase3/stage3/sta/sta_mcorner_ocv_{kind}.tcl",
+            f"read_liberty {{{lib}}}\n"
+            f"read_verilog {{{project / 'phase3/stage3/pnr/chip_top_pnr.v'}}}\n"
+            "link_design chip_top\n"
+            f"read_sdc {{{sdc}}}\n"
+            "set_timing_derate -early 0.95\nset_timing_derate -late 1.05\n"
+            f"read_spef {{{spef}}}\n")
+    put(project, "phase3/stage3/rcx/COMMANDS", "SOURCE_CONTROL RCX transport\n")
+    put(project, "phase3/stage3/rcx/vibeic_receipt.json", json.dumps({
+        "input": {"step": "OpenROAD.RCX", "image": image,
+        "state_files": {str(project / "phase3/stage3/pnr/routed.def"):
+                        sha(project / "phase3/stage3/pnr/routed.def")}}, "sha256": refs}))
+    drv_run_identity.record(project)
+    _stage_receipts(project)
+    plan = planner.build(project)
+    _install_test_freeze(plan, project, monkeypatch)
+    anchor = {"path": str(config), "sha256": sha(config),
+              "pdk_commit": "SOURCE_CONTROL_synthetic_PDK"}
+    monkeypatch.setattr(capture, "image_pdk_anchor", lambda *a: anchor)
+    monkeypatch.setattr(drv, "image_pdk_anchor", lambda *a: anchor)
+    monkeypatch.setattr(capture, "openroad_identity", lambda image:
+                        {"commit": "SOURCE_CONTROL_openroad_transport"})
+
+    def fresh(script, roots, *, image):
+        calls.append("drv_" + script.name)
+        folder = script.parent
+        control = script.name == "positive_control.tcl"
+        prefix = "positive_control_" if control else ""
+        limits = dict(fanout=2, fanout_limit=1, cap_limit=1e-6,
+                      slew_limit=1e-6) if control else dict(fanout=2)
+        put(folder, prefix + "all_limits.rpt",
+            _report(**limits))
+        put(folder, "positive_control.rpt" if control else "violators.rpt",
+            _report(**limits, violators=True))
+        put(folder, prefix + "counters.log", "".join(
+            f"DRV_COUNTER {kind} {int(control)}\n" for kind in drv.KINDS))
+        if not control:
+            put(folder, "pin_census.tsv",
+                "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
+            put(folder, "net_census.rpt", "Net n\n Total capacitance: 0.1\n"
+                " Number of drivers: 1\n Number of loads: 0\n Number of pins: 1\n"
+                "\nDriver pins\n u/Y output (logic)\n\n")
+            put(folder, "disabled_edges.rpt", "")
+            put(folder, "annotation.rpt", "Found 0 unannotated drivers.\n")
+            put(folder, "clocks.rpt", "propagated\n")
+        return "OpenSTA SOURCE_CONTROL aaaaaaaaaa\n"
+
+    monkeypatch.setattr(capture, "_run_fresh", fresh)
+    real_process = R._pr.run
+
+    def process(argv, **kwargs):
+        if len(argv) > 1 and Path(str(argv[1])).name == "drv_signoff_judge.py":
+            # Same actual CLI main and project judge; in-process dispatch keeps
+            # the explicit synthetic PDK/owner I/O boundaries local to this test.
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with monkeypatch.context() as env:
+                for name, value in (kwargs.get("env") or {}).items():
+                    env.setenv(name, value)
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = drv.main([str(value) for value in argv[2:]])
+            return subprocess.CompletedProcess(argv, rc, stdout.getvalue(), stderr.getvalue())
+        return real_process(argv, **kwargs)
+
+    monkeypatch.setattr(R._pr, "run", process)
 
 
 def fixture(tmp_path, monkeypatch, case):
@@ -83,6 +210,7 @@ def fixture(tmp_path, monkeypatch, case):
     put(project, "reports/density.json", json.dumps({
         "tool": "klayout neutral density instrument",
         "layers": [{"name": "met1", "density_pct": 45.0}]}))
+    post_stream_transport(project, pdk, monkeypatch, calls)
     native = R._docker_exec
     observed = []
 
@@ -188,7 +316,7 @@ def fixture(tmp_path, monkeypatch, case):
 
 
 def current_window(tmp_path, monkeypatch):
-    """Real current Default owner/declared writers/full nine-output consumer."""
+    """Real current Default owner/declared writers/full twelve-output consumer."""
     project, pdk, calls, observed, row = fixture(tmp_path, monkeypatch, 'current')
     before = {name: (R._pl.pnr_dir(project) / name).read_bytes()
               for name in ('routed.def', 'chip_top.gds')}
@@ -204,7 +332,7 @@ def current_window(tmp_path, monkeypatch):
     assert observed[0][2]['verdict'] == 'PRODUCED'
     current = V.latest_pass(project, '31')
     assert current and current['canonical_pass'] and current['current_inputs']
-    assert len(row['required_outputs']) == 9
+    assert len(row['required_outputs']) == 12
     assert all((project / name).is_file() for name in row['required_outputs'])
     for name, payload in before.items():
         assert (R._pl.pnr_dir(project) / name).read_bytes() == payload
@@ -250,7 +378,7 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         assert census["verdict"] == "PRODUCED", census
         assert rc == 0
         assert result and result["canonical_pass"] is True
-        assert len(observation["required_outputs"]) == 9
+        assert len(observation["required_outputs"]) == 12
         assert all(observation["required_outputs"].values())
         perc = json.loads((project / "reports/phase3/perc_sweep.json").read_text())
         assert perc["program"] == perc["sweep"] == "perc_corpus_sweep"
