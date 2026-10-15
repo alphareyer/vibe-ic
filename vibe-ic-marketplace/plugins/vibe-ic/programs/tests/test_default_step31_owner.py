@@ -116,12 +116,12 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
         spef = put(project, f"phase3/stage3/rcx/{rc}/top.{rc}.spef", "*SPEF neutral\n")
         refs[f"{rc}/top.{rc}.spef"] = sha(spef)
         put(project, f"phase3/stage3/sta/sta_mcorner_ocv_{kind}.tcl",
-            f"read_liberty {{{lib}}}\n"
-            f"read_verilog {{{project / 'phase3/stage3/pnr/chip_top_pnr.v'}}}\n"
+            f"read_liberty {lib}\n"
+            f"read_verilog {project / 'phase3/stage3/pnr/chip_top_pnr.v'}\n"
             "link_design chip_top\n"
-            f"read_sdc {{{sdc}}}\n"
+            f"read_sdc {sdc}\n"
             "set_timing_derate -early 0.95\nset_timing_derate -late 1.05\n"
-            f"read_spef {{{spef}}}\n")
+            f"read_spef {spef}\n")
     put(project, "phase3/stage3/rcx/COMMANDS", "SOURCE_CONTROL RCX transport\n")
     put(project, "phase3/stage3/rcx/vibeic_receipt.json", json.dumps({
         "input": {"step": "OpenROAD.RCX", "image": image,
@@ -210,6 +210,8 @@ def fixture(tmp_path, monkeypatch, case):
     put(project, "reports/density.json", json.dumps({
         "tool": "klayout neutral density instrument",
         "layers": [{"name": "met1", "density_pct": 45.0}]}))
+    put(project, "phase3/stage3/pnr/routed.odb",
+        "SOURCE_CONTROL neutral routed checkpoint\n")
     post_stream_transport(project, pdk, monkeypatch, calls)
     native = R._docker_exec
     observed = []
