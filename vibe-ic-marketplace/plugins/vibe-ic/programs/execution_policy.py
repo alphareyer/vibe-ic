@@ -580,19 +580,19 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
             # fetch destination is not invented as a pre-existing input.
             path = Path(template)
             unbound_reason = None
-            if '..' in path.parts:
-                # Parent traversal after a symlink has producer-specific
-                # semantics; preserve execution with unknown freshness.
-                unbound_reason = 'TEMPLATE_PARENT_COMPONENT_UNBOUND'
+            try:
+                source = path if path.is_absolute() else root / path
+                source.resolve().relative_to(root.resolve())
+                # Keep the contained lexical alias: its target may change
+                # later, and current-input checks must reopen that same name.
+                path = source.relative_to(root.resolve())
+            except ValueError:
+                unbound_reason = 'EXTERNAL_TEMPLATE_OUTSIDE_PROJECT'
             else:
-                try:
-                    source = path if path.is_absolute() else root / path
-                    source.resolve().relative_to(root.resolve())
-                    # Keep the contained lexical alias: its target may change
-                    # later, and current-input checks must reopen that same name.
-                    path = source.relative_to(root.resolve())
-                except ValueError:
-                    unbound_reason = 'EXTERNAL_TEMPLATE_OUTSIDE_PROJECT'
+                if '..' in path.parts:
+                    # Preserve the existing external-source reason above;
+                    # contained parent traversal still has unknown freshness.
+                    unbound_reason = 'TEMPLATE_PARENT_COMPONENT_UNBOUND'
             if unbound_reason:
                 # Preserve the existing producer route when its source cannot
                 # be bound by the collector's safe project-local namespace.
