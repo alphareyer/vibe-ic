@@ -1,0 +1,556 @@
+{
+  "creator": "Yosys 0.70+ (git sha1 ce18972b2, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+  "modules": {
+    "spm": {
+      "attributes": {
+        "dynports": "00000000000000000000000000000001",
+        "top": "00000000000000000000000000000001",
+        "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:16.1-55.10"
+      },
+      "parameter_default_values": {
+        "size": "00000000000000000000000000100000"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "x": {
+          "direction": "input",
+          "bits": [ 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 ]
+        },
+        "y": {
+          "direction": "input",
+          "bits": [ 36 ]
+        },
+        "p": {
+          "direction": "output",
+          "bits": [ 37 ]
+        }
+      },
+      "cells": {
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:36$1": {
+          "hide_name": 1,
+          "type": "$and",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:36.26-36.40"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 ],
+            "B": [ 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38, 38 ],
+            "Y": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 ]
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$4": {
+          "hide_name": 1,
+          "type": "$and",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.27-38.32"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 ],
+            "B": [ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102 ],
+            "Y": [ 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134 ]
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$5": {
+          "hide_name": 1,
+          "type": "$and",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.37-38.42"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 ],
+            "B": [ 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166 ],
+            "Y": [ 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198 ]
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$7": {
+          "hide_name": 1,
+          "type": "$and",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.47-38.52"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102 ],
+            "B": [ 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166 ],
+            "Y": [ 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230 ]
+          }
+        },
+        "$or$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$6": {
+          "hide_name": 1,
+          "type": "$or",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.26-38.43"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134 ],
+            "B": [ 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198 ],
+            "Y": [ 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262 ]
+          }
+        },
+        "$or$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$8": {
+          "hide_name": 1,
+          "type": "$or",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.26-38.53"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262 ],
+            "B": [ 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230 ],
+            "Y": [ 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294 ]
+          }
+        },
+        "$procdff$22": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326 ],
+            "Q": [ 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166 ]
+          }
+        },
+        "$procdff$23": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358 ],
+            "Q": [ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102 ]
+          }
+        },
+        "$procdff$24": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 359 ],
+            "Q": [ 38 ]
+          }
+        },
+        "$procdff$25": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 360 ],
+            "Q": [ 37 ]
+          }
+        },
+        "$procmux$11": {
+          "hide_name": 1,
+          "type": "$mux",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "full_case": "00000000000000000000000000000001",
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.13-41.16|/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.9-51.12"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "S": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 361 ],
+            "B": [ "0" ],
+            "S": [ 3 ],
+            "Y": [ 360 ]
+          }
+        },
+        "$procmux$14": {
+          "hide_name": 1,
+          "type": "$mux",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "full_case": "00000000000000000000000000000001",
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.13-41.16|/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.9-51.12"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "S": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 36 ],
+            "B": [ "0" ],
+            "S": [ 3 ],
+            "Y": [ 359 ]
+          }
+        },
+        "$procmux$17": {
+          "hide_name": 1,
+          "type": "$mux",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "full_case": "00000000000000000000000000000001",
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.13-41.16|/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.9-51.12"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "S": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294 ],
+            "B": [ "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0" ],
+            "S": [ 3 ],
+            "Y": [ 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326 ]
+          }
+        },
+        "$procmux$20": {
+          "hide_name": 1,
+          "type": "$mux",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "full_case": "00000000000000000000000000000001",
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.13-41.16|/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:41.9-51.12"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "S": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, "0" ],
+            "B": [ "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0" ],
+            "S": [ 3 ],
+            "Y": [ 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358 ]
+          }
+        },
+        "$xor$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37$2": {
+          "hide_name": 1,
+          "type": "$xor",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37.26-37.31"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 ],
+            "B": [ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102 ],
+            "Y": [ 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424 ]
+          }
+        },
+        "$xor$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37$3": {
+          "hide_name": 1,
+          "type": "$xor",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000100000",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000100000",
+            "Y_WIDTH": "00000000000000000000000000100000"
+          },
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37.26-37.35"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424 ],
+            "B": [ 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166 ],
+            "Y": [ 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392 ]
+          }
+        }
+      },
+      "netnames": {
+        "$0\\c[31:0]": {
+          "hide_name": 1,
+          "bits": [ 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          }
+        },
+        "$0\\pr[0:0]": {
+          "hide_name": 1,
+          "bits": [ 360 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          }
+        },
+        "$0\\s[31:0]": {
+          "hide_name": 1,
+          "bits": [ 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          }
+        },
+        "$0\\yr[0:0]": {
+          "hide_name": 1,
+          "bits": [ 359 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:40.5-52.8"
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$4_Y": {
+          "hide_name": 1,
+          "bits": [ 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.27-38.32"
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$5_Y": {
+          "hide_name": 1,
+          "bits": [ 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.37-38.42"
+          }
+        },
+        "$and$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$7_Y": {
+          "hide_name": 1,
+          "bits": [ 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.47-38.52"
+          }
+        },
+        "$or$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38$6_Y": {
+          "hide_name": 1,
+          "bits": [ 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.26-38.43"
+          }
+        },
+        "$xor$/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37$2_Y": {
+          "hide_name": 1,
+          "bits": [ 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37.26-37.31"
+          }
+        },
+        "c": {
+          "hide_name": 0,
+          "bits": [ 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:26.21-26.22"
+          }
+        },
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:19.28-19.31"
+          }
+        },
+        "co": {
+          "hide_name": 0,
+          "bits": [ 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:38.21-38.23"
+          }
+        },
+        "m": {
+          "hide_name": 0,
+          "bits": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:36.21-36.22"
+          }
+        },
+        "p": {
+          "hide_name": 0,
+          "bits": [ 37 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:23.28-23.29"
+          }
+        },
+        "pr": {
+          "hide_name": 0,
+          "bits": [ 37 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:28.21-28.23"
+          }
+        },
+        "rst": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:20.28-20.31"
+          }
+        },
+        "s": {
+          "hide_name": 0,
+          "bits": [ 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:25.21-25.22"
+          }
+        },
+        "so": {
+          "hide_name": 0,
+          "bits": [ 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:37.21-37.23"
+          }
+        },
+        "x": {
+          "hide_name": 0,
+          "bits": [ 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:21.28-21.29"
+          }
+        },
+        "y": {
+          "hide_name": 0,
+          "bits": [ 36 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:22.28-22.29"
+          }
+        },
+        "yr": {
+          "hide_name": 0,
+          "bits": [ 38 ],
+          "attributes": {
+            "src": "/mnt/ssd2/codex_tasks/work/default-ic-spm8-converge-20261015/project/phase2/stage1/rtl/spm.v:27.21-27.23"
+          }
+        }
+      }
+    }
+  }
+}

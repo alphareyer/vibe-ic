@@ -1126,18 +1126,26 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         raw_drivers = _drivers(raw_mod)
         raw_q = {q for _, c, k in _cells(raw_mod) if k == "ff" for q in _bits(c, "Q")}
 
-        def literal_undef(bit, seen=frozenset()):
-            if isinstance(bit, str):
-                return bit.lower() in {"x", "z"}
-            if bit in seen or bit in raw_q:
-                return False
-            driver = raw_drivers.get(bit)
-            if driver is None:
-                return False
-            return any(literal_undef(b, seen | {bit})
-                       for p, bits in (driver.get("connections") or {}).items()
-                       if (driver.get("port_directions") or {}).get(p) == "input"
-                       for b in bits)
+        def literal_undef(bit):
+            # This is graph reachability, not path enumeration. Visit shared
+            # combinational fan-in once per query; current Q remains a cut.
+            pending, visited = [bit], set()
+            while pending:
+                current = pending.pop()
+                if isinstance(current, str):
+                    if current.lower() in {"x", "z"}:
+                        return True
+                    continue
+                if current in visited or current in raw_q:
+                    continue
+                visited.add(current)
+                driver = raw_drivers.get(current)
+                if driver is not None:
+                    pending.extend(b
+                        for pin, bits in (driver.get("connections") or {}).items()
+                        if (driver.get("port_directions") or {}).get(pin) == "input"
+                        for b in bits)
+            return False
 
         undef_q = set()
         for _name, cell, kind in _cells(raw_mod):
