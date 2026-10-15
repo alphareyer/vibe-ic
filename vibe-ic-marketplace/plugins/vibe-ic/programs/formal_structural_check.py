@@ -446,7 +446,7 @@ def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
     for name, net in (mod.get("netnames") or {}).items():
         bits = net.get("bits") or []
         # Exactly the dotted grammar the existing default runner binds.
-        if (re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", name)
+        if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name)
                 and bits and all(isinstance(b, int) and b in state for b in bits)):
             names.append((name, bits))
     names.sort(key=lambda x: ("." in x[0], len(x[0]), x[0]))
