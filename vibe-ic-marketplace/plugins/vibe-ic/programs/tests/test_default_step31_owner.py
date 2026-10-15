@@ -198,10 +198,16 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     put(project, "API_OBSERVATION.json", json.dumps(observation, indent=2))
     assert calls.count("erc") == 1
     assert calls.count("extraction") == 1
-    assert calls.count("netgen") == (2 if case == "lvs_fail" else 1)
+    assert calls.count("netgen") == 1
     order = [x[:2] for x in observed]
-    assert order in ([("declared", "31")],
-                     [("declared", "31"), ("consumer", "31")])
+    if case == "lvs_fail":
+        assert rc != 0
+        assert receipt["verdict"] == "FAIL", receipt
+        assert receipt["producer_verdict"] == "FAIL", receipt
+        assert order == [], "a measured producer FAIL must stop before declared writers or consumers"
+        assert result is None
+        return
+    assert order == [("declared", "31"), ("consumer", "31")]
     census = observed[0][2]
     assert census["executed"] > 0, census
     if case == "current":
@@ -217,10 +223,7 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     else:
         assert rc != 0
         assert result is None or result["current_inputs"] is not True
-        if case == "lvs_fail":
-            assert receipt["verdict"] == "FAIL", receipt
-            assert receipt["producer_verdict"] == "FAIL", receipt
-        elif case == "missing_erc":
+        if case == "missing_erc":
             assert observation["required_outputs"]["reports/phase3/erc.rpt"] is None
         else:
             report = project / "reports/phase3/perc_sweep.json"
