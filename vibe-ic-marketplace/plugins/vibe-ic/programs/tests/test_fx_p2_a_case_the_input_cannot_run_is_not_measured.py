@@ -315,6 +315,10 @@ def test_optional_case_diagnostic_agrees_with_selection(tmp_path, declaration, c
         row, = execution["not_executed"]
         assert row["case"] == optional["name"] and row["state"] == "NOT_EXECUTED"
         assert "NOT_EXECUTED" in report["message"]
+        # Bind the reverse control to the existing contradictory diagnostic,
+        # before checking the replacement explanation.
+        assert ("declares no selection at this point" in report["message"]) == (
+            classification == "undeclared")
         if classification == "selected":
             assert decision["decided"] and decision["design_selected"] == ["i", "zicsr"]
             assert "case-owned oracle has not executed" in report["message"]
@@ -325,8 +329,6 @@ def test_optional_case_diagnostic_agrees_with_selection(tmp_path, declaration, c
         elif classification == "opaque":
             assert decision["decided"] is True and decision["cases"] == []
             assert "does not establish option" in report["message"]
-        assert ("declares no selection at this point" in report["message"]) == (
-            classification == "undeclared")
     after = L10X.load_record(project, project / "phase1/generated_docs/L10_TEST_CASES.json")
     assert before == after
 
