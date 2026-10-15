@@ -2918,6 +2918,11 @@ def test_current_step23_repair_scope_reaches_judge(tmp_path, monkeypatch, case):
         bundle['identity']['repair_adoption']['adopted'] = False
     elif case == 'changed_after_capture':
         old_state.write_text(old_state.read_text() + ' ')
+    from unittest.mock import Mock
+    # This synthetic repair-adoption fixture keeps the installed-PDK probe
+    # explicitly unavailable, independently of the test host's transport.
+    monkeypatch.setattr(drv, "image_pdk_anchor", Mock(side_effect=OSError(
+        "repair-adoption fixture has no installed PDK image")))
     result = drv.judge(bundle, project=project)
     adoption_gaps = [item for item in result['not_measured']
                      if 'repair adoption' in item]
@@ -2931,6 +2936,7 @@ def test_current_step23_repair_scope_reaches_judge(tmp_path, monkeypatch, case):
     assert (required in result['failures']) is is_adopted
     if is_adopted:
         assert result['verdict'] == 'FAIL'
+
 
 
 def _native_top_capture_fixture(tmp_path, monkeypatch, filename='arbitrary_route.v',
