@@ -1092,3 +1092,95 @@ def test_stopped_default_window_does_not_audit_old_or_unexecuted_outputs(tmp_pat
     report = json.loads(saved[0].read_text())
     assert report['verdict'] == 'NOT_MEASURED'
     assert report['declared_gate_checks']['20']['status'] == 'NOT_MEASURED'
+
+
+@pytest.mark.parametrize('case', ['default', 'caller_false', 'caller_true',
+                                  'tool_failure', 'missing_stage'])
+def test_default_route_supplies_required_post_grt_policy_to_native_chain(
+        tmp_path, monkeypatch, case):
+    """Real producer/state-chain/gate filtering; only native I/O is modeled."""
+    import drv_signoff_judge as drv
+    import librelane_contract as ll
+    import librelane_route as route
+
+    segment = ['Odb.HeuristicDiodeInsertion', 'OpenROAD.GlobalRouting',
+               route.POST_GRT_REPAIR, 'OpenROAD.ResizerTimingPostGRT', route.DRT]
+    if case == 'missing_stage':
+        segment.remove(route.POST_GRT_REPAIR)
+    monkeypatch.setattr(producers, '_parameters', lambda *args:
+                        (runner, ll, SimpleNamespace(name='unit'), ''))
+    monkeypatch.setattr(ll, 'flow_segment', lambda *args, **kwargs: list(segment))
+    monkeypatch.setattr(runner, '_resolved_cell_policy',
+                        lambda configs, *args: (configs, {}))
+    state = tmp_path / 'current_post_hold_state.json'
+    state.write_text('{}')
+    monkeypatch.setattr(producers, '_predecessor_state', lambda *args: state)
+    observed = {}
+
+    def resolve(project, image, pdk, ids, **kwargs):
+        # Model the native resolver's default false and explicit overlay.
+        overlay = kwargs.get('overlay') or {}
+        observed['overlay'] = dict(overlay)
+        root = project / 'phase3/librelane' / kwargs['folder']
+        root.mkdir(parents=True)
+        gates = {
+            route.POST_GRT_REPAIR: {'RUN_POST_GRT_DESIGN_REPAIR':
+                overlay.get('RUN_POST_GRT_DESIGN_REPAIR', (False, 'image default'))[0]},
+            'Odb.HeuristicDiodeInsertion': {'RUN_HEURISTIC_DIODE_INSERTION': False},
+            'OpenROAD.ResizerTimingPostGRT': {'RUN_POST_GRT_RESIZER_TIMING': False}}
+        (root / 'flow_gates.json').write_text(json.dumps(gates))
+        configs = {sid: root / (sid + '.json') for sid in ids}
+        for config in configs.values():
+            config.write_text(json.dumps({'DESIGN_NAME': 'unit'}))
+        return configs
+
+    monkeypatch.setattr(ll, 'resolve_step_configs', resolve)
+
+    class AtNativeChain(RuntimeError):
+        pass
+
+    def native(project, image, chain, **kwargs):
+        observed['ordered_steps'] = [sid for sid, _, _ in chain]
+        observed['input_states'] = [str(value) for _, _, value in chain]
+        root = project / 'phase3/librelane/execution-backend-21-config'
+        observed['flow_gates'] = json.loads((root / 'flow_gates.json').read_text())
+        if case == 'tool_failure':
+            raise ll.Refusal('LL_STEP_FAILED', 'SOURCE_CONTROL native tool failed')
+        raise AtNativeChain('SOURCE_CONTROL native boundary reached')
+
+    monkeypatch.setattr(ll, 'run_chain', native)
+    caller = ({'RUN_POST_GRT_DESIGN_REPAIR': (
+                  case == 'caller_true', 'explicit neutral caller')}
+              if case in ('caller_false', 'caller_true') else {})
+    params = {'step_id': '21', 'top': 'unit', 'pdk_name': 'unit',
+              'image_id': 'unit-image', 'pdk_root': str(tmp_path), 'overlay': caller}
+    if case == 'tool_failure':
+        with pytest.raises(ll.Refusal, match='LL_STEP_FAILED'):
+            producers.produce_pnr(tmp_path, params)
+        observed['outcome'] = 'REFUSED'
+    else:
+        with pytest.raises(AtNativeChain, match='native boundary reached'):
+            producers.produce_pnr(tmp_path, params)
+        observed['outcome'] = 'NATIVE_CHAIN_SUBMITTED'
+    (tmp_path / 'default21-policy.observation.json').write_text(
+        json.dumps(observed, indent=2) + '\n')
+
+    ids = observed['ordered_steps']
+    expected = case not in ('caller_false', 'missing_stage')
+    assert (route.POST_GRT_REPAIR in ids) is expected, observed
+    assert 'Odb.HeuristicDiodeInsertion' not in ids, observed
+    assert 'OpenROAD.ResizerTimingPostGRT' not in ids, observed
+    assert observed['input_states'] == [str(state)] * len(ids), observed
+    if caller:
+        assert observed['overlay']['RUN_POST_GRT_DESIGN_REPAIR'] == \
+            caller['RUN_POST_GRT_DESIGN_REPAIR']
+    elif case != 'missing_stage':
+        assert observed['overlay']['RUN_POST_GRT_DESIGN_REPAIR'] == \
+            route.POST_GRT_DESIGN_REPAIR['RUN_POST_GRT_DESIGN_REPAIR']
+    if expected:
+        assert ids.index(route.POST_GRT_REPAIR) < ids.index(route.DRT), observed
+    else:
+        judged = drv.judge({'identity': {}, 'frozen': {}, 'current': {},
+                            'stages': [], 'pins': {}, 'scenes': []})
+        assert judged['verdict'] == 'FAIL'
+        assert 'post_grt_repair: required stage absent' in judged['failures']

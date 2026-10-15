@@ -1199,6 +1199,7 @@ def produce_pnr(project, params):
     elif sid == '21':
         import librelane_route as route
         ids = route.chain_ids(params['image_id'], canonical_routing_only=True)
+        overlay = {**route.POST_GRT_DESIGN_REPAIR, **overlay}
         ll, configs, by = _state_chain(project, params, ids, 'post_hold.def', overlay,
                                        respect_flow_gates=True)
         _handoff(project, ll, list(by.values())[-1], {'def': PNR + 'routed.def', 'odb': PNR + 'routed.odb',
