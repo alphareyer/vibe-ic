@@ -78497,7 +78497,11 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
             if site not in [r.name for r in rows]:
                 stale.setdefault(site, {"status": "NOT_MEASURED",
                                         "reason": f"upstream step {changed_step} changed output"})
-        canonical = _phase3_window_steps("15", "39")
+        import _flow_yaml
+        canonical = (_flow_yaml.ordered_step_ids(
+            execution_stages=range(4, 9), execution_tracks=('default',))
+            if execution_policy.request()['mode'] == 'default' else
+            _phase3_window_steps("15", "39"))
         last = max((canonical.index(sid) for sid in window_ids
                     if sid in canonical), default=-1)
         for sid in canonical[last + 1:]:
