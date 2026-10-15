@@ -121,11 +121,31 @@ def _described_clock_edges(l9: Dict[str, Any]) -> Dict[str, str]:
                 low = text.lower()
                 rise = bool(re.search(r"\b(rising|positive|posedge)\s+edge\b", low) or "上升沿" in text)
                 fall = bool(re.search(r"\b(falling|negative|negedge)\s+edge\b", low) or "下降沿" in text)
-                negated = bool(re.search(r"\b(not|without)\s+(a\s+)?(rising|falling|positive|negative)\s+edge\b", low) or "非上升沿" in text or "非下降沿" in text)
+                negated = bool(re.search(r"\b(?:does\s+)?not\b[^.]*\b(rising|falling|positive|negative)\s+edge\b", low) or re.search(r"\bwithout\b[^.]*\b(rising|falling|positive|negative)\s+edge\b", low) or "非上升沿" in text or "非下降沿" in text)
                 if not negated and rise != fall:
                     candidates.setdefault(name, set()).add("posedge" if rise else "negedge")
     return {name: next(iter(edges)) for name, edges in candidates.items()
             if len(edges) == 1}
+
+
+def _refresh_existing_edges(existing: Dict[str, Any], l9: Dict[str, Any]) -> bool:
+    """Fill only absent retained clock edges from unambiguous L9 authority."""
+    edges = _clock_edges(l9)
+    for name, edge in _described_clock_edges(l9).items():
+        edges.setdefault(name, edge)
+    changed = False
+    clocks = existing.get("clocks")
+    if not isinstance(clocks, list):
+        return False
+    for row in clocks:
+        if not isinstance(row, dict) or _nonempty(row.get("edge")):
+            continue
+        edge = edges.get(row.get("name"))
+        if edge:
+            row["edge"] = edge
+            row["edge_derived_from"] = L9_REL
+            changed = True
+    return changed
 
 
 def _project(l8: Dict[str, Any], l9: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -191,23 +211,10 @@ def run(project: Path) -> Dict[str, Any]:
     for scope in _scopes(l8):
         existing = scope.get(L8_KEY)
         if _nonempty(existing):
-            projected = _project(l8, l9)
-            if isinstance(existing, dict) and isinstance(projected, dict):
-                old, fresh = existing.get("clocks"), projected.get("clocks")
-                if isinstance(old, list) and isinstance(fresh, list):
-                    by_name = {r.get("name"): r for r in fresh if isinstance(r, dict)}
-                    changed = False
-                    for row in old:
-                        if isinstance(row, dict) and "edge" not in row:
-                            candidate = by_name.get(row.get("name"))
-                            if candidate and candidate.get("edge"):
-                                row["edge"] = candidate["edge"]
-                                row["edge_derived_from"] = L9_REL
-                                changed = True
-                    if changed:
-                        _stamp.dump(l8_path, l8)
-                        return {"tool": TOOL, "status": "OK", "emitted_count": 1,
-                                "reason": "existing waveform refreshed from L9 authority"}
+            if isinstance(existing, dict) and _refresh_existing_edges(existing, l9):
+                _stamp.dump(l8_path, l8)
+                return {"tool": TOOL, "status": "OK", "emitted_count": 1,
+                        "reason": "existing waveform refreshed from L9 authority"}
             return {"tool": TOOL, "status": "OK", "emitted_count": 0,
                     "reason": "existing clock_and_reset_waveform preserved"}
 

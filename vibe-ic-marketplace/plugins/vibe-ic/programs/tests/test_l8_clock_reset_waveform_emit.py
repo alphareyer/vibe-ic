@@ -143,6 +143,28 @@ def test_missing_or_negated_description_does_not_guess_edge(tmp_path, descriptio
     assert _l8(tmp_path)["clock_and_reset_waveform"] == existing
 
 
+def test_retained_waveform_refresh_does_not_require_duplicate_top_level_facts(tmp_path):
+    existing = {"clocks": [{"name": "clk", "period_ns": 20}],
+                "resets": [{"name": "rst", "sync": "synchronous",
+                            "polarity": "active_high"}]}
+    _write(tmp_path, clock=False, reset=False, existing=existing)
+    l9_path = tmp_path / EMIT.L9_REL
+    l9 = {"ports": [{"name": "clk", "description": "rising edge sample clock"}]}
+    l9_path.write_text(json.dumps(l9))
+    assert getattr(RUNNER, HELPER)(tmp_path) == 1
+    value = _l8(tmp_path)["clock_and_reset_waveform"]
+    assert value["clocks"][0]["edge"] == "posedge"
+    assert value["resets"] == existing["resets"]
+
+
+def test_description_with_non_immediate_negation_does_not_guess_edge(tmp_path):
+    _write(tmp_path, existing={"clocks": [{"name": "clk"}], "resets": [{"name": "rst"}]})
+    p = tmp_path / EMIT.L9_REL
+    p.write_text(json.dumps({"ports": [{"name": "clk", "description": "This clock does not use the rising edge."}]}))
+    assert getattr(RUNNER, HELPER)(tmp_path) == 0
+    assert "edge" not in _l8(tmp_path)["clock_and_reset_waveform"]["clocks"][0]
+
+
 def test_empty_primary_lists_fall_through_to_typed_aliases(tmp_path):
     _write(tmp_path)
     l8 = _l8(tmp_path)
