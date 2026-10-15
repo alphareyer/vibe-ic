@@ -61535,7 +61535,9 @@ _DRC_ATTRIBUTION_JOBS_BASE = (
       "--under", "reports/phase3/drc_router.rpt")),
     ("drc_report_check", "reports/phase3/drc_signoff.json",
      "reports/phase3/drc_signoff.rpt",
-     ("--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt")),
+     ("--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt",
+      "--under", "reports/phase3/drc_signoff.log",
+      "--subject", "reports/phase3/drc_signoff.rpt")),
     # The graded spare-cell pool, for `design_for_eco__spares__count`. Same
     # ordering defect, found the same way: MEASURED on a run of `spm`,
     # `phase3/final/metrics.json` 07:03:00 and `reports/spare_cell_coverage.json`
