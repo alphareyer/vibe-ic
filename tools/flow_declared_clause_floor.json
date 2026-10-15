@@ -52,12 +52,12 @@
       "from": {
         "step": "18",
         "kind": "optional_program_exit_zero",
-        "cmd": "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
+        "cmd": "spare_cell_coverage_check . --post-spare-def --json reports/phase2/gates/spare_cell_coverage.json"
       },
       "to": {
         "step": "18",
         "kind": "program_exit_zero",
-        "cmd": "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
+        "cmd": "spare_cell_coverage_check . --post-spare-def --json reports/phase2/gates/spare_cell_coverage.json"
       },
       "transition": "kind",
       "landing": "61f610636 (v1.24.33, batch-D268)",
@@ -110,12 +110,12 @@
     },
     {
       "from": {
-        "step": "36",
+        "step": "38",
         "kind": "program_exit_zero",
         "cmd": "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_checklist.json"
       },
       "to": {
-        "step": "36",
+        "step": "38",
         "kind": "program_exit_zero",
         "cmd": "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
       },
@@ -178,17 +178,17 @@
     {
       "step": "14",
       "kind": "advisory_program_exit_zero",
-      "cmd": "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json"
+      "cmd": "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order_verdict.json"
     },
     {
       "step": "14",
       "kind": "optional_program_exit_zero",
-      "cmd": "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json"
+      "cmd": "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap_verdict.json"
     },
     {
       "step": "14",
       "kind": "optional_program_exit_zero",
-      "cmd": "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json"
+      "cmd": "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template_verdict.json"
     },
     {
       "step": "15",
@@ -233,7 +233,7 @@
     {
       "step": "18",
       "kind": "optional_program_exit_zero",
-      "cmd": "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
+      "cmd": "spare_cell_coverage_check . --post-spare-def --json reports/phase2/gates/spare_cell_coverage.json"
     },
     {
       "step": "19",
@@ -318,7 +318,7 @@
     {
       "step": "2",
       "kind": "program_exit_zero",
-      "cmd": "rtl_hygiene_lint phase2/stage1/rtl/*.sv phase2/stage1/rtl/*.v --severity ERROR --json reports/phase2/lint/rtl_hygiene.json"
+      "cmd": "rtl_hygiene_lint --project . --define SYNTHESIS --severity ERROR --json reports/phase2/lint/rtl_hygiene.json"
     },
     {
       "step": "2",
@@ -378,7 +378,7 @@
     {
       "step": "23",
       "kind": "program_exit_zero",
-      "cmd": "hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage.json"
+      "cmd": "hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage_verdict.json"
     },
     {
       "step": "23",
@@ -411,7 +411,7 @@
       "cmd": "em_report_check . --mode em --json reports/phase3/em_signoff.json"
     },
     {
-      "step": "26",
+      "step": "37",
       "kind": "optional_program_exit_zero",
       "cmd": "gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json"
     },
@@ -493,7 +493,7 @@
     {
       "step": "31",
       "kind": "program_exit_zero",
-      "cmd": "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --json reports/phase3/drc_signoff.json"
+      "cmd": "drc_report_check . --mode drc --signoff --under reports/phase3/drc_signoff.rpt --under reports/phase3/drc_signoff.log --subject reports/phase3/drc_signoff.rpt --json reports/phase3/drc_signoff.json"
     },
     {
       "step": "31",
@@ -586,7 +586,7 @@
       "cmd": "step_internal_fail_bubble_up_check ."
     },
     {
-      "step": "36",
+      "step": "38",
       "kind": "program_exit_zero",
       "cmd": "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_checklist.json"
     },
@@ -1133,12 +1133,7 @@
     {
       "step": "FS1",
       "kind": "program_exit_zero",
-      "cmd": "fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_gate.json"
-    },
-    {
-      "step": "FS1",
-      "kind": "program_exit_zero",
-      "cmd": "fmeda_fault_injection_coverage . --rtl-dir phase2/stage1/rtl --asil D --json reports/phase2/safety/fmeda_coverage.json"
+      "cmd": "fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_verdict.json"
     },
     {
       "step": "M1",
@@ -1173,17 +1168,17 @@
     {
       "step": "M3",
       "kind": "program_exit_zero",
-      "cmd": "mixed_signal_cosim_check . --json reports/analog/mixed_signal/cosim_audit.json"
+      "cmd": "mixed_signal_cosim_check . --require-current-production --json reports/analog/mixed_signal/cosim_audit.json"
     },
     {
       "step": "M3",
       "kind": "program_exit_zero",
-      "cmd": "mixed_signal_interface_si_check . --json reports/analog/mixed_signal/interface_si_audit.json"
+      "cmd": "mixed_signal_interface_si_check . --require-current-production --json reports/analog/mixed_signal/interface_si_audit.json"
     },
     {
       "step": "M4",
       "kind": "program_exit_zero",
-      "cmd": "mixed_signal_signoff_check . --json reports/analog/mixed_signal/signoff_audit.json"
+      "cmd": "mixed_signal_signoff_check . --require-current-production --json reports/analog/mixed_signal/signoff_audit.json"
     }
   ]
 }

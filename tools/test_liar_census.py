@@ -3887,7 +3887,9 @@ _SHIPPED_RENAMES = json.loads(
 
 @pytest.mark.parametrize(
     "row", _SHIPPED_RENAMES,
-    ids=[f'{r["to"]["step"]}-{r["transition"]}' for r in _SHIPPED_RENAMES])
+    # Preserve original test IDs while the checklist's canonical owner moves.
+    ids=["18-kind", "26-input_scope", "27-kind", "32-kind",
+         "36-verdict_path", "38-verdict_path"])
 def test_a_shipped_rename_spelled_the_old_way_again_is_MISSING(tmp_path, row):
     """The successor is the floor now. Reverting the flow to the recorded old
     spelling must name the successor as MISSING -- the rename made the floor
