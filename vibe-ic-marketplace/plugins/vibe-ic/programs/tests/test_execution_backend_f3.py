@@ -337,12 +337,23 @@ def test_backend_project_contract_uses_published_synthesis_folder_only(tmp_path)
     prior.write_text('{"module": "top"}\n')
     old_state = "/original/project/phase3/librelane/02-yosys-synthesis/top.nl.v"
     (folder / "state_out.json").write_text(json.dumps({"nl": old_state}))
+    # The published folder is a namespace. Only the existing receipt closure
+    # and the handoff reader's required metadata belong to the contract.
+    metadata = ("config.json", "reports/stat.json", "input_fingerprint.json", "pdk_root.json")
+    for name in metadata:
+        target = folder / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}")
     (folder / "vibeic_receipt.json").write_text(json.dumps({"input": {
         "state_files": {
             "/original/project/phase3/librelane/01-yosys-jsonheader/top.h.json": em.digest(prior)
-        }}}))
+        }}, "sha256": {name: em.digest(folder / name) for name in metadata}}))
+    (folder / "unreferenced.lock").write_bytes(b"")
     contract = backend_project_input_contract(project, "37")
-    assert "phase3/librelane/02-yosys-synthesis" in contract
+    assert "phase3/librelane/02-yosys-synthesis" not in contract
+    assert all(f"phase3/librelane/02-yosys-synthesis/{name}" in contract for name in
+               (*metadata, "vibeic_receipt.json", "state_out.json"))
+    assert "phase3/librelane/02-yosys-synthesis/unreferenced.lock" not in contract
     assert "phase2/stage2/synth/top_synth.v" in contract
     assert "phase3/librelane" not in contract
     assert "phase3/librelane/01-yosys-jsonheader/top.h.json" in contract

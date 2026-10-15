@@ -582,12 +582,12 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
         from execution_adapters_backend import backend_project_input_contract
         for item in backend_project_input_contract(
                 root, str(step_id), collect_missing=True):
-            # Preserve the public helper's historical path-string API while
-            # giving an existing waiver its explicit optional semantics in the
-            # issuer/worker manifest.  Other dynamic paths remain required.
+            # These existing optional consumer edges keep their semantics.
+            # The TB directory may be empty; its actual descendants are still
+            # collected and hash-bound below, without requiring a dummy file.
             declarations.append(
                 {'from': 'external', 'path': item, 'required': False}
-                if item == 'waivers.json' else item)
+                if item in {'waivers.json', 'phase2/stage1/sim/tb'} else item)
     # Frontend adapters retain YAML mappings; native adapters declare paths.
     # Use the canonical expansion for upstream `outputs: all` and keep an
     # unchecked external declaration out of the filesystem search.

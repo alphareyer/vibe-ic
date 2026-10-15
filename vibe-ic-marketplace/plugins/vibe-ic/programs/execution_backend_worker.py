@@ -204,17 +204,6 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
     declarations = condition_aware_declarations(project, declarations, rows)
     missing = []
     seen = set()
-    # An existing empty waiver is malformed input that must reach the schema
-    # consumer.  Every other zero-byte member remains a preflight missing
-    # input.  Grant this exception only through the explicit optional mapping
-    # emitted by the backend issuer.
-    zero_byte_allowed = {
-        str(entry.get('path'))
-        for entry in declarations or ()
-        if isinstance(entry, Mapping)
-        and entry.get('required') is False
-        and isinstance(entry.get('path'), str)
-    }
 
     def add(value):
         value = str(value)
@@ -310,8 +299,10 @@ def _resolve_input_contract(project: Path, declarations, manifest=None) -> dict:
             except OSError:
                 add(raw)
                 continue
-            if (target.is_symlink() or not target.is_file() or
-                    (not target.stat().st_size and str(rel) not in zero_byte_allowed)
+            # Members prove byte identity, not semantic substance. Required
+            # declarations above retain their nonempty design-input checks;
+            # a directory may also contain valid empty native metadata.
+            if (target.is_symlink() or not target.is_file()
                     or actual != digest.removeprefix('sha256:')):
                 add(raw)
     if isinstance(manifest, Mapping):

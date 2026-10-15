@@ -936,9 +936,10 @@ def backend_project_input_contract(project: Path, step_id: str, *,
             target = root / rel
             if target.is_symlink():
                 raise ValueError(f"backend synthesis binding uses symlinked {key}: {value}")
-            result.append(rel.as_posix())
             if key == "folder":
                 folder_path = target
+            else:
+                result.append(rel.as_posix())
         # The synthesis receipt's state_files can point to an earlier
         # producer in the same LibreLane chain (for example the Yosys JSON
         # header consumed by Yosys.Synthesis).  Include those exact relative
@@ -954,6 +955,25 @@ def backend_project_input_contract(project: Path, step_id: str, *,
                 else:
                     raise ValueError("backend synthesis receipt/state is unreadable")
             else:
+                # The folder is a namespace, not a recursive dependency.
+                # Carry the handoff reader's fixed metadata plus the existing
+                # receipt's exact output closure. Unreferenced native caches
+                # and locks are not inputs to this backend invocation.
+                for name in ("vibeic_receipt.json", "config.json", "state_out.json",
+                             "reports/stat.json", "input_fingerprint.json", "pdk_root.json"):
+                    carry_checkpoint_file(str((folder_path / name).relative_to(root)))
+                hashes = receipt.get("sha256", {})
+                if not isinstance(hashes, Mapping):
+                    raise ValueError("backend synthesis receipt has malformed sha256")
+                for raw, digest in hashes.items():
+                    rel = Path(raw) if isinstance(raw, str) else None
+                    if (rel is None or rel.is_absolute() or not raw or ".." in rel.parts
+                            or rel.as_posix() != raw or not isinstance(digest, str)):
+                        raise ValueError(f"backend synthesis receipt path is unsafe: {raw!r}")
+                    target = folder_path / rel
+                    carry_checkpoint_file(str(target.relative_to(root)))
+                    if target.is_file() and em.digest(target) != digest:
+                        raise ValueError(f"backend synthesis receipt digest mismatch: {raw}")
                 result.extend(_mapped_receipt_state_files(
                     root, folder_path, receipt, state,
                     collect_missing=collect_missing))
@@ -1007,14 +1027,21 @@ def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[st
         raise ValueError("native receipt has malformed state_files")
     seen: set[str] = set()
     mapped: list[str] = []
-    for raw, digest in state_files.items():
+    config_files = inp.get("config_files", {})
+    if not isinstance(config_files, Mapping):
+        raise ValueError("native receipt has malformed config_files")
+    for raw, digest in {**config_files, **state_files}.items():
         if (not isinstance(raw, str) or not isinstance(digest, str)
                 or not raw.startswith("/") or ".." in Path(raw).parts
                 or str(Path(raw)) != raw):
             raise ValueError(f"native receipt state path is unsafe: {raw}")
         source = Path(raw)
         if not source.is_relative_to(original_root):
-            raise ValueError(f"native receipt state path is foreign: {raw}")
+            if raw in state_files:
+                raise ValueError(f"native receipt state path is foreign: {raw}")
+            # PDK/image config material is resolved by the existing receipt
+            # mount reader; it is not a project file to stage here.
+            continue
         relative = source.relative_to(original_root)
         target = project / relative
         try:
