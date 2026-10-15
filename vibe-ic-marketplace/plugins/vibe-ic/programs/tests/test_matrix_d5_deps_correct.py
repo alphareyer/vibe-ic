@@ -1718,7 +1718,7 @@ _NARROWED_LIVE_SUBJECTS: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (
         "stage_on_pass_review",
         "packaging_log.json",
-        ("2", "7", "14", "15", "37", "39"),
+        ("2", "7", "14", "15", "36", "39"),
         "named only by R5_PACKAGE_CANNOT_BOND_DESIGN, which the flow declares "
         "under stage5_manufacturing's `on_pass_review.artefact`. No gate "
         "command passes `--stage stage5_manufacturing`, and the rule is "

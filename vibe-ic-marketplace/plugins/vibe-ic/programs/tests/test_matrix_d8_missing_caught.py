@@ -89,17 +89,20 @@ is never read. Every predicate here is recomputed from the current flow yaml and
 the current ``flow_compliance_check.py`` by executing them.
 
 ====================================================================
-CELL STATES (63 = 61 + 0 + 2)
+CELL STATES (70 = 69 + 0 + 1)
 ====================================================================
-  ENFORCED  61 — every step that declares ``required_outputs``.
+  ENFORCED  69 — every step that declares ``required_outputs``.
   WAIVED     0 — ``flow_matrix.waivers.WAIVERS`` is empty for this dimension.
-  NA         2 — ``FS1`` and ``P0`` declare no ``required_outputs`` at all, so
+  NA         1 — ``P0`` declares no ``required_outputs`` at all, so
                  there is no declared artefact that can go missing. The NA test
-                 asserts that PRECONDITION live: the day either step gains a
+                 asserts that PRECONDITION live: the day this step gains a
                  ``required_outputs`` key the NA self-invalidates and goes red,
                  forcing re-evaluation. It never calls ``pytest.skip()``.
 
-``test_d8_cell_census_is_complete`` proves the three states partition the 63
+FS1 now declares its two producer reports and is ENFORCED by the same missing
+output sweep; this is an ownership change, not an additional NA allowance.
+
+``test_d8_cell_census_is_complete`` proves the three states partition the 70
 exactly, so a cell cannot go silently unprobed.
 
 ====================================================================
@@ -852,7 +855,7 @@ INTERACTION_STEP = _pick_interaction_step()
 #: a 61/0/2 split that is no longer true, with nobody told. Pinning the set
 #: makes that transition red exactly once, in the place where the split is
 #: written down.
-NA_STEPS_AS_MEASURED: Tuple[str, ...] = ("FS1", "P0")
+NA_STEPS_AS_MEASURED: Tuple[str, ...] = ("P0",)
 
 #: `flow_compliance_check._PLATFORM_CAPABILITY_GAPS` as measured 2026-07-27.
 #:
@@ -2255,9 +2258,11 @@ CONTENT_ARM_BLIND: Tuple[str, ...] = ()
 #: The inference was coarser and it is the one that lost, on evidence.
 CONTENT_ARM_UNGRADABLE_SELF_WRITTEN: Tuple[str, ...] = ()
 
-#: Kinds the flow can read at all. Anything else is not a content channel, so a step
-#: that rewrites only those is NOT gradable and its UNMOVED means nothing about blindness.
-_CONTENT_BEARING_SUFFIXES: Tuple[str, ...] = (".json", ".jsonl")
+#: Kinds the current flow reads. The existing Verilog wrong-body mutator and
+#: step 1's MOVED pin already exercise the real RTL content checker; excluding
+#: those same .v/.sv inputs from gradability discarded a working content arm.
+#: Other kinds remain ungraded rather than claiming an unread channel is blind.
+_CONTENT_BEARING_SUFFIXES: Tuple[str, ...] = (".json", ".jsonl", ".v", ".sv")
 
 
 #: Paths a step's OWN gate writes, from the `--json` / `--out` of its own gate

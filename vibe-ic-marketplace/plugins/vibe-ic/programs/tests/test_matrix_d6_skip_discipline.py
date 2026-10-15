@@ -3093,7 +3093,8 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
     """Only still-live unjustified skip tiers enter L6 after classification.
 
         Steps 12 and 30 previously entered this leg as ambiguous VACUOUS_PASS rows.
-        The shared reason taxonomy classifies them as INCOMPLETE. A consumer
+        The shared reason taxonomy classified them as INCOMPLETE; the current
+        Step-30 native binding now rejects its generic report as FAIL. A consumer
         asked before an omitted producer is a legitimate one-step skip; once
         the producer completes, a missing promised output must FAIL.
     """
@@ -3111,18 +3112,17 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
     assert probe_for("P0").scenarios["SEEDED"].declared_by.startswith(
         "ASKED_BEFORE_PRODUCER:")
     assert illegit == [], illegit
-    # R-0915-85 — `INCOMPLETE` was the word that kept 12 and 30 out of this
-    # leg, and it is `NOT_MEASURED(partial_population)` now: the step RAN and
-    # examined PART of its population. Pinned as the PAIR, because the verdict
-    # alone no longer carries the distinction — `NOT_MEASURED` also spells the
-    # two reasons that ARE skips (`is_skip_tier`), and pinning the word alone
-    # would let a step that examined nothing drift in here wearing it.
+    # Step 12 still reports a partial population. Step 30's current native
+    # binding now refuses this generic seeded report as FAIL, rather than
+    # treating a copied historical result as a partial measurement. Neither
+    # may enter the legitimate-skip population. Keep the exact status/reason
+    # pairs, since NOT_MEASURED alone does not distinguish a skip.
     assert {
         sid: (probe_for(sid).scenarios["SEEDED"].status,
               probe_for(sid).scenarios["SEEDED"].reason_class)
         for sid in ("12", "30")
     } == {"12": ("NOT_MEASURED", "partial_population"),
-          "30": ("NOT_MEASURED", "partial_population")}
+          "30": ("FAIL", "")}
 
 
 def test_d6_l6_deferred_register_only_shrinks():

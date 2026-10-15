@@ -6171,7 +6171,7 @@ steps:
               - "phase3/stage3/pnr/drv_promotion_not_run.json"
               - "pnr/drv_promotion_not_run.json"
             absent_condition_reason: "no route promotion happened this run, so no promoted route exists whose claimed improvement the sign-off report could corroborate; the gate's own verdict table makes this its normal outcome and the marker is measured at 0 of 15 published run-roots"
-    blocks_on: [32]
+    blocks_on: [32, 22]
 
   - id: DT2
     name: "Path-delay-fault (at-speed, timing-graded) ATPG"
@@ -6969,7 +6969,7 @@ steps:
               is conditioned on. As a GATE the MCF axis is a documented
               ADVISORY: it is a conservative BOUND, so it validates the
               emitted report rather than hard-failing a negative bound.
-    blocks_on: [32]
+    blocks_on: [32, 22]
 
   # ── Step 28: PERC / Reliability Sign-off ─────────────────
   # Industry standard: Calibre-PERC-class reliability verification is
@@ -7967,6 +7967,9 @@ steps:
       - "reports/phase3/sta/drv_signoff_bundle.json"
       - "reports/phase3/sta/drv_signoff.json"
       - "reports/phase3/drc_signoff.rpt"
+      # Native invocation transcript is also consumed by the final metrics
+      # owner. It remains provenance, not a second numerical DRC report.
+      - "reports/phase3/drc_signoff.log"
       - "reports/phase3/lvs.rpt"
       - "reports/phase3/erc.rpt"
       # The two MACHINE-READABLE verdicts the three .rpt files above do not

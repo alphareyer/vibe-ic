@@ -226,6 +226,12 @@ handful of stub files, so each gate returns in ~30ms — plus one iverilog
 injection run for ``FMEDA_RTL_BLIND``, which is the price of measuring the
 verdict instead of the argument parser); ``VIBE_IC_GATE_TIMEOUT_S``
 is pinned low by :func:`_gate_timeout` so one hung gate cannot hang the suite.
+
+Current FS1 ownership separates injection from its read-only coverage audit.
+``FMEDA_BAD`` first runs the unchanged ``_f_fmeda_rtl_blind`` producer
+negative through that live audit, then supplies the original contradictory
+counts. Both content negatives remain; the retired producer command is no
+longer misregistered as a blocking gate clause.
 """
 from __future__ import annotations
 
@@ -1120,7 +1126,29 @@ def _f_mfg_bad(p: Path) -> None:
 
 
 def _f_fmeda_bad(p: Path) -> None:
-    """A coverage report whose OWN counts contradict an ASIL-D claim."""
+    """Exercise the real RTL producer before the now read-only FS1 audit.
+
+    Injection is no longer a gate clause. Keep its tied-off-detector negative
+    here, then preserve the independent contradictory-counts negative below.
+    """
+    import fmeda_fault_injection_coverage as injection
+
+    _f_fmeda_rtl_blind(p)
+    with pytest.MonkeyPatch.context() as environment:
+        if shutil.which("docker") is None:
+            # The official image already contains iverilog/vvp. Match the
+            # existing FMEDA unit pattern instead of launching nested Docker.
+            environment.delenv("VIBEIC_EDA_IMAGE", raising=False)
+            environment.delenv("IIC_EDA_IMAGE", raising=False)
+        rc = injection.main([str(p), "--rtl-dir", "phase2/stage1/rtl",
+                             "--asil", "D", "--json",
+                             str(p / "reports/phase2/safety/fmeda_coverage.json")])
+    produced = json.loads((p / "reports/phase2/safety/fmeda_coverage.json").read_text())
+    assert rc == 1 and produced["baseline_valid"] is True
+    assert produced["injected_faults"] > produced["detected_faults"] >= 0
+    tier, out = _tier(p, "fmeda_coverage_check . --json "
+                      "reports/phase2/safety/fmeda_coverage_verdict.json")
+    assert tier == RED, out
     _w(p, "reports/phase2/safety/fmeda_coverage.json",
        {"applicable": True, "asil": "D", "injected_faults": 100,
         "detected_faults": 1, "baseline_valid": True})
@@ -1480,6 +1508,11 @@ def _f_post_layout_no_spice(p: Path) -> None:
               was not performed. SPEF extraction exists (Step 20) and STA ran
               (Step 21), but no SPICE decks or results found …
     """
+    # The owning predicate distinguishes a completed route from a Phase-2
+    # question asked before extraction was due. SPEF/STA alone are not that
+    # predicate; retain the routed input whose absence means legitimately early.
+    _w(p, "phase3/stage3/pnr/routed.def",
+       "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
     _w(p, "phase3/stage3/extracted/top.spef",
        '*SPEF "IEEE 1481-1998"\n*DESIGN "top"\n*DIVIDER /\n')
     _w(p, "phase3/stage3/sta/post_route_timing.rpt",
@@ -2455,7 +2488,6 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "GDS_NO_LABELS": _f_gds_no_labels,
     "MFG_BAD": _f_mfg_bad,
     "FMEDA_BAD": _f_fmeda_bad,
-    "FMEDA_RTL_BLIND": _f_fmeda_rtl_blind,
     "MS_BAD": _f_ms_bad,
     "TB_BAD": _f_tb_bad,
     "HOLLOW_REPORTS": _f_hollow_reports,
@@ -2534,16 +2566,14 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # provenance report to read certifies nothing (#1140) — so the falsifiable
     # arm needs the two halves present and disagreeing. The fixture's docstring
     # carries the measurement for both.
-    ("23", "sta_assumed_clock_disclosure_check . --json "
-           "reports/phase3/sta/assumed_clock_disclosure.json"):
+    ("23", 'sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure_verdict.json'):
         "ASSUMED_CLOCK_UNDISCLOSED",
     # vibe-ic#2159 wired `clock_target_record_agreement_check` BLOCKING on step
     # 23. EMPTY answers rc 0 NOT_APPLICABLE — correctly: a run that publishes
     # neither record has made no second claim that could contradict a first —
     # so the falsifiable arm needs the two records present and disagreeing.
     # The fixture's docstring carries the measurement for both.
-    ("23", "clock_target_record_agreement_check . --json "
-           "reports/phase3/clock_target_record_agreement.json"):
+    ("23", 'clock_target_record_agreement_check . --json reports/phase3/clock_target_record_agreement_verdict.json'):
         "CLOCK_TARGET_RECORDS_DISAGREE",
     # Step 4 promoted this clause from advisory to required only after its N/A
     # contract became executable. EMPTY still correctly means "L3 absent, no
@@ -2774,8 +2804,7 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # The fixture states a hold sign-off whose declared corner CONTRADICTS its
     # own script, so the arm it reddens is the declared-field-over-evidence
     # one rather than the easier bare-bad-label one.
-    ("23", "hold_corner_coverage_check . --json "
-           "reports/phase3/sta/hold_corner_coverage.json"):
+    ("23", 'hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage_verdict.json'):
         "HOLD_CORNER_CONTRADICTED",
     # 2026-09-02 (vibe-ic#2013). De-registered from UNREDDENED, where it read
     # "PASS: needs an STA report claiming a DRV promotion that a second source
@@ -2789,8 +2818,7 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
         "DRV_PROMOTION_CONTRADICTED",
     # A missing bundle is honestly NOT_MEASURED. This present bundle violates
     # the declared fanout with an SDC value of 10, so the gate must reach FAIL.
-    ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json "
-           "--capture-point post_stream"):
+    ('31', 'drv_signoff_judge . --json reports/phase3/sta/drv_signoff_verdict.json --capture-point post_stream'):
         "DRV_SIGNOFF_BAD_SDC",
     # R-0929-IO-INPUT-TRANSITION-2. EMPTY is not a DIE top (a decided
     # NOT_APPLICABLE_BY_STRUCTURE); the fixture is a die whose resolved drive
@@ -2845,11 +2873,7 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     ("8", "sdc_validator_check . --l8 "
           "phase1/generated_docs/L8_TIMING_WAVEFORM.json --json "
           "reports/sdc_validator.json"): "SDC_BAD",
-    ("FS1", "fmeda_fault_injection_coverage . --rtl-dir phase2/stage1/rtl "
-            "--asil D --json reports/phase2/safety/fmeda_coverage.json"):
-        "FMEDA_RTL_BLIND",
-    ("FS1", "fmeda_coverage_check . --json "
-            "reports/phase2/safety/fmeda_coverage_gate.json"): "FMEDA_BAD",
+    ("FS1", 'fmeda_coverage_check . --json reports/phase2/safety/fmeda_coverage_verdict.json'): "FMEDA_BAD",
     ("A1", "analog_a1_spec_extract_check . --json reports/analog/a1_spec.json"):
         "ANALOG_P3",
     ("A2", "analog_a2_topology_select_check . --json "
@@ -2880,10 +2904,8 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
         "ANALOG_P3",
     ("A9", "analog_a9_hw_verify_check . --json "
            "reports/phase2/gates/a9_hw_verify.json"): "ANALOG_P3",
-    ("14", "yosys_hilomap_required_check . --json "
-           "reports/phase2/gates/yosys_hilomap.json"): "SYNTH_BAD",
-    ("14", "yosys_script_template_check . --json "
-           "reports/phase2/gates/yosys_script_template.json"): "SYNTH_BAD",
+    ("14", 'yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap_verdict.json'): "SYNTH_BAD",
+    ("14", 'yosys_script_template_check . --json reports/phase2/gates/yosys_script_template_verdict.json'): "SYNTH_BAD",
     # The command string is the KEY, so it moves with the flow declaration.
     # `--require-measured` (2026-08-27) makes this clause additionally ask
     # whether the run bound to the SPEF carried positive evidence it measured
@@ -2917,12 +2939,9 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
            "reports/analog/mixed_signal/level_shifter_audit.json"): "MS_BAD",
     ("M2", "isolation_cell_required_check . --json "
            "reports/analog/mixed_signal/isolation_audit.json"): "MS_BAD",
-    ("M3", "mixed_signal_cosim_check . --json "
-           "reports/analog/mixed_signal/cosim_audit.json"): "ANALOG_P3",
-    ("M3", "mixed_signal_interface_si_check . --json "
-           "reports/analog/mixed_signal/interface_si_audit.json"): "ANALOG_P3",
-    ("M4", "mixed_signal_signoff_check . --json "
-           "reports/analog/mixed_signal/signoff_audit.json"): "ANALOG_P3",
+    ("M3", 'mixed_signal_cosim_check . --require-current-production --json reports/analog/mixed_signal/cosim_audit.json'): "ANALOG_P3",
+    ("M3", 'mixed_signal_interface_si_check . --require-current-production --json reports/analog/mixed_signal/interface_si_audit.json'): "ANALOG_P3",
+    ("M4", 'mixed_signal_signoff_check . --require-current-production --json reports/analog/mixed_signal/signoff_audit.json'): "ANALOG_P3",
     ("40", "manufacturing_fab_intake_check . --json "
            "reports/manufacturing/fab_intake.json"): "MFG_BAD",
     ("42", "packaging_intake_check . --json "
@@ -3085,7 +3104,7 @@ UNREDDENED: Dict[Tuple[str, str], str] = {
     # assertion (4) reddened step 23's cell for 79 versions. The clause is now
     # assigned `DRV_PROMOTION_CONTRADICTED`, which reaches the arm this entry
     # described. See the fixture's docstring for the measurement.
-    ("26", "gds_antenna_deck_check . --json "
+    ('37', "gds_antenna_deck_check . --json "
            "reports/phase2/gates/gate_oxide_geom_deck.json"):
         "VACUOUS: needs a real PDK antenna rule deck to grade; the check is "
         "inapplicable without one and no fixture can synthesise a PDK",
@@ -3593,8 +3612,7 @@ _WIRED_BLOCKING = (
     ("17", "pnr_timing_repair_completeness_check phase3/stage3/pnr --json "
            "reports/phase3/pnr/timing_repair_completeness.json",
      "PNR_TCL_HOLD_ONLY"),
-    ("23", "hold_corner_coverage_check . --json "
-           "reports/phase3/sta/hold_corner_coverage.json",
+    ("23", 'hold_corner_coverage_check . --json reports/phase3/sta/hold_corner_coverage_verdict.json',
      "HOLD_CORNER_CONTRADICTED"),
 )
 
@@ -3608,11 +3626,10 @@ def _tier(project: Path, command: str) -> Tuple[str, str]:
 
 def test_d2_drv_signoff_fixture_reddens_on_the_wrong_sdc_value(tmp_path):
     import hashlib
-    command = ("drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json "
-               "--capture-point post_stream")
+    command = ('drv_signoff_judge . --json reports/phase3/sta/drv_signoff_verdict.json --capture-point post_stream')
     project = _build_project(tmp_path, "drv", "DRV_SIGNOFF_BAD_SDC")
     tier, _ = _tier(project, command)
-    result = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())
+    result = json.loads((project / "reports/phase3/sta/drv_signoff_verdict.json").read_text())
     assert tier == RED
     assert any("sign-off SDC set_max_fanout != declared value" in item
                for item in result["failures"])
@@ -3624,9 +3641,9 @@ def test_d2_drv_signoff_fixture_reddens_on_the_wrong_sdc_value(tmp_path):
     bundle["current"]["sources"]["signoff_sdc"]["sha256"] = sha
     bundle["frozen"]["sources"]["signoff_sdc"] = sha
     bundle_path.write_text(json.dumps(bundle))
-    (project / "reports/phase3/sta/drv_signoff.json").unlink()
+    (project / "reports/phase3/sta/drv_signoff_verdict.json").unlink()
     _tier(project, command)
-    repaired = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())
+    repaired = json.loads((project / "reports/phase3/sta/drv_signoff_verdict.json").read_text())
     assert not any("sign-off SDC set_max_fanout != declared value" in item
                    for item in repaired["failures"])
 
