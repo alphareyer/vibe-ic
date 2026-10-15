@@ -15,9 +15,12 @@ Pins:
   * the independent gate recomputes the verdict and CATCHES a fabricated PASS.
 """
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 PROG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG_DIR))
@@ -30,6 +33,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 
 _REPO_ROOT = ceiling_check.find_repo_root()
+
+
+@pytest.fixture(autouse=True)
+def local_injection_backend(monkeypatch):
+    # The official image supplies real iverilog/vvp locally. An outer
+    # launch identity must not request an unavailable nested Docker daemon.
+    if shutil.which('docker') is None:
+        monkeypatch.delenv('VIBEIC_EDA_IMAGE', raising=False)
+        monkeypatch.delenv('IIC_EDA_IMAGE', raising=False)
 
 
 # ── DC math ──────────────────────────────────────────────────────────────
