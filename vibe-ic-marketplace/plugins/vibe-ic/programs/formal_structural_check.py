@@ -732,6 +732,16 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 names[f"roles_disjoint{arm}"] = inverse(either(
                     both(zero, one), either(both(force, hold), both(either(force, hold), data))))
                 names[f"roles_cover{arm}"] = either(either(zero, one), either(hold, data))
+                pin = "SRST" if "SRST" in conn else "ARST" if "ARST" in conn else None
+                if "EN" in conn and pin:
+                    blocked = both(inverse(active("EN", arm)), active(pin, arm))
+                    reset_constant = reset_value(pin)
+                    differs = inverse(gate("$eq", shared[q], reset_constant))
+                    expected = shared[q] if kind == "$sdffce" else reset_constant
+                    names[f"priority_domain{arm}"] = blocked
+                    names[f"priority_discriminating{arm}"] = both(blocked, differs)
+                    names[f"priority_valid{arm}"] = either(
+                        inverse(blocked), gate("$eq", value, expected))
             row["query_ports"] = {k: f"q{len(rows)-1}_{k}" for k in names}
             for key, bit in names.items():
                 ports[row["query_ports"][key]] = {"direction": "output", "bits": [bit]}
@@ -850,6 +860,10 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                     queries[f"{role}_valid{arm}"] = (f"{role}_valid{arm}", "1")
             for proof in ("roles_disjoint", "roles_cover"):
                 queries[f"{proof}{arm}"] = (f"{proof}{arm}", "1")
+            if f"priority_domain{arm}" in ports:
+                queries[f"priority_domain{arm}"] = (f"priority_domain{arm}", "0")
+                queries[f"priority_discriminating{arm}"] = (f"priority_discriminating{arm}", "0")
+                queries[f"priority_valid{arm}"] = (f"priority_valid{arm}", "1")
         for key, (port, value) in queries.items():
             ident = f"{i}_{key}"
             specs[ident] = (i, key)
@@ -903,6 +917,18 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                        for role in ("force_zero", "force_one", "retain")]
         role_proofs += [a.get(f"{proof}{arm}") for arm in (0, 1)
                         for proof in ("roles_disjoint", "roles_cover")]
+        row["priority_domains"] = [{"reset_value": arm,
+            "domain_query": a[f"priority_domain{arm}"],
+            "domain_reachable": a[f"priority_domain{arm}"] == "REFUTED",
+            "discriminating_query": a[f"priority_discriminating{arm}"],
+            "discriminating": a[f"priority_discriminating{arm}"] == "REFUTED",
+            "implication_query": a[f"priority_valid{arm}"],
+            "credit": ("FEASIBLE_DIFFERING_NEXT_STATE" if
+                       a[f"priority_discriminating{arm}"] == "REFUTED" else
+                       "NOT_DISCRIMINATING")}
+            for arm in (0, 1) if f"priority_domain{arm}" in a]
+        role_proofs += [a[f"priority_valid{arm}"] for arm in (0, 1)
+                        if f"priority_valid{arm}" in a]
         if row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
             row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
         elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):
