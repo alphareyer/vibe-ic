@@ -1440,9 +1440,7 @@ def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
     assert [row["pin"] for row in restored["unresolved"]] == ["u/VDD"]
 
 
-@pytest.mark.parametrize("producer_image", [None, "sha256:" + "c" * 64])
-def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch,
-                                                   producer_image):
+def _project_clean_opensta_census_bundle(tmp_path, monkeypatch, producer_image=None):
     from drv_signoff_census import derive
     bundle = _bundle(tmp_path)
     l7 = _file(tmp_path, "input/docs/L7.md", "verification plan\n")
@@ -1490,6 +1488,14 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch,
                                          (folder / "net_census.rpt").read_text()),
                  disabled_edges_report=_file(folder, "disabled_edges.rpt", ""))
     _install_test_freeze(bundle, tmp_path, monkeypatch)
+    return bundle, root, provenance_ref, provenance, scene
+
+
+@pytest.mark.parametrize("producer_image", [None, "sha256:" + "c" * 64])
+def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch,
+                                                   producer_image):
+    bundle, root, provenance_ref, provenance, scene = \
+        _project_clean_opensta_census_bundle(tmp_path, monkeypatch, producer_image)
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "PASS", result
     if producer_image:
@@ -1512,6 +1518,74 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch,
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "NOT_MEASURED"
     assert any("pin_census_report" in reason for reason in result["not_measured"])
+
+
+@pytest.mark.parametrize('case', ['recorded', 'continued', 'no_record',
+                                  'late_issued', 'unverified_owner', 'changed_freeze'])
+def test_original_run_start_reaches_the_complete_project_judge(
+        tmp_path, monkeypatch, case):
+    """Real run record and plan identity, with the existing complete project fixture."""
+    from datetime import datetime, timedelta
+    import drv_capture_plan as planner
+    import drv_run_identity as runs
+
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    _file(project, 'phase1/generated_docs/L1_DATASHEET.json', '{"ic_name": "unit"}\n')
+    plugin = tmp_path / 'installed-plugin'
+    _file(plugin, 'programs/neutral.py', '# source-control fixture\n')
+    record = None
+    if case != 'no_record':
+        record = runs.record(project, plugin_root=plugin)
+    _stage_receipts(project)
+    if case == 'continued':
+        monkeypatch.setattr(runs, 'PLUGIN_ROOT', plugin)
+        continued = runs.start(project, continue_steps=['32'])
+        assert continued['run_id'] == record['run_id']
+        assert continued['recorded_at'] == record['recorded_at']
+        assert continued['continued_at'] != record['recorded_at']
+    record_path = project / runs.RECORD
+    before = record_path.read_bytes() if record_path.exists() else None
+    published = planner.publish(project, final_state=_step32_report(project, adopted))
+    plan = json.loads(published.read_text())
+    bundle, *_ = _project_clean_opensta_census_bundle(project, monkeypatch)
+    # The fixture's unrelated literal start must not fill a missing plan field.
+    for key in ('run_id', 'tree_sha', 'spec_version', 'code_identity', 'run_started_at'):
+        bundle['identity'].pop(key, None)
+        if key in plan['identity']:
+            bundle['identity'][key] = plan['identity'][key]
+    if case in ('late_issued', 'changed_freeze'):
+        static = drv._THRESHOLD_FREEZES
+        freeze = json.loads(static.read_text())
+        if case == 'late_issued':
+            freeze['designs'][0]['issued_at'] = (
+                datetime.fromisoformat(record['recorded_at']) + timedelta(seconds=1)
+            ).isoformat()
+        else:
+            freeze['designs'][0]['values']['fanout'] = 5
+        static.write_text(json.dumps(freeze))
+    elif case == 'unverified_owner':
+        monkeypatch.setattr(drv, '_owner_records',
+                            lambda *args: ([], 'OWNER_SIGNATURE_UNAVAILABLE'))
+    result = drv.judge(bundle, project=project)
+    (tmp_path / 'run-start.observation.json').write_text(json.dumps({
+        'case': case, 'scope': 'SOURCE_CONTROL only; no native EDA/IC execution',
+        'record': runs.load(project), 'plan_identity': plan['identity'],
+        'judge': result}, indent=2) + '\n')
+    assert (record_path.read_bytes() if record_path.exists() else None) == before
+    if case in ('recorded', 'continued'):
+        assert result['verdict'] == 'PASS', result
+        assert plan['identity']['run_started_at'] == record['recorded_at']
+        assert result['threshold_freeze']['signed_owner_record_verified'] is True
+    else:
+        assert result['verdict'] != 'PASS', result
+        reasons = result['failures'] + result['not_measured']
+        expected = {
+            'no_record': 'run ID, tree SHA or specification version absent',
+            'late_issued': 'threshold freeze record was not issued before run',
+            'unverified_owner': 'validated threshold_freeze owner record absent before run',
+            'changed_freeze': 'threshold source changed: declared values',
+        }
+        assert expected[case] in reasons, result
 
 
 def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):

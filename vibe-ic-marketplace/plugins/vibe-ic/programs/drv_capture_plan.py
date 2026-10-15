@@ -56,6 +56,7 @@ def _run_identity(project: Path) -> dict:
     import drv_run_identity
     record = drv_run_identity.load(project)
     return {"run_id": record.get("run_id"),
+            "run_started_at": record.get("recorded_at"),
             "tree_sha": record.get("plugin_tree_sha256"),
             "code_identity": {k: record.get(k) for k in (
                 "plugin_source_commit", "plugin_tree_sha256", "recorded_at")},
