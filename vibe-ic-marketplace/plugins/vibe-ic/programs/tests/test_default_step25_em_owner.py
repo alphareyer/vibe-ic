@@ -184,7 +184,7 @@ def _ready(tmp_path, monkeypatch, *, stress=False, ir_fail=False):
 
 
 @pytest.mark.parametrize("case", ["current", "report_changed", "state_changed", "sdc_changed",
-                                  "spef_changed", "missing_primary", "ir_fail", "em_fail"])
+                                  "spef_changed", "missing_primary", "ir_fail", "em_fail", "em_basis_changed"])
 def test_default_step25_keeps_current_ir_owned_by_step24(tmp_path, monkeypatch, case):
     project, pdk, calls, assets = _ready(tmp_path, monkeypatch,
         stress=case == "em_fail", ir_fail=case == "ir_fail")
@@ -196,6 +196,12 @@ def test_default_step25_keeps_current_ir_owned_by_step24(tmp_path, monkeypatch, 
         changed.write_text(changed.read_text() + "\nchanged current scientific bytes\n")
     if case == "missing_primary":
         (rpt / R._LL_IR_RECORD).unlink()
+    if case == "em_basis_changed":
+        # The existing primary remains valid. A different selected EM tech
+        # file must not be mistaken for the same scientific native basis.
+        tech = tmp_path / "another_authority.tlef"
+        tech.write_text(TECH + "# distinct selected native input\n")
+        pdk.tech_lef = str(tech)
     protected = [rpt / name for name in ("ir_drop.rpt", "ir_drop.json", "ir_drop_signoff.json", "dynamic_ir.json")]
     protected += list((project / "phase3/librelane/24").rglob("*"))
     before = {str(path.relative_to(project)): digest(path) for path in protected if path.is_file()}
@@ -219,8 +225,13 @@ def test_default_step25_keeps_current_ir_owned_by_step24(tmp_path, monkeypatch, 
         commands = [call for call in calls if "check_current_density -net PWR" in call]
         assert len(commands) == 1, calls
         assert validation["valid"] is True
-        expected = "FAIL" if case in {"ir_fail", "em_fail"} else "PASS"
+        expected = ("FAIL" if case in {"ir_fail", "em_fail"} else
+                    "NOT_MEASURED" if case == "em_basis_changed" else "PASS")
         assert row.status == expected, row.detail
+        if case == "em_basis_changed":
+            invalid_basis = E.validate_native_density(project)
+            assert invalid_basis["valid"] is False
+            assert "tech_lef" in invalid_basis["reason"]
         if case == "current":
             assert bound["current_inputs"] is True
             assert V.latest_pass(project, "24")["current_inputs"] is True

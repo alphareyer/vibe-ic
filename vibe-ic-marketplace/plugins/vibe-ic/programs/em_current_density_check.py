@@ -1139,6 +1139,10 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
             if _native_sha(ll_path) != ll["record_sha256"]:
                 raise ValueError("LibreLane primary record changed")
             ll_doc = json.loads(ll_path.read_text())
+            if primary is not None and (
+                    ll_doc["inputs"]["def"]["sha256"] != doc["inputs"]["layout"]["sha256"]
+                    or ll_doc["record"]["def_sha256"] != doc["inputs"]["layout"]["sha256"]):
+                raise ValueError("LibreLane/EM layout basis differs")
             ll_basis = ll_doc["native_basis"]
             for role in ("sdc", "spef", "tech_lef"):
                 if ll_basis[role]["sha256"] != doc["inputs"][role]["sha256"]:
