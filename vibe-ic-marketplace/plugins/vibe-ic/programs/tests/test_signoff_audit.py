@@ -53,6 +53,10 @@ def _si_proved(proj):
     _si_signoff_fixture.write_proved_si_report(proj)
     # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
     _tapeout_timing_fixture.write_timing_signoff_pass(proj)
+    # These pillar controls supply legacy reports, not native density State.
+    import json
+    (proj / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"34": "direct"}}))
 
 
 # ---------------------------------------------------------------------------

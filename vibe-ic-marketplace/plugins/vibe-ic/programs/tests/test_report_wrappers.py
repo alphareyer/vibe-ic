@@ -194,6 +194,10 @@ class TestTapeoutSignoffCheck:
         _si_signoff_fixture.write_proved_si_report(tmp_path)
         # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
         _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
+        # This wrapper control supplies legacy reports, not native density State.
+        import json
+        (tmp_path / "phase3/librelane_switch.json").write_text(
+            json.dumps({"steps": {"34": "direct"}}))
         assert _run_wrapper("tapeout_signoff_check.py", str(tmp_path)) == 0
 
 

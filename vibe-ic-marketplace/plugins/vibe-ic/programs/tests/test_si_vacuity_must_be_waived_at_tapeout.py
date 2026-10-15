@@ -123,6 +123,9 @@ def _five_pillars(proj: Path) -> Path:
     _write(proj / "reports" / "phase3" / "lvs.rpt", _LVS_MATCH)
     # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
     _tapeout_timing_fixture.write_timing_signoff_pass(proj)
+    # SI is the subject; the other pillars supply legacy report evidence.
+    _write(proj / "phase3/librelane_switch.json",
+           json.dumps({"steps": {"34": "direct"}}))
     return proj
 
 

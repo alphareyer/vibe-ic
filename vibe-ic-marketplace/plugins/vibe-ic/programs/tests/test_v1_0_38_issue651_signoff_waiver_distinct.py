@@ -104,6 +104,9 @@ def _base_project(tmp_path: Path) -> Path:
     _si_signoff_fixture.write_proved_si_report(tmp_path)
     # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
     _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
+    # The rc/sentinel controls provide legacy reports, not native density State.
+    (tmp_path / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"34": "direct"}}))
     return tmp_path
 
 

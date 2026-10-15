@@ -313,6 +313,64 @@ def test_a_deck_on_this_host_that_does_not_name_the_rule_is_refused(tmp_path):
 
 # ── the two callers, end to end ───────────────────────────────────────────
 
+def _current_signoff_subject(project: Path, report: Path) -> None:
+    """Source-fixture current protocol; no native EDA or checker substitution."""
+    import hashlib
+    import _gdsii
+    import _physical_current as current
+
+    pnr = project / "phase3/stage3/pnr"
+    gds = _gdsii.write_gdsii(pnr / "fixture_core.gds", cell="fixture_core")
+    final = project / "phase3/stage4/gds/fixture_core.gds"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(gds.read_bytes())
+    pdk = project / "input/pdk/source_fixture"
+    materials = {
+        "def": (pnr / "fixture_core.def", "VERSION 5.8 ;\nDESIGN fixture_core ;\nEND DESIGN\n"),
+        "netlist": (pnr / "fixture_core_pnr.v", "module fixture_core(); endmodule\n"),
+        "pdk_tech_lef": (pdk / "tech.lef", "VERSION 5.8 ;\nLAYER met1\n TYPE ROUTING ;\nEND met1\nEND LIBRARY\n"),
+        "pdk_cell_lef": (pdk / "cells.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+        "pdk_deck": (pdk / "fixture.drc", "# SOURCE_FIXTURE parser input; no native EDA\n"),
+        "technology": (project / "reports/phase3/technology_units.json",
+                       json.dumps({"pdk": "source_fixture"})),
+    }
+    for path, body in materials.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    native = project / "phase3/reports/drc.rpt"
+    native.parent.mkdir(parents=True, exist_ok=True)
+    native.write_bytes(report.read_bytes())
+    log = native.with_suffix(".log")
+    log.write_text("SOURCE_FIXTURE KLayout current/report protocol; no native EDA\n")
+    report.with_suffix(".log").write_bytes(log.read_bytes())
+    rel = lambda path: path.relative_to(project).as_posix()
+    sha = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    deck = materials["pdk_deck"][0]
+    argv = ["klayout", "-b", "-r", str(deck), "-rd", f"input={gds}",
+            "-rd", f"report={native}"]
+    invocation = {
+        "record": "invocation", "measured": True, "tool": "klayout",
+        "exit_code": 0, "command": " ".join(argv),
+        "scope": "SOURCE_FIXTURE parser/receipt control; no native EDA",
+        "inputs": {rel(gds): sha(gds), rel(deck): sha(deck)},
+        "outputs": {rel(path): sha(path) for path in
+                    (report, report.with_suffix(".log"), native, log)},
+    }
+    with (project / "provenance.jsonl").open("a") as stream:
+        stream.write(json.dumps(invocation) + "\n")
+    subject = current.build(project, "31", "stage4", "fixture_core",
+        "source_fixture", "klayout",
+        {"gds": current.entry(project, gds),
+         **{role: current.entry(project, path)
+            for role, (path, _body) in materials.items()}},
+        {"report": current.entry(project, report),
+         "native_report": current.entry(project, native),
+         "log": current.entry(project, log)},
+        {"rc": 0, "argv": argv, "native_invocation": invocation,
+         "scope": "SOURCE_FIXTURE parser/receipt control; no native EDA"})
+    (project / "reports/phase3/direct_current_drc.json").write_text(json.dumps(subject))
+
+
 def _signoff_project(tmp_path: Path, rules=("XX.9", "YY.9"),
                      deliverable="HARDMACRO", handoff=("XX.9", "YY.9")) -> Path:
     p = make_project(tmp_path, deliverable=deliverable, handoff_rules=handoff)
@@ -320,7 +378,7 @@ def _signoff_project(tmp_path: Path, rules=("XX.9", "YY.9"),
     rpt.write_text(
         "# Tool: KLayout\n"
         "<report-database>\n"
-        " <generator>drc: script='/fixture_pdk/tech/drc/fixture.drc'"
+        f" <generator>drc: script='{p / 'input/pdk/source_fixture/fixture.drc'}'"
         "</generator>\n"
         " <description>DRC</description>\n"
         f" <cells><cell><name>fixture_core</name></cell></cells>\n"
@@ -330,8 +388,7 @@ def _signoff_project(tmp_path: Path, rules=("XX.9", "YY.9"),
             f"<values><value>polygon: (0,0;10,0;10,10;0,10)</value></values>"
             f"</item>\n" for r in rules) +
         " </items>\n</report-database>\n")
-    (p / "phase3/stage4/gds").mkdir(parents=True, exist_ok=True)
-    (p / "phase3/stage4/gds/fixture_core.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+    _current_signoff_subject(p, rpt)
     return p
 
 
@@ -426,7 +483,11 @@ def _tapeout_project(tmp_path: Path, rules=("m2.9", "m3.9"),
     make_project(tmp_path, record=record, deliverable=deliverable,
                  handoff_rules=handoff)
     counts = {r: 1 for r in rules}
-    return _proj(tmp_path, _report_db(counts) if counts else _report_db({}))
+    project = _proj(tmp_path, _report_db(counts) if counts else _report_db({}))
+    # These controls supply legacy reports, not a native density State.
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"34": "direct"}}))
+    return project
 
 
 def test_tapeout_credits_the_drc_slot_by_attribution(tmp_path):
@@ -516,7 +577,7 @@ def test_the_attribution_cannot_suppress_an_unrelated_signoff_refusal(tmp_path):
     p = _signoff_project(tmp_path)
     rpt = p / "reports/phase3/drc_signoff.rpt"
     rpt.write_text(rpt.read_text().replace(
-        " <generator>drc: script='/fixture_pdk/tech/drc/fixture.drc'"
+        f" <generator>drc: script='{p / 'input/pdk/source_fixture/fixture.drc'}'"
         "</generator>\n", ""))
     cp, rec = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
                    "--under", "reports/phase3/drc_signoff.rpt")
@@ -533,7 +594,8 @@ def test_the_attribution_cannot_suppress_a_missing_layout(tmp_path):
     """Same contract, the other producer clause: no streamed layout means no
     certificate, however cleanly the violations are attributed."""
     p = _signoff_project(tmp_path)
-    for g in (p / "phase3/stage4/gds").glob("*.gds"):
+    # Remove both the declared stream and its required current-subject mirror.
+    for g in (p / "phase3").rglob("*.gds"):
         g.unlink()
     cp, _ = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
                  "--under", "reports/phase3/drc_signoff.rpt")
