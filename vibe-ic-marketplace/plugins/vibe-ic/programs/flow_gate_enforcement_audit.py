@@ -1083,6 +1083,11 @@ class _RunnerModule:
                     if not isinstance(node, ast.Return) or node.value is None:
                         continue
                     v = node.value
+                    if (isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
+                            and out.get(v.func.id, ("", None))[0]
+                            in ("tuple", "tuple_process")):
+                        out[name], grew = out[v.func.id], True
+                        break
                     if isinstance(v, ast.Tuple):
                         # CZT2-17 — BOTH CARRIER KINDS, exactly as the scalar
                         # branch below already accepts both. This branch matched
@@ -1440,6 +1445,50 @@ class _RunnerModule:
                          for branch, arm in self._if_arms(n).items())]
         return min(later) if later else sys.maxsize
 
+    def _stored_carrier(self, store: ast.Name, depth: int = 0) -> Optional[str]:
+        """A binding proven to carry a spawn result, including tuple unpacking."""
+        if depth > 2:
+            return None
+        target = store
+        assignment = self.parent.get(id(target))
+        index = None
+        if isinstance(assignment, ast.Tuple):
+            index = assignment.elts.index(target)
+            target, assignment = assignment, self.parent.get(id(assignment))
+        if (not isinstance(assignment, ast.Assign)
+                or len(assignment.targets) != 1
+                or assignment.targets[0] is not target):
+            return None
+        value = assignment.value
+        if index is not None and isinstance(value, ast.Tuple):
+            if index >= len(value.elts):
+                return None
+            value, index = value.elts[index], None
+        if isinstance(value, ast.Call):
+            carrier = self._spawn_carrier(value)
+            if carrier is None and isinstance(value.func, ast.Name):
+                carrier = self.wrappers.get(value.func.id)
+            if carrier is not None:
+                kind, position = carrier
+                if index is None and kind in ("status", "process"):
+                    return kind
+                if (index is not None and index == position
+                        and kind in ("tuple", "tuple_process")):
+                    return "status" if kind == "tuple" else "process"
+        if (index is None and isinstance(value, ast.Attribute)
+                and value.attr in _STATUS_ATTRS
+                and isinstance(value.value, ast.Name)):
+            arms = self._if_arms(store)
+            bindings = [n for n in self.stores.get(
+                (self._scope(store), value.value.id), ())
+                if n.lineno < store.lineno
+                and not any(branch in arms and arms[branch] != arm
+                            for branch, arm in self._if_arms(n).items())]
+            if bindings and all(self._stored_carrier(n, depth + 1) == "process"
+                                for n in bindings):
+                return "status"
+        return None
+
     def _loads(self, scope: int, name: str, after: int,
                skip: Sequence[Tuple[int, int]] = ()) -> List[ast.Name]:
         """Loads of `name` in `scope` between its binding and any rebinding.
@@ -1468,10 +1517,11 @@ class _RunnerModule:
             if not after < n.lineno < self._next_store(
                     scope, name, after, skip, n):
                 continue
-            # A store in the opposite arm of the binding's own conditional
-            # cannot overwrite that binding within one execution. Across loop
-            # iterations either arm can overwrite the prior value, so retain
-            # the original conservative join for repeatable bindings.
+            # A reader still in this arm cannot see the opposite store. A
+            # reader AFTER the conditional sees a join: only proven spawn
+            # carriers of the same kind can share that decision. Unknown
+            # values must not inherit another branch's process credit.
+            # Across loop iterations retain the conservative join.
             if any((after < store.lineno < n.lineno
                     or (store.lineno < after < n.lineno
                         and any(branch in bound_arms
@@ -1483,9 +1533,13 @@ class _RunnerModule:
                            and bound_arms.get(branch) != arm
                            for branch, arm in self._if_arms(store).items())
                    for store in stores
-                   if repeatable_binding or not any(branch in bound_arms
-                              and bound_arms[branch] != arm
-                              for branch, arm in self._if_arms(store).items())):
+                   if repeatable_binding or not any(
+                       branch in bound_arms and bound_arms[branch] != arm
+                       and (read_arms.get(branch) == bound_arms[branch]
+                            or (self._stored_carrier(store) is not None
+                                and self._stored_carrier(store)
+                                == self._stored_carrier(binding)))
+                       for branch, arm in self._if_arms(store).items())):
                 # A joined value is read, but does not prove that this
                 # particular producer can block the flow.
                 self.joined_load_ids.add(id(n))
