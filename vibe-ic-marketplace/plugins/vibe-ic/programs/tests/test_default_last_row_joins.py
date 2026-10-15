@@ -190,10 +190,34 @@ def test_actual_final_receipt_writes_stage3_audit_before_complete_consumer(tmp_p
         return SimpleNamespace(returncode=audit_rc, stdout='', stderr='')
     monkeypatch.setattr(phase3._pr, 'run', audit if scope == 'ELIGIBLE_FOR_AUDIT'
                         else lambda *a, **k: pytest.fail('cannot audit a non-release layout'))
-    rc = phase3._publish_final_layout_receipts(tmp_path, {'release_verdict': scope}, rows)
+    # The raw receipt writer belongs to 36 now; its complete acceptance is
+    # the same invocation's outer Default row, not a second 31/37 audit.
+    # Only the upstream admission seam is controlled here. The raw writer,
+    # retained snapshots and rejecting complete consumer remain real calls.
+    import execution_backend_worker as worker
+    monkeypatch.setattr(phase3, '_backend_parameter_values', lambda *a: {})
+    monkeypatch.setattr(worker, 'resolve_input_contract', lambda *a: [])
+    returned = []
+    rejected_consumer = gates.evaluate
+    def current_consumer(project, row):
+        assert str(row['id']) == '36'
+        assert report.read_text() == '{"verdict":"PASS"}'
+        assert (project / 'reports/phase3/layout_receipts.json').is_file()
+        return rejected_consumer(project, row)
+    monkeypatch.setattr(gates, 'evaluate', current_consumer)
+    def publish(project, top, pdk, container):
+        rc = phase3._publish_final_layout_receipts(project, {'release_verdict': scope}, rows)
+        returned.append(rc)
+        return rc
+    monkeypatch.setattr(phase3, '_default_checklist_layout_receipts', publish)
+    result = phase3._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='unit'), '', ['36'])
+    assert len(returned) == 1
+    rc = returned[0]
     assert rc == (0 if scope == 'ELIGIBLE_FOR_AUDIT' and audit_rc in (0, 1) else 2)
-    assert seen == (['31', '37'] if rc == 0 else ['31'])
-    folder, record = saved(tmp_path, '37')
+    assert seen == (['36'] if rc == 0 else [])
+    assert result.status == ('FAIL' if rc == 0 else 'NOT_MEASURED')
+    folder, record = saved(tmp_path, '36')
     assert record['status'] == ('FAIL' if rc == 0 else 'NOT_MEASURED')
     assert not record['canonical_pass']
     assert before(folder, rel) == b'previous stage3 audit'

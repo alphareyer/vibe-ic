@@ -72,8 +72,13 @@ def test_canonical_default_frontdoor_produces_d1_and_waits_for_expert(tmp_path):
     frontdoor = json.loads((project / "reports/orchestrator/vibe_ic_one_shot.json").read_text())
     assert frontdoor["halted_at"] == "phase1", frontdoor
     assert frontdoor["verdict"] not in ("PASS", "PASS_WITH_WAIVERS")
-    assert any("downstream registration and dispatch were not started" in item
-               for item in frontdoor["advisories"])
+    # The specific advisory belongs to the awaiting-signed-judgement branch;
+    # a current canonical rejection may halt earlier. Assert the actual
+    # downstream dispatch account in either case, not that branch's prose.
+    downstream = [row for row in frontdoor["phases"]
+                  if row["name"] in ("phase2", "phase3")]
+    assert downstream == [{"name": "phase2", "verdict": "SKIPPED", "rc": 0},
+                          {"name": "phase3", "verdict": "SKIPPED", "rc": 0}]
     for report in ("phase2_one_shot.json", "phase3_one_shot.json"):
         assert not (project / "reports/orchestrator" / report).exists()
     assert not (project / "phase2").exists()
@@ -135,9 +140,24 @@ def test_default_canonical_d1_scope_does_not_unlock_other_rows(tmp_path, monkeyp
     (outside / "slot.yaml").write_text("not an admitted input\n")
     alias = project / "input/template_alias"
     alias.symlink_to(outside, target_is_directory=True)
+    original = outside / "slot.yaml"
+    original_bytes, original_inode = original.read_bytes(), original.stat().st_ino
     for template in (str(outside), "../outside", "input/template_alias"):
+        # Default preserves its pre-existing external-template execution, but
+        # these sources cannot acquire collector freshness through local keys.
+        parameters = {"template": template}
+        assert policy._fixed_inputs(runtime, "0.5ic", parameters=parameters) == {}
+        manifest = parameters["resolved_input_manifest"]
+        assert manifest["files"] == {} and manifest["missing"] == []
+        assert manifest["input_freshness"] == "NOT_MEASURED"
+        assert manifest["input_freshness_reason"] == "EXTERNAL_TEMPLATE_OUTSIDE_PROJECT"
+        assert original.read_bytes() == original_bytes and original.stat().st_ino == original_inode
+        # Keep all three original unsafe worker-staging negative controls.
+        # Ultra retains that strict project-local namespace; no absolute key
+        # may escape into its snapshot copier or overwrite the outside source.
+        ultra = {**runtime, "policy": {**runtime.get("policy", {}), "mode": "ultra"}}
         with pytest.raises(em.Refusal, match="ORDINARY_INPUT_PATH_UNSAFE"):
-            policy._fixed_inputs(runtime, "0.5ic", parameters={"template": template})
+            policy._fixed_inputs(ultra, "0.5ic", parameters={"template": template})
     absent = policy._fixed_inputs(runtime, "0.5ic", parameters={
         "template": "input/absent_template", "no_template_reason": "Owner-declared absence"})
     assert set(absent) == {"input/step_0_5ic_answers.json"}
