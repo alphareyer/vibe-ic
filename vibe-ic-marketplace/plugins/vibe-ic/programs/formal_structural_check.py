@@ -528,23 +528,106 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                                           for p, bits in cell["connections"].items()}
                 cells[f"comb_{arm}_{i}"] = copied
 
-    def d_force(bit, arm, seen=frozenset()):
-        # Preserve mux branch structure. A Q branch is retention, never force.
+    def both(a, b):
+        return gate("$and", a, b)
+
+    def either(a, b):
+        return gate("$or", a, b)
+
+    def inverse(a):
+        return gate("$not", a)
+
+    role_cache, role_provenance = {}, []
+
+    def input_bit(cell, pin, index):
+        values = cell["connections"].get(pin) or []
+        if index < len(values):
+            return values[index]
+        signed = _param_bit(cell.get("parameters", {}).get(pin + "_SIGNED"))
+        return values[-1] if signed and values else "0"
+
+    def d_roles(bit, arm, q, seen=frozenset()):
+        """Conditional source roles, without solving for convenient data values.
+
+        The three predicates mean force-zero, force-one, and retain-Q. A mux
+        keeps its original branch selection. A Boolean mask uses its original
+        reset-dependent operand as the control: AND's zero and OR's one are
+        dominating values, independent of the other (unconstrained) data
+        operand. Two reset-dependent operands are composed from their roles;
+        neither arbitrary SAT cubes nor a data value chosen by a witness become
+        a new control. Every resulting force/hold implication is checked by
+        native SAT against the original next-state value below.
+        """
+        key = (bit, arm, q)
+        if key in role_cache:
+            return role_cache[key]
+        empty = ("0", "0", "0")
         if bit in ("0", "1"):
-            return "1"
+            return ("1", "0", "0") if bit == "0" else ("0", "1", "0")
+        if bit == q:
+            return ("0", "0", "1")
         if not isinstance(bit, int) or bit in qbits or bit in seen:
-            return "0"
+            return empty
         cell = drivers.get(bit) or {}
-        if cell.get("type") != "$mux":
-            return "0"
-        conn = cell["connections"]
+        conn, kind = cell.get("connections") or {}, cell.get("type")
         try:
             i = conn["Y"].index(bit)
-            return mux(d_force(conn["A"][i], arm, seen | {bit}),
-                       d_force(conn["B"][i], arm, seen | {bit}),
-                       remap(conn["S"][0], arm))
+            seen = seen | {bit}
+            if kind in {"$pos", "$not"}:
+                zero, one, held = d_roles(input_bit(cell, "A", i), arm, q, seen)
+                answer = (one, zero, "0") if kind == "$not" else (zero, one, held)
+            elif kind in {"$mux", "$bwmux"}:
+                select = conn["S"][i if kind == "$bwmux" else 0]
+                a = d_roles(input_bit(cell, "A", i), arm, q, seen)
+                b = d_roles(input_bit(cell, "B", i), arm, q, seen)
+                answer = tuple(mux(x, y, remap(select, arm)) for x, y in zip(a, b))
+                role_provenance.append({"output_bit": bit, "kind": kind,
+                    "control_bits": [select], "branch_roles": "original A/B selection"})
+            elif kind in {"$and", "$or", "$xor", "$xnor"}:
+                left, right = input_bit(cell, "A", i), input_bit(cell, "B", i)
+                a, b = d_roles(left, arm, q, seen), d_roles(right, arm, q, seen)
+                controls = [v for v in (left, right) if isinstance(v, int) and v in cone]
+                if len(controls) == 1 and kind in {"$and", "$or"}:
+                    control = controls[0]
+                    data = b if control == left else a
+                    select = remap(control, arm)
+                    # Annihilator versus transparent branch, not a cube over
+                    # the other operand. The data branch stays free/shared.
+                    answer = ((mux("1", data[0], select),
+                               mux("0", data[1], select),
+                               mux("0", data[2], select)) if kind == "$and" else
+                              (mux(data[0], "0", select),
+                               mux(data[1], "1", select),
+                               mux(data[2], "0", select)))
+                    role_provenance.append({"output_bit": bit, "kind": kind,
+                        "control_bits": [control],
+                        "branch_roles": "dominating Boolean mask / unchanged data"})
+                elif kind == "$and":
+                    answer = (either(a[0], b[0]), both(a[1], b[1]),
+                              either(both(a[2], b[1]), both(b[2], a[1])))
+                elif kind == "$or":
+                    answer = (both(a[0], b[0]), either(a[1], b[1]),
+                              either(both(a[2], b[0]), both(b[2], a[0])))
+                else:
+                    zero = either(both(a[0], b[0]), both(a[1], b[1]))
+                    one = either(both(a[0], b[1]), both(a[1], b[0]))
+                    held = either(both(a[2], b[0]), both(b[2], a[0]))
+                    answer = ((one, zero, "0") if kind == "$xnor" else (zero, one, held))
+            elif kind in {"$slice", "$concat"}:
+                if kind == "$slice":
+                    offset = cell.get("parameters", {}).get("OFFSET", 0)
+                    offset = int(offset, 2) if isinstance(offset, str) else int(offset)
+                    source = input_bit(cell, "A", i + offset)
+                else:
+                    width = len(conn.get("A") or [])
+                    source = input_bit(cell, "A", i) if i < width else input_bit(cell, "B", i - width)
+                answer = d_roles(source, arm, q, seen)
+            else:
+                answer = empty
         except (IndexError, KeyError, ValueError):
-            return "0"
+            answer = empty
+        role_cache[key] = answer
+        return answer
 
     rows = []
     for name, cell in flops:
@@ -587,36 +670,68 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                 return value[-1-i]
 
             outputs = []
+            role_provenance = []
             try:
                 for arm in (0, 1):
                     d, held = remap(conn["D"][i], arm), shared[q]
-                    force = d_force(conn["D"][i], arm)
+                    zero, one, hold = d_roles(conn["D"][i], arm, q)
+
+                    def apply_branch(value, select):
+                        nonlocal d, zero, one, hold
+                        d = mux(d, value, select)
+                        zero = mux(zero, "1" if value == "0" else "0", select)
+                        one = mux(one, "1" if value == "1" else "0", select)
+                        hold = mux(hold, "0", select)
+
+                    def apply_enable(select):
+                        nonlocal d, zero, one, hold
+                        d = mux(held, d, select)
+                        zero, one = mux("0", zero, select), mux("0", one, select)
+                        hold = mux("1", hold, select)
+
                     if "EN" in conn and kind != "$sdffce":
                         en = active("EN", arm)
-                        d, force = mux(held, d, en), mux("0", force, en)
+                        apply_enable(en)
                     if "SRST" in conn or "ARST" in conn:
                         pin = "SRST" if "SRST" in conn else "ARST"
                         rst = active(pin, arm)
-                        d, force = mux(d, reset_value(pin), rst), mux(force, "1", rst)
+                        apply_branch(reset_value(pin), rst)
                     if kind == "$sdffce":
                         en = active("EN", arm)
-                        d, force = mux(held, d, en), mux("0", force, en)
+                        apply_enable(en)
                     if kind in {"$dffsr", "$dffsre"}:
                         st, cl = active("SET", arm, i), active("CLR", arm, i)
-                        d = mux(mux(d, "1", st), "0", cl)
-                        force = mux(mux(force, "1", st), "1", cl)
-                    outputs.append((d, force))
+                        apply_branch("1", st)
+                        apply_branch("0", cl)
+                    force = either(zero, one)
+                    # Force takes precedence over an algebraically coincident
+                    # hold predicate; the roles must be disjoint and exhaustive.
+                    hold = both(hold, inverse(force))
+                    data = inverse(either(force, hold))
+                    outputs.append((d, force, zero, one, hold, data))
             except ValueError as exc:
                 row["unsupported"] = str(exc)
                 continue
-            n0, f0 = outputs[0]
-            n1, f1 = outputs[1]
+            n0, f0 = outputs[0][:2]
+            n1, f1 = outputs[1][:2]
             names = {"n0": n0, "n1": n1,
                 "retain0": gate("$eq", n0, shared[q]),
                 "retain1": gate("$eq", n1, shared[q]),
                 "equal": gate("$eq", n0, n1),
                 "high_violation": gate("$and", f0, gate("$not", f1)),
                 "low_violation": gate("$and", f1, gate("$not", f0))}
+            for arm, (value, force, zero, one, hold, data) in enumerate(outputs):
+                roles = {"force_zero": zero, "force_one": one,
+                         "retain": hold, "data": data}
+                for role, guard in roles.items():
+                    names[f"{role}_guard{arm}"] = guard
+                    if role != "data":
+                        expected = (gate("$eq", value, shared[q]) if role == "retain" else
+                                    gate("$eq", value, "1" if role == "force_one" else "0"))
+                        names[f"{role}_valid{arm}"] = either(inverse(guard), expected)
+                names[f"roles_disjoint{arm}"] = inverse(either(
+                    both(zero, one), either(both(force, hold), both(either(force, hold), data))))
+                names[f"roles_cover{arm}"] = either(either(zero, one), either(hold, data))
             row["query_ports"] = {k: f"q{len(rows)-1}_{k}" for k in names}
             for key, bit in names.items():
                 ports[row["query_ports"][key]] = {"direction": "output", "bits": [bit]}
@@ -624,6 +739,8 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                                "CLR > SET > EN > D" if kind in {"$dffsr", "$dffsre"} else
                                "ARST > EN > D" if "ARST" in conn else
                                "SRST > EN > D" if "SRST" in conn else "EN > D")
+            row["role_provenance"] = list({json.dumps(p, sort_keys=True): p
+                                            for p in role_provenance}.values())
     module = {"attributes": {"top": 1}, "ports": ports, "cells": cells,
               "netnames": {n: {"hide_name": 0, "bits": p["bits"], "attributes": {}}
                            for n, p in ports.items()}}
@@ -726,6 +843,13 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             "retain0": ("retain0", "1"), "retain1": ("retain1", "1"),
             "equal": ("equal", "1"), "high": ("high_violation", "0"),
             "low": ("low_violation", "0")}
+        for arm in (0, 1):
+            for role in ("force_zero", "force_one", "retain", "data"):
+                queries[f"{role}_reachable{arm}"] = (f"{role}_guard{arm}", "0")
+                if role != "data":
+                    queries[f"{role}_valid{arm}"] = (f"{role}_valid{arm}", "1")
+            for proof in ("roles_disjoint", "roles_cover"):
+                queries[f"{proof}{arm}"] = (f"{proof}{arm}", "1")
         for key, (port, value) in queries.items():
             ident = f"{i}_{key}"
             specs[ident] = (i, key)
@@ -768,10 +892,23 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         a = {key: answers.get(f"{i}_{key}", "UNKNOWN") for j, key in specs.values() if j == i}
         row["native_queries"] = a
         row["classification"] = "UNSUPPORTED"
+        row["conditional_roles"] = [{"reset_value": arm,
+            "role": role.upper(), "guard_port": row.get("query_ports", {}).get(f"{role}_guard{arm}"),
+            "reachable": a.get(f"{role}_reachable{arm}") == "REFUTED",
+            "domain_query": a.get(f"{role}_reachable{arm}", "UNKNOWN"),
+            "implication_query": (a.get(f"{role}_valid{arm}", "UNKNOWN") if role != "data" else
+                                  "RESIDUAL_DATA_NOT_RESET_FORCE")}
+            for arm in (0, 1) for role in ("force_zero", "force_one", "retain", "data")]
+        role_proofs = [a.get(f"{role}_valid{arm}") for arm in (0, 1)
+                       for role in ("force_zero", "force_one", "retain")]
+        role_proofs += [a.get(f"{proof}{arm}") for arm in (0, 1)
+                        for proof in ("roles_disjoint", "roles_cover")]
         if row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
             row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
         elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):
             row["reason"] = "literal-X or undefined next-state cofactor"
+        elif any(proof != "PROVED" for proof in role_proofs):
+            row["reason"] = "conditional role implication, disjointness or full-domain partition not proved"
         elif a["equal"] == "PROVED":
             row["classification"] = ("LOCAL_CLEAR" if not row["reset_reaches"] and
                 any(p in row["controls"] for p in ("SRST", "ARST", "SET", "CLR")) else "NO_DEPENDENCE")
