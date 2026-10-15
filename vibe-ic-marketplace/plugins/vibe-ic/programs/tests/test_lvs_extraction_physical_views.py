@@ -440,7 +440,7 @@ def test_default_reroute_missing_current_input_stops_before_launcher(tmp_path, m
 @pytest.mark.parametrize('entry,exit_,expected', [
     ('15', '22', 'enclosing_phase3'), ('17', '20', 'enclosing_pnr'),
     ('20', '22', 'enclosing_phase3'),
-])
+], ids=['15-22-pnr', '17-20-enclosing_pnr', '20-22-enclosing_pnr'])
 def test_legacy_reroute_window_preserves_no_restore_contract(
         tmp_path, monkeypatch, entry, exit_, expected):
     """Explicit legacy transport coverage; Default cases above never mode-escape."""
