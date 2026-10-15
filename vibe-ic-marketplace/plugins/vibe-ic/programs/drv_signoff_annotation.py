@@ -297,13 +297,23 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
             # evidence for any of them.
             endpoints = spef_connections.get(_unescape(net))
             wanted = {_unescape(m) for m in members} | {_unescape(name)}
+            # A sole modeled core driver has no interconnect to extract when
+            # the bound DEF names only that endpoint and carries no geometry.
+            singleton_driver = (members == [census_name] and pin.get("kind") == "pin"
+                                and pin.get("cell_class") == "std"
+                                and pin.get("driver_pin") == census_name
+                                and pin.get("driver_cell") == pin.get("cell")
+                                and bool(pin.get("liberty"))
+                                and (pin.get("cell"), pin.get("cell_pin")) in lib_pins)
             if port_pad and endpoints is not None and wanted <= endpoints:
                 resolved.append({"pin": name, "net": net,
                                  "reason": "port_pad_spef_conn",
                                  "spef_endpoints": sorted(wanted)})
-            elif port_pad and _zero_segment_proof(segments.get(_unescape(net)), wanted):
+            elif (port_pad or singleton_driver) and _zero_segment_proof(
+                    segments.get(_unescape(net)), wanted):
                 resolved.append({"pin": name, "net": net,
-                                 "reason": "port_pad_zero_routed_segments",
+                                 "reason": ("port_pad_zero_routed_segments" if port_pad else
+                                            "singleton_driver_zero_routed_segments"),
                                  "def_sections": segments[_unescape(net)]["sections"],
                                  "def_endpoints": sorted(wanted)})
             else:
