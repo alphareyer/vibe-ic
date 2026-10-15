@@ -370,8 +370,41 @@ def _prose_success_claim(text: str) -> Optional[str]:
     "PRODUCTION-READY (all gates pass)", which is where the measured instance
     came from.
     """
-    m = _PROSE_SUCCESS_RE.search(text or "")
-    return m.group(0) if m else None
+    from _prose_polarity import LINE_END_BREAKS, NEGATION_RE, is_denied, sentence_scope
+
+    text = text or ""
+    for m in _PROSE_SUCCESS_RE.finditer(text):
+        lo, hi = sentence_scope(text, m.start(), m.end(),
+                                extra_breaks=LINE_END_BREAKS + (";", "。", " but "))
+        before, after = text[lo:m.start()], text[m.end():hi]
+        # Bind a denial to this adjective or claim predicate. An unrelated
+        # "no errors" must not hide a genuine readiness assertion. Keep commas
+        # in scope: "No whole-flow, tapeout-ready or ... claim" is one list.
+        claim_after = re.match(
+            r"(?:(?!\b(?:is|are|was|were|has|have|remains?)\b).)*"
+            r"\b(?:claim|assertion|declaration|qualification)s?\b", after, re.I)
+        denied = False
+        for denial in NEGATION_RE.finditer(before):
+            tail = before[denial.end():]
+            adjective_tail = _PROSE_SUCCESS_RE.sub("", tail)
+            adjective_tail = re.sub(r"\b(?:yet|or|nor|and)\b|[\s,`*_\"']",
+                                    "", adjective_tail, flags=re.I)
+            if (not adjective_tail or
+                    re.match(r"\s*(?:claim|assert|declar|state)\w*\b", tail, re.I) or
+                    (claim_after and not re.search(
+                        r"\b(?:is|are|was|were|has|have|remains?)\b", tail, re.I))):
+                denied = True
+                break
+        # Also accept the ordinary passive disclaimer "ready is not claimed".
+        # A later adverbial denial ("ready, with no errors") is not its predicate.
+        passive = re.match(
+            r"^[\s`*_\"']*(?:(?:is|are|was|were|has been|have been)\s+)?"
+            r"([^,;.!?]*?)\b(?:claim(?:ed|ing)?|asserted|declared|stated|verified|established)\b",
+            after, re.I)
+        if denied or (passive and is_denied(passive.group(0))):
+            continue
+        return m.group(0)
+    return None
 
 
 def extract_headline_verdict(text: str) -> Dict[str, object]:
