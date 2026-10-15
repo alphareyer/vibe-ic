@@ -336,39 +336,60 @@ def test_sta_corner_basis_is_empty_when_the_report_declares_nothing():
 
 
 def _stub_driver(monkeypatch, tmp_path, sta_text, calls):
-    """Minimal project + stubs so the driver reaches its corner decision.
+    """Use the current Step-23 State/receipt; stop at native transport.
 
-    Everything downstream of that decision is allowed to fail -- the assertion
-    is about WHICH liberty the deck is built from, and that is decided before
-    any of it. Nothing here is a string search: a driver that went back to the
-    active corner records the active corner."""
-    pnr = tmp_path / "phase3" / "stage3" / "pnr"
-    pnr.mkdir(parents=True)
-    (pnr / "spm_pnr.v").write_text("module spm(); endmodule\n")
-    ext = tmp_path / "phase3" / "stage3" / "extracted"
-    ext.mkdir(parents=True)
-    (ext / "spm.spef").write_text("*SPEF \"ieee 1481-1999\"\n")
-    sta = tmp_path / "phase3" / "stage3" / "sta"
-    sta.mkdir(parents=True)
-    (sta / "sta_mcorner_ocv.rpt").write_text(sta_text)
+    The historical OCV report stays on disk and cannot stand in for the
+    current corner. Reuse the shipped source-only binding fixture rather
+    than replacing the current State reader or any scientific verdict.
+    """
+    import test_default_si_spice_power as fixture
+    from test_spice_correlation_sta_slack_parse import _current_binding_fixture
 
-    monkeypatch.setattr(scc, "_resolve_ngspice", lambda c: "/bin/ngspice")
-    monkeypatch.setattr(
-        scc, "_read_container_text",
-        lambda c, path: (calls["read"].append(path), "library (x) { }")[1])
-    monkeypatch.setattr(scc, "parse_verilog_instances", lambda t: {})
+    name = Path(scc.parse_sta_corner_basis(_OCV_REPORT)["liberty"]).name
+    project, folder, lib, observations = _current_binding_fixture(
+        tmp_path, monkeypatch, corner="slow", liberty_name=name)
+    lib.write_text(lib.read_text().replace(
+        "{", "{ nom_temperature: 125; nom_voltage: 4.50;", 1))
+    fingerprint = json.loads((folder / "input_fingerprint.json").read_text())
+    guest = "/pdk/neutral/" + name
+    fingerprint["config_files"][guest] = fixture.LC.digest(lib)
+    fingerprint["liberty_files"][guest] = fixture.LC.digest(lib)
+    fixture.seal(folder, fingerprint)
+    historical = project / "phase3/stage3/sta/sta_mcorner_ocv.rpt"
+    historical.parent.mkdir(parents=True, exist_ok=True)
+    historical.write_text(sta_text)
+    model = project / "fixture_pdk/neutral/libs.tech/ngspice/model.sp"
+    model.write_text(".lib ss\n.model neutral nmos level=1\n.endl ss\n"
+                     ".lib tt\n.model neutral nmos level=1\n.endl tt\n")
+    record_path = project / fixture.LP.STEP23_RECORD
+    if not scc.parse_sta_corner_basis(sta_text)["liberty"]:
+        record = json.loads(record_path.read_text())
+        record["judgment"]["worst_setup"].pop("corner")
+        fixture.put(record_path, record)
 
-    def _disc(container, liberty, required):
-        calls["discover"].append(liberty)
-        return {"subckt_names": {"buf"}, "cell_spice": "/c.spice",
-                "cell_text": "", "model_file": "/m.spice",
-                "model_section": "ss", "model_preludes": []}
-    monkeypatch.setattr(scc, "discover_installed_pdk_sources", _disc)
-    monkeypatch.setattr(scc, "sta_path_stitch_score", lambda t, n: 5)
-    monkeypatch.setattr(
-        scc, "parse_sta_path",
-        lambda t: {"startpoint": "a", "endpoint": "b", "rows": [],
-                   "path_delay_ns": 13.4, "endpoint_transition": "rise"})
+    stopped_transport = fixture.PST.run_step30
+    calls["binding"] = observations
+    calls["liberty"] = lib
+    calls["model"] = model
+
+    def observe(*args, **kwargs):
+        try:
+            return stopped_transport(*args, **kwargs)
+        except fixture.LC.Refusal:
+            if observations:
+                observed = observations[-1]
+                # These are the real bound inputs and the actual native Tcl,
+                # not calls to the retired text-report discovery driver.
+                calls["read"] += observed["inputs"]["liberties"]
+                calls["models"] = fixture.PST.model_file(
+                    model.parent, "/pdk/neutral/libs.tech/ngspice", "ngspice",
+                    Path(observed["inputs"]["liberties"][0]).name,
+                    {"neutral"}, scc.parse_liberty_header(lib.read_text())["nom_temperature"],
+                    project / "SOURCE_FIXTURE_ONLY/models.sp")
+            raise
+
+    monkeypatch.setattr(fixture.PST, "run_step30", observe)
+    return project
 
 
 ACTIVE_TT = "/pdk/lib/cell__tt_025C_5v00.lib"
@@ -376,53 +397,73 @@ ACTIVE_TT = "/pdk/lib/cell__tt_025C_5v00.lib"
 
 def test_driver_builds_the_deck_at_the_corner_the_report_declares(
         monkeypatch, tmp_path):
-    """MEASURED: the deck was tt / 25 C / 5.00 V and the path came from a
-    report produced at ss / 125 C / 4.50 V. -71.101 % of "design error"."""
+    """Current Step-23 corner wins over the caller's active-TT hint."""
     calls = {"read": [], "discover": []}
-    _stub_driver(monkeypatch, tmp_path, _OCV_REPORT, calls)
-    scc.run_installed_pdk_path_correlation(
-        tmp_path, liberty_path=ACTIVE_TT, container="none")
-    ss = "/pdk/lib/cell__ss_125C_4v50.lib"
+    project = _stub_driver(monkeypatch, tmp_path, _OCV_REPORT, calls)
+    result = scc.run_installed_pdk_path_correlation(
+        project, liberty_path=ACTIVE_TT, container="none")
+    ss = "/pdk/neutral/cell__ss_125C_4v50.lib"
     assert ss in calls["read"], (
-        "the corner liberty the STA report declares was never read")
-    assert calls["discover"][-1] == ss, (
-        f"the device-model section was discovered for {calls['discover'][-1]}, "
-        f"not for the corner the report was produced at")
+        "the corner liberty the current STA State declares was never read")
+    assert calls["models"]["sections"] == [[str(calls["model"]), "ss"]], (
+        "the device-model section must be selected for the same slow corner")
+    assert calls["models"]["temperature"] == 125.0
+    assert "read_liberty " + ss in calls["binding"][0]["script"]
+    assert result["status"] == "ERROR" and result["measurement"] == "NOT_MEASURED"
+    assert result["reason"].startswith("SOURCE_FIXTURE_ONLY_NATIVE_TRANSPORT_NOT_RUN:")
 
 
 def test_driver_declines_when_the_report_declares_no_corner(
         monkeypatch, tmp_path):
-    """An undeclared corner is a REFUSAL, never a fallback to the active one."""
+    """An undeclared current corner refuses; active TT is never a fallback."""
     calls = {"read": [], "discover": []}
-    # R-0915-162 — the basis is present so the report REACHES the corner
-    # check; this test is about the CORNER refusal, and a report that is not a
-    # candidate at all would refuse one step earlier, for a different reason.
-    _stub_driver(monkeypatch, tmp_path,
+    project = _stub_driver(monkeypatch, tmp_path,
                  "STA_BASIS: POST_ROUTE_SPEF\n"
                  "Startpoint: a\nEndpoint: b\n  0.00 0.00 x\n", calls)
     out = scc.run_installed_pdk_path_correlation(
-        tmp_path, liberty_path=ACTIVE_TT, container="none")
+        project, liberty_path=ACTIVE_TT, container="none")
     assert out["status"] == "ERROR"
-    assert "declares no corner liberty" in out["reason"]
+    assert "CURRENT_STEP30_CORNER_MISSING" in out["reason"]
+    assert calls["binding"] == [] and calls["read"] == []
 
 
 def test_driver_declines_when_the_declared_corner_cannot_be_read(
         monkeypatch, tmp_path):
     calls = {"read": [], "discover": []}
-    _stub_driver(monkeypatch, tmp_path, _OCV_REPORT, calls)
-    monkeypatch.setattr(
-        scc, "_read_container_text",
-        lambda c, path: "library (x) { }" if path == ACTIVE_TT else None)
+    project = _stub_driver(monkeypatch, tmp_path, _OCV_REPORT, calls)
+    calls["liberty"].unlink()
     out = scc.run_installed_pdk_path_correlation(
-        tmp_path, liberty_path=ACTIVE_TT, container="none")
+        project, liberty_path=ACTIVE_TT, container="none")
     assert out["status"] == "ERROR"
-    assert "unreadable" in out["reason"]
+    assert calls["liberty"].name in out["reason"]
+    assert calls["binding"] == [] and calls["read"] == []
 
 
-def test_driver_divides_out_the_ocv_derate_the_spice_side_does_not_carry():
-    src = (PROGS / "spice_correlation_check.py").read_text()
-    assert "expected_ns = derated_ns / ocv_late if ocv_late else derated_ns" \
-           in src
+def test_driver_divides_out_the_ocv_derate_the_spice_side_does_not_carry(
+        tmp_path, monkeypatch):
+    """The current route measures nominal STA and SPICE in the same session.
+
+    The retired report-based driver divided its borrowed OCV report by 1.05.
+    The native owner instead emits report_checks and write_path_spice together,
+    so applying that old division again would manufacture a basis mismatch.
+    """
+    import path_spice_tool as pst
+    calls = {"read": [], "discover": []}
+    project = _stub_driver(monkeypatch, tmp_path, _OCV_REPORT, calls)
+    result = scc.run_installed_pdk_path_correlation(
+        project, liberty_path=ACTIVE_TT, container="none")
+    assert result["reason"].startswith("SOURCE_FIXTURE_ONLY_NATIVE_TRANSPORT_NOT_RUN:")
+    observed = calls["binding"][0]
+    script = observed["script"]
+    assert script.index("report_checks ") < script.index("write_path_spice ")
+    assert "set_timing_derate" not in script and "1.05" not in script
+    assert "set_timing_derate" not in (project / observed["inputs"]["sdc"]).read_text()
+    native = ("Startpoint: in\nEndpoint: out\n"
+              " 0.02 0.00 0.00 ^ in (in)\n"
+              " 0.03 13.40 13.40 ^ out (BUF)\n")
+    parsed = pst.parse_path_report(native)
+    assert parsed["path_delay_ns"] == pytest.approx(13.40)
+    assert parsed["path_delay_ns"] != pytest.approx(13.40 / 1.05)
 
 
 def test_stagewise_deck_visits_the_sta_operating_points():

@@ -46,6 +46,13 @@ def _promote(tmp_path, monkeypatch, ratios_for=None, mode="librelane",
     import librelane_pv_signoff as pv
     import drc_feedback_repair as feedback
     import phase3_one_shot_runner as runner
+    import execution_policy
+
+    # This fixture exercises the explicit tool/dual selection route. Default
+    # now has one primary stream; its own real stream controls cover that path.
+    original_request = execution_policy.request
+    monkeypatch.setattr(execution_policy, "request",
+                        lambda: dict(original_request(), mode="ultra"))
 
     project = tmp_path / "project"
     pnr = runner._pl.pnr_dir(project)
