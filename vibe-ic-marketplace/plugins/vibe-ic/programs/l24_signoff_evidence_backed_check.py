@@ -87,6 +87,7 @@ import sys
 import json
 import re
 import hashlib
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -872,6 +873,105 @@ def _required_sta_corners(project: Path, required: Any,
     return out
 
 
+def _requirement_producer_progress(project: Path, check: str
+                                   ) -> Optional[Tuple[str, bool]]:
+    """Return (producer step, due) from the existing canonical local journal.
+
+    A floorplan is a physical attempt, but cannot measure post-route signoff.
+    Reuse the flow's report declarations and the sequential runner's existing
+    input-bound attempts; dashboard placeholders are not attempts. Unknown
+    contexts and final audits retain the original strict missing-report rule.
+    This predicate supplies no reading and never supersedes a measured report.
+    """
+    final_audit = "ALL" in os.environ.get("VIBEIC_FCC_ACTIVE_SCOPES", "").split(":")
+    try:
+        import _flow_yaml
+        import step_output_collector as versions
+        import l24_signoff_requirements_extract as requirements
+
+        steps = _flow_yaml.load(requirements.find_flow_def())["steps"]
+        order = {str(row["id"]): i for i, row in enumerate(steps)}
+        physical = [row for row in steps
+                    if row.get("stage") in ("stage3", "stage4")]
+        declared = requirements.signoff_record_paths_for(check)
+        tokens = requirements.report_tokens_for(check)
+        owners = []
+        for row in physical:
+            reports = [part.strip()
+                       for output in row.get("required_outputs", [])
+                       for part in requirements._OUTPUT_ALT_RE.split(str(output))
+                       if part.strip().startswith("reports/phase3/")
+                       and part.strip().endswith(".json")]
+            if (any(path in declared for path in reports) if declared else
+                    any(requirements._path_names_token(path, tokens)
+                        for path in reports)):
+                owners.append(row)
+        # Prefer the declared signoff reading over an earlier router estimate.
+        # An unowned input requirement may defer only before the FIRST signoff
+        # producer, never indefinitely because the flow lacks its producer.
+        owner = (owners[-1] if owners else next(
+            row for row in physical
+            if requirements._SIGNOFF_STEP_NAME_RE.search(str(row.get("name")))))
+        due_at = order[str(owner["id"])]
+        newest_netlist = _newest_phase2_netlist_mtime(project)
+        current_inputs = _pl.phase3_signoff_input_identity(project)
+        # Legacy native producers can fail before publishing a summary or a
+        # step journal. A current report belonging to the SAME declared owner
+        # is still an attempt: e.g. LVS makes its sibling DRC reading due.
+        for output in owner.get("required_outputs", []):
+            for part in requirements._OUTPUT_ALT_RE.split(str(output)):
+                rel = part.strip()
+                path = project / rel
+                if (rel.startswith("reports/phase3/") and rel.endswith(".json")
+                        and path.is_file() and _mtime(path) >= (newest_netlist or 0)
+                        and not _is_input_or_audit_record(path)
+                        and _phase3_record_matches_inputs(path, current_inputs)):
+                    return str(owner["id"]), True
+
+        top = project / "reports/orchestrator/phase3_one_shot.json"
+        if top.is_file():
+            summary = json.loads(top.read_text())
+            if (isinstance(summary, dict) and not summary.get("bounded")
+                    and summary.get("verdict") is not None
+                    and _mtime(top) >= (newest_netlist or 0)
+                    and _phase3_record_matches_inputs(
+                        top, current_inputs)):
+                return str(owner["id"]), True
+
+        observed = []
+        root = versions._versions_root(project)
+        for path in root.glob("*/*/*/attempt.json"):
+            attempt = json.loads(path.read_text())
+            sid = str(attempt.get("id"))
+            if (attempt.get("phase") != "phase3" or sid not in order
+                    or not attempt.get("started_at")
+                    or _mtime(path) < (newest_netlist or 0)):
+                continue
+            inputs = attempt.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            current = True
+            for rel, binding in inputs.items():
+                subject = (project / rel).resolve()
+                expected = binding.get("sha256") if isinstance(binding, dict) else binding
+                if (not subject.is_relative_to(project.resolve())
+                        or not subject.is_file()
+                        or hashlib.sha256(subject.read_bytes()).hexdigest() != expected):
+                    current = False
+                    break
+            if not current:
+                continue
+            if order[sid] >= due_at:
+                # The due producer was attempted, even if it failed before
+                # publishing a reading. No output or successful status needed.
+                return str(owner["id"]), True
+            if inputs:
+                observed.append(sid)
+        return (str(owner["id"]), final_audit) if observed else None
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, ImportError):
+        return None
+
+
 def _requirements_backed(project: Path, doc: Any, rel: str,
                          rows_out: Optional[List[Dict[str, Any]]] = None
                          ) -> Tuple[List[str], List[str]]:
@@ -946,7 +1046,12 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                 for p, v in stale]
         rows_out.append(record)
         failed = [(p, v) for p, v in measured if v in _FAILING_VERDICTS]
-        if not phase3 and not failed:
+        progress = (_requirement_producer_progress(project, check)
+                    if not measured else None)
+        due = phase3 or (progress is not None and progress[1])
+        future = (progress[0] if progress is not None and not progress[1]
+                  else None)
+        if (not due and not failed) or future is not None:
             # A report from an earlier Phase 3 run may still be on disk after
             # synthesis or staged constraints change. Its verdict describes
             # that earlier input identity, even when the value is PASS.
@@ -954,11 +1059,15 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             record["evidence_scope"] = "HISTORICAL" if found else "NONE"
             if found:
                 record["historical_records"] = record["records_read"]
+            if future is not None:
+                record["producer_step"] = future
             msgs.append(
                 f"{rel}: {check} "
                 f"{requirement or '(prose)'} required at {where} — "
-                "recorded; this run has not reached phase 3 for its current "
-                "inputs, so it is not yet measurable"
+                + (f"recorded; the current canonical attempts precede producer "
+                 f"step {future}, so it is not yet measurable" if future is not None
+                 else "recorded; this run has not reached phase 3 for its current "
+                      "inputs, so it is not yet measurable")
                 + ("; existing sign-off reports are historical evidence"
                    if found else ""))
             continue
@@ -1176,7 +1285,7 @@ def main(argv: List[str]) -> int:
                 print(f"[PASS] l24_signoff_evidence_backed_check: "
                       f"{len(pending)} sign-off requirement(s) extracted from "
                       f"the design's own input and recorded; this run has not "
-                      f"reached phase 3, so none is measurable yet")
+                      f"reached their producers, so none is measurable yet")
             elif pending:
                 print(f"[PASS] l24_signoff_evidence_backed_check: "
                       f"{len(backed)} of {len(requirement_rows)} sign-off "
