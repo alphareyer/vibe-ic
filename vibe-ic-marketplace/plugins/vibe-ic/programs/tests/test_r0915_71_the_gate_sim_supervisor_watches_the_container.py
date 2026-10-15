@@ -39,6 +39,7 @@ from a corpse").  This call site never adopted it.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 from pathlib import Path
 
@@ -46,6 +47,12 @@ import pytest
 
 import _container_exec as _ce
 import sdf_gate_sim as SG
+
+
+@pytest.fixture(autouse=True)
+def _container_route(monkeypatch):
+    """These controls exercise container supervision on every test host."""
+    monkeypatch.setattr(_ce, "no_container_route", lambda: False)
 
 
 class _Recorder:
@@ -90,8 +97,17 @@ def test_the_tool_path_prelude_is_still_prepended(monkeypatch):
 
 def test_docker_no_longer_builds_a_bare_supervised_argv():
     """THE DEFECT ITSELF: a `_progress_run.run` over `docker_exec_argv` with no
-    probe is the shape that cannot see the container's work."""
-    src = inspect.getsource(SG._docker)
+    probe is the shape that cannot see the container's work. LOCAL execution
+    has no container client; only the container arm has this obligation."""
+    function = ast.parse(inspect.getsource(SG._docker)).body[0]
+    local = function.body[0]
+    assert isinstance(local, ast.If)
+    expected = ast.parse('_ce.local_exec_mode("sdf_gate_sim")', mode="eval")
+    assert ast.dump(local.test) == ast.dump(expected.body)
+    assert not local.orelse
+    assert len(local.body) == 1 and isinstance(local.body[0], ast.Return)
+    assert function.body[1:], "the guarded container arm must remain present"
+    src = ast.unparse(ast.Module(body=function.body[1:], type_ignores=[]))
     assert "_pr.run" not in src
     assert "docker_exec_argv" not in src
     assert "run_in_container_supervised" in src
