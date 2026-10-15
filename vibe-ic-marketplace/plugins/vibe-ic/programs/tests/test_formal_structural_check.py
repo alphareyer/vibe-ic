@@ -295,3 +295,26 @@ def test_guarded_logical_and_reduction_masks_use_native_vector_truth(tmp_path, o
         assert row["native_queries"]["zero0"] == row["native_queries"]["one0"] == "REFUTED", row
         assert all(row["native_queries"][f"roles_cover{arm}"] == "PROVED" and
                    row["native_queries"][f"roles_disjoint{arm}"] == "PROVED" for arm in (0, 1)), row
+
+
+def test_lowered_data_mux_cannot_select_shared_payload_for_force_guard(tmp_path):
+    """The H1 source meaning survives AND/OR lowering, without a mux opcode."""
+    _yosys()
+    rtl, output = tmp_path / "m.v", tmp_path / "mapping.json"
+    rtl.write_text("module m(input clk,rst,d,en,clear,output reg q);\n"
+        " always @(posedge clk) q <= ((rst & d) | ((!rst) & (d | en))) & clear;\nendmodule\n")
+    rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+        "reset_polarity:rst:active_high", "--work-dir", str(tmp_path), "--json", str(output)])
+    rec = json.loads(output.read_text())
+    assert rc == 1 and rec["verdict"] == fsc.NOT_DISCHARGED, rec
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert len(mapping["raw_identities"]) == len(mapping["rows"]) == 1, mapping
+    assert mapping["unresolved"] and not mapping["complete"], mapping
+    row = mapping["rows"][0]
+    assert row["classification"] == "UNRESOLVED_DATA_DEPENDENCE", mapping
+    assert not any(role["reachable"] and role["role"] in {"FORCE_ZERO", "FORCE_ONE"}
+                   for role in row["conditional_roles"]), row
+    assert row["payload_support"]["status"] == "NATIVE_NORMALIZED_COFACTOR_SUPPORT", row
+    native = json.loads((tmp_path / "formal_structural_netlist.json").read_text())["modules"]["m"]
+    assert native["ports"]["d"]["bits"][0] in row["payload_support"]["shared_payload_bits"], row
+    assert mapping["payload_analysis"]["native_exit_code"] == 0, mapping
