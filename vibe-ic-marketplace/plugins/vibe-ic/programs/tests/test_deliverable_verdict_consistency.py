@@ -781,3 +781,9 @@ def test_prose_success_polarity_reaches_the_normal_consumer(tmp_path, text, clai
     assert not rep['blocking']
     if claim:
         assert 'tapeout-ready' in rep['reason']
+
+
+@pytest.mark.parametrize('surface', ['api', 'cli'])
+def test_unrelated_denial_cannot_cross_an_affirmative_claim_predicate(tmp_path, surface):
+    test_prose_success_polarity_reaches_the_normal_consumer(
+        tmp_path, 'No errors, and we assert a tapeout-ready claim.', True, surface)
