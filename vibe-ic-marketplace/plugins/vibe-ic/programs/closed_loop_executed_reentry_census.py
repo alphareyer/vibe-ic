@@ -137,6 +137,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import json
 import sys
 from pathlib import Path
@@ -379,6 +380,56 @@ def _self_checked(region: ast.AST, call: ast.Call,
     return None
 
 
+def _retained_callback_body(call: ast.Call, functions: Dict[str, ast.AST],
+                            modules: Set[str], names: Set[str]) -> List[ast.AST]:
+    """Resolve the existing retained_call's same-file callable and arguments.
+
+    Only a statically bound callback is evidence. An arbitrary method with the
+    same spelling, an unresolved callable or argument unpacking earns nothing.
+    """
+    f = call.func
+    known = (isinstance(f, ast.Name) and f.id in names) or (
+        isinstance(f, ast.Attribute) and f.attr == 'retained_call'
+        and isinstance(f.value, ast.Name) and f.value.id in modules)
+    if not known or len(call.args) < 3 or not isinstance(call.args[2], ast.Name):
+        return []
+    fn = functions.get(call.args[2].id)
+    if fn is None or fn.decorator_list or fn.args.vararg or fn.args.kwarg:
+        return []
+    params = list(fn.args.posonlyargs) + list(fn.args.args)
+    values = call.args[3:]
+    if len(values) > len(params) or any(isinstance(v, ast.Starred) for v in values):
+        return []
+    bound = {p.arg: v for p, v in zip(params, values)}
+    defaults = dict(zip([p.arg for p in params][-len(fn.args.defaults):],
+                        fn.args.defaults)) if fn.args.defaults else {}
+    defaults.update({p.arg: v for p, v in zip(fn.args.kwonlyargs,
+                                             fn.args.kw_defaults) if v is not None})
+    for kw in call.keywords:
+        if kw.arg == 'canonical_acceptance':
+            continue
+        if kw.arg is None or kw.arg in bound or kw.arg not in _params(fn):
+            return []
+        bound[kw.arg] = kw.value
+    for name in _params(fn):
+        if name not in bound:
+            if name not in defaults:
+                return []
+            bound[name] = defaults[name]
+    # Rebinding a parameter needs control-flow analysis; it is not this
+    # narrowly proved argument handoff.
+    if _bound_names(fn) & set(bound):
+        return []
+
+    class Bind(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load) and node.id in bound:
+                return copy.deepcopy(bound[node.id])
+            return node
+
+    return [Bind().visit(copy.deepcopy(n)) for n in fn.body]
+
+
 def scan_module(path: Path) -> List[Dict]:
     """Every re-entry site in one runner, with both signals decided."""
     try:
@@ -386,6 +437,42 @@ def scan_module(path: Path) -> List[Dict]:
     except SyntaxError:
         return []
     sites: List[Dict] = []
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    modules = {a.asname or a.name for n in tree.body if isinstance(n, ast.Import)
+               for a in n.names if a.name == 'step_preflight'}
+    names = {a.asname or a.name for n in tree.body
+             if isinstance(n, ast.ImportFrom) and n.module == 'step_preflight'
+             for a in n.names if a.name == 'retained_call'}
+
+    def record(ch: ast.Call, fn: ast.AST, loops: Tuple[ast.AST, ...],
+               region: ast.AST, *, line: Optional[int] = None) -> None:
+        name = _callee_name(ch)
+        self_call = _is_step(fn.name) and name == fn.name
+        invariant = {n.id for n in ast.walk(region) if isinstance(n, ast.Name)} \
+                    - _bound_names(region)
+        varies = (_varies_self_call(ch, fn) if self_call
+                  else _varies_in_loop(ch, invariant))
+        checked = _self_checked(region, ch, after_call_only=self_call)
+        sites.append({
+            "file": path.name, "line": line or ch.lineno,
+            "fn": fn.name, "callee": name,
+            "kind": "SELF_CALL" if self_call else "IN_LOOP",
+            "varying_args": varies[:4], "measured_name": checked,
+            "verdict": (ACTUATING if varies
+                        else SELF_CHECKED_ONLY if checked else INERT),
+        })
+
+    def callback_calls(node: ast.AST):
+        # A primitive already inside the callback's own loop is counted by
+        # its original owner, once. Do not manufacture a second site for it.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                             ast.For, ast.AsyncFor, ast.While)):
+            return
+        if isinstance(node, ast.Call) and (_callee_name(node) in EXEC_PRIMITIVES
+                                          or _is_step(_callee_name(node))):
+            yield node
+        for child in ast.iter_child_nodes(node):
+            yield from callback_calls(child)
 
     def visit(node: ast.AST, fn: Optional[ast.AST],
               loops: Tuple[ast.AST, ...]) -> None:
@@ -402,26 +489,14 @@ def scan_module(path: Path) -> List[Dict]:
                                            or _is_step(name))
                 if self_call or in_loop:
                     region = loops[-1] if loops else fn
-                    invariant = {
-                        n.id for n in ast.walk(region)
-                        if isinstance(n, ast.Name)
-                    } - _bound_names(region)
-                    varies = (_varies_self_call(ch, fn) if self_call
-                              else _varies_in_loop(ch, invariant))
-                    checked = _self_checked(region, ch,
-                                            after_call_only=self_call)
-                    verdict = (ACTUATING if varies
-                               else SELF_CHECKED_ONLY if checked else INERT)
-                    sites.append({
-                        "file": path.name,
-                        "line": ch.lineno,
-                        "fn": fn.name,
-                        "callee": name,
-                        "kind": "SELF_CALL" if self_call else "IN_LOOP",
-                        "varying_args": varies[:4],
-                        "measured_name": checked,
-                        "verdict": verdict,
-                    })
+                    record(ch, fn, loops, region)
+                elif loops:
+                    body = _retained_callback_body(ch, functions, modules, names)
+                    if body:
+                        region = ast.Module(body=[loops[-1], *body], type_ignores=[])
+                        for statement in body:
+                            for primitive in callback_calls(statement):
+                                record(primitive, fn, loops, region, line=ch.lineno)
             visit(ch, nfn, nloops)
 
     visit(tree, None, ())
@@ -495,16 +570,20 @@ def regressions(now: Dict[str, Dict[str, int]],
                        f"re-entry was deleted or renamed; re-record the "
                        f"baseline in the same change that removes it")
             continue
+        own = dict(have or {})
         for tier in (ACTUATING, SELF_CHECKED_ONLY):
-            current = have.get(tier, 0) if have else 0
-            for candidate in sorted(candidates):
-                if current >= want.get(tier, 0):
-                    break
-                credit = min(want.get(tier, 0) - current,
-                             available.get(candidate, {}).get(tier, 0))
-                current += credit
-                if credit:
-                    available[candidate][tier] -= credit
+            current = 0
+            # A stronger site can preserve a self-checked obligation, after
+            # its actuation obligation is met. Consume each site only once.
+            eligible = (ACTUATING,) if tier == ACTUATING else (
+                SELF_CHECKED_ONLY, ACTUATING)
+            for pool in [own] + [available.get(c, {}) for c in sorted(candidates)]:
+                for supplied in eligible:
+                    credit = min(want.get(tier, 0) - current,
+                                 pool.get(supplied, 0))
+                    current += credit
+                    if credit:
+                        pool[supplied] -= credit
             if current < want.get(tier, 0):
                 out.append(
                     f"{key}: {tier} {want[tier]} -> {current}; a "

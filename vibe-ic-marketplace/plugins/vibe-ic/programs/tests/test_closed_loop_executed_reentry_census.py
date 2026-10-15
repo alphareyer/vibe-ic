@@ -190,6 +190,73 @@ def test_a_direct_helper_move_keeps_the_same_actuating_population():
     assert C.regressions(now, base, edge)  # losing actuation stays red
 
 
+def test_a_tier_promotion_preserves_each_recorded_obligation_once():
+    key = "r.py::main::run"
+    assert C.regressions({key: {C.ACTUATING: 3}},
+                         {key: {C.SELF_CHECKED_ONLY: 3}}) == []
+    base = {key: {C.ACTUATING: 1, C.SELF_CHECKED_ONLY: 1}}
+    assert C.regressions({key: {C.ACTUATING: 2}}, base) == []
+    assert C.regressions({key: {C.ACTUATING: 1}}, base), (
+        "one stronger site cannot satisfy two recorded sites")
+    assert C.regressions({key: {C.SELF_CHECKED_ONLY: 2}}, base), (
+        "self-checking cannot replace recorded actuation")
+
+
+@pytest.mark.parametrize("mode", ["current", "constant", "unknown", "wrong_owner"])
+def test_retained_callback_relocation_uses_the_actual_callable(tmp_path, mode):
+    """The execution remains under the owner's loop after retention wraps it."""
+    module = "step_preflight" if mode != "wrong_owner" else "other_module"
+    callback = "_produce" if mode != "unknown" else "unresolved_callback"
+    arguments = "project, item" if mode != "constant" else "project, project"
+    root = _tree(tmp_path,
+                 f"import {module} as _spf\n"
+                 "def main(project):\n"
+                 "    for item in range(3):\n"
+                 f"        _spf.retained_call(project, item, {callback},\n"
+                 "                           project, item, canonical_acceptance=True)\n"
+                 "def _produce(project, item):\n"
+                 f"    return subprocess.run([{arguments}])\n")
+    path = root / "vibe-ic-marketplace/plugins/vibe-ic/programs/x_one_shot_runner.py"
+    rows = C.scan_module(path)
+    base = {f"{path.name}::main::run": {C.ACTUATING: 1}}
+    if mode == "current":
+        assert len(rows) == 1 and rows[0]["fn"] == "main"
+        assert rows[0]["verdict"] == C.ACTUATING
+        assert C.regressions(C.summarise(rows), base,
+                             C._direct_helper_calls([path])) == []
+    else:
+        assert C.regressions(C.summarise(rows), base,
+                             C._direct_helper_calls([path]))
+        if mode == "constant":
+            assert len(rows) == 1 and rows[0]["verdict"] == C.INERT
+        else:
+            assert rows == [], "an unevaluated callback is not relocation proof"
+
+
+def test_a_relocated_helper_site_cannot_credit_two_old_owners():
+    first, second = "r.py::first::run", "r.py::second::run"
+    helper = "r.py::_produce::run"
+    base = {first: {C.ACTUATING: 1}, second: {C.ACTUATING: 1}}
+    now = {helper: {C.ACTUATING: 1}}
+    edges = {("r.py", "first"): {"_produce"},
+             ("r.py", "second"): {"_produce"}}
+    assert len(C.regressions(now, base, edges)) == 1
+
+
+def test_a_callback_with_its_own_loop_is_not_counted_twice(tmp_path):
+    root = _tree(tmp_path,
+                 "import step_preflight as _spf\n"
+                 "def main(project):\n"
+                 "    for item in range(3):\n"
+                 "        _spf.retained_call(project, item, _produce, project, item)\n"
+                 "def _produce(project, item):\n"
+                 "    for index in range(2):\n"
+                 "        subprocess.run([project, item, index])\n")
+    path = root / "vibe-ic-marketplace/plugins/vibe-ic/programs/x_one_shot_runner.py"
+    rows = C.scan_module(path)
+    assert len(rows) == 1 and rows[0]["fn"] == "_produce"
+
+
 # ── the rc contract ─────────────────────────────────────────────────────────
 
 def _tree(root: Path, runner_src: str) -> Path:
