@@ -77499,7 +77499,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
         return ["default_pnr"]
     if execution_policy.request()['mode'] == 'default':
         from execution_provider_catalog import BACKEND_ROWS
-        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'35'}
+        native_ids = (set(BACKEND_ROWS) & _PHASE3_CANONICALIZER_IDS) | pnr_ids | {'31', '35'}
         if set(ids).issubset(native_ids):
             return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
