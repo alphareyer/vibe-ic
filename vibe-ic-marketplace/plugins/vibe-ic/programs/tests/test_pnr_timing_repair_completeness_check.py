@@ -517,3 +517,88 @@ def test_step17_setup_error_stops_before_legalization_and_export(tmp_path, monke
     assert "detailed_placement" not in log and "write_views" not in log
     assert not (folder / "pnr_postgpl_timing.json").exists()
     assert not list((tmp_path / "neutral/phase3/stage3/pnr").glob("pnr*.tcl"))
+
+
+@pytest.mark.parametrize("commands, verdict", [
+    pytest.param(["repair_design", "repair_timing -setup"], "FAIL", id="setup"),
+    pytest.param(["repair_design", "repair_timing -hold"], "FAIL", id="hold"),
+    pytest.param(["repair_design", "repair_antennas"], "FAIL", id="antenna"),
+    pytest.param(["repair_design", "repair_timing -setup", "repair_design"],
+                 "PASS", id="repaired"),
+    pytest.param(["repair_timing -setup",
+                  "report_check_types -max_slew -max_capacitance -max_fanout"],
+                 "PASS", id="complete-census"),
+    pytest.param(["repair_timing -setup", "report_check_types -max_slew"],
+                 "FAIL", id="partial-census"),
+])
+def test_literal_log_cmd_matches_bare_drv_sequence(commands, verdict):
+    bare = mod.drv_sequence("\n".join(commands))
+    wrapped = mod.drv_sequence("\n".join("log_cmd " + cmd for cmd in commands))
+    assert bare["verdict"] == verdict
+    assert bare["event_count"] == len(commands)
+    assert wrapped == bare
+
+
+@pytest.mark.parametrize("suffix", [
+    pytest.param("# log_cmd repair_design\n", id="comment"),
+    pytest.param('puts "log_cmd repair_design"\n', id="quoted-data"),
+    pytest.param("puts {log_cmd repair_design}\n", id="braced-data"),
+    pytest.param("set note {log_cmd repair_design}\n", id="assigned-data"),
+    pytest.param("if {0} {log_cmd repair_design}\n", id="disabled-body"),
+    pytest.param("proc unused {} {log_cmd repair_design}\n", id="proc-body"),
+    pytest.param("log_cmd $operation\n", id="dynamic-command"),
+    pytest.param("log_cmd {repair_design; repair_timing -setup}\n",
+                 id="script-data"),
+    pytest.param("log_cmd eval {repair_design}\n", id="other-dispatch"),
+])
+def test_log_cmd_data_does_not_clear_unchecked_edit(suffix):
+    expected = mod.drv_sequence("repair_timing -setup\n")
+    assert expected["verdict"] == "FAIL"
+    assert mod.drv_sequence("repair_timing -setup\n" + suffix) == expected
+
+
+@pytest.mark.parametrize("script", [
+    pytest.param("catch {log_cmd repair_design}; log_cmd repair_timing -setup",
+                 id="catch-body"),
+    pytest.param("if {[catch {log_cmd repair_design} err]} {puts $err}\n"
+                 "log_cmd repair_timing -setup", id="condition-substitution"),
+    pytest.param('puts "[log_cmd repair_design]"\n'
+                 "log_cmd repair_timing -setup", id="quoted-substitution"),
+])
+def test_literal_log_cmd_keeps_executable_script_boundaries(script):
+    assert mod.drv_sequence(script) == mod.drv_sequence(
+        "repair_design\nrepair_timing -setup")
+
+
+def test_shipped_literal_log_cmd_is_a_static_repair_event():
+    from _hostpaths import require_repo
+
+    script = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "librelane_plugins", "librelane_plugin_vibeic",
+        "postgpl_fanout_closure.tcl").read_text()
+    assert "log_cmd repair_design {*}$args" in script
+    assert mod.drv_sequence(script) == {
+        "verdict": "PASS", "severity": "ADVISORY",
+        "last_unchecked_edit": None, "event_count": 1, "missing_axes": [],
+    }
+
+
+def test_log_cmd_drv_finding_remains_advisory_in_normal_cli(tmp_path):
+    script = _write(tmp_path, "pnr_literal.tcl",
+                    "set_wire_rc -signal -layer M1\n"
+                    "estimate_parasitics -placement\n"
+                    "log_cmd repair_design\n"
+                    "log_cmd repair_timing -setup\n"
+                    "log_cmd repair_timing -hold\n")
+    report = tmp_path / "report.json"
+    assert mod.main([str(script), "--json", str(report)]) == 0
+    result = json.loads(report.read_text())
+    assert result["verdict"] == "PASS"
+    assert result["summary"]["setup_repair_chain_present"] is True
+    assert result["summary"]["missing_required"] == []
+    assert result["summary"]["drv_sequence"] == {
+        "verdict": "FAIL", "severity": "ADVISORY",
+        "last_unchecked_edit": "repair_timing", "event_count": 3,
+        "missing_axes": ["max_capacitance", "max_fanout", "max_slew"],
+    }

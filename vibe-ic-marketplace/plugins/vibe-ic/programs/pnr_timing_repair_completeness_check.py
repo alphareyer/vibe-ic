@@ -322,11 +322,16 @@ def _tcl_script_events(script: str, base: int = 0) -> List[Tuple[int, str, set[s
         if not words or words[0][0] != "bare" or words[0][1].startswith("#"):
             continue
         name = words[0][1]
-        if name in ("repair_timing", "repair_antennas", "repair_design",
-                    "report_check_types"):
-            flags = {word[1][1:] for word in words[1:]
+        # Native log_cmd dispatches its literal command word and arguments.
+        # Recognize only the existing DRV events; keep script/data traversal
+        # tied to the original command below, not an arbitrary wrapper target.
+        dispatched = (words[1:] if name == "log_cmd" and len(words) > 1
+                      and words[1][0] == "bare" else words)
+        if dispatched[0][1] in ("repair_timing", "repair_antennas", "repair_design",
+                                 "report_check_types"):
+            flags = {word[1][1:] for word in dispatched[1:]
                      if word[0] == "bare" and word[1].startswith("-")}
-            events.append((words[0][2], name, flags))
+            events.append((dispatched[0][2], dispatched[0][1], flags))
         if name in ("catch", "eval", "uplevel"):
             body = next((word for word in words[1:] if word[0] == "braced"), None)
             if body:
