@@ -578,9 +578,17 @@ def test_shipped_literal_log_cmd_is_a_static_repair_event():
         "librelane_plugins", "librelane_plugin_vibeic",
         "postgpl_fanout_closure.tcl").read_text()
     assert "log_cmd repair_design {*}$args" in script
+    assert [(kind, flags) for _, kind, flags in sorted(
+        mod._tcl_script_events(mod._strip_commented(script)),
+        key=lambda event: event[0],
+    )] == [
+        ("repair_design", set()),
+        ("repair_timing", {"setup"}),
+        ("repair_design", set()),
+    ]
     assert mod.drv_sequence(script) == {
         "verdict": "PASS", "severity": "ADVISORY",
-        "last_unchecked_edit": None, "event_count": 1, "missing_axes": [],
+        "last_unchecked_edit": None, "event_count": 3, "missing_axes": [],
     }
 
 
