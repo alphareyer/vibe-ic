@@ -660,7 +660,8 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
 
 
 def backend_project_input_contract(project: Path, step_id: str, *,
-                                   collect_missing: bool = False) -> tuple[str, ...]:
+                                   collect_missing: bool = False,
+                                   execution_mode: str = "ultra") -> tuple[str, ...]:
     """Add only the current synthesis receipt namespace to a worker manifest.
 
     The static adapter contract cannot know the design's published synthesis
@@ -792,10 +793,11 @@ def backend_project_input_contract(project: Path, step_id: str, *,
                 or not constraint_rel.name.endswith(".asic.sdc")):
             raise ValueError(f"Step-7 constraint path is unsafe: {issued_constraint!r}")
         for raw in (
-            # Step32 reads and appends this promotion audit journal; it is
-            # not immutable design input to its native measurement/consumer.
-            # Retain the existing journal dependency for other backend rows.
-            *(("provenance.jsonl",) if step_id != "32" else ()),
+            # Default producers append this run's audit journal. It is not
+            # an immutable scientific input; explicit producer/Step7 bindings
+            # below still carry any journal they actually cite. The isolated
+            # Ultra worker retains its established transport dependency.
+            *(("provenance.jsonl",) if execution_mode != "default" and step_id != "32" else ()),
             "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
             "phase2/stage2/constraints/asic_sdc.json",
             issued_constraint,
@@ -870,11 +872,11 @@ def backend_project_input_contract(project: Path, step_id: str, *,
                     or not resolved.is_file()):
                 raise ValueError(f"step-7 input path is unsafe: {raw!r}")
             result.append(rel.as_posix())
-        # ``@container_image`` is a semantic binding, but its canonical report
-        # is still a project file that the isolated reader must open to
-        # recompute that binding.  Keep the external digest key out of the
-        # manifest while carrying the exact report bytes through the worker.
-        if "@container_image" in bound:
+        # The isolated reader needs the report transported to recompute the
+        # semantic binding. Default reads it live on the same host: ephemeral
+        # container/attestation metadata is not an immutable design input.
+        # Explicit non-@ report paths above remain bound in either mode.
+        if "@container_image" in bound and execution_mode != "default":
             raw = "reports/container_image.json"
             target = root / raw
             try:

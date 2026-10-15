@@ -1322,6 +1322,7 @@ def produce_signoff(project, params):
         record = json.loads((rpt / R._LL_IR_RECORD).read_text())
         if record.get('record'):
             R._librelane_step24_publish(project, record)
+            R._step24_adopt_primary(project, None, notes)
         else:
             R._librelane_step24_refusal_publish(project, record)
     elif sid == '25':

@@ -632,7 +632,8 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
     if str(step_id) in BACKEND_IDS:
         from execution_adapters_backend import backend_project_input_contract
         for item in backend_project_input_contract(
-                root, str(step_id), collect_missing=True):
+                root, str(step_id), collect_missing=True,
+                execution_mode=runtime.get('policy', {}).get('mode', 'ultra')):
             # These existing optional consumer edges keep their semantics.
             # The TB directory may be empty; its actual descendants are still
             # collected and hash-bound below, without requiring a dummy file.

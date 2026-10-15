@@ -68713,20 +68713,22 @@ def _step24_primary_mode(project: Path) -> str:
     return ll.selected_mode(project, "24") if "24" in steps else "librelane"
 
 
-def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
+def _step24_adopt_primary(project: Path, basis: Optional[Dict[str, Any]],
                           notes: List[str]) -> Dict[str, Any]:
     """Adopt the existing LibreLane static result; disclose a concrete refusal.
 
-    The PSM session needed for EM leaves a cross-check, not a second primary
-    IR producer. A known over-budget measurement is retained even when the
-    primary is incomplete. Missing primary evidence never turns into PASS.
+    A Default same-session result (basis=None) retains its native input basis.
+    The separate PSM session needed for EM leaves a cross-check, not a second
+    primary IR producer. Missing primary evidence never turns into PASS.
     """
     import em_current_density_check as emc
     import librelane_ir_antenna as la
     rpt = _pl.reports_phase3_dir(project)
-    direct = json.loads((rpt / "ir_drop.json").read_text())
-    _aa.write_json(rpt / "ir_drop_psm_cross_check.json", direct)
-    _aa.write_text(rpt / "ir_drop_psm_cross_check.rpt", (rpt / "ir_drop.rpt").read_text())
+    direct = None
+    if basis is not None:
+        direct = json.loads((rpt / "ir_drop.json").read_text())
+        _aa.write_json(rpt / "ir_drop_psm_cross_check.json", direct)
+        _aa.write_text(rpt / "ir_drop_psm_cross_check.rpt", (rpt / "ir_drop.rpt").read_text())
     doc = json.loads((rpt / _LL_IR_RECORD).read_text())
     valid = bool(doc.get("record") and doc.get("artifacts"))
     for row in (doc.get("inputs") or {}).values():
@@ -68735,12 +68737,29 @@ def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
         valid = valid and bool(digest and emc._native_sha(project / name) == digest)
     if valid:
         record = doc["record"]
-        valid = (record["def_sha256"] == basis["layout_sha256"]
-                 and record["spef_sha256"] == basis["spef_sha256"]
+        # Default's same-session primary has its own complete native basis;
+        # it has no separate EM solve to label as a PSM cross-check or power
+        # basis. Reopen those actual assets before publishing adoption.
+        primary_basis = basis
+        if primary_basis is None:
+            try:
+                native = doc["native_basis"]
+                rows = [native[key] for key in ("odb", "sdc", "spef", "tech_lef")] + native["liberties"]
+                valid = (valid and {"def", "netlist", "sdc", "spef"}.issubset(doc["inputs"])
+                         and bool(native["liberties"])
+                         and all(row["sha256"] and emc._native_sha(Path(row["path"])) == row["sha256"]
+                                 for row in rows))
+                primary_basis = {"layout_sha256": doc["inputs"]["def"]["sha256"],
+                                 "spef_sha256": doc["inputs"]["spef"]["sha256"]}
+            except (KeyError, TypeError):
+                valid = False
+        valid = (valid and record["def_sha256"] == primary_basis["layout_sha256"]
+                 and record["spef_sha256"] == primary_basis["spef_sha256"]
                  and emc._native_sha(Path(record["tool_state"])) == record["tool_state_sha256"])
     if valid:
         doc["judgment"] = la.judge_ir(doc["record"])
-        doc["power_basis"] = basis
+        if basis is not None:
+            doc["power_basis"] = basis
         _librelane_step24_publish(project, doc)
         notes.append(f"Step24 primary adopted LibreLane IR: {doc['judgment']['verdict']}")
     else:
@@ -68748,8 +68767,9 @@ def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
             doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": ["LL_IR_CURRENT_BINDING_INVALID"]}
         _librelane_step24_refusal_publish(project, doc)
         refused = json.loads((rpt / "ir_drop.json").read_text())
-        refused["power_basis"] = basis
-        if direct.get("verdict") == "FAIL":
+        if basis is not None:
+            refused["power_basis"] = basis
+        if direct is not None and direct.get("verdict") == "FAIL":
             refused.update(direct)
             refused["primary_tool_status"] = "NOT_MEASURED"
             refused["measured_failure"] = "ir_drop_psm_cross_check.json"
@@ -78706,7 +78726,8 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
             # empty; copying the entire PnR tree would bind mutable outputs.
             issued = {}
             execution_policy._fixed_inputs(
-                {'project': project}, sid, parameters=issued)
+                {'project': project, 'policy': {'mode': 'default'}}, sid,
+                parameters=issued)
             manifest = issued['resolved_input_manifest']
             missing = manifest['missing']
         else:
