@@ -87,7 +87,20 @@ def test_phase3_backend_binding_carries_current_image_and_pdk_root(
 
     project = tmp_path / "backend"
     project.mkdir()
-    pdk = SimpleNamespace(name="synthetic_process")
+    # The real backend resolver reads the selected Liberty on the host.
+    # These are neutral role assets, not native measurement evidence.
+    pdk_dir = tmp_path / "pdks" / "synthetic_process"
+    pdk_dir.mkdir(parents=True)
+    for name, body in (
+        ("cells.lib", 'library (synthetic) { time_unit : "1ns"; }\n'),
+        ("tech.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+        ("cells.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+    ):
+        (pdk_dir / name).write_text(body)
+    pdk = backend.PdkConfig(
+        name="synthetic_process", liberty=str(pdk_dir / "cells.lib"),
+        tech_lef=str(pdk_dir / "tech.lef"), cell_lef=str(pdk_dir / "cells.lef"),
+        cell_gds=None, site="unit_site", drc_deck=None)
     image = "registry.invalid/eda@sha256:" + "a" * 64
     root = str(tmp_path / "pdks")
     resolved = []
@@ -131,7 +144,8 @@ def test_phase3_backend_binding_carries_current_image_and_pdk_root(
     assert observed["parameters"]["image_id"] == image
     assert observed["parameters"]["pdk_root"] == root
     assert observed["parameters"]["pdk_name"] == pdk.name
-    assert resolved == [(project, pdk.name, image)]
+    # The front door binds once; the real first consumer independently rereads.
+    assert resolved == [(project, pdk.name, image)] * 2
 
 
 @pytest.mark.parametrize("cause", ["image", "pdk_root"])
