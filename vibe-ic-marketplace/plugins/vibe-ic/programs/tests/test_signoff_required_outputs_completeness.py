@@ -101,10 +101,10 @@ def _declared_signoff_outputs() -> set:
         return set()
     out = set()
     primary = set()
-    # The same real dispatcher writes the pre-stream and final-layout tables.
+    # The same real dispatcher writes the pre-stream table.
     # Raw Step-23 products moved here when independent verdict paths were split;
     # their consumer --json targets must not be mistaken for their producers.
-    tables = {_SIGNOFF_TABLE, "_PRESTREAM_GATES", "_FINAL_LAYOUT_GATES"}
+    tables = {_SIGNOFF_TABLE, "_PRESTREAM_GATES"}
     for node in tree.body:
         targets = (node.targets if isinstance(node, ast.Assign)
                    else [node.target] if isinstance(node, ast.AnnAssign)
@@ -649,11 +649,11 @@ def test_the_table_is_dispatched_over_every_row():
         _RUNNER_SRC), (
         f"nothing iterates {_SIGNOFF_TABLE}, so its rows are declarations "
         f"with no dispatch behind them")
-    # The two newly recognized tables must likewise pass each actual row to
-    # the same writer, not merely mention their names in source or comments.
+    # The newly recognized pre-stream table must pass each actual row to the
+    # same writer, not merely mention its name in source or comments.
     import ast
     tree = ast.parse(_RUNNER_SRC)
-    for table in ("_PRESTREAM_GATES", "_FINAL_LAYOUT_GATES"):
+    for table in ("_PRESTREAM_GATES",):
         dispatched = False
         for comp in ast.walk(tree):
             if not isinstance(comp, (ast.ListComp, ast.DictComp)):
