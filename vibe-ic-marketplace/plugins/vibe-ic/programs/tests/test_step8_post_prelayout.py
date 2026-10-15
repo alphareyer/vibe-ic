@@ -231,7 +231,8 @@ def test_postcheck_is_wired_only_after_passing_prelayout(tmp_path, monkeypatch):
             ('FAIL', False, 'dual'), ('NOT_MEASURED', False, 'dual'),
             ('PASS', True, 'dual'), ('PASS', False, 'direct')]:
         calls = []
-        producer = P.StepResult('prelayout_signoff', status, 0, 'neutral producer')
+        producer = P.StepResult('prelayout_signoff', status, 0, 'neutral producer',
+                               reason_class='tool_absent' if status == 'NOT_MEASURED' else '')
         rejection = P.StepResult('canonical_consumer', 'FAIL', 0, 'neutral rejection') if rejected else None
         postcheck = D.StepResult('sdc_validation', 'PASS', 0, 'neutral consumer')
         plan = []
