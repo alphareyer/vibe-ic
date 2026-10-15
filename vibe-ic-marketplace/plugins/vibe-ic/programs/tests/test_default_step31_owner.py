@@ -181,6 +181,9 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
         tmp_path, monkeypatch, case):
     project, pdk, calls, observed, definition = fixture(tmp_path, monkeypatch, case)
     selected = R._phase3_window_sites("31", "31")
+    put(project, "ROUTE_OBSERVATION.json", json.dumps({"selected": selected,
+        "required_owner": "Default31 native producer and current-step declared writers"}))
+    assert selected == ["default_backend"], selected
     args = SimpleNamespace(entry_step="31", exit_step="31", container="SOURCE_CONTROL_ONLY",
                            die_um=None, util=None, spare_density=None)
     rc = R._run_phase3_window(project, "chip_top", pdk, args, selected)
@@ -193,7 +196,6 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
                              for name in definition["required_outputs"]},
         "scope": "source-only neutral native instruments; complete real Default31 consumer"}
     put(project, "API_OBSERVATION.json", json.dumps(observation, indent=2))
-    assert selected == ["default_backend"]
     assert calls.count("erc") == 1
     assert calls.count("extraction") == 1
     assert calls.count("netgen") == (2 if case == "lvs_fail" else 1)
