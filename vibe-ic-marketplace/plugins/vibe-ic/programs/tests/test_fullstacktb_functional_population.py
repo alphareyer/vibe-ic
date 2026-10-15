@@ -26,6 +26,7 @@ report. chip-AGNOSTIC: every fixture is a synthetic design.
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import re
 import sys
@@ -454,21 +455,38 @@ endmodule
         "@SCHEDULE@", schedule)
 
 
-def _supplement_integrity_input(proj: Path) -> None:
-    """Explicit neutral fixture authorship; enabled only by four integrity tests."""
-    _write(proj / "plugin_output/declaration.json", json.dumps({
+def _supplement_integrity_input(proj: Path, *, author_cases=True, models=None) -> None:
+    """Declare the neutral interface and exact selected wrapper/model inputs."""
+    declaration_path = proj / "plugin_output/declaration.json"
+    declaration = (json.loads(declaration_path.read_text())
+                   if declaration_path.is_file() else {})
+    declaration.update({
         "integer_encoding": "signed_2c", "bit_order": "LSB_first",
         "latency_cycles": 1, "latency_cycles_origin": "settled_edge_offset",
         "reset_polarity": "active_high", "transaction_rearm": "clocked_reset",
-        "rearm_reset_cycles": 1, "parallel_hold": "through_final_product_bit"}))
+        "rearm_reset_cycles": 1, "parallel_hold": "through_final_product_bit"})
+    top_record = proj / _fsf().CHIP_TOP_RECORD_REL
+    if top_record.is_file():
+        top = json.loads(top_record.read_text())
+        wrapper = proj / top["chip_top_verilog"]
+        selected_models = _resolver(proj, set(), None)[0] if models is None else models
+        binding = {str(wrapper.resolve()): _fsf().sha256_file(wrapper)}
+        binding.update({str(Path(path).resolve()): hashlib.sha256(text.encode()).hexdigest()
+                        for path, text in selected_models.items()})
+        declaration.setdefault("verification_stimuli", {}).setdefault(
+            "arithmetic_observation", {})[top["chip_top_module"]] = {
+                "clock": "clk", "output": "p", "settle_ns": 0,
+                "sample_offset_ns": 1, "binding": binding}
+    _write(declaration_path, json.dumps(declaration))
     l9_path = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
     l9 = json.loads(l9_path.read_text())
     l9["clocks"] = [{"name": "clk", "period_ns": 10}]
     l9["reset_domains"] = [
         {"name": "rst", "sync": "synchronous", "polarity": "active_high"}]
     l9_path.write_text(json.dumps(l9))
-    for name in ("corner_operand", "reset"):
-        _write(proj / "input/tb" / f"{name}.v", _authored_integrity_tb(name))
+    if author_cases:
+        for name in ("corner_operand", "reset"):
+            _write(proj / "input/tb" / f"{name}.v", _authored_integrity_tb(name))
 
 
 def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
@@ -511,13 +529,15 @@ def _mk_project(tmp_path: Path, *, die: bool, chip_top: bool = True,
                                "core_module": CORE,
                                "chip_top_verilog":
                                    "phase3/stage3/pnr/chip_top_io.v"}))
-    if integrity_input:
-        _supplement_integrity_input(proj)
+    _supplement_integrity_input(proj, author_cases=integrity_input)
     return proj
 
 
 def _resolver(project, used, container):
-    return dict(MODELS), "fixture models"
+    # These are authored neutral INPUT bytes, not files borrowed from a PDK.
+    sources = {str(_write(project / "input/models" / Path(path).name, text)): text
+               for path, text in MODELS.items()}
+    return sources, "fixture models"
 
 
 class _FakeSim:
@@ -538,6 +558,15 @@ class _FakeSim:
         tb = Path(self.tb_for[str(run_dir)])
         text = tb.read_text()
         case = tb.stem
+        plan = aog._scenario_header(tb)
+        if plan is not None:
+            a, b = self.outcome(case, plan["transactions"])
+            errors = max(0, b - a)
+            word = "FAIL" if errors else "PASS"
+            return (1 if errors else 0), (
+                f"ARITH_SCENARIO_DONE transactions={b} "
+                f"comparisons={b * plan['spec']['width']} errors={errors} held_edges=2\n"
+                f"[TB {case}] {word}: source-only simulator stand-in\n")
         m = re.search(r"\blocalparam\s+integer\s+[^;]*\bNV\s*=\s*(\d+)\s*[,;]", text)
         if m:
             nv = int(m.group(1))
@@ -616,7 +645,7 @@ def test_producer_drives_every_case_through_the_pad_ring_top(tmp_path,
         text = (proj / c["tb"]).read_text()
         assert _fsf().instance_count(text, "chip_top") == 1
         assert _fsf().instance_count(text, CORE) == 0
-        assert c["family"] == "declared_function_golden"
+        assert c["family"] == "declared_arithmetic_scenario"
     # compiled with the staged PDK models, the chip top and the core RTL
     build = next(a for a in sim.calls if a[0] == "iverilog")
     joined = " ".join(build)
@@ -631,17 +660,27 @@ def test_the_case_text_decides_population_corners_and_reset_scenario(
     rec = _fsf().generate(proj, "ctr", dispatch=_FakeSim(),
                           model_resolver=_resolver)
     by = {c["name"]: c for c in rec["cases"]}
-    rnd = (proj / by["random_equivalence"]["tb"]).read_text()
-    nv = int(re.search(r"localparam integer NV = (\d+);", rnd).group(1))
+    random_tb = proj / by["random_equivalence"]["tb"]
+    rnd = random_tb.read_text()
+    random_plan = aog._scenario_header(random_tb)
+    nv = random_plan["transactions"]
     assert nv >= 100 and by["random_equivalence"]["declared_population"] == 100
-    assert "framing calibrated on the first 28" in rnd
-    corner = (proj / by["corner_operand"]["tb"]).read_text()
+    assert "framing calibrated on the first 28" not in rnd
+    assert random_plan["framing"]["bit_order"] == "LSB"
+    assert random_plan["framing"]["settled_latency"] == 1
+    corner_tb = proj / by["corner_operand"]["tb"]
+    corner = corner_tb.read_text()
+    corner_plan = aog._scenario_header(corner_tb)
     # MIN_NEG for an 8-bit operand is the pattern 128, crossed with itself
-    assert "_av[0] = 8'd0; _bv[0] = 8'd0;" in corner
-    assert re.search(r"= 8'd128; _bv\[\d+\] = 8'd128;", corner)
-    reset = (proj / by["reset"]["tb"]).read_text()
-    assert "for (_k = 0; _k < N/2; _k = _k + 1)" in reset
-    assert "for (_k = 0; _k < N/2" not in corner
+    assert [0, 0] in corner_plan["pairs"]
+    assert [128, 128] in corner_plan["pairs"]
+    reset_tb = proj / by["reset"]["tb"]
+    reset = reset_tb.read_text()
+    reset_plan = aog._scenario_header(reset_tb)
+    assert reset_plan["scenario"] == "reset_situations"
+    assert reset_plan["transactions"] == 9 * len(reset_plan["pairs"])
+    assert "interrupted(vi,4,1);" in reset
+    assert "interrupted(vi," not in corner
 
 
 def test_a_case_short_of_its_stated_population_is_not_a_pass(tmp_path,
@@ -1060,6 +1099,7 @@ def _late_pad_producer(project, monkeypatch, *, outcome='pass'):
             _write(p / 'reports/phase3/io_pad_chip_top.json', json.dumps({
                 'verdict': 'WROTE', 'chip_top_module': 'chip_top', 'core_module': CORE,
                 'chip_top_verilog': 'phase3/stage3/pnr/chip_top_io.v'}))
+            _supplement_integrity_input(p, author_cases=False)
             if outcome == 'old_pad':
                 import os
                 import time
@@ -1256,6 +1296,7 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
         rc, produced = pads.run(p, str(pdk_root), 'testpdk')
         assert rc == 0 and produced['verdict'] == 'WROTE', produced
         _write(p / 'reports/phase3/io_pad_chip_top.json', json.dumps(produced))
+        _supplement_integrity_input(p, author_cases=False, models=models(p, set(), None)[0])
         return phase3.StepResult('io_pad_chip_top_gen', 'PASS')
 
     monkeypatch.setattr(phase3, 'step_io_pad_chip_top_gen', actual_pad)
@@ -1275,7 +1316,9 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
                 cells[item['master']] = (
                     f'module {item["master"]}(inout {terminal}, input {core_pin}, input OE, output TIELO); '
                     f'assign TIELO = 1\'b0; assign {terminal} = OE ? 1\'bz : {core_pin}; endmodule\n')
-        return {'neutral_pad_models.v': ''.join(cells.values())}, 'neutral pad models'
+        text = ''.join(cells.values())
+        source = _write(p / 'input/models/neutral_pad_models.v', text)
+        return {str(source): text}, 'neutral pad models'
 
     monkeypatch.setattr(fsf, 'default_model_resolver', models)
     entered, env = _actual_outer_phase3_entry(project, report, started)
