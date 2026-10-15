@@ -78855,18 +78855,21 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                                   'detail': 'current stream finishing consumer retained'
                                   if produced else 'current stream finishing consumer absent'}
                     elif sid == '36':
-                        result = _default_prepare_checklist(project, top, pdk, container)
+                        rc = _default_checklist_layout_receipts(project, top, pdk, container)
+                        result = {'verdict': 'PASS' if rc == 0 else 'FAIL' if rc == 1 else 'NOT_MEASURED',
+                                  'detail': 'current final-layout identity and compliance'}
                         produced = result['verdict'] == 'PASS'
                     elif sid == '37.4':
                         row = step_signoff_metrics_aggregate(project)
                         result = {'verdict': row.status, 'detail': row.detail}
                         produced = row.status == 'PASS'
                     elif sid == '38':
-                        prepared = _default_prepared_handoff(project)
-                        produced = prepared is not None
-                        result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
-                                  'detail': 'current package preparation retained' if produced else
-                                  'current package preparation absent or changed; resume at checklist'}
+                        # Package inputs (including the operator precheck) are
+                        # complete now. Produce once, then judge the unchanged
+                        # full package and tapeout sign-off clauses below.
+                        handoff = _default_final_handoff(project, container)
+                        result = {'verdict': handoff.status, 'detail': handoff.detail}
+                        produced = handoff.status == 'PASS'
                     elif sid == '37.5ip':
                         row = step_digital_hardmacro_gen(project, pdk, container)
                         result = {'verdict': row.status, 'detail': row.detail}
@@ -79139,53 +79142,18 @@ def _write_final_layout_receipts(project: Path, receipt, plan):
     return 0
 
 
-def _default_prepared_handoff(project: Path) -> Optional[dict]:
-    """Read the existing retained package preparation, never infer from files."""
-    import step_output_collector as versions
-    index = versions._read_index(project)
-    row = next((row for row in index.get('steps', []) if str(row['id']) == '38'), None)
-    if row is None:
-        return None
-    try:
-        record = json.loads((versions._versions_root(project) / row['folder'] / 'outputs.json').read_text())
-        inputs = record['inputs']
-        if (record['status'] != 'PASS' or not inputs
-                or any(not (project / rel).is_file()
-                       or _sha256_file(project / rel) !=
-                       (sha.get('sha256') if isinstance(sha, dict) else sha)
-                       for rel, sha in inputs.items())
-                or not record['outputs']
-                or any(not (project / item['rel']).is_file()
-                       or _sha256_file(project / item['rel']) != item['sha256']
-                       for item in record['outputs'])):
-            return None
-        return record
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def _default_prepare_checklist(project: Path, top: str, pdk: PdkConfig,
-                                container: str) -> dict:
-    """Prepare the checklist's declared handoff inputs without accepting 38."""
-    import _flow_yaml
-    row = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '36')
-    if row.get('prepares') != [38]:
-        return {'verdict': 'NOT_MEASURED', 'detail': 'checklist preparation owner not declared'}
-    if _default_prepared_handoff(project) is None:
-        spec = next(spec for spec in _PRE_AUDIT_PRODUCERS if spec[0] == 'foundry_handoff')
-        prepared = _spf.retained_call(
-            project, '38', _run_pre_audit_producer,
-            project, *spec, container, canonical_acceptance=False)
-        if prepared.status != 'PASS':
-            return {'verdict': prepared.status, 'detail': prepared.detail}
-    if _default_prepared_handoff(project) is None:
-        return {'verdict': 'NOT_MEASURED', 'detail': 'current package preparation is incomplete'}
-    rc = _default_checklist_layout_receipts(project, top, pdk, container)
-    if rc:
-        return {'verdict': 'NOT_MEASURED', 'detail': 'current completed layout identity unavailable'}
-    spec = next(spec for spec in _PRE_AUDIT_PRODUCERS if spec[0] == 'tapeout_checklist')
-    checklist = _run_pre_audit_producer(project, *spec, container)
-    return {'verdict': checklist.status, 'detail': checklist.detail}
+def _default_final_handoff(project: Path, container: str) -> StepResult:
+    """The existing final package producer precedes its complete checklist."""
+    rows = []
+    for name in ('foundry_handoff', 'tapeout_checklist'):
+        spec = next(spec for spec in _PRE_AUDIT_PRODUCERS if spec[0] == name)
+        row = _run_pre_audit_producer(project, *spec, container)
+        rows.append(row)
+        if row.status != 'PASS':
+            return row
+    return StepResult('foundry_handoff', 'PASS', sum(row.duration_s for row in rows),
+                      '; '.join(row.detail for row in rows),
+                      [path for row in rows for path in row.output_files])
 
 
 def _default_checklist_layout_receipts(project: Path, top: str, pdk: PdkConfig,

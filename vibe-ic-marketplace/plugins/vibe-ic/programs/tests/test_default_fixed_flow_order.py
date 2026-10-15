@@ -28,7 +28,8 @@ def test_cold_order_has_no_future_dependency_and_preserves_all_legacy_ids():
     assert runner._phase3_window_steps('37', '34') == ['37', '26.5ic', '34']
     assert runner._phase3_window_steps('37.4', '38') == ['37.4', '36', '37.5ip', '37.5ic', '38']
     by_id = {str(row['id']): row for row in rows}
-    assert by_id['36']['prepares'] == [38]
+    assert 'tapeout_checklist_gen' not in by_id['36']['programs']
+    assert 'tapeout_checklist_gen' in by_id['38']['programs']
     assert by_id['32']['blocks_on'] == [21, 7]
     assert by_id['22']['blocks_on'] == [32]
     assert 'gds_antenna_deck_check' not in by_id['26']['programs']
@@ -70,8 +71,98 @@ def test_stage5_and_bounded_calls_share_the_actual_row_plan():
 def test_real_cold_step32_does_not_require_a_future_step22_spef(tmp_path, monkeypatch, case):
     from test_default_step32_output_publication import test_current_step32_publishes_before_its_output_receipt
     test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatch, case)
-    receipts = list(tmp_path.rglob('default_steps/32/backend_result.json'))
+    receipts = list(tmp_path.glob('project/reports/phase3/default_steps/32/backend_result.json'))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text())
     assert receipt['verdict'] == ('FAIL' if case == 'measured_fail' else 'PASS')
     assert not list(tmp_path.rglob('*.spef'))
+
+
+@pytest.mark.parametrize('rejected_stage,status', [(None, 'PASS'), (5, 'FAIL'), (7, 'FAIL'), (7, 'NOT_MEASURED')])
+def test_actual_cold_main_visits_each_stage_once_and_stops_all_later_writers(
+        tmp_path, monkeypatch, rejected_stage, status):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _drive, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL, TOP,
+    )
+    project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
+    _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    pnr = runner._pl.pnr_dir(project)
+    (pnr / f'{TOP}.gds').unlink()
+    source_gds = runner._pl.gds_dir(project) / f'{TOP}.gds'
+    source_gds.unlink(missing_ok=True)
+    calls, writers = [], []
+    # This is an orchestration control over the actual main boundary. Native
+    # stage outcomes are supplied; their independent complete consumers have
+    # separate producer/consumer controls, and no whole-design PASS is claimed.
+    monkeypatch.setattr(runner, '_default_prelayout_rejection', lambda *a: None)
+    monkeypatch.setattr(runner, 'run_step11_dft_after_synth', lambda *a: [])
+    monkeypatch.setattr(runner, 'run_step13_lec_on_pnr_input', lambda *a: [])
+    monkeypatch.setattr(runner, '_ordinary_phase3_row', lambda *a: None)
+    monkeypatch.setattr(runner, '_default_step15_with_backend_receipt',
+                        lambda project, top, pdk, container, *a, **k: rows(
+                            project, top, pdk, container,
+                            list(flow.ordered_step_ids(execution_stages=(4,))), report_name='pnr'))
+
+    def rows(project, top, pdk, container, ids, *, report_name='pnr', **kwargs):
+        stages = {int(row['execution_stage']) for row in flow.load()['steps'] if str(row['id']) in ids}
+        assert len(stages) == 1, ids
+        stage = stages.pop()
+        assert ids == list(flow.ordered_step_ids(execution_stages=(stage,)))
+        calls.append((stage, list(ids)))
+        if stage == 4:
+            for target in (pnr / 'routed.def', pnr / f'{TOP}.def'):
+                target.write_text('DIEAREA ( 0 0 ) ( 1500000 1500000 ) ;\nPINS 0 ;\nEND PINS\n')
+        if stage == 5:
+            assert not (pnr / f'{TOP}.gds').exists(), 'no previous stream at cold route electrical stage'
+        if stage == 6:
+            (pnr / 'filled.def').write_bytes((pnr / 'routed.def').read_bytes())
+            (pnr / f'{TOP}.gds').write_text('CURRENT STREAM FROM CURRENT FILLED LAYOUT\n')
+            source_gds.parent.mkdir(parents=True, exist_ok=True)
+            source_gds.write_bytes((pnr / f'{TOP}.gds').read_bytes())
+        verdict = status if stage == rejected_stage else 'PASS'
+        return runner.StepResult(report_name, verdict, 0, f'controlled stage {stage}',
+            extras={'requested_steps': ids},
+            reason_class=runner._V.ReasonClass.NOT_EXECUTED if verdict == 'NOT_MEASURED' else '')
+
+    monkeypatch.setattr(runner, '_default_pnr_rows', rows)
+    monkeypatch.setattr(runner, 'step_canonicalize_artefacts',
+                        lambda *a, **k: runner.StepResult('canonicalize_artefacts', 'PASS', 0, 'controlled remaining physical evidence'))
+    monkeypatch.setattr(runner, 'step_drv_promotion_corroboration',
+                        lambda *a: runner.StepResult('drv_promotion_corroboration', 'PASS', 0, 'controlled measured reader'))
+    monkeypatch.setattr(runner, 'step_declared_signoff_gates', lambda *a, **k: [])
+    monkeypatch.setattr(runner, 'step_pad_ring_final_evidence',
+                        lambda *a: runner.StepResult('pad_ring_final_evidence', 'PASS', 0, 'controlled current pin evidence'))
+    monkeypatch.setattr(runner, '_run_derived_artefact_generators', lambda *a, **k: writers.append('legacy-derived') or [])
+    import subprocess
+    previous = subprocess.run
+    def execution(argv, *args, **kwargs):
+        if (isinstance(argv, (tuple, list)) and len(argv) > 1
+                and Path(str(argv[1])).name == 'flow_declared_producer_run.py'):
+            writers.append('legacy-global-declared')
+        return previous(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, 'run', execution)
+    runner.main()
+    stages = [stage for stage, ids in calls]
+    expected = [4, 5, 6, 7, 8] if rejected_stage is None else [s for s in (4, 5, 6, 7, 8) if s <= rejected_stage]
+    assert stages == expected, calls
+    flat = [sid for stage, ids in calls for sid in ids]
+    assert len(flat) == len(set(flat)), flat
+    assert writers == [], writers
+    (project / 'FIXED_ORDER_MAIN_OBSERVATION.json').write_text(json.dumps({
+        'calls': calls, 'legacy_writers': writers,
+        'controlled_native_results_only': True, 'rejected_stage': rejected_stage,
+        'rejected_status': status}, indent=2))
+
+
+@pytest.mark.parametrize('first_status', ['PASS', 'FAIL', 'NOT_MEASURED'])
+def test_final_handoff_produces_package_then_checklist_once(tmp_path, monkeypatch, first_status):
+    calls = []
+    def produce(project, name, *args):
+        calls.append(name)
+        verdict = first_status if name == 'foundry_handoff' else 'PASS'
+        return runner.StepResult(name, verdict, 0, 'controlled process boundary',
+            reason_class=runner._V.ReasonClass.NOT_EXECUTED if verdict == 'NOT_MEASURED' else '')
+    monkeypatch.setattr(runner, '_run_pre_audit_producer', produce)
+    result = runner._default_final_handoff(tmp_path, '')
+    assert calls == (['foundry_handoff', 'tapeout_checklist'] if first_status == 'PASS' else ['foundry_handoff'])
+    assert result.status == first_status

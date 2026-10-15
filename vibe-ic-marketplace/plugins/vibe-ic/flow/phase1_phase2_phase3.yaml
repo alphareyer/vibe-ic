@@ -8453,10 +8453,9 @@ steps:
         - program_exit_zero: "signoff_metrics_aggregate . --check"
     blocks_on: [31, 34, 35, "37.3"]
   - id: 36
-    name: "Tapeout checklist (final sign-off confirmation)"
+    name: "Final physical sign-off identity and compliance"
     stage: stage4
     execution_stage: 8
-    prepares: [38]  # Existing package writer only; full handoff remains last.
     required_inputs:
       - from: 31
         outputs: all
@@ -8466,15 +8465,8 @@ steps:
         path: "phase3/stage4/gds/*.gds"
     skills: [tapeout-checklist]
     programs:
-      # R-0915-141 — THE PRODUCER, not the checker. `tapeout_signoff_check` is a
-      # 22-line shim over `signoff_audit --mode tapeout` whose job is to JUDGE;
-      # naming it here made the step's only declared producer its own gate, which
-      # is the shape the ruling forbids. `tapeout_checklist_gen` assembles the
-      # checklist from the sign-off results the run already holds.
-      - tapeout_checklist_gen
       - stage3_compliance
     required_outputs:
-      - "reports/audit/tapeout_checklist.json"
       - "reports/phase3/gates/stage3_compliance.json"
       - "reports/phase3/layout_receipts.json"
     # #651 — `tapeout_signoff_check` (= signoff_audit --mode tapeout) carries
@@ -8562,7 +8554,6 @@ steps:
         - advisory_program_exit_zero:
               command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
               advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
-        - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
         - advisory_program_exit_zero:
               command: "report_belongs_to_project_check . --json reports/audit/report_belongs_to_project.json"
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
@@ -9363,7 +9354,14 @@ steps:
     programs:
       # R-0915-141 — the PRODUCER of the package, not its checker.
       - foundry_handoff_pack_gen
+      # R-0915-141 — THE PRODUCER, not the checker. `tapeout_signoff_check` is a
+      # 22-line shim over `signoff_audit --mode tapeout` whose job is to JUDGE;
+      # naming it here made the step's only declared producer its own gate, which
+      # is the shape the ruling forbids. `tapeout_checklist_gen` assembles the
+      # checklist from the sign-off results the run already holds.
+      - tapeout_checklist_gen
     required_outputs:
+      - "reports/audit/tapeout_checklist.json"
       - "phase3/stage4/foundry_handoff/mask_spec.json"
       - "phase3/stage4/foundry_handoff/wat_plan.json"
       # The scribe-line PCM/alignment frame is FOUNDRY-SUPPLIED — this flow
@@ -9387,7 +9385,9 @@ steps:
       # assembles and which this step's gate reads; the gate's verdict now goes to
       # its own path (see the clause below).
     gate:
-      program_exit_zero: "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"
+      all_of:
+        - program_exit_zero: "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"
+        - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
     # R-0929-TAIL-CONTINUES: 38 packages the antenna sign-off record (26's
     # output); it used to reach 26 through 32, whose inverted edges now point
     # the runner's way (26 is downstream of 32), so the read is declared.
@@ -9398,7 +9398,8 @@ steps:
       (Wafer Acceptance Test) probe plan, scribe-line PCM
       structures, corner-test ATE vector kit. Without this kit
       the foundry cannot accept the GDS for fab. Distinct from
-      Step 36 tapeout_checklist which is internal sign-off.
+      Step 36 physical sign-off identity and compliance. The full checklist
+      and its unchanged sign-off consumer finish this final handoff step.
 
   - id: 39
     name: "FPGA final sign-off (recompile + on-board test)"
