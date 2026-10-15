@@ -51,7 +51,12 @@ def test_default_direct_step8_runs_canonical_checks_without_controller(tmp_path,
     if present:
         project(tmp_path)
     put(tmp_path / 'phase3/librelane_switch.json', {'steps': {'8': 'direct'}})
-    monkeypatch.setattr(E, '_ordinary_runtime', {'policy': {'mode': 'default'}})
+    # Use the ordinary constructor: retained acceptance also binds this
+    # runtime to its project and reads its declared parameters.
+    monkeypatch.setattr(E, '_ordinary_runtime', None)
+    runtime = E.bootstrap(tmp_path)
+    assert runtime['project'] == tmp_path.resolve()
+    assert runtime['policy']['mode'] == 'default'
     monkeypatch.setattr(E, 'dispatch_fixed_step', lambda *_a, **_k:
                         pytest.fail('Default direct Step 8 dispatched a Controller'))
     row = D.step_sdc_validation(tmp_path)
@@ -204,13 +209,61 @@ def test_stale_netlist_bound_gate_is_not_reused(tmp_path):
     assert json.loads(Path(row.output_files[0]).read_text())['records'] == []
 
 
-def test_postcheck_is_wired_only_after_passing_prelayout():
+def test_postcheck_is_wired_only_after_passing_prelayout(tmp_path, monkeypatch):
     tree = ast.parse(Path(P.__file__).read_text())
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
-    guarded = [n for n in ast.walk(main) if isinstance(n, ast.If) and
-               ast.unparse(n.test) == "_pls.status == 'PASS'"]
-    assert any('step_sdc_validation_post_prelayout(project, effective_top)' in
-               ast.unparse(n) for n in guarded)
+    # Execute the contiguous real main call sites. The current guard also
+    # requires canonical acceptance; matching a literal one-clause If would
+    # reject that stricter behavior without checking the ordering invariant.
+    body = next(n.body for n in ast.walk(main) if isinstance(n, ast.If) and any(
+        isinstance(s, ast.Assign) and isinstance(s.value, ast.Call) and
+        isinstance(s.value.func, ast.Name) and s.value.func.id == 'step_prelayout_signoff'
+        for s in n.body))
+    start = next(i for i, s in enumerate(body) if isinstance(s, ast.Assign) and
+                 any(isinstance(t, ast.Name) and t.id == '_prelayout_started' for t in s.targets))
+    end = next(i for i, s in enumerate(body) if isinstance(s, ast.If) and any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and
+        c.func.id == 'step_sdc_validation_post_prelayout' for c in ast.walk(s)))
+    code = compile(ast.Module(body=body[start:end + 1], type_ignores=[]),
+                   '<actual-phase3-prelayout-handoff>', 'exec')
+    for status, rejected, mode in [
+            ('PASS', False, 'dual'), ('PASS', False, 'librelane'),
+            ('FAIL', False, 'dual'), ('NOT_MEASURED', False, 'dual'),
+            ('PASS', True, 'dual'), ('PASS', False, 'direct')]:
+        calls = []
+        producer = P.StepResult('prelayout_signoff', status, 0, 'neutral producer')
+        rejection = P.StepResult('canonical_consumer', 'FAIL', 0, 'neutral rejection') if rejected else None
+        postcheck = D.StepResult('sdc_validation', 'PASS', 0, 'neutral consumer')
+        plan = []
+
+        def prelayout(current, top, pdk, container):
+            assert current == tmp_path and top == 'top' and not plan
+            calls.append('producer')
+            return producer
+
+        def acceptance(current, started):
+            assert current == tmp_path and plan[0] is producer
+            calls.append('acceptance')
+            return rejection
+
+        def post(current, top):
+            assert current == tmp_path and top == 'top'
+            assert producer.status == 'PASS' and rejection is None
+            assert plan == [producer]
+            calls.append('postcheck')
+            return postcheck
+
+        monkeypatch.setattr(P, 'step_prelayout_signoff', prelayout)
+        monkeypatch.setattr(P, '_default_prelayout_rejection', acceptance)
+        monkeypatch.setattr(D, 'step_sdc_validation_post_prelayout', post)
+        monkeypatch.setattr(LC, 'selected_mode', lambda *_: mode)
+        env = dict(vars(P), project=tmp_path, effective_top='top', pdk=object(),
+                   args=SimpleNamespace(container='unused'), plan=plan)
+        exec(code, env)
+        runs = status == 'PASS' and not rejected and mode in ('dual', 'librelane')
+        assert calls == (['producer', 'acceptance', 'postcheck', 'acceptance']
+                         if runs else ['producer', 'acceptance'])
+        assert plan == ([producer, postcheck] if runs else [producer])
 
 
 @pytest.mark.parametrize('producer_status', ['PASS', 'FAIL', 'NOT_MEASURED'])
