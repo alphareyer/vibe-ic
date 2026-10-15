@@ -640,9 +640,7 @@ def test_current_sync_census_recomputed_after_parameter_source_change(tmp_path):
         G.generate(project=tmp_path,top="neutral_register",assertion_form="immediate")
         c=json.loads((tmp_path/"phase2/stage1/formal/property_contract.json").read_text())
         matched=[r for r in c["covered_obligations"] if r["id"].endswith("resets.0.sync")]
-        assert len(matched)==1,c
-        sync=matched[0]
-        counts.append(len(sync["full_state_census"]["q_bits"]))
+        counts.append(len(matched[0]["full_state_census"]["q_bits"]) if len(matched)==1 else None)
     assert counts == [3,4],counts
 
 
