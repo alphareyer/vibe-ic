@@ -529,3 +529,137 @@ def test_applicable_but_unanswerable_authoring_is_incomplete_not_skip(tmp_path):
         "phase2/stage1/formal/formal_authoring_request.json").read_text())
     assert req["verdict"] == "INCOMPLETE"
     assert "construction-safe property" in req["unresolved_obligations"][0]["description"]
+
+
+# Full-state SYNC is independent of reset-force/value classification.
+_SYNC_D_LEAF = """module state_leaf(input clk,rst,en,input [1:0] data,output [1:0] mixed);
+reg [1:0] stored;
+always @(posedge clk) if(en) stored <= rst ? data ^ 2'b01 : data;
+assign mixed=stored ^ data;
+endmodule
+"""
+_SYNC_D_TOP = """module neutral_register(input clk,rst,en,input [1:0] data,
+output reg floor,output [1:0] mixed);
+state_leaf u_state(.clk(clk),.rst(rst),.en(en),.data(data),.mixed(mixed));
+always @(posedge clk) if(rst) floor<=0; else floor<=data[0];
+endmodule
+"""
+
+
+def _full_sync_project(project, mode):
+    text = _SYNC_D_LEAF + _SYNC_D_TOP
+    if mode == "plain":
+        text = _SYNC_D_TOP.replace(
+            "state_leaf u_state(.clk(clk),.rst(rst),.en(en),.data(data),.mixed(mixed));",
+            "reg [1:0] stored; always @(posedge clk) if(en) stored <= rst ? data ^ 2'b01 : data; assign mixed=stored ^ data;")
+    elif mode == "async":
+        text = text.replace("always @(posedge clk) if(en) stored <= rst ? data ^ 2'b01 : data;",
+            "always @(posedge clk or posedge rst) if(rst) stored<=0; else if(en) stored<=data;")
+    elif mode == "latch":
+        text = text.replace("always @(posedge clk) if(en) stored <= rst ? data ^ 2'b01 : data;",
+                            "always @* if(en) stored <= rst ? data ^ 2'b01 : data;")
+    rtl = _diagnostic_project(project, text)
+    _write_doc(project, "L8_TIMING_WAVEFORM.json", {"clock_and_reset_waveform": {
+        "clocks": [{"name": "clk", "edge": "posedge"}],
+        "resets": [{"name": "rst", "sync": "synchronous", "polarity": "active_high"}]}})
+    if mode == "sentinel":
+        formal = project / "phase2/stage1/formal"
+        formal.mkdir(parents=True)
+        (formal/G.EXPERT_PROPERTIES_SVH).write_text(
+            "always @($global_clock) if(f_sync_past_valid)\n"
+            "a_offedge_sentinel: assert(!(!$past(clk) && !clk && !$past(rst) && rst));\n")
+    return rtl
+
+
+@pytest.mark.parametrize("mode", ["plain", "dotted", "async", "sentinel"])
+def test_full_state_sync_normal_generator_default_runner_consumer(tmp_path, mode):
+    rtl = _full_sync_project(tmp_path, mode)
+    floor = G.generate(project=tmp_path, top="neutral_register", assertion_form="immediate")
+    formal = tmp_path/"phase2/stage1/formal"
+    contract = json.loads((formal/"property_contract.json").read_text())
+    authored = [r for r in contract["covered_obligations"]
+                if r["id"].endswith("resets.0.sync")]
+    assert len(authored) == 1, contract
+    census = authored[0]["full_state_census"]
+    assert census["ok"] and len(census["q_bits"]) == 3, census
+    assert len(census["identities"]) == 2, census
+    assert sum(r["width"] for r in census["registers"]) == 3, census
+    observers = contract["observers"]
+    assert len({o["wire"] for o in observers}) == len(observers)
+    if mode != "plain":
+        assert any(o["net"] == "dut.u_state.stored" for o in observers), observers
+    # Full census and exact identities remain even when the async mutant is bad.
+    assert any(r["id"].endswith("resets.0.polarity")
+               for r in contract["unresolved_obligations"]), contract
+    h = Path(floor["harness_path"]).read_text()
+    assert "always @($global_clock)" in h and "!$past(clk) && clk" in h
+    assert "assume" not in G.strip_comments(h)
+    proof, checked = _native_diagnostic_proof(tmp_path, rtl, floor)
+    (tmp_path/"FULL_SYNC_READBACK.json").write_text(json.dumps({
+        "mode": mode,"census": census,"proof": proof,"consumer": checked},indent=2))
+    assert proof["all_proved"] is (mode in {"plain", "dotted"}), proof
+    if mode in {"async", "sentinel"}:
+        assert any(formal.rglob("trace*.aiw")), proof
+        import re
+        expected = "a_l8_state_sync_0" if mode == "async" else "a_offedge_sentinel"
+        for task in ("safety", "bmc"):
+            run=formal/f"formal_neutral_register_formal_{task}"
+            witness_map=json.loads((run/"model/design_aiger.ywa").read_text())
+            hits=re.findall(r"Output (\d+) of miter .*? was asserted",(run/"engine_0/logfile.txt").read_text())
+            assert hits and {witness_map["asserts"][int(i)][-1].lstrip("\\") for i in hits} == {expected}
+            assert witness_map["assumes"] == []
+    else:
+        assert checked["verdict"] == "INCOMPLETE", checked
+
+
+def test_full_state_sync_refuses_latch_without_shrinking_census(tmp_path):
+    _full_sync_project(tmp_path, "latch")
+    floor = G.generate(project=tmp_path, top="neutral_register", assertion_form="immediate")
+    rows = [r for r in floor["unresolved_obligations"] if r["id"].endswith("resets.0.sync")]
+    assert rows and "unsupported storage" in rows[0]["program_refused"], floor
+
+
+@pytest.mark.parametrize("storage", ["unused-latch", "unused-memory"])
+def test_full_sync_census_precedes_cleanup_of_unsupported_state(tmp_path, storage):
+    rtl = _full_sync_project(tmp_path, "dotted")
+    extra = ("reg hidden; always @* if(en) hidden<=rst;" if storage == "unused-latch"
+             else "reg [3:0] hidden_bank [0:1];")
+    rtl.write_text(rtl.read_text().replace("output reg floor,output [1:0] mixed);",
+        "output reg floor,output [1:0] mixed);\n" + extra))
+    floor = G.generate(project=tmp_path,top="neutral_register",assertion_form="immediate")
+    rows=[r for r in floor["unresolved_obligations"] if r["id"].endswith("resets.0.sync")]
+    assert rows and "unsupported storage" in rows[0]["program_refused"],floor
+
+
+def test_current_sync_census_recomputed_after_parameter_source_change(tmp_path):
+    rtl = _full_sync_project(tmp_path,"dotted")
+    counts=[]
+    for width in [2,3]:
+        if width == 3:
+            rtl.write_text(rtl.read_text().replace("[1:0]","[2:0]").replace("2'b01","3'b001"))
+        G.generate(project=tmp_path,top="neutral_register",assertion_form="immediate")
+        c=json.loads((tmp_path/"phase2/stage1/formal/property_contract.json").read_text())
+        matched=[r for r in c["covered_obligations"] if r["id"].endswith("resets.0.sync")]
+        assert len(matched)==1,c
+        sync=matched[0]
+        counts.append(len(sync["full_state_census"]["q_bits"]))
+    assert counts == [3,4],counts
+
+
+def test_complete_mapping_normal_author_default_runner_and_actual_consumer(tmp_path):
+    rtl=_full_sync_project(tmp_path,"dotted")
+    rtl.write_text(rtl.read_text().replace(
+        "if(en) stored <= rst ? data ^ 2'b01 : data;",
+        "if(rst | en) stored <= 0; else stored <= data;"))
+    floor=G.generate(project=tmp_path,top="neutral_register",assertion_form="immediate")
+    pol_rows=[r for r in floor["unresolved_obligations"] if r["id"].endswith("resets.0.polarity")]
+    assert len(pol_rows)==1 and not pol_rows[0].get("program_refused"),floor
+    proof,checked=_native_diagnostic_proof(tmp_path,rtl,floor)
+    assert proof["all_proved"] is True,proof
+    formal=tmp_path/"phase2/stage1/formal"
+    disposition=json.loads((formal/"formal_program_discharge.json").read_text())
+    pol=next(r for r in disposition["dispositions"] if r["id"].endswith("resets.0.polarity"))
+    assert pol["status"] == "DISCHARGED_BY_PROGRAM",disposition
+    assert all(r["verdict"] == "PASS" for r in pol["claims"]),pol
+    assert checked["verdict"] == "INCOMPLETE",checked
+    assert any(r["id"].endswith("clocks.0.edge") for r in floor["unresolved_obligations"])
