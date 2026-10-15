@@ -17,7 +17,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from execution_adapters_mixed import (GATE_REPORTS, M2_SIDECAR_OUTPUTS, OUTPUTS,
-                                      PRODUCERS)
+                                      PRODUCERS, resolved_output_paths)
 
 GATES = {
     "M1": (("mixed_signal_merge_check", "reports/analog/mixed_signal/merge.json"),),
@@ -387,7 +387,9 @@ def execute(inputs: Path, outputs: Path, step_id: str, params: dict):
             temp_receipt = Path(stream.name)
         os.replace(temp_receipt, receipt_path)
     output_hashes = {}
-    output_rels = set(OUTPUTS[step_id]) | set(GATE_REPORTS[step_id])
+    # Registry contracts retain the canonical glob; exported hashes name the
+    # actual issued top's extracted file, never a file with a literal '*'.
+    output_rels = set(resolved_output_paths(step_id, top)) | set(GATE_REPORTS[step_id])
     output_rels.update(producer_output_hashes)
     if step_id == "M4":
         try:

@@ -38,6 +38,16 @@ OUTPUTS = {
     "M1": ("phase3/mixed_signal/top_merged.gds",
            "reports/analog/mixed_signal/merge.json",
            "reports/analog/mixed_signal/top_lvs.json",
+           "phase3/mixed_signal/m1_merge_receipt.json",
+           "phase3/mixed_signal/merge.log",
+           "phase3/mixed_signal/merge.json",
+           "phase3/mixed_signal/macro_placements.json",
+           "phase3/mixed_signal/klayout_merge.py",
+           "phase3/mixed_signal/*_merged_extracted.sp",
+           "phase3/mixed_signal/ext2spice_merged.log",
+           "phase3/mixed_signal/ext2spice_merged.tcl",
+           "phase3/mixed_signal/top_lvs.tcl",
+           "reports/analog/mixed_signal/top_lvs.rpt",
            "reports/analog/mixed_signal/top_lvs_run.json"),
     "M2": ("reports/analog/mixed_signal/power_domain.json",
            "reports/analog/mixed_signal/level_shifter.json",
@@ -101,6 +111,18 @@ INPUTS = {
 }
 
 
+def resolved_output_paths(step_id: str, top_name: str) -> tuple[str, ...]:
+    """Name M1's extracted sidecar exactly as its issued producer does."""
+    if step_id != "M1":
+        return OUTPUTS[step_id]
+    if (not isinstance(top_name, str) or not top_name or
+            Path(top_name).name != top_name or top_name in (".", "..")):
+        raise ValueError("MIXED_M1_OUTPUT_TOP_INVALID")
+    return tuple(f"phase3/mixed_signal/{top_name}_merged_extracted.sp"
+                 if name == "phase3/mixed_signal/*_merged_extracted.sp" else name
+                 for name in OUTPUTS[step_id])
+
+
 def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
     path = Path(outputs) / "mixed-result.json"
     gates = tuple(binding.get("required_gates", ()))
@@ -125,11 +147,16 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
     step = str(binding.get("step_id"))
     if step not in IDS or value.get("step_id") != step or value.get("producer") != PRODUCERS[step]:
         return em.Evidence(binding, "NOT_MEASURED", {}, {}, detail="MIXED_SUBJECT_MISMATCH")
+    try:
+        required_outputs = resolved_output_paths(step, (binding.get("objective") or {}).get("top_name"))
+    except (AttributeError, TypeError, ValueError):
+        return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
+                           detail="MIXED_M1_OUTPUT_TOP_INVALID")
     outputs_hashes = {"mixed-result.json": em.digest(path)}
     for name, expected in (value.get("outputs") or {}).items():
         rel = Path(name)
         if (rel.is_absolute() or ".." in rel.parts or
-                not (name in OUTPUTS[step] or name in GATE_REPORTS[step] or
+                not (name in required_outputs or name in GATE_REPORTS[step] or
                      (step == "M4" and name.startswith("phase3/librelane/")))):
             return em.Evidence(binding, "NOT_MEASURED", {}, {}, detail="MIXED_OUTPUT_PATH_INVALID")
         candidate = Path(outputs) / name
@@ -180,6 +207,9 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
     verdict = ("FAIL" if measured_fail else
                "PASS" if producer_verdict == "PASS" and all(gate_states[g] == "PASS" for g in gates)
                else "NOT_MEASURED")
+    if verdict == "PASS" and step == "M1" and not set(required_outputs).issubset(value.get("outputs", {})):
+        return em.Evidence(binding, "NOT_MEASURED", gate_states, outputs_hashes,
+                           detail="MIXED_M1_PRODUCER_OUTPUT_EXPORT_INCOMPLETE")
     if verdict == "PASS" and not set(GATE_REPORTS[step]).issubset(value.get("outputs", {})):
         return em.Evidence(binding, "NOT_MEASURED", gate_states, outputs_hashes,
                            detail="MIXED_GATE_REPORT_ABSENT")
@@ -319,4 +349,4 @@ def register_mixed_adapters(registry: em.Registry, *, source_sha: str,
 
 
 __all__ = ["IDS", "PRODUCERS", "OUTPUTS", "GATE_REPORTS",
-           "register_mixed_adapters", "validate"]
+           "register_mixed_adapters", "resolved_output_paths", "validate"]
