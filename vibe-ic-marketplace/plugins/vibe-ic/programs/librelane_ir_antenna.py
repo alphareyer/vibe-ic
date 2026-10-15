@@ -878,3 +878,275 @@ def xor_sealed(project: Path, image: str, pdk_root: Path, pdk: str, *,
     return {'verdict': verdict, 'xor_difference_count': count,
             'direct_sha256': digest(direct_gds), 'tool_sha256': digest(tool_gds),
             'state': str(folder / 'state_out.json')}
+
+
+POWER_CONNECTIVITY_REPORT = 'reports/phase3/no_disconnected_ports.json'
+
+
+def _power_connectivity_tcl(layout: Path, output: Path, declared: dict,
+                            sources: list[list[str]]) -> str:
+    """Native connectivity plus the terminals PDNSim can otherwise skip.
+
+    The existing source proof permits an internal resistor-fed rail to have
+    no BTerm. Its wrapper changes only that native presence requirement.
+    """
+    from librelane_contract import internal_supply_grid_check_tcl
+
+    def word(value):
+        return '"' + ''.join('\\' + c if c in '\\"$[]' else c for c in str(value)) + '"'
+
+    expected = ' '.join(word(n) for n in declared)
+    proof = internal_supply_grid_check_tcl(sources) if sources else ''
+    return f'read_def {word(layout)}\n' + proof + f'''
+set _pg_out [open {word(output)} w]
+proc _pg_b64 {{s}} {{ binary encode base64 -maxlen 0 [encoding convertto utf-8 $s] }}
+proc _pg_row {{args}} {{ puts $::_pg_out [join $args "\t"]; flush $::_pg_out }}
+proc _pg_routing_box {{layer box}} {{
+  expr {{[$layer getRoutingLevel] > 0 && [$box xMin] < [$box xMax] && [$box yMin] < [$box yMax]}}
+}}
+set _pg_block [ord::get_db_block]
+set _pg_nets [list {expected}]
+foreach n [$_pg_block getNets] {{
+  if {{[$n getSigType] in {{POWER GROUND}}}} {{ lappend _pg_nets [$n getName] }}
+}}
+set _pg_nets [lsort -unique $_pg_nets]
+set _pg_ni 0; set _pg_nb 0
+foreach i [$_pg_block getInsts] {{
+  foreach m [[$i getMaster] getMTerms] {{
+    set t [$i findITerm [$m getName]]
+    set nn ""; set shapes 0
+    set net_kind ""
+    if {{$t ne "NULL"}} {{
+      set n [$t getNet]
+      if {{$n ne "NULL"}} {{ set nn [$n getName]; set net_kind [$n getSigType] }}
+    }}
+    if {{[$m getSigType] ni {{POWER GROUND}} && $net_kind ni {{POWER GROUND}}}} {{ continue }}
+    incr _pg_ni
+    if {{$t ne "NULL"}} {{
+      foreach g [$t getGeometries] {{
+        lassign $g layer box
+        if {{[_pg_routing_box $layer $box]}} {{ incr shapes }}
+      }}
+    }}
+    set box [$i getBBox]
+    set placed [expr {{[$i isPlaced] && [$box xMin] < [$box xMax] && [$box yMin] < [$box yMax]}}]
+    _pg_row I [_pg_b64 [$i getName]] [_pg_b64 [$m getName]] [_pg_b64 $nn] [$m getSigType] $placed $shapes
+  }}
+}}
+foreach b [$_pg_block getBTerms] {{
+  set n [$b getNet]; set nn ""
+  if {{$n ne "NULL"}} {{ set nn [$n getName] }}
+  if {{[$b getSigType] ni {{POWER GROUND}} && $nn ni $_pg_nets}} {{ continue }}
+  incr _pg_nb
+  set pins 0; set valid 0; set shapes 0
+  foreach bp [$b getBPins] {{
+    incr pins; set count 0
+    foreach box [$bp getBoxes] {{
+      if {{[_pg_routing_box [$box getTechLayer] $box]}} {{ incr count }}
+    }}
+    incr shapes $count
+    if {{[$bp getPlacementStatus] in {{PLACED FIRM FIXED}} && $count > 0}} {{ incr valid }}
+  }}
+  _pg_row B [_pg_b64 [$b getName]] [_pg_b64 $nn] [$b getSigType] $pins $valid $shapes
+}}
+foreach nn $_pg_nets {{
+  set n [$_pg_block findNet $nn]
+  if {{$n eq "NULL"}} {{ _pg_row N [_pg_b64 $nn] MISSING; continue }}
+  _pg_row N [_pg_b64 $nn] [$n getSigType]
+  set mode external
+  if {{[info exists ::vibeic_internal_supply_grids] && $nn in $::vibeic_internal_supply_grids}} {{ set mode resistor_fed_internal }}
+  set report [file join [file dirname {word(output)}] "grid-[binary encode hex [encoding convertto utf-8 $nn]].rpt"]
+  set rc [catch {{check_power_grid -net $nn -error_file $report}} result]
+  set answer UNKNOWN
+  if {{$rc == 0 && [string is boolean -strict $result]}} {{ set answer [expr {{!!$result}}] }}
+  _pg_row C [_pg_b64 $nn] $mode $rc $answer [_pg_b64 $result] [_pg_b64 $report]
+}}
+_pg_row END [llength $_pg_nets] $_pg_ni $_pg_nb
+close $_pg_out
+'''
+
+
+def _power_connectivity_readback(text: str, declared: dict,
+                                 sources: list[list[str]]) -> dict:
+    """Reconcile the full native census and each native boolean answer."""
+    import base64
+    def name(value):
+        return base64.b64decode(value, validate=True).decode('utf-8')
+    nets, pins, checks, end = {}, [], {}, None
+    failures, missing = [], []
+    try:
+        for line in text.splitlines():
+            row = line.split('\t')
+            if row[0] == 'I' and len(row) == 7:
+                pin = dict(kind='ITerm', instance=name(row[1]), pin=name(row[2]),
+                           net=name(row[3]), use=row[4], placed=int(row[5]), shapes=int(row[6]))
+                pins.append(pin)
+                if not pin['net']:
+                    failures.append(f"unconnected supply ITerm: {pin['instance']}/{pin['pin']}")
+                if pin['placed'] != 1 or pin['shapes'] <= 0:
+                    missing.append(f"ITerm outside native physical population: {pin['instance']}/{pin['pin']}")
+            elif row[0] == 'B' and len(row) == 7:
+                pin = dict(kind='BTerm', pin=name(row[1]), net=name(row[2]), use=row[3],
+                           bpins=int(row[4]), valid_bpins=int(row[5]), shapes=int(row[6]))
+                pins.append(pin)
+                if not pin['net']:
+                    failures.append(f"unconnected supply BTerm: {pin['pin']}")
+                if pin['bpins'] <= 0 or pin['bpins'] != pin['valid_bpins'] or pin['shapes'] <= 0:
+                    missing.append(f"BTerm outside native physical population: {pin['pin']}")
+            elif row[0] == 'N' and len(row) == 3:
+                key = name(row[1])
+                if key in nets: raise ValueError('duplicate net')
+                nets[key] = row[2]
+            elif row[0] == 'C' and len(row) == 7:
+                key = name(row[1])
+                if key in checks: raise ValueError('duplicate native answer')
+                checks[key] = dict(mode=row[2], catch_rc=int(row[3]), answer=row[4],
+                                   result=name(row[5]), report=name(row[6]))
+            elif row[0] == 'END' and len(row) == 4 and end is None:
+                end = list(map(int, row[1:]))
+            else:
+                raise ValueError('unknown or incomplete census row')
+    except (ValueError, UnicodeError):
+        missing.append('native power census unreadable')
+    for net, use in declared.items():
+        if net not in nets:
+            missing.append(f'declared supply net was not measured: {net}')
+        elif nets[net] != use:
+            failures.append(f'declared supply net absent or mistyped: {net}')
+    internal = {row[-1] for row in sources}
+    for net, use in nets.items():
+        population = [pin for pin in pins if pin['net'] == net]
+        if use not in ('POWER', 'GROUND') or any(
+                pin['use'] in ('POWER', 'GROUND') and pin['use'] != use for pin in population):
+            failures.append(f'supply terminal/net kind mismatch: {net}')
+        if any(pin['use'] not in ('POWER', 'GROUND') for pin in population):
+            missing.append(f'supply net has an unclassified terminal: {net}')
+        if not population:
+            missing.append(f'empty supply terminal population: {net}')
+        if net not in internal and not any(p['kind'] == 'BTerm' for p in population):
+            missing.append(f'external supply has no BTerm: {net}')
+        check = checks.get(net) or {}
+        expected_mode = 'resistor_fed_internal' if net in internal else 'external'
+        if check.get('mode') != expected_mode:
+            missing.append(f'native terminal applicability unbound: {net}')
+        if check.get('answer') == '0' or re.search(r'PSM-00(?:25|38|39|69)\b', check.get('result', '')):
+            failures.append(f'native power connectivity failed: {net}: {check.get("result")}')
+        elif check.get('catch_rc') != 0 or check.get('answer') != '1':
+            missing.append(f'native power connectivity unanswered: {net}: {check.get("result")}')
+    if any(p['net'] and p['net'] not in nets for p in pins):
+        missing.append('supply terminal on an unchecked net')
+    ni = sum(p['kind'] == 'ITerm' for p in pins)
+    nb = len(pins) - ni
+    if not nets or not ni or end != [len(nets), ni, nb] or set(checks) != set(nets):
+        missing.append('native power census incomplete or empty')
+    identities = [(p['kind'], p.get('instance'), p['pin']) for p in pins]
+    if len(identities) != len(set(identities)):
+        missing.append('native power census has duplicate terminals')
+    return {'verdict': 'FAIL' if failures else 'NOT_MEASURED' if missing else 'PASS',
+            'failures': failures, 'not_measured': missing,
+            'nets': nets, 'pins': pins, 'native_checks': checks,
+            'counts': {'nets': len(nets), 'iterms': ni, 'bterms': nb}}
+
+
+def power_connectivity_reading(project: Path, record: dict) -> dict:
+    """The L24 reader reopens current source/raw bytes, not the report label."""
+    project = Path(project).resolve()
+    try:
+        config = project / 'phase3/librelane/22-config/OpenROAD.RCX.json'
+        raw = Path(record['raw'])
+        layout = project / record['layout']
+        required = [config, raw, raw.with_name('power-connectivity.tcl'),
+                    raw.with_name('power-connectivity.log'), layout,
+                    project / 'phase3/stage3/pnr/routed.def']
+        if (not record['sources'] or
+                any(str(path) not in record['sources'] for path in required)):
+            raise ValueError('power connectivity source/raw binding incomplete')
+        for path, expected in record['sources'].items():
+            if not re.fullmatch(r'[0-9a-f]{64}', str(expected)) or digest(Path(path)) != expected:
+                raise ValueError(f'power connectivity source changed: {path}')
+        if (not layout.is_relative_to(project) or digest(layout) != record['layout_sha256'] or
+                digest(project / 'phase3/stage3/pnr/routed.def') != record['layout_sha256']):
+            raise ValueError('power connectivity current route changed')
+        if record.get('producer') != 'librelane:OpenROAD.check_power_grid':
+            raise ValueError('power connectivity native producer absent')
+        cfg = _load(config)
+        declared = {str(net): use for key, use in [('VDD_NETS', 'POWER'), ('GND_NETS', 'GROUND')]
+                    for net in (cfg.get(key) or [])}
+        if not declared or declared != record['declared_nets']:
+            raise ValueError('power connectivity supply declarations changed')
+        from librelane_contract import internal_supply_grid_sources
+        pad_path = project / PAD_PLAN_REL
+        sources = internal_supply_grid_sources(_load(pad_path)) if pad_path.is_file() else []
+        if sources != record['internal_sources'] or (sources and str(pad_path) not in record['sources']):
+            raise ValueError('power connectivity internal source proof changed')
+        reading = _power_connectivity_readback(raw.read_text(), declared, sources)
+        # PDNSim creates error_file only for errors, not successful checks.
+        # Bind any actual error report; do not manufacture an empty one.
+        if any(Path(check['report']).exists() and check['report'] not in record['sources']
+               for check in reading['native_checks'].values()):
+            raise ValueError('native per-net power error report is unbound')
+        return reading
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'failures': [], 'not_measured': [str(exc)]}
+
+
+def publish_power_connectivity(project: Path, image: str, pdk_root: Path, *,
+                               routed_def: Path, config: Path) -> dict:
+    """Existing Step23's current-layout reading; no repair or IR analysis."""
+    import librelane_contract as ll
+    import l24_signoff_requirements_extract as requirements
+    project, routed_def, config = Path(project).resolve(), Path(routed_def).resolve(), Path(config).resolve()
+    output = project / POWER_CONNECTIVITY_REPORT
+    output.parent.mkdir(parents=True, exist_ok=True)
+    requested = any(row.get('check') == 'power_network' and row.get('stated')
+                    for row in requirements.extract_signoff_requirements(project)['signoff_requirements'])
+    record = {'check': 'no_disconnected_ports', 'step': '23',
+              'producer': 'librelane:OpenROAD.check_power_grid', 'image': image}
+    if not requested:
+        record.update(verdict='NOT_APPLICABLE', reason='no input-stated power-network requirement')
+        write_json(output, record)
+        return record
+    import tempfile
+    attempts = project / 'phase3/librelane/23-power-connectivity'
+    attempts.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix='attempt-', dir=attempts))
+    raw = folder / 'power-connectivity.tsv'
+    try:
+        cfg = _load(config)
+        declared = {str(net): use for key, use in [('VDD_NETS', 'POWER'), ('GND_NETS', 'GROUND')]
+                    for net in (cfg.get(key) or [])}
+        if not declared:
+            raise ValueError('current native supply declarations absent')
+        pad_path = project / PAD_PLAN_REL
+        pads = _load(pad_path) if pad_path.is_file() else {}
+        sources = ll.internal_supply_grid_sources(pads)
+        mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
+        record.update(layout=str(routed_def.relative_to(project)), layout_sha256=digest(routed_def),
+                      raw=str(raw), declared_nets=declared, internal_sources=sources)
+        assets = [routed_def, project / 'phase3/stage3/pnr/routed.def', config]
+        assets += [_host_path(str(path), mounts) for path in ll._walk_paths({
+            key: cfg.get(key) for key in ('TECH_LEFS', 'CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS')})]
+        if pad_path.is_file(): assets.append(pad_path)
+        before = {str(path): digest(path) for path in assets}
+        error = None
+        try:
+            ll._openroad_convert(project, image, cfg,
+                [_power_connectivity_tcl(routed_def, raw, declared, sources)],
+                folder, 'power-connectivity', mounts, 'docker')
+        except ll.Refusal as exc:
+            error = str(exc)  # partial native FAIL still outranks missing data
+        record['sources'] = {**before, **{str(path): digest(path) for path in folder.iterdir()
+                                         if path.is_file()}}
+        if any(digest(Path(path)) != value for path, value in before.items()):
+            raise ValueError('power connectivity inputs changed during native measurement')
+        reading = power_connectivity_reading(project, record)
+        if error and reading['verdict'] != 'FAIL':
+            reading.update(verdict='NOT_MEASURED', not_measured=reading['not_measured'] + [error])
+        record.update(reading)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        record.update(verdict='NOT_MEASURED', failures=[], not_measured=[str(exc)])
+    # Each native attempt keeps its report as well as its raw files; replacing
+    # the live canonical reading cannot erase the earlier measured epoch.
+    write_json(folder / 'no_disconnected_ports.json', record)
+    write_json(output, record)
+    return record

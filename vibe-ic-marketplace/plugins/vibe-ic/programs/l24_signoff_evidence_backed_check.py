@@ -1016,6 +1016,21 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             basis = _BASIS_SCAN
             where_looked = (f"searched reports/ excluding reports/audit for "
                             f"{'/'.join(_signoff_tokens(check))}")
+        if check == 'power_network':
+            from librelane_ir_antenna import POWER_CONNECTIVITY_REPORT, power_connectivity_reading
+            # The new native reading must answer for the route that exists NOW.
+            # Preserve the existing semantic report contract for older producers.
+            current_found = []
+            for path, verdict in found:
+                if path == POWER_CONNECTIVITY_REPORT:
+                    try:
+                        payload = json.loads((project / path).read_text())
+                        reading = power_connectivity_reading(project, payload)
+                        verdict = reading['verdict'].lower()
+                    except (OSError, ValueError, TypeError):
+                        verdict = 'not_measured'
+                current_found.append((path, verdict))
+            found = current_found
         measured = [(p, v) for p, v in found
                     if v is not None and v not in _ABSENT_VERDICTS
                     # The XOR producer explicitly uses NOT_DETERMINED when

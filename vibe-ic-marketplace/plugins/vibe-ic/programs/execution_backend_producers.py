@@ -1298,6 +1298,18 @@ def produce_signoff(project, params):
             period, _ = R._resolve_clock_spec(project, top=top, pdk_name=pdk.name)
             provenance.emit_report(project, pdk=pdk.name, applied_period_ns=float(period))
             provenance.stamp_signoff_records(project)
+            # This existing input-stated L24 reading is due at this row.
+            # It measures the current route, independently of timing/IR budgets.
+            import librelane_ir_antenna as power_grid
+            connectivity = power_grid.publish_power_connectivity(
+                project, image, root, routed_def=pnr / (top + '.def'),
+                config=project / 'phase3/librelane/22-config/OpenROAD.RCX.json')
+            if connectivity['verdict'] == 'FAIL':
+                failures += connectivity.get('failures', [])
+            elif connectivity['verdict'] == 'NOT_MEASURED' and not failures:
+                return {'verdict': 'NOT_MEASURED',
+                        'detail': 'power-network connectivity: ' +
+                                  '; '.join(connectivity.get('not_measured', []))}
         if failures:
             return {'verdict': 'FAIL', 'detail': '\n'.join(failures)}
     elif sid == '24':

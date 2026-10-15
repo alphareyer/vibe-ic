@@ -5934,6 +5934,11 @@ steps:
         path: "reports/phase3/mcorner_ocv_stance.json"
       - program: phase3_one_shot_runner
         path: "reports/phase3/multi_corner_spef_stance.json"
+      # Default's current-route native PG reading. The existing L24 input
+      # requirement consumes it; this declaration adds no separate gate/CLI.
+      - program: execution_backend_producers
+        path: "reports/phase3/no_disconnected_ports.json"
+        verdict_field: "verdict"
     required_outputs:
       - "phase3/stage3/sta/post_route_timing.rpt"
       # Emitted by Step 23's SPEF-backed STA pass and mirrored here.  Step
