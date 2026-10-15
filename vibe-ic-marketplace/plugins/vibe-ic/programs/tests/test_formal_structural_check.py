@@ -177,3 +177,60 @@ def test_unknown_clock_is_explicit_not_full_polarity(tmp_path):
     mapping = rec["claims"][0].get("reset_control_mapping") or {}
     assert mapping.get("unresolved") and all(r["classification"] == "UNSUPPORTED"
                                              for r in mapping["rows"]), mapping
+
+
+# These are self-authored public circuits, not examples copied from a field IC.
+# In particular, the Boolean masking controls leave every Q/data bit free.
+_GUARDED_ROLE_CASES = {
+    "and-not": ("q<=d & {W{!(rst&clear)}};", fsc.PASS, "RESET_FORCE"),
+    "and-not-low": ("q<=d & {W{!(!rst&clear)}};", fsc.REFUTED, "RESET_FORCE"),
+    "or-mask": ("q<=d | {W{rst&clear}};", fsc.PASS, "RESET_FORCE"),
+    "nested-predicate": ("q<=d & {W{!((rst&clear)|(rst&en))}};", fsc.PASS, "RESET_FORCE"),
+    "qualified-retain": ("q<=q & {W{!(rst&clear)}};", fsc.PASS, "RESET_FORCE"),
+    "shared-q-data": ("if(rst) begin if(en) q<=0; end else if(en) q<=d;", fsc.PASS, "RESET_FORCE"),
+    "data-mux": ("q<=rst ? d : {W{en}};", fsc.NOT_DISCHARGED, "UNRESOLVED_DATA_DEPENDENCE"),
+    "lowered-data-mux": ("q<=({W{rst}}&d)|({W{!rst}}&{W{en}});", fsc.NOT_DISCHARGED, "UNRESOLVED_DATA_DEPENDENCE"),
+    "data-xor": ("q<=d ^ {W{rst&clear}};", fsc.NOT_DISCHARGED, "UNRESOLVED_DATA_DEPENDENCE"),
+    "mixed-sense": ("if(rst^clear) q<=0; else q<=d;", fsc.NOT_DISCHARGED, "UNRESOLVED_DATA_DEPENDENCE"),
+    "impossible-control": ("if(rst & !rst & clear) q<=0; else q<=d;", fsc.NOT_DISCHARGED, "NO_DEPENDENCE"),
+    "conditional-x": ("if(rst&clear) q<={W{1'bx}}; else q<=d;", fsc.NOT_DISCHARGED, "UNSUPPORTED"),
+}
+
+
+@pytest.mark.parametrize("case", _GUARDED_ROLE_CASES)
+def test_guarded_boolean_roles_normal_cli_has_actual_feasible_domains(tmp_path, case):
+    _yosys()
+    body, expected, classification = _GUARDED_ROLE_CASES[case]
+    rtl, output = tmp_path / "m.v", tmp_path / "mapping.json"
+    rtl.write_text(_control_rtl(body))
+    rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+        "reset_polarity:rst:active_high", "--work-dir", str(tmp_path), "--json", str(output)])
+    rec = json.loads(output.read_text())
+    assert rec["verdict"] == expected and rc == (0 if expected == fsc.PASS else 1), rec
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+    assert len(mapping["raw_identities"]) == 2, mapping
+    assert all(len(r["current_q"]) == 1 for r in mapping["raw_identities"]), mapping
+    assert classification in {r["classification"] for r in mapping["rows"]}, mapping
+    if case != "conditional-x":
+        for row in mapping["rows"]:
+            roles = row["conditional_roles"]
+            assert len(roles) == 8, row
+            assert all(row["native_queries"][f"roles_cover{arm}"] == "PROVED" and
+                       row["native_queries"][f"roles_disjoint{arm}"] == "PROVED"
+                       for arm in (0, 1)), row
+            assert all(r["domain_query"] in {"PROVED", "REFUTED"} for r in roles), row
+            assert all(r["implication_query"] == "PROVED" for r in roles
+                       if r["role"] != "DATA"), row
+    if expected in {fsc.PASS, fsc.REFUTED}:
+        assert mapping["complete"] and not mapping["unresolved"], mapping
+        assert all(any(r["reachable"] and r["role"] in {"FORCE_ZERO", "FORCE_ONE"}
+                       for r in row["conditional_roles"]) for row in mapping["rows"]), mapping
+    if case in {"and-not", "or-mask", "nested-predicate", "qualified-retain", "shared-q-data"}:
+        assert all(row["total_force"] is False for row in mapping["rows"]), mapping
+    if case in {"data-mux", "lowered-data-mux", "data-xor", "impossible-control"}:
+        assert not any(r["reachable"] and r["role"] in {"FORCE_ZERO", "FORCE_ONE"}
+                       for row in mapping["rows"] for r in row["conditional_roles"]), mapping
+    if case == "mixed-sense":
+        assert all(row["native_queries"]["high"] == "REFUTED" and
+                   row["native_queries"]["low"] == "REFUTED" for row in mapping["rows"]), mapping
