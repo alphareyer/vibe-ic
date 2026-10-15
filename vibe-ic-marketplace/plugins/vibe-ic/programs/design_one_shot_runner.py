@@ -10071,10 +10071,9 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
         # docker-exec consumer must use the corresponding bind-mount spelling;
         # passing the host path verbatim makes the container fail before make
         # starts (the native SPM run returned `cd: .../sim_professional/spm:
-        # No such file or directory`).  Keep the host path for the log because
-        # the bind mount writes that file back into the run tree the runner
-        # owns, but use the consumer's spelling for both the shell and the
-        # watchdog's process marker.
+        # No such file or directory`).  Keep the runner's path for observing
+        # log growth and publishing the returned streams below, but use the
+        # consumer's spelling for both the shell and the process marker.
         import shlex as _shlex
         consumer_out_dir = str(out_dir)
         if _exec_site == "container":
@@ -10106,12 +10105,14 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
             # the local PATH (see _professional_tb_exec_site).
             rc, so, se = _run(["bash", "-lc", cmd], cwd=out_dir,
                               timeout=1200)
-            try:
-                log_path.write_text((so or "") + "\n" + (se or ""))
-            except OSError:
-                pass
-        rec["cocotb_exec_site"] = _exec_site
+        # The supervisor only observes log_path; this caller owns publication
+        # for both transports, including the evidence from a nonzero child.
         combined = (so or "") + "\n" + (se or "")
+        try:
+            log_path.write_text(combined)
+        except OSError:
+            pass
+        rec["cocotb_exec_site"] = _exec_site
         pass_marker = "PROFESSIONAL_TB PASS" in combined
         xml_summary = _cocotb_xml_summary(out_dir)
         xml_fail = (xml_summary["failures"] + xml_summary["errors"]

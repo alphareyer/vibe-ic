@@ -239,6 +239,66 @@ def test_a_real_mismatch_is_still_a_fail(tmp_path, monkeypatch):
     assert _gate(tmp_path)["functional_mismatch"] is True
 
 
+@pytest.mark.parametrize("site", ["container", "host"])
+@pytest.mark.parametrize("child_rc", [0, 7], ids=["rc0", "rc7"])
+def test_professional_transcript_retains_both_child_streams(
+        tmp_path, monkeypatch, site, child_rc):
+    """The normal caller publishes real child streams for either transport.
+
+    Generator and transport are neutral fixtures, not native EDA evidence.
+    A previous transcript must be replaced even when this child fails.
+    """
+    import _watchdog as W
+
+    out = _bundle_project(tmp_path, "serial_stream", monkeypatch,
+                          out_name="neutral")
+    log = out / "cocotb_run.log"
+    log.write_text("STALE_PRIOR_TRANSCRIPT\n")
+    xml = _FAIL_XML if child_rc else _PASS_XML
+    stdout = ("CONTROLLED_NONZERO_FAILURE" if child_rc
+              else "PROFESSIONAL_TB PASS")
+    stderr = f"CONTROLLED_STDERR_{child_rc}"
+    child = ("import pathlib,sys;pathlib.Path('results.xml').write_text("
+             f"{xml!r});print({stdout!r});print({stderr!r},file=sys.stderr);"
+             f"sys.exit({child_rc})")
+    captured = {}
+
+    def execute(log_path=None):
+        result = W.run_supervised(
+            [sys.executable, "-c", child], cwd=out,
+            log_path=log_path, poll_s=0.01)
+        captured.update(rc=result.rc, stdout=result.out, stderr=result.err)
+        return result.rc, result.out, result.err
+
+    def container_exec(container, cmd, timeout=600, *, marker=None,
+                       log_path=None):
+        assert cmd.endswith("make -B SIM=icarus")
+        assert marker == str(out)
+        assert log_path == str(log)
+        return execute(log_path)
+
+    def host_exec(cmd, **kwargs):
+        assert kwargs["cwd"] == out
+        return execute()
+
+    monkeypatch.setattr(D, "_professional_tb_exec_site", lambda _c: site)
+    monkeypatch.setattr(D, "_path_in_container", lambda *_args: True)
+    monkeypatch.setattr(D, "_to_container_path", lambda path, _c: path)
+    monkeypatch.setattr(D, "_professional_tb_sim_differential",
+                        lambda *_args: None)
+    monkeypatch.setattr(D, "_docker_exec", container_exec)
+    monkeypatch.setattr(D, "_run", host_exec)
+    step = D.step_professional_tb_gen(tmp_path, "neutral", "fixture-container")
+    gate = _gate(tmp_path)
+
+    assert captured["rc"] == gate["cocotb_rc"] == child_rc
+    assert captured["stdout"] == stdout + "\n"
+    assert captured["stderr"] == stderr + "\n"
+    assert step.status == ("FAIL" if child_rc else "PASS"), step.detail
+    assert gate["functional_mismatch"] == bool(child_rc)
+    assert log.read_text() == captured["stdout"] + "\n" + captured["stderr"]
+
+
 def test_a_class_the_generator_SKIPs_owes_no_bundle(tmp_path, monkeypatch):
     """Unchanged scoping, re-asserted: nothing generated, nothing owed."""
     import types
