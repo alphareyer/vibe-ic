@@ -744,3 +744,40 @@ def test_no_audit_file_at_all_is_not_reported_as_unreadable(tmp_path):
     rep = G.check(run)
     assert rep.verdict == "PASS", rep.verdict
     assert not rep.orchestrator.get("audit_unreadable")
+
+
+# A denied success claim is not an affirmative claim. Exercise the normal
+# consumer and its CLI; the closed success/headline vocabularies stay unchanged.
+@pytest.mark.parametrize('text,claim', [
+    ('No whole-IC, tapeout-ready or two-round blind convergence claim is made.', False),
+    ('The design is not tapeout-ready.', False),
+    ('Tapeout-ready is not claimed.', False),
+    ('We do not claim tapeout-ready.', False),
+    ('The design is tapeout-ready.', True),
+    ('No whole-IC claim is made; the design is tapeout-ready.', True),
+    ('No warnings remain and the design is tapeout-ready, with no errors.', True),
+    ('No sign-off-clean claim is made. The design is tapeout-ready.', True),
+], ids=['denied_claim_list', 'direct_negation', 'denied_postpredicate',
+        'denied_claim_verb', 'genuine_claim', 'independent_clause',
+        'unrelated_denials', 'later_genuine_claim'])
+@pytest.mark.parametrize('surface', ['api', 'cli'])
+def test_prose_success_polarity_reaches_the_normal_consumer(tmp_path, text, claim, surface):
+    run = _mkrun(tmp_path, deliverable=text + '\n', orch_verdict='FAIL')
+    if surface == 'api':
+        rep = G.report_to_dict(G.check(run))
+        assert G.check(run).rc == 2
+    else:
+        output = run / 'normal-consumer.json'
+        process = subprocess.run(
+            [sys.executable, str(PROG_PATH), str(run), '--json', str(output)],
+            capture_output=True, text=True)
+        assert process.returncode == 2, process.stdout + process.stderr
+        rep = json.loads(output.read_text())
+        assert process.stdout.startswith('DISCLOSED:' if claim else 'SKIP:')
+    assert rep['state'] == ('UNCHECKED_SUCCESS_CLAIM' if claim else 'NOT_APPLICABLE')
+    assert rep['verdict'] == ('DISCLOSED' if claim else 'SKIP')
+    assert rep['headline']['token'] is None
+    assert rep['orchestrator']['verdict'] == 'FAIL'
+    assert not rep['blocking']
+    if claim:
+        assert 'tapeout-ready' in rep['reason']
