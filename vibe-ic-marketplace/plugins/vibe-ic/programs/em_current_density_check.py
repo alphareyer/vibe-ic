@@ -1117,7 +1117,18 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
         for role, field in (("layout", "layout"), ("sdc", "sdc"), ("spef", "spef")):
             if basis.get(field) and basis[field + "_sha256"] != doc["inputs"][role]["sha256"]:
                 raise ValueError("power basis input digest disagrees")
-        if (basis != static["power_basis"]
+        primary = doc.get("step24_primary")
+        if primary is not None:
+            checked = validate_primary_ir(project)
+            if not checked["valid"] or checked != primary:
+                raise ValueError("current Step-24 primary binding changed")
+            # This EM solve must carry its own complete basis. The primary
+            # was measured independently and is compared by its actual native
+            # SDC/SPEF/tech LEF/ODB/library population below, without rewriting
+            # that earlier step's published dictionary.
+            if not (doc.get("librelane_ir") or {}).get("adopted"):
+                raise ValueError("current Step-24 primary reference absent")
+        if ((primary is None and basis != static["power_basis"])
                 or subject["power_basis"]["basis_id"] != basis["id"]
                 or subject["subject_def_sha256"] != doc["inputs"]["layout"]["sha256"]
                 or subject["subject_def"] != doc["inputs"]["layout"]["project_path"]):

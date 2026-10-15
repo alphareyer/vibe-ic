@@ -1328,10 +1328,21 @@ def produce_signoff(project, params):
     elif sid == '25':
         # Same SDC+SPEF/VSRC basis as the IR pipeline. Both outputs are retained;
         # the existing EM authority judges drawn width and foundry Jmax.
-        ok = R._emit_ir_em_reports(project, top, pdk, container, rpt / 'ir_drop.rpt', rpt / 'em.rpt', notes)
+        ordinary = params.get('execution_mode') == 'default'
+        if ordinary:
+            import em_current_density_check as density
+            primary = density.validate_primary_ir(project)
+            if not primary['valid']:
+                return {'verdict': 'NOT_MEASURED', 'detail': primary['reason']}
+        ok = R._emit_ir_em_reports(
+            project, top, pdk, container,
+            rpt / ('ir_drop_psm_cross_check.rpt' if ordinary else 'ir_drop.rpt'),
+            rpt / 'em.rpt', notes, **({'em_only': True} if ordinary else {}))
         if not ok[1]:
             raise em.Refusal('BACKEND_EM_NATIVE_UNMEASURED', sid)
         R._emit_em_current_authority(project, pdk, container, notes)
+        if ordinary and primary['verdict'] == 'FAIL':
+            return {'verdict': 'FAIL', 'detail': 'current Step-24 IR measurement failed; ' + '; '.join(notes)}
     elif sid == '26':
         R._librelane_antenna_router(project, top, pdk, 'librelane', written)
         gds = pnr / (top + '.gds')

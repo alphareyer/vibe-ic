@@ -72018,7 +72018,7 @@ def _polarity_accepted_tool_lines(log: str, pattern: str,
 
 def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                         container: str, ir_rpt: Path, em_rpt: Path,
-                        notes: List[str]) -> Tuple[bool, bool]:
+                        notes: List[str], *, em_only: bool = False) -> Tuple[bool, bool]:
     """OpenROAD PSM IR-drop + EM on the routed DEF (no SPEF required).
 
     Runs `analyze_power_grid -enable_em` for each discovered supply and ground
@@ -72166,8 +72166,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _basis = _step24_basis_inputs(project, def_file, pdk)
     _primary_ir_mode = _step24_primary_mode(project)
     if _primary_ir_mode != "direct":
-        _librelane_step24_record(project, top, pdk, _primary_ir_mode,
-                                  _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
+        if not em_only:
+            _librelane_step24_record(project, top, pdk, _primary_ir_mode,
+                                      _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
         _basis = _step24_basis_inputs(project, def_file, pdk)
         liberty_c = _to_container_path(_basis["liberty"], container)
         _oc = _liberty_operating_condition(_basis["liberty"], container)
@@ -72436,7 +72437,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         # inline regex, which is the drift the module's own header warns about;
         # there is ONE implementation of the rule and this reads it.
         _psm_unconn = _cov["unconnected_instances"]
-        _aa.write_text(ir_rpt.parent / "ir_drop.json", json.dumps({
+        _aa.write_text(ir_rpt.with_suffix(".json"), json.dumps({
             "tool": "openroad-psm",
             "mode": "static_ir_drop",
             "power_nets": power_nets,
@@ -72646,7 +72647,13 @@ catch {{set_wire_rc -clock -layer {mp}5}}
     # Step-25 gate and downstream signoff readers. A native marker, not rc0 or
     # a tool label, binds each density CSV. The source is frozen before probes.
     if _primary_ir_mode != "direct" and ir_ok:
-        _ll_primary = _step24_adopt_primary(project, _basis_record, notes)
+        # Default Step 25 owns EM and its cross-check, not Step 24's live
+        # publications or native state. The caller verified that primary
+        # before this solve; the unchanged validator checks both bases below.
+        _ll_primary = (json.loads(_ll_doc_path.read_text()) if em_only else
+                       _step24_adopt_primary(project, _basis_record, notes))
+        if em_only:
+            _native_density_record["step24_primary"] = _emcd.validate_primary_ir(project)
         _native_density_record["librelane_ir"] = {
             "adopted": _ll_primary.get("adopted", False),
             "record": str(_ll_doc_path.relative_to(project)),
@@ -72663,6 +72670,10 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)]
     if _primary_ir_mode != "direct":
+        if em_only:
+            # Retain the already measured primary as a bound scientific
+            # input, alongside this solve's separately owned IR cross-check.
+            _outputs += [out_dir / "ir_drop.rpt", out_dir / "ir_drop.json"]
         _outputs += [_ll_doc_path]
         _outputs += [project / path for path in (_ll_primary.get("artifacts") or {})] if ir_ok else []
     _native_density_record["outputs"] = {str(path.relative_to(project)): _emcd._native_sha(path)
