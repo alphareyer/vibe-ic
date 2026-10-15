@@ -356,10 +356,29 @@ def _approved_before_run(record: dict, identity: dict) -> bool:
         return False
 
 
+def _scene_profile_conditions(profile: object) -> dict | None:
+    """The selected PDK's existing typed PVT/RC conditions, per scene."""
+    if not isinstance(profile, dict):
+        return None
+    points, corners = profile.get("pvt"), profile.get("rc_corners")
+    if (not isinstance(points, dict) or not points or
+            not isinstance(corners, list) or not corners or
+            not all(isinstance(rc, str) and rc for rc in corners)):
+        return None
+    for name, point in points.items():
+        if (not isinstance(name, str) or not name or not isinstance(point, dict) or
+                not all(isinstance(point.get(axis), (int, float)) and
+                        not isinstance(point.get(axis), bool)
+                        for axis in ("nom_voltage", "nom_temperature"))):
+            return None
+    return {f"{name}_{rc}": point for name, point in points.items() for rc in corners}
+
+
 def _check_threshold_freeze(identity: dict, frozen: dict,
                             owner_records: list[dict],
                             fails: list[str], missing: list[str], *,
-                            owner_status: str = "OWNER_APPROVAL_ABSENT") -> dict:
+                            owner_status: str = "OWNER_APPROVAL_ABSENT",
+                            scene_profile: dict | None = None) -> dict:
     """Reconcile the plan with committed values and any required owner signature.
 
     The data file is independent of the capture plan.  Its PDK defaults and
@@ -423,9 +442,19 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
             fails.append(f"threshold source changed: PDK {field}")
     if values != standard.get("values"):
         fails.append("threshold source changed: declared values")
-    for field in ("scope", "scenes", "rc_corners", "scene_profile_sha256"):
+    for field in ("scope", "scenes", "rc_corners"):
         if frozen.get(field) != standard.get(field):
             fails.append(f"threshold source changed: {field}")
+    conditions = _scene_profile_conditions(scene_profile)
+    expected_pvt = standard.get("pvt") or {}
+    if conditions is None:
+        fails.append("threshold source changed: active PDK scene profile incomplete")
+    elif (set(conditions) != set(standard.get("scenes") or []) or
+          set(scene_profile["rc_corners"]) != set(standard.get("rc_corners") or []) or
+          any(not isinstance(expected_pvt.get(name), dict) or
+              any(expected_pvt[name].get(axis) != value for axis, value in point.items())
+              for name, point in conditions.items())):
+        fails.append("threshold source changed: active PDK scene profile")
     for scene, expected in (standard.get("pvt") or {}).items():
         actual = (frozen.get("pvt") or {}).get(scene) or {}
         if any(actual.get(key) != value for key, value in expected.items()):
@@ -769,10 +798,14 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     owner_records, owner_status = _owner_records(project, identity, current, frozen)
     declared = frozen.get("values") or {}
     run_id, tree_sha = identity.get("run_id"), identity.get("tree_sha")
+    profiles = json.loads(_SCENE_PROFILES.read_text())
+    profile = next((value for key, value in profiles.items()
+                    if str(identity.get("pdk", "")).lower().startswith(key.lower())), None)
     freeze_evidence = {}
     if project is not None:
         freeze_evidence = _check_threshold_freeze(
-            identity, frozen, owner_records, fails, missing, owner_status=owner_status)
+            identity, frozen, owner_records, fails, missing, owner_status=owner_status,
+            scene_profile=profile)
         if Path(str(identity.get("project") or "")).resolve() != project.resolve():
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):
@@ -925,18 +958,19 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     required_scenes = frozen.get("scenes") or []
     if not required_scenes:
         missing.append("frozen corner/RC scene set absent")
-    profiles = json.loads(_SCENE_PROFILES.read_text())
-    profile = next((value for key, value in profiles.items()
-                    if str(identity.get("pdk", "")).lower().startswith(key.lower())), None)
     if profile is None:
         missing.append("installed PDK sign-off scene profile unresolved")
+    elif _scene_profile_conditions(profile) is None:
+        missing.append("installed PDK sign-off scene profile incomplete")
     else:
         expected_scenes = {f"{pvt}_{rc}" for pvt in profile["pvt"]
                            for rc in profile["rc_corners"]}
         if set(required_scenes) != expected_scenes or len(required_scenes) != len(expected_scenes):
             missing.append("installed PDK sign-off requires the fixed 3 PVT x 3 RC scenes")
-        if frozen.get("scene_profile_sha256") != _sha(_SCENE_PROFILES):
-            missing.append("frozen PDK scene profile sha256 absent or changed")
+        # The complete file digest remains provenance; only this PDK's
+        # typed conditions define the run's frozen measurement conditions.
+        if not re.fullmatch(r"[0-9a-f]{64}", str(frozen.get("scene_profile_sha256") or "")):
+            missing.append("frozen PDK scene profile sha256 absent or invalid")
         for scene_name in required_scenes:
             pvt_key = next((key for key in profile["pvt"]
                             if scene_name.startswith(key + "_")), None)

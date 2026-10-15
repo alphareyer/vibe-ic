@@ -1663,6 +1663,57 @@ def test_committed_freeze_uses_the_configured_owner_key_policy(
             assert result['verdict'] == 'FAIL', result
 
 
+@pytest.mark.parametrize('case', ['unchanged', 'unrelated_retained', 'unrelated_fresh',
+                                  'active_pvt', 'active_rc', 'missing_pvt',
+                                  'missing_rc', 'changed_frozen'])
+def test_committed_profile_tracks_only_the_active_pdk_conditions(
+        tmp_path, monkeypatch, case):
+    """Complete neutral project, including the actual Oct11 unrelated-PDK delta."""
+    import copy
+    owner_reader = drv._owner_records
+    profiles = json.loads(drv._SCENE_PROFILES.read_text())
+    sky = profiles.pop('sky130A')
+    gf_before = copy.deepcopy(profiles['gf180mcuD'])
+    drv._SCENE_PROFILES.write_text(json.dumps(profiles))
+    bundle, *_ = _project_clean_opensta_census_bundle(tmp_path, monkeypatch)
+    monkeypatch.setattr(drv, '_owner_records', owner_reader)
+    registry = tmp_path / 'allowed_signers'
+    registry.write_text('# no registered owner key\n')
+    monkeypatch.setattr(drv, '_OWNER_SIGNERS', registry)
+    if case.startswith('unrelated'):
+        profiles['sky130A'] = sky
+    elif case == 'active_pvt':
+        profiles['synthetic']['pvt']['typ']['nom_temperature'] = 100
+    elif case == 'active_rc':
+        profiles['synthetic']['rc_corners'].append('max')
+    elif case == 'missing_pvt':
+        del profiles['synthetic']['pvt']['typ']['nom_voltage']
+    elif case == 'missing_rc':
+        del profiles['synthetic']['rc_corners']
+    elif case == 'changed_frozen':
+        del bundle['frozen']['pvt']['typ_nom']['nom_voltage']
+    drv._SCENE_PROFILES.write_text(json.dumps(profiles))
+    whole_sha = drv._sha(drv._SCENE_PROFILES)
+    if case not in ('unchanged', 'unrelated_retained', 'changed_frozen'):
+        # A fresh plan records the current complete file as provenance. The
+        # independent committed standard retains its original file digest.
+        bundle['frozen']['scene_profile_sha256'] = whole_sha
+    assert profiles['gf180mcuD'] == gf_before
+    before = bundle['frozen']['scene_profile_sha256']
+    result = drv.judge(bundle, project=tmp_path)
+    (tmp_path / 'active-profile.observation.json').write_text(json.dumps({
+        'case': case, 'scope': 'SOURCE_CONTROL only; active unit PDK, public GF subtree unchanged',
+        'whole_source_sha256': whole_sha, 'retained_source_sha256': before,
+        'gf180_subtree_unchanged': True, 'judge': result}, indent=2) + '\n')
+    assert bundle['frozen']['scene_profile_sha256'] == before
+    if case in ('unchanged', 'unrelated_retained', 'unrelated_fresh'):
+        assert result['verdict'] == 'PASS', result
+        assert result['threshold_freeze']['signed_owner_record_verified'] is False
+    else:
+        assert result['verdict'] == 'FAIL', result
+        assert any('threshold source changed' in reason for reason in result['failures'])
+
+
 def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
     from drv_signoff_census import derive
     folder = tmp_path / "tool"
