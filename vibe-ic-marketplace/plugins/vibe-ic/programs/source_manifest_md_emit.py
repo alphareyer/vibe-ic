@@ -22,6 +22,11 @@ FAITHFULLY from the on-disk artifacts — it never fabricates provenance:
     chip-top, or a fully generated design with no reused manifest) is
     **GENERATED**.
 
+A current SHA-256-bound ``ai_authored_files`` entry overrides the design-level
+reuse default for that file, unless its own copyright contradicts the claim.
+This records source origin; retained provenance does not establish new work in
+the current run. Invalid entries are disclosed without inventing authorship.
+
 Idempotent + NON-DESTRUCTIVE: writes ONLY when ``SOURCE_MANIFEST.md`` is ABSENT
 (unless ``force``), so a hand-authored provenance is never clobbered. Returns
 ``None`` when there is neither RTL nor a reused manifest (e.g. an analog-only
@@ -33,6 +38,7 @@ schema); no chip / vendor literal anywhere.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -116,6 +122,49 @@ def third_party_copyright(path: Path) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _authored_evidence(project: Path) -> Tuple[Set[Path], List[str], bool]:
+    """Current per-file source authorship, not proof of work in this run."""
+    rtl = _rtl_dir(project).resolve()
+    try:
+        doc = json.loads((rtl / MANIFEST_NAME).read_text())
+    except (OSError, ValueError):
+        return set(), [], False
+    if not isinstance(doc, dict) or "ai_authored_files" not in doc:
+        return set(), [], False
+    rows = doc["ai_authored_files"]
+    if not isinstance(rows, list):
+        return set(), ["ai_authored_files is not a per-file list"], True
+    authored: Set[Path] = set()
+    problems: List[str] = []
+    for number, row in enumerate(rows):
+        name = row.get("path") if isinstance(row, dict) else None
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        label = name if isinstance(name, str) else f"entry {number + 1}"
+        if not isinstance(name, str) or not name or Path(name).is_absolute():
+            problems.append(f"{label}: missing or non-relative staged file path")
+            continue
+        path = (rtl / name).resolve()
+        if not path.is_relative_to(rtl):
+            problems.append(f"{label}: file is outside the staged RTL directory")
+            continue
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            problems.append(f"{label}: missing or invalid SHA-256")
+            continue
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            problems.append(f"{label}: declared file is missing or unreadable")
+            continue
+        if actual != digest.lower():
+            problems.append(f"{label}: declared SHA-256 does not match current file bytes")
+            continue
+        if third_party_copyright(path) is not None:
+            problems.append(f"{label}: declared authorship conflicts with the file's copyright")
+            continue
+        authored.add(path)
+    return authored, problems, True
+
+
 def collect(project: Path) -> List[Tuple[str, str, str]]:
     """Walk phase2/stage1/rtl and tag each module. Returns a sorted list of
     (module, tag, relative_file) where tag is 'REUSED-IP' or 'GENERATED'.
@@ -123,7 +172,9 @@ def collect(project: Path) -> List[Tuple[str, str, str]]:
     DESIGN-LEVEL provenance is the DEFAULT: a ``reused_ip:true`` manifest →
     REUSED-IP; no reused manifest → GENERATED.
 
-    PER-FILE EVIDENCE OVERRIDES THAT DEFAULT. The design-level rule used to be
+    PER-FILE EVIDENCE OVERRIDES THAT DEFAULT. A current digest-bound authored
+    entry identifies glue in a mixed-origin design; a copyright header still
+    takes precedence over that claim. The design-level rule used to be
     the whole answer, and its docstring claimed it "never falsely tags vendor
     RTL as generated". MEASURED, that claim was false: on a run where
     ``ip_catalog_query`` REFUSED the catalog match and no reused manifest was
@@ -152,6 +203,7 @@ def collect(project: Path) -> List[Tuple[str, str, str]]:
     if not rtl.is_dir():
         return []
     is_reused, _present = _load_reused(project)
+    authored, _problems, _declared = _authored_evidence(project)
     default_tag = "REUSED-IP" if is_reused else "GENERATED"
     rows: Dict[str, Tuple[str, str]] = {}
     files = sorted(rtl.rglob("*.v")) + sorted(rtl.rglob("*.sv"))
@@ -163,7 +215,9 @@ def collect(project: Path) -> List[Tuple[str, str, str]]:
         except ValueError:
             rel = f.name
         tag = default_tag
-        if tag == "GENERATED" and third_party_copyright(f) is not None:
+        if f.resolve() in authored:
+            tag = "GENERATED"
+        if third_party_copyright(f) is not None:
             tag = "REUSED-IP"
         for mod in _module_names(f):
             rows.setdefault(mod, (tag, rel))  # first declaration wins
@@ -175,6 +229,7 @@ def render_md(project: Path) -> Optional[str]:
     source to describe (no RTL and no reused manifest)."""
     rows = collect(project)
     _is_reused, manifest_present = _load_reused(project)
+    _authored, problems, has_authored_declaration = _authored_evidence(project)
     if not rows and not manifest_present:
         return None
     n_reused = sum(1 for _, t, _ in rows if t == "REUSED-IP")
@@ -187,21 +242,31 @@ def render_md(project: Path) -> Optional[str]:
     # module — the prose/tally here deliberately avoids the bare tokens.
     L.append(f"_Emitted by `{PROGRAM}.py` from the on-disk staged RTL and "
              f"`{'/'.join(RTL_REL)}/{MANIFEST_NAME}` (when present). Each module "
-             "is tagged as authored-this-run or reused-from-catalog in the "
+             "is tagged by source authorship or reuse in the "
              "Source column._")
     L.append("")
     L.append(f"- Reused from catalog / vendor RTL: {n_reused}")
-    L.append(f"- Authored this run: {n_gen}")
+    if has_authored_declaration:
+        L.append(f"- Authored source modules: {n_gen}")
+        L.append("_Current-run authorship is not established by retained source "
+                 "provenance. A matching file digest establishes source origin, "
+                 "not when that source was authored; resumed runs retain that distinction._")
+        for problem in problems:
+            L.append(f"- Authorship evidence not used: {problem}")
+    else:
+        L.append(f"- Authored this run: {n_gen}")
     L.append("")
     # The authored-this-run count is an UPPER bound and says so. A staged file
     # whose copyright header was stripped is indistinguishable here from one
     # the run wrote, so silence about that limit would be the same groundless
     # assertion this program used to make.
-    L.append("_Provenance evidence: a module is counted as reused when its own "
+    L.append("_Provenance evidence: a current digest-bound per-file authored "
+             "declaration overrides the design-level reuse default, unless the "
+             "file carries conflicting copyright. A module is counted as reused when its own "
              "file header carries an `SPDX-FileCopyrightText` naming an author, "
              "or when the reused-IP manifest lists it. A vendored file with no "
              "such header cannot be told apart from an authored one, so "
-             "**`Authored this run` is an upper bound**._")
+             "**the default authored count is an upper bound**._")
     L.append("")
     L.append("| Module | Source | File |")
     L.append("|---|---|---|")
