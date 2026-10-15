@@ -295,6 +295,10 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float, execution_mode=
             # Explicit legacy-unit context, not a Default checkpoint claim.
             monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
             monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+            # A legacy geometry/cache unit calls its substituted PnR native
+            # transport directly, without claiming a Default canonical receipt.
+            monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
+                                lambda *a, **k: R.step_pnr(*a, **k))
 
     def _fake_pnr(proj, top, pdk, container, die_um, u, **kw):
         d.called.append("pnr")
@@ -478,7 +482,8 @@ def test_the_disclosure_row_is_present_and_did_not_block_anything(
     steps after it still ran — so the test above cannot be passing merely
     because the disclosure row went missing."""
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
-    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL,
+               execution_mode="ultra")
     R.main()
 
     plan = _plan(project)
@@ -502,7 +507,8 @@ def test_unchanged_geometry_still_reuses_the_gds(tmp_path, monkeypatch):
     """Same die + same util as the cached run: PnR is skipped and the GDS is
     reused. This is the provenance-preserving behaviour #593 kept."""
     project = _project(tmp_path, cached_die=NEW_DIE, cached_util=NEW_UTIL)
-    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL,
+               execution_mode="ultra")
     R.main()
 
     plan = _plan(project)
@@ -549,7 +555,8 @@ def _repair_producer(monkeypatch, project, producer, status, detail):
 def test_an_appended_repair_row_does_not_disable_the_guard(tmp_path,
                                                            monkeypatch, producer):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
-    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL,
+               execution_mode="ultra")
     row = _repair_producer(monkeypatch, project, producer, "PASS", "no repair needed")
     R.main()
 
@@ -716,7 +723,8 @@ def test_pad_side_fail_does_not_block_the_rest_of_the_flow(tmp_path,
     project = _project(tmp_path, cached_die=NEW_DIE, cached_util=NEW_UTIL)
     _with_pad_table(project, {"sig_a": (700000, 1499000),
                               "sig_b": (800000, 1499000)})
-    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL,
+               execution_mode="ultra")
     rc = R.main()
 
     plan = _plan(project)

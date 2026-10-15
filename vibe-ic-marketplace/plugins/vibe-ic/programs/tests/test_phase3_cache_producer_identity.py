@@ -528,6 +528,12 @@ def _drive(monkeypatch, project: Path) -> list:
                         lambda: dict(original_request(), mode='ultra'))
     monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
     monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    # This legacy recipe/cache unit has no native LOCAL runtime or current
+    # canonical PnR receipt. Substitute only that unrelated transport, as the
+    # geometry-cache fixture does; real cache/recording predicates stay live.
+    monkeypatch.setattr(R, '_backend_parameter_values', lambda *a, **k: {})
+    monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
+                        lambda *a, **k: R.step_pnr(*a, **k))
 
     def _step(name):
         def _f(*a, **k):
