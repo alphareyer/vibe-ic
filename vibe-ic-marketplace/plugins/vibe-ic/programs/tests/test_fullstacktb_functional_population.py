@@ -563,7 +563,26 @@ class _FakeSim:
             a, b = self.outcome(case, plan["transactions"])
             errors = max(0, b - a)
             word = "FAIL" if errors else "PASS"
+            records = []
+            remaining, remaining_errors = b, errors
+            for phase in plan.get("populations", []):
+                measured = min(remaining, phase["transactions"])
+                phase_errors = min(remaining_errors, measured)
+                records.append(
+                    f"ARITH_SCENARIO_POPULATION family={phase['scenario']} "
+                    f"transactions={measured} comparisons={measured * plan['spec']['width']} "
+                    f"errors={phase_errors}\n")
+                remaining -= measured
+                remaining_errors -= phase_errors
+            if plan["scenario"] == "random_transactions" and errors == 0:
+                declared = plan["framing"]
+                order = 0 if declared["bit_order"] == "LSB" else 1
+                records.append(
+                    f"ORACLE_TB_FRAMING in_order={order} out_order={order} "
+                    f"latency_cycles={declared['settled_latency']} "
+                    f"latency_origin={aog.SERIAL_LATENCY_ORIGIN}\n")
             return (1 if errors else 0), (
+                "".join(records) +
                 f"ARITH_SCENARIO_DONE transactions={b} "
                 f"comparisons={b * plan['spec']['width']} errors={errors} held_edges=2\n"
                 f"[TB {case}] {word}: source-only simulator stand-in\n")
