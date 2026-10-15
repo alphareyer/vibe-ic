@@ -257,6 +257,36 @@ def begin_step(project: Path, step_id: str, inputs=None) -> dict:
     return begin_steps(project, [(step_id, inputs)])[0]
 
 
+def retain_before(project: Path, step_id: str, paths) -> None:
+    """Add an existing producer's cited files to its active before snapshot."""
+    project = Path(project).resolve()
+    active = []
+    for folder in _active_local_calls():
+        where = Path(folder)
+        if not where.is_relative_to(project):
+            continue
+        attempt = json.loads((where / 'attempt.json').read_text())
+        if str(attempt['id']) == str(step_id):
+            active.append(where)
+    if not active:
+        raise OSError(f'no active retained owner for step {step_id}')
+    outputs = []
+    for path in paths:
+        path = Path(path).resolve(strict=True)
+        if not path.is_relative_to(project) or not path.is_file():
+            raise OSError(f'producer history path outside project or not a file: {path}')
+        outputs.append({'abs': str(path), 'rel': str(path.relative_to(project)), 'exists': True})
+    for where in active:
+        previous = where / 'before'
+        document = json.loads((previous / 'outputs.json').read_text())
+        copied, errors = _copy_outputs(project, previous, outputs)
+        document['outputs'].extend(copied)
+        document['capture_errors'].extend(errors)
+        write_json(previous / 'outputs.json', document)
+        if errors:
+            raise OSError('producer history could not be retained: ' + '; '.join(errors))
+
+
 def _read_index(project: Path) -> dict:
     try:
         return json.loads((_versions_root(project) / 'index.json').read_text())

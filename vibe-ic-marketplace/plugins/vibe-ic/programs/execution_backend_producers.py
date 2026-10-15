@@ -1475,6 +1475,9 @@ def produce_signoff(project, params):
         if row.status == 'PASS':
             _copy(pnr / (top + '.gds'), project / 'phase3/stage4/gds' / (top + '.gds'))
             if params.get('execution_mode') == 'default':
+                # The geometry axis belongs to this finished stream. A router
+                # antenna report never measures seal/fill GDS geometry.
+                R._librelane_antenna_gds(project, top, pdk, 'librelane', written)
                 R._ga.admit_gds(project, pnr / (top + '.gds'),
                                 pre.extras['layout_digest'],
                                 R._layout_basis_paths(project, top))

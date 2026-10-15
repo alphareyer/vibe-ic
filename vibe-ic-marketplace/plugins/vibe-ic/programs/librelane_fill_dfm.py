@@ -50,6 +50,7 @@ import _docker_memory as _dmem
 from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
 import die_level_deck_rule_attribution as _dla
+import step_preflight as _spf
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
                                 DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
@@ -1371,6 +1372,7 @@ def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
     return record
 
 
+@_spf.retained_step('37')
 def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     """One Default KLayout stream of the current filled DEF, then real fill.
 
@@ -1384,15 +1386,57 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     # Adopt a retained current primary result before starting another producer.
     # Every ordinary consumer still rechecks its bytes and runs the per-layer
     # judge; the receipt alone is never sufficient for reuse.
+    reuse_refusal = None
     if (project / DEFAULT_STREAM_REL).is_file():
-        record = validate_default_stream(project)
-        if record['file_top'] != top or record.get('pdk') != pdk.name:
-            raise Refusal('LL_FINISHING_WRONG_DECLARATION', str(record))
-        arm = _load(project / RECORD_REL)['gds']['librelane']
-        judged = current_metal_density(project, arm, record)
-        if arm.get(DENSITY_METRIC) != 0 or judged.get('verdict') != 'PASS':
-            raise Refusal('LL_METAL_DENSITY_CONSUMER_FAILED', str(judged))
-        return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
+        try:
+            record = validate_default_stream(project)
+            if record['file_top'] != top or record.get('pdk') != pdk.name:
+                raise Refusal('LL_FINISHING_WRONG_DECLARATION', str(record))
+            arm = _load(project / RECORD_REL)['gds']['librelane']
+            judged = current_metal_density(project, arm, record)
+            if arm.get(DENSITY_METRIC) == 0 and judged.get('verdict') == 'PASS':
+                return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
+            reuse_refusal = 'retained density consumer did not pass: ' + str(judged)
+        except (Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+            reuse_refusal = f'{type(exc).__name__}: {exc}'
+        # Keep the old promotion and its actual cited source closure in the
+        # existing step-version snapshot before a new epoch changes any byte.
+        import step_output_collector as versions
+        pending = [project / DEFAULT_STREAM_REL, project / RECORD_REL,
+                   project / f'phase3/stage3/pnr/{top}.stream_inputs.json',
+                   project / 'reports/phase3/die_finishing.json']
+        retained = set()
+        while pending:
+            path = pending.pop().resolve()
+            try:
+                present = path.is_file()
+            except OSError:
+                present = False
+            if path in retained or not path.is_relative_to(project) or not present:
+                continue
+            retained.add(path)
+            if path.name == 'state_out.json':
+                pending.extend(path.parent / name for name in
+                               ('vibeic_receipt.json', 'input_fingerprint.json', 'COMMANDS', 'invocation.log'))
+            if path.suffix != '.json':
+                continue
+            try:
+                doc = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            def cite(node):
+                if isinstance(node, dict):
+                    for value in node.values():
+                        cite(value)
+                elif isinstance(node, list):
+                    for value in node:
+                        cite(value)
+                elif isinstance(node, str):
+                    pending.append(Path(node) if Path(node).is_absolute() else project / node)
+            cite(doc)
+            if path.name == 'vibeic_receipt.json':
+                pending.extend(path.parent / name for name in doc.get('sha256', {}))
+        versions.retain_before(project, '37', sorted(retained))
     pnr = project / 'phase3/stage3/pnr'
     filled = pnr / 'filled.def'
     try:
@@ -1454,6 +1498,7 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     shutil.copyfile(pnr_gds, canonical)
     record = {'file_top': top, 'design_name': _def_design_name(filled),
               'image': image, 'pdk': pdk.name, 'gates': gates,
+              'prior_promotion_refusal': reuse_refusal,
               'finishing_stream_sha256': digest(stream),
               'stream_inputs_sha256': digest(pnr / f'{top}.stream_inputs.json'),
               'stream_state': str(folder / 'state_out.json'),

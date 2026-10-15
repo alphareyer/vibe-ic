@@ -44,6 +44,15 @@ def _require(condition, reason):
         raise ValueError(reason)
 
 
+def _source_def(project):
+    import execution_policy
+    import librelane_fill_dfm as fill
+    if execution_policy.request()['mode'] == 'default':
+        stream = fill.validate_default_stream(project)
+        return Path(stream['filled_def']).resolve()
+    return project / 'phase3/stage3/pnr/routed.def'
+
+
 def read_current(project, record=None):
     """Validate retained native producers, inputs, material and typed count."""
     project = Path(project).resolve()
@@ -57,7 +66,7 @@ def read_current(project, record=None):
     _require(not refusal, refusal)
     pnr = project / "phase3/stage3/pnr"
     design = pc.design_of(_path(project, current["inputs"]["def"]))
-    for role, path in (("def", pnr / "routed.def"),
+    for role, path in (("def", _source_def(project)),
                        ("netlist", pnr / f"{design}_pnr.v"),
                        ("sdc", pnr / "constraint.sdc")):
         _require(pc.entry(project, path) == current["inputs"][role],
@@ -81,6 +90,21 @@ def read_current(project, record=None):
                                     folder, doc["image"])
         _require(fp["config_files"] == lc._current_config_material(
             _read(config_root / f"{step}.json"), mounts), "NATIVE373_MATERIAL_CHANGED")
+        import execution_policy
+        if step == 'KLayout.StreamOut' and execution_policy.request()['mode'] == 'default':
+            import _stream_input_record as sir
+            import librelane_fill_dfm as fill
+            stream = fill.validate_default_stream(project)
+            source, why = sir.read(sir.record_path(Path(stream['pnr_gds'])))
+            _require(source is not None, 'NATIVE373_STREAM_READSET_ABSENT: ' + why)
+            for entry in source['native_cli']['inputs']:
+                material = Path(entry['path'])
+                for host, guest in mounts:
+                    if material.is_relative_to(guest):
+                        material = Path(host) / material.relative_to(guest)
+                        break
+                _require(fp['config_files'].get(str(material)) == entry['sha256'],
+                         'NATIVE373_STREAM_READSET_CHANGED: ' + str(material))
         native._hashes(fp["state_files"])
         _require(all(Path(path).resolve().is_relative_to(project) for path in fp["state_files"]),
                  "NATIVE373_FOREIGN_STATE")
@@ -133,6 +157,7 @@ def read_current(project, record=None):
 def produce(project, routed_def):
     """Ordinary three-step producer; retained current evidence can be reused."""
     project, routed_def = Path(project).resolve(), Path(routed_def).resolve()
+    _require(routed_def == _source_def(project), 'NATIVE373_WRONG_SOURCE_DEF')
     path = project / REL
     if path.is_file():
         try:

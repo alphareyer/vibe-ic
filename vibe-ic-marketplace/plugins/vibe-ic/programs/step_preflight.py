@@ -318,6 +318,25 @@ RUNNER_PLANS: Dict[str, RunnerPlan] = {
 }
 
 
+def runner_plan(name: str) -> Optional[RunnerPlan]:
+    """Existing site ownership in the canonical Default execution order."""
+    plan = RUNNER_PLANS.get(name)
+    import execution_policy
+    if (plan is None or name != 'phase3_one_shot_runner'
+            or execution_policy.request()['mode'] != 'default'):
+        return plan
+    import _flow_yaml
+    order = _flow_yaml.ordered_step_ids()
+    pnr = _flow_yaml.ordered_step_ids(execution_stages=(4,))
+    sites = [(site, pnr if site == 'pnr' else span) for site, span in plan.sites]
+    known = {site for site, _ in sites}
+    sites.extend((f'default_step_{sid}', (sid,)) for sid in _flow_yaml.ordered_step_ids(execution_stages=range(4, 9))
+                 if f'default_step_{sid}' not in known)
+    sites.sort(key=lambda item: min((order.index(str(sid)) for sid in item[1]
+                                    if str(sid) in order), default=len(order)))
+    return RunnerPlan(plan.name, plan.inherited_steps, plan.inherits, tuple(sites))
+
+
 def exit_pruned_sites(sites: Sequence[Tuple[str, Sequence[str]]],
                       exit_step: Any) -> Optional[List[str]]:
     """Share the runner's exit boundary with consumers of its gate evidence.
@@ -345,7 +364,7 @@ def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
 
     = this runner's inherited closure + the spans of every EARLIER site.
     Returns (set, error)."""
-    plan = RUNNER_PLANS.get(runner)
+    plan = runner_plan(runner)
     if plan is None:
         return frozenset(), f"unknown runner {runner!r}"
     acc: set = set()
@@ -359,7 +378,7 @@ def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
         if cur is not plan:
             for _n, span in cur.sites:
                 acc.update(span)
-        cur = RUNNER_PLANS.get(cur.inherits) if cur.inherits else None
+        cur = runner_plan(cur.inherits) if cur.inherits else None
     for n, span in plan.sites:
         if n == site:
             import execution_policy
@@ -370,8 +389,7 @@ def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
                 if positions:
                     # A step label is an identity. YAML position alone says
                     # which producer was due before this Default dispatch.
-                    return frozenset(acc & set(order[:min(positions)]) |
-                                     set(order[:min(positions)])), None
+                    return frozenset(order[:min(positions)]), None
             return frozenset(acc), None
         acc.update(span)
     return frozenset(), f"{runner} declares no site {site!r}"
@@ -520,7 +538,7 @@ def window_is_effective(entry_step=None, exit_step=None,
     entry owned by `design_one_shot_runner` -- `--entry-step 1` included -- and
     that decision lives in the front door, not in this table."""
     if runner is not None:
-        plan = RUNNER_PLANS.get(runner)
+        plan = runner_plan(runner)
         plans = [plan] if plan is not None else []
     else:
         plans = list(RUNNER_PLANS.values())
@@ -544,7 +562,7 @@ def site_for_step(runner: str, step_id: str) -> Optional[str]:
     not, and pretending otherwise would report a step as entered that was never
     separately dispatched.
     """
-    plan = RUNNER_PLANS.get(runner)
+    plan = runner_plan(runner)
     if plan is None:
         return None
     for name, span in plan.sites:
@@ -555,7 +573,7 @@ def site_for_step(runner: str, step_id: str) -> Optional[str]:
 
 def enterable_steps(runner: str) -> Tuple[str, ...]:
     """Every step this runner can be entered AT (the span heads, in order)."""
-    plan = RUNNER_PLANS.get(runner)
+    plan = runner_plan(runner)
     return tuple(str(s[0]) for _, s in (plan.sites if plan else ()) if s)
 
 
@@ -625,7 +643,7 @@ def entry_admission(project: Path, runner: str, step_id: str,
 def decide(project: Path, runner: str, site: str,
            flow_def: Optional[Path] = None) -> Decision:
     """The pre-flight, for ONE dispatch site. Reads only; writes nothing."""
-    plan = RUNNER_PLANS.get(runner)
+    plan = runner_plan(runner)
     span: Tuple[str, ...] = ()
     if plan is not None:
         for n, s in plan.sites:
@@ -1331,7 +1349,7 @@ def gate(project: Path, runner: str, site: str,
     # records verdict NOT-APPLICABLE with the reason.
     not_applicable = kwargs.pop("_preflight_not_applicable", None)
     if not_applicable:
-        _p = RUNNER_PLANS.get(runner)
+        _p = runner_plan(runner)
         _span = dict(_p.sites).get(site, ()) if _p else ()
         dec = Decision(runner=runner, site=site,
                        flow_steps=list(_span),

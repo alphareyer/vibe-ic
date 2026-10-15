@@ -52593,6 +52593,13 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                         extras.setdefault("published", []).append(
                             _pv.publish_report(lyrdb.parent, lyrdb.name, dest))
                         outputs.append(str(dest))
+                    # The canonical audit owns its native transcript. Metrics
+                    # must not discover authority from a later precheck sibling.
+                    native_log = folders['KLayout.DRC'] / 'invocation.log'
+                    dest_log = project / 'reports/phase3/drc_signoff.log'
+                    extras.setdefault('published', []).append(
+                        _pv.publish_report(native_log.parent, native_log.name, dest_log))
+                    outputs.append(str(dest_log))
             if half == "lvs" and "Netgen.LVS" in folders:
                 dest = _pl.reports_phase3_dir(project) / "lvs.rpt"
                 extras.setdefault("published", []).append(_pv.publish_report(
@@ -58944,7 +58951,8 @@ _PDK_AWARE_SIGNOFF_GATES = frozenset({"tapeout_precheck"})
 def step_declared_signoff_gates(project: Path,
                                 pdk_name: str = "",
                                 container: str = "",
-                                upstream_refusal: Optional[str] = None) -> List[StepResult]:
+                                upstream_refusal: Optional[str] = None,
+                                *, skip_names: Sequence[str] = ()) -> List[StepResult]:
     """Every flow-declared step-23/25 sign-off gate, one StepResult each.
 
     `pdk_name` is the run's OWN `PdkConfig.name` — the distribution the flow was
@@ -58980,7 +58988,7 @@ def step_declared_signoff_gates(project: Path,
                     _RUN_STARTED_AT)
     if upstream_refusal:
         return [_upstream_signoff_not_measured(name, upstream_refusal)
-                for name, *_ in _DECLARED_SIGNOFF_GATES]
+                for name, *_ in _DECLARED_SIGNOFF_GATES if name not in skip_names]
     # ── vibe-ic#2091 — a sign-off measured against an ASSUMED clock says so ──
     #
     # MEASURED, opentitan_aes x sky130A: the input states no target clock period
@@ -59019,11 +59027,13 @@ def step_declared_signoff_gates(project: Path,
     with ThreadPoolExecutor(max_workers=len(parallel_names)) as pool:
         jobs = {}
         for spec in _DECLARED_SIGNOFF_GATES:
-            if spec[0] in parallel_names:
+            if spec[0] in parallel_names and spec[0] not in skip_names:
                 jobs[spec[0]] = pool.submit(
                     _run_declared_signoff_gate, project, *spec)
         parallel_rows = {name: job.result() for name, job in jobs.items()}
     for name, program, out_rel, extra_argv in _DECLARED_SIGNOFF_GATES:
+        if name in skip_names:
+            continue
         if name in parallel_rows:
             out.append(parallel_rows[name])
             continue
@@ -62942,60 +62952,61 @@ def _default_poststream_evidence(project: Path, top: str, pdk: PdkConfig,
     failures: List[str] = []
     _publish_canonical_gds_alias(project, top, written, notes)
     if prepv:
-        # Step 34 already produced fill before stream-out. ERC reads this
-        # final stream before the existing independent DRC/LVS readers run.
-        return _default_pnr_rows(project, top, pdk, container,
-                                 _phase3_window_steps('26.5ic', '35'),
-                                 report_name=name)
-        # producer to repeat: post-layout LEC, GDS density, aging and thermal.
-        lec = rpt / "lec_post_layout.json"
-        if _signoff_regen(lec, routed, pnr / f"{top}_pnr.v"):
-            try:
-                _emit_lec_post_layout(project, top, pdk, container, lec,
-                                      rpt / "lec_post_layout.rpt", notes)
-                if not lec.is_file():
-                    unmeasured.append("post-layout LEC produced no report")
-                else:
-                    written.append(str(lec))
-            except Exception as exc:
-                failures.append(f"post-layout LEC producer failed: {exc}")
-        refusal = _lec_post_layout_refusal(project)
-        if refusal:
-            failures.append(refusal)
-        final_emitters = (
-            ("GDS density", rpt / "metal_density.json", lambda:
-             _emit_metal_density_report(project, top, pdk, container,
-                                        rpt / "metal_density.json", notes)),
-            ("aging STA", rpt / "aging_sta.json", lambda:
-             _emit_aging_sta_report(project, top, pdk, container,
-                                    rpt / "aging_sta.rpt", rpt / "aging_sta.json", notes)),
-            ("thermal screen", rpt / "thermal_screen.json", lambda:
-             _emit_thermal_screen(project, top, pdk, container,
-                                  rpt / "thermal_screen.json", notes)),
-        )
-        for label, output, emit in final_emitters:
-            # The density emitter owns its GDS freshness; the other two read
-            # the retained route and the current power/STA reports.
-            if label != "GDS density" and not _signoff_regen(
-                    output, routed, pnr / "constraint.sdc",
-                    _pl.extracted_dir(project) / f"{top}.spef",
-                    rpt / "power.rpt", _pl.sta_dir(project) / "sta_spef_based.rpt"):
-                continue
-            try:
-                if emit() and output.is_file():
-                    written.append(str(output))
-                else:
-                    unmeasured.append(f"{label} producer did not complete")
-            except Exception as exc:
-                failures.append(f"{label} producer failed: {exc}")
-        # Recompose the existing PERC report after the new thermal evidence.
-        # This aggregates current reports; it does not rerun RCX/STA/IR/EM.
+        # Finishing owns these rows after its one primary native stream.
+        return _default_pnr_rows(
+            project, top, pdk, container,
+            [sid for sid in _flow_yaml.ordered_step_ids(execution_stages=(6,))
+             if sid != '37'], report_name=name)
+    # Produce remaining final-layout evidence without restarting route rows.
+    # producer to repeat: post-layout LEC, GDS density, aging and thermal.
+    lec = rpt / "lec_post_layout.json"
+    if _signoff_regen(lec, routed, pnr / f"{top}_pnr.v"):
         try:
-            if not _emit_perc_equivalent(project, top, pdk, container, notes):
-                unmeasured.append("final PERC aggregation did not complete")
-            run_at_speed_atpg_producers(project, written, notes)
+            _emit_lec_post_layout(project, top, pdk, container, lec,
+                                  rpt / "lec_post_layout.rpt", notes)
+            if not lec.is_file():
+                unmeasured.append("post-layout LEC produced no report")
+            else:
+                written.append(str(lec))
         except Exception as exc:
-            failures.append(f"final reliability producer failed: {exc}")
+            failures.append(f"post-layout LEC producer failed: {exc}")
+    refusal = _lec_post_layout_refusal(project)
+    if refusal:
+        failures.append(refusal)
+    final_emitters = (
+        ("GDS density", rpt / "metal_density.json", lambda:
+         _emit_metal_density_report(project, top, pdk, container,
+                                    rpt / "metal_density.json", notes)),
+        ("aging STA", rpt / "aging_sta.json", lambda:
+         _emit_aging_sta_report(project, top, pdk, container,
+                                rpt / "aging_sta.rpt", rpt / "aging_sta.json", notes)),
+        ("thermal screen", rpt / "thermal_screen.json", lambda:
+         _emit_thermal_screen(project, top, pdk, container,
+                              rpt / "thermal_screen.json", notes)),
+    )
+    for label, output, emit in final_emitters:
+        # The density emitter owns its GDS freshness; the other two read
+        # the retained route and the current power/STA reports.
+        if label != "GDS density" and not _signoff_regen(
+                output, routed, pnr / "constraint.sdc",
+                _pl.extracted_dir(project) / f"{top}.spef",
+                rpt / "power.rpt", _pl.sta_dir(project) / "sta_spef_based.rpt"):
+            continue
+        try:
+            if emit() and output.is_file():
+                written.append(str(output))
+            else:
+                unmeasured.append(f"{label} producer did not complete")
+        except Exception as exc:
+            failures.append(f"{label} producer failed: {exc}")
+    # Recompose the existing PERC report after the new thermal evidence.
+    # This aggregates current reports; it does not rerun RCX/STA/IR/EM.
+    try:
+        if not _emit_perc_equivalent(project, top, pdk, container, notes):
+            unmeasured.append("final PERC aggregation did not complete")
+        run_at_speed_atpg_producers(project, written, notes)
+    except Exception as exc:
+        failures.append(f"final reliability producer failed: {exc}")
     status = "FAIL" if failures else "NOT_MEASURED" if unmeasured else "PASS"
     detail = "; ".join(failures + unmeasured + notes) or "current final-layout evidence produced"
     return StepResult(name, status, time.time() - t0, detail, written,
@@ -63108,8 +63119,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # Full Default uses the same row producers as a bounded continuation.
         # Step 32 has run before this site. The existing GDS producer owns
         # 26.5ic's stream finishing, so that writer stays at stream-out.
-        rows = [sid for sid in _phase3_window_steps('23', '35')
-                if sid != '26.5ic']
+        import _flow_yaml
+        rows = list(_flow_yaml.ordered_step_ids(execution_stages=(5,)))
         return _default_pnr_rows(
             project, top, pdk, container, rows,
             report_name='prestream_evidence')
@@ -77370,7 +77381,10 @@ def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
     import yaml
     import flow_compliance_check as _fcc
     import _flow_yaml                                        # noqa: PLC0415
-    ids = list(_flow_yaml.ordered_step_ids(stages=('stage3', 'stage4')))
+    import execution_policy
+    ids = list(_flow_yaml.ordered_step_ids(execution_stages=range(4, 9))
+               if execution_policy.request()['mode'] == 'default' else
+               _flow_yaml.ordered_step_ids(stages=('stage3', 'stage4')))
     # Step 9 is the backend synthesis dispatch inherited from Phase 2.
     ids.insert(0, "9")
     if entry not in ids or exit_ not in ids:
@@ -77385,7 +77399,7 @@ def _phase3_step_sites() -> Dict[str, str]:
     """Canonical step id -> the Phase-3 dispatch site (and report row) that
     runs it: the runner plan's spans, plus the sites that own one step each.
     The one map both the window's dispatch and its enclosing verdict read."""
-    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
+    sites = _spf.runner_plan("phase3_one_shot_runner").sites
     direct = {str(sid): name for name, span in sites for sid in span}
     direct.update({"15.5ic": "pnr",
                    "36": "tapeout_checklist",
@@ -77441,7 +77455,7 @@ def _PHASE3_GATE_TABLES() -> Tuple[Tuple[Any, ...], ...]:
 def _phase3_row_step_map() -> Dict[str, FrozenSet[str]]:
     rows: Dict[str, Set[str]] = {
         name: {str(sid) for sid in span}
-        for name, span in _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites}
+        for name, span in _spf.runner_plan("phase3_one_shot_runner").sites}
     for sid, site in _phase3_step_sites().items():
         rows.setdefault(site, set()).add(sid)
     rows.setdefault("canonicalize_artefacts", set()).update(
@@ -77499,7 +77513,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     Ultra retains its existing enclosing sessions.
     """
     ids = _phase3_window_steps(entry, exit_)
-    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
+    sites = _spf.runner_plan("phase3_one_shot_runner").sites
     direct = _phase3_step_sites()
     spans = dict(sites)
     pnr_ids = set(spans["pnr"]) | {"15.5ic"}
@@ -77508,7 +77522,7 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
         return ["default_pnr"]
     if execution_policy.request()['mode'] == 'default':
         from execution_provider_catalog import BACKEND_ROWS
-        native_ids = set(BACKEND_ROWS) | pnr_ids | {'31', '35', '37.5ic'}
+        native_ids = set(BACKEND_ROWS) | pnr_ids | {'31', '35', '36', '37.4', '37.5ic', '37.5ip', '38', 'DT2', 'DT3'}
         if set(ids).issubset(native_ids):
             return ["default_backend"]
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
@@ -77733,7 +77747,7 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
     import tempfile
     import yaml
     import flow_compliance_check as _fcc
-    spans = dict(_spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
+    spans = dict(_spf.runner_plan("phase3_one_shot_runner").sites)
     flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
     owned = {str(sid) for sid in spans[site]}
     if site == "pnr":
@@ -78466,7 +78480,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     changed = sorted(k for k in set(before) | set(after)
                      if before.get(k) != after.get(k))
     sites = [name for name, _ in
-             _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites]
+             _spf.runner_plan("phase3_one_shot_runner").sites]
     stale = {}
     changed_labels = {"signoff_metrics_aggregate": "37.4 (signoff_metrics_aggregate)",
                       "tapeout_checklist": "36 (tapeout_checklist)",
@@ -78823,7 +78837,7 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
         _publish_in_progress_steps(project, rows)
         with step_versions.active_steps(project, [attempt]):
             try:
-                if sid in ('16', '35', '26.5ic', '37.5ic'):
+                if sid in ('16', '35', '26.5ic', '36', '37.4', '37.5ic', '37.5ip', '38', 'DT2', 'DT3'):
                     if sid == '16':
                         notes: List[str] = []
                         clock_path = _pl.cts_dir(project) / 'clock_plan.json'
@@ -78832,9 +78846,6 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                             _pl.pnr_dir(project), notes, pdk=pdk)
                         result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
                                   'detail': '; '.join(notes)}
-                    elif sid == '37.5ic':
-                        result = _default_ic_release_docs(project, top, pdk, container)
-                        produced = result['verdict'] == 'PASS'
                     elif sid == '26.5ic':
                         import librelane_fill_dfm as fill
                         fill.validate_default_stream(project)
@@ -78843,6 +78854,39 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                         result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
                                   'detail': 'current stream finishing consumer retained'
                                   if produced else 'current stream finishing consumer absent'}
+                    elif sid == '36':
+                        result = _default_prepare_checklist(project, top, pdk, container)
+                        produced = result['verdict'] == 'PASS'
+                    elif sid == '37.4':
+                        row = step_signoff_metrics_aggregate(project)
+                        result = {'verdict': row.status, 'detail': row.detail}
+                        produced = row.status == 'PASS'
+                    elif sid == '38':
+                        prepared = _default_prepared_handoff(project)
+                        produced = prepared is not None
+                        result = {'verdict': 'PASS' if produced else 'NOT_MEASURED',
+                                  'detail': 'current package preparation retained' if produced else
+                                  'current package preparation absent or changed; resume at checklist'}
+                    elif sid == '37.5ip':
+                        row = step_digital_hardmacro_gen(project, pdk, container)
+                        result = {'verdict': row.status, 'detail': row.detail}
+                        if row.status == 'PASS':
+                            row = step_ip_release_docs_gen(project, top)
+                            result = {'verdict': row.status, 'detail': row.detail}
+                        produced = result['verdict'] == 'PASS'
+                    elif sid in ('DT2', 'DT3'):
+                        notes, written = [], []
+                        program = ('path_delay_fault_atpg_run.py' if sid == 'DT2'
+                                   else 'sdd_atpg_run.py')
+                        native = _run_at_speed_atpg_producer(
+                            project, sid, program, [], written, notes)
+                        result = {'verdict': ('PASS' if native.get('rc') in (0, None)
+                                              else 'FAIL' if native['rc'] == 1 else 'NOT_MEASURED'),
+                                  'detail': '; '.join(notes)}
+                        produced = result['verdict'] == 'PASS'
+                    elif sid == '37.5ic':
+                        result = _default_ic_release_docs(project, top, pdk, container)
+                        produced = result['verdict'] == 'PASS'
                     else:
                         # DFM is an existing program-first report producer. It
                         # runs after current fill and before stream-out, without
@@ -78962,8 +79006,9 @@ def _default_step15_with_backend_receipt(
 
     import execution_policy
     if execution_policy.request()['mode'] == 'default':
+        import _flow_yaml
         return _default_pnr_rows(
-            project, top, pdk, container, _phase3_window_steps('15', '22'),
+            project, top, pdk, container, list(_flow_yaml.ordered_step_ids(execution_stages=(4,))),
             die_um=die_um, util=util, spare_density=spare_density)
 
     started_ns = time.time_ns()
@@ -79092,6 +79137,55 @@ def _write_final_layout_receipts(project: Path, receipt, plan):
     if cp.returncode not in (0, 1) or not report.is_file():
         return 2
     return 0
+
+
+def _default_prepared_handoff(project: Path) -> Optional[dict]:
+    """Read the existing retained package preparation, never infer from files."""
+    import step_output_collector as versions
+    index = versions._read_index(project)
+    row = next((row for row in index.get('steps', []) if str(row['id']) == '38'), None)
+    if row is None:
+        return None
+    try:
+        record = json.loads((versions._versions_root(project) / row['folder'] / 'outputs.json').read_text())
+        inputs = record['inputs']
+        if (record['status'] != 'PASS' or not inputs
+                or any(not (project / rel).is_file()
+                       or _sha256_file(project / rel) !=
+                       (sha.get('sha256') if isinstance(sha, dict) else sha)
+                       for rel, sha in inputs.items())
+                or not record['outputs']
+                or any(not (project / item['rel']).is_file()
+                       or _sha256_file(project / item['rel']) != item['sha256']
+                       for item in record['outputs'])):
+            return None
+        return record
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _default_prepare_checklist(project: Path, top: str, pdk: PdkConfig,
+                                container: str) -> dict:
+    """Prepare the checklist's declared handoff inputs without accepting 38."""
+    import _flow_yaml
+    row = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '36')
+    if row.get('prepares') != [38]:
+        return {'verdict': 'NOT_MEASURED', 'detail': 'checklist preparation owner not declared'}
+    if _default_prepared_handoff(project) is None:
+        spec = next(spec for spec in _PRE_AUDIT_PRODUCERS if spec[0] == 'foundry_handoff')
+        prepared = _spf.retained_call(
+            project, '38', _run_pre_audit_producer,
+            project, *spec, container, canonical_acceptance=False)
+        if prepared.status != 'PASS':
+            return {'verdict': prepared.status, 'detail': prepared.detail}
+    if _default_prepared_handoff(project) is None:
+        return {'verdict': 'NOT_MEASURED', 'detail': 'current package preparation is incomplete'}
+    rc = _default_checklist_layout_receipts(project, top, pdk, container)
+    if rc:
+        return {'verdict': 'NOT_MEASURED', 'detail': 'current completed layout identity unavailable'}
+    spec = next(spec for spec in _PRE_AUDIT_PRODUCERS if spec[0] == 'tapeout_checklist')
+    checklist = _run_pre_audit_producer(project, *spec, container)
+    return {'verdict': checklist.status, 'detail': checklist.detail}
 
 
 def _default_checklist_layout_receipts(project: Path, top: str, pdk: PdkConfig,
@@ -79904,9 +79998,11 @@ def main() -> int:
         # T102 -- step 32 on LibreLane (`phase3/librelane_switch.json` "32")
         # replaces the two direct repair producers below.
         if _chain_ok and _execution.request()['mode'] == 'default':
+            import _flow_yaml
             _electrical = _default_pnr_rows(
                 project, effective_top, pdk, args.container,
-                _phase3_window_steps('32', '33'), report_name='routed_electrical')
+                list(_flow_yaml.ordered_step_ids(execution_stages=(5,))),
+                report_name='routed_electrical')
             plan.append(_electrical)
             _chain_ok = _electrical.status == 'PASS'
             if not _chain_ok:
@@ -80099,7 +80195,8 @@ def main() -> int:
                 # says exactly that instead of pretending to have checked it.
                 _gds_dispatched = (
                     _default_pnr_rows(project, effective_top, pdk, args.container,
-                                      ['37'], report_name='gds')
+                                      list(_flow_yaml.ordered_step_ids(execution_stages=(6,))),
+                                      report_name='gds')
                     if _execution.request()['mode'] == 'default' else _spf.gate(
                         project, "phase3_one_shot_runner", "gds",
                         _preflight_refusal("gds"),
@@ -80120,8 +80217,12 @@ def main() -> int:
                         container=args.container, top=effective_top,
                         args=args)
             if _gds_dispatched.status == "PASS":
-                _prefill = step_canonicalize_artefacts(
-                    project, effective_top, pdk, args.container, prepv=True)
+                _prefill = (StepResult('prefill_evidence', _gds_dispatched.status, 0.0,
+                                        'completed stream/fill canonical consumers',
+                                        extras=_gds_dispatched.extras)
+                            if _execution.request()['mode'] == 'default' else
+                            step_canonicalize_artefacts(
+                                project, effective_top, pdk, args.container, prepv=True))
                 plan.append(_prefill)
                 _fill = _pl.pnr_dir(project) / "filled.def"
                 _fill_done = _pl.pnr_dir(project) / "metal_fill.done"
@@ -80190,9 +80291,13 @@ def main() -> int:
             # Both readers consume the same immutable stream. Their engines
             # write disjoint report paths; collect in canonical row order.
             if _execution.request()['mode'] == 'default':
-                plan.append(_default_pnr_rows(
+                _physical = _default_pnr_rows(
                     project, effective_top, pdk, args.container,
-                    ['37.3', '31'], report_name='physical_verification_complete'))
+                    list(_flow_yaml.ordered_step_ids(execution_stages=(7,))),
+                    report_name='physical_verification_complete')
+                plan.append(_physical)
+                if _physical.status != 'PASS':
+                    _layout_refusal = _physical.detail
             else:
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     drc_job = pool.submit(
@@ -80294,121 +80399,144 @@ def main() -> int:
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a route whose claimed improvement the
     # sign-off may contradict.
-    plan.append(_upstream_signoff_not_measured("drv_promotion_corroboration",
-                 _layout_refusal) if _layout_refusal else
-                step_drv_promotion_corroboration(project))
-
-    # Steps 23 / 25 — the sign-off gates the flow DECLARES but that no runner
-    # ever executed (see `_DECLARED_SIGNOFF_GATES` for the measured blast
-    # radius and the exit-code convention). They run HERE for the same reason
-    # the #306 gate above does: after `step_canonicalize_artefacts`, which is
-    # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
-    # BEFORE the derived-artefact generators build the hand-off pack and
-    # tape-out checklist on top of a sign-off nobody checked.
+    _pre_audit_rows: List[StepResult] = []
     if _execution.request()['mode'] == 'default':
-        plan.extend(step_declared_signoff_gates(
-            project, pdk.name, args.container,
-            upstream_refusal=_layout_refusal))
         if not _layout_refusal:
-            _xor_rows = run_pre_audit_producers(
-                project, args.container, only_names=("gds_xor",))
+            _final_readers = [step_drv_promotion_corroboration(project)]
+            _final_readers.extend(step_declared_signoff_gates(
+                project, pdk.name, args.container, skip_names=('tapeout_precheck',)))
+            plan.extend(_final_readers)
+            _reader_status = _aggregate_verdict(_final_readers)
+            if _reader_status != 'PASS':
+                _layout_refusal = 'final physical readers: ' + _reader_status
+        if _layout_refusal:
+            plan.append(_upstream_signoff_not_measured('final_checklist_and_release',
+                                                       _layout_refusal))
+        else:
+            _release = _default_pnr_rows(
+                project, effective_top, pdk, args.container,
+                list(_flow_yaml.ordered_step_ids(execution_stages=(8,))),
+                report_name='final_checklist_and_release')
+            plan.append(_release)
+            if _release.status != 'PASS':
+                _layout_refusal = _release.detail
     else:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            # Ultra retains the existing independent diagnostic readers.
-            xor_job = (pool.submit(run_pre_audit_producers, project,
-                                   args.container, only_names=("gds_xor",))
-                       if not _layout_refusal else None)
+        plan.append(_upstream_signoff_not_measured("drv_promotion_corroboration",
+                     _layout_refusal) if _layout_refusal else
+                    step_drv_promotion_corroboration(project))
+
+        # Steps 23 / 25 — the sign-off gates the flow DECLARES but that no runner
+        # ever executed (see `_DECLARED_SIGNOFF_GATES` for the measured blast
+        # radius and the exit-code convention). They run HERE for the same reason
+        # the #306 gate above does: after `step_canonicalize_artefacts`, which is
+        # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
+        # BEFORE the derived-artefact generators build the hand-off pack and
+        # tape-out checklist on top of a sign-off nobody checked.
+        if _execution.request()['mode'] == 'default':
             plan.extend(step_declared_signoff_gates(
                 project, pdk.name, args.container,
                 upstream_refusal=_layout_refusal))
-            if xor_job is not None:
-                _xor_rows = xor_job.result()
-    # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
-    # declare their own gate as their only producer, so without this the only
-    # writer of their documents is the audit's own clause and the audit refuses
-    # them as self-certified. Deliberately NOT extended into `plan`: see
-    # `_PRE_AUDIT_PRODUCERS` -- these are producers, and producing a document is
-    # not signing off on it. A refusal here is printed and does not withhold the
-    # release, because each step's own yaml clause still decides it in the audit.
-    _pre_audit_rows: List[StepResult] = []
-    if _layout_refusal:
-        plan.append(_upstream_signoff_not_measured(
-            "foundry_handoff", _layout_refusal))
-    else:
-        _pre_audit_rows = run_pre_audit_producers(
-            project, args.container, skip_names=("gds_xor",))
-        _pre_audit_rows.extend(_xor_rows)
-        for _row in _pre_audit_rows:
-            _row.extras["layout_digest"] = _frozen_digest
-            print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
+            if not _layout_refusal:
+                _xor_rows = run_pre_audit_producers(
+                    project, args.container, only_names=("gds_xor",))
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                # Ultra retains the existing independent diagnostic readers.
+                xor_job = (pool.submit(run_pre_audit_producers, project,
+                                       args.container, only_names=("gds_xor",))
+                           if not _layout_refusal else None)
+                plan.extend(step_declared_signoff_gates(
+                    project, pdk.name, args.container,
+                    upstream_refusal=_layout_refusal))
+                if xor_job is not None:
+                    _xor_rows = xor_job.result()
+        # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
+        # declare their own gate as their only producer, so without this the only
+        # writer of their documents is the audit's own clause and the audit refuses
+        # them as self-certified. Deliberately NOT extended into `plan`: see
+        # `_PRE_AUDIT_PRODUCERS` -- these are producers, and producing a document is
+        # not signing off on it. A refusal here is printed and does not withhold the
+        # release, because each step's own yaml clause still decides it in the audit.
+        _pre_audit_rows: List[StepResult] = []
+        if _layout_refusal:
+            plan.append(_upstream_signoff_not_measured(
+                "foundry_handoff", _layout_refusal))
+        else:
+            _pre_audit_rows = run_pre_audit_producers(
+                project, args.container, skip_names=("gds_xor",))
+            _pre_audit_rows.extend(_xor_rows)
+            for _row in _pre_audit_rows:
+                _row.extras["layout_digest"] = _frozen_digest
+                print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
 
-    # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
-    # sign-off gates below WRITE three of the reports the sign-off metrics
-    # record READS -- `sta/post_route_signoff_corner.json`,
-    # `sta/sta_corner_record_completeness.json` and
-    # `tapeout_precheck.json`.  They used to run AFTER it, so the record was
-    # produced over reports that did not exist yet: 7 of its 18 keys came out
-    # NOT_MEASURED, its own `--check` passed at production time because both
-    # sides were equally empty, and the SAME command re-run at the end of the
-    # run exited 1 with "7 key(s) no longer state what this run's reports
-    # state ... Re-run the producer" -- which the run recorded in its gate
-    # ledger as FAIL while printing PASS in the step list.  They run BEFORE
-    # the record now.  Both of their own ordering constraints still hold:
-    # after `step_canonicalize_artefacts` (just above, which emits
-    # `sta_mcorner_ocv.rpt`, `phase3/stage3/sta/*.rpt` and `em.rpt`) and
-    # before the derived-artefact generators.  None of the six reads
-    # `phase3/final/metrics.json` or any release document, so nothing that
-    # depended on 37.4 preceding 37.5ic moved.
-    plan.append(_upstream_signoff_not_measured("signoff_metrics_aggregate",
-                 _layout_refusal) if _layout_refusal else
-                step_signoff_metrics_aggregate(project))
+        # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
+        # sign-off gates below WRITE three of the reports the sign-off metrics
+        # record READS -- `sta/post_route_signoff_corner.json`,
+        # `sta/sta_corner_record_completeness.json` and
+        # `tapeout_precheck.json`.  They used to run AFTER it, so the record was
+        # produced over reports that did not exist yet: 7 of its 18 keys came out
+        # NOT_MEASURED, its own `--check` passed at production time because both
+        # sides were equally empty, and the SAME command re-run at the end of the
+        # run exited 1 with "7 key(s) no longer state what this run's reports
+        # state ... Re-run the producer" -- which the run recorded in its gate
+        # ledger as FAIL while printing PASS in the step list.  They run BEFORE
+        # the record now.  Both of their own ordering constraints still hold:
+        # after `step_canonicalize_artefacts` (just above, which emits
+        # `sta_mcorner_ocv.rpt`, `phase3/stage3/sta/*.rpt` and `em.rpt`) and
+        # before the derived-artefact generators.  None of the six reads
+        # `phase3/final/metrics.json` or any release document, so nothing that
+        # depended on 37.4 preceding 37.5ic moved.
+        plan.append(_upstream_signoff_not_measured("signoff_metrics_aggregate",
+                     _layout_refusal) if _layout_refusal else
+                    step_signoff_metrics_aggregate(project))
 
-    plan.append(_upstream_signoff_not_measured("tapeout_docs_gen",
-                 _layout_refusal) if _layout_refusal else
-                step_tapeout_docs_gen(project))
+        plan.append(_upstream_signoff_not_measured("tapeout_docs_gen",
+                     _layout_refusal) if _layout_refusal else
+                    step_tapeout_docs_gen(project))
 
-    # And the PRODUCT documents beside the sign-off evidence. The generator
-    # above writes what was CHECKED; this writes what the part IS — and refuses
-    # to write anything when an artefact class this run signed off carries no
-    # substance, which is a population the metrics-only sign-off cannot see.
-    plan.append(_upstream_signoff_not_measured("ic_release_docs_gen",
-                 _layout_refusal) if _layout_refusal else
-                step_ic_release_docs_gen(project))
+        # And the PRODUCT documents beside the sign-off evidence. The generator
+        # above writes what was CHECKED; this writes what the part IS — and refuses
+        # to write anything when an artefact class this run signed off carries no
+        # substance, which is a population the metrics-only sign-off cannot see.
+        plan.append(_upstream_signoff_not_measured("ic_release_docs_gen",
+                     _layout_refusal) if _layout_refusal else
+                    step_ic_release_docs_gen(project))
 
-    # Canonical step 37.5ip — the cell/IP path terminal. The four-view kit is
-    # what an IP delivery IS, and until this was wired nothing this flow
-    # produced digitally could be placed by anybody: a completed sign-off run
-    # contained no `.lef` anywhere. Immediately after canonicalisation, which
-    # is what puts the sign-off GDS at this producer's declared input path.
-    plan.append(_upstream_signoff_not_measured("digital_hardmacro_gen",
-                 _layout_refusal) if _layout_refusal else
-                step_digital_hardmacro_gen(project, pdk, args.container))
+        # Canonical step 37.5ip — the cell/IP path terminal. The four-view kit is
+        # what an IP delivery IS, and until this was wired nothing this flow
+        # produced digitally could be placed by anybody: a completed sign-off run
+        # contained no `.lef` anywhere. Immediately after canonicalisation, which
+        # is what puts the sign-off GDS at this producer's declared input path.
+        plan.append(_upstream_signoff_not_measured("digital_hardmacro_gen",
+                     _layout_refusal) if _layout_refusal else
+                    step_digital_hardmacro_gen(project, pdk, args.container))
 
-    # And the documents that make the kit usable by somebody who was not in the
-    # room. AFTER the kit producer above, because it reads the four views it
-    # documents; the gate at step 37.5ip then judges what this wrote.
-    plan.append(_upstream_signoff_not_measured("ip_release_docs_gen",
-                 _layout_refusal) if _layout_refusal else
-                step_ip_release_docs_gen(
-                    project, args.ic_name or args.top_name, pdk.name))
+        # And the documents that make the kit usable by somebody who was not in the
+        # room. AFTER the kit producer above, because it reads the four views it
+        # documents; the gate at step 37.5ip then judges what this wrote.
+        plan.append(_upstream_signoff_not_measured("ip_release_docs_gen",
+                     _layout_refusal) if _layout_refusal else
+                    step_ip_release_docs_gen(
+                        project, args.ic_name or args.top_name, pdk.name))
 
 
-    # v1.6.36 — invoke the derived-artefact generators (each emits its
-    # own canonical path; failures are best-effort and logged in notes).
-    # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
-    # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
-    # already exist (not a snapshot written moments too early).
-    # foundry_handoff_pack_gen and tapeout_checklist_gen that PASSed and wrote
-    # current outputs already ran in the synchronous pre-audit chain above.
-    # Only those exact successes are skipped.  A refusal/timeout leaves its
-    # derived retry available; the pre-audit call has already invalidated the
-    # old output, so the retry cannot consume stale bytes.
-    plan.extend(_derived_generator_refusals(
-        _run_derived_artefact_generators(
-            project, effective_top,
-            skip_names=(_successful_pre_audit_generator_names(
-                project, _pre_audit_rows)
-                        if not _layout_refusal else frozenset()))))
+        # v1.6.36 — invoke the derived-artefact generators (each emits its
+        # own canonical path; failures are best-effort and logged in notes).
+        # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
+        # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
+        # already exist (not a snapshot written moments too early).
+        # foundry_handoff_pack_gen and tapeout_checklist_gen that PASSed and wrote
+        # current outputs already ran in the synchronous pre-audit chain above.
+        # Only those exact successes are skipped.  A refusal/timeout leaves its
+        # derived retry available; the pre-audit call has already invalidated the
+        # old output, so the retry cannot consume stale bytes.
+    if _execution.request()['mode'] != 'default':
+        plan.extend(_derived_generator_refusals(
+            _run_derived_artefact_generators(
+                project, effective_top,
+                skip_names=(_successful_pre_audit_generator_names(
+                    project, _pre_audit_rows)
+                            if not _layout_refusal else frozenset()))))
 
     # ORGANIC #655 — the post-hoc audits, on the run that just finished.
     for prog, rel_json, kind in _POST_RUN_AUDITS:
@@ -80541,113 +80669,115 @@ def main() -> int:
     # step this delivery does not have — see `flow_declared_producer_run.owed`.
     # Its own rc is RECORDED, not gating: the step gates re-run these programs
     # and keep their verdicts.
-    try:
-        import subprocess as _sp_dp
-        _dp = _sp_dp.run(
-            [sys.executable, str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
-             str(project)],
-            timeout=_pl.audit_timeout_s(project) + 120,
-            check=False, capture_output=True, text=True)
-        for _ln in (_dp.stdout or "").strip().splitlines():
-            print(f"[phase3] {_ln}")
-        if _dp.returncode != 0:
-            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
-                  f"declared producer could not be EXECUTED (not a verdict "
-                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
-                  file=sys.stderr)
-    except Exception as _dp_exc:  # nosec — must not abort finalize
-        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
-              f"documents the flow declares this run's steps to produce may "
-              f"still be authored by the audit and refused as its own "
-              f"evidence", file=sys.stderr)
+    if _execution.request()['mode'] != 'default':
+        try:
+            import subprocess as _sp_dp
+            _dp = _sp_dp.run(
+                [sys.executable, str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+                 str(project)],
+                timeout=_pl.audit_timeout_s(project) + 120,
+                check=False, capture_output=True, text=True)
+            for _ln in (_dp.stdout or "").strip().splitlines():
+                print(f"[phase3] {_ln}")
+            if _dp.returncode != 0:
+                print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                      f"declared producer could not be EXECUTED (not a verdict "
+                      f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                      file=sys.stderr)
+        except Exception as _dp_exc:  # nosec — must not abort finalize
+            print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+                  f"documents the flow declares this run's steps to produce may "
+                  f"still be authored by the audit and refused as its own "
+                  f"evidence", file=sys.stderr)
 
     # Release receipts bind every final reader to the GDS/DEF revision frozen
     # at stream-out. A later writer voids them before the completion audit.
-    _final_digest, _final_error = _shipped_layout_digest(
-        project, effective_top)
-    _current_basis, _basis_error = _layout_basis(
-        project, effective_top, pdk, args.container)
-    _prestream_row = next((r for r in reversed(plan)
-                           if r.name == "prestream_gate"), None)
-    _prestream_basis = ((_prestream_row.extras or {}).get("layout_digest")
-                        if _prestream_row is not None else "")
-    _basis_stale = bool(_prestream_basis and
-                        (_basis_error or _current_basis != _prestream_basis))
-    _layout_stale = bool(_frozen_digest and
-                         (_final_error or _final_digest != _frozen_digest))
-    _diagnostic_only = bool(_prestream_refusal and args.diagnostic_continue)
-    # The identity guards: a receipt that no longer binds the layout on disk
-    # voids its PASS in EVERY mode, measurement-only included (review wave 58).
-    _stale_refusal = ((f"routed DEF/netlist/SDC/PDK basis changed: "
-                       f"{_prestream_basis} -> {_current_basis or _basis_error}"
-                       if _basis_stale else "") or
-                      (f"frozen layout changed: {_frozen_digest} -> "
-                       f"{_final_digest or _final_error}" if _layout_stale else "") or
-                      ("no frozen layout identity" if not _frozen_digest else ""))
-    # R-0929-TAIL-CONTINUES: rows measured on a CURRENT measurement-only stream
-    # keep their measured status; the stream is never a release candidate.
-    _void_refusal = _prestream_refusal or _stale_refusal
-    _release_refusal = _void_refusal or _measurement_only
-    _layout_rows = {"gds", "prefill_evidence", "layout_freeze",
-                    "pad_ring_route_evidence", "drc", "lvs",
-                    "canonicalize_artefacts",
-                    "drv_promotion_corroboration", "gds_xor",
-                    "tapeout_precheck", "signoff_metrics_aggregate",
-                    "tapeout_docs_gen", "ic_release_docs_gen",
-                    "digital_hardmacro_gen", "ip_release_docs_gen"}
-    _layout_rows.update(name for name, *_ in _FINAL_LAYOUT_GATES)
-    _layout_rows.update(name for name, *_ in _DECLARED_SIGNOFF_GATES)
-    for _row in plan:
-        if _row.name not in _layout_rows:
-            continue
-        _row.extras["layout_digest"] = _frozen_digest or "UNAVAILABLE"
-        if _void_refusal and _row.status == "PASS":
-            _row.status = "NOT_MEASURED"
-            _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
-            _row.detail += "; receipt invalidated: " + _void_refusal
-        if _measurement_only and not _prestream_refusal:
-            _row.extras["release_scope"] = "MEASUREMENT_ONLY"
-            _row.extras["release_verdict"] = "NOT_ELIGIBLE_FOR_RELEASE"
-            _row.extras["upstream_failed_gate"] = _measurement_only
-        if _diagnostic_only:
-            _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
-            _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
-            _row.extras["upstream_failed_gate"] = _prestream_refusal
-    for _row in _pre_audit_rows:
-        if _diagnostic_only:
-            _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
-            _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
-            _row.extras["upstream_failed_gate"] = _prestream_refusal
-            if _row.status == "PASS":
+    if _execution.request()['mode'] != 'default':
+        _final_digest, _final_error = _shipped_layout_digest(
+            project, effective_top)
+        _current_basis, _basis_error = _layout_basis(
+            project, effective_top, pdk, args.container)
+        _prestream_row = next((r for r in reversed(plan)
+                               if r.name == "prestream_gate"), None)
+        _prestream_basis = ((_prestream_row.extras or {}).get("layout_digest")
+                            if _prestream_row is not None else "")
+        _basis_stale = bool(_prestream_basis and
+                            (_basis_error or _current_basis != _prestream_basis))
+        _layout_stale = bool(_frozen_digest and
+                             (_final_error or _final_digest != _frozen_digest))
+        _diagnostic_only = bool(_prestream_refusal and args.diagnostic_continue)
+        # The identity guards: a receipt that no longer binds the layout on disk
+        # voids its PASS in EVERY mode, measurement-only included (review wave 58).
+        _stale_refusal = ((f"routed DEF/netlist/SDC/PDK basis changed: "
+                           f"{_prestream_basis} -> {_current_basis or _basis_error}"
+                           if _basis_stale else "") or
+                          (f"frozen layout changed: {_frozen_digest} -> "
+                           f"{_final_digest or _final_error}" if _layout_stale else "") or
+                          ("no frozen layout identity" if not _frozen_digest else ""))
+        # R-0929-TAIL-CONTINUES: rows measured on a CURRENT measurement-only stream
+        # keep their measured status; the stream is never a release candidate.
+        _void_refusal = _prestream_refusal or _stale_refusal
+        _release_refusal = _void_refusal or _measurement_only
+        _layout_rows = {"gds", "prefill_evidence", "layout_freeze",
+                        "pad_ring_route_evidence", "drc", "lvs",
+                        "canonicalize_artefacts",
+                        "drv_promotion_corroboration", "gds_xor",
+                        "tapeout_precheck", "signoff_metrics_aggregate",
+                        "tapeout_docs_gen", "ic_release_docs_gen",
+                        "digital_hardmacro_gen", "ip_release_docs_gen"}
+        _layout_rows.update(name for name, *_ in _FINAL_LAYOUT_GATES)
+        _layout_rows.update(name for name, *_ in _DECLARED_SIGNOFF_GATES)
+        for _row in plan:
+            if _row.name not in _layout_rows:
+                continue
+            _row.extras["layout_digest"] = _frozen_digest or "UNAVAILABLE"
+            if _void_refusal and _row.status == "PASS":
                 _row.status = "NOT_MEASURED"
                 _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
-    _receipt_path = _pl.reports_phase3_dir(project) / "layout_receipts.json"
-    _receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    _receipt_doc = {
-        "frozen_layout_digest": _frozen_digest or None,
-        "current_layout_digest": _final_digest or None,
-        "prestream_basis_digest": _prestream_basis or None,
-        "current_basis_digest": _current_basis or None,
-        "gds_relpath": f"phase3/stage3/pnr/{effective_top}.gds",
-        "gds_sha256": (_sha256_file(_pl.pnr_dir(project) / f"{effective_top}.gds")
-                       if (_pl.pnr_dir(project) / f"{effective_top}.gds").is_file()
-                       else None),
-        "def_sha256": (_sha256_file(_pl.pnr_dir(project) / "routed.def")
-                       if (_pl.pnr_dir(project) / "routed.def").is_file()
-                       else None),
-        "upstream_failed_gate": _prestream_refusal or _measurement_only or None,
-        "release_scope": ("DIAGNOSTIC_ONLY" if _diagnostic_only
-                          else "MEASUREMENT_ONLY" if (_measurement_only
-                                                      and not _prestream_refusal)
-                          else "RELEASE_CANDIDATE"),
-        "release_verdict": ("NOT_ELIGIBLE_FOR_RELEASE" if (_measurement_only
+                _row.detail += "; receipt invalidated: " + _void_refusal
+            if _measurement_only and not _prestream_refusal:
+                _row.extras["release_scope"] = "MEASUREMENT_ONLY"
+                _row.extras["release_verdict"] = "NOT_ELIGIBLE_FOR_RELEASE"
+                _row.extras["upstream_failed_gate"] = _measurement_only
+            if _diagnostic_only:
+                _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
+                _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
+                _row.extras["upstream_failed_gate"] = _prestream_refusal
+        for _row in _pre_audit_rows:
+            if _diagnostic_only:
+                _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
+                _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
+                _row.extras["upstream_failed_gate"] = _prestream_refusal
+                if _row.status == "PASS":
+                    _row.status = "NOT_MEASURED"
+                    _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
+        _receipt_path = _pl.reports_phase3_dir(project) / "layout_receipts.json"
+        _receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        _receipt_doc = {
+            "frozen_layout_digest": _frozen_digest or None,
+            "current_layout_digest": _final_digest or None,
+            "prestream_basis_digest": _prestream_basis or None,
+            "current_basis_digest": _current_basis or None,
+            "gds_relpath": f"phase3/stage3/pnr/{effective_top}.gds",
+            "gds_sha256": (_sha256_file(_pl.pnr_dir(project) / f"{effective_top}.gds")
+                           if (_pl.pnr_dir(project) / f"{effective_top}.gds").is_file()
+                           else None),
+            "def_sha256": (_sha256_file(_pl.pnr_dir(project) / "routed.def")
+                           if (_pl.pnr_dir(project) / "routed.def").is_file()
+                           else None),
+            "upstream_failed_gate": _prestream_refusal or _measurement_only or None,
+            "release_scope": ("DIAGNOSTIC_ONLY" if _diagnostic_only
+                              else "MEASUREMENT_ONLY" if (_measurement_only
                                                           and not _prestream_refusal)
-                            else "NOT_MEASURED_FOR_RELEASE" if _release_refusal
-                            else "ELIGIBLE_FOR_AUDIT"),
-        "receipts": ([asdict(r) for r in plan if r.name in _layout_rows]
-                     + [asdict(r) for r in _pre_audit_rows]),
-    }
-    _publish_final_layout_receipts(project, _receipt_doc, plan)
+                              else "RELEASE_CANDIDATE"),
+            "release_verdict": ("NOT_ELIGIBLE_FOR_RELEASE" if (_measurement_only
+                                                              and not _prestream_refusal)
+                                else "NOT_MEASURED_FOR_RELEASE" if _release_refusal
+                                else "ELIGIBLE_FOR_AUDIT"),
+            "receipts": ([asdict(r) for r in plan if r.name in _layout_rows]
+                         + [asdict(r) for r in _pre_audit_rows]),
+        }
+        _publish_final_layout_receipts(project, _receipt_doc, plan)
 
     fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
 
