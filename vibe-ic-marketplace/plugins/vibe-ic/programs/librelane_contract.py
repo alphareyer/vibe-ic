@@ -3888,6 +3888,21 @@ def check_xor_report(folder: Path, receipt: dict) -> dict:
     return current
 
 
+def _step_input_identity(fingerprint: dict) -> dict:
+    """Compare scientific inputs while retaining full execution attestations.
+
+    LOCAL image authority is freshly verified before every lookup. Its CID
+    and launch-receipt location/hash describe that execution, not tool inputs.
+    Project a copy on both sides so older receipts remain byte-for-byte intact.
+    """
+    identity = dict(fingerprint)
+    local = identity.get('local_image')
+    if isinstance(local, dict):
+        identity['local_image'] = {key: value for key, value in local.items()
+            if key not in ('cid', 'attestation_path', 'attestation_sha256')}
+    return identity
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -4020,7 +4035,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             retained = validate_step_receipt(folder, step_id) if receipt.exists() else None
         except Refusal:
             retained = None
-        if (retained is not None and retained.get('input') == fingerprint
+        if (retained is not None
+                and _step_input_identity(retained['input']) == _step_input_identity(fingerprint)
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
