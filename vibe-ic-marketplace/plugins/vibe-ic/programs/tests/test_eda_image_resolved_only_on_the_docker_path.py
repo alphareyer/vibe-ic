@@ -538,6 +538,9 @@ def test_a_digest_no_local_name_carries_is_refused_by_name(monkeypatch):
 
 def test_librelane_runs_the_held_reference_or_refuses(monkeypatch):
     import librelane_contract as LL
+    from _stated_eda_image import mock_docker_route
+    # This case models the host Docker daemon, not the enclosing LOCAL image.
+    mock_docker_route(monkeypatch)
     monkeypatch.delenv("VIBEIC_LIBRELANE_IMAGE", raising=False)
     _host_holding(monkeypatch, _eda_pin.IMAGE_REPO_DEFAULT)
     assert LL.resolve_image(None) == f"{_eda_pin.IMAGE_REPO_DEFAULT}@{_D}"
