@@ -83,6 +83,24 @@ def _pad_record(proj):
     return rec
 
 
+def test_native_prelayout_binds_step7_not_the_later_pnr_deck(tmp_path, monkeypatch):
+    """Only the native edge is captured; the normal Step-7 caller still runs."""
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    (proj / "phase3").mkdir(exist_ok=True)
+    (proj / "phase3/librelane_switch.json").write_text(json.dumps({
+        "steps": {"7": "direct", "8": "librelane", "10": "direct"}}))
+    seen = []
+    def prelayout(project, top, pdk, sdc, staged, modes, notes):
+        seen.append(sdc)
+        return {}
+    monkeypatch.setattr(R, "_prelayout_librelane", prelayout)
+    R.step_prelayout_signoff(proj, TOP, pdk, "some-container")
+    record = _record(proj)
+    assert seen == [proj / record["path"]]
+    assert seen[0] != proj / "phase3/stage3/pnr/constraint.sdc"
+
+
 # --------------------------------------------------------------------------- #
 # RED on main: step 7's declared output is absent after step 7
 # --------------------------------------------------------------------------- #

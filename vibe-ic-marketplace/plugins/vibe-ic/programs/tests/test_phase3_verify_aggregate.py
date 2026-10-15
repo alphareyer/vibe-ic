@@ -92,3 +92,46 @@ class TestAggregator:
         d = rep.as_dict()
         assert d["emitted_by"] == \
             f"phase3_verify_aggregate v{shipped_plugin_version()}"
+
+
+def test_backing_checks_are_shipped_canonical_consumers(tmp_path):
+    expected = {"phase23_completion_self_audit_check.py", "drc_report_check.py",
+                "lvs_report_check.py", "sta_report_check.py"}
+    assert set(mod.BACKING_CHECKS) == expected
+    for name in mod.BACKING_CHECKS:
+        assert (mod.PROGRAMS_DIR / name).is_file()
+        child = mod._run_check(name, tmp_path)
+        assert child.argv[1] == str(mod.PROGRAMS_DIR / name)
+        assert child.exit_code != 127
+        assert "can't open file" not in child.stderr_tail
+    assert "--signoff" in mod._run_check("drc_report_check.py", tmp_path).argv
+    sta = mod._run_check("sta_report_check.py", tmp_path)
+    assert sta.argv[-2:] == ["--under", "phase3/stage3/sta/post_route_timing.rpt"]
+
+
+def test_missing_checker_retains_stderr_and_is_not_measured(tmp_path):
+    child = mod._run_check("unshipped_public_checker.py", tmp_path)
+    assert not child.passed
+    assert child.status == "NOT_MEASURED"
+    assert "can't open file" in child.stderr_tail
+    assert child.argv[1].endswith("unshipped_public_checker.py")
+
+
+def test_canonical_artifacts_are_discovered_without_legacy_aliases(tmp_path):
+    paths = ["phase2/stage2/synth/public_synth.v", "phase3/stage3/pnr/public.gds",
+             "phase3/stage3/pnr/public.def", "phase3/stage3/sta/post_route_timing.rpt",
+             "reports/phase3/drc_signoff.rpt", "reports/phase3/lvs.rpt"]
+    for rel in paths:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("public source fixture\n")
+    rows = mod.scan_artifacts(tmp_path)
+    assert all(row.present for row in rows), rows
+    assert {str(mod.Path(row.path).relative_to(tmp_path)) for row in rows} == set(paths)
+
+
+def test_missing_sta_is_not_displayed_as_measured_zero(tmp_path):
+    rep = mod.verify(tmp_path)
+    assert rep.verdict == "FAIL"
+    assert rep.sta_wns_ns is None and rep.sta_tns_ns is None
+    assert all(check.exit_code != 127 for check in rep.checks)

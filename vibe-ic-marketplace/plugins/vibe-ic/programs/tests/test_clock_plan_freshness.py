@@ -81,6 +81,48 @@ _SDC = "create_clock -name clk -period 10.0 [get_ports clk]\n"
 _SDC_REL = "phase3/stage3/pnr/constraint.sdc"
 
 
+def test_image_owned_lef_metadata_does_not_read_the_host_namespace(tmp_path, monkeypatch):
+    import _physical_current as pc
+    import librelane_contract as llc
+    from types import SimpleNamespace
+    lef = tmp_path.parent / (tmp_path.name + "-image-only.lef")
+    # Deliberately different host bytes at the same absolute image path.
+    lef.write_text("host namespace is not the selected image\n")
+    image = "ghcr.io/vibeic/vibeic-eda@sha256:" + "a" * 64
+    expected = {"path": str(lef), "bytes": 9,
+                "sha256": hashlib.sha256(b"image LEF").hexdigest(), "image": image}
+    calls = []
+    def image_read(argv, **kwargs):
+        calls.append(argv)
+        assert argv[argv.index("--skip") - 1] == image
+        assert argv[-1] == str(lef)
+        return SimpleNamespace(returncode=0, stdout=json.dumps([dict(expected)]), stderr="")
+    monkeypatch.setattr(llc, "run_container", image_read)
+    assert pc.lef_entries(tmp_path, [str(lef)], image=image) == [expected]
+    assert len(calls) == 1
+
+
+def test_missing_image_lef_does_not_fall_back_to_host(tmp_path, monkeypatch):
+    import _physical_current as pc
+    import librelane_contract as llc
+    import pytest
+    from types import SimpleNamespace
+    path = tmp_path.parent / (tmp_path.name + "-host-only.lef")
+    path.write_text("host LEF\n")
+    monkeypatch.setattr(llc, "run_container", lambda *_a, **_k: SimpleNamespace(
+        returncode=1, stdout="", stderr="FileNotFoundError: selected image LEF missing"))
+    with pytest.raises(ValueError, match="CURRENT_IMAGE_LEF_UNAVAILABLE"):
+        pc.lef_entries(tmp_path, [str(path)], image="image@sha256:" + "a" * 64)
+
+
+def test_project_lef_remains_bound_to_the_identity_mount(tmp_path):
+    import _physical_current as pc
+    path = tmp_path / "input/pdk/tech.lef"
+    path.parent.mkdir(parents=True)
+    path.write_text("project LEF\n")
+    assert pc.lef_entries(tmp_path, [str(path)], image="selected-image") == [pc.entry(tmp_path, path)]
+
+
 def _plan(*, derived_from=None, clocks=None) -> dict:
     doc = {
         "tool": "openroad",
