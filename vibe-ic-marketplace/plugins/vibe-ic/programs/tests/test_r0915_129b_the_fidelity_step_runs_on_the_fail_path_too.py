@@ -221,9 +221,11 @@ def test_the_trigger_has_a_loud_absence_and_a_declared_producer():
 
 
 def test_its_sibling_keeps_its_own_dependency():
-    """CONTROL: 37.4 aggregates the run's verdicts and IS downstream of 37. This
-    change must not widen to it -- only the step whose subject is two files."""
-    assert _step("37.4").get("blocks_on") == [37]
+    """The aggregate waits for all current owners and remains after stream-out."""
+    assert _step("37.4").get("blocks_on") == [31, 34, 35, "37.3"]
+    edges = {str(row['id']): [str(sid) for sid in row.get('blocks_on', [])]
+             for row in _flow()['steps']}
+    assert '37' in _ancestry(edges, '37.4')
 
 
 # ── (2) the producer runs before the audit reads its output ─────────────────

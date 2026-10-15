@@ -14,9 +14,8 @@ density.rb`, one of 177 such lines naming 36 distinct rule decks, while
 write the release documents over `Density: NOT_MEASURED`, failing step 37.5ic --
 over a number the run had produced.
 
-The transcript is found by SHARED EVIDENCE, not by a filename guess: on run21
-`drc_signoff.json` scopes only the report, and the sibling
-`general_precheck/precheck_klayout_drc.json` scopes that SAME report AND the log.
+The transcript is named by the canonical DRC audit's OWN scope. A future
+precheck sibling cannot supply authority for this earlier metrics row.
 
 Both directions are pinned. A log that shows the deck executed over a clean report
 gives a MEASURED zero with the log line as its basis; a log that does NOT show it,
@@ -49,7 +48,9 @@ def project(tmp_path, *, total=0, cats=("spacing", "width"), decks=("via", "dens
         "program": "eda_report_audit:drc", "passed": True,
         "summary": {"real_violation_total": total,
                     "categories_found": list(cats),
-                    "scoped_under": ["reports/phase3/drc_signoff.rpt"]}}))
+                    "scoped_under": ["reports/phase3/drc_signoff.rpt"] +
+                        (["reports/phase3/drc_signoff.log"]
+                         if log_scoped_by_sibling else [])}}))
     if log_scoped_by_sibling:
         (p / "reports/phase3/general_precheck/precheck_klayout_drc.json").write_text(
             json.dumps({"program": "eda_report_audit:drc", "passed": True,

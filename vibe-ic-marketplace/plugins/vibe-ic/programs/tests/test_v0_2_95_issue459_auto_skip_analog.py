@@ -25,6 +25,7 @@ chip-AGNOSTIC: fixtures use synthetic generic names only.
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,6 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
     stage_owner_route(project, "ic")
     if need_analog:
         # The dispatched analog route consumes the Phase-1 block declaration.
-        import json
         declaration = project / "phase1/analog/analog_block_list.json"
         declaration.parent.mkdir(parents=True, exist_ok=True)
         declaration.write_text(json.dumps({"blocks": [{"name": "neutral_analog"}]}))
@@ -63,6 +63,13 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
         captured["events"].append(runner.name)
         if runner.name.startswith("analog"):
             captured["analog_ran"] = True
+        # This substituted child must publish its own current account. The
+        # real Default row reader must not infer a verdict from rc=0 alone.
+        report = orch._phase_report_path(
+            project, runner.name.removesuffix('_runner.py') + '.json')
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({'verdict': 'PASS',
+            'scope': 'SOURCE_FIXTURE_ONLY phase argument transport; no EDA measurement'}))
         return 0  # pretend every child phase succeeded
 
     def fake_read_report(_p):
@@ -230,7 +237,6 @@ def _drive_main_verdicts(monkeypatch, project: Path, argv_extra,
     stage_owner_route(project, "ic")
     if need_analog:
         # The dispatched analog route consumes the Phase-1 block declaration.
-        import json
         declaration = project / "phase1/analog/analog_block_list.json"
         declaration.parent.mkdir(parents=True, exist_ok=True)
         declaration.write_text(json.dumps({"blocks": [{"name": "neutral_analog"}]}))
@@ -242,7 +248,13 @@ def _drive_main_verdicts(monkeypatch, project: Path, argv_extra,
             captured["analog_ran"] = True
         # rc mirrors the configured verdict so main()'s rc-derived verdict agrees
         stem = runner.name.split("_")[0]
-        return 0 if verdicts.get(stem, "PASS") != "FAIL" else 1
+        verdict = verdicts.get(stem, "PASS")
+        report = orch._phase_report_path(
+            project, runner.name.removesuffix('_runner.py') + '.json')
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({'verdict': verdict,
+            'scope': 'SOURCE_FIXTURE_ONLY phase argument transport; no EDA measurement'}))
+        return 0 if verdict != "FAIL" else 1
 
     def fake_read_report(_p):
         # main() calls _read_report right after each phase; return the verdict

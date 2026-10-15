@@ -73,6 +73,13 @@ def _span_inputs(project, top: str = "top") -> None:
     """
     from pathlib import Path as _P
     project = _P(project)
+    # These cache controls use the legacy direct synthesis recipe, not a
+    # LibreLane handoff. State that selection before computing its read-set.
+    switch = project / 'phase3/librelane_switch.json'
+    settings = json.loads(switch.read_text()) if switch.is_file() else {}
+    settings.setdefault('steps', {}).setdefault('9', 'direct')
+    switch.parent.mkdir(parents=True, exist_ok=True)
+    switch.write_text(json.dumps(settings))
     for rel, text in (
         ("phase2/stage1/rtl/%s.v" % top, "module %s(); endmodule\n" % top),
         ("phase2/stage2/constraints/%s.sdc" % top,
@@ -513,6 +520,14 @@ def _drive(monkeypatch, project: Path) -> list:
     record which steps it invokes. The producer helpers are LEFT REAL — the
     cache verdict is what is under test."""
     called: list = []
+    import execution_policy
+    original_request = execution_policy.request
+    # The old three-kind cache is a legacy-unit responsibility. A bare GDS
+    # cache does not stand in for Default's current finishing/consumer chain.
+    monkeypatch.setattr(execution_policy, 'request',
+                        lambda: dict(original_request(), mode='ultra'))
+    monkeypatch.setattr(execution_policy, 'bootstrap', lambda *a, **k: None)
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
 
     def _step(name):
         def _f(*a, **k):
@@ -533,6 +548,7 @@ def _drive(monkeypatch, project: Path) -> list:
                  "step_canonicalize_artefacts"):
         monkeypatch.setattr(R, attr, _step(attr[len("step_"):]))
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
+    monkeypatch.setattr(R, "step_postroute_repair_librelane", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
     # This fixture tests cache identity with synthetic route and timing data.
