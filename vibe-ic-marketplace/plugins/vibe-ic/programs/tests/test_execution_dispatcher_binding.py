@@ -115,18 +115,31 @@ def test_actual_dispatcher_alias_cannot_create_another_eligible_arm(tmp_path, mo
     assert not (root / alias.arm_id).exists()
 
 
-def test_unregistered_executed_helper_has_terminal_refusal(tmp_path):
+def test_unregistered_executed_helper_has_terminal_refusal(tmp_path, monkeypatch):
     alias, helper = wrapper(tmp_path, arm(), 'nested_static', bind_helper=False)
-    ctl = controller(alias, fixture_root=tmp_path); root = tmp_path / 'run'; ctx = backend.context16(tmp_path)
-    try:
-        result = ctl.run(ctx, root, 'ultra-mode')
-        status = result['candidate_statuses'].get(alias.arm_id)
-    except em.Refusal as exc:
-        status = 'REFUSED'; reason = exc.code
-    record(tmp_path, status=status, helper=str(helper), helper_registered=str(helper) in alias.source_files)
+    root = tmp_path / 'run'
+    run_calls = []
+    real_run = em.Controller.run
+
+    def observe_run(self, *args, **kwargs):
+        run_calls.append(True)
+        return real_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(em.Controller, 'run', observe_run)
+    # The real unbound dependency is now rejected at enrollment. Do not
+    # admit it merely to manufacture a later runtime refusal receipt.
+    with pytest.raises(em.Refusal, match='^ADAPTER_SOURCE_CLOSURE_INCOMPLETE:') as caught:
+        controller(alias, fixture_root=tmp_path)
+    status = 'REFUSED'; reason = caught.value.code
+    record(tmp_path, status=status, reason=reason, detail=str(caught.value),
+           helper=str(helper), helper_registered=str(helper) in alias.source_files,
+           controller_run_calls=len(run_calls), run_root_exists=root.exists())
     assert status == 'REFUSED', status
-    refusal = json.loads((root / 'refusal.json').read_text())
-    assert refusal['reason'] == reason == 'PROVIDER_DEPENDENCY_UNBOUND'
+    assert reason == 'ADAPTER_SOURCE_CLOSURE_INCOMPLETE'
+    assert str(caught.value) == f'ADAPTER_SOURCE_CLOSURE_INCOMPLETE: {helper}'
+    assert run_calls == []
+    assert not root.exists()
+    assert not (root / 'selected').exists()
     assert not (root / alias.arm_id).exists()
 
 
