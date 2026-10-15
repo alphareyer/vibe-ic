@@ -914,7 +914,7 @@ set _pg_ni 0; set _pg_nb 0
 foreach i [$_pg_block getInsts] {{
   foreach m [[$i getMaster] getMTerms] {{
     set t [$i findITerm [$m getName]]
-    set nn ""; set shapes 0
+    set nn ""; set shapes 0; set nwells 0; set pwells 0; set unknown 0
     set net_kind ""
     if {{$t ne "NULL"}} {{
       set n [$t getNet]
@@ -925,12 +925,20 @@ foreach i [$_pg_block getInsts] {{
     if {{$t ne "NULL"}} {{
       foreach g [$t getGeometries] {{
         lassign $g layer box
-        if {{[_pg_routing_box $layer $box]}} {{ incr shapes }}
+        if {{[_pg_routing_box $layer $box]}} {{
+          incr shapes
+        }} elseif {{[$box xMin] < [$box xMax] && [$box yMin] < [$box yMax] &&
+                    [$layer getType] eq "MASTERSLICE" && [$layer getLef58TypeString] eq "NWELL"}} {{
+          incr nwells
+        }} elseif {{[$box xMin] < [$box xMax] && [$box yMin] < [$box yMax] &&
+                    [$layer getType] eq "MASTERSLICE" && [$layer getLef58TypeString] eq "PWELL"}} {{
+          incr pwells
+        }} else {{ incr unknown }}
       }}
     }}
     set box [$i getBBox]
     set placed [expr {{[$i isPlaced] && [$box xMin] < [$box xMax] && [$box yMin] < [$box yMax]}}]
-    _pg_row I [_pg_b64 [$i getName]] [_pg_b64 [$m getName]] [_pg_b64 $nn] [$m getSigType] $placed $shapes
+    _pg_row I [_pg_b64 [$i getName]] [_pg_b64 [$m getName]] [_pg_b64 $nn] [$m getSigType] $placed $shapes $nwells $pwells $unknown
   }}
 }}
 foreach b [$_pg_block getBTerms] {{
@@ -977,13 +985,28 @@ def _power_connectivity_readback(text: str, declared: dict,
     try:
         for line in text.splitlines():
             row = line.split('\t')
-            if row[0] == 'I' and len(row) == 7:
+            if row[0] == 'I' and len(row) in (7, 10):
                 pin = dict(kind='ITerm', instance=name(row[1]), pin=name(row[2]),
                            net=name(row[3]), use=row[4], placed=int(row[5]), shapes=int(row[6]))
                 pins.append(pin)
+                nwells, pwells, unknown = map(int, row[7:]) if len(row) == 10 else (0, 0, 0)
+                if min(pin['shapes'], nwells, pwells, unknown) < 0:
+                    raise ValueError('negative physical geometry count')
+                well_only = (pin['shapes'] == 0 and unknown == 0 and
+                             ((nwells > 0 and pwells == 0 and pin['use'] == 'POWER') or
+                              (pwells > 0 and nwells == 0 and pin['use'] == 'GROUND')))
+                if nwells or pwells or unknown:
+                    pin.update(nwell_shapes=nwells, pwell_shapes=pwells,
+                               unknown_shapes=unknown)
+                if well_only:
+                    # The explicit supply-net binding is checked below. PSM
+                    # measures routing metal, not semiconductor body ties.
+                    pin['physical_scope'] = 'well_geometry_and_supply_net_not_body_tie_continuity'
+                if (nwells and pin['use'] != 'POWER') or (pwells and pin['use'] != 'GROUND'):
+                    failures.append(f"well terminal supply kind mismatch: {pin['instance']}/{pin['pin']}")
                 if not pin['net']:
                     failures.append(f"unconnected supply ITerm: {pin['instance']}/{pin['pin']}")
-                if pin['placed'] != 1 or pin['shapes'] <= 0:
+                if pin['placed'] != 1 or (pin['shapes'] <= 0 and not well_only):
                     missing.append(f"ITerm outside native physical population: {pin['instance']}/{pin['pin']}")
             elif row[0] == 'B' and len(row) == 7:
                 pin = dict(kind='BTerm', pin=name(row[1]), net=name(row[2]), use=row[3],

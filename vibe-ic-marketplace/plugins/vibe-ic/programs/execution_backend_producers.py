@@ -1304,12 +1304,17 @@ def produce_signoff(project, params):
             connectivity = power_grid.publish_power_connectivity(
                 project, image, root, routed_def=pnr / (top + '.def'),
                 config=project / 'phase3/librelane/22-config/OpenROAD.RCX.json')
+            pg_failures = connectivity.get('failures', [])
+            pg_missing = connectivity.get('not_measured', [])
+            pg_detail = ('power-network connectivity: ' + str(connectivity.get('counts', {})) +
+                         f'; failures={len(pg_failures)}; not_measured={len(pg_missing)}' +
+                         '; samples=' + repr([str(s)[:240] for s in (pg_failures[:3] + pg_missing[:3])]) +
+                         '; full_report=' + power_grid.POWER_CONNECTIVITY_REPORT)
             if connectivity['verdict'] == 'FAIL':
-                failures += connectivity.get('failures', [])
+                failures.append(pg_detail)
             elif connectivity['verdict'] == 'NOT_MEASURED' and not failures:
                 return {'verdict': 'NOT_MEASURED',
-                        'detail': 'power-network connectivity: ' +
-                                  '; '.join(connectivity.get('not_measured', []))}
+                        'detail': pg_detail}
         if failures:
             return {'verdict': 'FAIL', 'detail': '\n'.join(failures)}
     elif sid == '24':
