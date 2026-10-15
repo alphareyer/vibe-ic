@@ -19951,12 +19951,32 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
             return False
 
     def current_inputs():
-        paths = {'opensta_gate': gate, 'pnr_sdc': deck,
+        # Step8 times Step7's selected immutable output. PnR owns a separate
+        # deck which can later receive a named derivation. Read the existing
+        # producer record instead of requiring those two paths to be equal.
+        from _ppa import timing as timing
+        import phase3_one_shot_runner as phase3
+        producer_record = _pl.constraints_dir(project) / timing.ASIC_SDC_RECORD
+        selected_deck, deck_key = deck, 'pnr_sdc'
+        if producer_record.is_file():
+            produced = json.loads(producer_record.read_text())
+            owned = timing.owned_step7_outputs(phase3, project)
+            rel = produced.get('path') if isinstance(produced, dict) else None
+            if (not isinstance(rel, str) or not isinstance(produced.get('sha256'), str)
+                    or owned.get(rel) != produced['sha256']):
+                raise ValueError('SDC_POSTCHECK_STEP7_OUTPUT_STALE')
+            selected_deck = rooted_file(project / rel, 'canonical_sdc')
+            deck_key = 'canonical_sdc'
+        # Preserve the existing legacy producer contract when no Step7 record
+        # exists. A canonical gate cannot fall back to an unrelated PnR deck.
+        paths = {'opensta_gate': gate, deck_key: selected_deck,
                  'mapped_netlist': netlist, 'l8': l8,
                  # Step 7's PVT matrix is a declared Step-8 input. Keep it as
                  # a named binding (rather than relying on the SDC glob) so a
                  # changed corner census invalidates this receipt.
                  'pvt_matrix': project / 'phase2/stage2/constraints/pvt_matrix.json'}
+        if deck_key == 'canonical_sdc':
+            paths['step7_sdc_record'] = producer_record
         paths.update({str(p.relative_to(project)): p for p in
                       (project / 'phase2/stage2/constraints').glob('*.sdc')})
         paths = {name: rooted_file(path, name) for name, path in paths.items()}
@@ -19966,8 +19986,8 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
             raise ValueError('SDC_POSTCHECK_GATE_STALE: OpenSTA state')
         gate_deck = rooted_file(doc.get('sdc'), 'step8 gate sdc')
         gate_netlist = rooted_file(doc.get('netlist'), 'step8 gate netlist')
-        if (gate_deck != deck or
-                doc.get('sdc_sha256') != ll.digest(deck) or
+        if (gate_deck != selected_deck or
+                doc.get('sdc_sha256') != ll.digest(selected_deck) or
                 gate_netlist != netlist or
                 doc.get('netlist_sha256') != ll.digest(netlist)):
             raise ValueError('SDC_POSTCHECK_GATE_STALE: current deck/netlist')
