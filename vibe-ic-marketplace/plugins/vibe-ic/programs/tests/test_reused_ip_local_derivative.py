@@ -1312,3 +1312,118 @@ def test_native_derivative_pad_metadata_closes_before_current_source_admission(p
                       if json.loads(line).get('event') == 'ip_catalog_local_derivative'
                       and json.loads(line).get('record') == current['local_derivative']]
     assert changed_events[-1]['outputs']['phase2/stage1/rtl/SOURCE_MANIFEST.json'] == 'sha256:' + _h(mf)
+
+
+# #3155: public exact selected pin, native architectural effects, no owner fixture.
+import os  # noqa: E402
+import subprocess  # noqa: E402
+
+_CSR_PUBLIC_CASES = ["csrrs-x0", "csrrc-x0", "csrrsi-zero", "csrrci-zero",
+                     "write-clear-set", "no-read-timer"]
+
+
+def _mtie_firmware(case):
+    def addi(rd, value):
+        return ((value & 0xfff) << 20) | (rd << 7) | 0x13
+    def csr(number, source, rd=0, operation=1):
+        return (number << 20) | (source << 15) | (operation << 12) | (rd << 7) | 0x73
+    def store(rs, address):
+        return ((address >> 5) << 25) | (rs << 20) | (2 << 12) | ((address & 31) << 7) | 0x23
+    words = [csr(0x304,0), csr(0x300,0), addi(3,128), csr(0x304,3)]
+    expected = []
+    def observe(address, value):
+        words.append(store(2,address)); expected.append((address,value))
+    if case == "no-read-timer":
+        words += [addi(4,256), csr(0x305,4), addi(4,8), csr(0x300,4), store(3,512), 0x0000006f]
+        expected = [(512,128),(516,0x777),(704,1445)]
+        words += [0x13] * (64-len(words))
+        words += [addi(2,0x777),store(2,516),addi(2,1445),store(2,704),0x0000006f]
+    else:
+        words.append(store(0,512)); expected.append((512,0))
+        if case == "write-clear-set":
+            words.append(csr(0x304,0,2)); observe(516,128)
+            words.append(csr(0x304,0,2,2)); observe(520,0)
+            words.append(csr(0x304,3,2,2)); observe(524,0)
+            words.append(csr(0x304,0,2,2)); observe(528,128)
+            words.append(csr(0x304,3,2,3)); observe(532,128)
+            words.append(csr(0x304,0,2,2)); observe(536,0)
+        else:
+            operation = {"csrrs-x0":2,"csrrc-x0":3,"csrrsi-zero":6,"csrrci-zero":7}[case]
+            words.append(csr(0x304,0,2,operation)); observe(516,128)
+            words.append(csr(0x304,0,2,2)); observe(520,128)
+        words += [addi(2,1445),store(2,704),0x0000006f]; expected.append((704,1445))
+    return words,expected
+
+
+@pytest.fixture(scope="module")
+def public_serv_catalog_project(tmp_path_factory):
+    root=tmp_path_factory.mktemp("public_serv_mtie")
+    project=root/"project"; docs=project/"phase1/generated_docs"; docs.mkdir(parents=True)
+    source=project/"input/docs/core_contract.md";source.parent.mkdir(parents=True)
+    text="Reuse SERV from olofk:serv:serv:1.4.0 with selected Zicsr and timer IRQ. WITH_CSR=1, W=1.\n"
+    source.write_text(text)
+    _json(docs/"L1_DATASHEET.json",{"part_name":"neutral_csr_core"})
+    _json(docs/"L2_FRS.json",{"cpu_isa":"rv32i","cpu_arch":"bit-serial","cpu_family":"risc-v","notes":text})
+    old_cache=pull.CACHE_ROOT
+    pull.CACHE_ROOT=Path(os.environ.get("VIBEIC_SERV_PUBLIC_CACHE",str(root/"cache")))
+    try:
+        result=runner.step_rtl_gen(project,"processor_cpu")
+        _json(root/"GENERATOR_RESULT.json",{"status":result.status,"detail":result.detail,"extras":result.extras})
+        assert result.status=="PASS_WITH_WAIVERS",result.detail
+        assert result.extras["ip_fetch"]["reuse_kind"]=="LOCAL_DERIVATIVE",result.extras
+        matches=query.query_catalog(project)
+        assert [m.ip_name for m in matches]==["serv"]
+        yield root,project,matches
+    finally:
+        pull.CACHE_ROOT=old_cache
+
+
+@pytest.mark.parametrize("case",_CSR_PUBLIC_CASES)
+def test_issue3155_selected_mtie_native_external_effects(public_serv_catalog_project,case):
+    root,project,_=public_serv_catalog_project
+    folder=root/case;folder.mkdir()
+    words,expected=_mtie_firmware(case)
+    (folder/"program.hex").write_text("".join(f"{word:08x}\n" for word in words+[0x13]*(1024-len(words))))
+    (folder/"expected.hex").write_text("".join(f"{address:08x}{value:08x}\n" for address,value in expected+[(0,0)]*(32-len(expected))))
+    tb=Path(__file__).parent/"fixtures/serv_mtie_public_tb.sv"
+    rtl=project/"phase2/stage1/rtl"
+    compile_argv=["iverilog","-g2012","-s","serv_mtie_public_tb",
+        f"-Pserv_mtie_public_tb.TIMER_CASE={int(case=='no-read-timer')}",
+        "-o",str(folder/"core.vvp"),str(tb),*[str(p) for p in sorted(rtl.glob("*.v"))]]
+    compiled=subprocess.run(compile_argv,capture_output=True,text=True,cwd=folder)
+    native_argv=["vvp",str(folder/"core.vvp"),"+program=program.hex","+expected=expected.hex",f"+count={len(expected)}"]
+    native=subprocess.run(native_argv,capture_output=True,text=True,cwd=folder) if compiled.returncode==0 else None
+    _json(folder/"NATIVE_RECEIPT.json",{"case":case,"selected":{"WITH_CSR":1,"W":1},
+        "input_words":words,"expected_external_writes":expected,"firmware_sha256":_h(folder/"program.hex"),
+        "tb_sha256":_h(tb),"rtl_sha256":{p.name:_h(p) for p in sorted(rtl.glob("*.v"))},
+        "compile_argv":compile_argv,"compile_rc":compiled.returncode,"compile_stdout":compiled.stdout,"compile_stderr":compiled.stderr,
+        "native_argv":native_argv,"native_rc":native.returncode if native else None,
+        "native_stdout":native.stdout if native else None,"native_stderr":native.stderr if native else None})
+    assert compiled.returncode==0,compiled.stdout+compiled.stderr
+    assert native.returncode==0,native.stdout+native.stderr
+    assert "PUBLIC_MTIP_PASS" in native.stdout
+
+
+def test_issue3155_selected_capability_and_original_errata_preserved(public_serv_catalog_project):
+    _,project,matches=public_serv_catalog_project
+    match=matches[0]
+    assert match.version=="1.4.0" and match.canonical_commit=="1.4.0"
+    assert [e["upstream_commit"] for e in match.errata]==[
+        "41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2","61ef8eaef9f795e2e5425f620e96c6f732a5609b"]
+    manifest=json.loads((project/"phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
+    assert len(list((project/"phase2/stage1/rtl").glob("*.v")))==22
+    state,why=pull.verify_existing_reused_pins_outcome(project,matches,manifest)
+    assert state==pull.PIN_VERIFIED,why
+
+
+def test_issue3155_wrong_csr_bytes_refused_by_normal_consumer(public_serv_catalog_project):
+    _,project,matches=public_serv_catalog_project
+    path=project/"phase2/stage1/rtl/serv_csr.v"
+    original=path.read_bytes()
+    manifest=json.loads((path.parent/"SOURCE_MANIFEST.json").read_text())
+    try:
+        path.write_bytes(original+b"\n// changed selected source\n")
+        state,why=pull.verify_existing_reused_pins_outcome(project,matches,manifest)
+        assert state==pull.PIN_MISMATCH,(state,why)
+    finally:
+        path.write_bytes(original)
