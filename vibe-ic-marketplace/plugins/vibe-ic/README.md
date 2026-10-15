@@ -1,4 +1,4 @@
-# vibe-ic — AI-Native IC Design plugin (**v1.29.3**)
+# vibe-ic — AI-Native IC Design plugin (**v1.29.4**)
 
 **A deterministic program layer with AI-backup skills, driving spec → RTL → GDS.**
 
@@ -6,7 +6,7 @@ The plugin is no longer "compliance regexes over agent prose". It is **1604 top-
 programs** (1444 of them catalogued in [`programs/INDEX.md`](programs/INDEX.md); the other
 160 are helper modules and shims) that run the flow, **70 skills** that back the programs up
 where judgment is genuinely required, **7 slash commands**, **9 agents**, and
-**4428 test files**. Programs decide; skills only fill the holes the programs
+**4432 test files**. Programs decide; skills only fill the holes the programs
 deliberately leave.
 
 ## ► The one front door
@@ -30,6 +30,23 @@ Mixed-signal `M1-M4` is a **reporting** track (`final_report_generate.py`,
 Flags: `--top-name --container --max-rtl-repair-retries --skip-phase1 --skip-analog --skip-phase3
 --skip-hardware --die-um --util --pdk --allow-oss-pdk-fallback --ic-name
 --dashboard[-port|-host|-full]`.
+
+### Default execution order
+
+The canonical [`flow/phase1_phase2_phase3.yaml`](flow/phase1_phase2_phase3.yaml)
+declares the execution sequence and its eight `execution_stage` groups: route and
+endpoint; RTL verification; synthesis and constraints; physical design; route
+closure and electrical verification; GDS finishing; final GDS verification; and
+sign-off and delivery. Execution, bounded resume and preflight use that sequence
+through `programs/_flow_yaml.py`; legacy step IDs are identities, not numeric
+execution ranks. Existing output paths and dated step versions remain available.
+
+AI identifies the IC, IP or RTL-only endpoint. The program follows the selected
+fixed route and stops when a required current step cannot pass. Analog,
+mixed-signal, hardware and post-fabrication tracks retain their applicability
+rules. The complete delivery checklist runs after package generation; a later
+artifact is not required before its producer is due. A genuine repair resumes
+the affected upstream steps. Source tests do not establish whole-IC acceptance.
 
 ### Program-first, AI-backup
 
@@ -235,7 +252,7 @@ plugins/vibe-ic/
 │   ├── l_doc_taxonomy.py          — L1..L27 layer definitions
 │   ├── _commercial_pdk.py         — config-driven commercial-PDK resolution
 │   ├── gds_antenna/, metal_fill/  — sub-packages
-│   └── tests/                     — 4428 test files
+│   └── tests/                     — 4432 test files
 ├── skills/                        — 70 skills, each with SKILL.md + compliance.yaml
 │   └── <skill>/tests/             — 82 per-skill compliance regression files
 ├── commands/                      — 7 slash commands + _anti_fabrication_rules.md
@@ -249,7 +266,7 @@ plugins/vibe-ic/
 
 ## Test suite
 
-**4428 test files** under `programs/tests/`, plus **82** per-skill compliance regressions
+**4432 test files** under `programs/tests/`, plus **82** per-skill compliance regressions
 under `skills/*/tests/`.
 
 Run it the CI way — a bare `pytest` from the plugin root, exactly as

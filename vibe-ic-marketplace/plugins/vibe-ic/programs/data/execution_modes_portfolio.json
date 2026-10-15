@@ -32,8 +32,8 @@
       "default-mode",
       "ultra-mode"
     ],
-    "canonical_flow_sha256": "4127110c13672d728d410f2896ee6ff22c77d38ce2e3d9f4c5b8262f71cddad1",
-    "canonical_flow_git_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207",
+    "canonical_flow_sha256": "f884c32d2921838898befb6d5519c45a1e56ce97a2e2be65dc36d03a6d064e38",
+    "canonical_flow_git_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add",
     "production_runner_hooks": 5,
     "registered_fixed_step_adapters": 60,
     "source_candidate_implementations": 54,
@@ -869,7 +869,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=D1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1042,7 +1042,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=0.5ic",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1158,7 +1158,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1236,6 +1236,183 @@
       "required_output_contract": [
         "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
       ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
+      "id": "P0",
+      "title_en": "Structural-RTL pre-flight (chip-AGNOSTIC structural gates)",
+      "phase": "phase2",
+      "canonical_stage": "stage1",
+      "current_default": {
+        "mode": "direct_adapter",
+        "tool_ids": [
+          "vibeic",
+          "iverilog"
+        ],
+        "label_en": "Current source adapter: Vibe-IC program and evidence gates, Icarus Verilog / vvp",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "P0",
+          "programs": [
+            "flow_step_output_content_check"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=P0",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "librelane"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "LibreLane RTL facts/lint with structural preflight gates",
+        "component_tool_ids": [
+          "yosys",
+          "verilator",
+          "vibeic"
+        ],
+        "status": "proposed",
+        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "P0_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Yosys.JsonHeader / Verilator.Lint",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Frontend/lint tools feed declaration-based rules.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_yosys_2",
+          "tool_id": "yosys",
+          "role": "producer",
+          "applicability": "Elaborated connectivity/cell facts",
+          "integration_status": "proposed",
+          "independence_family": "yosys",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Must save typed current JSON.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_slang_3",
+          "tool_id": "slang",
+          "role": "producer",
+          "applicability": "Semantic elaboration/AST",
+          "integration_status": "proposed",
+          "independence_family": "slang",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Semantic SystemVerilog elaboration and AST APIs. slang-tidy shares the slang family.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_verible_4",
+          "tool_id": "verible",
+          "role": "checker",
+          "applicability": "Structural/style lint",
+          "integration_status": "proposed",
+          "independence_family": "verible",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Parser and style lint. A clean style report does not prove functional correctness or eliminate all elaboration defects.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_svck_5",
+          "tool_id": "svck",
+          "role": "checker",
+          "applicability": "Additional lint",
+          "integration_status": "proposed",
+          "independence_family": "svck",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Additional lint rule set; rule coverage and target-project diagnostics need integration.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_iverilog_6",
+          "tool_id": "iverilog",
+          "role": "checker",
+          "applicability": "Protocol reference-TB execution",
+          "integration_status": "verified",
+          "independence_family": "iverilog",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "A P0 subgate already invokes a real simulator.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_vibeic_7",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "P0_openroad_missed10",
+          "tool_id": "openroad",
+          "role": "checker",
+          "applicability": "sv_elaborate command presence only; integration semantics NOT_MEASURED",
+          "integration_status": "proposed",
+          "independence_family": "openroad",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Mostly own policy checks today. Frontend/lint reports cannot discharge the whole preflight population or replace actual testbench execution.",
+      "mandatory_gate_programs": [
+        "flow_step_output_content_check"
+      ],
+      "required_output_contract": [],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
@@ -1332,7 +1509,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=2",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1562,7 +1739,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=3",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1725,7 +1902,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=4",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -1908,7 +2085,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=5",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2034,7 +2211,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=6",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2173,7 +2350,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=7",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2284,7 +2461,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=8",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2416,7 +2593,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=9",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2582,7 +2759,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=10",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2704,7 +2881,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=11",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2829,7 +3006,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=FS1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -2917,7 +3094,6 @@
       ],
       "limitations_en": "Safety designs only. A fault injector does not establish failure-rate authority, ASIL allocation or complete FMEDA.",
       "mandatory_gate_programs": [
-        "fmeda_fault_injection_coverage",
         "fmeda_coverage_check"
       ],
       "required_output_contract": [
@@ -2950,7 +3126,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=DT1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3067,7 +3243,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=12",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3194,7 +3370,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=13",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3327,7 +3503,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3417,7 +3593,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=A2",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3540,7 +3716,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=A3",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3660,7 +3836,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A4",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3830,7 +4006,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=A5",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -3967,7 +4143,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=A6",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4096,7 +4272,8 @@
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "A7",
           "programs": [
-            "analog_pre_vs_post_layout_check"
+            "analog_pre_vs_post_layout_check",
+            "analog_a7_post_layout_emit"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A7",
@@ -4110,7 +4287,7 @@
               ]
             }
           ],
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4272,12 +4449,13 @@
             "analog_hardmacro_gds_emit",
             "analog_lef_gds_outline_check",
             "analog_macro_rtl_interface_check",
-            "analog_topology_behaviour_check"
+            "analog_topology_behaviour_check",
+            "analog_a8_hardmacro_emit"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=A8",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4449,7 +4627,7 @@
               ]
             }
           ],
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4654,7 +4832,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=14",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4769,7 +4947,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=15",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -4918,7 +5096,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=15.5ic",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5039,7 +5217,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=16",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5143,7 +5321,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=17",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5263,7 +5441,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=18",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5383,7 +5561,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=19",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5503,7 +5681,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=20",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5626,7 +5804,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=21",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5760,6 +5938,144 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
+      "id": "32",
+      "title_en": "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
+      "phase": "phase3",
+      "canonical_stage": "stage3",
+      "current_default": {
+        "mode": "class_scoped_librelane",
+        "tool_ids": [
+          "librelane",
+          "openroad",
+          "vibeic"
+        ],
+        "label_en": "Chip pad-ring: LibreLane; core-only/hardmacro: direct adapter",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "32",
+          "programs": [
+            "flow_step_output_content_check",
+            "postroute_timing_repair_audit"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=32",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "librelane"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "LibreLane captured post-route repair and fresh verification",
+        "component_tool_ids": [
+          "openroad",
+          "vibeic"
+        ],
+        "status": "verified",
+        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+        "is_deployed_current": true,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "SOURCE_DEFAULT_FOR_CHIP_PAD_RING_ONLY",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "32_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Vibeic.PostRouteRepair / ResizerTimingPostGRT / RepairDesignPostGRT",
+          "integration_status": "verified",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Current chip class default retains post-DRT closure orchestration.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_openroad_fork_2",
+          "tool_id": "openroad_fork",
+          "role": "producer",
+          "applicability": "Post-DRT repair / incremental route / RC",
+          "integration_status": "verified",
+          "independence_family": "openroad",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Same physical engine family.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_librelane_3",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Odb.InsertECOBuffers",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Different repair actuator; reroute/RCX/STA/DRV/PV afterward.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_vibeic_4",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_siliconcompiler_missed25",
+          "tool_id": "siliconcompiler",
+          "role": "orchestrator",
+          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
+          "integration_status": "proposed",
+          "independence_family": "siliconcompiler",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Non-PASS repair can continue measurement with FAIL/quarantine; it gains no release credit. Missing route inputs refuse stream-out.",
+      "mandatory_gate_programs": [
+        "flow_step_output_content_check",
+        "postroute_timing_repair_audit"
+      ],
+      "required_output_contract": [
+        "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
       "id": "22",
       "title_en": "Parasitic Extraction (RC → SPEF)",
       "phase": "phase3",
@@ -5783,7 +6099,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=22",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -5925,368 +6241,6 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
-      "id": "DT2",
-      "title_en": "Path-delay-fault (at-speed, timing-graded) ATPG",
-      "phase": "phase2",
-      "canonical_stage": "stage2",
-      "current_default": {
-        "mode": "direct_adapter",
-        "tool_ids": [
-          "opensta",
-          "yosys"
-        ],
-        "label_en": "Current source adapter: OpenSTA, Yosys",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "DT2",
-          "programs": [
-            "path_delay_coverage_check",
-            "path_delay_fault_atpg_run"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=DT2",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "yosys"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "SAT path-delay ATPG with real timing grading",
-        "component_tool_ids": [
-          "opensta",
-          "vibeic"
-        ],
-        "status": "verified",
-        "selection_reason": "No LibreLane/OpenROAD path-delay ATPG generator.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "DT2_yosys_1",
-          "tool_id": "yosys",
-          "role": "producer",
-          "applicability": "Path sensitization ATPG",
-          "integration_status": "verified",
-          "independence_family": "yosys",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Current fork SAT path; tool capabilities beyond upstream need pinning.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "DT2_opensta_2",
-          "tool_id": "opensta",
-          "role": "checker",
-          "applicability": "Timing path/slack grading",
-          "integration_status": "verified",
-          "independence_family": "opensta",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Not ATPG pattern generation.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "DT2_tempus_3",
-          "tool_id": "tempus",
-          "role": "checker",
-          "applicability": "Optional independent path/slack grading",
-          "integration_status": "needslicensed",
-          "independence_family": "tempus",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Optional independent commercial STA/SI arm; requires license, qualified libraries and an integration adapter.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "DT2_vibeic_4",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Bind test patterns to required timed paths and corners. Scan insertion alone cannot produce timing-graded path-delay coverage.",
-      "mandatory_gate_programs": [
-        "path_delay_coverage_check"
-      ],
-      "required_output_contract": [
-        "reports/phase2/dft/path_delay_coverage.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "DT3",
-      "title_en": "Small-delay-defect (SDD) at-speed grade",
-      "phase": "phase2",
-      "canonical_stage": "stage2",
-      "current_default": {
-        "mode": "direct_adapter",
-        "tool_ids": [
-          "opensta",
-          "yosys",
-          "vibeic"
-        ],
-        "label_en": "Current source adapter: OpenSTA, Yosys, Vibe-IC program and evidence gates",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "DT3",
-          "programs": [
-            "sdd_atpg_run",
-            "sdd_coverage_check"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=DT3",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "yosys"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "SAT pattern population with small-delay grading",
-        "component_tool_ids": [
-          "opensta",
-          "vibeic"
-        ],
-        "status": "verified",
-        "selection_reason": "No existing full SDD engine in LibreLane/OpenROAD.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "DT3_yosys_1",
-          "tool_id": "yosys",
-          "role": "producer",
-          "applicability": "Reuse timing-graded ATPG population",
-          "integration_status": "verified",
-          "independence_family": "yosys",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Current producer via DT2.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "DT3_opensta_2",
-          "tool_id": "opensta",
-          "role": "checker",
-          "applicability": "Small-delay slack sensitivity",
-          "integration_status": "verified",
-          "independence_family": "opensta",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Complementary grader; not independent ATPG.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "DT3_vibeic_3",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Small-delay-defect grade needs declared defect magnitude/path timing, not merely DT2 presence.",
-      "mandatory_gate_programs": [
-        "sdd_coverage_check"
-      ],
-      "required_output_contract": [
-        "reports/phase2/dft/sdd_coverage.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "32",
-      "title_en": "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
-      "phase": "phase3",
-      "canonical_stage": "stage3",
-      "current_default": {
-        "mode": "class_scoped_librelane",
-        "tool_ids": [
-          "librelane",
-          "openroad",
-          "vibeic"
-        ],
-        "label_en": "Chip pad-ring: LibreLane; core-only/hardmacro: direct adapter",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "32",
-          "programs": [
-            "flow_step_output_content_check",
-            "postroute_timing_repair_audit"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=32",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "librelane"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "LibreLane captured post-route repair and fresh verification",
-        "component_tool_ids": [
-          "openroad",
-          "vibeic"
-        ],
-        "status": "verified",
-        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
-        "is_deployed_current": true,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "SOURCE_DEFAULT_FOR_CHIP_PAD_RING_ONLY",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "32_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Vibeic.PostRouteRepair / ResizerTimingPostGRT / RepairDesignPostGRT",
-          "integration_status": "verified",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Current chip class default retains post-DRT closure orchestration.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_openroad_fork_2",
-          "tool_id": "openroad_fork",
-          "role": "producer",
-          "applicability": "Post-DRT repair / incremental route / RC",
-          "integration_status": "verified",
-          "independence_family": "openroad",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Same physical engine family.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_librelane_3",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Odb.InsertECOBuffers",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Different repair actuator; reroute/RCX/STA/DRV/PV afterward.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_vibeic_4",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_siliconcompiler_missed25",
-          "tool_id": "siliconcompiler",
-          "role": "orchestrator",
-          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
-          "integration_status": "proposed",
-          "independence_family": "siliconcompiler",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Non-PASS repair can continue measurement with FAIL/quarantine; it gains no release credit. Missing route inputs refuse stream-out.",
-      "mandatory_gate_programs": [
-        "flow_step_output_content_check",
-        "postroute_timing_repair_audit"
-      ],
-      "required_output_contract": [
-        "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
-        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
-        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
       "id": "23",
       "title_en": "🔁 Post-route STA (multi-corner multi-mode sign-off)",
       "phase": "phase3",
@@ -6323,7 +6277,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=23",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6447,7 +6401,6 @@
         "post_route_signoff_corner_check",
         "sta_corner_record_completeness_check",
         "pad_input_drive_check",
-        "drv_signoff_judge",
         "sta_architectural_residual_check",
         "sta_assumed_clock_disclosure_check",
         "clock_target_record_agreement_check",
@@ -6464,10 +6417,231 @@
         "reports/phase3/sta/assumed_clock_disclosure.json",
         "reports/phase3/clock_target_record_agreement.json",
         "reports/phase3/achievable_fmax.json",
-        "reports/phase3/sta/drv_capture_plan.json",
-        "reports/phase3/sta/drv_signoff_bundle.json",
-        "reports/phase3/sta/drv_signoff.json",
         "reports/phase3/sta_postpnr_signoff.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
+      "id": "DT2",
+      "title_en": "Path-delay-fault (at-speed, timing-graded) ATPG",
+      "phase": "phase2",
+      "canonical_stage": "stage2",
+      "current_default": {
+        "mode": "direct_adapter",
+        "tool_ids": [
+          "opensta",
+          "yosys"
+        ],
+        "label_en": "Current source adapter: OpenSTA, Yosys",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "DT2",
+          "programs": [
+            "path_delay_coverage_check",
+            "path_delay_fault_atpg_run"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=DT2",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "yosys"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "SAT path-delay ATPG with real timing grading",
+        "component_tool_ids": [
+          "opensta",
+          "vibeic"
+        ],
+        "status": "verified",
+        "selection_reason": "No LibreLane/OpenROAD path-delay ATPG generator.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "DT2_yosys_1",
+          "tool_id": "yosys",
+          "role": "producer",
+          "applicability": "Path sensitization ATPG",
+          "integration_status": "verified",
+          "independence_family": "yosys",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Current fork SAT path; tool capabilities beyond upstream need pinning.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "DT2_opensta_2",
+          "tool_id": "opensta",
+          "role": "checker",
+          "applicability": "Timing path/slack grading",
+          "integration_status": "verified",
+          "independence_family": "opensta",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Not ATPG pattern generation.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "DT2_tempus_3",
+          "tool_id": "tempus",
+          "role": "checker",
+          "applicability": "Optional independent path/slack grading",
+          "integration_status": "needslicensed",
+          "independence_family": "tempus",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Optional independent commercial STA/SI arm; requires license, qualified libraries and an integration adapter.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "LICENSE_AND_ADAPTER_REQUIRED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "DT2_vibeic_4",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Bind test patterns to required timed paths and corners. Scan insertion alone cannot produce timing-graded path-delay coverage.",
+      "mandatory_gate_programs": [
+        "path_delay_coverage_check"
+      ],
+      "required_output_contract": [
+        "reports/phase2/dft/path_delay_coverage.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
+      "id": "DT3",
+      "title_en": "Small-delay-defect (SDD) at-speed grade",
+      "phase": "phase2",
+      "canonical_stage": "stage2",
+      "current_default": {
+        "mode": "direct_adapter",
+        "tool_ids": [
+          "opensta",
+          "yosys",
+          "vibeic"
+        ],
+        "label_en": "Current source adapter: OpenSTA, Yosys, Vibe-IC program and evidence gates",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "DT3",
+          "programs": [
+            "sdd_atpg_run",
+            "sdd_coverage_check"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=DT3",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "yosys"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "SAT pattern population with small-delay grading",
+        "component_tool_ids": [
+          "opensta",
+          "vibeic"
+        ],
+        "status": "verified",
+        "selection_reason": "No existing full SDD engine in LibreLane/OpenROAD.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "DT3_yosys_1",
+          "tool_id": "yosys",
+          "role": "producer",
+          "applicability": "Reuse timing-graded ATPG population",
+          "integration_status": "verified",
+          "independence_family": "yosys",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Current producer via DT2.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "DT3_opensta_2",
+          "tool_id": "opensta",
+          "role": "checker",
+          "applicability": "Small-delay slack sensitivity",
+          "integration_status": "verified",
+          "independence_family": "opensta",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Complementary grader; not independent ATPG.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "DT3_vibeic_3",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Small-delay-defect grade needs declared defect magnitude/path timing, not merely DT2 presence.",
+      "mandatory_gate_programs": [
+        "sdd_coverage_check"
+      ],
+      "required_output_contract": [
+        "reports/phase2/dft/sdd_coverage.json"
       ],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
@@ -6495,7 +6669,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=24",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6664,7 +6838,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=25",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6781,13 +6955,12 @@
           "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
           "canonical_step_id": "26",
           "programs": [
-            "antenna_report_check",
-            "gds_antenna_deck_check"
+            "antenna_report_check"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=26",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -6906,138 +7079,13 @@
       ],
       "limitations_en": "Never ship a route edit after the last verification. Zero-net and zero-pin censuses both need typed measured evidence.",
       "mandatory_gate_programs": [
-        "antenna_report_check",
-        "gds_antenna_deck_check"
+        "antenna_report_check"
       ],
       "required_output_contract": [
         "reports/phase3/antenna.rpt",
         "reports/phase3/antenna.json",
-        "reports/phase3/antenna_signoff.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "26.5ic",
-      "title_en": "Die Finishing — seal ring + die identification (chip/IC path only)",
-      "phase": "phase3",
-      "canonical_stage": "stage3",
-      "current_default": {
-        "mode": "direct_adapter",
-        "tool_ids": [
-          "klayout"
-        ],
-        "label_en": "Current source adapter: KLayout",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "26.5ic",
-          "programs": [
-            "die_finishing_check",
-            "die_finishing_gen"
-          ],
-          "capture_routes": [
-            {
-              "id": "phase3.die_finishing",
-              "program": "programs/die_finishing_check.py",
-              "skill": "skills/phase3-backend-verify/SKILL.md"
-            }
-          ],
-          "review_row": "review70_final.json#/rows/step_id=26.5ic",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "librelane"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "LibreLane KLayout.SealRing and die finishing",
-        "component_tool_ids": [
-          "klayout",
-          "vibeic"
-        ],
-        "status": "proposed",
-        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "26_5ic_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "KLayout.SealRing",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Consume authoritative die spans and verify emitted ring geometry.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "26_5ic_klayout_2",
-          "tool_id": "klayout",
-          "role": "producer",
-          "applicability": "PDK seal-ring and die-ID layout",
-          "integration_status": "verified",
-          "independence_family": "klayout",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Same geometry engine via a direct PDK script.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "26_5ic_magic_3",
-          "tool_id": "magic",
-          "role": "producer",
-          "applicability": "Supported PDK seal-ring generator",
-          "integration_status": "verified",
-          "independence_family": "magic",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "PDK-specific alternative, not universal.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "26_5ic_vibeic_4",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Ring dimensions use coordinate span, not upper-right coordinates alone. ID, GDS finishing boundary and every required layer remain measured.",
-      "mandatory_gate_programs": [
-        "die_finishing_check"
-      ],
-      "required_output_contract": [
-        "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt",
-        "reports/phase3/die_finishing.json"
+        "reports/phase3/antenna_signoff.json",
+        "reports/phase3/prestream_route_census.json"
       ],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
@@ -7066,7 +7114,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=27",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7203,7 +7251,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=28",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7324,7 +7372,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=29",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7459,7 +7507,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=30",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7609,7 +7657,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=33",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7723,6 +7771,287 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
+      "id": "37",
+      "title_en": "GDSII output (after routed-layout pre-stream admission)",
+      "phase": "phase3",
+      "canonical_stage": "stage4",
+      "current_default": {
+        "mode": "direct_adapter",
+        "tool_ids": [
+          "magic",
+          "klayout",
+          "vibeic"
+        ],
+        "label_en": "Current source adapter: Magic, KLayout, Vibe-IC program and evidence gates",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "37",
+          "programs": [
+            "flow_stage_check",
+            "gate_evidence_completeness_check",
+            "gds_ip_attribution",
+            "gds_port_label_check",
+            "gds_size_check",
+            "gds_substance_check",
+            "layout_receipt_identity_check",
+            "provenance_check",
+            "reported_figure_artifact_backing_check",
+            "stage_on_pass_review",
+            "gds_antenna_deck_check"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=37",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "librelane"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "LibreLane stream-out with macro and finishing views",
+        "component_tool_ids": [
+          "klayout",
+          "vibeic"
+        ],
+        "status": "proposed",
+        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "37_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "KLayout.StreamOut or Magic.StreamOut",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "One producer chosen by policy/PDK; the other is ultra comparison.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "37_klayout_2",
+          "tool_id": "klayout",
+          "role": "producer",
+          "applicability": "DEF/LEF/macro-GDS stream-out",
+          "integration_status": "verified",
+          "independence_family": "klayout",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Same engine as LibreLane KLayout stream.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "37_magic_3",
+          "tool_id": "magic",
+          "role": "producer",
+          "applicability": "Independent stream-out representation",
+          "integration_status": "verified",
+          "independence_family": "magic",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Require same intended geometry and macro views.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "37_vibeic_4",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "37_siliconcompiler_missed25",
+          "tool_id": "siliconcompiler",
+          "role": "orchestrator",
+          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
+          "integration_status": "proposed",
+          "independence_family": "siliconcompiler",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Route inputs, macro contents, seal ring, grid/fill boundaries and actual nonempty GDS must be bound. Stream rc0 is not tapeout PASS.",
+      "mandatory_gate_programs": [
+        "gds_size_check",
+        "gds_substance_check",
+        "gds_port_label_check",
+        "reported_figure_artifact_backing_check",
+        "provenance_check",
+        "flow_stage_check",
+        "gate_evidence_completeness_check",
+        "gds_ip_attribution",
+        "gds_antenna_deck_check"
+      ],
+      "required_output_contract": [
+        "phase3/stage4/gds/*.gds",
+        "phase3/stage3/pnr/*stream_out.log",
+        "phase3/stage3/pnr/*.stream_inputs.json",
+        "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py",
+        "reports/phase3/pad_ring_route_evidence.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
+      "id": "26.5ic",
+      "title_en": "Die Finishing — seal ring + die identification (chip/IC path only)",
+      "phase": "phase3",
+      "canonical_stage": "stage3",
+      "current_default": {
+        "mode": "direct_adapter",
+        "tool_ids": [
+          "klayout"
+        ],
+        "label_en": "Current source adapter: KLayout",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "26.5ic",
+          "programs": [
+            "die_finishing_check",
+            "die_finishing_gen"
+          ],
+          "capture_routes": [
+            {
+              "id": "phase3.die_finishing",
+              "program": "programs/die_finishing_check.py",
+              "skill": "skills/phase3-backend-verify/SKILL.md"
+            }
+          ],
+          "review_row": "review70_final.json#/rows/step_id=26.5ic",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "librelane"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "LibreLane KLayout.SealRing and die finishing",
+        "component_tool_ids": [
+          "klayout",
+          "vibeic"
+        ],
+        "status": "proposed",
+        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "26_5ic_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "KLayout.SealRing",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Consume authoritative die spans and verify emitted ring geometry.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "26_5ic_klayout_2",
+          "tool_id": "klayout",
+          "role": "producer",
+          "applicability": "PDK seal-ring and die-ID layout",
+          "integration_status": "verified",
+          "independence_family": "klayout",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Same geometry engine via a direct PDK script.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "26_5ic_magic_3",
+          "tool_id": "magic",
+          "role": "producer",
+          "applicability": "Supported PDK seal-ring generator",
+          "integration_status": "verified",
+          "independence_family": "magic",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "PDK-specific alternative, not universal.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "26_5ic_vibeic_4",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Ring dimensions use coordinate span, not upper-right coordinates alone. ID, GDS finishing boundary and every required layer remain measured.",
+      "mandatory_gate_programs": [
+        "die_finishing_check"
+      ],
+      "required_output_contract": [
+        "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt",
+        "reports/phase3/die_finishing.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
       "id": "34",
       "title_en": "Metal Fill (ECO-aware density fill insertion)",
       "phase": "phase3",
@@ -7748,7 +8077,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=34",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -7916,7 +8245,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=35",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8042,166 +8371,6 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
-      "id": "37",
-      "title_en": "GDSII output (after routed-layout pre-stream admission)",
-      "phase": "phase3",
-      "canonical_stage": "stage4",
-      "current_default": {
-        "mode": "direct_adapter",
-        "tool_ids": [
-          "magic",
-          "klayout",
-          "vibeic"
-        ],
-        "label_en": "Current source adapter: Magic, KLayout, Vibe-IC program and evidence gates",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "37",
-          "programs": [
-            "flow_stage_check",
-            "gate_evidence_completeness_check",
-            "gds_ip_attribution",
-            "gds_port_label_check",
-            "gds_size_check",
-            "gds_substance_check",
-            "layout_receipt_identity_check",
-            "provenance_check",
-            "reported_figure_artifact_backing_check",
-            "stage3_compliance",
-            "stage_on_pass_review"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=37",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "librelane"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "LibreLane stream-out with macro and finishing views",
-        "component_tool_ids": [
-          "klayout",
-          "vibeic"
-        ],
-        "status": "proposed",
-        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "37_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "KLayout.StreamOut or Magic.StreamOut",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "One producer chosen by policy/PDK; the other is ultra comparison.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "37_klayout_2",
-          "tool_id": "klayout",
-          "role": "producer",
-          "applicability": "DEF/LEF/macro-GDS stream-out",
-          "integration_status": "verified",
-          "independence_family": "klayout",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Same engine as LibreLane KLayout stream.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "37_magic_3",
-          "tool_id": "magic",
-          "role": "producer",
-          "applicability": "Independent stream-out representation",
-          "integration_status": "verified",
-          "independence_family": "magic",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Require same intended geometry and macro views.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "37_vibeic_4",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "37_siliconcompiler_missed25",
-          "tool_id": "siliconcompiler",
-          "role": "orchestrator",
-          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
-          "integration_status": "proposed",
-          "independence_family": "siliconcompiler",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Route inputs, macro contents, seal ring, grid/fill boundaries and actual nonempty GDS must be bound. Stream rc0 is not tapeout PASS.",
-      "mandatory_gate_programs": [
-        "layout_receipt_identity_check",
-        "stage3_compliance",
-        "stage_on_pass_review",
-        "gds_size_check",
-        "gds_substance_check",
-        "gds_port_label_check",
-        "reported_figure_artifact_backing_check",
-        "provenance_check",
-        "flow_stage_check",
-        "gate_evidence_completeness_check",
-        "gds_ip_attribution"
-      ],
-      "required_output_contract": [
-        "phase3/stage4/gds/*.gds",
-        "phase3/stage3/pnr/*stream_out.log",
-        "phase3/stage3/pnr/*.stream_inputs.json",
-        "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py",
-        "reports/phase3/pad_ring_route_evidence.json",
-        "reports/phase3/gates/stage3_compliance.json",
-        "reports/phase3/layout_receipts.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
       "id": "37.3",
       "title_en": "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary",
       "phase": "phase3",
@@ -8223,7 +8392,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=37.3",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8352,12 +8521,13 @@
             "pnr_via_stack_completeness_check",
             "provenance_check",
             "sweep_reach_check",
-            "waiver_growth_check"
+            "waiver_growth_check",
+            "drv_signoff_judge"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=31",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8503,7 +8673,8 @@
         "erc_density_check",
         "waiver_growth_check",
         "sweep_reach_check",
-        "mcp_execution_verify"
+        "mcp_execution_verify",
+        "drv_signoff_judge"
       ],
       "required_output_contract": [
         "reports/phase3/drc_signoff.rpt",
@@ -8514,101 +8685,10 @@
         "reports/phase3/magic_illegal_overlap.json",
         "reports/phase3/lvs_verdict.json",
         "reports/phase3/drc_signoff.json",
-        "reports/phase3/perc_sweep.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "36",
-      "title_en": "Tapeout checklist (final sign-off confirmation)",
-      "phase": "phase3",
-      "canonical_stage": "stage4",
-      "current_default": {
-        "mode": "program_only",
-        "tool_ids": [
-          "vibeic"
-        ],
-        "label_en": "Current source adapter: Vibe-IC program and evidence gates",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "36",
-          "programs": [
-            "declared_pdk_is_the_pdk_used_check",
-            "report_belongs_to_project_check",
-            "step_internal_fail_bubble_up_check",
-            "tapeout_checklist_gen",
-            "tapeout_signoff_check"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=36",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "vibeic"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "Release checklist over measured signoff receipts",
-        "component_tool_ids": [
-          "librelane"
-        ],
-        "status": "verified",
-        "selection_reason": "No EDA engine determines every project/operator release contract.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "36_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Misc.ReportManufacturability",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Useful tool summary, not release authority.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "36_vibeic_2",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "All declared obligations, final artifacts and current digests",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "AI/tool summary cannot override a mandatory failure or missing evidence; all target-specific signoff requirements stay explicit.",
-      "mandatory_gate_programs": [
-        "tapeout_signoff_check",
-        "report_belongs_to_project_check",
-        "step_internal_fail_bubble_up_check",
-        "declared_pdk_is_the_pdk_used_check",
-        "ppa_head_to_head_check"
-      ],
-      "required_output_contract": [
-        "reports/audit/tapeout_checklist.json"
+        "reports/phase3/perc_sweep.json",
+        "reports/phase3/sta/drv_capture_plan.json",
+        "reports/phase3/sta/drv_signoff_bundle.json",
+        "reports/phase3/sta/drv_signoff.json"
       ],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
@@ -8634,7 +8714,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=37.4",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8715,6 +8795,103 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
+      "id": "36",
+      "title_en": "Tapeout checklist (final sign-off confirmation)",
+      "phase": "phase3",
+      "canonical_stage": "stage4",
+      "current_default": {
+        "mode": "program_only",
+        "tool_ids": [
+          "vibeic"
+        ],
+        "label_en": "Current source adapter: Vibe-IC program and evidence gates",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "36",
+          "programs": [
+            "declared_pdk_is_the_pdk_used_check",
+            "report_belongs_to_project_check",
+            "step_internal_fail_bubble_up_check",
+            "tapeout_signoff_check",
+            "stage3_compliance"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=36",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "vibeic"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "Release checklist over measured signoff receipts",
+        "component_tool_ids": [
+          "librelane"
+        ],
+        "status": "verified",
+        "selection_reason": "No EDA engine determines every project/operator release contract.",
+        "is_deployed_current": false,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "36_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Misc.ReportManufacturability",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Useful tool summary, not release authority.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "36_vibeic_2",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "All declared obligations, final artifacts and current digests",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "AI/tool summary cannot override a mandatory failure or missing evidence; all target-specific signoff requirements stay explicit.",
+      "mandatory_gate_programs": [
+        "report_belongs_to_project_check",
+        "step_internal_fail_bubble_up_check",
+        "declared_pdk_is_the_pdk_used_check",
+        "ppa_head_to_head_check",
+        "layout_receipt_identity_check",
+        "stage3_compliance",
+        "stage_on_pass_review"
+      ],
+      "required_output_contract": [
+        "reports/phase3/gates/stage3_compliance.json",
+        "reports/phase3/layout_receipts.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
       "id": "37.5ip",
       "title_en": "Digital Hardmacro Generation — LEF + Liberty + GDS + Verilog (delivered on EVERY route)",
       "phase": "phase3",
@@ -8753,7 +8930,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=37.5ip",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -8910,7 +9087,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=37.5ic",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9035,12 +9212,13 @@
           "canonical_step_id": "38",
           "programs": [
             "foundry_handoff_pack_gen",
-            "foundry_handoff_package_check"
+            "foundry_handoff_package_check",
+            "tapeout_checklist_gen"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=38",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9112,13 +9290,15 @@
       ],
       "limitations_en": "No LibreLane/OpenROAD WAT, mask-spec, scribe or corner-test-kit generator. A package is not an accepted or fabricated wafer.",
       "mandatory_gate_programs": [
-        "foundry_handoff_package_check"
+        "foundry_handoff_package_check",
+        "tapeout_signoff_check"
       ],
       "required_output_contract": [
         "phase3/stage4/foundry_handoff/mask_spec.json",
         "phase3/stage4/foundry_handoff/wat_plan.json",
         "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",
-        "phase3/stage4/foundry_handoff/corner_test_vectors.json"
+        "phase3/stage4/foundry_handoff/corner_test_vectors.json",
+        "reports/audit/tapeout_checklist.json"
       ],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
@@ -9150,7 +9330,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=39",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9309,7 +9489,7 @@
           ],
           "review_row": "review70_final.json#/rows/step_id=M1",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9470,12 +9650,13 @@
             "isolation_cell_required_check",
             "level_shifter_required_check",
             "power_domain_crossing_check",
-            "power_domain_signal_crossing_check"
+            "power_domain_signal_crossing_check",
+            "mixed_signal_power_domain_run"
           ],
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M2",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9601,7 +9782,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M3",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9767,7 +9948,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=M4",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9902,7 +10083,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=40",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -9989,7 +10170,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=41",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10106,7 +10287,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=42",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10207,7 +10388,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=43",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10324,7 +10505,7 @@
           "capture_routes": [],
           "review_row": "review70_final.json#/rows/step_id=44",
           "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
+          "canonical_blob": "ab7dc5dea6673456e8c5c8ba08a51c44058b7add"
         },
         "verified": true,
         "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
@@ -10416,183 +10597,6 @@
       "required_output_contract": [
         "phase3/stage5_manufacturing/htol_results.json"
       ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "P0",
-      "title_en": "Structural-RTL pre-flight (chip-AGNOSTIC structural gates)",
-      "phase": "phase2",
-      "canonical_stage": "stage1",
-      "current_default": {
-        "mode": "direct_adapter",
-        "tool_ids": [
-          "vibeic",
-          "iverilog"
-        ],
-        "label_en": "Current source adapter: Vibe-IC program and evidence gates, Icarus Verilog / vvp",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "c85f97544bdaf3f77dbe1f2ece12170df01d9bc1",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "P0",
-          "programs": [
-            "flow_step_output_content_check"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=P0",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/c85f97544bdaf3f77dbe1f2ece12170df01d9bc1/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_blob": "1ec6d22d8f09b65d06df6e56655a27b77e27b207"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "librelane"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "LibreLane RTL facts/lint with structural preflight gates",
-        "component_tool_ids": [
-          "yosys",
-          "verilator",
-          "vibeic"
-        ],
-        "status": "proposed",
-        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
-        "is_deployed_current": false,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "POLICY_TARGET_NOT_DEPLOYED_AS_A_COMPLETE_DEFAULT_MODE",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "P0_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Yosys.JsonHeader / Verilator.Lint",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Frontend/lint tools feed declaration-based rules.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_yosys_2",
-          "tool_id": "yosys",
-          "role": "producer",
-          "applicability": "Elaborated connectivity/cell facts",
-          "integration_status": "proposed",
-          "independence_family": "yosys",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Must save typed current JSON.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_slang_3",
-          "tool_id": "slang",
-          "role": "producer",
-          "applicability": "Semantic elaboration/AST",
-          "integration_status": "proposed",
-          "independence_family": "slang",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Semantic SystemVerilog elaboration and AST APIs. slang-tidy shares the slang family.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_verible_4",
-          "tool_id": "verible",
-          "role": "checker",
-          "applicability": "Structural/style lint",
-          "integration_status": "proposed",
-          "independence_family": "verible",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Parser and style lint. A clean style report does not prove functional correctness or eliminate all elaboration defects.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_svck_5",
-          "tool_id": "svck",
-          "role": "checker",
-          "applicability": "Additional lint",
-          "integration_status": "proposed",
-          "independence_family": "svck",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Additional lint rule set; rule coverage and target-project diagnostics need integration.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_iverilog_6",
-          "tool_id": "iverilog",
-          "role": "checker",
-          "applicability": "Protocol reference-TB execution",
-          "integration_status": "verified",
-          "independence_family": "iverilog",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "A P0 subgate already invokes a real simulator.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_vibeic_7",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "P0_openroad_missed10",
-          "tool_id": "openroad",
-          "role": "checker",
-          "applicability": "sv_elaborate command presence only; integration semantics NOT_MEASURED",
-          "integration_status": "proposed",
-          "independence_family": "openroad",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Mostly own policy checks today. Frontend/lint reports cannot discharge the whole preflight population or replace actual testbench execution.",
-      "mandatory_gate_programs": [
-        "flow_step_output_content_check"
-      ],
-      "required_output_contract": [],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     }
   ]
