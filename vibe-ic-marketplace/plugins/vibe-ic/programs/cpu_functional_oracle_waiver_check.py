@@ -656,6 +656,8 @@ def _oracles_that_actually_ran(project: Path) -> dict:
     excluded: list = []
     rows = _l10_rows_by_name(project) if declared else {}
     ic_class = _tbg._detect_ic_class(project) if declared else None
+    selection_issue: Dict[str, Any] = {}
+    selected = design_selected_options(project, selection_issue) if declared else None
     for case_id in declared:
         state, why = _l10x.case_state(case_id, record)
         if state == _l10x.PASS:
@@ -688,13 +690,24 @@ def _oracles_that_actually_ran(project: Path) -> dict:
             aw = row.get("applies_when")
             opt = aw.get("option") if isinstance(aw, dict) else None
             if opt and state == _l10x.NOT_EXECUTED:
-                # R-0915-102 left it in the denominator because the design
-                # has declared no selection yet (a declaration that excludes
-                # it removes it before this loop, as NOT_APPLICABLE citing
-                # that declaration). Say so: it is not the input's gap.
-                why = (f"{why}; applies only if the design selects option "
-                       f"{opt!r}, and {_DECLARATION_REL} declares no "
-                       f"selection at this point")
+                # Use the applicability reader's normalized decision. Being
+                # conditional does not mean the design left it undecided.
+                if selected is not None and str(opt).strip().lower() in selected:
+                    why = (f"{why}; {_DECLARATION_REL} selects option {opt!r}; "
+                           "its case-owned oracle has not executed")
+                elif selection_issue.get("reason_class") in (
+                        "SELECTION_UNAVAILABLE", "SELECTION_UNDECLARED"):
+                    why = (f"{why}; applies only if the design selects option "
+                           f"{opt!r}, and {_DECLARATION_REL} declares no "
+                           f"selection at this point")
+                elif selected is None:
+                    why = (f"{why}; cannot resolve design option selection: "
+                           f"{selection_issue.get('reason_class')}: "
+                           f"{selection_issue.get('why')}; the case remains required")
+                else:
+                    why = (f"{why}; declared selection {sorted(selected)} does "
+                           f"not establish option {opt!r} as absent; "
+                           "the case remains required")
             not_executed.append({"case": case_id, "state": state, "why": why})
     return {
         "declared": declared,

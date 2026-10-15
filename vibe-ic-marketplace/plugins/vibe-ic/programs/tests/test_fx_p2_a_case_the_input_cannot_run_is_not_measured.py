@@ -37,6 +37,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
@@ -268,3 +270,78 @@ def test_a_write_enable_or_a_lookalike_is_not_a_read():
     in the letters (`o_green`) are not."""
     outs = [("o_sram_wen", ""), ("o_green", "")]
     assert CLG._pick_bus_activity_output(outs) is None
+
+
+@pytest.mark.parametrize("declaration,classification", [
+    ({"isa_extensions": ["I", "Zicsr"]}, "selected"),
+    ({"isa_extensions": [" i ", "zICsr"],
+      "fields": {"selected_options": ["ZICSR", "I"]}}, "selected"),
+    (None, "undeclared"),
+    ({"top_module": "neutral_core"}, "undeclared"),
+    ({"isa_extensions": ["I"]}, "excluded"),
+    ({"isa_extensions": []}, "excluded"),
+    ({"isa_extensions": ["I"], "options": ["Zicsr"]}, "CONFLICTING_SELECTION"),
+    ({"isa_extensions": [""]}, "MALFORMED_SELECTION"),
+    ({"options": ["unresolved_selection"]}, "opaque"),
+], ids=["selected", "normalized-selected", "missing-declaration",
+        "undeclared", "explicitly-excluded", "empty-selection", "conflicting",
+        "malformed", "opaque-selection"])
+def test_optional_case_diagnostic_agrees_with_selection(tmp_path, declaration, classification):
+    baseline = {"name": "baseline_operation", "kind": "functional_vector",
+                "stimulus": "drive the declared control", "expected": "PASS"}
+    optional = {"name": "optional_operation", "kind": "functional_vector",
+                "stimulus": "exercise the optional operation", "expected": "PASS",
+                "applies_when": {"option": " ZIcSr "}}
+    project = _project(tmp_path, [baseline, optional], {baseline["name"]: "PASS"})
+    if declaration is not None:
+        path = project / "plugin_output/declaration.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(declaration))
+    before = L10X.load_record(project, project / "phase1/generated_docs/L10_TEST_CASES.json")
+    output = tmp_path / "gate.json"
+    rc = GATE.main([str(project), "--json", str(output)])
+    report = json.loads(output.read_text())
+    decision = report["declared_denominator"]["l10_design_declared_na"]
+    execution = GATE._oracles_that_actually_ran(project)
+    assert report["declared_denominator"]["l10_test_cases"] == 2
+    assert execution["executed"] == [baseline["name"]]
+    if classification == "excluded":
+        assert rc == 0 and report["verdict"] == "PASS", report
+        assert execution["declared"] == [baseline["name"]]
+        assert [r["case"] for r in decision["cases"]] == [optional["name"]]
+    else:
+        assert rc == 1 and report["verdict"] == "FAIL", report
+        assert execution["declared"] == [baseline["name"], optional["name"]]
+        row, = execution["not_executed"]
+        assert row["case"] == optional["name"] and row["state"] == "NOT_EXECUTED"
+        assert "NOT_EXECUTED" in report["message"]
+        if classification == "selected":
+            assert decision["decided"] and decision["design_selected"] == ["i", "zicsr"]
+            assert "case-owned oracle has not executed" in report["message"]
+        elif classification in ("CONFLICTING_SELECTION", "MALFORMED_SELECTION"):
+            assert decision["decided"] is False
+            assert decision["reason_class"] == classification
+            assert classification in report["message"]
+        elif classification == "opaque":
+            assert decision["decided"] is True and decision["cases"] == []
+            assert "does not establish option" in report["message"]
+        assert ("declares no selection at this point" in report["message"]) == (
+            classification == "undeclared")
+    after = L10X.load_record(project, project / "phase1/generated_docs/L10_TEST_CASES.json")
+    assert before == after
+
+
+def test_selected_optional_case_actual_failure_stays_failure(tmp_path):
+    case = {"name": "optional_operation", "kind": "functional_vector",
+            "stimulus": "exercise the optional operation", "expected": "PASS",
+            "applies_when": {"option": "Zicsr"}}
+    project = _project(tmp_path, [case], {case["name"]: "FAIL"})
+    path = project / "plugin_output/declaration.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"isa_extensions": ["I", "Zicsr"]}))
+    rc, message = GATE._evaluate(project)
+    assert rc == 1 and "FAIL" in message
+    row, = GATE._oracles_that_actually_ran(project)["not_executed"]
+    assert row["state"] == "FAIL"
+    assert "declares no selection" not in message
+    assert "case-owned oracle has not executed" not in message
