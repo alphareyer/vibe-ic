@@ -186,6 +186,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 import tempfile
 from fnmatch import fnmatchcase
 from functools import lru_cache
@@ -1845,10 +1846,13 @@ def _real_gate_seeded_status() -> Dict[str, str]:
     the two cannot disagree and the fixture is built once per step.
     """
     out: Dict[str, str] = {}
-    for sid in F.step_ids():
+    steps = tuple(sid for sid in F.step_ids()
+                  if F.declares_required_outputs(sid) and F.has_gate(sid))
+    progress = getattr(sys.modules.get("_pytest_progress_plugin"),
+                       "domain_progress", None)
+    completed = 0
+    for sid in steps:
         key = F.normalize_id(sid)
-        if not F.declares_required_outputs(sid) or not F.has_gate(sid):
-            continue
         step = dict(F.step_by_id(sid))  # the REAL gate, not PASS_GATE
         tmp = Path(tempfile.mkdtemp(prefix="d8_realgate_"))
         try:
@@ -1864,6 +1868,11 @@ def _real_gate_seeded_status() -> Dict[str, str]:
                 "status": result.status, "reason_class": result.reason_class,
                 "reasons": list(result.reasons), "gate_output": result.gate_output,
             }
+            # One finite checkpoint only after a real current gate completes.
+            # An unsupported fixture or a stalled checker earns no checkpoint.
+            completed += 1
+            if progress is not None:
+                progress("d8-real-gate-seeded", completed, len(steps))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     return out
@@ -1876,11 +1885,13 @@ def _real_gate_sweep() -> Dict[str, Tuple[str, str]]:
     tier on the seeded fixture."""
     out: Dict[str, Tuple[str, str]] = {}
     seeded_all = _real_gate_seeded_status()
-    for sid in F.step_ids():
+    steps = tuple(sid for sid in F.step_ids()
+                  if seeded_all.get(F.normalize_id(sid)) in _PASS_TIER_LABELS)
+    progress = getattr(sys.modules.get("_pytest_progress_plugin"),
+                       "domain_progress", None)
+    for completed, sid in enumerate(steps, 1):
         key = F.normalize_id(sid)
         seeded = seeded_all.get(key)
-        if seeded is None or seeded not in _PASS_TIER_LABELS:
-            continue
         step = dict(F.step_by_id(sid))  # the REAL gate, not PASS_GATE
         tmp = Path(tempfile.mkdtemp(prefix="d8_realgate_"))
         try:
@@ -1889,6 +1900,8 @@ def _real_gate_sweep() -> Dict[str, Tuple[str, str]]:
             dropped.mkdir(parents=True)
             _materialize(dropped, step, drop_entries=(outs[0],))
             out[key] = (seeded, FCC.check_step(dropped, step, {}).status)
+            if progress is not None:
+                progress("d8-real-gate-dropped", completed, len(steps))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     return out

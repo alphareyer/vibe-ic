@@ -77,6 +77,47 @@ class TestLvsReportCheck:
             "Final result: Circuits match uniquely.\n"
             "parameter mismatches: 0\n" + _PADDING
         )
+        # Current-subject reader fixture, not a native Netgen measurement.
+        # Keep the report bytes and real CLI/scientific reader; supply the
+        # material subject now required before that reader can certify it.
+        import hashlib
+        import json
+        import _physical_current as current
+
+        pnr = tmp_path / "phase3/stage3/pnr"
+        pnr.mkdir(parents=True)
+        _gdsii.write_gdsii(pnr / "fixture_top.gds", cell="fixture_top")
+        materials = {
+            "def": (pnr / "fixture_top.def", "VERSION 5.8 ;\nDESIGN fixture_top ;\nEND DESIGN\n"),
+            "netlist": (pnr / "fixture_top_pnr.v", "module fixture_top(); endmodule\n"),
+            "technology": (tmp_path / "reports/phase3/technology_units.json",
+                           json.dumps({"pdk": "source_fixture"})),
+            "pdk_deck": (tmp_path / "input/pdk/setup.tcl", "# SOURCE_FIXTURE_ONLY Netgen deck input\n"),
+            "pdk_tech_lef": (tmp_path / "input/pdk/tech.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+            "pdk_cell_lef": (tmp_path / "input/pdk/cells.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+        }
+        for path, body in materials.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+        report = tmp_path / "reports/phase3/lvs.rpt"
+        report.write_bytes(rpt.read_bytes())
+        log = report.with_suffix(".log")
+        log.write_text("SOURCE_FIXTURE_ONLY Netgen transport; no native execution\n")
+        gds = pnr / "fixture_top.gds"
+        rel = lambda path: path.relative_to(tmp_path).as_posix()
+        digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        invocation = {"tool": "netgen", "measured": True, "exit_code": 0,
+                      "scope": "SOURCE_FIXTURE_ONLY current-subject parser input; no native execution",
+                      "inputs": {rel(gds): digest(gds)},
+                      "outputs": {rel(path): digest(path) for path in (report, log)}}
+        subject = current.build(tmp_path, "31", "stage4", "fixture_top", "source_fixture", "netgen",
+            {"gds": current.entry(tmp_path, gds),
+             **{role: current.entry(tmp_path, path) for role, (path, _) in materials.items()}},
+            {"report": current.entry(tmp_path, report), "native_report": current.entry(tmp_path, report),
+             "log": current.entry(tmp_path, log)},
+            {"rc": 0, "argv": ["SOURCE_FIXTURE_ONLY", "netgen", str(materials["pdk_deck"][0])],
+             "native_invocation": invocation})
+        (tmp_path / "reports/phase3/direct_current_lvs.json").write_text(json.dumps(subject))
         assert _run_wrapper("lvs_report_check.py", str(tmp_path)) == 0
 
     def test_stub_rejected(self, tmp_path):
