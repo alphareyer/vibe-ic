@@ -69,7 +69,14 @@ def assert_current_composite_refusals(controller, context, root, arm_id):
             raise AssertionError('issued completion mutation became authoritative')
         try:
             report = json.loads(report_bytes)
-            report['gate_records'][0]['argv'].append('--forged')
+            # The current receipt keeps canonical cmd strings losslessly;
+            # Popen argv lists belong to processes/gate_receipts above. Mutate
+            # an actually projected required call, never an advisory sibling.
+            projected = baseline['evidence']['provenance']['composite_gate_execution']
+            commands = {row['cmd'] for row in projected['gate_records'][gate]}
+            observed = next(row for row in report['gate_records']
+                            if row['gate'] == gate and row['cmd'] in commands)
+            observed['cmd'] += ' --forged'
             report_path.write_text(json.dumps(report))
             candidate = deepcopy(baseline)
             candidate['evidence'] = asdict(arm.validate(Path(baseline['output_root']), baseline['binding']))
