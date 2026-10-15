@@ -743,8 +743,8 @@ def test_source_identity_binds_worker_runner_and_librelane_contract():
 
 
 def _required_gates(step_id):
-    return next(row['mandatory_gate_programs'] for row in em.load_portfolio()['steps']
-                if row['id'] == step_id)
+    from execution_backend_gates import required_programs
+    return required_programs(BACKEND_ROWS[str(step_id)]['canonical_row'])
 
 
 @pytest.mark.parametrize('execution_mode', [
@@ -1404,7 +1404,8 @@ def _backend_projection_current_fixture():
     import shlex
     step = "15"
     row = backend.ROWS[step]
-    gates = list(row["portfolio_policy"]["mandatory_gate_programs"])
+    from execution_backend_gates import required_programs
+    gates = list(required_programs(row["canonical_row"]))
     commands = []
     def walk(node):
         if isinstance(node, dict):

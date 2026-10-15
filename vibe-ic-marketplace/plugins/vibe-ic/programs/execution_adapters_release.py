@@ -118,31 +118,31 @@ def _composite_gate_execution(outputs, binding, report, report_sha):
             report.get("source_sha") != binding.get("source_sha") or
             report.get("producer_verdict") != "PASS" or report.get("missing_inputs") or
             len(required) != len(set(required)) or
-            set(required) != set(ROWS[step]["policy"]["mandatory_gate_programs"])):
+            not required):
         return {}
-    from execution_release_worker import _canonical_gate_invocations, _command_argv
-    expected = []
-    for invocation in _canonical_gate_invocations(step, Path(outputs) / "project"):
-        module, args = _command_argv(invocation["command"], Path(outputs) / "project")
-        expected.append((module, [module, *args], bool(invocation["blocking"])))
+    from execution_backend_gates import required_programs, required_commands
+    if (not required or set(required) != set(required_programs(ROWS[step]["canonical"]))
+            or report.get("canonical_status") != "PASS"
+            or report.get("qualification") != "PASS"):
+        return {}
+    commands = required_commands(ROWS[step]["canonical"])
     rows = report.get("gate_records")
-    if not isinstance(rows, list) or len(rows) != len(expected):
+    if not isinstance(rows, list):
         return {}
     groups, sources = {}, {}
-    for row, (gate, argv, blocking) in zip(rows, expected):
-        if (not isinstance(row, dict) or row.get("gate") != gate or
-                row.get("argv") != argv or row.get("blocking") is not blocking):
-            return {}
-        if gate not in required or not blocking:
-            continue
+    import shlex
+    for gate in required:
+        expected = [cmd for cmd in commands if Path(shlex.split(cmd)[0]).stem == gate]
+        observed = [row for row in rows if isinstance(row, dict) and
+                    row.get("gate") == gate and row.get("cmd") in expected]
         source = HERE / (gate + ".py")
-        if (type(row.get("rc")) is not int or row["rc"] != 0 or
-                row.get("verdict") != "PASS" or not source.is_file() or source.is_symlink()):
+        if (not expected or sorted(row.get("cmd", "") for row in observed) != sorted(expected) or
+                any(row.get("blocking") is not True or type(row.get("rc")) is not int or
+                    row["rc"] != 0 or row.get("verdict") != "PASS" for row in observed) or
+                not source.is_file() or source.is_symlink()):
             return {}
-        groups.setdefault(gate, []).append(row)
+        groups[gate] = observed
         sources[str(source)] = em.digest(source)
-    if set(groups) != set(required):
-        return {}
     return {"schema": "vibeic/composite-gate-execution/1", "worker_component": "release-producer",
             "worker_source": str(HERE / "execution_release_worker.py"),
             "receipt_name": "release-evidence.json", "receipt_sha256": report_sha,
@@ -187,9 +187,13 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
     if binding.get("step_id") == "39" and report.get("excluded_from_verdict") is not True:
         return em.Evidence(binding, "NOT_MEASURED", {}, {},
                            detail="STEP39_EXCLUSION_DECLARATION_MISSING")
+    from execution_backend_gates import required_commands
+    canonical = ROWS.get(str(binding.get('step_id')), {}).get('canonical')
+    hard_commands = required_commands(canonical) if canonical is not None else []
     gates: dict[str, str] = {}
     for row in report.get("gate_records", ()):
-        if not isinstance(row, dict) or not row.get("gate") or not row.get("blocking", True):
+        if (not isinstance(row, dict) or not row.get("gate") or
+                row.get("cmd") not in hard_commands or not row.get("blocking", True)):
             continue
         name, verdict = str(row["gate"]), str(row.get("verdict", "NOT_MEASURED"))
         previous = gates.get(name)
@@ -213,7 +217,8 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
             return em.Evidence(binding, "NOT_MEASURED", gates, outputs_hashes,
                                detail="RELEASE_OUTPUT_UNMEASURED: " + str(name))
     verdict = "FAIL" if measured_fail else (
-        "PASS" if report.get("qualification") == "PASS" and not report.get("missing_outputs") and
+        "PASS" if report.get("qualification") == "PASS" and report.get("canonical_status") == "PASS"
+        and canonical is not None and not report.get("missing_outputs") and
         (not native_required or native_verdicts and all(v == "PASS" for v in native_verdicts))
         else "NOT_MEASURED")
     composite = _composite_gate_execution(outputs, binding, report, outputs_hashes["release-evidence.json"])

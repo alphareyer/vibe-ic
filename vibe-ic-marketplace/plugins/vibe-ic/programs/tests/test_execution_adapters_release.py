@@ -70,7 +70,7 @@ def _context_for_route(step_id, inputs, route, *, native_mode='librelane'):
     context = em.Context(
         str(step_id), route['source_sha'], inputs,
         {"metric": "canonical_evidence", "direction": "max"},
-        tuple(portfolio_row["mandatory_gate_programs"]), native_mode,
+        __import__("execution_backend_gates").required_programs(ROWS[str(step_id)]["canonical"]), native_mode,
         project_digest=route['project_digest'],
         **policy.controller_fields(ic_ip_path='IC', route_receipt=route))
     return context
@@ -421,13 +421,21 @@ def test_metrics_gate_fail_is_not_rewritten_as_json_pass(tmp_path, monkeypatch):
     inputs, outputs = tmp_path / "inputs", tmp_path / "outputs"
     inputs.mkdir()
     calls = []
-    monkeypatch.setattr(release_worker, "produce", lambda step, project, params: [])
-
-    def failing_call(module, args):
+    # The real canonical consumer needs current producer outputs before it
+    # invokes its checker. Only the expensive checker process is substituted.
+    def producer(step, project, params):
+        for name in ROWS[step]["canonical"]["required_outputs"]:
+            target = project / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"scope": "SOURCE_CONTROL_ONLY"}))
+        return [{"program": "neutral_metrics_producer", "rc": 0}]
+    monkeypatch.setattr(release_worker, "produce", producer)
+    import flow_compliance_check as fcc
+    def failing_call(project, command):
+        module, args = release_worker._command_argv(command, project)
         calls.append((module, list(args)))
-        return {"program": module, "rc": 1}
-
-    monkeypatch.setattr(release_worker, "_call", failing_call)
+        return fcc._ProgramCheckOutcome(False, "FAIL: neutral measured failure", 1)
+    monkeypatch.setattr(fcc, "__check_program_exit_zero", failing_call)
     result = execute_release(inputs, outputs, step_id="37.4", params={"input_contract": []})
     metrics = [args for module, args in calls if module == "signoff_metrics_aggregate"]
     assert metrics == [[str(outputs / "project"), "--check"]]
@@ -485,3 +493,47 @@ def test_step39_has_structured_exclusion_and_not_measured_status(tmp_path):
     assert result["qualification"] == "NOT_MEASURED"
     assert result["excluded_from_verdict"] is True
     assert result["producer"][0]["verdict"] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("scenario", ["active_fail", "absent_reason_missing", "absent_declared"])
+def test_release_canonical_optional_semantics_are_not_hard_program_passes(
+        tmp_path, monkeypatch, scenario):
+    """Real canonical consumer; only its external program transport is neutral."""
+    import flow_compliance_check as fcc
+    import execution_backend_gates as gates
+    artifact = tmp_path / "source.txt"
+    artifact.write_text("source-owned neutral output\n")
+    optional = {"command": "optional_neutral .", "condition_files_exist": ["trigger.txt"]}
+    if scenario != "absent_reason_missing":
+        optional["absent_condition_reason"] = (
+            "The neutral design has no optional feature when trigger.txt is absent.")
+    if scenario == "active_fail":
+        (tmp_path / "trigger.txt").write_text("active\n")
+    row = {"id": "neutral_projection", "stage": "source_control", "required_outputs": ["source.txt"],
+           "gate": {"all_of": [{"program_exit_zero": "regular_neutral ."},
+                                  {"optional_program_exit_zero": optional}]}}
+    calls = []
+    def transport(project, command):
+        calls.append(command)
+        failed = command.startswith("optional_neutral")
+        return fcc._ProgramCheckOutcome(not failed,
+            "FAIL: neutral active optional" if failed else "PASS: neutral regular", 1 if failed else 0)
+    monkeypatch.setattr(fcc, "__check_program_exit_zero", transport)
+    result = gates.evaluate(tmp_path, row)
+    assert gates.required_programs(row) == ("regular_neutral",)
+    optional_records = [r for r in result["ledger"] if r["gate"] == "optional_neutral"]
+    if scenario == "active_fail":
+        assert calls == ["regular_neutral .", "optional_neutral ."]
+        assert optional_records and optional_records[0]["verdict"] == "FAIL"
+        assert result["status"] == "FAIL"
+    else:
+        assert calls == ["regular_neutral ."]
+        assert optional_records == []  # No fabricated optional PASS invocation.
+        if scenario == "absent_reason_missing":
+            assert result["status"] == "FAIL"
+        else:
+            assert any("not-applicable" in reason.lower() or "nothing was checked" in reason.lower()
+                       for reason in result["step"]["reasons"])
+    # A receipt cannot promote canonical FAIL/NM merely because all regular
+    # programs passed: the whole canonical verdict is retained independently.
+    assert result["step"]["status"] == result["status"]

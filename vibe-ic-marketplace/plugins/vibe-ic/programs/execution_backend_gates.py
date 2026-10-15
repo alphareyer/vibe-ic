@@ -11,6 +11,61 @@ import execution_backend_snapshot as snap
 import execution_modes as em
 
 
+
+def program_invocations(row: dict) -> list[dict]:
+    """Keep canonical command roles and duplicates; do not evaluate clauses."""
+    found = []
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ('program_exit_zero', 'advisory_program_exit_zero',
+                           'optional_program_exit_zero'):
+                    spec = value if isinstance(value, dict) else {'command': value}
+                    command = spec.get('command')
+                    if isinstance(command, str) and command.strip():
+                        found.append({'command': command,
+                                      'blocking': key == 'program_exit_zero',
+                                      'optional': key == 'optional_program_exit_zero',
+                                      'condition_files_exist': spec.get('condition_files_exist', [])})
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+    walk(row.get('gate', {}))
+    return found
+
+
+def required_commands(row: dict) -> list[str]:
+    """Unconditional program obligations, separate from full row acceptance.
+
+    Optional activation and advisory enforcement are decided only by the real
+    canonical consumer. Its overall verdict remains mandatory at validation;
+    an absent optional is never fabricated into an executed program PASS.
+    """
+    commands = [item['command'] for item in program_invocations(row)
+                if item['blocking']]
+    if str(row['id']) == '20':
+        commands.append('hold_area_budget_check')
+    return commands
+
+
+def required_programs(row: dict) -> tuple[str, ...]:
+    import shlex
+    return tuple(sorted({Path(shlex.split(cmd)[0]).stem
+                         for cmd in required_commands(row)}))
+
+
+def canonical_family_row(step_id: str) -> dict | None:
+    from execution_provider_catalog import BACKEND_ROWS, RELEASE_ROWS
+    step_id = str(step_id)
+    if step_id in BACKEND_ROWS:
+        return BACKEND_ROWS[step_id]['canonical_row']
+    if step_id in RELEASE_ROWS:
+        return RELEASE_ROWS[step_id]['canonical']
+    return None
+
+
 def evaluate(project: Path, row: dict) -> dict:
     import flow_compliance_check as fcc
     # Capture the actual semantic consumer and its lossless gate ledger. No
@@ -40,7 +95,8 @@ def evaluate(project: Path, row: dict) -> dict:
             verdict.status = 'FAIL' if area_rc == 1 else 'NOT_MEASURED'
     ledger = fcc._GATE_LEDGER[start:]
     from dataclasses import asdict
-    return {'step': asdict(verdict), 'ledger': ledger, 'status': verdict.status}
+    return {'step': asdict(verdict), 'ledger': ledger, 'status': verdict.status,
+            'required_commands': required_commands(row)}
 
 
 def contracts(project: Path, row: dict) -> dict:
@@ -69,9 +125,11 @@ def states(binding, gate_result, producer):
     for name in binding['required_gates']:
         if name in values:
             continue
-        observed = [x for x in gate_result['ledger'] if x.get('gate') == name]
-        # Preserve raw advisory FAIL too. F1 must not demand a fake PASS for a
-        # program the canonical policy explicitly makes advisory/conditional.
+        observed = [x for x in gate_result['ledger'] if x.get('gate') == name
+                    and x.get('cmd') in gate_result.get('required_commands', ())]
+        # Only unconditional program calls satisfy individual hard obligations.
+        # Raw advisory/optional rows remain in the lossless ledger, while
+        # backend_canonical carries the complete consumer's actual verdict.
         values[name] = ('FAIL' if any(x.get('rc') == 1 or x.get('verdict') == 'FAIL' for x in observed)
                         else 'PASS' if observed and all(x.get('rc') == 0 and x.get('verdict') == 'PASS' for x in observed)
                         else 'NOT_MEASURED')

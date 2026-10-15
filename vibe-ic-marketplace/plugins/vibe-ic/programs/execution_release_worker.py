@@ -57,28 +57,8 @@ def _call(module_name: str, args: list) -> dict:
 
 def _canonical_gate_invocations(step: str, project: Path) -> list[dict]:
     """Extract the canonical command strings losslessly, including repeats."""
-    found: list[dict] = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key in {"program_exit_zero", "advisory_program_exit_zero",
-                           "optional_program_exit_zero"}:
-                    spec = value if isinstance(value, dict) else {"command": value}
-                    command = spec.get("command")
-                    if isinstance(command, str):
-                        found.append({"command": command,
-                                      "blocking": key == "program_exit_zero",
-                                      "optional": key == "optional_program_exit_zero",
-                                      "condition_files_exist": spec.get("condition_files_exist", [])})
-                else:
-                    walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(ROWS[str(step)]["canonical"].get("gate", {}))
-    return found
+    from execution_backend_gates import program_invocations
+    return program_invocations(ROWS[str(step)]["canonical"])
 
 
 _PATH_FLAGS = {"--json", "--output", "--compliance", "--responses-dir",
@@ -252,35 +232,28 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     # Defer canonical consumers until their declared INPUT is present; record
     # their absence without converting a capability probe into a measured FAIL.
     # Once INPUT is complete, consumers run after producer refusal or exception.
-    for invocation in _canonical_gate_invocations(str(step_id), project):
-        if missing_inputs:
-            module, args = _command_argv(invocation["command"], project)
-            gate_records.append({"gate": module, "argv": [module, *args],
-                "blocking": bool(invocation.get("blocking")), "rc": None,
-                "verdict": "NOT_MEASURED", "reason": "REQUIRED_INPUT_ABSENT"})
-        else:
-            gate_records.append(_gate(str(step_id), project, invocation))
-    # Step 39's required external input is a physical FPGA board.  A missing
-    # board cannot be turned into a measured FAIL by a checker that merely
-    # observes its absent pass JSON; preserve the canonical invocation, but
-    # classify its blocking result as NOT_MEASURED and exclude the row from
-    # tapeout verdicts.  If an owner-produced board marker exists, checker
-    # FAIL remains a real FAIL.
-    if str(step_id) == "39" and not _fpga_hardware_present(project):
-        for record in gate_records:
-            if record.get("blocking") and record.get("verdict") == "FAIL":
-                record.update(verdict="NOT_MEASURED",
-                              reason="physical FPGA board evidence absent")
+    from execution_backend_gates import evaluate, program_invocations
+    canonical = {"status": "NOT_MEASURED", "ledger": []}
+    if not missing_inputs:
+        try:
+            canonical = evaluate(project, ROWS[str(step_id)]["canonical"])
+        except BaseException as exc:
+            canonical = {"status": "NOT_MEASURED", "ledger": [],
+                         "reason": f"{type(exc).__name__}: {exc}"}
+    # Preserve only actual invocations from the canonical consumer's ledger.
+    # Absent optionals stay absent/NM in its step disclosure, never synthetic P.
+    invocations = program_invocations(ROWS[str(step_id)]["canonical"])
+    blocking_commands = {item['command'] for item in invocations
+                         if item['blocking'] or item['optional']}
+    gate_records = [dict(record, blocking=record.get('cmd') in blocking_commands)
+                    for record in canonical['ledger']]
     files, missing = resolve_contract(project, ROWS[str(step_id)]["canonical"]["required_outputs"])
     for name in files:
         source, target = project / name, outputs / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
-    fail = producer_verdict == "FAIL" or any(
-        r.get("blocking") and r.get("verdict") == "FAIL" for r in gate_records)
-    nm = (producer_verdict == "NOT_MEASURED" or
-          any(r.get("blocking") and r.get("verdict") == "NOT_MEASURED"
-              for r in gate_records) or
+    fail = producer_verdict == "FAIL" or canonical['status'] == "FAIL"
+    nm = (producer_verdict != "PASS" or canonical['status'] != "PASS" or
           bool(missing) or bool(missing_inputs))
     verdict = "FAIL" if fail else "NOT_MEASURED" if nm else "PASS"
     # Native qualification is earned only from the canonical producer's own
@@ -304,6 +277,8 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
               "source_sha": binding.get("source_sha"), "binding": binding,
               "producer": records, "producer_verdict": producer_verdict,
               "gate_records": gate_records, "outputs": files,
+              "canonical_status": canonical["status"],
+              "canonical_step_result": canonical.get("step"),
               "missing_outputs": missing, "input_contract": input_contract,
               "missing_inputs": missing_inputs, "qualification": verdict,
               "design_verdict": verdict, "physical_measurement": "NOT_MEASURED",

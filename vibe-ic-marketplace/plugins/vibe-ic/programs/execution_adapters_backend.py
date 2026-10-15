@@ -178,6 +178,7 @@ def _composite_gate_execution(binding, result, report_sha):
     """Project the canonical consumer ledger without inventing child processes."""
     step = str(binding.get("step_id"))
     required = list(binding.get("required_gates", ()))
+    from execution_backend_gates import required_programs, required_commands
     summaries = {"backend_canonical", "backend_native_substance"}
     if (step not in ROWS or result.get("schema") != "vibeic/backend-result/2" or
             result.get("step_id") != step or result.get("source_sha") != binding.get("source_sha") or
@@ -186,7 +187,8 @@ def _composite_gate_execution(binding, result, report_sha):
             set(result.get("gates", {})) != set(required) | summaries or
             any(result["gates"].get(name) != "PASS" for name in summaries) or
             len(required) != len(set(required)) or
-            set(required) != set(ROWS[step]["portfolio_policy"]["mandatory_gate_programs"])):
+            not required or
+            set(required) != set(required_programs(ROWS[step]["canonical_row"]))):
         return {}
     producers = result.get("canonical_receipts")
     if (not isinstance(producers, list) or not producers or any(
@@ -194,22 +196,7 @@ def _composite_gate_execution(binding, result, report_sha):
             row.get("producer") != "execution_backend_producers.produce" or
             row.get("step_id") != step or row.get("verdict") != "PASS" for row in producers)):
         return {}
-    commands = []
-    def walk(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key in ("program_exit_zero", "advisory_program_exit_zero", "optional_program_exit_zero"):
-                    command = value.get("command") if isinstance(value, dict) else value
-                    if isinstance(command, str):
-                        commands.append(command)
-                else:
-                    walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-    walk(ROWS[step]["canonical_row"].get("gate", {}))
-    if step == "20":
-        commands.append("hold_area_budget_check")
+    commands = required_commands(ROWS[step]["canonical_row"])
     ledger = result.get("gate_ledger")
     if not isinstance(ledger, list):
         return {}
@@ -225,7 +212,8 @@ def _composite_gate_execution(binding, result, report_sha):
             source = HERE / "execution_backend_producers.py"
         else:
             expected = [cmd for cmd in commands if Path(shlex.split(cmd)[0]).stem == gate]
-            rows = [row for row in ledger if isinstance(row, dict) and row.get("gate") == gate]
+            rows = [row for row in ledger if isinstance(row, dict) and
+                    row.get("gate") == gate and row.get("cmd") in expected]
             if (not expected or sorted(row.get("cmd", "") for row in rows) != sorted(expected) or
                     any(type(row.get("rc")) is not int or row["rc"] != 0 or
                         row.get("verdict") != "PASS" or row.get("exit_code", 0) != 0 for row in rows)):
@@ -251,7 +239,7 @@ def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gate
         result = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return em.Evidence(binding, "NOT_MEASURED", {}, {}, detail=f"malformed receipt: {exc}")
-    measured_fail = result.get("producer_verdict") == "FAIL" or any(
+    measured_fail = result.get("verdict") == "FAIL" or result.get("producer_verdict") == "FAIL" or any(
         value == "FAIL" for value in (result.get("gates") or {}).values())
     if result.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
@@ -261,9 +249,10 @@ def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gate
     # not additional required gate invocations.
     observed = {name: (result.get("gates") or {}).get(name, "NOT_MEASURED") for name in gates}
     status = "FAIL" if measured_fail else "NOT_MEASURED"
-    if not measured_fail and result.get("producer_verdict") == "PASS" and all(
+    if (not measured_fail and result.get("verdict") == "PASS" and
+            result.get("producer_verdict") == "PASS" and all(
             observed.get(g) == "PASS" for g in gates) and (
-                result.get("native_receipts") or result.get("canonical_receipts")):
+                result.get("native_receipts") or result.get("canonical_receipts"))):
         status = "PASS"
     outputs_hashes = {"backend_result.json": em.digest(path)}
     for name, expected in (result.get("outputs") or {}).items():

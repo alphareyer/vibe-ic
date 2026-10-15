@@ -1943,7 +1943,23 @@ class Controller:
         step = next((s for s in self.portfolio['steps'] if s['id'] == context.step_id), None)
         if step is None:
             raise Refusal('UNKNOWN_CANONICAL_STEP', context.step_id)
-        if not set(step['mandatory_gate_programs']).issubset(context.required_gates):
+        from execution_backend_gates import canonical_family_row, required_programs
+        adapters = self.registry.adapters(context.step_id)
+        family_workers = {'producer': 'execution_backend_worker.py',
+                          'release-producer': 'execution_release_worker.py'}
+        canonical_family = bool(adapters) and all(
+            len(arm.components) == 1 and
+            arm.components[0].name in family_workers and
+            str(Path(__file__).resolve().parent /
+                family_workers[arm.components[0].name]) in arm.source_files
+            for arm in adapters)
+        canonical = canonical_family_row(context.step_id) if canonical_family else None
+        required = (set(required_programs(canonical)) if canonical is not None
+                    else set(step['mandatory_gate_programs']))
+        # Source-owned fixed-step workers consume the entire canonical row.
+        # Keep portfolio enumeration lossless without reclassifying optional
+        # absence or advisory disclosures into unconditional program PASSes.
+        if not required or not required.issubset(context.required_gates):
             raise Refusal('REQUIRED_GATES_DROPPED', context.step_id)
         self._measure_versions(context)
         adapters = self.registry.adapters(context.step_id)

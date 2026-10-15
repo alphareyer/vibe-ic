@@ -1158,8 +1158,12 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
                  dict(runtime['parameters'], **dict(parameters or {}))) if frontend else dict(applicable[0].objective)
     if frontend:
         objective.setdefault('metric', 'source_boundary')
+    from execution_backend_gates import canonical_family_row, required_programs
+    canonical = canonical_family_row(step_id)
+    required = (required_programs(canonical) if canonical is not None
+                else tuple(row['mandatory_gate_programs']))
     context = em.Context(step_id, runtime['route']['source_sha'], files, objective,
-        tuple(row['mandatory_gate_programs']), project_digest=runtime['route']['project_digest'],
+        required, project_digest=runtime['route']['project_digest'],
         **controller_fields(ic_ip_path=runtime['route']['ic_ip_path'], route_receipt=runtime['route']))
     analog_prepared = None
     if step_id in ('A6', 'A7', 'A8'):
