@@ -580,7 +580,11 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
             # fetch destination is not invented as a pre-existing input.
             path = Path(template)
             try:
-                path = (path if path.is_absolute() else root / path).resolve().relative_to(root.resolve())
+                source = Path(os.path.abspath(path if path.is_absolute() else root / path))
+                source.resolve().relative_to(root.resolve())
+                # Keep the contained lexical alias: its target may change
+                # later, and current-input checks must reopen that same name.
+                path = source.relative_to(root.resolve())
             except ValueError:
                 # Preserve Default's existing external-template producer
                 # route, including relative/symlink spellings. The local

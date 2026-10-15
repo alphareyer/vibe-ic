@@ -155,3 +155,44 @@ def test_failed_or_missing_route_evidence_never_promotes(tmp_path, monkeypatch, 
     retained = json.loads((project / "steps" / row["folder"] / "outputs.json").read_text())
     assert retained["canonical_pass"] is False
     assert retained["status"] != "PASS"
+
+
+@pytest.mark.parametrize("retarget", [False, True], ids=["current", "retarget"])
+def test_contained_operator_alias_tracks_the_template_the_producer_reads(tmp_path, monkeypatch, retarget):
+    import submission_template_ingest as ingest
+
+    project = _project(tmp_path)
+    a = _write(project, "input/operator_A/neutral.yaml",
+               "DIE_AREA: [0, 0, 100, 100]\nCORE_AREA: [10, 10, 90, 90]\nSEAL_RING_WIDTH: 10\nFP_SIZING: absolute\npads: [neutral_pad]\n")
+    b = _write(project, "input/operator_B/neutral.yaml",
+               "DIE_AREA: [0, 0, 200, 200]\nCORE_AREA: [10, 10, 190, 190]\nSEAL_RING_WIDTH: 10\nFP_SIZING: absolute\npads: [neutral_pad]\n")
+    alias = project / "operator_link"
+    alias.symlink_to(a.parent, target_is_directory=True)
+    answers = project / "input/step_0_5ic_answers.json"
+    own = json.loads(answers.read_text())
+    own["operator_template"].update(path="operator_link", slot="neutral")
+    answers.write_text(json.dumps(own))
+    owner_before, a_before = answers.read_bytes(), a.read_bytes()
+    _external_fetch_boundary(monkeypatch)
+    assert phase1._run_step_0_5ic(project, pdk="gf180mcuD") == 0
+    original = versions.latest_pass(project, "0.5ic")
+    assert original is not None and original["canonical_pass"]
+    assert original["current_inputs"] is True
+    if retarget:
+        alias.unlink()
+        alias.symlink_to(b.parent, target_is_directory=True)
+    readback = ingest.build_record(project, str(alias), "neutral", "Neutral declared operator source.")
+    expected_root = b.parent if retarget else a.parent
+    assert Path(readback["lookup"]["template_root"]) == expected_root.resolve()
+    assert readback["slots"] and Path(readback["slots"][0]["source_file"]) == expected_root / "neutral.yaml"
+    current = versions.latest_pass(project, "0.5ic")
+    assert answers.read_bytes() == owner_before and a.read_bytes() == a_before
+    assert current["inputs"] == original["inputs"]
+    _write(project, "API_OBSERVATION_ALIAS.json", json.dumps({
+        "retarget": retarget, "bound_inputs": current["inputs"],
+        "current_inputs": current["current_inputs"],
+        "real_ingest_template_root": readback["lookup"]["template_root"],
+        "real_ingest_source_file": readback["slots"][0]["source_file"],
+        "original_owner_and_A_unchanged": True,
+    }, indent=2))
+    assert current["current_inputs"] is (not retarget), current
