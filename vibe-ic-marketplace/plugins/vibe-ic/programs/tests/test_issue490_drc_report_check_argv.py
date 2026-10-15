@@ -456,21 +456,63 @@ def _plant_signoff_evidence(proj: Path):
     # must already be on disk here, because the receipt digests it.
     report = proj / "reports" / "phase3" / "drc_signoff.rpt"
     if report.is_file():
+        import _physical_current as current
+
+        # Current-subject parser fixture, not a native EDA measurement. Keep
+        # the real strict reader and wrapper: provide their material readset
+        # with the existing shared build/entry writer, as the other retained
+        # process controls do. No current reader or scientific verdict is stubbed.
+        pdk_dir = proj / "input/pdk/source_fixture"
+        pdk_dir.mkdir(parents=True, exist_ok=True)
+        materials = {
+            "def": (gds / "chip_top.def", "VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n"),
+            "netlist": (gds / "chip_top_pnr.v", "module chip_top(); endmodule\n"),
+            "pdk_tech_lef": (pdk_dir / "tech.lef",
+                "VERSION 5.8 ;\nLAYER met1\n TYPE ROUTING ;\nEND met1\nEND LIBRARY\n"),
+            "pdk_cell_lef": (pdk_dir / "cells.lef", "VERSION 5.8 ;\nEND LIBRARY\n"),
+            "pdk_deck": (pdk_dir / "deck.lydrc", "# SOURCE_FIXTURE parser input; no EDA run\n"),
+            "technology": (proj / "reports/phase3/technology_units.json",
+                           json.dumps({"pdk": "source_fixture"})),
+        }
+        for path, body in materials.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+        deck = materials["pdk_deck"][0]
+        # Name the same material deck in the RDB and the fixture invocation.
+        # A dirty/plain report is left dirty/plain; no result body is replaced.
+        report.write_text(report.read_text().replace(
+            "/pdk/tech/klayout/drc/deck.lydrc", str(deck)))
         transcript = report.with_suffix(".log")
-        # Both the RDB and its transcript are now in the declared sign-off
-        # scope. Give the transcript its own readable count, preserving the
-        # real gate's refusal of an undetermined file beside a clean report.
-        transcript.write_text("KLayout completed deck execution\n" + _CLEAN_DRC)
+        transcript.write_text("SOURCE_FIXTURE KLayout completed deck execution\n" + _CLEAN_DRC)
+        native_report = proj / "phase3/reports/drc.rpt"
+        native_report.parent.mkdir(parents=True, exist_ok=True)
+        native_report.write_bytes(report.read_bytes())
+        native_log = native_report.with_suffix(".log")
+        native_log.write_bytes(transcript.read_bytes())
         gds_file = gds / "chip_top.gds"
         _sha = lambda q: "sha256:" + hashlib.sha256(q.read_bytes()).hexdigest()
         rel = lambda q: q.relative_to(proj).as_posix()
+        argv = ["klayout", "-b", "-r", str(deck), "-rd", f"input={gds_file}",
+                "-rd", f"report={native_report}"]
         record = {"record": "invocation", "measured": True, "tool": "klayout",
-                  "exit_code": 0,
-                  "inputs": {rel(gds_file): _sha(gds_file)},
-                  "outputs": {rel(report): _sha(report),
-                              rel(transcript): _sha(transcript)}}
+                  "exit_code": 0, "scope": "SOURCE_FIXTURE parser/receipt control; no native EDA",
+                  "command": " ".join(argv),
+                  "inputs": {rel(gds_file): _sha(gds_file), rel(deck): _sha(deck)},
+                  "outputs": {rel(q): _sha(q) for q in
+                              (report, transcript, native_report, native_log)}}
         with (proj / "provenance.jsonl").open("a") as fh:
             fh.write(json.dumps(record) + "\n")
+        inputs = {"gds": current.entry(proj, gds_file),
+                  **{role: current.entry(proj, path)
+                     for role, (path, _body) in materials.items()}}
+        subject = current.build(proj, "31", "stage4", "chip_top", "source_fixture",
+            "klayout", inputs,
+            {"report": current.entry(proj, report),
+             "native_report": current.entry(proj, native_report),
+             "log": current.entry(proj, native_log)},
+            {"rc": 0, "argv": argv, "native_invocation": record,
+             "scope": "SOURCE_FIXTURE parser/receipt control; no native EDA"})
+        (proj / "reports/phase3/direct_current_drc.json").write_text(json.dumps(subject))
 
 
 def _plant_in_scope(proj: Path, cmd: str, body: str = None):
