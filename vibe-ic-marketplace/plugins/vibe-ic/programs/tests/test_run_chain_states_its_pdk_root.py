@@ -549,6 +549,8 @@ def test_run_chain_refuses_an_unstated_root(tmp_path, monkeypatch):
 def test_run_chain_passes_and_records_the_stated_root(tmp_path, monkeypatch):
     """The CLI gets `--pdk-root <stated>`, and the step folder records it
     with the host mount beneath it."""
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     config = tmp_path / "c.json"
     config.write_text(json.dumps({"meta": {"step": "OpenROAD.Floorplan"}}))
     state = tmp_path / "s.json"
@@ -792,6 +794,8 @@ def test_a_step_folder_resumes_only_under_the_root_it_was_run_with(tmp_path, mon
     """Resume reads `pdk_root.json`: a folder from before the root was recorded
     (the CLI then took the image's PDK_ROOT) or run under another root/mount
     is re-run under the stated one, never handed downstream as if it had been."""
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     config = tmp_path / "c.json"
     config.write_text(json.dumps({"meta": {"step": "OpenROAD.Floorplan"}}))
     state = tmp_path / "s.json"

@@ -538,7 +538,7 @@ class _FakeSim:
         tb = Path(self.tb_for[str(run_dir)])
         text = tb.read_text()
         case = tb.stem
-        m = re.search(r"localparam integer NV = (\d+);", text)
+        m = re.search(r"\blocalparam\s+integer\s+[^;]*\bNV\s*=\s*(\d+)\s*[,;]", text)
         if m:
             nv = int(m.group(1))
             a, b = self.outcome(case, nv)

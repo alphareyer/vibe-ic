@@ -702,9 +702,14 @@ def _runner_invocations() -> Dict[str, ast.FunctionDef]:
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            parents = {id(child): parent for parent in ast.walk(node)
+                       for child in ast.iter_child_nodes(parent)}
             for sub in ast.walk(node):
+                # A dispatch helper may compare runner.name with this string;
+                # that comparison does not build or launch checker argv.
                 if (isinstance(sub, ast.Constant)
-                        and sub.value == _CHECKER_ARGV_CONSTANT):
+                        and sub.value == _CHECKER_ARGV_CONSTANT
+                        and not isinstance(parents.get(id(sub)), ast.Compare)):
                     out[path.name] = node
                     break
             if path.name in out:
