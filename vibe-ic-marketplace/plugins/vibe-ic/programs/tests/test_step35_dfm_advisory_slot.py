@@ -83,6 +83,8 @@ def test_step35_declares_dfm_screen_as_a_program_output():
         "program": "dfm_screen_check",
         "path": _ARTEFACT,
         "verdict_field": "verdict",
+        "producer_command": "dfm_screen_check . --json reports/phase3/dfm_screen.json",
+        "enforcement": "advisory",
     }]
 
 

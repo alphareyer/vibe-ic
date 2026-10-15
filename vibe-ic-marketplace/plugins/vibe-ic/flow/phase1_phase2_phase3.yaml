@@ -7410,6 +7410,8 @@ steps:
       - program: dfm_screen_check
         path: "reports/phase3/dfm_screen.json"
         verdict_field: verdict
+        producer_command: "dfm_screen_check . --json reports/phase3/dfm_screen.json"
+        enforcement: advisory
     required_outputs:
       - "reports/phase3/dfm_screen.json"
     gate:

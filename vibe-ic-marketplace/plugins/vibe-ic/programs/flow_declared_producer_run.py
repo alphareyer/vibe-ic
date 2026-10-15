@@ -245,9 +245,12 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
             if any(f["step"] == str(step.get("id")) and f["target"] == target
                    for f in found):
                 continue
-            found.append({"step": str(step.get("id")), "program": program,
-                          "command": cmd, "target": target,
-                          "siblings": sorted(outs - {target})})
+            clause = {"step": str(step.get("id")), "program": program,
+                      "command": cmd, "target": target,
+                      "siblings": sorted(outs - {target})}
+            if spec.get("enforcement") == "advisory":
+                clause["enforcement"] = "advisory"
+            found.append(clause)
 
     # MERGED IN FLOW ORDER, NOT CONCATENATED. R-0915-160. This function's own docstring has
     # always said "in flow order"; it was not, and nothing checked.
