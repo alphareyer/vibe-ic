@@ -12326,6 +12326,21 @@ def _phase2_logical_pad_top(project: Path, synth: StepResult,
     pad = phase3.step_io_pad_chip_top_gen(project, container, pdk)
     rows = [pad]
     if pad.status == 'PASS':
+        # The pad reader can refresh L9's selected-source binding. Finish the
+        # actual expert reading before a functional oracle consumes it; the
+        # final-audit refresh is too late for this consumer. A changed reading
+        # still needs a fresh AI D1 decision, never an automatic signature.
+        currentness = _finish_selected_interface_currentness(project)
+        if currentness.status != 'NOT_APPLICABLE':
+            rows.append(currentness)
+        if currentness.status not in ('PASS', 'NOT_APPLICABLE'):
+            rows.append(StepResult(
+                'full_stack_functional_tb', 'NOT_MEASURED', 0.0,
+                'functional execution awaits current selected-interface review: '
+                + currentness.detail,
+                reason_class=currentness.reason_class or _V.ReasonClass.UPSTREAM_FAILED,
+                extras={'sim_executed': False}))
+            return rows
         rows.append(step_full_stack_functional_tb(project, container))
     return rows
 

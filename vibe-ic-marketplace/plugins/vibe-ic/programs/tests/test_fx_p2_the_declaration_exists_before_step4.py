@@ -326,3 +326,110 @@ def test_identical_declaration_replay_preserves_published_sidecar_bytes(tmp_path
                                     {k: v for k, v in json.loads(after).items() if k != 'generated_at'},
         'scope': 'Actual producer same-input byte idempotence; no consumer hash exemption'}) + '\n')
     assert after == before, 'same complete provenance payload rewrote generated_at bytes'
+
+
+@pytest.mark.parametrize('change', ['selected_source', 'late_provenance', 'declaration'])
+def test_logical_pad_owner_finishes_reading_before_functional_dispatch(tmp_path, monkeypatch, change):
+    """Source control: real owner, pad port reader and freshness readers.
+
+    The physical pad/PDK transport and functional executor are probes only;
+    no native synthesis or AI acceptance is claimed by this fixture.
+    """
+    import io_pad_chip_top_gen as pad
+    import phase3_one_shot_runner as phase3
+    import full_stack_functional_tb as functional
+    import _path_layout as paths
+    project = _current_interface_project(tmp_path, monkeypatch)
+    l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    prior_expert = paths.report_path(project, 'phase1/expert_parse_track.json').read_bytes()
+    receipt = project / 'reports/audit/ai_judgements/D1.json'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    # Deliberately not a valid judgement. The owner must leave it untouched.
+    receipt.write_text('{"source_control": "unsigned prior evidence"}\n')
+    prior_receipt = receipt.read_bytes()
+    record = functional.record_path(project)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"verdict": "FAIL", "source_control": "prior failure"}\n')
+    prior_record = record.read_bytes()
+    if change == 'selected_source':
+        source = project / json.loads(l9.read_text())['selected_interface_binding']['selected_source']
+        source.write_bytes(source.read_bytes() + b'\n// neutral current derivation\n')
+    elif change == 'late_provenance':
+        sidecar = project / 'plugin_output/declaration.provenance.json'
+        content = json.loads(sidecar.read_text())
+        content['generated_at'] = '2026-10-15T00:00:00+00:00'
+        sidecar.write_text(json.dumps(content))
+    else:
+        declaration = project / 'plugin_output/declaration.json'
+        declaration.write_bytes(declaration.read_bytes() + b'\n')
+    drift_key = 'declaration_provenance' if change == 'late_provenance' else change
+    assert _current_interface_values(project)['refs'][drift_key] is False
+    observed = []
+    monkeypatch.setattr(D, '_phase2_pdk_config', lambda *_: {})
+    def pad_transport(project, *_):
+        ports = pad._read_top_ports(project)
+        assert ports
+        observed.append('actual pad port reader')
+        return D.StepResult('io_pad_chip_top_gen', 'PASS', 0, 'SOURCE_CONTROL pad transport')
+    monkeypatch.setattr(phase3, 'step_io_pad_chip_top_gen', pad_transport)
+    def functional_probe(*_):
+        observed.append('functional dispatched without current review')
+        record.write_text('{"source_control": "unauthorized overwrite"}\n')
+        return D.StepResult('full_stack_functional_tb', 'FAIL', 0, 'SOURCE_CONTROL dispatch probe')
+    monkeypatch.setattr(D, 'step_full_stack_functional_tb', functional_probe)
+    rows = D._phase2_logical_pad_top(project,
+        D.StepResult('yosys_synth', 'PASS', 0, 'SOURCE_CONTROL transport only',
+                     ['neutral.v'], {'synth_top': 'core'}), None, None)
+    values = _current_interface_values(project)
+    saved = {'scope': 'SOURCE_CONTROL, no native or AI credit', 'observed': observed,
+             'currentness': values, 'rows': [vars(row) for row in rows],
+             'record_preserved': record.read_bytes() == prior_record,
+             'receipt_preserved': receipt.read_bytes() == prior_receipt}
+    (tmp_path / 'preconsumer_observed.json').write_text(json.dumps(saved, indent=2))
+    assert values['expert_check_rc'] == 0, saved
+    assert all(values['refs'].values()), saved
+    assert values['D1_credit'] is False, saved
+    assert any(row.status == 'NOT_MEASURED' and
+               row.reason_class == 'awaiting_signed_judgement' for row in rows), saved
+    assert observed == ['actual pad port reader'], saved
+    assert saved['record_preserved'] and saved['receipt_preserved'], saved
+    assert any(p.read_bytes() == prior_expert
+               for p in (project / 'steps').rglob('expert_parse_track.json')), saved
+    # An unchanged retry neither churns the reading nor acquires AI credit.
+    stable_l9 = l9.read_bytes()
+    stable_expert = paths.report_path(project, 'phase1/expert_parse_track.json').read_bytes()
+    repeat = D._phase2_logical_pad_top(project,
+        D.StepResult('yosys_synth', 'PASS', 0, 'SOURCE_CONTROL transport only',
+                     ['neutral.v'], {'synth_top': 'core'}), None, None)
+    assert any(row.reason_class == 'awaiting_signed_judgement' for row in repeat)
+    assert observed == ['actual pad port reader', 'actual pad port reader']
+    assert l9.read_bytes() == stable_l9
+    assert paths.report_path(project, 'phase1/expert_parse_track.json').read_bytes() == stable_expert
+    assert record.read_bytes() == prior_record and receipt.read_bytes() == prior_receipt
+
+
+@pytest.mark.parametrize('document', [False, True])
+def test_logical_pad_owner_keeps_non_delegated_functional_dispatch(tmp_path, monkeypatch, document):
+    """Source-only dispatch control: no selected binding means no new handoff."""
+    import phase3_one_shot_runner as phase3
+    import execution_policy
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    if document:
+        path = tmp_path / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+        path.parent.mkdir(parents=True)
+        path.write_text('{"top_module": "neutral_core", "top_ports": []}')
+    monkeypatch.setattr(D, '_phase2_pdk_config', lambda *_: {})
+    monkeypatch.setattr(phase3, 'step_io_pad_chip_top_gen', lambda *_:
+                        D.StepResult('io_pad_chip_top_gen', 'PASS', 0, 'SOURCE_CONTROL transport'))
+    dispatched = []
+    def functional_probe(*_):
+        dispatched.append('functional')
+        return D.StepResult('full_stack_functional_tb', 'NOT_MEASURED', 0,
+                            'SOURCE_CONTROL executor probe; no simulation credit',
+                            reason_class='not_executed')
+    monkeypatch.setattr(D, 'step_full_stack_functional_tb', functional_probe)
+    rows = D._phase2_logical_pad_top(tmp_path,
+        D.StepResult('yosys_synth', 'PASS', 0, 'SOURCE_CONTROL transport',
+                     ['neutral.v'], {'synth_top': 'neutral_core'}), None, None)
+    assert dispatched == ['functional']
+    assert [row.name for row in rows] == ['io_pad_chip_top_gen', 'full_stack_functional_tb']
