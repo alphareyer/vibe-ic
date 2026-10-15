@@ -192,6 +192,7 @@ import hashlib
 import json
 import re
 import sys
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -806,6 +807,35 @@ def spans(seg: Dict[str, Any], box: Tuple[float, float, float, float]) -> bool:
             and bx1 <= seg["x1"] <= bx2)
 
 
+class _SupplySegmentIndex:
+    """Index spans' inclusive transverse interval; retain input multiplicity."""
+
+    def __init__(self, segments: Sequence[Dict[str, Any]]) -> None:
+        self.segments = segments
+        self.layers: Dict[str, Tuple[List[Tuple[float, int]],
+                                     List[Tuple[float, int]]]] = {}
+        for ordinal, seg in enumerate(segments):
+            horizontal = (seg["y2"] - seg["y1"]) <= (seg["x2"] - seg["x1"])
+            buckets = self.layers.setdefault(seg["layer"].lower(), ([], []))
+            buckets[0 if horizontal else 1].append(
+                (seg["y1"] if horizontal else seg["x1"], ordinal))
+        for buckets in self.layers.values():
+            for bucket in buckets:
+                bucket.sort()
+
+    def candidates(self, layer: str, box: Tuple[float, float, float, float]
+                   ) -> List[Dict[str, Any]]:
+        bx1, by1, bx2, by2 = box
+        horizontal, vertical = self.layers.get(layer.lower(), ([], []))
+        ordinals = []
+        for bucket, lo, hi in ((horizontal, by1, by2), (vertical, bx1, bx2)):
+            start = bisect_left(bucket, (lo, -1))
+            stop = bisect_right(bucket, (hi, len(self.segments)))
+            ordinals.extend(ordinal for _, ordinal in bucket[start:stop])
+        # Coordinate order must not change the public findings' input order.
+        return [self.segments[i] for i in sorted(ordinals)]
+
+
 def merge_macro_obs(per_file: Sequence[Dict[str, Dict[str, Any]]],
                     labels: Sequence[str] = ()
                     ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
@@ -934,6 +964,7 @@ def audit(def_text: str, macro_lef_texts: Sequence[str],
     units = int(um.group(1)) if um else 1000
     placed = parse_placed_macros(def_text, list(with_obs))
     segs, gaps = parse_routed_segments_with_gaps(def_text)
+    segment_index = _SupplySegmentIndex(segs)
 
     findings: List[Dict[str, Any]] = []
     for inst in placed:
@@ -945,9 +976,7 @@ def audit(def_text: str, macro_lef_texts: Sequence[str],
             box = place_rect((x1, y1, x2, y2), e["size"], ox, oy,
                              inst["orient"])
             box_du = tuple(v * units for v in box)
-            for s in segs:
-                if s["layer"].lower() != layer.lower():
-                    continue
+            for s in segment_index.candidates(layer, box_du):
                 if spans(s, box_du):
                     findings.append({
                         "inst": inst["inst"], "master": inst["master"],

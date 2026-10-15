@@ -26,8 +26,11 @@ MEASURED after the fix, on the shape the issue describes:
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
+
+import pytest
 
 _PROGRAMS = pathlib.Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
@@ -173,3 +176,114 @@ def test_it_passes_when_nothing_crosses(tmp_path):
     d.mkdir(parents=True)
     (d / "routed.def").write_text(_def(n_through=0, n_clear=12))
     assert M.main([str(tmp_path), "--macro-lef", str(lef)]) == 0
+
+
+def _spatial_fixture(orient, crossing):
+    """Neutral CORE OBS and many irrelevant, same-layer H/V supply paths."""
+    lef = """MACRO neutral_core
+  CLASS CORE ;
+  SIZE 10 BY 4 ;
+  OBS
+    LAYER Metal1 ;
+      RECT 0 0 8 2 ;
+      RECT 0 0 8 2 ;
+    LAYER MET7 ;
+      RECT 0 0 8 2 ;
+  END
+END neutral_core
+"""
+    bx1, by1 = 10000, 20000
+    bx2, by2 = ((18000, 22000) if orient == "N" else (12000, 28000))
+    mx, my = (bx1 + bx2) // 2, (by1 + by2) // 2
+    paths = []
+    hits = []
+
+    def add(layer, seg, *, hit=False, shape="STRIPE"):
+        paths.append((layer, seg, shape))
+        if hit:
+            hits.append({"inst": "u_core", "master": "neutral_core",
+                         "layer": "Metal1", "net": "supply",
+                         "followpin": shape == "FOLLOWPIN", "shape": shape,
+                         "seg": list(seg)})
+
+    for i in range(128):
+        far = -10000 - 10 * i
+        add("Metal1", (0, far, 90000, far))
+        add("mEtAl1", (far, 0, far, 90000))
+    if crossing:
+        add("metal1", (0, my, 90000, my), hit=True)
+        add("METAL1", (mx, 0, mx, 90000), hit=True, shape="FOLLOWPIN")
+        add("metal1", (0, my, 90000, my), hit=True)  # exact duplicate
+    # Strict longitudinal boundaries and internal endpoints never span.
+    add("Metal1", (bx1, my, bx2 + 1000, my))
+    add("Metal1", (bx1 - 1000, my, bx2 - 1, my))
+    add("Metal1", (mx, by1, mx, by2 + 1000))
+    add("Metal1", (mx, by1 - 1000, mx, by2 - 1))
+    if crossing:
+        # The transverse interval is inclusive on both ends, for BOTH axes.
+        add("Metal1", (0, by1, 90000, by1), hit=True)
+        add("Metal1", (bx1, 0, bx1, 90000), hit=True)
+        add("Metal1", (0, by2, 90000, by2), hit=True)
+        add("Metal1", (bx2, 0, bx2, 90000), hit=True)
+    add("MET9", (0, my, 90000, my))  # wrong layer, never a finding
+    routes = []
+    for i, (layer, (x1, y1, x2, y2), shape) in enumerate(paths):
+        head = "+ ROUTED" if i == 0 else "NEW"
+        routes.append(f"  {head} {layer} 0 + SHAPE {shape} "
+                      f"( {x1} {y1} ) ( {x2} {y2} )")
+    design = ("UNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS 1 ;\n"
+              f"- u_core neutral_core + PLACED ( 10000 20000 ) {orient} ;\n"
+              "END COMPONENTS\nSPECIALNETS 1 ;\n"
+              "- supply ( * P ) + USE POWER\n" + "\n".join(routes)
+              + "\n ;\nEND SPECIALNETS\nEND DESIGN\n")
+    return design, lef, hits * 2, len(paths)
+
+
+@pytest.mark.parametrize("orient", ["N", "E"])
+@pytest.mark.parametrize("crossing", [True, False], ids=["crossing", "clean"])
+def test_spatial_fixture_preserves_complete_order_and_metadata(orient, crossing):
+    design, lef, findings, segments = _spatial_fixture(orient, crossing)
+    report = M.audit(design, [lef])
+    assert report["findings"] == findings
+    assert report["findings_count"] == len(findings)
+    assert report["special_segments"] == segments
+    assert report["obs_rects_consumed"] == 3
+    assert report["count_is_floor"] is False
+    assert report["count_floor_reasons"] == []
+    assert report["findings_by_layer"] == ({"metal1": 14} if crossing else {})
+    assert report["obs_layers_compared"] == ["met7", "metal1"]
+    assert report["obs_layer_applicability"]["met7"]["verdict"] == \
+        "NOT_APPLICABLE_BY_STRUCTURE"
+
+
+@pytest.mark.parametrize("orient", ["N", "E"])
+@pytest.mark.parametrize("crossing", [True, False], ids=["crossing", "clean"])
+def test_same_layer_irrelevant_paths_do_not_reach_spans(
+        monkeypatch, orient, crossing):
+    design, lef, findings, _ = _spatial_fixture(orient, crossing)
+    original = M.spans
+    calls = []
+
+    def counted(segment, box):
+        calls.append((segment, box))
+        return original(segment, box)
+
+    monkeypatch.setattr(M, "spans", counted)
+    assert M.audit(design, [lef])["findings"] == findings
+    print(f"ORIGINAL_SPANS_CALLS orient={orient} crossing={crossing}: {len(calls)}")
+    assert len(calls) <= (22 if crossing else 8)
+
+
+@pytest.mark.parametrize("orient", ["N", "E"])
+@pytest.mark.parametrize("crossing", [True, False], ids=["crossing", "clean"])
+def test_spatial_fixture_cli_matches_the_whole_audit(tmp_path, orient, crossing):
+    design, lef, _, _ = _spatial_fixture(orient, crossing)
+    abstract = tmp_path / "neutral.lef"
+    abstract.write_text(lef)
+    routed = tmp_path / "routed.def"
+    routed.write_text(design)
+    output = tmp_path / "report.json"
+    rc = M.main([str(tmp_path), "--def", str(routed),
+                 "--macro-lef", str(abstract), "--json", str(output)])
+    assert rc == (1 if crossing else 0)
+    assert json.loads(output.read_text()) == M.audit(design, [lef], [str(abstract)])
