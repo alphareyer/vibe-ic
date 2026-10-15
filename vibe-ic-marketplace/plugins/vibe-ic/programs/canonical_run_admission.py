@@ -152,6 +152,15 @@ def build_identity(project: Path, span: str, *, container_image: str,
         "container_image": container_image or "IMAGE_UNAVAILABLE",
         "dispatch_config": config,
     }
+    if span == "phase2":
+        # professional_tb_gen reads this persistent authored source beside
+        # its regenerated bundle. Hash that exact input name, never the
+        # sim_professional subtree (JUnit, waves and generated TBs are outputs).
+        hooks = tuple(str(path.relative_to(project)) for path in sorted(
+            (project / "phase2/stage1/sim_professional").glob(
+                "*/expert_reference_tb.py")) if path.is_file())
+        if hooks:
+            identity["authored_simulation_input_sha256"] = _tree_digest(project, hooks)
     return identity
 
 
