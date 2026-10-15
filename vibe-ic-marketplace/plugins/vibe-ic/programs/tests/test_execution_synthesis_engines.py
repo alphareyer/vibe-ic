@@ -153,8 +153,14 @@ def test_local_workdir_runs_child_from_mapped_docker_directory(tmp_path, monkeyp
     monkeypatch.setattr(ll, "local_image_attestation", lambda image: dict(attestation))
 
     class Child:
-        pid = 1
+        # This completed protocol fixture owns no OS process. The supervisor
+        # must neither watch container init nor wait forever for a missing API.
+        pid = None
         returncode = 0
+        def wait(self, timeout=None):
+            return self.returncode
+        def poll(self):
+            return self.returncode
         def __enter__(self):
             return self
         def __exit__(self, *args):
