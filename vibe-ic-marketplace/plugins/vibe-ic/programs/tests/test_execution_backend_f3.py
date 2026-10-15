@@ -1185,7 +1185,10 @@ def test_br2_004_mismatched_route_and_engine_refused(monkeypatch, mutation):
 
 def hardmacro_report(tmp_path, native):
     binding = {'step_id':'37.5ip','required_gates':['digital_hardmacro_check','release_docs_check']}
-    report = {'step_id':'37.5ip','binding':binding,'qualification':'PASS','producer_verdict':'PASS','design_verdict':'PASS',
+    # Supply the canonical-result premise of this checker-only fixture.  No
+    # current gate invocations or worker issuance are supplied as authority.
+    report = {'step_id':'37.5ip','binding':binding,'qualification':'PASS','canonical_status':'PASS',
+        'reason':'SOFTWARE_FIXTURE_ONLY','producer_verdict':'PASS','design_verdict':'PASS',
         'outputs':{},'missing_outputs':[], 'gate_records':[{'gate':g,'verdict':'PASS','blocking':True} for g in binding['required_gates']],
         'native_receipts':native}
     dump(tmp_path / 'release-evidence.json', report)
@@ -1205,6 +1208,11 @@ def test_br2_005_absent_invalid_and_mixed_evidence(tmp_path, native):
 def test_br2_005_valid_checker_positive_is_only_software_fixture(tmp_path):
     processes = [{'binary':name,'rc':0,'version':'fixture','argv':[name],'output_sha256':'a'*64} for name in ('magic','sta')]
     assert hardmacro_report(tmp_path, [{'status':'PRODUCED','processes':processes}]) == 'PASS'
+    report = json.loads((tmp_path / 'release-evidence.json').read_text())
+    evidence = release.validate(tmp_path, report['binding'])
+    assert evidence.detail == 'SOFTWARE_FIXTURE_ONLY'
+    assert evidence.metrics['canonical_evidence'] == 0
+    assert not evidence.provenance.get('composite_gate_execution')
 
 
 @pytest.mark.parametrize('qualified', [False, True])
