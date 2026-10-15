@@ -467,3 +467,82 @@ def test_inapplicable_row_marker_is_not_subtracted_twice(monkeypatch, tmp_path):
     assert audit["steps"][1]["status"] == "NOT_APPLICABLE"
     assert audit["steps"][1]["excluded_from_verdict"]
     _assert_executed_views(md, 1, 1)
+
+
+# #3149: actual producer publishes an immutable recheck in the renderer's call.
+import hashlib  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("cited", [False, True], ids=["canonical", "immutable-recheck"])
+def test_issue3149_normal_renderer_consumes_actual_publication(monkeypatch, tmp_path, cited):
+    project = tmp_path / "project"
+    project.mkdir()
+    flow = tmp_path / "neutral_flow.yaml"
+    flow.write_text("version: 2\nflow_name: neutral_audit\ntotal_steps: 1\n"
+        "analog_steps: 0\nstages: [{id: stage1, name: neutral}]\nsteps:\n"
+        "  - id: 1\n    name: missing required output\n    stage: stage1\n"
+        "    required_outputs: [required.txt]\n")
+    checker = PLUGIN / "programs" / "flow_compliance_check.py"
+    argv = [sys.executable, str(checker), str(project), "--flow-def", str(flow), "--strict"]
+    initial = subprocess.run(argv, capture_output=True, text=True)
+    (tmp_path / "initial-audit.log").write_text(initial.stdout + initial.stderr)
+    assert initial.returncode == 1, initial.stdout + initial.stderr
+    canonical = project / "reports/audit/phase23_completion_audit.json"
+    before = canonical.read_bytes()
+    if cited:
+        record = project / "reports/orchestrator/phase3_one_shot.json"
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"cited_artefacts": {
+            "reports/audit/phase23_completion_audit.json": hashlib.sha256(before).hexdigest()}}))
+    # Existing --flow-def confines the real checker to this public one-row flow.
+    # No result or writer is mocked: the renderer runs the ordinary audit subprocess.
+    wrapper = tmp_path / "audit_selected_flow.py"
+    wrapper.write_text("import runpy, sys\n"
+        + "sys.argv += ['--flow-def', " + repr(str(flow)) + "]\n"
+        + "runpy.run_path(" + repr(str(checker)) + ", run_name='__main__')\n")
+    monkeypatch.setattr(F, "COMPLIANCE_TOOL", wrapper)
+    monkeypatch.setattr(F, "FLOW_YAML", flow)
+    assert F.main([str(project)]) == 0  # report generation rc, not the audit verdict
+    markdown = (project / "reports/final_summary.md").read_text()
+    snapshots = list((project / "reports/audit").glob("phase23_completion_audit.*.json"))
+    assert len(snapshots) == (1 if cited else 0)
+    actual_path = snapshots[0] if cited else canonical
+    actual = json.loads(actual_path.read_text())
+    assert actual["scope"]["whole_flow"] is True
+    assert actual["verdict"] == "FAIL"
+    assert actual["step_counts"]["FAIL"] >= 1
+    if cited:
+        assert canonical.read_bytes() == before
+        assert actual["recheck_of"] == "reports/audit/phase23_completion_audit.json"
+    _assert_public_summary(markdown, actual)
+    assert "canonical audit JSON was not refreshed" not in markdown
+    assert "NO-VERDICT-IN-AUDIT" not in markdown
+    (tmp_path / "ROUNDTRIP_RECEIPT.json").write_text(json.dumps({
+        "initial_argv": argv, "initial_rc": initial.returncode,
+        "cited": cited, "canonical_preserved": canonical.read_bytes() == before,
+        "published_path": str(actual_path),
+        "published_sha256": hashlib.sha256(actual_path.read_bytes()).hexdigest(),
+        "audit_verdict": actual["verdict"], "counts": actual["step_counts"],
+        "summary_sha256": hashlib.sha256(markdown.encode()).hexdigest()}, indent=2) + "\n")
+
+
+@pytest.mark.parametrize("publication", ["none", "wrong-hash"])
+def test_issue3149_old_recheck_does_not_become_current(monkeypatch, tmp_path, publication):
+    project = tmp_path / "project"
+    target = project / "reports/audit/phase23_completion_audit.json"
+    target.parent.mkdir(parents=True)
+    audit = _fixture()
+    target.write_text(json.dumps(audit))
+    old = target.with_name("phase23_completion_audit." + "a" * 64 + ".json")
+    old.write_text(json.dumps(audit))
+    original = {p: p.read_bytes() for p in [target, old]}
+    text = "Overall: FAIL (strict=True)\n"
+    if publication == "wrong-hash":
+        text += "flow_compliance_check: AUDIT_SNAPSHOT " + json.dumps({
+            "path": str(old), "sha256": "0" * 64}) + "\n"
+    monkeypatch.setattr(F, "_run_audit", lambda *a, **kw: (text, "FAIL"))
+    markdown = F._render(project)
+    assert "NO-VERDICT-IN-AUDIT" in markdown
+    assert "no coherent audit counts available" in markdown
+    assert all(p.read_bytes() == data for p, data in original.items())

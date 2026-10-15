@@ -262,3 +262,66 @@ def test_public_3088_native_schema_reaches_actual_cli(tmp_path, label):
     for token in case.get("required_tokens", []):
         assert any(token in item["coverage_tokens"] and item["block_eligible"]
                    and not item["covered"] for item in doc["items"]), (label, doc)
+
+
+# Current84 public reopen: native empty fields, nested applicability and split choice.
+_CURRENT84_RESIDUAL = json.loads((Path(__file__).parent / "fixtures" /
+    "issue3088_current84_residual.json").read_text())["cases"]
+
+
+@pytest.mark.parametrize("label", _CURRENT84_RESIDUAL)
+def test_public_3088_current84_residual_reaches_actual_cli(tmp_path, label):
+    case = _CURRENT84_RESIDUAL[label]
+    rtl = tmp_path / "neutral.v"
+    rtl.write_text(_UNSIGNED_RTL)
+    tb = tmp_path / "tb.sv"
+    tb.write_text(_UNSIGNED_TB)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text(case.get("prompt", ""))
+    project = tmp_path / "project"
+    docs = (project / "phase1/generated_docs" if case.get("canonical")
+            else project / "ldocs")
+    docs.mkdir(parents=True)
+    for doc in case["ldocs"]:
+        if doc.get("declaration_requirements"):
+            source_doc = project / "input/docs/L7_declaration.md"
+            source_doc.parent.mkdir(parents=True, exist_ok=True)
+            source_doc.write_text(doc["declaration_requirements"])
+    if case.get("declaration") is not None:
+        declaration = project / "plugin_output/declaration.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(json.dumps(case["declaration"]) + "\n")
+    for number, doc in enumerate(case["ldocs"]):
+        (docs / f"L{number}.json").write_text(json.dumps(doc) + "\n")
+    report = tmp_path / "coverage.json"
+    argv = [sys.executable, str(PROGRAMS / "spec_coverage_check.py"),
+        "--prompt", str(prompt), "--ldocs", str(docs), "--rtl", str(rtl),
+        "--tb", str(tb), "--strict", "--json", str(report)]
+    actual = subprocess.run(argv, capture_output=True, text=True)
+    doc = json.loads(report.read_text())
+    (tmp_path / "CLI_RECEIPT.json").write_text(json.dumps({
+        "argv": argv, "exit_code": actual.returncode,
+        "stdout": actual.stdout, "stderr": actual.stderr}, indent=2) + "\n")
+    kinds = {item["kind"] for item in doc["items"]}
+    assert not kinds.intersection(case.get("absent", [])), (label, doc)
+    for kind in case.get("required", []):
+        assert any(item["kind"] == kind and item["block_eligible"] and not item["covered"]
+                   for item in doc["items"]), (label, doc)
+    if case.get("unsigned"):
+        signed = [item for item in doc["items"] if item["kind"] == "signedness"]
+        assert signed and all(item["coverage_tokens"] == ["unsigned"]
+                              and item["covered"] for item in signed), (label, doc)
+    if "clocks" in case:
+        clocks = [item for item in doc["items"] if item["kind"] == "clock_frequency"]
+        assert {re.search(r"\b(\d+(?:\.\d+)?)\s+MHz\b", item["requirement"]).group(1)
+                for item in clocks} == set(case["clocks"]), (label, doc)
+        assert all(item["block_eligible"] and not item["covered"] for item in clocks)
+    if "canonical" in case:
+        source = doc.get("declared_choice_source")
+        if case["canonical"] and case.get("declaration") is not None:
+            assert source and source["integer_encoding"] == "unsigned", (label, doc)
+            assert Path(source["path"]).read_bytes() == declaration.read_bytes()
+        else:
+            assert source is None, (label, doc)
+    expected = 1 if case.get("required") or case.get("clocks") else 0
+    assert actual.returncode == expected, (label, doc, actual.stdout, actual.stderr)

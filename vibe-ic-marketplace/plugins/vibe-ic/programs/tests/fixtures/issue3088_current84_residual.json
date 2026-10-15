@@ -1,0 +1,236 @@
+{
+  "source": "Public issue3088 latest reopen; neutral native-schema equivalents, no field artifacts.",
+  "cases": {
+    "empty-native-trim-loop": {
+      "ldocs": [
+        {
+          "doc_class": "L13_LAB_CALIBRATION",
+          "no_lab_calibration_in_input": true,
+          "lab_calibration_present": false,
+          "trim_loop": []
+        }
+      ],
+      "absent": [
+        "calibration_field",
+        "calibration_procedure"
+      ]
+    },
+    "dated-native-na-applicability": {
+      "ldocs": [
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integration": {
+            "applicability": [
+              {
+                "status": "not-applicable",
+                "normalized_absence": "no calibration controller",
+                "written_at": "2026-05",
+                "description": "No trimming, OTP calibration or calibration controller.",
+                "quoted_source": "L6 calibration document, written_at 2026-05: No trimming, OTP calibration or calibration controller."
+              }
+            ]
+          }
+        }
+      ],
+      "absent": [
+        "calibration_field",
+        "calibration_procedure",
+        "otp_field"
+      ]
+    },
+    "na-entry-required-sibling": {
+      "ldocs": [
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integration": {
+            "applicability": [
+              {
+                "status": "not-applicable",
+                "normalized_absence": "no calibration controller",
+                "written_at": "2026-05",
+                "description": "No trimming, OTP calibration or calibration controller.",
+                "quoted_source": "L6 calibration document, written_at 2026-05: No trimming, OTP calibration or calibration controller."
+              }
+            ]
+          },
+          "required_feature": "The calibration register trim_code at offset 0x10 is required."
+        }
+      ],
+      "required": [
+        "calibration_field"
+      ]
+    },
+    "empty-loop-required-upstream": {
+      "prompt": "The calibration register trim_code at offset 0x10 is required.\n",
+      "ldocs": [
+        {
+          "doc_class": "L13_LAB_CALIBRATION",
+          "no_lab_calibration_in_input": true,
+          "lab_calibration_present": false,
+          "trim_loop": []
+        }
+      ],
+      "required": [
+        "calibration_field"
+      ]
+    },
+    "nonempty-native-trim-loop": {
+      "ldocs": [
+        {
+          "doc_class": "L13_LAB_CALIBRATION",
+          "lab_calibration_present": true,
+          "trim_loop": [
+            "The calibration register trim_code at offset 0x10 is required."
+          ]
+        }
+      ],
+      "required": [
+        "calibration_field"
+      ]
+    },
+    "modulo-choice-other-station": {
+      "prompt": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integer_encoding": "unsigned"
+        }
+      ],
+      "unsigned": true
+    },
+    "modulo-choice-separate-native-docs": {
+      "ldocs": [
+        {
+          "doc_class": "L2_FUNCTIONAL",
+          "arithmetic_contract": "Signed and unsigned N-bit operands have identical modulo-2^N product bit patterns. The plugin may declare unsigned interpretation before RTL.\n"
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integer_encoding": "unsigned"
+        }
+      ],
+      "unsigned": true
+    },
+    "genuine-signed-with-permitted-modulo": {
+      "prompt": "Signed and unsigned N-bit operands have identical modulo-2^N product bit patterns. The plugin may declare unsigned interpretation before RTL.\nThe independent division path requires signed arithmetic.\n| Independent path | Required behavior |\n|---|---|\n| Signed division | Signed division of a and b is required. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integer_encoding": "unsigned"
+        }
+      ],
+      "required": [
+        "signedness"
+      ]
+    },
+    "selected-timing-next-to-na-calibration": {
+      "prompt": "Selected target gf180mcuD: required clock frequency 41.7 MHz (24 ns).\n",
+      "ldocs": [
+        {
+          "doc_class": "L13_LAB_CALIBRATION",
+          "no_lab_calibration_in_input": true,
+          "lab_calibration_present": false,
+          "trim_loop": []
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "integration": {
+            "applicability": [
+              {
+                "status": "not-applicable",
+                "normalized_absence": "no calibration controller",
+                "written_at": "2026-05",
+                "description": "No trimming, OTP calibration or calibration controller.",
+                "quoted_source": "L6 calibration document, written_at 2026-05: No trimming, OTP calibration or calibration controller."
+              }
+            ]
+          }
+        }
+      ],
+      "absent": [
+        "calibration_field",
+        "calibration_procedure"
+      ],
+      "clocks": [
+        "41.7"
+      ]
+    },
+    "canonical-declared-unsigned": {
+      "prompt": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L2_FUNCTIONAL",
+          "arithmetic_contract": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n"
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "declaration_requirements": "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n| Field | Required | Example |\n|---|---|---|\n| `integer_encoding` | Yes | string |\n"
+        }
+      ],
+      "canonical": true,
+      "declaration": {
+        "integer_encoding": "unsigned"
+      },
+      "unsigned": true
+    },
+    "canonical-missing-declaration": {
+      "prompt": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L2_FUNCTIONAL",
+          "arithmetic_contract": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n"
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "declaration_requirements": "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n| Field | Required | Example |\n|---|---|---|\n| `integer_encoding` | Yes | string |\n"
+        }
+      ],
+      "canonical": true,
+      "declaration": null,
+      "required": [
+        "signedness"
+      ]
+    },
+    "noncanonical-adjacent-choice": {
+      "prompt": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L2_FUNCTIONAL",
+          "arithmetic_contract": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n"
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "declaration_requirements": "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n| Field | Required | Example |\n|---|---|---|\n| `integer_encoding` | Yes | string |\n"
+        }
+      ],
+      "canonical": false,
+      "declaration": {
+        "integer_encoding": "unsigned"
+      },
+      "required": [
+        "signedness"
+      ]
+    },
+    "canonical-declared-unsigned-genuine-signed": {
+      "prompt": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n\n| Extra operation | Contract |\n|---|---|\n| signed division | The a operand must undergo signed division. |\n",
+      "ldocs": [
+        {
+          "doc_class": "L2_FUNCTIONAL",
+          "arithmetic_contract": "| Operand interpretation | Contract |\n|---|---|\n| Signed and unsigned | N-bit operands have identical modulo-2^N product bit patterns; the plugin may declare unsigned interpretation before RTL. |\n"
+        },
+        {
+          "doc_class": "L9_INTEGRATION_SPEC",
+          "declaration_requirements": "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n| Field | Required | Example |\n|---|---|---|\n| `integer_encoding` | Yes | string |\n"
+        }
+      ],
+      "canonical": true,
+      "declaration": {
+        "integer_encoding": "unsigned"
+      },
+      "unsigned": false,
+      "required": [
+        "signedness"
+      ]
+    }
+  }
+}
