@@ -151,7 +151,12 @@ def test_a_window_that_routes_again_does_not_restore(tmp_path, monkeypatch, entr
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", f"lvsfix{entry}{exit_}")
     seen = _default_reroute_control(project, pdk, monkeypatch, entry)
     selected = mod._phase3_window_sites(entry, exit_)
-    assert selected == ["default_pnr"], selected
+    ids = mod._phase3_window_steps(entry, exit_)
+    # Step 32 now belongs between detailed routing and Step 22 in the one
+    # canonical order; a span crossing it uses the shared native row driver.
+    if exit_ == '22':
+        assert ids.index('21') < ids.index('32') < ids.index('22')
+    assert selected == (["default_backend"] if '32' in ids else ["default_pnr"]), selected
     args = SimpleNamespace(entry_step=entry, exit_step=exit_, container="c",
                            die_um="100,100", util=0.4)
     rc = mod._run_phase3_window(project, "view_unit", pdk, args, selected)
@@ -419,7 +424,8 @@ def test_default_reroute_missing_current_input_stops_before_launcher(tmp_path, m
     seen = _default_reroute_control(project, pdk, monkeypatch, '20', missing=True)
     monkeypatch.setenv('VIBEIC_PHASE3_WINDOW_RUN_ID', 'missing_current_cts')
     selected = mod._phase3_window_sites('20', '22')
-    assert selected == ['default_pnr']
+    assert selected == ['default_backend']
+    assert mod._phase3_window_steps('20', '22') == ['20', '21', '32', '22']
     args = SimpleNamespace(entry_step='20', exit_step='22', container='c',
                            die_um='100,100', util=0.4)
     rc = mod._run_phase3_window(project, 'view_unit', pdk, args, selected)
@@ -432,7 +438,8 @@ def test_default_reroute_missing_current_input_stops_before_launcher(tmp_path, m
 
 
 @pytest.mark.parametrize('entry,exit_,expected', [
-    ('15', '22', 'pnr'), ('17', '20', 'enclosing_pnr'), ('20', '22', 'enclosing_pnr'),
+    ('15', '22', 'enclosing_phase3'), ('17', '20', 'enclosing_pnr'),
+    ('20', '22', 'enclosing_phase3'),
 ])
 def test_legacy_reroute_window_preserves_no_restore_contract(
         tmp_path, monkeypatch, entry, exit_, expected):
@@ -449,6 +456,8 @@ def test_legacy_reroute_window_preserves_no_restore_contract(
     monkeypatch.setenv('VIBEIC_PHASE3_WINDOW_RUN_ID', f'legacy{entry}{exit_}')
     selected = mod._phase3_window_sites(entry, exit_)
     assert selected == [expected], selected
+    if exit_ == '22':
+        assert '32' in mod._phase3_window_steps(entry, exit_)
     seen = []
     def dispatch(*args, **kwargs):
         seen.append((list(pdk.macro_lefs), pdk.tech_lef))

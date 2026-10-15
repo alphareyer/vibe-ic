@@ -375,7 +375,11 @@ def test_native_tool_refusal_is_recorded_at_the_actual_default_row(
                                       ('17', '17'), ('19', '22')])
 def test_default_partial_pnr_selects_rows_without_enclosing_run(first, last, monkeypatch):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
-    assert runner._phase3_window_sites(first, last) == ['default_pnr']
+    ids = runner._phase3_window_steps(first, last)
+    assert runner._phase3_window_sites(first, last) == (
+        ['default_backend'] if '32' in ids else ['default_pnr'])
+    if last == '22':
+        assert ids.index('21') < ids.index('32') < ids.index('22')
 
 
 @pytest.mark.parametrize('first,last', [('23', '23'), ('24', '24'),
@@ -388,12 +392,15 @@ def test_default_signoff_selects_existing_producers_without_enclosing_run(
 
 def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
-    assert runner._phase3_window_sites('23', '24') == ['enclosing_canonicalize']
+    assert runner._phase3_window_sites('23', '24') == ['enclosing_phase3']
+    assert {'DT2', 'DT3'}.issubset(runner._phase3_window_steps('23', '24'))
 
 
 def test_default_retains_the_existing_individual_layout_release_producers(tmp_path, monkeypatch):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
-    assert runner._phase3_window_sites('37', '37') == ['gds']
+    assert runner._phase3_window_sites('37', '37') == ['default_backend']
+    from execution_provider_catalog import BACKEND_ROWS
+    assert '37' in BACKEND_ROWS
     assert runner._phase3_window_sites('31', '31') == ['default_backend']
     import test_default_step31_owner as current31
     current31.current_window(tmp_path, monkeypatch)

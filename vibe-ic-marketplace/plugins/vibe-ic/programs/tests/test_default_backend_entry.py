@@ -35,7 +35,13 @@ def test_supported_default_entry_reaches_required_exit_guard(tmp_path, step):
 def test_unknown_or_non_native_span_keeps_entry_refusal(tmp_path, step):
     result = observe(tmp_path, step)
     assert result.returncode == 2
-    assert "no runner can be entered" in result.stderr, result.stdout + result.stderr
+    if step == "36":
+        # The fixed-order release owner now supports this canonical row;
+        # it must still refuse an unbounded entry before dispatching a tool.
+        assert "needs --exit-step" in result.stderr, result.stdout + result.stderr
+        assert "no runner can be entered" not in result.stderr
+    else:
+        assert "no runner can be entered" in result.stderr, result.stdout + result.stderr
 
 
 def test_ultra_does_not_gain_midspan_entry(tmp_path):

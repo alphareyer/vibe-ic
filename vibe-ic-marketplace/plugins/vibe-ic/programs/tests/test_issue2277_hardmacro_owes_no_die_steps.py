@@ -303,20 +303,21 @@ def test_an_entry_without_a_producer_command_is_NOT_adopted(tmp_path):
 
 
 def test_the_current_FS1_gate_channel_binds_its_own_output():
+    """The typed producer owns the raw report; the gate reads it separately."""
     step = _steps()["FS1"]
     entries = [e for e in step["program_outputs"]
                if e["program"] == "fmeda_fault_injection_coverage"]
     assert len(entries) == 1, entries
     entry = entries[0]
-    assert not entry.get("producer_command")
+    assert entry.get("producer_command")
     assert entry["path"] == "reports/phase2/safety/fmeda_coverage.json"
     commands = _explicit_gate_commands_for_entry(step, entry)
-    assert len(commands) == 1, commands
+    assert commands == [], "the gate must not write the producer-owned raw report"
     rows = [c for c in _clauses()
             if (c["step"], c["program"], c["target"])
             == ("FS1", entry["program"], entry["path"])]
     assert len(rows) == 1, rows
-    assert rows[0]["command"] == commands[0]
+    assert rows[0]["command"] == entry["producer_command"]
     assert _silent_entries({"steps": [step]}) == []
 
 

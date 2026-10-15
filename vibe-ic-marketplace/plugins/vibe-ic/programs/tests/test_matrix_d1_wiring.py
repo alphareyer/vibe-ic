@@ -986,6 +986,14 @@ def _scan_runner(path: Path) -> RunnerScan:
     stems = all_program_stems()
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings = _docstring_constants(tree)
+    # Resolve an exact filename at the runner's PROGRAMS_DIR join, such as
+    # f"{FMEDA_PRODUCER}.py". A prose f-string or an unknown variable is not
+    # a dispatch name, and no wildcard is introduced.
+    module_strings = {target.id: node.value.value
+                      for node in tree.body if isinstance(node, ast.Assign)
+                      and isinstance(node.value, ast.Constant)
+                      and isinstance(node.value.value, str)
+                      for target in node.targets if isinstance(target, ast.Name)}
 
     def add(name: str) -> None:
         if name in stems:
@@ -1002,6 +1010,24 @@ def _scan_runner(path: Path) -> RunnerScan:
                 scan.invoked.add(stem)
 
     for node in ast.walk(tree):
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                and isinstance(node.left, ast.Name) and node.left.id == "PROGRAMS_DIR"
+                and isinstance(node.right, ast.JoinedStr)):
+            parts = []
+            for part in node.right.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    parts.append(part.value)
+                elif (isinstance(part, ast.FormattedValue)
+                      and isinstance(part.value, ast.Name)
+                      and part.value.id in module_strings
+                      and part.conversion == -1 and part.format_spec is None):
+                    parts.append(module_strings[part.value.id])
+                else:
+                    break
+            else:
+                name = "".join(parts)
+                if name.endswith(".py") and Path(name).name == name:
+                    add(name[:-3])
         if isinstance(node, ast.Import):
             for alias in node.names:
                 add(alias.name.split(".")[0])
@@ -1561,6 +1587,21 @@ def test_probe_channel_c_ignores_non_dispatch_fstrings(tmp_path):
     scan = _scan_runner(runner)
     assert "lvs_triage_classify" not in scan.invoked
     assert not scan.fstring_patterns
+
+    runner.write_text(
+        'PRODUCER = "fmeda_fault_injection_coverage"\n'
+        'def dispatch():\n'
+        '    return run([python, str(PROGRAMS_DIR / f"{PRODUCER}.py")])\n',
+        encoding="utf-8",
+    )
+    assert _scan_runner(runner).invoked == {"fmeda_fault_injection_coverage"}
+    runner.write_text(
+        'PRODUCER = "fmeda_fault_injection_coverage"\n'
+        'def reason():\n'
+        '    return f"{PRODUCER}.py"\n',
+        encoding="utf-8",
+    )
+    assert "fmeda_fault_injection_coverage" not in _scan_runner(runner).invoked
 
 
 def test_probe_no_cell_rests_on_channel_c_alone():
