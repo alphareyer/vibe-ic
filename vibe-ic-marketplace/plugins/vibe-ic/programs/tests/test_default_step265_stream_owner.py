@@ -40,6 +40,8 @@ def owner_inputs(project):
 @pytest.mark.parametrize('next_status', ['PASS', 'FAIL', 'NOT_MEASURED'])
 def test_bounded_plan_retains_pending_finishing_and_runs_the_next_due_row(
         tmp_path, monkeypatch, next_status):
+    # Historical test ID retained: router 26 now precedes 27; finishing is
+    # already accepted inside stream 37 and is never a pending early row.
     source = owner_inputs(tmp_path)
     seen = []
     monkeypatch.setattr(runner, '_backend_parameter_values', lambda *a: {})
@@ -52,14 +54,12 @@ def test_bounded_plan_retains_pending_finishing_and_runs_the_next_due_row(
             'declarations': [], 'missing': []}
 
     monkeypatch.setattr(policy, '_fixed_inputs', inputs)
-    real_produce = producers.produce_signoff
 
     def native(project, params):
         sid = params['step_id']
         seen.append(('producer', sid))
-        if sid == '26.5ic':
-            return real_produce(project, {**params, 'image_id': 'neutral',
-                                         'pdk_root': str(tmp_path)})
+        if sid == '26':
+            return {'verdict': 'PASS', 'detail': 'neutral current router-antenna transport'}
         return {'verdict': next_status, 'detail': 'neutral next-row native transport'}
 
     def consume(project, *, step_id, producer):
@@ -69,21 +69,21 @@ def test_bounded_plan_retains_pending_finishing_and_runs_the_next_due_row(
 
     monkeypatch.setattr(producers, 'produce', native)
     monkeypatch.setattr(worker, 'execute_current_step', consume)
-    assert runner._phase3_window_sites('26.5ic', '27') == ['default_backend']
-    ids = runner._phase3_window_steps('26.5ic', '27')
-    assert ids == ['26.5ic', '27']
+    assert runner._phase3_window_sites('26', '27') == ['default_backend']
+    ids = runner._phase3_window_steps('26', '27')
+    assert ids == ['26', '27']
     result = runner._default_pnr_rows(tmp_path, 'neutral', None, '', ids)
-    assert seen == [('producer', '27'), ('consumer', '27')]
-    assert result.status == ('FAIL' if next_status == 'FAIL' else 'NOT_MEASURED')
+    assert seen == [('producer', '26'), ('consumer', '26'), ('producer', '27'), ('consumer', '27')]
+    assert result.status == next_status
     checks = result.extras['canonical_gate_checks']
-    assert checks['26.5ic']['status'] == 'NOT_MEASURED'
-    assert checks['26.5ic']['deferred_until'] == '37'
+    assert checks['26']['status'] == 'PASS'
+    assert 'deferred_until' not in checks['26']
     assert checks['27']['status'] == next_status
     assert versions.latest_pass(tmp_path, '26.5ic') is None
     index = versions._read_index(tmp_path)
-    pending = next(r for r in index['steps'] if r['id'] == '26.5ic')
+    pending = next(r for r in index['steps'] if r['id'] == '26')
     saved = json.loads((tmp_path / 'steps' / pending['folder'] / 'outputs.json').read_text())
-    assert saved['status'] == 'NOT_MEASURED' and not saved['canonical_pass']
+    assert saved['status'] == 'PASS' and saved['canonical_pass']
     assert not list(tmp_path.rglob('*.gds'))
 
 
@@ -117,6 +117,9 @@ def selected_native_stream(project):
 ])
 def test_real_stream_owner_uses_selected_seal_and_keeps_the_final_fill(
         tmp_path, monkeypatch, defect, expected):
+    # This control owns the retained Ultra two-engine selector. Default's
+    # one primary stream is measured by test_default_stream_epoch_order.
+    monkeypatch.setattr(policy, 'request', lambda: {'mode': 'ultra'})
     import drc_feedback_repair
     import librelane_contract as ll
     import librelane_fill_dfm as fill

@@ -177,3 +177,49 @@ def test_real_default_stream_retries_a_changed_route_and_retains_prior_epoch(tmp
                    for row in json.loads(before.read_text()).get('outputs', [])
                    if row['rel'] == LF.DEFAULT_STREAM_REL)
     assert first_bytes in old, 'prior promotion must remain in existing before history'
+
+
+@pytest.mark.parametrize('damage', ['current', 'wrong_def', 'changed_filled',
+                                    'changed_material', 'missing_readset', 'changed_recipe'])
+def test_actual_373_owner_only_reaches_transport_with_current_bound_filled_def(
+        tmp_path, monkeypatch, damage):
+    import _native373_current as native
+    import gds_xor_check as xor
+    import librelane_pv_signoff as pv
+    p, pdk, calls, _ = _transport(tmp_path, monkeypatch)
+    record = LF.default_stream(p, 'top', pdk, '')
+    pnr = p / 'phase3/stage3/pnr'
+    filled = pnr / 'filled.def'
+    (pnr / 'cal_pg_pnr.v').write_text('module cal_pg; endmodule\n')
+    (pnr / 'constraint.sdc').write_text('create_clock -period 10 [get_ports clk]\n')
+    BF.put(p / 'reports/phase3/technology_units.json', {'pdk': 'neutral'})
+    root = p / 'fixture_pdk'
+    monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(root)})
+    monkeypatch.setattr(pv, 'tech_lef_overlay', lambda *a: {})
+    observed = []
+    class ReachedNativeTransport(Exception):
+        pass
+    def configurations(project, image, pdk, steps, **kwargs):
+        return {step: p / 'phase3/librelane/34-config' / (step + '.json') for step in steps}
+    def bridge(project, image, config, views, *args, **kwargs):
+        observed.append({name: str(path) for name, path in views.items()})
+        assert kwargs['mounts'] == [(root, '/pdk')]
+        raise ReachedNativeTransport
+    monkeypatch.setattr(LC, 'resolve_step_configs', configurations)
+    monkeypatch.setattr(LC, 'state_from_direct', bridge)
+    if damage == 'changed_filled': filled.write_text(filled.read_text() + '\n# changed current source\n')
+    elif damage == 'changed_material': (root / 'neutral/stream.lef').write_text('changed actual native readset\n')
+    elif damage == 'missing_readset': (pnr / 'top.stream_inputs.json').unlink()
+    elif damage == 'changed_recipe': (pnr / 'stream_out.py').write_text('changed actual recipe\n')
+    if damage == 'current':
+        shipped, source, attestation = xor.shipped_and_source(p)
+        assert source == filled and source != pnr / 'routed.def'
+        assert shipped == Path(record['canonical'])
+        with pytest.raises(ReachedNativeTransport): native.produce(p, source)
+        assert observed == [{'def': str(filled), 'nl': str(pnr / 'cal_pg_pnr.v'),
+                             'sdc': str(pnr / 'constraint.sdc')}]
+    else:
+        with pytest.raises((LC.Refusal, OSError, ValueError, KeyError)):
+            native.produce(p, pnr / 'routed.def' if damage == 'wrong_def' else filled)
+        assert observed == []
+    assert calls == ['primary', 'seal', 'filler-density']
