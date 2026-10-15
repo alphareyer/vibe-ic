@@ -51,7 +51,7 @@ sys.path.insert(0, str(_PROGRAMS))
 import design_one_shot_runner as DOSR                # noqa: E402
 import step_preflight as _spf                        # noqa: E402
 
-_DISPATCH = "plan.append(step_synth_log_audit(project, plan[-1]))"
+_DISPATCH = "plan.append(step_synth_log_audit(project, _synth_row))"
 _GATE = "eda_log_check"
 
 #: SPELLED HERE, and pinned to the runner's constants by
@@ -117,7 +117,8 @@ def test_the_dispatch_follows_the_step_that_writes_the_log() -> None:
     src = Path(DOSR.__file__).read_text(errors="replace")
     synth = src.index("step_yosys_synth, project, args.top_name, args.container")
     here = src.index(_DISPATCH)
-    assert synth < here, (
+    binding = src.index("_synth_row = plan[-1]")
+    assert synth < binding < here, (
         "the synth-log audit moved ahead of the step that writes the log; it "
         "would then judge the PREVIOUS run's file, or none.")
     qsf = src.index("plan.append(step_qsf_gen(project, args.top_name, ic_class))")

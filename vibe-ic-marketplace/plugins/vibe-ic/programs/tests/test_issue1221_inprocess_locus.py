@@ -235,13 +235,19 @@ def test_every_dispatch_in_gate_routes_through_the_scope():
     tree = ast.parse(src)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "gate")
-    raw = [n for n in ast.walk(fn)
+    retained = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "_retained_dispatch")
+    raw = [n for body in (fn, retained) for n in ast.walk(body)
            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
            and n.func.id == "fn"]
     assert raw == [], (
         f"{len(raw)} dispatch(es) in gate() call fn() directly instead of "
         f"through _scoped_dispatch, so §4.05 is not imposed on them")
-    scoped = [n for n in ast.walk(fn)
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_retained_dispatch"]
+    assert len(calls) == 2, f"expected both gate paths retained, found {len(calls)}"
+    scoped = [n for n in ast.walk(retained)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
               and n.func.id == "_scoped_dispatch"]
     assert len(scoped) == 2, f"expected both dispatches routed, found {len(scoped)}"

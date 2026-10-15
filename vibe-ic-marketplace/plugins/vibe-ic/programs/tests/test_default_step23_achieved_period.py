@@ -16,6 +16,11 @@ def _produce(tmp_path, monkeypatch, *, worst=1.0):
     project = fixture.tool_project(
         tmp_path, setup={'max_ss_125C_4v50': worst})
     (project / 'config.json').write_text(json.dumps({'CLOCK_PERIOD': 24.0}))
+    # A real readable input corpus distinguishes unstated power requirements
+    # from an unmeasured empty corpus; keep the timing instruments independent.
+    docs = project / 'input/docs'
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / 'timing_fixture.md').write_text('# Timing source-control input\nTarget period: 24 ns.\n')
     nominal = project / 'phase3/stage3/extracted/top.spef'
     nominal.write_text('*SPEF "IEEE 1481-1998"\n')
     pdk = SimpleNamespace(name='p')
