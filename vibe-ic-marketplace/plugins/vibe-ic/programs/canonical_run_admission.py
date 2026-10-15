@@ -161,6 +161,13 @@ def build_identity(project: Path, span: str, *, container_image: str,
                 "*/expert_reference_tb.py")) if path.is_file())
         if hooks:
             identity["authored_simulation_input_sha256"] = _tree_digest(project, hooks)
+        # Reuse the per-case producer's preservation rule and consumer scope;
+        # generated scaffolds and simulation reports cannot buy another run.
+        from testbench_gen import authored_unit_tb_paths
+        cases = tuple(str(path.relative_to(project))
+                      for path in authored_unit_tb_paths(project))
+        if cases:
+            identity["authored_unit_tb_input_sha256"] = _tree_digest(project, cases)
     return identity
 
 

@@ -701,20 +701,35 @@ def authored_oracle_preserved(out_dir: Path, name: str,
     and stays refreshable, so a plugin upgrade still reaches it).
     """
     authored = Path(out_dir) / f"{name}.v"
-    if not authored.is_file():
-        return None
-    try:
-        prior = authored.read_text(errors="replace")
-    except OSError:
-        return None
-    if not prior:
-        return None
-    if ORACLE_NONE_MARKER in prior or ORACLE_GENERATED_MARKER in prior:
+    if not _is_authored_tb(authored):
         return None
     if report is not None:
         report.setdefault("preserved_authored", []).append(
             {"case": str(name), "path": str(authored)})
     return authored
+
+
+def _is_authored_tb(path: Path) -> bool:
+    """The producer's persistent-source rule, shared with admission discovery."""
+    if not path.is_file():
+        return False
+    try:
+        prior = path.read_text(errors="replace")
+    except OSError:
+        return False
+    return bool(prior and ORACLE_NONE_MARKER not in prior
+                and ORACLE_GENERATED_MARKER not in prior)
+
+
+def authored_unit_tb_paths(project: Path) -> List[Path]:
+    """Persistent authored cases from the ordinary unit-TB consumer's inputs.
+
+    Generated or scaffold TBs remain refreshable outputs. Reports, waves and
+    build products are never candidate sources.
+    """
+    tb_dir = _pl.sim_dir(project) / "tb"
+    return [path for path in sorted(tb_dir.glob("*.v")) + sorted(tb_dir.glob("*.sv"))
+            if _is_authored_tb(path) and is_unit_tb(path)]
 
 
 def stamp_generated(text: str, emitter: str) -> str:

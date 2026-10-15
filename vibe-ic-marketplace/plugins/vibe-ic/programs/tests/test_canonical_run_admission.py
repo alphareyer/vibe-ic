@@ -335,3 +335,129 @@ def test_phase3_span_does_not_reopen_for_phase2_professional_hook_only(tmp_path)
     _recognized_hook(hook)
     same = cra.admit(project, "phase3", **kw)
     assert not same.admitted and same.identity_sha256 == first.identity_sha256
+
+
+_CASE_TB = """`timescale 1ns/1ps
+module register_case;
+  reg clk = 0;
+  reg d = 0;
+  wire q;
+  core dut(.clk(clk), .d(d), .q(q));
+  always #5 clk = ~clk;
+  initial begin
+    d = 1'b0;
+    @(posedge clk); #1;
+    if (q !== 1'b0) $fatal(1, "register mismatch");
+    $finish;
+  end
+endmodule
+"""
+
+
+def _authored_case_project(tmp_path):
+    project = _project(tmp_path / "project")
+    (project / "input/spec.md").write_text(
+        "On each rising clock edge the one-bit register captures d into q. "
+        "Verify both data values.\n")
+    (project / "phase2/stage1/rtl/core.v").write_text(
+        "module core(input clk, input d, output reg q); "
+        "always @(posedge clk) q <= d; endmodule\n")
+    (project / "phase1/generated_docs/L10_TEST_CASES.json").write_text(
+        json.dumps({"test_cases": [
+            {"name": "register_case", "kind": "functional"}]}))
+    tb = project / "phase2/stage1/sim/tb/register_case.v"
+    tb.parent.mkdir(parents=True)
+    tb.write_text(_CASE_TB)
+    return project, tb
+
+
+def _case_admit(project):
+    return _admit(project, programs=cra.canonical_program_paths(PROGRAMS),
+                  config={"entry": 4, "exit": 4, "top_name": "core"})
+
+
+def test_authored_case_stimulus_and_assertion_changed(tmp_path):
+    import testbench_gen as producer
+    project, tb = _authored_case_project(tmp_path)
+    assert producer.authored_oracle_preserved(tb.parent, tb.stem, {}) == tb
+    initial = _case_admit(project)
+    assert initial.admitted
+    before = cra.ledger_path(project).read_bytes()
+    assert not _case_admit(project).admitted
+    assert cra.ledger_path(project).read_bytes() == before
+    tb.write_text(_CASE_TB.replace("1'b0", "1'b1"))
+    assert producer.authored_oracle_preserved(tb.parent, tb.stem, {}) == tb
+    changed = _case_admit(project)
+    assert changed.admitted
+    assert changed.identity_sha256 != initial.identity_sha256
+    assert cra.ledger_path(project).read_bytes().startswith(before)
+    assert not _case_admit(project).admitted
+
+
+def test_authored_case_reverse_with_changed_rtl(tmp_path):
+    project, tb = _authored_case_project(tmp_path)
+    assert _case_admit(project).admitted
+    tb.write_text(_CASE_TB.replace("1'b0", "1'b1"))
+    _case_admit(project)
+    rtl = project / "phase2/stage1/rtl/core.v"
+    rtl.write_text(rtl.read_text().replace("q <= d", "q <= ~d"))
+    changed_rtl = _case_admit(project)
+    assert changed_rtl.admitted
+    before = cra.ledger_path(project).read_bytes()
+    tb.write_text(_CASE_TB)
+    reversed_case = _case_admit(project)
+    assert reversed_case.admitted
+    assert reversed_case.identity_sha256 != changed_rtl.identity_sha256
+    assert cra.ledger_path(project).read_bytes().startswith(before)
+
+
+def test_authored_case_add_remove_and_exact_reversal(tmp_path):
+    project, tb = _authored_case_project(tmp_path)
+    initial = _case_admit(project)
+    extra = tb.with_name("second_case.sv")
+    extra.write_text(_CASE_TB.replace("register_case", "second_case"))
+    assert _case_admit(project).admitted
+    # Removal must change identity even with another authored TB remaining.
+    tb.unlink()
+    assert _case_admit(project).admitted
+    extra.unlink()
+    assert _case_admit(project).admitted
+    tb.write_text(_CASE_TB)
+    before = cra.ledger_path(project).read_bytes()
+    restored = _case_admit(project)
+    assert not restored.admitted
+    assert restored.identity_sha256 == initial.identity_sha256
+    assert cra.ledger_path(project).read_bytes() == before
+
+
+def test_authored_case_generated_refresh_and_reports_remain_duplicate(tmp_path):
+    import testbench_gen as producer
+    project, tb = _authored_case_project(tmp_path)
+    initial = _case_admit(project)
+    before = cra.ledger_path(project).read_bytes()
+    for marker in (producer.ORACLE_NONE_MARKER, producer.ORACLE_GENERATED_MARKER):
+        generated = tb.with_name("generated_case.v")
+        generated.write_text("// " + marker + "\n" +
+                             _CASE_TB.replace("register_case", "generated_case"))
+        assert producer.authored_oracle_preserved(
+            generated.parent, generated.stem, {}) is None
+        assert producer.is_unit_tb(generated)
+        assert not _case_admit(project).admitted
+        generated.write_text(generated.read_text().replace("1'b0", "1'b1"))
+        assert not _case_admit(project).admitted
+        generated.unlink()
+    for name in ("results.xml", "wave.vcd", "report.json"):
+        (tb.parent / name).write_text("generated output refresh\n")
+    same = _case_admit(project)
+    assert not same.admitted and same.identity_sha256 == initial.identity_sha256
+    assert cra.ledger_path(project).read_bytes() == before
+
+
+def test_authored_case_phase3_remains_duplicate(tmp_path):
+    project, tb = _authored_case_project(tmp_path)
+    kw = {"container_image": "sha256:" + "c" * 64,
+          "config": {}, "program_paths": cra.canonical_program_paths(PROGRAMS)}
+    initial = cra.admit(project, "phase3", **kw)
+    tb.write_text(_CASE_TB.replace("1'b0", "1'b1"))
+    same = cra.admit(project, "phase3", **kw)
+    assert not same.admitted and same.identity_sha256 == initial.identity_sha256
