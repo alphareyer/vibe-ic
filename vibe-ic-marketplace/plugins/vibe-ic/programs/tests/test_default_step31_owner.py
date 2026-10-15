@@ -84,12 +84,18 @@ def fixture(tmp_path, monkeypatch, case):
     native = R._docker_exec
     observed = []
 
-    def provenance(tool, outputs):
+    def provenance(tool, outputs, command=None):
         files = {str(Path(p).relative_to(project)): "sha256:" + sha(p)
                  for p in outputs if Path(p).is_file()}
         with (project / "provenance.jsonl").open("a") as stream:
             stream.write(json.dumps({"record": "invocation", "tool": tool,
                 "measured": True, "exit_code": 0, "scope": "SOURCE_CONTROL",
+                "command": command or tool,
+                "measurement": {"schema": "mcp-eda/measurement/1",
+                    "measured": True, "tool": tool,
+                    "operation": "neutral source-control instrument",
+                    "read": [str(pnr / "chip_top.def"), str(pnr / "chip_top.gds")],
+                    "wrote": [str(p) for p in outputs]},
                 "inputs": {str((pnr / name).relative_to(project)):
                            "sha256:" + sha(pnr / name)
                            for name in ("chip_top.def", "chip_top.gds")},
@@ -108,7 +114,7 @@ def fixture(tmp_path, monkeypatch, case):
             report.write_text(body)
             log = report.with_suffix(".log")
             log.write_text("Netgen source-control instrument completed\n" + text)
-            provenance("netgen", [report, log])
+            provenance("netgen", [report, log], command)
             return 0, text, ""
         if "/erc_chip_top.tcl" in command:
             calls.append("erc")
@@ -117,7 +123,11 @@ def fixture(tmp_path, monkeypatch, case):
                 Path(output).write_text(text)
             provenance("openroad", kwargs.get("outputs", []))
             return 0, text, ""
-        return native(container, command, **kwargs)
+        result = native(container, command, **kwargs)
+        outputs = kwargs.get("outputs", [])
+        if outputs and ("klayout -b" in command or command.startswith("magic ")):
+            provenance("klayout" if "klayout -b" in command else "magic", outputs, command)
+        return result
 
     def extraction(container, command, outputs, **kwargs):
         calls.append("extraction")
@@ -186,7 +196,7 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     assert selected == ["default_backend"]
     assert calls.count("erc") == 1
     assert calls.count("extraction") == 1
-    assert calls.count("netgen") == 1
+    assert calls.count("netgen") == (2 if case == "lvs_fail" else 1)
     order = [x[:2] for x in observed]
     assert order in ([("declared", "31")],
                      [("declared", "31"), ("consumer", "31")])
