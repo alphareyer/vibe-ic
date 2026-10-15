@@ -177,6 +177,7 @@ def _liberty_limits(body: str) -> dict:
                 for kind in KINDS}
     default_fanout_load = _attribute(header, "default_fanout_load")
     cells: dict[str, dict] = {}
+    ff_states: dict[str, set[str]] = {}
     pad_cells: set[str] = set()
     for cell in re.finditer(r'\bcell\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', body):
         cell_body = _balanced_block(body, cell.start())
@@ -207,8 +208,15 @@ def _liberty_limits(body: str) -> dict:
                 bool(re.search(r"\btiming\s*\(", pin_body)) or
                 any(pin_name in value.split() for value in related))
         cells[cell.group(1).strip()] = pins
+        live_cell = re.sub(r"/\*.*?\*/|//[^\n]*", "", cell_body, flags=re.S)
+        states = set()
+        for ff in re.finditer(r"\bff\s*\(([^()]+)\)\s*\{", live_cell):
+            names = [part.strip().strip('"') for part in ff[1].split(",")]
+            if len(names) in (1, 2) and all(re.fullmatch(r"[A-Za-z_]\w*", name) for name in names):
+                states.update(names)
+        ff_states[cell.group(1).strip()] = states
     return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells,
-            "default_fanout_load": default_fanout_load}
+            "default_fanout_load": default_fanout_load, "ff_states": ff_states}
 
 
 def _liberty_header(body: str) -> dict[str, float | None]:
@@ -456,16 +464,23 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
         missing.append(f"{scene['name']}: pin/net class absent for {row['pin']}")
         return False
     cell, cell_pin = row.get("cell"), row.get("cell_pin")
+    is_port = row.get("cell_class") == "port" and not cell and not cell_pin
+    is_internal = row.get("cell_class") == "internal" and not row.get("net")
     matched = []
     for linked in scene.get("linked_liberties") or []:
         lib = libs.get(linked.get("name")) if isinstance(linked, dict) else None
         if lib and cell in lib["limits"]["cells"]:
-            pin_table = lib["limits"]["cells"][cell].get(cell_pin)
+            if is_internal:
+                # FF state variables have no physical pin table. Their cell
+                # still binds the existing core-scoped sign-off declaration.
+                pin_table = ({} if kind == "max_slew" and
+                    cell_pin in lib["limits"]["ff_states"].get(cell, set()) and
+                    cell_pin not in lib["limits"]["cells"][cell] else None)
+            else:
+                pin_table = lib["limits"]["cells"][cell].get(cell_pin)
             if pin_table is not None:
                 matched.append((linked["name"], lib, pin_table))
-    is_port = row.get("cell_class") == "port" and not cell and not cell_pin
-    is_internal = row.get("cell_class") == "internal" and not row.get("net")
-    if len(matched) != 1 and not (is_port or is_internal):
+    if len(matched) != 1 and not is_port:
         missing.append(f"{scene['name']}: cell/pin Liberty identity unresolved for "
                        f"{row['pin']} ({len(matched)} matches)")
         return False
@@ -481,7 +496,7 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
         missing.append(f"{scene['name']}: clock net classification lacks tool proof for {row['pin']}")
         return False
     pin_limit = pin_table.get(kind)
-    if pin_limit is None and lib is not None:
+    if pin_limit is None and lib is not None and not is_internal:
         pin_limit = lib["limits"]["defaults"].get(kind)
     explicit = declared.get({"max_slew": "slew_ns",
                              "max_capacitance": "cap_pf",
