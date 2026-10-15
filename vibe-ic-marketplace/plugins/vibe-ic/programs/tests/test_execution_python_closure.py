@@ -136,7 +136,7 @@ def test_relative_entry_binds_actual_output_cwd(tmp_path):
     receipt = json.loads((root / original.arm_id / 'receipt.json').read_text())
     assert plan['arms'] == [original.arm_id]
     assert next(row for row in plan['portfolio'] if row['arm_id'] == name)['admission'] == 'SAME_ENGINE_FAMILY'
-    # The source-only Step-16 fixture lacks a declared/resolved PDK.  Preserve
+    # The source-only Step-16 fixture lacks a resolvable PDK.  Preserve
     # that measured gate FAIL while proving the relative entry resolves to the
     # same current source closure and cannot become another provider.
     assert result['candidate_statuses'] == {original.arm_id: 'FAIL'}
@@ -314,7 +314,7 @@ def test_image_editable_dependency_reaches_current_release_consumer(tmp_path):
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'changed', 'unbound'])
-def test_current_image_dependency_refused_before_execution(tmp_path, mutation):
+def test_current_image_dependency_refused_before_execution(tmp_path, monkeypatch, mutation):
     import importlib.util
     native = Path(importlib.util.find_spec('cocotb.simulator').origin).resolve()
     candidate = arm()
@@ -327,16 +327,40 @@ def test_current_image_dependency_refused_before_execution(tmp_path, mutation):
             em.Controller._source_current(candidate)
         return
     original = native.read_bytes()
-    try:
+    assert em.digest(native) == enrolled.source_files[str(native)]
+    control = tmp_path / native.name
+    control.write_bytes(original)
+    if mutation == 'missing':
+        control.unlink()
+    else:
+        control.write_bytes(original + b'changed dependency control')
+
+    # Installed image assets are root-owned. Supply this unit's controlled
+    # filesystem observation at the exact bound dependency, while retaining
+    # the real source checker and real digest of writable control bytes.
+    observed = []
+    real_is_file, real_digest = Path.is_file, em.digest
+    with monkeypatch.context() as patch:
         if mutation == 'missing':
-            saved = native.with_name(native.name + '.control-saved'); native.rename(saved)
+            def current_is_file(path):
+                if path == native:
+                    observed.append(str(path))
+                    return real_is_file(control)
+                return real_is_file(path)
+            patch.setattr(Path, 'is_file', current_is_file)
         else:
-            native.write_bytes(original + b'changed dependency control')
-        with pytest.raises(em.Refusal, match='ADAPTER_SOURCE_MISMATCH'):
+            def current_digest(path):
+                if Path(path) == native:
+                    observed.append(str(path))
+                    return real_digest(control)
+                return real_digest(path)
+            patch.setattr(em, 'digest', current_digest)
+        with pytest.raises(em.Refusal, match='ADAPTER_SOURCE_MISMATCH') as caught:
             em.Controller._source_current(enrolled)
-    finally:
-        if mutation == 'missing': saved.rename(native)
-        else: native.write_bytes(original)
+        assert caught.value.code == 'ADAPTER_SOURCE_MISMATCH'
+        assert str(caught.value) == f'ADAPTER_SOURCE_MISMATCH: {native}'
+        assert observed and set(observed) == {str(native)}
+    assert native.read_bytes() == original
 
 
 @pytest.mark.parametrize('mutation', ['valid', 'malformed', 'missing_metadata', 'bad_url',
