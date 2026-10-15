@@ -577,6 +577,44 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                    if cell.get("port_directions", {}).get(pin) == "input"
                    for value in values)
 
+    def combine_roles(kind, a, b):
+        if kind == "$and":
+            return (either(a[0], b[0]), both(a[1], b[1]),
+                    either(both(a[2], b[1]), both(b[2], a[1])))
+        return (both(a[0], b[0]), either(a[1], b[1]),
+                either(both(a[2], b[0]), both(b[2], a[0])))
+
+    def masked_roles(kind, data, select):
+        return ((mux("1", data[0], select), mux("0", data[1], select),
+                 mux("0", data[2], select)) if kind == "$and" else
+                (mux(data[0], "0", select), mux(data[1], "1", select),
+                 mux(data[2], "0", select)))
+
+    def native_reduce(kind, values, arm):
+        if not values:
+            return "1" if kind == "$and" else "0"
+        if len(values) == 1:
+            return remap(values[0], arm)
+        y = allocate()
+        cells[f"transition_{y}"] = {"type": "$reduce_and" if kind == "$and" else "$reduce_or",
+            "parameters": {"A_SIGNED": 0, "A_WIDTH": len(values), "Y_WIDTH": 1},
+            "port_directions": {"A": "input", "Y": "output"},
+            "connections": {"A": [remap(value, arm) for value in values], "Y": [y]}}
+        return y
+
+    def reduced_roles(kind, values, arm, q, seen):
+        control = [v for v in values if isinstance(v, int) and v in cone]
+        data = [v for v in values if not (isinstance(v, int) and v in cone)]
+        if control and data and all(mask_control(v) for v in control):
+            role_provenance.append({"kind": "native vector reduction",
+                "control_bits": control, "branch_roles": "dominating Boolean mask / unchanged vector data"})
+            return masked_roles(kind, reduced_roles(kind, data, arm, q, seen),
+                                native_reduce(kind, control, arm))
+        result = ("0", "1", "0") if kind == "$and" else ("1", "0", "0")
+        for value in values:
+            result = combine_roles(kind, result, d_roles(value, arm, q, seen))
+        return result
+
     def d_roles(bit, arm, q, seen=frozenset()):
         """Conditional source roles, without solving for convenient data values.
 
@@ -624,12 +662,7 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                     select = remap(control, arm)
                     # Annihilator versus transparent branch, not a cube over
                     # the other operand. The data branch stays free/shared.
-                    answer = ((mux("1", data[0], select),
-                               mux("0", data[1], select),
-                               mux("0", data[2], select)) if kind == "$and" else
-                              (mux(data[0], "0", select),
-                               mux(data[1], "1", select),
-                               mux(data[2], "0", select)))
+                    answer = masked_roles(kind, data, select)
                     role_provenance.append({"output_bit": bit, "kind": kind,
                         "control_bits": [control],
                         "branch_roles": "dominating Boolean mask / unchanged data"})
@@ -637,16 +670,35 @@ def _transition_pair(mod: dict, reset_bit: int) -> Tuple[dict, List[dict]]:
                     if len(controls) == 1:
                         role_provenance.append({"output_bit": bit, "kind": kind,
                             "control_bits": [], "branch_roles": "data-mux result is not a mask control"})
-                    answer = (either(a[0], b[0]), both(a[1], b[1]),
-                              either(both(a[2], b[1]), both(b[2], a[1])))
+                    answer = combine_roles(kind, a, b)
                 elif kind == "$or":
-                    answer = (both(a[0], b[0]), either(a[1], b[1]),
-                              either(both(a[2], b[0]), both(b[2], a[0])))
+                    answer = combine_roles(kind, a, b)
                 else:
                     zero = either(both(a[0], b[0]), both(a[1], b[1]))
                     one = either(both(a[0], b[1]), both(a[1], b[0]))
                     held = either(both(a[2], b[0]), both(b[2], a[0]))
                     answer = ((one, zero, "0") if kind == "$xnor" else (zero, one, held))
+            elif kind in {"$logic_and", "$logic_or"}:
+                # Logical operands use vector truth (nonzero), not bit zero.
+                left, right = conn.get("A") or [], conn.get("B") or []
+                a = reduced_roles("$or", left, arm, q, seen)
+                b = reduced_roles("$or", right, arm, q, seen)
+                dependent = [values for values in (left, right) if any(
+                    isinstance(v, int) and v in cone for v in values)]
+                op = "$and" if kind == "$logic_and" else "$or"
+                if len(dependent) == 1 and all(mask_control(v) for v in dependent[0]):
+                    control = dependent[0]
+                    data = b if control is left else a
+                    answer = masked_roles(op, data, native_reduce("$or", control, arm))
+                    role_provenance.append({"output_bit": bit, "kind": kind,
+                        "control_bits": control, "branch_roles": "native vector truth / unchanged data"})
+                else:
+                    answer = combine_roles(op, a, b)
+            elif kind in {"$reduce_and", "$reduce_or", "$reduce_bool", "$logic_not"}:
+                answer = reduced_roles("$and" if kind == "$reduce_and" else "$or",
+                                       conn.get("A") or [], arm, q, seen)
+                if kind == "$logic_not":
+                    answer = (answer[1], answer[0], "0")
             elif kind in {"$slice", "$concat"}:
                 if kind == "$slice":
                     offset = cell.get("parameters", {}).get("OFFSET", 0)

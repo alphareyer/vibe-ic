@@ -263,3 +263,35 @@ def test_data_mux_value_cannot_be_promoted_to_outer_mask_control(tmp_path):
     assert all(row["classification"] == "UNRESOLVED_DATA_DEPENDENCE" for row in mapping["rows"]), mapping
     assert not any(role["reachable"] and role["role"] in {"FORCE_ZERO", "FORCE_ONE"}
                    for row in mapping["rows"] for role in row["conditional_roles"]), mapping
+
+
+@pytest.mark.parametrize("operator", ["and", "or"])
+def test_guarded_logical_and_reduction_masks_use_native_vector_truth(tmp_path, operator):
+    _yosys()
+    logical, reduction = ("&&", "&") if operator == "and" else ("||", "|")
+    predicate = "!(rst&&clear)" if operator == "and" else "(rst&&clear)"
+    rtl, output = tmp_path / "m.v", tmp_path / "mapping.json"
+    rtl.write_text("module m #(parameter W=3)(input clk,rst,clear,input[W-1:0] d,output reg[1:0] q);\n"
+        f"always @(posedge clk) begin q[0]<=d {logical} {predicate}; "
+        f"q[1]<={reduction}{{d,{predicate}}}; end\nendmodule\n")
+    rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+        "reset_polarity:rst:active_high", "--work-dir", str(tmp_path), "--json", str(output)])
+    rec = json.loads(output.read_text())
+    assert rc == 0 and rec["verdict"] == fsc.PASS, rec
+    raw = json.loads((tmp_path / "formal_structural_netlist_raw.json").read_text())
+    types = {cell["type"] for cell in raw["modules"]["m"]["cells"].values()}
+    assert f"$logic_{operator}" in types and f"$reduce_{operator}" in types, types
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert mapping["complete"] and not mapping["unresolved"], mapping
+    assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+    assert len(mapping["raw_identities"]) == 2, mapping
+    assert all(len(r["current_q"]) == 1 for r in mapping["raw_identities"]), mapping
+    wanted = "FORCE_ZERO" if operator == "and" else "FORCE_ONE"
+    assert mapping["rows"] and all(r["classification"] == "RESET_FORCE" and
+        r["polarity"] == "active_high" and r["total_force"] is False for r in mapping["rows"]), mapping
+    for row in mapping["rows"]:
+        assert any(r["reset_value"] == 1 and r["role"] == wanted and r["reachable"] and
+                   r["implication_query"] == "PROVED" for r in row["conditional_roles"]), row
+        assert row["native_queries"]["zero0"] == row["native_queries"]["one0"] == "REFUTED", row
+        assert all(row["native_queries"][f"roles_cover{arm}"] == "PROVED" and
+                   row["native_queries"][f"roles_disjoint{arm}"] == "PROVED" for arm in (0, 1)), row
