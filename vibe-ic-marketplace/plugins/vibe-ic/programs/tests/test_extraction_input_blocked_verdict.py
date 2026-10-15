@@ -39,9 +39,12 @@ loudly as the new one:
   4. BLOCKED is never a pass anywhere downstream: not in the run
      aggregate, not in the Step-31 gate.
 
-Public behaviour only: everything below drives `step_lvs`, `_aggregate_verdict`
-and the Step-31 gate through their real entry points and reads the artifacts
-and statuses they publish.
+Scope: direct capability/extraction/compare controls. Calls to `step_lvs`
+explicitly select its existing `_direct=True` native body, as the direct
+callback of the Step-31 producer switch does. The substituted tool transport
+does not provide a current-PV execution envelope; these controls do not claim
+whole-PV qualification. The real capability check, extraction recipe, netgen
+classification, `_aggregate_verdict`, and Step-31 report gate remain in use.
 
 chip-AGNOSTIC: synthetic generic tech/LEF/netgen text. No PDK, foundry, layer
 or design literal is used as detection logic anywhere in this file.
@@ -234,7 +237,7 @@ def _run(tmp_path, monkeypatch, tech_text, transcript, tech_lef="/t.tlef"):
     monkeypatch.setattr(runner, "_docker_exec",
                         _fake_docker(tech_text, transcript))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    return p, runner.step_lvs(p, "chip_top", _pdk(tech_lef), "x")
+    return p, runner.step_lvs(p, "chip_top", _pdk(tech_lef), "x", _direct=True)
 
 
 def _verdict(project):
@@ -324,7 +327,7 @@ def test_stub_tech_that_actually_extracts_nothing_is_blocked_not_fail(
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
 
     assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_INPUT_TECH_INCAPABLE"
@@ -386,7 +389,7 @@ def test_unreadable_tech_does_not_block(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
     assert r.status == "PASS", (r.status, r.detail)
 
 
@@ -673,7 +676,7 @@ def test_stub_with_unreadable_include_is_not_blocked_by_the_runner(
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
     assert r.status != "NOT_MEASURED", (r.status, r.detail)
 
 
@@ -964,7 +967,7 @@ def test_tcl_variable_tech_load_is_a_finding_not_a_silent_pass(tmp_path,
 
     monkeypatch.setattr(runner, "_docker_exec", fake_unresolvable)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
     # never a false BLOCKED — we still cannot judge the technology
     assert r.status != "NOT_MEASURED"
     pre = json.loads((p / "reports" / "phase3"
@@ -1002,7 +1005,7 @@ def test_a_tcl_variable_tech_load_that_RESOLVES_is_checked(tmp_path,
 
     monkeypatch.setattr(runner, "_docker_exec", fake_resolvable)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
     assert r.status != "NOT_MEASURED"
     pre = json.loads((p / "reports" / "phase3"
                       / "lvs_extraction_preflight.json").read_text())
@@ -1029,7 +1032,7 @@ def test_magicrc_naming_a_nonexistent_tech_file_is_blocked(tmp_path,
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x", _direct=True)
     assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert "generic.tech" in r.detail
 
