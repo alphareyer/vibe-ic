@@ -136,3 +136,91 @@ def test_header_scan_is_bounded_to_the_header(tmp_path):
 
     tags = {mod: tag for mod, tag, _ in m.collect(tmp_path)}
     assert tags["quoting_top"] == "GENERATED", tags
+
+
+# #3154 public mixed-origin fixture and the existing normal CLI.
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
+import pytest  # noqa: E402
+
+
+def _mixed_origin_project(tmp_path, variant="valid"):
+    rtl = tmp_path / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    vendor = rtl / "vendor_core.v"
+    vendor.write_text("module vendor_core(); endmodule\n")
+    name = "different_unit.v" if variant == "renamed" else "authored_wrapper.v"
+    module = "joined_unit" if variant == "renamed" else "authored_wrapper"
+    wrapper = rtl / name
+    wrapper.write_text(f"module {module}(); vendor_core u(); endmodule\n")
+    if variant == "copyright":
+        wrapper.write_text("// SPDX-FileCopyrightText: 2019 Neutral External Author\n"
+                           + wrapper.read_text())
+    row = {"path": name, "sha256": hashlib.sha256(wrapper.read_bytes()).hexdigest()}
+    if variant == "missing-digest":
+        row.pop("sha256")
+    elif variant == "stale-digest":
+        row["sha256"] = "0" * 64
+    elif variant == "missing-file":
+        row["path"] = "absent_unit.v"
+    manifest = {"reused_ip": True, "ip_list": ["vendor_core"], "ai_authored_files": [row]}
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(manifest) + "\n")
+    if variant == "resumed":
+        (tmp_path / "provenance.jsonl").write_text(json.dumps({
+            "event": "ip_catalog_authored_glue_inventory", "exit_code": 0,
+            "run_id": "prior-public-run", "ai_authored_files": [row]}) + "\n")
+    return module
+
+
+def test_issue3154_public_mixed_origin_apis(tmp_path):
+    m = _load("source_manifest_md_emit")
+    _mixed_origin_project(tmp_path)
+    rows = m.collect(tmp_path)
+    rendered = m.render_md(tmp_path)
+    (tmp_path / "API_RESULT.json").write_text(json.dumps({
+        "rows": rows, "rendered": rendered}, indent=2) + "\n")
+    assert {mod: tag for mod, tag, _ in rows} == {
+        "vendor_core": "REUSED-IP", "authored_wrapper": "GENERATED"}
+
+
+@pytest.mark.parametrize("variant", ["valid", "missing-digest", "stale-digest",
+    "missing-file", "copyright", "resumed", "renamed"])
+def test_issue3154_normal_cli_preserves_mixed_source_evidence(tmp_path, variant):
+    module = _mixed_origin_project(tmp_path, variant)
+    inputs = {str(p.relative_to(tmp_path)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in tmp_path.rglob("*") if p.is_file()}
+    argv = [sys.executable, str(PROGRAMS / "source_manifest_md_emit.py"), str(tmp_path)]
+    actual = subprocess.run(argv, capture_output=True, text=True)
+    (tmp_path / "CLI_RECEIPT.json").write_text(json.dumps({
+        "argv": argv, "exit_code": actual.returncode, "stdout": actual.stdout,
+        "stderr": actual.stderr, "inputs": inputs}, indent=2) + "\n")
+    assert actual.returncode == 0, actual.stdout + actual.stderr
+    text = (tmp_path / "SOURCE_MANIFEST.md").read_text()
+    rows = _load("source_manifest_md_emit").collect(tmp_path)
+    tags = {mod: tag for mod, tag, _ in rows}
+    valid = variant in {"valid", "resumed", "renamed"}
+    assert tags == {"vendor_core": "REUSED-IP", module: "GENERATED" if valid else "REUSED-IP"}
+    assert "- Authored this run: 1" not in text
+    assert "current-run authorship is not established" in text.lower()
+    if valid:
+        assert "- Authored source modules: 1" in text
+    else:
+        assert "Authorship evidence not used" in text
+    assert "absent_unit" not in tags
+    assert all(hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
+               for name, digest in inputs.items())
+
+
+def test_issue3154_existing_manifest_is_preserved_until_explicit_force(tmp_path):
+    _mixed_origin_project(tmp_path)
+    out = tmp_path / "SOURCE_MANIFEST.md"
+    original = b"# Retained source history\nOriginal provenance must stay byte-identical.\n"
+    out.write_bytes(original)
+    argv = [sys.executable, str(PROGRAMS / "source_manifest_md_emit.py"), str(tmp_path)]
+    first = subprocess.run(argv, capture_output=True, text=True)
+    assert first.returncode == 0
+    assert out.read_bytes() == original
+    forced = subprocess.run(argv + ["--force"], capture_output=True, text=True)
+    assert forced.returncode == 0
+    assert "| `authored_wrapper` | GENERATED |" in out.read_text()
