@@ -25,8 +25,16 @@ def _run(project, monkeypatch, *, corners=None, stop=None):
     pdk = SimpleNamespace(name="testPDK", liberty=str(libs / "staged__tt.lib"),
                           macro_libs=[])
     calls = []
+    resolved = {"STA_CORNERS": corners if corners is not None else
+                ["tool__ss_100C", "tool__tt_025C", "tool__ff_n40C"],
+                "DEFAULT_CORNER": "tool__tt_025C",
+                "LIB": {"tool__*": ["/pdk/tool.lib"]}}
 
-    def tool(proj, top, selected_pdk, sdc, design_staged, modes, notes):
+    def prepare(proj, top, selected_pdk, sdc):
+        assert proj == project and selected_pdk is pdk and sdc.is_file()
+        return {"resolved": resolved}
+
+    def tool(proj, top, selected_pdk, sdc, design_staged, modes, notes, **_kwargs):
         calls.append(dict(modes))
         assert proj == project and selected_pdk is pdk and sdc.is_file()
         assert modes["7"] != "dual"
@@ -35,13 +43,11 @@ def _run(project, monkeypatch, *, corners=None, stop=None):
         folder = project / "phase3/librelane/prelayout/tool-output"
         folder.mkdir(parents=True)
         return {"folder": folder,
-                "resolved": {"STA_CORNERS": corners if corners is not None else
-                              ["tool__ss_100C", "tool__tt_025C", "tool__ff_n40C"],
-                             "DEFAULT_CORNER": "tool__tt_025C",
-                             "LIB": {"tool__*": ["/pdk/tool.lib"]}},
+                "resolved": resolved,
                 "sdc": {"verdict": "PASS", "findings": []},
                 "slack": {"verdict": "PASS", "findings": []}}
 
+    monkeypatch.setattr(R, "_prepare_prelayout_librelane", prepare, raising=False)
     monkeypatch.setattr(R, "_prelayout_librelane", tool)
     monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {})
     monkeypatch.setattr(R, "_emit_multi_corner_sta", lambda *a, **k: False)
@@ -91,7 +97,13 @@ def test_tool_failure_does_not_fall_back_to_staged_pass(tmp_path, monkeypatch,
                                                        stop, status, reason):
     project = _chip(tmp_path)
     result, matrix, calls = _run(project, monkeypatch, stop=stop)
-    assert calls and matrix is None
+    # Step7's configured population is now published before the failing
+    # native Step10 transport. That declaration cannot earn a timing PASS.
+    assert calls and matrix is not None
+    assert [row["name"] for row in matrix["corners"]] == [
+        "tool__ss_100C", "tool__tt_025C", "tool__ff_n40C"]
+    import step_output_collector as versions
+    assert versions.latest_pass(project, "10") is None
     assert result.status == status and result.reason_class == reason
 
 

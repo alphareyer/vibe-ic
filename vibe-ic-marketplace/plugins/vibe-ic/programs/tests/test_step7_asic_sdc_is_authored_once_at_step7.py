@@ -147,9 +147,11 @@ def test_native_prelayout_binds_step7_not_the_later_pnr_deck(tmp_path, monkeypat
     (proj / "phase3/librelane_switch.json").write_text(json.dumps({
         "steps": {"7": "direct", "8": "librelane", "10": "direct"}}))
     seen = []
-    def prelayout(project, top, pdk, sdc, staged, modes, notes):
+    def prelayout(project, top, pdk, sdc, staged, modes, notes, **_kwargs):
         seen.append(sdc)
         return {}
+    monkeypatch.setattr(R, "_prepare_prelayout_librelane",
+                        lambda *_a, **_k: {"resolved": {}}, raising=False)
     monkeypatch.setattr(R, "_prelayout_librelane", prelayout)
     R.step_prelayout_signoff(proj, TOP, pdk, "some-container")
     record = _record(proj)
@@ -1185,7 +1187,7 @@ def test_normal_step7_and_backend_share_selected_liberty_binding(
     prelayout_pdk = detect(proj, 'neutral_pdk')
     native_boundary = []
 
-    def stop_before_native(project, top, pdk, sdc, *args):
+    def stop_before_native(project, top, pdk, sdc, *args, **_kwargs):
         assert pdk is prelayout_pdk and pdk.liberty == str(guest_liberty)
         assert sdc.read_bytes() == sdc_before
         native_boundary.append(str(sdc))
@@ -1193,6 +1195,9 @@ def test_normal_step7_and_backend_share_selected_liberty_binding(
         # Stop only the native I/O boundary; do not fabricate a tool PASS.
         raise ll.Refusal('LL_STEP_FAILED', 'unit fixture stopped before native STA')
 
+    # This control stops at the first native I/O boundary, now preparation.
+    # No resolved population was obtained; prior PVT bytes stay untouched.
+    monkeypatch.setattr(R, '_prepare_prelayout_librelane', stop_before_native, raising=False)
     monkeypatch.setattr(R, '_prelayout_librelane', stop_before_native)
     prelayout = R.step_prelayout_signoff(proj, TOP, prelayout_pdk, 'fixture-container')
     assert prelayout.status == 'FAIL' and 'unit fixture stopped' in prelayout.detail

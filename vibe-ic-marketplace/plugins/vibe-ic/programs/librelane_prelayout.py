@@ -185,12 +185,12 @@ def emit_prelayout_config(project: Path, pdk: str, top: str, sdc: Optional[Path]
     return config
 
 
-def run_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
-                  sdc: Optional[Path], rtl: list[Path], *, arm: str = "design_sdc",
-                  std_cell_library: Optional[str] = None,
-                  mounts: Optional[list[tuple[Path, str]]] = None,
-                  pdk_root: str) -> Path:
-    """Run CheckSDCFiles -> STAPrePNR on `netlist`; return the STAPrePNR folder."""
+def prepare_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
+                      sdc: Optional[Path], rtl: list[Path], *, arm: str = "design_sdc",
+                      std_cell_library: Optional[str] = None,
+                      mounts: Optional[list[tuple[Path, str]]] = None,
+                      pdk_root: str) -> dict:
+    """Resolve the existing native inputs before the Step10 input snapshot."""
     if not netlist.is_file():
         raise Refusal("LL_PRELAYOUT_NETLIST_MISSING", f"no netlist file at {netlist}")
     if sdc is not None and not sdc.is_file():
@@ -209,6 +209,20 @@ def run_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
     resolved[STEPS[-1]] = _capture_time_unit_config(resolved[STEPS[-1]], mounts or [])
     state = root / "state_in.json"
     write_json(state, {"nl": str(netlist.resolve())})
+    return {"configs": resolved, "state": state}
+
+
+def run_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
+                  sdc: Optional[Path], rtl: list[Path], *, arm: str = "design_sdc",
+                  std_cell_library: Optional[str] = None,
+                  mounts: Optional[list[tuple[Path, str]]] = None,
+                  pdk_root: str, prepared: Optional[dict] = None) -> Path:
+    """Run the same resolved CheckSDCFiles -> STAPrePNR input population."""
+    if prepared is None:
+        prepared = prepare_prelayout(
+            project, image, pdk, top, netlist, sdc, rtl, arm=arm,
+            std_cell_library=std_cell_library, mounts=mounts, pdk_root=pdk_root)
+    resolved, state = prepared["configs"], prepared["state"]
     folders = run_chain(project, image, [(s, resolved[s], state) for s in STEPS],
                         mounts=mounts, pdk_root=pdk_root, namespace=f"prelayout/{arm}")
     return folders[-1]
@@ -304,14 +318,19 @@ def pvt_matrix_from_sta_corners(resolved: dict, folder: Optional[Path],
                  for lib in (group if isinstance(group, list) else [group])]
         rows.append({"name": name, "label": classify(name),
                      "liberty": match[0] if len(match) == 1 else match})
-    timed = [p.name for p in _corners(folder)] if folder else []
-    return {"version": "1.0", "corners": rows, "modes": ["functional"],
-            "primary_corner": resolved.get("DEFAULT_CORNER"),
-            "corner_source": "LibreLane resolved STA_CORNERS/DEFAULT_CORNER (PDK config)",
-            "prelayout_timed_corners": timed,
-            "notes": ("Corner set is the tool's resolved STA_CORNERS; STAPrePNR "
-                      "deduplicates corners that differ only in parasitics, so "
-                      "pre-layout times prelayout_timed_corners.")}
+    matrix = {"version": "1.0", "corners": rows, "modes": ["functional"],
+              "primary_corner": resolved.get("DEFAULT_CORNER"),
+              "corner_source": "LibreLane resolved STA_CORNERS/DEFAULT_CORNER (PDK config)",
+              "notes": ("Corner set is the tool's resolved STA_CORNERS; actual "
+                        "deduplicated timing population belongs to Step10's "
+                        "slack and per-corner reports, not this Step7 input.")}
+    if folder is not None:
+        # Retain the existing legacy API; Default publishes before native STA.
+        matrix["prelayout_timed_corners"] = [p.name for p in _corners(folder)]
+        matrix["notes"] = ("Corner set is the tool's resolved STA_CORNERS; STAPrePNR "
+                           "deduplicates corners that differ only in parasitics, so "
+                           "pre-layout times prelayout_timed_corners.")
+    return matrix
 
 
 # ── step 8: OpenSTA's verdict on the SDC ───────────────────────────────────

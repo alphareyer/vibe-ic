@@ -389,7 +389,7 @@ def _neutral_phase2_prelayout(project, monkeypatch, *, native_status='PASS', sla
         return D.StepResult('yosys_synth', 'PASS', 0.0, 'neutral mapped tool write',
                             [str(nl)], extras={'synth_top': top})
 
-    def native(current, top, _pdk, deck, *_args):
+    def native(current, top, _pdk, deck, *_args, **_kwargs):
         events.append('native prelayout')
         nl = current / f'phase2/stage2/synth/{top}_synth.v'
         assert nl.is_file(), 'the actual caller must synthesize before native SDC validation'
@@ -416,6 +416,15 @@ def _neutral_phase2_prelayout(project, monkeypatch, *, native_status='PASS', sla
 
     monkeypatch.setattr(P._ppa_timing, 'emit_step7_asic_sdc', emit)
     monkeypatch.setattr(D, 'step_yosys_synth', synth)
+    def prepare(current, top, _pdk, deck):
+        # The existing native transport below supplies this resolved fixture.
+        # Preparation is not a native execution or a consumer verdict.
+        events.append('prepare prelayout')
+        return {'resolved': {'STA_CORNERS': ['neutral__ss', 'neutral__tt'],
+                             'DEFAULT_CORNER': 'neutral__tt',
+                             'LIB': {'neutral__*': [str(current / 'input/pdk/liberty/neutral__tt.lib')]}}}
+
+    monkeypatch.setattr(P, '_prepare_prelayout_librelane', prepare, raising=False)
     monkeypatch.setattr(P, '_prelayout_librelane', native)
     monkeypatch.setattr(P, '_emit_multi_corner_sta', corners)
     # Other flow prerequisites are neutral controls. The changed SDC, PVT,
@@ -643,3 +652,145 @@ def test_postcheck_keeps_selected_step7_deck_binding_strict(tmp_path, monkeypatc
     assert 'STALE' in row.detail
     receipt = json.loads(Path(row.output_files[0]).read_text())
     assert receipt['records'] == []
+
+
+def _resolved_pvt_compound_fixture(current, monkeypatch, *, refuse=None):
+    """Real preparation/retention/SDC/STA readers; only resolved tool IO is neutral.
+
+    The native edge copies the existing calibration grammar. These controls
+    establish software ownership and currentness, not new OpenSTA measurements.
+    """
+    import step_output_collector as versions
+    real_native = P._prelayout_librelane
+    real_prepare = getattr(P, '_prepare_prelayout_librelane', None)
+    pdk, events = _neutral_phase2_prelayout(current, monkeypatch)
+    monkeypatch.setattr(P, '_prelayout_librelane', real_native)
+    if real_prepare is None:
+        monkeypatch.delattr(P, '_prepare_prelayout_librelane')
+    else:
+        monkeypatch.setattr(P, '_prepare_prelayout_librelane', real_prepare)
+    put(current / 'phase3/librelane_switch.json',
+        {'steps': {'7': 'librelane', '8': 'librelane', '10': 'librelane'}})
+    put(current / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json', {
+        'clock_domains': [{'role': 'primary', 'period_ns': 10, 'source_pin': 'clk'}]})
+    put(current / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'widget'})
+    mapped = current / 'phase2/stage2/synth/widget_synth.v'
+    D.step_yosys_synth(current, 'widget')
+    put(current / 'phase2/stage2/synth/netlist.v', mapped.read_text())
+    libs = {}
+    for process in ('ss', 'tt', 'ff'):
+        lib = put(current / f'input/pdk/liberty/neutral__{process}.lib',
+                  f'library(neutral_{process}) {{ time_unit : "1ns"; }}\n')
+        libs[f'*_{process}_*'] = [str(lib)]
+    configured = [f'{parasitic}_{process}_025C'
+                  for parasitic in ('min', 'nom', 'max')
+                  for process in ('ss', 'tt', 'ff')]
+    nominal = [name for name in configured if name.startswith('nom_')]
+    resolved_population = {'STA_CORNERS': configured, 'DEFAULT_CORNER': 'nom_tt_025C',
+                           'LIB': libs}
+    pvt = current / 'phase2/stage2/constraints/pvt_matrix.json'
+    put(pvt, LP.pvt_matrix_from_sta_corners(
+        {**resolved_population, 'STA_CORNERS': nominal}, None,
+        P._classify_corner_from_name))
+    initial_sha = LC.digest(pvt)
+    root = current / 'fixture-pdk'
+    root.mkdir()
+    monkeypatch.setattr(LC, 'resolve_image', lambda *_a, **_k: 'software-fixture-image')
+    monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *_a, **_k: {'path': str(root)})
+    resolved_calls, tool_calls, captures = [], [], []
+
+    def resolve(project, image, raw, output, **_kwargs):
+        resolved_calls.append(json.loads(raw.read_text())['meta']['step'])
+        if refuse:
+            raise LC.Refusal(refuse, 'neutral prepare transport refused before native')
+        return put(output, {**json.loads(raw.read_text()), **resolved_population})
+
+    def native(project, image, steps, **_kwargs):
+        tool_calls.append(steps)
+        events.append('native prelayout')
+        folder = project / 'phase3/librelane/prelayout/design_sdc/tool-output'
+        cfg = json.loads(Path(steps[-1][1]).read_text())
+        put(folder / 'config.json', cfg)
+        state = {'nl': str(mapped), 'metrics': {}}
+        calibration = Path(LP.__file__).parent / 'calibration'
+        for name in nominal:
+            corner = folder / name
+            corner.mkdir(parents=True)
+            shutil.copyfile(calibration / 'sta_prepnr_linked_clean_negative.log', corner / 'sta.log')
+            shutil.copyfile(calibration / 'sta_prepnr_check_setup_clean_negative.rpt', corner / 'checks.rpt')
+            process = 'ss' if '_ss_' in name else 'tt'
+            for sense in ('max', 'min'):
+                shutil.copyfile(calibration / f'sta_prepnr_cal_{process}_{sense}.rpt',
+                                corner / f'{sense}.rpt')
+            for check, slack in (('setup', 1.0), ('hold', 0.2)):
+                for metric, value in (('ws', slack), ('wns', 0), ('tns', 0)):
+                    state['metrics'][f'timing__{check}__{metric}__corner:{name}'] = value
+        put(folder / 'state_out.json', state)
+        return [folder]
+
+    original_begin = versions.begin_steps
+    def begin(project, rows):
+        rows = list(rows)
+        for sid, inputs in rows:
+            if str(sid) == '10':
+                captures.append({'inputs': dict(inputs), 'matrix': json.loads(pvt.read_text()),
+                                 'sha256': LC.digest(pvt), 'events': list(events)})
+        return original_begin(project, rows)
+
+    monkeypatch.setattr(LP, 'resolve_step_config', resolve)
+    monkeypatch.setattr(LP, 'run_chain', native)
+    monkeypatch.setattr(versions, 'begin_steps', begin)
+    return pdk, pvt, initial_sha, resolved_population, resolved_calls, tool_calls, captures
+
+
+@pytest.mark.parametrize('change', ['unchanged', 'corner_population', 'library_population'])
+def test_step7_final_pvt_precedes_step10_capture_and_stays_current(tmp_path, monkeypatch, change):
+    import step_output_collector as versions
+    pdk, pvt, initial, resolved, resolutions, native, captures = _resolved_pvt_compound_fixture(
+        tmp_path, monkeypatch)
+    result = P.step_prelayout_signoff(tmp_path, 'widget', pdk, 'LOCAL')
+    assert result.status == 'PASS', result.detail
+    assert len(captures) == 1
+    assert len(captures[0]['matrix']['corners']) == 9, captures
+    assert captures[0]['sha256'] != initial
+    assert captures[0]['inputs'][str(pvt.relative_to(tmp_path))] == captures[0]['sha256']
+    assert 'native prelayout' not in captures[0]['events']
+    assert resolutions == list(LP.STEPS) and len(native) == 1
+    assert LC.digest(pvt) == captures[0]['sha256']
+    assert 'prelayout_timed_corners' not in json.loads(pvt.read_text())
+    slack = json.loads((tmp_path / 'phase3/librelane/prelayout/gates/step10_slack.json').read_text())
+    assert len(slack['corners']) == 3 and slack['verdict'] == 'PASS'
+    current = versions.latest_pass(tmp_path, '10')
+    assert current and current['current_inputs'] is True, _complete_consumers(tmp_path, '10')
+    assert current['result']['canonical_consumer']['status'] == 'PASS'
+    if change != 'unchanged':
+        # A genuine new configured scene or Liberty population changes Step7's
+        # emitted scientific input; the prior Step10 result cannot become current.
+        altered = json.loads(json.dumps(resolved))
+        if change == 'corner_population':
+            altered['STA_CORNERS'].append('nom_tt_100C')
+        else:
+            alternate = put(tmp_path / 'input/pdk/liberty/alternate_tt.lib',
+                            'library(alternate_tt) { time_unit : "1ns"; }\n')
+            altered['LIB']['*_tt_*'] = [str(alternate)]
+        put(pvt, LP.pvt_matrix_from_sta_corners(altered, None, P._classify_corner_from_name))
+        assert LC.digest(pvt) != captures[0]['sha256']
+        assert versions.latest_pass(tmp_path, '10')['current_inputs'] is False
+
+
+@pytest.mark.parametrize('refusal,expected', [('LL_TOOL_DEADLINE', 'NOT_MEASURED'),
+                                               ('LL_STEP_FAILED', 'FAIL')])
+def test_pvt_preparation_refusal_cannot_run_native_or_accept_step10(
+        tmp_path, monkeypatch, refusal, expected):
+    import step_output_collector as versions
+    pdk, _pvt, _initial, _resolved, resolutions, native, captures = _resolved_pvt_compound_fixture(
+        tmp_path, monkeypatch, refuse=refusal)
+    result = P.step_prelayout_signoff(tmp_path, 'widget', pdk, 'LOCAL')
+    assert result.status == expected, result.detail
+    assert resolutions == [LP.STEPS[0]]
+    assert native == [] and captures == []
+    assert versions.latest_pass(tmp_path, '10') is None
+    index = json.loads((tmp_path / 'steps/index.json').read_text())
+    row7 = next(row for row in index['steps'] if row['id'] == '7')
+    actual = json.loads((tmp_path / 'steps' / row7['folder'] / 'outputs.json').read_text())
+    assert actual['status'] == expected and actual['canonical_pass'] is False

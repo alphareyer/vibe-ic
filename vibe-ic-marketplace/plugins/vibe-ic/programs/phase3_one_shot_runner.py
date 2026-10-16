@@ -60521,9 +60521,32 @@ def _portable_prelayout_gate(project: Path, report: dict) -> dict:
     return out
 
 
+def _prepare_prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
+                                 runner_sdc: Path) -> Dict[str, Any]:
+    """Resolve Step7 corner/library inputs before retaining the native STA call."""
+    import librelane_contract as contract
+    import librelane_prelayout as prelayout
+    image = contract.resolve_image(project)
+    root = Path(contract.pdk_root_resolution(project, str(pdk.name), image=image)["path"])
+    if not root.is_dir():
+        raise contract.Refusal("LL_PDK_ROOT_MISSING", str(root))
+    mounts = [(root, "/pdk")]
+    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + sorted(_pl.rtl_dir(project).glob("*.v"))
+    stem = Path(str(getattr(pdk, "liberty", ""))).stem
+    scl = stem.split("__", 1)[0] if "__" in stem else None
+    native = prelayout.prepare_prelayout(
+        project, image, str(pdk.name), top, netlist, runner_sdc, rtl,
+        arm="design_sdc", std_cell_library=scl, mounts=mounts, pdk_root="/pdk")
+    return {"image": image, "root": root, "mounts": mounts,
+            "netlist": netlist, "rtl": rtl, "scl": scl, "native": native,
+            "resolved": json.loads(native["configs"][prelayout.STEPS[-1]].read_text())}
+
+
 def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                          runner_sdc: Path, design_staged: bool,
-                         modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
+                         modes: Dict[str, str], notes: List[str], *,
+                         prepared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Steps 7/8/10 through LibreLane CheckSDCFiles -> STAPrePNR (opt-in).
 
     Returns the STAPrePNR folder, its resolved config and the gate reports.
@@ -60533,21 +60556,27 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     import librelane_prelayout as _llp
     # Image and PDK root through the contract's resolvers (declared >
     # resolved at run time > refused, naming the cause).
-    image = _llc.resolve_image(project)
-    root = Path(_llc.pdk_root_resolution(project, str(pdk.name), image=image)["path"])
-    if not root.is_dir():
-        raise _llc.Refusal("LL_PDK_ROOT_MISSING", str(root))
-    mounts: List[Tuple[Path, str]] = [(root, "/pdk")]
-    pdk_root_guest = "/pdk"
-    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
-    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + \
-        sorted(_pl.rtl_dir(project).glob("*.v"))
-    stem = Path(str(getattr(pdk, "liberty", ""))).stem
-    scl = stem.split("__", 1)[0] if "__" in stem else None
+    if prepared is None:
+        image = _llc.resolve_image(project)
+        root = Path(_llc.pdk_root_resolution(project, str(pdk.name), image=image)["path"])
+        if not root.is_dir():
+            raise _llc.Refusal("LL_PDK_ROOT_MISSING", str(root))
+        mounts: List[Tuple[Path, str]] = [(root, "/pdk")]
+        pdk_root_guest = "/pdk"
+        netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+        rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + \
+            sorted(_pl.rtl_dir(project).glob("*.v"))
+        stem = Path(str(getattr(pdk, "liberty", ""))).stem
+        scl = stem.split("__", 1)[0] if "__" in stem else None
+    else:
+        image, root = prepared["image"], prepared["root"]
+        mounts, pdk_root_guest = prepared["mounts"], "/pdk"
+        netlist, rtl, scl = prepared["netlist"], prepared["rtl"], prepared["scl"]
     folder = _llp.run_prelayout(project, image, str(pdk.name), top, netlist,
                                 runner_sdc, rtl, arm="design_sdc",
                                 std_cell_library=scl, mounts=mounts,
-                                pdk_root=pdk_root_guest)
+                                pdk_root=pdk_root_guest,
+                                **({"prepared": prepared["native"]} if prepared is not None else {}))
     resolved = json.loads((folder / "config.json").read_text())
     gates = project / "phase3/librelane/prelayout/gates"
     out: Dict[str, Any] = {"folder": folder, "resolved": resolved}
@@ -60704,7 +60733,7 @@ def publish_prelayout_reports(project: Path, folder: Path, *,
             "pre_pnr_summary": str(summary)}
 
 
-@_spf.retained_steps(('7', '10'), canonical_acceptance=True)
+@_spf.retained_step('7', canonical_acceptance=True)
 def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                            container: str) -> StepResult:
     """Steps 7 + 10 (pre-layout, stage-2) — emitted RIGHT AFTER synth, BEFORE PnR.
@@ -60876,13 +60905,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
     import librelane_contract as _llc
     _ll_modes = {s: _llc.selected_mode(project, s) for s in ("7", "8", "10")}
-    _ll: Dict[str, Any] = {}
+    prepared = None
     if any(m != "direct" for m in _ll_modes.values()) and canon_sdc.is_file():
         try:
-            # Step 8 certifies Step 7's immutable output. Step 15 owns the
-            # separate PnR deck and may later apply its named DRV derivation.
-            _ll = _prelayout_librelane(project, top, pdk, canon_sdc,
-                                       design_staged, _ll_modes, notes)
+            prepared = _prepare_prelayout_librelane(project, top, pdk, canon_sdc)
         except (_llc.Refusal, OSError, ValueError) as exc:
             stopped = (_llc.tool_stop_reason(exc.code)
                        if isinstance(exc, _llc.Refusal) else None)
@@ -60891,13 +60917,15 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                               f"LibreLane pre-layout path ({_ll_modes}): {exc}",
                               written, reason_class=stopped or "")
 
+    # The shared call still judges both rows with the original full consumers.
+    # Only Step7's actual input publication precedes Step10's input snapshot.
     # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
     pvt_path = constraints_out / "pvt_matrix.json"
-    if _ll and _ll_modes["7"] != "direct":
+    if prepared is not None and _ll_modes["7"] != "direct":
         # One corner set: the tool's resolved STA_CORNERS.
         import librelane_prelayout as _llp
         _pvt_ll = _llp.pvt_matrix_from_sta_corners(
-            _ll["resolved"], _ll["folder"], _classify_corner_from_name)
+            prepared["resolved"], None, _classify_corner_from_name)
         stamp_pvt_corner_coverage(_pvt_ll, _pvt_ll["corners"])
         pvt_path.write_text(json.dumps(_pvt_ll, indent=2) + "\n")
         written.append(str(pvt_path))
@@ -60929,205 +60957,225 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     written.append(str(emit_step7_corner_disclosure(
         project, json.loads(pvt_path.read_text()))))
 
-    # --- Step 10: GENUINE pre-layout multi-corner STA --------------------
-    # force_prelayout=True: this step is Step 10 (PRE-LAYOUT) by definition, so
-    # it must time the synth netlist even on a re-run in a dir that already
-    # holds a routed netlist + SPEF from a prior round — else the shared
-    # file-existence precedence would emit a POST_ROUTE report here and label it
-    # pre-layout (the contradiction sta_report_check flags).
-    # CUT_W1A: step 10's corner reports live in their OWN directory. Step 23
-    # writes post-route corner reports to `per_corner/` and
-    # `_emit_multi_corner_sta` reuses what it finds there, so one shared
-    # directory let a pre-layout report stand as post-route evidence
-    # (TOOL_DUPLICATION_AUDIT §3.14). The audit counts both directories by
-    # each report's own STA_BASIS stamp, exactly as it counted the one.
-    per_corner = sta_out / STEP10_CORNER_DIR
-    pre_pnr = sta_out / "pre_pnr_timing.rpt"
-    if _ll and _ll_modes["10"] == "librelane":
-        # The tool timed the synthesis netlist in its own step directory; its
-        # corner reports are published under the step-10 names and the
-        # composed report is always re-derived from THIS run.
-        import librelane_prelayout as _llp
-        _ll_reports = _llp.compose_corner_reports(
-            _ll["folder"], per_corner, _classify_corner_from_name)
-        written.append(str(per_corner))
-        pre_pnr.unlink(missing_ok=True)
-    elif runner_sdc.is_file():
-        per_corner.mkdir(parents=True, exist_ok=True)
-        if _emit_multi_corner_sta(project, top, pdk, container,
-                                  staged_libs, per_corner, notes,
-                                  force_prelayout=True):
-            written.append(str(per_corner))
-        if _ll and _ll_modes["10"] == "dual":
-            # Cross-check, not pick-the-better: the same netlist/SDC/liberty
-            # must give the same worst slack in both engines' packaging.
-            import librelane_prelayout as _llp
-            _arm = project / "phase3/tool_arms/10/librelane/per_corner"
-            _llp.compose_corner_reports(_ll["folder"], _arm,
-                                        _classify_corner_from_name)
-            notes.append(f"step 10 dual: LibreLane arm reports in "
-                         f"{_arm.relative_to(project)}; direct arm published")
-    # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
-    # SS preferred, else TT/FF/any) — NOT a copy of the post-route sta.rpt.
-    # Re-compose when a stale pre_pnr_timing.rpt from an earlier post-route
-    # round is present: its body would carry STA_BASIS: POST_ROUTE_* under this
-    # step's PRE-LAYOUT header — the precise contradiction sta_report_check
-    # flags. A genuinely pre-layout report (or an absent one) is left alone.
-    pre_pnr = sta_out / "pre_pnr_timing.rpt"
-    _pre_pnr_stale = (pre_pnr.is_file()
-                      and _sta_basis.declared_basis(pre_pnr.read_text())
-                      != "PRE_LAYOUT")
-    if not pre_pnr.is_file() or _pre_pnr_stale:
-        # BLOCKING-1 (2026-08-05 review). The source must be chosen by what the
-        # corner report DECLARES, not by its filename. Forcing the basis in
-        # `_emit_multi_corner_sta` only re-stamps the corners whose re-emit
-        # SUCCEEDED; a corner whose OpenSTA run failed contributes no fresh
-        # report, and — before the quarantine above — left its POST_ROUTE one
-        # sitting under the very name this loop reaches for first. Picking by
-        # name then composed a PRE-LAYOUT header over a POST_ROUTE body and the
-        # step still returned PASS: the could-not-measure state resolving to
-        # measured-clean. Only a report that declares PRE_LAYOUT may be the
-        # source of a pre-layout report; the belt goes with the braces because
-        # a mislabelled corner report can reach per_corner/ by routes this step
-        # does not own.
-        def _prelayout_src(cand: Path) -> bool:
+    def complete_prelayout_step10():
+        _ll: Dict[str, Any] = {}
+        if any(m != "direct" for m in _ll_modes.values()) and canon_sdc.is_file():
             try:
-                return (_sta_basis.declared_basis(cand.read_text())
-                        == "PRE_LAYOUT")
-            except OSError:
-                return False
+                # Step 8 certifies Step 7's immutable output. Step 15 owns the
+                # separate PnR deck and may later apply its named DRV derivation.
+                _ll = _prelayout_librelane(project, top, pdk, canon_sdc,
+                                           design_staged, _ll_modes, notes,
+                                           **({"prepared": prepared} if prepared is not None else {}))
+            except (_llc.Refusal, OSError, ValueError) as exc:
+                stopped = (_llc.tool_stop_reason(exc.code)
+                           if isinstance(exc, _llc.Refusal) else None)
+                return StepResult("prelayout_signoff", "NOT_MEASURED" if stopped else "FAIL",
+                                  time.time() - t0,
+                                  f"LibreLane pre-layout path ({_ll_modes}): {exc}",
+                                  written, reason_class=stopped or "")
 
-        src = None
-        _rejected: List[str] = []
-        _ordered = [per_corner / c
-                    for c in ("sta_SS.rpt", "sta_TT.rpt", "sta_FF.rpt")]
-        if per_corner.is_dir():
-            _ordered += [p for p in sorted(per_corner.glob("sta_*.rpt"))
-                         if p not in _ordered]
-        for cand in _ordered:
-            if not cand.is_file():
-                continue
-            if _prelayout_src(cand):
-                src = cand
-                break
-            _rejected.append(cand.name)
-        if _rejected:
-            notes.append(
-                "pre-layout compose REFUSED corner report(s) "
-                + ", ".join(_rejected)
-                + " — they do not declare STA_BASIS PRE_LAYOUT, and a "
-                  "pre-layout report composed from a post-route body is the "
-                  "contradiction this step exists to remove")
-        if src is not None:
-            pre_pnr.write_text(
-                "# PRE-LAYOUT STA (Step 10) — genuine OpenSTA on the synth\n"
-                "# netlist + SDC, emitted BEFORE PnR. STA_BASIS is stamped in\n"
-                "# the report body; interconnect is a pre-floorplan estimate.\n"
-                f"# corner source: {src.name}\n"
-                + src.read_text())
-            written.append(str(pre_pnr))
-        else:
-            notes.append("pre-layout STA produced no corner report — "
-                         "pre_pnr_timing.rpt deferred (sta tool unavailable?)")
-
-    # BLOCKING-1 (2026-08-05 review), second half. Refusing to COMPOSE from a
-    # post-route body is necessary but not sufficient: when nothing genuine was
-    # available the pre-existing `pre_pnr_timing.rpt` is simply LEFT — and it is
-    # the contradiction. Two distinct outcomes, deliberately not merged:
-    #
-    #   * POSITIVELY declares POST_ROUTE — the file states, about ITSELF, that
-    #     it is the wrong side of PnR while sitting at the pre-layout path. That
-    #     is a mislabel on its own testimony, so quarantine it (bytes kept under
-    #     a non-`.rpt` suffix) rather than publish it to Step 10.
-    #   * UNDECLARED (`declared_basis` -> None) — per `_sta_basis`'s stated
-    #     contract, None is neither basis; it is "the report stated no side".
-    #     Deleting a file on an absence would be acting on a question it never
-    #     answered, so it is LEFT ALONE and only reported.
-    #
-    # BOTH are a step that could not substantiate the pre-layout artefact it
-    # owns, so NEITHER may return PASS. Silently PASSing here is precisely the
-    # could-not-measure -> measured-clean collapse this PR is written about;
-    # Step 10 scoring MISSING against an absent report is the honest outcome,
-    # and a WARN says so where the run can see it.
-    _pre_pnr_basis: Optional[str] = None
-    _pre_pnr_ok = True
-    if pre_pnr.is_file():
-        _pre_pnr_basis = _sta_basis.declared_basis(pre_pnr.read_text())
-        if _pre_pnr_basis != "PRE_LAYOUT":
-            _pre_pnr_ok = False
-            if _pre_pnr_basis == "POST_ROUTE":
-                _q = pre_pnr.parent / (pre_pnr.name + ".stale_basis")
+        # --- Step 10: GENUINE pre-layout multi-corner STA --------------------
+        # force_prelayout=True: this step is Step 10 (PRE-LAYOUT) by definition, so
+        # it must time the synth netlist even on a re-run in a dir that already
+        # holds a routed netlist + SPEF from a prior round — else the shared
+        # file-existence precedence would emit a POST_ROUTE report here and label it
+        # pre-layout (the contradiction sta_report_check flags).
+        # CUT_W1A: step 10's corner reports live in their OWN directory. Step 23
+        # writes post-route corner reports to `per_corner/` and
+        # `_emit_multi_corner_sta` reuses what it finds there, so one shared
+        # directory let a pre-layout report stand as post-route evidence
+        # (TOOL_DUPLICATION_AUDIT §3.14). The audit counts both directories by
+        # each report's own STA_BASIS stamp, exactly as it counted the one.
+        per_corner = sta_out / STEP10_CORNER_DIR
+        pre_pnr = sta_out / "pre_pnr_timing.rpt"
+        if _ll and _ll_modes["10"] == "librelane":
+            # The tool timed the synthesis netlist in its own step directory; its
+            # corner reports are published under the step-10 names and the
+            # composed report is always re-derived from THIS run.
+            import librelane_prelayout as _llp
+            _ll_reports = _llp.compose_corner_reports(
+                _ll["folder"], per_corner, _classify_corner_from_name)
+            written.append(str(per_corner))
+            pre_pnr.unlink(missing_ok=True)
+        elif runner_sdc.is_file():
+            per_corner.mkdir(parents=True, exist_ok=True)
+            if _emit_multi_corner_sta(project, top, pdk, container,
+                                      staged_libs, per_corner, notes,
+                                      force_prelayout=True):
+                written.append(str(per_corner))
+            if _ll and _ll_modes["10"] == "dual":
+                # Cross-check, not pick-the-better: the same netlist/SDC/liberty
+                # must give the same worst slack in both engines' packaging.
+                import librelane_prelayout as _llp
+                _arm = project / "phase3/tool_arms/10/librelane/per_corner"
+                _llp.compose_corner_reports(_ll["folder"], _arm,
+                                            _classify_corner_from_name)
+                notes.append(f"step 10 dual: LibreLane arm reports in "
+                             f"{_arm.relative_to(project)}; direct arm published")
+        # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
+        # SS preferred, else TT/FF/any) — NOT a copy of the post-route sta.rpt.
+        # Re-compose when a stale pre_pnr_timing.rpt from an earlier post-route
+        # round is present: its body would carry STA_BASIS: POST_ROUTE_* under this
+        # step's PRE-LAYOUT header — the precise contradiction sta_report_check
+        # flags. A genuinely pre-layout report (or an absent one) is left alone.
+        pre_pnr = sta_out / "pre_pnr_timing.rpt"
+        _pre_pnr_stale = (pre_pnr.is_file()
+                          and _sta_basis.declared_basis(pre_pnr.read_text())
+                          != "PRE_LAYOUT")
+        if not pre_pnr.is_file() or _pre_pnr_stale:
+            # BLOCKING-1 (2026-08-05 review). The source must be chosen by what the
+            # corner report DECLARES, not by its filename. Forcing the basis in
+            # `_emit_multi_corner_sta` only re-stamps the corners whose re-emit
+            # SUCCEEDED; a corner whose OpenSTA run failed contributes no fresh
+            # report, and — before the quarantine above — left its POST_ROUTE one
+            # sitting under the very name this loop reaches for first. Picking by
+            # name then composed a PRE-LAYOUT header over a POST_ROUTE body and the
+            # step still returned PASS: the could-not-measure state resolving to
+            # measured-clean. Only a report that declares PRE_LAYOUT may be the
+            # source of a pre-layout report; the belt goes with the braces because
+            # a mislabelled corner report can reach per_corner/ by routes this step
+            # does not own.
+            def _prelayout_src(cand: Path) -> bool:
                 try:
-                    pre_pnr.replace(_q)
-                    notes.append(
-                        f"pre_pnr_timing.rpt declared STA_BASIS POST_ROUTE "
-                        f"under this step's PRE-LAYOUT header and no genuine "
-                        f"pre-layout corner report could replace it — "
-                        f"quarantined to {_q.name}; Step 10 is MISSING, which "
-                        f"is the honest state, NOT clean")
-                    if str(pre_pnr) in written:
-                        written.remove(str(pre_pnr))
-                except OSError as exc:
-                    notes.append(
-                        f"pre_pnr_timing.rpt declares POST_ROUTE and could "
-                        f"NOT be quarantined ({exc}) — a post-route body is "
-                        f"published under a PRE-LAYOUT header")
-            else:
-                notes.append(
-                    "pre_pnr_timing.rpt carries NO recognised STA_BASIS stamp "
-                    "— this step cannot substantiate it as pre-layout, and an "
-                    "undeclared report is not evidence of either basis; left "
-                    "in place, reported, NOT counted as clean")
+                    return (_sta_basis.declared_basis(cand.read_text())
+                            == "PRE_LAYOUT")
+                except OSError:
+                    return False
 
-    # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
-    # so it is part of the predicate unconditionally.
-    ok = runner_sdc.is_file() and pvt_path.is_file() and (
-        canon_sdc.is_file()) and _pre_pnr_ok
-    detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
-              f"{len(written)} artefact(s)"
-              + ("; " + "; ".join(notes[-2:]) if notes else ""))
-    if not _pre_pnr_ok:
-        # Lead with WHY, not with the artefact count — a detail that opens
-        # "sign-off emitted" while the pre-layout basis is unsubstantiated
-        # reads clean at a glance, which is the whole failure mode.
-        detail = (f"pre-layout basis UNSUBSTANTIATED "
-                  f"(pre_pnr_timing.rpt declared "
-                  f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
-                  + detail)
-    # Tool path: the gates judge the tool's own output, and they block.
-    _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
-                    if _ll and _ll_modes[step] != "direct"]
-    for step, gate in _ll_verdicts:
-        written.append(str(project / "phase3/librelane/prelayout/gates" /
-                           ("step8_sdc_opensta.json" if step == "8"
-                            else "step10_slack.json")))
-    _ll_bad = [f"step {s} gate {g['verdict']}: " + "; ".join(g["findings"][:2])
-               for s, g in _ll_verdicts if g["verdict"] != "PASS"]
-    if _ll_bad:
-        return StepResult(
-            "prelayout_signoff",
-            "FAIL" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
-            else "NOT_MEASURED",
-            time.time() - t0, " | ".join(_ll_bad) + " — " + detail, written,
-            reason_class=("" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
-                          else _V.ReasonClass.INCONCLUSIVE))
-    if ok:
-        try:
-            written.append(str(_publish_prelayout_summary(project)))
-        except (_llc.Refusal, OSError, ValueError) as exc:
-            code = getattr(exc, 'code', 'PRELAYOUT_STA_SUMMARY_UNAVAILABLE')
-            failed = code == 'PRELAYOUT_STA_SUMMARY_FAILED'
+            src = None
+            _rejected: List[str] = []
+            _ordered = [per_corner / c
+                        for c in ("sta_SS.rpt", "sta_TT.rpt", "sta_FF.rpt")]
+            if per_corner.is_dir():
+                _ordered += [p for p in sorted(per_corner.glob("sta_*.rpt"))
+                             if p not in _ordered]
+            for cand in _ordered:
+                if not cand.is_file():
+                    continue
+                if _prelayout_src(cand):
+                    src = cand
+                    break
+                _rejected.append(cand.name)
+            if _rejected:
+                notes.append(
+                    "pre-layout compose REFUSED corner report(s) "
+                    + ", ".join(_rejected)
+                    + " — they do not declare STA_BASIS PRE_LAYOUT, and a "
+                      "pre-layout report composed from a post-route body is the "
+                      "contradiction this step exists to remove")
+            if src is not None:
+                pre_pnr.write_text(
+                    "# PRE-LAYOUT STA (Step 10) — genuine OpenSTA on the synth\n"
+                    "# netlist + SDC, emitted BEFORE PnR. STA_BASIS is stamped in\n"
+                    "# the report body; interconnect is a pre-floorplan estimate.\n"
+                    f"# corner source: {src.name}\n"
+                    + src.read_text())
+                written.append(str(pre_pnr))
+            else:
+                notes.append("pre-layout STA produced no corner report — "
+                             "pre_pnr_timing.rpt deferred (sta tool unavailable?)")
+
+        # BLOCKING-1 (2026-08-05 review), second half. Refusing to COMPOSE from a
+        # post-route body is necessary but not sufficient: when nothing genuine was
+        # available the pre-existing `pre_pnr_timing.rpt` is simply LEFT — and it is
+        # the contradiction. Two distinct outcomes, deliberately not merged:
+        #
+        #   * POSITIVELY declares POST_ROUTE — the file states, about ITSELF, that
+        #     it is the wrong side of PnR while sitting at the pre-layout path. That
+        #     is a mislabel on its own testimony, so quarantine it (bytes kept under
+        #     a non-`.rpt` suffix) rather than publish it to Step 10.
+        #   * UNDECLARED (`declared_basis` -> None) — per `_sta_basis`'s stated
+        #     contract, None is neither basis; it is "the report stated no side".
+        #     Deleting a file on an absence would be acting on a question it never
+        #     answered, so it is LEFT ALONE and only reported.
+        #
+        # BOTH are a step that could not substantiate the pre-layout artefact it
+        # owns, so NEITHER may return PASS. Silently PASSing here is precisely the
+        # could-not-measure -> measured-clean collapse this PR is written about;
+        # Step 10 scoring MISSING against an absent report is the honest outcome,
+        # and a WARN says so where the run can see it.
+        _pre_pnr_basis: Optional[str] = None
+        _pre_pnr_ok = True
+        if pre_pnr.is_file():
+            _pre_pnr_basis = _sta_basis.declared_basis(pre_pnr.read_text())
+            if _pre_pnr_basis != "PRE_LAYOUT":
+                _pre_pnr_ok = False
+                if _pre_pnr_basis == "POST_ROUTE":
+                    _q = pre_pnr.parent / (pre_pnr.name + ".stale_basis")
+                    try:
+                        pre_pnr.replace(_q)
+                        notes.append(
+                            f"pre_pnr_timing.rpt declared STA_BASIS POST_ROUTE "
+                            f"under this step's PRE-LAYOUT header and no genuine "
+                            f"pre-layout corner report could replace it — "
+                            f"quarantined to {_q.name}; Step 10 is MISSING, which "
+                            f"is the honest state, NOT clean")
+                        if str(pre_pnr) in written:
+                            written.remove(str(pre_pnr))
+                    except OSError as exc:
+                        notes.append(
+                            f"pre_pnr_timing.rpt declares POST_ROUTE and could "
+                            f"NOT be quarantined ({exc}) — a post-route body is "
+                            f"published under a PRE-LAYOUT header")
+                else:
+                    notes.append(
+                        "pre_pnr_timing.rpt carries NO recognised STA_BASIS stamp "
+                        "— this step cannot substantiate it as pre-layout, and an "
+                        "undeclared report is not evidence of either basis; left "
+                        "in place, reported, NOT counted as clean")
+
+        # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
+        # so it is part of the predicate unconditionally.
+        ok = runner_sdc.is_file() and pvt_path.is_file() and (
+            canon_sdc.is_file()) and _pre_pnr_ok
+        detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
+                  f"{len(written)} artefact(s)"
+                  + ("; " + "; ".join(notes[-2:]) if notes else ""))
+        if not _pre_pnr_ok:
+            # Lead with WHY, not with the artefact count — a detail that opens
+            # "sign-off emitted" while the pre-layout basis is unsubstantiated
+            # reads clean at a glance, which is the whole failure mode.
+            detail = (f"pre-layout basis UNSUBSTANTIATED "
+                      f"(pre_pnr_timing.rpt declared "
+                      f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
+                      + detail)
+        # Tool path: the gates judge the tool's own output, and they block.
+        _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
+                        if _ll and _ll_modes[step] != "direct"]
+        for step, gate in _ll_verdicts:
+            written.append(str(project / "phase3/librelane/prelayout/gates" /
+                               ("step8_sdc_opensta.json" if step == "8"
+                                else "step10_slack.json")))
+        _ll_bad = [f"step {s} gate {g['verdict']}: " + "; ".join(g["findings"][:2])
+                   for s, g in _ll_verdicts if g["verdict"] != "PASS"]
+        if _ll_bad:
             return StepResult(
-                'prelayout_signoff', 'FAIL' if failed else 'NOT_MEASURED',
-                time.time() - t0, f'{code}: {exc} — {detail}', written,
-                reason_class='' if failed else _V.ReasonClass.INCONCLUSIVE)
-    # `WARN` (the pre-layout sign-off BASIS is unsubstantiated) is a pass the
-    # step itself declined to make clean — R-0915-85's word for that is
-    # PASS_WITH_WAIVERS, and `validate_step_row` derives the must-close row
-    # from this step's own detail.
-    return StepResult("prelayout_signoff",
-                      "PASS" if ok else "PASS_WITH_WAIVERS",
-                      time.time() - t0, detail, written)
+                "prelayout_signoff",
+                "FAIL" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
+                else "NOT_MEASURED",
+                time.time() - t0, " | ".join(_ll_bad) + " — " + detail, written,
+                reason_class=("" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
+                              else _V.ReasonClass.INCONCLUSIVE))
+        if ok:
+            try:
+                written.append(str(_publish_prelayout_summary(project)))
+            except (_llc.Refusal, OSError, ValueError) as exc:
+                code = getattr(exc, 'code', 'PRELAYOUT_STA_SUMMARY_UNAVAILABLE')
+                failed = code == 'PRELAYOUT_STA_SUMMARY_FAILED'
+                return StepResult(
+                    'prelayout_signoff', 'FAIL' if failed else 'NOT_MEASURED',
+                    time.time() - t0, f'{code}: {exc} — {detail}', written,
+                    reason_class='' if failed else _V.ReasonClass.INCONCLUSIVE)
+        # `WARN` (the pre-layout sign-off BASIS is unsubstantiated) is a pass the
+        # step itself declined to make clean — R-0915-85's word for that is
+        # PASS_WITH_WAIVERS, and `validate_step_row` derives the must-close row
+        # from this step's own detail.
+        return StepResult("prelayout_signoff",
+                          "PASS" if ok else "PASS_WITH_WAIVERS",
+                          time.time() - t0, detail, written)
+
+    return _spf.retained_call(
+        project, "10", complete_prelayout_step10, canonical_acceptance=True)
 
 
 def _hardmacro_pdk_dir(pdk: Optional["PdkConfig"],

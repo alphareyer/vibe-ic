@@ -257,6 +257,20 @@ def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypa
         put(folder / "config.json", config)
         return folder
 
+    def prepare(project, image, pdk, top, netlist, sdc, rtl, **_):
+        # The same substituted native transport resolves its configuration
+        # before the owning Step10 snapshot; it has not run STA here.
+        root = project / "phase3/librelane/prelayout-config/design_sdc"
+        config = put(root / "resolved.json", {
+            "PNR_SDC_FILE": str(sdc),
+            "STA_CORNERS": ["nom_tt_025C_5v00", "nom_ss_125C_4v50"],
+            "DEFAULT_CORNER": "nom_tt_025C_5v00",
+            "CELL_LIBS": {"*_tt_025C_5v00": ["/pdk/tt.lib"],
+                          "*_ss_125C_4v50": ["/pdk/ss.lib"]}})
+        state = put(root / "state_in.json", {"nl": str(netlist)})
+        return {"configs": dict.fromkeys(prelayout.STEPS, config), "state": state}
+
+    monkeypatch.setattr(prelayout, "prepare_prelayout", prepare, raising=False)
     monkeypatch.setattr(prelayout, "run_prelayout", tool)
     pdk = SimpleNamespace(name="pdkA", liberty=str(libs / "x_tt_025C.lib"))
     chosen["log"] = "clean"
