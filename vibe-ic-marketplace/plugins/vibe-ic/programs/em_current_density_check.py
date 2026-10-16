@@ -12,7 +12,7 @@ The plugin measures EM current and executes the native density arm:
     per-segment CSV whose columns are:
         Node0 Layer, Node0 X, Node0 Y, Node1 Layer, Node1 X, Node1 Y, Current
     (Current in Amperes). The same Default session runs check_current_density
-    on declared routing limits; this gate binds it before its retained screen.
+    on declared routing/cut limits; this gate binds it before its retained screen.
   * `signoff_ladder_run.check_tier_2_decap` calls its "EM" tier a
     DECAP-CELL-COUNT proxy (`decap_cells >= 100`) — a placement heuristic,
     not a current-density check.
@@ -30,7 +30,7 @@ the narrowest width elsewhere on the layer are never segment geometry.
 
   * a foundry / open-PDK **tech LEF** (sky130 / gf180 both carry, per LAYER:
       THICKNESS <um> ; WIDTH <um> ;
-      DCCURRENTDENSITY AVERAGE <v> ;   # mA/um for ROUTING, mA/cut for CUT
+      DCCURRENTDENSITY AVERAGE <v> ;   # mA/um for ROUTING, mA/um^2 for CUT
     ), OR
   * a supplied **jmax JSON** (see schema below).
 
@@ -188,7 +188,7 @@ def _num(v: Any) -> Optional[float]:
 # Normalised internal entry:
 #   routing: {"kind":"routing","thickness_um":t|None,"width_um":w|None,
 #             "jmax_areal_A_per_um2":a|None,"jmax_per_width_A_per_um":p|None}
-#   cut:     {"kind":"cut","jmax_per_cut_A":c}
+#   cut:     LEF areal A/um^2, or explicitly supplied JSON A/cut
 # ---------------------------------------------------------------------------
 _LAYER_BLOCK_RE = re.compile(
     r"^\s*LAYER\s+(\S+)\s*;?\s*$(.*?)^\s*END\s+\1\b",
@@ -201,16 +201,22 @@ _MINWIDTH_RE = re.compile(r"^\s*MINWIDTH\s+([0-9.eE+\-]+)\s*;", re.MULTILINE | r
 _DCDENS_RE = re.compile(
     r"^\s*DCCURRENTDENSITY\s+AVERAGE\s+([0-9.eE+\-]+)\s*;",
     re.MULTILINE | re.IGNORECASE)
+_VIA_BLOCK_RE = re.compile(
+    r"^\s*(?:VIA|VIARULE)\s+(\S+)[^\n]*\n(.*?)^\s*END\s+\1\b",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_VIA_LAYER_RE = re.compile(r"^\s*LAYER\s+(\S+)\s*;", re.MULTILINE | re.IGNORECASE)
 
 
 def parse_lef_jmax(text: str) -> Dict[str, Dict[str, Any]]:
     """Build a normalised Jmax table from a tech-LEF string."""
     table: Dict[str, Dict[str, Any]] = {}
+    layer_types: Dict[str, str] = {}
     for m in _LAYER_BLOCK_RE.finditer(text):
         name = m.group(1)
         body = m.group(2)
         tm = _TYPE_RE.search(body)
         ltype = (tm.group(1).upper() if tm else "")
+        layer_types[name.lower()] = ltype
         dm = _DCDENS_RE.search(body)
         if not dm:
             continue  # no DC current-density limit → not screenable
@@ -233,9 +239,52 @@ def parse_lef_jmax(text: str) -> Dict[str, Dict[str, Any]]:
         elif ltype == "CUT":
             table[name.lower()] = {
                 "orig_name": name, "kind": "cut",
-                "jmax_per_cut_A": dc * 1e-3,  # LEF cut DCCURRENTDENSITY is mA/cut
+                # LEF CUT scalar is mA/um^2, unlike explicit JSON mA/cut.
+                "jmax_areal_A_per_um2": dc * 1e-3,
             }
+    # PSM names the routing layers at both ends of a via edge. Only an
+    # explicit VIA in this same authority can identify its cut layer; layer
+    # names or their numeric suffixes are not a connectivity declaration.
+    connections: Dict[Tuple[str, str], set] = {}
+    for via in _VIA_BLOCK_RE.finditer(text):
+        layers = {name.lower() for name in _VIA_LAYER_RE.findall(via.group(2))}
+        routing = sorted(name for name in layers if layer_types.get(name) == "ROUTING")
+        cuts = {name for name in layers if layer_types.get(name) == "CUT"}
+        if len(routing) == 2 and len(cuts) == 1 and len(layers) == 3:
+            connections.setdefault(tuple(routing), set()).update(cuts)
+    for pair, cuts in connections.items():
+        # A second possible cut (including one without a limit) is ambiguous.
+        if len(cuts) == 1:
+            cut = table.get(next(iter(cuts)))
+            if cut is not None and cut["kind"] == "cut":
+                cut.setdefault("routing_pairs", []).append(pair)
     return table
+
+
+def _segment_geometry_key(net, layer0, layer1, points, current):
+    return (str(net).lower(), str(layer0).lower(), str(layer1).lower(),
+            tuple(tuple(float(value) for value in point) for point in points),
+            abs(float(current)))
+
+
+def _native_density_roundtrip_matches(current: float, area: float, density: float) -> bool:
+    """Check I/area=J through the native CSV's .3e/.4e/.3e codec.
+
+    These rounding intervals only validate serialized observations. They do
+    not modify a current, area, Jmax, margin, or the sign-off comparison.
+    """
+    if not all(math.isfinite(v) for v in (current, area, density)) or area <= 0:
+        return False
+
+    def interval(value, digits):
+        half_ulp = (0.5 * 10 ** (math.floor(math.log10(abs(value))) - digits)
+                    if value else 0.0)
+        return max(0.0, value - half_ulp), value + half_ulp
+
+    i_lo, i_hi = interval(abs(current), 3)
+    a_lo, a_hi = interval(area, 4)
+    j_lo, j_hi = interval(density, 3)
+    return a_lo > 0 and max(i_lo / a_hi, j_lo) <= min(i_hi / a_lo, j_hi)
 
 
 def parse_json_jmax(data: Any) -> Dict[str, Dict[str, Any]]:
@@ -877,10 +926,38 @@ def _screen_segment(seg: Dict[str, Any], table: Dict[str, Dict[str, Any]],
         cut = table.get(l0) if table.get(l0, {}).get("kind") == "cut" else None
         cut = cut or (table.get(l1) if table.get(l1, {}).get("kind") == "cut" else None)
         if cut is None:
+            pair = tuple(sorted((l0, l1)))
+            candidates = [entry for entry in table.values()
+                          if entry.get("kind") == "cut"
+                          and pair in entry.get("routing_pairs", ())]
+            if len(candidates) == 1:
+                cut = candidates[0]
+        if cut is None:
             return {"status": "unscreened", "net": net,
                     "layer": f"{seg['layer0']}->{seg['layer1']}",
                     "reason": "via_cut_layer_not_in_jmax_reference",
                     "current_A": cur}
+        if "jmax_areal_A_per_um2" in cut:
+            area = seg.get("native_area_um2")
+            if (seg.get("native_layer") != cut["orig_name"].lower()
+                    or not isinstance(area, (int, float))
+                    or not math.isfinite(area) or area <= 0):
+                return {"status": "unscreened", "net": net,
+                        "layer": cut["orig_name"],
+                        "reason": "via_cut_area_unproven", "current_A": cur}
+            limit = cut["jmax_areal_A_per_um2"]
+            density = cur / area
+            util = density / limit if limit > 0 else math.inf
+            return {"status": "offender" if util >= (1.0 - margin) else "ok",
+                    "net": net, "layer": cut["orig_name"], "basis": "areal",
+                    "current_A": cur, "cross_section_area_um2": area,
+                    "cuts": seg["native_cuts"],
+                    "density_A_per_um2": density, "value": density,
+                    "limit": limit, "utilization": util,
+                    "geometry_source": "bound_native_current_density",
+                    "lifetime_ratio": _lifetime_ratio(util, blacks_n)}
+        # Compare the whole branch current with one cut's limit. No cut
+        # count or equal current sharing is inferred from a VIA master.
         limit = cut["jmax_per_cut_A"]
         util = cur / limit if limit > 0 else math.inf
         offender = util >= (1.0 - margin)
@@ -897,14 +974,15 @@ def _screen_segment(seg: Dict[str, Any], table: Dict[str, Dict[str, Any]],
     if entry.get("kind") != "routing":
         return {"status": "unscreened", "net": net, "layer": seg["layer0"],
                 "reason": "layer_is_not_routing", "current_A": cur}
-    width = seg.get("width_um")
+    area = seg.get("native_area_um2") if seg.get("native_layer") == l0 else None
+    thickness = entry.get("thickness_um")
+    width = area / thickness if area and thickness else seg.get("width_um")
     if not width or width <= 0:
         return {"status": "unscreened", "net": net, "layer": seg["layer0"],
                 "reason": "segment_conductor_geometry_unproven", "current_A": cur}
 
-    thickness = entry.get("thickness_um")
     dens_per_width = cur / width  # A/um
-    dens_areal = (cur / (width * thickness)) if thickness else None  # A/um^2
+    dens_areal = cur / area if area else (cur / (width * thickness)) if thickness else None
 
     # Compare in areal space when possible (the task's I/(w*t) formula),
     # else fall back to per-width space. Both give the identical verdict when
@@ -947,16 +1025,11 @@ def _lifetime_ratio(util: float, n: float) -> Optional[float]:
 
 
 def native_limits(text: str, margin: float = _DEFAULT_MARGIN) -> str:
-    """Fork input: routing areal limits from this LEF, never wire-to-cut limits.
-
-    The native areal table cannot represent LEF mA/cut authority. Cut records
-    remain NO_LIMIT in this arm; the retained per-cut screen is independent.
-    """
+    """Fork input: each routing or cut layer's own LEF areal authority."""
     return "".join(
         f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - margin):.12g}\n"
         for row in parse_lef_jmax(text).values()
-        if row.get("kind") == "routing"
-        and math.isfinite(row.get("jmax_areal_A_per_um2") or 0)
+        if math.isfinite(row.get("jmax_areal_A_per_um2") or 0)
         and (row.get("jmax_areal_A_per_um2") or 0) > 0)
 
 
@@ -1050,7 +1123,8 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                 "reason": str(exc), "rule": "LL_IR_CURRENT_BINDING_INVALID"}
 
 
-def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
+def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
+                            *, segment_geometry: Optional[dict] = None
                             ) -> Dict[str, Any]:
     """Existing Step-25 blocking consumer: verify execution, inputs and authority.
 
@@ -1168,13 +1242,44 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
                 raise ValueError(f"native segment coverage disagrees: {net}")
             counts = {"checked": 0, "no_limit": 0, "violated": 0,
                       "psm_segments": len(psm), "worst_ratio": None}
-            for row in rows:
+            for row, psm_row in zip(rows, psm):
                 layer = table.get(row["Layer"].lower(), {})
                 status = row["Status"]
+                if (segment_geometry is not None and layer
+                        and status in ("OK", "VIOLATED") and row["Basis"] == "AREAL"):
+                    l0, l1 = (psm_row[name] for name in ("Node0 Layer", "Node1 Layer"))
+                    points = tuple(tuple(float(psm_row[f"Node{node} {axis} location"])
+                                         for axis in ("X", "Y")) for node in (0, 1))
+                    current = abs(float(psm_row["Current"]))
+                    if (any(float(row[f"Node{node} {axis}"]) != points[node][axis_index]
+                            for node in (0, 1) for axis_index, axis in enumerate(("X", "Y")))
+                            or abs(float(row["Current(A)"])) != current):
+                        raise ValueError("native density row differs from its PSM segment")
+                    if (l0.lower() != l1.lower()
+                            or points[0][0] != points[1][0] and points[0][1] != points[1][1]):
+                        pair = tuple(sorted((l0.lower(), l1.lower())))
+                        if (layer["kind"] == "cut" and pair not in layer.get("routing_pairs", ())
+                                or layer["kind"] == "routing" and
+                                not l0.lower() == l1.lower() == row["Layer"].lower()):
+                            raise ValueError("native density layer disagrees with VIA topology")
+                        area = float(row["Area(um^2)"])
+                        cuts = int(row["Cuts"])
+                        if (not math.isfinite(area) or area <= 0
+                                or not math.isfinite(current)
+                                or layer["kind"] == "cut" and cuts <= 0
+                                or not _native_density_roundtrip_matches(
+                                    current, area, float(row["J(A/um^2)"]))):
+                            raise ValueError("native conductor cross section is unproven")
+                        key = _segment_geometry_key(net, l0, l1, points, current)
+                        geometry = {"native_area_um2": area, "native_cuts": cuts,
+                                    "native_layer": row["Layer"].lower()}
+                        if key in segment_geometry and segment_geometry[key] != geometry:
+                            raise ValueError("ambiguous native segment cross section")
+                        segment_geometry[key] = geometry
                 if status == "NO_LIMIT":
                     counts["no_limit"] += 1
                     continue
-                if status not in ("OK", "VIOLATED") or layer.get("kind") != "routing" or row["Basis"] != "AREAL":
+                if status not in ("OK", "VIOLATED") or layer.get("kind") not in ("routing", "cut") or row["Basis"] != "AREAL":
                     raise ValueError("wire-to-via substitution or invalid native status")
                 expected = layer["jmax_areal_A_per_um2"] * (1 - margin)
                 if not math.isclose(float(row["Jlimit(A/um^2)"]), expected, rel_tol=0.0006):
@@ -1231,9 +1336,10 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     # Normal producer reports must reach this consumer through the native
     # invocation on the current basis. Offline segment fixtures stay offline.
     native = None
+    native_geometry = {}
     production = native_project(em_path)
     if production is not None:
-        native = validate_native_density(production, margin)
+        native = validate_native_density(production, margin, segment_geometry=native_geometry)
         rep["native_density"] = native
         supplied = tech_lef or jmax_path
         if native["valid"] and supplied is not None and _native_sha(supplied) != native["authority_sha256"]:
@@ -1292,6 +1398,11 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     for seg in segs:
         n_total += 1
         measured = seg
+        native_shape = (native_geometry.get(_segment_geometry_key(
+            seg["net"], seg["layer0"], seg["layer1"], seg["points_um"], seg["current_A"]))
+                        if native_geometry and seg.get("points_um") else None)
+        if native_shape and seg["layer0"].lower() != seg["layer1"].lower():
+            measured = dict(seg, **native_shape)
         if seg["layer0"].lower() == seg["layer1"].lower():
             geometry = _segment_geometry_width(seg, odb_rects)
             source = "odb_pg_metal_geometry"
@@ -1300,6 +1411,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                 source = "def_same_net_covering_wire"
             measured = dict(seg, width_um=geometry[0] if geometry else None,
                             width_source=source)
+            if not geometry and native_shape:
+                measured.update(native_shape, width_source="bound_native_current_density")
             if geometry:
                 if source == "odb_pg_metal_geometry":
                     odb_width_uses += 1

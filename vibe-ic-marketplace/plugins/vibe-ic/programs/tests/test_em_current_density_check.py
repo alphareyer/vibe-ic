@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROG = Path(__file__).resolve().parent.parent / "em_current_density_check.py"
 
 # A per-width Jmax of 2.8 mA/um on met1 (t=0.35um) mirrors sky130 metal.
@@ -230,3 +232,204 @@ def test_bad_margin_arg_error(tmp_path):
     csv = _csv(tmp_path, [("met1", 1.0e-5)])
     r = _run(csv, "--jmax", _jmax(tmp_path), "--margin", "1.5")
     assert r.returncode == 2
+
+
+@pytest.mark.parametrize("case,current,expected_rc", [
+    ("forward", 6.2e-6, 0),
+    ("reverse", 6.2e-6, 0),
+    ("over_limit", 6.2e-5, 1),
+    ("multiple_cuts_do_not_divide_current", 6.2e-5, 1),
+    ("unknown_endpoint", 6.2e-5, 3),
+    ("missing_via", 6.2e-5, 3),
+    ("missing_cut_limit", 6.2e-5, 3),
+    ("ambiguous_cut", 6.2e-5, 3),
+    ("ambiguous_unlimited_cut", 6.2e-5, 3),
+    ("stacked_via_is_not_one_cut", 6.2e-5, 3),
+])
+def test_psm_metal_endpoints_need_explicit_unique_cut_authority(
+        tmp_path, case, current, expected_rc):
+    # Source-control fixture: PSM's native grammar uses two metal endpoints,
+    # while the authority publishes cut current per area on a third named layer.
+    # The arbitrary names deliberately carry no inferable layer numbering.
+    routing = """
+LAYER lower
+  TYPE ROUTING ;
+  DCCURRENTDENSITY AVERAGE 0.67 ;
+END lower
+LAYER upper
+  TYPE ROUTING ;
+  DCCURRENTDENSITY AVERAGE 0.67 ;
+END upper
+"""
+    cut = """
+LAYER bridge
+  TYPE CUT ;
+  DCCURRENTDENSITY AVERAGE 0.18 ;
+END bridge
+"""
+    via = """
+VIA native_bridge DEFAULT
+  LAYER lower ;
+  RECT -0.19 -0.13 0.19 0.13 ;
+  LAYER bridge ;
+  RECT -0.13 -0.13 0.13 0.13 ;
+  LAYER upper ;
+  RECT -0.19 -0.14 0.19 0.14 ;
+END native_bridge
+"""
+    if case == "missing_via":
+        via = ""
+    elif case == "missing_cut_limit":
+        cut = cut.replace("  DCCURRENTDENSITY AVERAGE 0.18 ;\n", "")
+    elif case.startswith("ambiguous"):
+        other = cut.replace("bridge", "other_bridge")
+        if case == "ambiguous_unlimited_cut":
+            other = other.replace("  DCCURRENTDENSITY AVERAGE 0.18 ;\n", "")
+        cut += other
+        via += via.replace("native_bridge", "second_native_bridge").replace(
+            "LAYER bridge", "LAYER other_bridge")
+    elif case == "multiple_cuts_do_not_divide_current":
+        via = via.replace("  LAYER upper ;", "  RECT 0.39 -0.13 0.65 0.13 ;\n  LAYER upper ;")
+    elif case == "stacked_via_is_not_one_cut":
+        routing += routing.split("LAYER upper", 1)[0].replace("lower", "third")
+        cut += cut.replace("bridge", "second_bridge")
+        via = via.replace("END native_bridge", "  LAYER second_bridge ;\n  RECT 0 0 0.26 0.26 ;\n  LAYER third ;\n  RECT 0 0 0.26 0.26 ;\nEND native_bridge")
+    layer0, layer1 = (("upper", "lower") if case == "reverse"
+                      else ("lower", "other") if case == "unknown_endpoint"
+                      else ("lower", "upper"))
+    sys.path.insert(0, str(PROG.parent))
+    import em_current_density_check as E
+    table = E.parse_lef_jmax(routing + cut + via)
+    # The producer's native row binds this actual cross section. An array's
+    # current is compared as I/area, never divided by an assumed cut count.
+    segment = {"net": "VPWR", "layer0": layer0, "layer1": layer1,
+               "current_A": current, "native_layer": "bridge",
+               "native_area_um2": 0.0676, "native_cuts": 1}
+    row = E._screen_segment(segment, table, 0.1, 2.0)
+    expected = "unscreened" if expected_rc == 3 else "ok" if expected_rc == 0 else "offender"
+    assert row["status"] == expected, row
+    if expected_rc == 3:
+        assert row["reason"] == "via_cut_layer_not_in_jmax_reference"
+    else:
+        assert row["layer"] == "bridge"
+        assert row["basis"] == "areal"
+        assert row["current_A"] == current
+        assert row["cross_section_area_um2"] == pytest.approx(0.0676)
+        assert row["limit"] == pytest.approx(0.18e-3)
+        assert row["value"] == pytest.approx(current / 0.0676)
+
+
+@pytest.mark.parametrize("authority,area,expected", [
+    ("lef", 0.2028, "offender"),
+    ("lef", None, "unscreened"),
+    ("json_per_cut", None, "ok"),
+])
+def test_cut_scalar_area_units_differ_from_explicit_per_cut_json(authority, area, expected):
+    sys.path.insert(0, str(PROG.parent))
+    import em_current_density_check as E
+    # Identical numeric scalars carry different dimensions; 62uA is above
+    # .18mA/um^2 * .2028um^2, but below an explicit .18mA per-cut limit.
+    table = (E.parse_lef_jmax("LAYER bridge\n TYPE CUT ;\n DCCURRENTDENSITY AVERAGE 0.18 ;\nEND bridge\n")
+             if authority == "lef" else E.parse_json_jmax({"layers": {
+                 "bridge": {"kind": "cut", "jmax_mA_per_cut": 0.18}}}))
+    row = E._screen_segment({"net": "VPWR", "layer0": "lower", "layer1": "bridge",
+                             "current_A": 6.2e-5, "native_layer": "bridge",
+                             "native_area_um2": area, "native_cuts": 3}, table, 0.1, 2.0)
+    assert row["status"] == expected, row
+    if authority == "lef" and area:
+        assert row["basis"] == "areal"
+        assert row["density_A_per_um2"] == pytest.approx(6.2e-5 / area)
+    elif authority == "json_per_cut":
+        assert row["basis"] == "per_cut"
+        assert row["limit_A_per_cut"] == pytest.approx(0.18e-3)
+
+
+@pytest.mark.parametrize("damage,expected", [
+    ("none", "PASS"), ("over_limit", "FAIL"),
+    ("node", "NOT_MEASURED"), ("current", "NOT_MEASURED"),
+    ("layer", "NOT_MEASURED"), ("area", "NOT_MEASURED"),
+    ("no_limit", "NOT_MEASURED"), ("missing_row", "NOT_MEASURED"),
+    ("bound_native_diagonal", "PASS"),
+    ("rounded_native_diagonal", "PASS"),
+    ("inconsistent_native_diagonal", "NOT_MEASURED"),
+])
+def test_native_cut_area_reaches_the_gate_only_on_the_same_bound_segment(
+        tmp_path, monkeypatch, damage, expected):
+    # Reuse the existing explicitly offline native-transport fixture. The
+    # real producer writes its binding after this transport, and the real
+    # consumer checks it; these are not native IC measurements.
+    import test_default_power_density as T
+    import em_current_density_check as E
+    tech = T.TECH.replace("LAYER cutA\n TYPE CUT ;\n", "LAYER cutA\n TYPE CUT ;\n DCCURRENTDENSITY AVERAGE 0.18 ;\n")
+    tech += """
+LAYER wireB
+ TYPE ROUTING ;
+ THICKNESS 1 ;
+ DCCURRENTDENSITY AVERAGE 1 ;
+END wireB
+VIA native_cut
+ LAYER wireA ;
+ RECT -0.2 -0.2 0.2 0.2 ;
+ LAYER cutA ;
+ RECT -0.13 -0.13 0.13 0.13 ;
+ LAYER wireB ;
+ RECT -0.2 -0.2 0.2 0.2 ;
+END native_cut
+"""
+    monkeypatch.setattr(T, "TECH", tech)
+    project, pdk, _ = T.build(tmp_path, monkeypatch, via=True, direct=True)
+    R = T.R
+    original_transport = R._docker_exec
+    rpt = project / "reports/phase3"
+    current = 6.2e-5 if damage == "over_limit" else 1e-6
+    area = 0.2028
+
+    def transport(*args, **kwargs):
+        rc, log, error = original_transport(*args, **kwargs)
+        psm = rpt / "em_segments_PWR.csv"
+        psm.write_text(T.HEADER + f"wireA,0,0,wireA,1,0,0.000001\nwireA,0,0,wireB,0,0,{current}\n")
+        native = rpt / "em_openroad_density_PWR.csv"
+        before = T.digest(native)
+        row = ["cutA", "0", "0", "0", "0", str(current), str(area),
+               str(current / area), str(0.18e-3 * 0.9),
+               str(current / area / (0.18e-3 * 0.9)),
+               "VIOLATED" if damage == "over_limit" else "OK", "3", "AREAL"]
+        if damage == "node": row[1] = "1"
+        if damage == "current": row[5] = str(current * 2)
+        if damage == "layer": row[0] = "wireA"
+        if damage == "area": row[6] = "0"
+        if damage == "no_limit": row[8:11] = ["0", "0", "NO_LIMIT"]; row[12] = "NO_LIMIT"
+        first = native.read_text().splitlines()[:2]
+        native.write_text("\n".join(first + ([] if damage == "missing_row" else [",".join(row)])) + "\n")
+        if damage.endswith("native_diagonal"):
+            # The rounded case retains the actual native line361524 I/Area/J
+            # decimals on neutral nodes; the inconsistent case lies outside
+            # every interval permitted by the same serializer.
+            i, a, j = (("1.374e-10", "1.2420e-1", "1.107e-9")
+                       if damage != "bound_native_diagonal" else
+                       ("0.000001", "1", "0.000001"))
+            if damage == "inconsistent_native_diagonal":
+                j = "1.300e-9"
+            psm.write_text(T.HEADER + f"wireA,0,0,wireA,1,1,{i}\n")
+            ratio = float(j) / 0.0009
+            native.write_text(T.DHEADER + f"wireA,0,0,1,1,{i},{a},{j},0.0009,{ratio},OK,0,AREAL\n")
+        log = log.replace(before, T.digest(native))
+        (rpt / "ir_em.log").write_text(log)
+        return rc, log, error
+
+    monkeypatch.setattr(R, "_docker_exec", transport)
+    assert R._emit_ir_em_reports(project, "unit", pdk, "offline", rpt / "ir_drop.rpt",
+                                 rpt / "em.rpt", []) == (True, True)
+    verdict, report = E.evaluate(rpt / "em_segments.csv", None, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=rpt / "em_pg_geometry.tsv")
+    assert verdict == expected, report
+    assert report["pass"] is (expected == "PASS")
+    if expected == "PASS":
+        assert report["summary"]["segments_screened"] == (1 if damage.endswith("native_diagonal") else 2)
+        assert report["summary"]["segments_unscreened"] == 0
+        if damage.endswith("native_diagonal"):
+            assert report["worst_segments"][0]["width_source"] == "bound_native_current_density"
+    if expected == "FAIL":
+        assert report["offender_count"] == 1
+        assert report["offenders"][0]["layer"] == "cutA"
+        assert report["offenders"][0]["cross_section_area_um2"] == pytest.approx(area)
