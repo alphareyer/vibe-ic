@@ -891,3 +891,41 @@ def test_step30_native_local_process_uses_its_declared_workdir(tmp_path):
     assert json.loads((work / 'process.json').read_text()) == {
         'cwd': str(work), 'scope': 'SOURCE_FIXTURE_ONLY'}
     assert result._vibeic_lifecycle['rc'] == 0
+
+
+
+@pytest.mark.parametrize('route', ['LOCAL', 'DOCKER'])
+def test_step30_model_publication_matches_the_selected_execution_namespace(tmp_path, monkeypatch, route):
+    p, folder, lib = project(tmp_path)
+    root = p / 'fixture_pdk'
+    tech = root / 'neutral/libs.tech/ngspice'
+    write(tech / 'design.ngspice', '.param neutral_scale=1\n')
+    write(tech / 'models.ngspice', '.lib typ\n.model neutral nmos level=1\n.endl typ\n')
+    write(root / 'neutral/cells.spice', '.subckt BUF A Z VDD VSS\nM0 Z A VSS VSS neutral W=1u L=1u\n.ends\n')
+    write(lib, 'library(neutral_typ) {\n operating_conditions(typ) { voltage: 1.8; }\n}\n')
+    config = json.loads((folder / 'config.json').read_text())
+    config.update(VDD_PIN='VDD', GND_PIN='VSS', CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'])
+    put(folder / 'config.json', config)
+    # Only the tool process is substituted; the real normal prepare_arm and
+    # model-section reader/publication execute in the selected namespace.
+    monkeypatch.setattr(LC, '_provider_for_image', lambda *_: None)
+    monkeypatch.setattr(LC, '_provider_route', lambda *_: route == 'LOCAL')
+    calls = []
+    def sta(image, project, mounts, argv, cwd, **kwargs):
+        assert argv[0] == 'sta'
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY STA transport\n', stderr='')
+    monkeypatch.setattr(PST, '_docker', sta)
+    arm = PST.prepare_arm(p, BF.IMAGE, folder / 'state_out.json', 'nom_typ',
+                          pdk_root=root, pdk='neutral', out_dir=p / 'tool-fixture', paths=1)
+    assert len(calls) == 1 and arm['prepared'] == []
+    text = Path(arm['models']['path']).read_text()
+    expected = str(tech) if route == 'LOCAL' else '/pdk/neutral/libs.tech/ngspice'
+    assert f'.include {expected}/design.ngspice' in text
+    assert f'.lib {expected}/models.ngspice typ' in text
+    assert arm['models']['devices'] == ['neutral']
+    if route == 'LOCAL':
+        assert '/pdk/' not in text
+        for line in text.splitlines():
+            if line.startswith(('.include ', '.lib ')):
+                assert Path(line.split()[1]).is_file()

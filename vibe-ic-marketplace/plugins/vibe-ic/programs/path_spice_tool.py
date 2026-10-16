@@ -777,7 +777,10 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
                          ground, out_dir / 'cells_folded.spice')
     cells['cell_view'] = {k: v for k, v in view.items() if k != 'sources'}
-    models = model_file(pdk_root / pdk / 'libs.tech' / simulator, f'{guest}/libs.tech/{simulator}',
+    import librelane_contract as lc
+    local = lc._provider_for_image(image) is not None or lc._provider_route(project)
+    model_root = str(pdk_root / pdk) if local else guest
+    models = model_file(pdk_root / pdk / 'libs.tech' / simulator, f'{model_root}/libs.tech/{simulator}',
                         simulator, Path(inputs['liberties'][0]).name,
                         device_names(Path(cells['path']).read_text()),
                         header.get('nom_temperature'), out_dir / f'models_{simulator}.sp')
