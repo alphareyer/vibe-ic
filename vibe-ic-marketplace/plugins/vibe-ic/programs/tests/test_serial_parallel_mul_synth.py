@@ -376,7 +376,8 @@ The Plugin MUST declare `plugin_output/declaration.json` before authoring:
 """
 
 
-def _serial_random_contract_project(tmp_path, *, predeclared):
+def _serial_random_contract_project(tmp_path, *, predeclared, count=64,
+                                    contract=_DECLARATION_CONTRACT):
     import phase1_doc_one_shot_runner as phase1
     import spec_declaration_emit as declaration
     proj = _mk_project(tmp_path, ports=_SPM_PORTS, top="neutral_serial",
@@ -386,8 +387,8 @@ def _serial_random_contract_project(tmp_path, *, predeclared):
     goal_text = ("layer: L7\n# Functional verification\n"
                  "| Test category | Pass criterion | Scope |\n|---|---|---|\n"
                  "| Random arithmetic functional equivalence | 100% PASS (binary) | "
-                 "Random >= 64 operand pairs (x, y), all matching the independent modulo model |\n")
-    (docs / "L7_verification_plan.md").write_text(_DECLARATION_CONTRACT + "\n" + goal_text)
+                 f"Random >= {count} operand pairs (x, y), all matching the independent modulo model |\n")
+    (docs / "L7_verification_plan.md").write_text(contract + "\n" + goal_text)
     cases = phase1._harvest_test_cases_from_input_tables({"L7_verification_plan.md": goal_text})
     assert len(cases) == 1 and cases[0]["kind"] == "coverage_goal", cases
     gd = proj / "phase1/generated_docs"
@@ -478,3 +479,59 @@ def test_serial_native_dispatch_preserves_foreign_rtl_suffixes(tmp_path, suffix)
     assert evidence["files"] == [foreign.name]
     assert foreign.read_bytes() == original
     assert not provenance.ledger_path(proj).exists()
+
+
+
+def test_measured_origin_reemission_keeps_real_random_goal_current(tmp_path, monkeypatch):
+    """Real generation/simulation/readback; no mocked publisher or verdict."""
+    import os
+    import professional_tb_gen as professional
+    contract = _DECLARATION_CONTRACT.replace("`2`(primary)", "integer").replace(
+        "| `latency_cycles_origin` | No | `pre_nba_sample_offset`(primary) |\n", "")
+    proj, goal = _serial_random_contract_project(
+        tmp_path, predeclared=False, count=10000, contract=contract)
+    generated = runner.step_rtl_gen(proj, "digital_arithmetic_primitive")
+    assert generated.status == "PASS", generated.detail
+    manifest = proj / "phase2/stage1/sim_full_stack/arith_oracle_manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}")
+    # The preceding full-stack oracle's actual marker format. The following
+    # professional TB independently executes the full random population.
+    runner._persist_oracle_calibrated_framing(proj,
+        "ORACLE_TB_FRAMING in_order=0 out_order=0 latency_cycles=1 latency_origin=settled_edge_offset\n")
+    before = (proj / "plugin_output/declaration.json").read_bytes()
+    declaration = json.loads(before)
+    assert declaration["latency_cycles"] == 2
+    assert declaration["latency_cycles_origin"] == "pre_nba_sample_offset"
+    monkeypatch.setenv("PYTHONPATH", str(PROGRAMS) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("COCOTB_HDL_TIMEUNIT", "1ns")
+    monkeypatch.setenv("COCOTB_HDL_TIMEPRECISION", "1ps")
+    measured = runner.step_professional_tb_gen(proj, "neutral_serial", "")
+    assert measured.status == "PASS", measured.detail
+    early = runner.declaration_before_step4(proj)
+    assert early["emitted"] is True, early
+    assert (proj / "plugin_output/declaration.json").read_bytes() == before
+    outcome = professional.random_pair_goal_measurement(proj, goal)
+    assert outcome["verdict"] == "PASS", outcome
+    assert outcome["requested_random_pairs"] == 10000
+    assert outcome["executed_random_pairs"] == 10000
+    assert outcome["distinct_random_pairs"] == 10000
+    late = runner.step_arith_declaration_emit(proj)
+    assert runner._refuse_a_disagreeing_declaration(late, early, proj).status == "PASS"
+    assert (proj / "plugin_output/declaration.json").read_bytes() == before
+    assert professional.random_pair_goal_measurement(proj, goal)["verdict"] == "PASS"
+    # A real later measurement change must not transfer current credit to
+    # the original attempt. No rebind/replay of that attempt is performed.
+    mutant = tmp_path / "changed-measured-framing"
+    shutil.copytree(proj, mutant)
+    changed = json.loads((mutant / "phase2/stage1/sim_full_stack/arith_oracle_manifest.json").read_text())
+    changed["calibrated_latency"] = 0
+    (mutant / "phase2/stage1/sim_full_stack/arith_oracle_manifest.json").write_text(json.dumps(changed))
+    changed_row = runner.step_arith_declaration_emit(mutant)
+    assert runner._refuse_a_disagreeing_declaration(changed_row, early, mutant).status == "FAIL"
+    changed_decl = json.loads((mutant / "plugin_output/declaration.json").read_text())
+    assert changed_decl["latency_cycles"] == 0
+    assert changed_decl["latency_cycles_origin"] == "settled_edge_offset"
+    refusal = professional.random_pair_goal_measurement(mutant, goal)
+    assert refusal["verdict"] == "NOT_MEASURED" and "stale" in refusal["why"], refusal
+    runner._finalize_rtl_provenance()

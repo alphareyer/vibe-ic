@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 PROGRAMS_DIR = Path(__file__).resolve().parents[1]
@@ -330,3 +332,60 @@ def test_the_generator_declares_the_latency_its_rtl_has():
                          "    assign p = q2;")
     assert deeper != rtl
     assert spm.serial_path_latency(deeper, "y", "p") == 3
+
+
+@pytest.mark.parametrize("value,origin", [
+    (2, "pre_nba_sample_offset"), (1, "settled_edge_offset"), (1, None),
+])
+def test_equivalent_measured_latency_preserves_complete_declaration_bytes(tmp_path, value, origin):
+    """A representation conversion cannot invalidate a bound measurement."""
+    declaration = {"bit_order": "LSB_first", "latency_cycles": value,
+                   "independent_metadata": {"owner_choice": "retained", "items": [1, 2]}}
+    if origin is not None:
+        declaration["latency_cycles_origin"] = origin
+    proj = _project(tmp_path, declaration=declaration, manifest=None)
+    assert _emit(proj).returncode == 0
+    before = (proj / DECL).read_bytes()
+    manifest = dict(SETTLED_METADATA_CONTROL, calibrated_latency=1)
+    (proj / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+    (proj / MANIFEST).write_text(json.dumps(manifest))
+    for _ in range(2):
+        cp = _emit(proj)
+        assert cp.returncode == 0, cp.stderr
+        assert (proj / DECL).read_bytes() == before
+        assert _decl(proj) == declaration
+        assert _gate(proj)[0].returncode == 0
+
+
+def test_changed_measured_latency_publishes_value_and_origin_together(tmp_path):
+    proj = _project(tmp_path, manifest=None, declaration={
+        "bit_order": "LSB_first", "latency_cycles": 3,
+        "latency_cycles_origin": "pre_nba_sample_offset", "foreign_key": "keep"})
+    assert _emit(proj).returncode == 0
+    before = (proj / DECL).read_bytes()
+    (proj / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+    (proj / MANIFEST).write_text(json.dumps(dict(SETTLED_METADATA_CONTROL, calibrated_latency=1)))
+    assert _emit(proj).returncode == 0
+    assert (proj / DECL).read_bytes() != before
+    assert _decl(proj) == {"bit_order": "LSB_first", "latency_cycles": 1,
+                          "latency_cycles_origin": "settled_edge_offset", "foreign_key": "keep"}
+    assert _sidecar(proj)["fields"]["latency_cycles"]["replaced_value"] == 3
+    assert _gate(proj)[0].returncode == 0
+
+
+@pytest.mark.parametrize("value,origin,measured,expected_rc", [
+    (1, "unknown_origin", 1, 1), (0, "pre_nba_sample_offset", 0, 1),
+    (0, "settled_edge_offset", 0, 0), (0, None, 0, 0),
+])
+def test_unusable_origins_are_not_guessed_and_zero_keeps_its_policy(tmp_path, value, origin, measured, expected_rc):
+    declaration = {"bit_order": "LSB_first", "latency_cycles": value}
+    if origin is not None:
+        declaration["latency_cycles_origin"] = origin
+    proj = _project(tmp_path, declaration=declaration, manifest=None)
+    assert _emit(proj).returncode == 0
+    before = (proj / DECL).read_bytes()
+    (proj / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+    (proj / MANIFEST).write_text(json.dumps(dict(SETTLED_METADATA_CONTROL, calibrated_latency=measured)))
+    assert _emit(proj).returncode == 0
+    assert (proj / DECL).read_bytes() == before
+    assert _gate(proj)[0].returncode == expected_rc

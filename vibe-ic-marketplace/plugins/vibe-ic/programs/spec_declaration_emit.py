@@ -1352,7 +1352,14 @@ def resolve(contract: Dict[str, Any],
                     entry.get("provenance_verified") is False
                     or entry.get("provenance") == MEASURED_PROVENANCE):
                 m_value, m_source = measured[name]
-                if not same_framing(name, existing[name], m_value):
+                stated = existing[name]
+                if name == "latency_cycles":
+                    from arith_oracle_tb_gen import settled_serial_latency, SERIAL_LATENCY_ORIGIN
+                    settled = settled_serial_latency(
+                        stated, existing.get("latency_cycles_origin", SERIAL_LATENCY_ORIGIN))
+                    if settled is not None:
+                        stated = settled
+                if not same_framing(name, stated, m_value):
                     entry = {k: v for k, v in entry.items()
                              if k not in ("provenance_note",
                                           "provenance_diverged",
@@ -2316,6 +2323,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             declaration.pop(k, None)             # an explicit retraction
         else:
             declaration[k] = v
+    # A replacement from measured_framing is expressed at settled edges.
+    # Publish its unit with its value; an old foreign origin must not reinterpret
+    # the newly measured scalar. Equal framing keeps the original declaration.
+    latency = status.get("latency_cycles", {})
+    if (latency.get("provenance") == MEASURED_PROVENANCE
+            and "replaced_value" in latency):
+        from arith_oracle_tb_gen import SERIAL_LATENCY_ORIGIN
+        declaration["latency_cycles_origin"] = SERIAL_LATENCY_ORIGIN
     # Deliberately last: no author override can replace a fresh flow record.
     supplied = supplied_rtl_record(project, args.supplied_top)
     if supplied is not None:
