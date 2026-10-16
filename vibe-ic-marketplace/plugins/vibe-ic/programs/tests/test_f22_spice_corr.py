@@ -543,3 +543,225 @@ def test_step30_does_not_reload_the_extraction_style_between_layout_cells(tmp_pa
     assert commands.count('extract all') == len(cells)
     assert commands.count('extresist all') == len(cells)
     assert commands.count('ext2spice extresist on') == len(cells)
+
+
+# Native processes below are SOFTWARE_FIXTURE_ONLY. The ordinary simulation,
+# interpolation, judgment, publication and strict current consumer are real.
+_REFERENCE_LIB = '''library(neutral_typ) {
+ time_unit : "1ns";
+ capacitive_load_unit(1,pf);
+ nom_voltage : 1.8;
+ nom_temperature : 25;
+ operating_conditions(typ) { voltage : 1.8; temperature : 25; }
+ normalized_driver_waveform(ndw) {
+  driver_waveform_name : "fall_ndw";
+  index_1("0.1,0.3");
+  index_2("0,.05,.15,.25,.35,.45,.55,.65,.75,.85,.95,.99,1");
+  values("1,.95,.85,.75,.65,.55,.45,.35,.25,.15,.05,.01,0",
+         "1,.95,.85,.75,.65,.55,.45,.35,.25,.15,.05,.01,0");
+ }
+ cell(BUF) {
+  pin(A) { direction : input; driver_waveform_fall : fall_ndw; }
+  pin(Z) { direction : output;
+   timing() { related_pin : "A"; timing_sense : positive_unate;
+    cell_fall(t) { index_1("0.1,0.3"); index_2("0.01,0.03");
+     values("0.9,1.0", "1.0,1.1"); }
+   }
+  }
+ }
+}
+'''
+
+
+def _reference_report(cell, inst, slew, cap, delay, *, external=False):
+    first, last = ('I', 'Z') if external else ('launch', 'capture')
+    before = (f' 0.002 {slew:.9f} 0 0 v I (in)\n' if external else
+              ' 0.002 0.1 0 0 v launch/Q (DFF)\n')
+    return (f'Startpoint: {first}\nEndpoint: {last}\n' + before
+            + f' {slew:.9f} 0.05 0.05 v {inst}/A ({cell})\n'
+            + f' {cap:.9f} 0.2 {delay:.9f} {delay + .05:.9f} v {inst}/Z ({cell})\n'
+            + f' 0.2 0.05 {delay + .1:.9f} v '
+            + ('Z (out)' if external else 'capture/D (DFF)') + '\n')
+
+
+def _native_reference_transport(tmp_path, monkeypatch, *, damage='', companion=False):
+    import re
+    import test_default_si_spice_power as ordinary
+    p, folder, lib = ordinary.project(tmp_path)
+    lib.write_text(_REFERENCE_LIB)
+    if damage == 'no_ndw':
+        lib.write_text(lib.read_text().replace('driver_waveform_fall : fall_ndw;', ''))
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp['liberty_files'] = {key: ordinary.LC.digest(lib) for key in fp['liberty_files']}
+    fp['config_files'].update(fp['liberty_files'])
+    ordinary.seal(folder, fp)
+    # Reuse the existing current-subject/material setup; the next ordinary
+    # producer retires this prior receipt before running the actual helpers.
+    ordinary.spice_produce(p, folder, lib, monkeypatch)
+    calls, points, main_delays = [], {}, {}
+
+    def tool(image, project, mounts, argv, cwd, **_kwargs):
+        calls.append((argv, Path(cwd)))
+        cwd = Path(cwd)
+        if argv[0] == 'sta':
+            text = Path(argv[-1]).read_text()
+            assert 'read_spef' not in text and 'set_load' not in text
+            assert 'set_pi_model u_ref/Z' in text
+            assert 'write_path_spice' in text and 'set_input_transition -fall' in Path(cwd / 'reference.sdc').read_text()
+            slew = float(re.search(r'set_input_transition -fall (\S+)', (cwd / 'reference.sdc').read_text())[1])
+            cap = float(re.search(r'set_pi_model u_ref/Z (\S+)', text)[1])
+            delay = .8 + .5 * slew + 5 * cap
+            points[cwd] = (slew, cap, delay)
+            write(cwd / 'reference.rpt', _reference_report('BUF', 'u_ref', slew, cap, delay, external=True))
+            write(cwd / 'reference.sp_1.sp', '* native reference fixture\n'
+                  '.include "reference.sp_1.subckt"\n.tran 1e-13 8e-9\n'
+                  '.print tran v(I) v(u_ref/A) v(u_ref/Z) v(Z)\n'
+                  'v1 u_ref/VDD 0 1.8\nv2 u_ref/VSS 0 0\nv3 I 0 pwl(0 1.8 1e-9 0)\n.end\n')
+            write(cwd / 'reference.sp_1.subckt', '.subckt ref I Z\nX0 Z I 0 0 neutral\n.ends\n')
+            return SimpleNamespace(returncode=int(damage == 'partial' and cwd.name == '0'),
+                                   stdout='SOFTWARE_FIXTURE_ONLY reference STA\n', stderr='')
+        assert argv[0] == 'ngspice'
+        text = Path(argv[-1]).read_text()
+        wave = Path(re.search(r'wrdata (\S+)', text)[1])
+        if 'refs' in cwd.parts:
+            delay = points[cwd][2] * .7  # independent fixed model-vs-table basis
+            names = ['I', 'u_ref/A', 'u_ref/Z', 'Z']
+            delays = [0, 0, delay, delay]
+        else:
+            delay = main_delays[cwd]
+            names = ['launch/Q', 'capture/D']
+            delays = [0, delay]
+        rows = ['time ' + ' '.join('v(' + n + ')' for n in names)]
+        for t in sorted({0, 8.0, *[1 + d + off for d in delays for off in (-.001, .001)]}):
+            rows.append(' '.join([str(t * 1e-9)]
+                        + [str(1.8 if t <= 1 + d - .001 else 0) for d in delays]))
+        write(wave, '\n'.join(rows) + '\n')
+        return SimpleNamespace(returncode=int(companion and cwd.name == 'mutated'),
+                               stdout='SOFTWARE_FIXTURE_ONLY ' + ('ref NG' if 'refs' in cwd.parts else 'WHOLE DESIGN NG'), stderr='')
+    monkeypatch.setattr(pst, '_docker', tool)
+
+    if damage in ('arc', 'pvt', 'view', 'execution'):
+        native = pst._native_grid_reference
+        def wrong(*args):
+            got = native(*args)
+            if damage == 'execution':
+                got['executions'] = []
+            else:
+                got['identity'] = dict(got['identity'])
+                got['identity'][{'arc': 'out_pin', 'pvt': 'temperature', 'view': 'cell_view_sha256'}[damage]] = 'foreign'
+            return got
+        monkeypatch.setattr(pst, '_native_grid_reference', wrong)
+
+    def run(project, image, root, pdk, **_kwargs):
+        detail = {}
+        state = folder / 'state_out.json'
+        inputs = ordinary.LC.post_pnr_timing_inputs(p, state, 'nom_typ')
+        for variant in ('base', 'mutated'):
+            directory = p / 'phase3/tool_arms/30/ngspice' / variant
+            directory.mkdir(parents=True, exist_ok=True)
+            cap, wire = (.02, .1) if variant == 'base' else (.025, .2)
+            cell_delay = .8 + .5 * .2 + 5 * cap
+            main_delays[directory] = cell_delay * .7 + wire + (.5 if damage == 'wire' else 0)
+            if damage == 'removed_stage':
+                main_delays[directory] = wire
+            if damage == 'raw_good_partial':
+                main_delays[directory] = cell_delay + wire
+            cells = write(directory / 'cells_folded.spice', '.subckt BUF A Z VDD VSS\n X0 Z A VDD VSS neutral\n.ends\n')
+            models = write(directory / 'models_ngspice.sp', '.model neutral nmos level=1\n')
+            deck = write(directory / 'path_1.sp', '* Gate u0 A -> Z\nxu0 u0/A u0/Z u0/VDD u0/VSS BUF\n'
+                         'v1 u0/VDD 0 1.8\nv2 u0/VSS 0 0\n.ends\n'
+                         '.tran 1e-13 8e-9\n.print tran v(launch/Q) v(capture/D)\n.end\n')
+            dcalc = write(directory / 'dcalc.rpt', 'Library: neutral_typ\nCell: BUF\nA v -> Z v\n'
+                          f'------- input_net_transition = 0.200000000\n'
+                          f'| total_output_net_capacitance = {cap:.9f}\n'
+                          f'Delay = {cell_delay + (.75e-6 if damage == 'codec' else 0):.9f}\n')
+            parsed = pst.parse_path_report(_reference_report('BUF', 'u0', .2, cap + .005, cell_delay))
+            parsed['path_delay_ns'] = cell_delay + wire
+            script = write(directory / 'arm.tcl', 'SOFTWARE_FIXTURE_ONLY main STA\nreport_dcalc\n')
+            log = write(directory / 'sta.log', 'SOFTWARE_FIXTURE_ONLY main STA\n')
+            arm = dict(corner='nom_typ', simulator='ngspice', inputs=inputs,
+                spef=str(p / inputs['spef']), spef_sha256=inputs['sha256']['spef'],
+                cells={'path': str(cells)}, models={'path': str(models)},
+                sta_rc=0, sta_execution={'tool': 'OpenSTA', 'rc': 0, 'argv': ['sta', str(script)],
+                    'script': str(script), 'log': str(log)}, image=image, project=p, mounts=[],
+                header=pst._scc.parse_liberty_header(lib.read_text()), liberty_text=lib.read_text(),
+                liberty_sources=[{'path': str(lib), 'text': lib.read_text(), 'sha256': ordinary.LC.digest(lib)}],
+                power='VDD', ground='VSS', clock_periods_ns=[10],
+                prepared=[{'path': 1, 'parsed': parsed, 'deck': deck, 'wps_fail': [],
+                           'dcalc': {('u0/A', 'u0/Z'): str(dcalc)}}])
+            if damage == 'raw_good_partial':
+                arm['liberty_sources'] = []
+            detail[variant] = pst.simulate_arm(arm)
+        judgment = pst.judge(detail['base'], detail['mutated'])
+        doc = {'step': '30', 'corner': 'nom_typ', 'sta_state': str(state),
+               'sta_state_sha256': ordinary.LC.digest(state), 'detail': {'ngspice': detail},
+               'arms': {'ngspice': judgment}, **pst.step_verdict({'ngspice': judgment}, {'ngspice': detail['base']['paths']})}
+        put(p / 'reports/phase3/spice_path_tool.json', doc)
+        return doc
+    monkeypatch.setattr(pst, 'run_step30', run)
+    return ordinary, p, folder, lib, calls, points
+
+
+@pytest.mark.parametrize('damage', ['', 'wire', 'removed_stage', 'partial', 'arc', 'pvt', 'view', 'no_ndw', 'codec'],
+                         ids=['complete', 'wrong-wire', 'removed-stage', 'partial-ref', 'wrong-arc', 'wrong-pvt', 'wrong-view', 'no-ndw-binding', 'summed-print-float-codec'])
+def test_step30_native_grid_separation_reaches_the_ordinary_consumer(tmp_path, monkeypatch, damage):
+    ordinary, p, folder, lib, calls, points = _native_reference_transport(tmp_path, monkeypatch, damage=damage)
+    result = ordinary.SC.run_installed_pdk_path_correlation(p, str(lib))
+    gate = ordinary.SC.run_audit(p)
+    assert result['status'] == 'RAN', result
+    doc = json.loads((p / 'reports/phase3/spice_path_tool.json').read_text())
+    row = doc['detail']['ngspice']['base']['paths'][0]
+    expected_good = damage in ('', 'codec')
+    assert gate.passed is expected_good, gate.summary
+    assert row['raw_verdict'] in ('MISMATCH', 'CRITICAL_MISMATCH')
+    if damage in ('partial', 'arc', 'pvt', 'view', 'no_ndw'):
+        assert not row['pdk_characterisation']['complete']
+        assert row['design_reference_ns'] is None
+        assert row['error_pct'] == row['raw_error_pct']
+    else:
+        assert row['pdk_characterisation']['complete']
+        assert row['sta_wire_ns'] == pytest.approx(.1)
+        assert row['design_reference_ns'] == pytest.approx(.8)
+        assert len(row['pdk_characterisation']['references']) == 4
+        assert {(s, c) for s, c, _ in points.values()} >= {(.1, .01), (.1, .03), (.3, .01), (.3, .03)}
+        assert row['tolerance_pct'] == pytest.approx(pst._scc.derive_liberty_path_tolerance(
+            _REFERENCE_LIB, pst.path_stages(pst.parse_path_report(_reference_report('BUF', 'u0', .2, .025, 1))['rows']), 1.1)['tolerance_pct'])
+    receipt = json.loads((p / 'reports/phase3/spice_correlation.current.json').read_text())
+    assert next(e for e in receipt['execution'] if e['tool'] == 'ngspice')['log'].endswith('/base/path_1.log')
+    assert 'WHOLE DESIGN NG' in (p / 'phase3/stage3/spice/correlation.log').read_text()
+    assert any('/base/refs/' in r['path'] for r in receipt['outputs']) is (damage != 'no_ndw')
+
+
+def test_step30_partial_reference_keeps_the_original_raw_pass(tmp_path, monkeypatch):
+    ordinary, p, _, lib, _, _ = _native_reference_transport(tmp_path, monkeypatch, damage='raw_good_partial')
+    assert ordinary.SC.run_installed_pdk_path_correlation(p, str(lib))['status'] == 'RAN'
+    assert ordinary.SC.run_audit(p).passed
+    row = json.loads((p / 'reports/phase3/spice_path_tool.json').read_text())['detail']['ngspice']['base']['paths'][0]
+    assert row['raw_verdict'] == 'CORRELATED' and not row['pdk_characterisation']['complete']
+    assert row['design_reference_ns'] is None
+
+
+@pytest.mark.parametrize('damage', ['wave', 'result', 'execution'])
+def test_step30_current_consumer_binds_native_references(tmp_path, monkeypatch, damage):
+    ordinary, p, _, lib, _, _ = _native_reference_transport(tmp_path, monkeypatch, damage='execution' if damage == 'execution' else '')
+    result = ordinary.SC.run_installed_pdk_path_correlation(p, str(lib))
+    if damage == 'execution':
+        assert result['status'] == 'ERROR' and 'REFERENCE_EXECUTION_MISSING' in result['reason']
+        return
+    assert result['status'] == 'RAN' and ordinary.SC.run_audit(p).passed
+    target = next((p / 'phase3/tool_arms/30/ngspice/base/refs').rglob('*.wave' if damage == 'wave' else 'result.json'))
+    target.write_text(target.read_text() + '\nCHANGED\n')
+    assert not ordinary.SC.run_audit(p).passed
+
+
+@pytest.mark.parametrize('damage, expected', [('', False), ('wire', True)])
+def test_step30_companion_uses_the_design_residual_not_the_raw_gap(tmp_path, monkeypatch, damage, expected):
+    ordinary, p, _, lib, _, _ = _native_reference_transport(tmp_path, monkeypatch, damage=damage, companion=True)
+    result = ordinary.SC.run_installed_pdk_path_correlation(p, str(lib))
+    gate = ordinary.SC.run_audit(p)
+    assert not gate.passed
+    assert (result['status'] == 'RAN') is expected, result
+    if expected:
+        assert gate.summary['measurement'] == 'MEASURED' and gate.summary['verdict'] == 'FAIL'
+    else:
+        assert gate.summary['measurement'] == 'NOT_MEASURED'

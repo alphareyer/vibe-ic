@@ -1037,9 +1037,204 @@ def stage_nldm_table(liberty_text: str, stage: dict
     return candidates[0] if candidates else None
 
 
+def native_reference_grid(liberty_text: str, stage: dict, hdr: dict) -> dict:
+    """The exact output/condition arc and nonzero original bilinear points.
+
+    The side state comes from the executed WPS deck, never the legacy
+    reference builder's tie heuristic. Unknown or conflicting arcs are not
+    a basis on which to change a design comparison.
+    """
+    cell = extract_cell_block(liberty_text, stage['cell'])
+    if not cell:
+        raise ValueError('reference cell absent from selected Liberty')
+    inputs, outputs = liberty_pins(cell)
+    related, output = stage['toggle_pin'], stage['out_pin']
+    state = stage['side_inputs']
+    if (related not in inputs or output not in outputs
+            or set(state) != set(inputs) - {related}
+            or any(type(v) is not int or v not in (0, 1) for v in state.values())):
+        raise ValueError('reference input/output or side-input state is incomplete')
+    input_match = re.search(r'\bpin\s*\(\s*"?' + re.escape(related) + r'"?\s*\)\s*\{', cell)
+    input_block = _match_brace_block(cell, input_match.start())
+    binding = re.search(r'driver_waveform_' + stage['input_transition']
+                        + r'\s*:\s*"?([^";\s]+)', input_block)
+    ndw = None
+    if binding:
+        for match in re.finditer(r'\bnormalized_driver_waveform\s*\([^)]*\)\s*\{', liberty_text):
+            block = _match_brace_block(liberty_text, match.start())
+            if re.search(r'driver_waveform_name\s*:\s*"?' + re.escape(binding[1])
+                         + r'"?\s*;', block):
+                ndw = binding[1]
+                break
+    if ndw is None:
+        raise ValueError('selected input pin/edge has no declared native driver waveform')
+    match = re.search(r'\bpin\s*\(\s*' + re.escape(output) + r'\s*\)\s*\{', cell)
+    pin_block = _match_brace_block(cell, match.start())
+    table_name = 'cell_' + stage['transition']
+    wanted_sense = ('positive_unate' if stage['input_transition'] == stage['transition']
+                    else 'negative_unate')
+    conditional, defaults = [], []
+    for block in _timing_blocks(pin_block):
+        rel = re.search(r'related_pin\s*:\s*"?([^";]+)', block)
+        sense = re.search(r'timing_sense\s*:\s*(\w+)', block)
+        if not (rel and rel.group(1).split() == [related] and sense
+                and sense.group(1) in (wanted_sense, 'non_unate')):
+            continue
+        table = parse_nldm_table(block, table_name)
+        if not table:
+            continue
+        when = re.search(r'when\s*:\s*"([^"]*)"', block)
+        if when:
+            active = evaluate_when(when.group(1), state)
+            if active is None:
+                raise ValueError('reference conditional arc is undecidable')
+            if active:
+                conditional.append((when.group(1), table))
+        else:
+            defaults.append(('', table))
+    choices = conditional or defaults
+    if len(choices) != 1:
+        raise ValueError('reference arc is absent or ambiguous')
+    when, table = choices[0]
+    x = float(stage['lookup_input_slew_ns']) / hdr['time_unit_ns']
+    y = float(stage['lookup_cap_pf']) / hdr['cap_unit_pf']
+    if not all(math.isfinite(v) and v >= 0 for v in (x, y)):
+        raise ValueError('reference slew/load is not measured')
+    # Cardinal tables recover the weights from the existing interpolation
+    # function itself, including its established edge-clamping behavior.
+    points = []
+    for i, slew in enumerate(table['index_1']):
+        for j, load in enumerate(table['index_2']):
+            basis = [[float(a == i and b == j) for b in range(len(table['index_2']))]
+                     for a in range(len(table['index_1']))]
+            weight = bilinear(table['index_1'], table['index_2'], basis, x, y)
+            if weight > 0:
+                value = table['values'][i][j] * hdr['time_unit_ns']
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError('reference grid delay is not positive')
+                points.append({'grid_index': [i, j], 'weight': weight,
+                               'grid_input_slew_ns': slew * hdr['time_unit_ns'],
+                               'grid_output_load_pf': load * hdr['cap_unit_pf'],
+                               'liberty_grid_delay_ns': value})
+    # The design report prints slew/cap/increment to six decimal places.
+    # Reproduce its interval, including single-precision STA arithmetic; this
+    # checks the selected table/Ceff basis, not the physical correlation.
+    printed = [bilinear(table['index_1'], table['index_2'], table['values'], a, b)
+               * hdr['time_unit_ns']
+               for a in (max(0, x - .5e-6 / hdr['time_unit_ns']),
+                         x + .5e-6 / hdr['time_unit_ns'])
+               for b in (max(0, y - .5e-6 / hdr['cap_unit_pf']),
+                         y + .5e-6 / hdr['cap_unit_pf'])]
+    original = float(stage['sta_delay_ns'])
+    codec = .5e-6 + abs(original) * 2 ** -21
+    if not min(printed) - codec <= original <= max(printed) + codec:
+        raise ValueError('reference table does not reproduce the actual STA cell arc')
+    return {'table': table_name, 'when': when, 'driver_waveform': ndw, 'points': points,
+            'liberty_interpolated_ns': sum(p['weight'] * p['liberty_grid_delay_ns']
+                                          for p in points)}
+
+
+def _native_pdk_characterisation(sources: dict, stages: List[dict], runner) -> dict:
+    """Independent native NDW references, atomic across every original stage.
+
+    This function never receives a measured design delay or its SPEF. The
+    callback owns the existing normal STA/simulator transport; it must return
+    the exact requested material/arc/grid identity, not a cell-wide ratio.
+    """
+    references, incomplete, cache, stage_delays = [], [], {}, []
+    for index, stage in enumerate(stages):
+        try:
+            source = sources[index]
+            hdr = parse_liberty_header(source['text'])
+            grid = native_reference_grid(source['text'], stage, hdr)
+            measured_points = []
+            point_records = []
+            for point in grid['points']:
+                identity = {**source['identity'], **{k: stage[k] for k in
+                            ('cell', 'toggle_pin', 'out_pin', 'input_transition',
+                             'transition', 'side_inputs')},
+                            'when': grid['when'], 'table': grid['table'],
+                            'driver_waveform': grid['driver_waveform'],
+                            'grid_index': point['grid_index']}
+                key = json.dumps(identity, sort_keys=True)
+                if key not in cache:
+                    request = {**stage, **point, 'identity': identity}
+                    got = runner(source, request, len(cache))
+                    cache[key] = got
+                    references.append({'request': request, **got})
+                got = cache[key]
+                delay = got.get('spice_ns')
+                if (got.get('identity') != identity or got.get('status') != 'MEASURED'
+                        or type(delay) not in (int, float) or not math.isfinite(delay)
+                        or delay <= 0):
+                    raise ValueError('native PDK reference is missing or has a different basis')
+                measured_points.append(point['weight'] * delay)
+                point_records.append({**point, 'identity': identity})
+            stage_delays.append({'stage': index, 'inst': stage['inst'],
+                                 'sta_delay_ns': stage['sta_delay_ns'],
+                                 'liberty_ns': grid['liberty_interpolated_ns'],
+                                 'reference_ns': sum(measured_points),
+                                 'points': point_records})
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            incomplete.append({'stage': index, 'inst': stage.get('inst'), 'reason': str(exc)})
+    complete = bool(stages) and not incomplete and len(stage_delays) == len(stages)
+    return {'basis': 'NATIVE_NDW_GRID_REFERENCES', 'complete': complete,
+            'references': references, 'stages': stage_delays, 'incomplete': incomplete,
+            'reference_cell_ns': sum(r['reference_ns'] for r in stage_delays) if complete else None,
+            'liberty_cell_ns': sum(r['liberty_ns'] for r in stage_delays) if complete else None}
+
+
+def native_path_comparison(row: dict) -> dict:
+    """Raw whole-path error, independent PDK gap and design residual (pure).
+
+    The original STA wire contribution is added unchanged. Incomplete
+    reference coverage never applies a subset or scales the measured design.
+    This same arithmetic is used by the ordinary current-result consumer.
+    """
+    sta, spice, tol = (row[k] for k in ('sta_ns', 'spice_ns', 'tolerance_pct'))
+    raw = (spice - sta) / sta * 100
+    raw_verdict = path_correlation_verdict(raw, tol)
+    result = {'raw_error_pct': raw, 'raw_verdict': raw_verdict,
+              'error_pct': raw, 'abs_error_ns': abs(spice - sta),
+              'verdict': raw_verdict, 'design_reference_ns': None,
+              'design_error_pct': None, 'pdk_gap_ns': None}
+    char = row.get('pdk_characterisation') or {}
+    stages = char.get('stages') or []
+    if not char.get('complete') or len(stages) != row.get('stages') or not stages:
+        return result
+    refs = {json.dumps(r['identity'], sort_keys=True): r
+            for r in char['references']}
+    reference_cell, sta_cell = 0.0, 0.0
+    for stage in stages:
+        if not math.isclose(sum(p['weight'] for p in stage['points']), 1, abs_tol=1e-12):
+            raise ValueError('incomplete PDK interpolation weights')
+        for point in stage['points']:
+            got = refs[json.dumps(point['identity'], sort_keys=True)]
+            if (got['request']['identity'] != point['identity'] or got['status'] != 'MEASURED'
+                    or got['spice_ns'] <= 0 or not math.isfinite(got['spice_ns'])):
+                raise ValueError('incomplete PDK reference identity or measurement')
+            reference_cell += point['weight'] * got['spice_ns']
+        sta_cell += stage['sta_delay_ns']
+    wire = sta - sta_cell
+    # Negative beyond the six-place path/stage print codec is not a wire
+    # basis on which to correct a physical design.
+    if wire < -(len(stages) + 1) * .5e-6:
+        raise ValueError('STA cell increments exceed the original whole path')
+    expected = wire + reference_cell
+    if not math.isfinite(expected) or expected <= 0:
+        raise ValueError('independent PDK reference is not positive')
+    error = (spice - expected) / expected * 100
+    result.update(sta_wire_ns=wire, design_reference_ns=expected,
+                  pdk_gap_ns=expected - sta, pdk_gap_pct=(expected - sta) / sta * 100,
+                  design_error_pct=error, error_pct=error,
+                  abs_error_ns=abs(spice - expected),
+                  verdict=path_correlation_verdict(error, tol))
+    return result
+
+
 def measure_pdk_characterisation(
         container: str, sources: dict, subckts: dict, liberty_text: str,
-        stages: List[dict], out_dir: Path, hdr: dict) -> dict:
+        stages: List[dict], out_dir: Path, hdr: dict, *, reference_runner=None) -> dict:
     """Measure the PDK's liberty<->model characterisation ratio per distinct
     cell of the path, each on its OWN single-stage deck at a liberty grid point.
 
@@ -1049,6 +1244,8 @@ def measure_pdk_characterisation(
     whose reference could not be measured, so a caller degrades LOUDLY instead
     of silently treating an unmeasured PDK as a perfect one.
     """
+    if reference_runner is not None:
+        return _native_pdk_characterisation(sources, stages, reference_runner)
     vdd = hdr["nom_voltage"] or 1.0
     temp_c = hdr["nom_temperature"]
     vth = vdd * hdr["output_threshold_fall"] / 100.0

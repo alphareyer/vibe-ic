@@ -20,6 +20,11 @@ What stays vibe-ic's (the gate), applied to the tool's result:
   slew and load STA used, with no fixed percentage;
 * the SAME ARC: SPICE is measured from the start pin to the end pin at the
   transitions the STA path names, at the liberty's own thresholds;
+* independent PDK references at every nonzero NLDM grid corner of that arc:
+  native driver waveform, the same cell view/models/PVT and actual dcalc
+  slew/Ceff. The expected design delay is their original bilinear sum plus
+  the unchanged STA wire residual. Raw error, PDK gap and design residual
+  are all retained. Incomplete references leave the raw comparison intact;
 * the SPEF-MUTATION CONTROL: every `*CAP` (and `*D_NET` total) is scaled by
   ``MUTATION_FACTOR`` and the same start/end pins are re-timed and
   re-simulated. A SPICE delay that does not move is not a post-layout
@@ -74,6 +79,7 @@ chip-AGNOSTIC: no design, PDK, cell or corner literal selects a branch.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import time
@@ -332,6 +338,9 @@ def arm_tcl(inputs: Dict[str, Any], project: Path, top: str, spef: str,
               f'read_sdc {project / inputs["sdc"]}',
               f'set_operating_conditions -library {opcond[0]} {opcond[1]}',
               'set_propagated_clock [all_clocks]', f'read_spef {spef}']
+    lines += [f'set _cf [open {deck_dir}/reference_clocks.txt w]',
+              'foreach _clock [all_clocks] { puts $_cf [get_property $_clock period] }',
+              'close $_cf']
     for index, args in enumerate(path_args, 1):
         lines.append(f'report_checks {args} -fields {{slew cap input_pins}} -digits 6 '
                      f'-format full > {deck_dir}/path_{index}.rpt')
@@ -340,6 +349,19 @@ def arm_tcl(inputs: Dict[str, Any], project: Path, top: str, spef: str,
                      f'-model_file {models} -power {power} -ground {ground} '
                      f'-simulator {simulator}}} _e]}} {{ puts "VIBEIC_WPS_FAIL {index} $_e" }} '
                      f'else {{ puts "VIBEIC_WPS_OK {index}" }}')
+        # Total net capacitance in report_checks is not the effective load
+        # used by the NLDM lookup. Ask this same native STA session, after
+        # writing the original design deck, for each selected path's dcalc.
+        lines += [f'set _pn 0; foreach _path [find_timing_paths {args}] {{',
+                  'incr _pn; set _prev ""; set _an 0',
+                  f'set _idx [open {deck_dir}/dcalc_{index}_$_pn.tsv w]',
+                  'foreach _point [get_property $_path points] {',
+                  'set _pin [get_full_name [get_property $_point pin]]',
+                  'if {$_prev != "" && [file dirname $_prev] == [file dirname $_pin]} {',
+                  f'incr _an; set _file {deck_dir}/dcalc_{index}_${{_pn}}_${{_an}}.rpt',
+                  'if {![catch {report_dcalc -from $_prev -to $_pin -max -digits 9 > $_file} _err]} {',
+                  'puts $_idx "$_prev\t$_pin\t$_file"',
+                  '}', '}', 'set _prev $_pin', '}', 'close $_idx', '}']
     return '\n'.join(lines) + '\n'
 
 
@@ -681,10 +703,175 @@ def path_stages(rows: List[dict]) -> List[dict]:
                 and row['cell'] not in ('in', 'out') and not _scc.is_sequential_cell(row['cell']):
             stages.append({'inst': row['inst'], 'cell': row['cell'],
                            'toggle_pin': prev['pin'].rsplit('/', 1)[1],
+                           'out_pin': row['pin'].rsplit('/', 1)[1],
+                           'input_transition': 'fall' if prev['tr'] == 'v' else 'rise',
                            'transition': 'fall' if row['tr'] == 'v' else 'rise',
                            'input_slew_ns': prev.get('slew_ns'),
                            'sta_load_pf': row.get('cap_pf'), 'sta_delay_ns': row['incr']})
     return stages
+
+
+def _reference_sources(arm: dict, stages: List[dict], deck: Path) -> dict:
+    """Selected Liberty/view and the *executed WPS* arc's literal side DC.
+
+    Only the native gate block/instance/voltage-source grammar is read here.
+    A dynamic side input or a different output/condition stays unqualified.
+    """
+    text, sources = deck.read_text().replace('\\/', '/'), {}
+    cells = Path(arm['cells']['path']).read_text()
+    ports = subckt_ports(cells)
+    for index, stage in enumerate(stages):
+        library = next((lib for lib in arm.get('liberty_sources', [])
+                        if _scc.extract_cell_block(lib['text'], stage['cell'])), None)
+        if library is None:
+            continue
+        gate = re.search(r'^\* Gate ' + re.escape(stage['inst']) + r' '
+                         + re.escape(stage['toggle_pin']) + r' -> '
+                         + re.escape(stage['out_pin']) + r'\s*\n(.*?)(?=^\*|^\.ends)',
+                         text, re.M | re.S)
+        if gate is None:
+            continue
+        lines = gate.group(1).splitlines()
+        call = next((line.split() for line in lines if line.startswith('x' + stage['inst'] + ' ')), [])
+        pins = ports.get(stage['cell'], [])
+        if not call or call[-1] != stage['cell'] or len(call) != len(pins) + 2:
+            continue
+        nodes = dict(zip(pins, call[1:-1]))
+        dc = {m[1]: float(m[2]) for line in lines
+              if (m := re.fullmatch(r'v\d+\s+(\S+)\s+0\s+([-\d.eE+]+)', line))}
+        header = _scc.parse_liberty_header(library['text'])
+        lookup = stage.get('dcalc')
+        if lookup and Path(lookup).is_file():
+            dcalc = Path(lookup).read_text()
+            name = _LIBRARY_RE.search(library['text'])
+            if (not name or not re.search(r'^Library: ' + re.escape(name[1]) + r'\s*$', dcalc, re.M)
+                    or not re.search(r'^Cell: ' + re.escape(stage['cell']) + r'\s*$', dcalc, re.M)):
+                continue
+            rf = lambda edge: 'v' if edge == 'fall' else '^'
+            arc = re.compile(r'^' + re.escape(stage['toggle_pin']) + ' '
+                             + re.escape(rf(stage['input_transition'])) + r' -> '
+                             + re.escape(stage['out_pin']) + ' '
+                             + re.escape(rf(stage['transition'])) + r'\s*$', re.M)
+            candidates = set()
+            for match in arc.finditer(dcalc):
+                block = dcalc[match.end():].split('.............................................')[0]
+                slew = re.search(r'input_net_transition =\s*([-\d.eE+]+)', block)
+                cap = re.search(r'total_output_net_capacitance =\s*([-\d.eE+]+)', block)
+                delay = re.search(r'^Delay =\s*([-\d.eE+]+)', block, re.M)
+                # Match the same summed print + float codec as the grid
+                # projection; isclose would take max and reject valid rows.
+                if slew and cap and delay and abs(
+                        float(delay[1]) * header['time_unit_ns'] - stage['sta_delay_ns']
+                        ) <= .5e-6 + abs(stage['sta_delay_ns']) * 2 ** -21:
+                    candidates.add((float(slew[1]) * header['time_unit_ns'],
+                                    float(cap[1]) * header['cap_unit_pf']))
+            if len(candidates) == 1:
+                stage['lookup_input_slew_ns'], stage['lookup_cap_pf'] = candidates.pop()
+        if 'lookup_cap_pf' not in stage:
+            continue
+        inputs, _ = _scc.liberty_pins(_scc.extract_cell_block(library['text'], stage['cell']))
+        side = {}
+        for pin in inputs:
+            if pin == stage['toggle_pin']:
+                continue
+            voltage = dc.get(nodes.get(pin))
+            if voltage == 0:
+                side[pin] = 0
+            elif voltage == header['nom_voltage']:
+                side[pin] = 1
+        stage['side_inputs'] = side
+        block = _scc.extract_subckt(cells, stage['cell'], model_map={})
+        if block is None:
+            continue
+        sources[index] = {**library, 'identity': {
+            'liberty_sha256': library['sha256'], 'corner': arm['corner'],
+            'voltage': header['nom_voltage'], 'temperature': header['nom_temperature'],
+            'cell_view_sha256': hashlib.sha256(block[1].encode()).hexdigest(),
+            'models_sha256': digest(Path(arm['models']['path']))}}
+    return sources
+
+
+def _native_grid_reference(arm: dict, directory: Path, source: dict, request: dict) -> dict:
+    """One independent cell/grid point, native NDW + true Pi load, normal runner.
+
+    No design netlist, SPEF, wire or measured delay enters this circuit.
+    Native write_path_spice owns its stimulus and extracted-cell subckt.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    liberty, hdr = source['text'], _scc.parse_liberty_header(source['text'])
+    opc, libname = _OPCOND_RE.search(liberty), _LIBRARY_RE.search(liberty)
+    result = {'identity': request['identity'], 'status': 'NOT_MEASURED', 'executions': []}
+    # Do not silently substitute the legacy linear reference for an absent NDW.
+    if not opc or not libname or 'normalized_driver_waveform' not in liberty:
+        return {**result, 'reason': 'selected Liberty has no native driver-waveform basis'}
+    cell = _scc.extract_cell_block(liberty, request['cell'])
+    inputs, _ = _scc.liberty_pins(cell)
+    connection = {pin: ('I' if pin == request['toggle_pin'] else
+                       f"1'b{request['side_inputs'][pin]}") for pin in inputs}
+    connection[request['out_pin']] = 'Z'
+    netlist, sdc, tcl = (directory / name for name in ('reference.v', 'reference.sdc', 'reference.tcl'))
+    netlist.write_text('module pdk_ref(input I, output Z);\n ' + request['cell']
+                       + ' u_ref(' + ', '.join(f'.{p}({n})' for p, n in connection.items())
+                       + ');\nendmodule\n')
+    # The virtual clock carries the original declared cycle, not a guessed
+    # settling time. This reference's output load is a real native Pi model.
+    periods = set(arm.get('clock_periods_ns') or [])
+    if len(periods) != 1:
+        return {**result, 'reason': 'reference clock period is not uniquely declared'}
+    sdc.write_text(f'create_clock -name VREF -period {periods.pop():.17g}\n'
+                   'set_input_delay 0 -clock VREF [get_ports I]\n'
+                   'set_output_delay 0 -clock VREF [get_ports Z]\n'
+                   f"set_input_transition -{request['input_transition']} "
+                   f"{request['grid_input_slew_ns']:.17g} [get_ports I]\n")
+    args = (f"-path_delay max -{request['input_transition']}_from I "
+            f"-{request['transition']}_to Z -group_path_count 1")
+    tcl.write_text('set_cmd_units -time ns -capacitance pF -current mA -voltage V '
+                   '-resistance kOhm -distance um\n'
+                   f"read_liberty {source['path']}\nread_verilog {netlist}\n"
+                   f'link_design pdk_ref\nread_sdc {sdc}\n'
+                   f'set_operating_conditions -library {libname[1]} {opc[1]}\n'
+                   f"sta::set_pi_model u_ref/{request['out_pin']} "
+                   f"{request['grid_output_load_pf']:.17g} 0 0\n"
+                   f'report_checks {args} -fields {{slew cap input_pins}} -digits 9 '
+                   f'-format full > {directory}/reference.rpt\n'
+                   f'write_path_spice -path_args {{{args}}} -spice_file {directory}/reference.sp '
+                   f"-lib_subckt_files {{{arm['cells']['path']}}} -model_file {arm['models']['path']} "
+                   f"-power {arm['power']} -ground {arm['ground']} -simulator {arm['simulator']}\n")
+    argv = ['sta', '-no_init', '-no_splash', '-exit', str(tcl)]
+    sta = _docker(arm['image'], arm['project'], arm['mounts'], argv, directory)
+    log = directory / 'sta.log'
+    log.write_text(sta.stdout + '\n' + sta.stderr)
+    result['executions'].append({'tool': 'OpenSTA', 'rc': sta.returncode, 'argv': argv,
+                                 'script': str(tcl), 'log': str(log)})
+    rpt, deck = directory / 'reference.rpt', directory / 'reference.sp_1.sp'
+    parsed = parse_path_report(rpt.read_text()) if rpt.is_file() else None
+    if sta.returncode != 0 or parsed is None or not deck.is_file():
+        return {**result, 'reason': 'native reference STA/write_path_spice did not complete'}
+    stages = path_stages(parsed['rows'])
+    expected = request['liberty_grid_delay_ns']
+    if (len(stages) != 1 or stages[0]['cell'] != request['cell']
+            or any(stages[0][k] != request[k] for k in
+                   ('toggle_pin', 'out_pin', 'input_transition', 'transition'))
+            or not math.isclose(stages[0]['sta_delay_ns'], expected,
+                                rel_tol=2 ** -21, abs_tol=.5e-9)):
+        return {**result, 'reason': 'native reference does not reproduce the requested grid arc'}
+    # Measure only the actual cell pins. The native ideal-port/Pi short is
+    # not an extra cell contribution to be added to the design wire residual.
+    cell_rows = [r for r in parsed['rows'] if r['inst'] == 'u_ref']
+    parsed = {**parsed, 'rows': cell_rows, 'start_row': cell_rows[0]}
+    step, _ = transient_step_s(deck, cell_rows)
+    sim = _simulate(deck, arm['simulator'], arm['image'], arm['project'], arm['mounts'], step)
+    log = deck.with_suffix('.log')
+    log.write_text(sim.stdout + '\n' + sim.stderr)
+    argv = (['ngspice', '-b'] if arm['simulator'] == 'ngspice' else ['Xyce']) + [str(deck.with_suffix('.run.sp'))]
+    result['executions'].append({'tool': arm['simulator'], 'rc': sim.returncode,
+                                 'argv': argv, 'script': str(deck.with_suffix('.run.sp')), 'log': str(log)})
+    got = measure(deck, arm['simulator'], parsed, hdr)
+    if sim.returncode != 0:
+        got = {'status': 'NOT_MEASURED', 'reason': 'native reference simulator exited non-zero'}
+    result.update(got, sta_ns=stages[0]['sta_delay_ns'], deck=str(deck))
+    write_json(directory / 'result.json', result)
+    return result
 
 
 def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, Any]:
@@ -849,6 +1036,19 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     for stale in out_dir.glob('path_*'):
         if stale.is_file():
             stale.unlink()
+    import shutil
+    if (out_dir / 'refs').exists():
+        # Use the native-run attempts convention (run_chain) to preserve the
+        # preceding invocation's raw references, outside current products.
+        archive = out_dir.parent / 'attempts'
+        archive.mkdir(exist_ok=True)
+        number = 1
+        while (archive / f'{out_dir.name}-refs-{number:04d}').exists():
+            number += 1
+        shutil.move(str(out_dir / 'refs'), str(archive / f'{out_dir.name}-refs-{number:04d}'))
+    for stale in out_dir.glob('dcalc_*'):
+        stale.unlink()
+    (out_dir / 'reference_clocks.txt').unlink(missing_ok=True)
     cell_sources = [host(p) for p in (config.get('CELL_SPICE_MODELS') or [])]
     spice_sources = cell_sources + [host(p) for p in (config.get('PAD_SPICE_MODELS') or [])]
     import librelane_contract as lc
@@ -888,7 +1088,13 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
                    .split('Startpoint: ')[1:]] if rpt.is_file() else [])
         for n, block in enumerate(blocks, 1):
             deck = out_dir / f'path_{i}.sp_{n}.sp'
-            prepared.append({'path': len(prepared) + 1, 'parsed': parse_path_report(block),
+            lookup = out_dir / f'dcalc_{i}_{n}.tsv'
+            dcalc = {}
+            if lookup.is_file():
+                for line in lookup.read_text().splitlines():
+                    source_pin, target_pin, report = line.split('\t')
+                    dcalc[(source_pin, target_pin)] = report
+            prepared.append({'path': len(prepared) + 1, 'parsed': parse_path_report(block), 'dcalc': dcalc,
                              'deck': deck if deck.is_file() else None,
                              'wps_fail': [f for k, f in failed if int(k) == i]})
     return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
@@ -899,6 +1105,11 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
                 'script': str(tcl), 'log': str(out_dir / 'sta.log')},
             'sta_lifecycle': getattr(sta, '_vibeic_lifecycle', None),
             'image': image, 'project': project, 'mounts': mounts, 'header': header,
+            'power': power, 'ground': ground,
+            'clock_periods_ns': ([float(value) for value in (out_dir / 'reference_clocks.txt').read_text().split()]
+                                if (out_dir / 'reference_clocks.txt').is_file() else []),
+            'liberty_sources': [{'path': str(host(path)), 'text': text, 'sha256': digest(host(path))}
+                                for path, text in zip(inputs['liberties'], lib_texts)],
             'liberty_text': '\n'.join(lib_texts)}
 
 
@@ -930,6 +1141,9 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
             got = {'status': 'NOT_MEASURED', 'reason': 'simulator exited non-zero'}
         sta_ns = parsed['path_delay_ns']
         stages = path_stages(parsed['rows'])
+        for stage in stages:
+            stage['dcalc'] = item.get('dcalc', {}).get(
+                (stage['inst'] + '/' + stage['toggle_pin'], stage['inst'] + '/' + stage['out_pin']))
         tol = (_scc.derive_liberty_path_tolerance(arm['liberty_text'], stages, sta_ns)
                if stages else None)
         row.update(startpoint=parsed['startpoint'], endpoint=parsed['endpoint'],
@@ -942,12 +1156,23 @@ def simulate_arm(arm: Dict[str, Any], *, workers: int = 1) -> Dict[str, Any]:
                        tolerance_pct=tol['tolerance_pct'] if tol else None,
                        verdict=(_scc.path_correlation_verdict(err, tol['tolerance_pct'])
                                 if tol and err is not None else 'TOLERANCE_UNDERIVABLE'))
+            if tol and sta_ns:
+                reference_arm = (arm.get('reference_arms') or {}).get(item.get('arm'), arm)
+                sources = _reference_sources(reference_arm, stages, deck)
+                refs = deck.parent / 'refs' / f"path_{item['path']}"
+                characterisation = _scc.measure_pdk_characterisation(
+                    '', sources, {}, '', stages, refs, header,
+                    reference_runner=lambda source, request, index: _native_grid_reference(
+                        reference_arm, refs / str(index), source, request))
+                row['pdk_characterisation'] = characterisation
+                row.update(_scc.native_path_comparison(row))
         return row
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         rows = list(pool.map(one, arm['prepared']))
     return {k: v for k, v in arm.items()
-            if k not in ('prepared', 'image', 'project', 'mounts', 'header', 'liberty_text')
+            if k not in ('prepared', 'image', 'project', 'mounts', 'header', 'liberty_text',
+                         'liberty_sources', 'reference_arms')
             } | {'paths': rows}
 
 
@@ -1108,7 +1333,8 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
             # Every deck of both arms simulates at once; they are independent.
             base['prepared'] = [dict(i, arm='base') for i in base['prepared']]
             both = dict(base, prepared=base['prepared']
-                        + [dict(i, arm='mutated') for i in (mutated or {}).get('prepared', [])])
+                        + [dict(i, arm='mutated') for i in (mutated or {}).get('prepared', [])],
+                        reference_arms={'base': base, 'mutated': mutated})
             rows = simulate_arm(both)['paths']
             done_base = {k: v for k, v in simulate_arm(dict(base, prepared=[]))
                          .items()} | {'paths': rows[:len(base['prepared'])]}
@@ -1237,6 +1463,17 @@ def _current_executions(tool: dict):
                 executions.append(data['sta_execution'])
             executions += [row['simulator_execution'] for row in data.get('paths') or []
                            if row.get('simulator_execution')]
+            # Preserve the original design NG first: the canonical wholepath
+            # log must never be replaced by a single-cell reference log.
+            for row in data.get('paths') or []:
+                char = row.get('pdk_characterisation') or {}
+                for ref in char.get('references') or []:
+                    ran = ref.get('executions') or []
+                    if ref.get('status') == 'MEASURED' and (
+                            [ex.get('tool') for ex in ran] != ['OpenSTA', row['simulator_execution']['tool']]
+                            or any(ex.get('rc') != 0 for ex in ran)):
+                        raise Refusal('CURRENT_STEP30_REFERENCE_EXECUTION_MISSING', str(ref))
+                    executions += [{**ex, 'purpose': 'pdk_reference'} for ex in ran]
     return executions
 
 
@@ -1259,7 +1496,10 @@ def _current_companion_errors(project: Path, tool: dict, subject: dict, context:
             for execution in _current_executions({'detail': {simulator: {variant: arm.get(variant)}}}):
                 if type(execution.get('rc')) is not int:
                     raise Refusal('CURRENT_STEP30_EXECUTION_FAILED', str(execution))
-                if execution['rc'] != 0:
+                # A failed independent reference keeps the original raw
+                # comparison and explicitly incomplete separation. It does
+                # not change the health of the primary design execution.
+                if execution['rc'] != 0 and execution.get('purpose') != 'pdk_reference':
                     errors.append({'simulator': simulator, 'variant': variant, **execution})
     if not errors and not incomplete:
         return []
@@ -1285,7 +1525,13 @@ def _current_companion_errors(project: Path, tool: dict, subject: dict, context:
                     or not all(type(value) in (int, float) and math.isfinite(value) for value in values)
                     or values[0] <= 0 or values[1] < 0 or values[2] < 0):
                 continue
-            measured = _scc.path_correlation_verdict((values[1] - values[0]) / values[0] * 100, values[2])
+            if 'pdk_characterisation' in row:
+                try:
+                    measured = _scc.native_path_comparison(row)['verdict']
+                except (KeyError, TypeError, ValueError):
+                    continue
+            else:
+                measured = _scc.path_correlation_verdict((values[1] - values[0]) / values[0] * 100, values[2])
             if measured == row.get('verdict') and measured in ('MISMATCH', 'CRITICAL_MISMATCH'):
                 return errors
     raise Refusal('CURRENT_STEP30_MEASURED_FAILURE_MISSING',
