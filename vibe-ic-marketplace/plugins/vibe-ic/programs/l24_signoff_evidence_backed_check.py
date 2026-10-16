@@ -931,8 +931,23 @@ def _requirement_producer_progress(project: Path, check: str
         top = project / "reports/orchestrator/phase3_one_shot.json"
         if top.is_file():
             summary = json.loads(top.read_text())
+            # A completed runner can disclose an upstream canonical row that
+            # never reached this requirement's producer. Its terminal report
+            # is not an attempt at every later signoff row. The input-bound
+            # journal below remains authoritative; unknown legacy summaries
+            # and a real whole-flow audit keep their strict behavior.
+            early_halt = any(
+                str(item.get('extras', {}).get('step_id')) in order
+                and order[str(item['extras']['step_id'])] < due_at
+                and item.get('status') in {'FAIL', 'NOT_MEASURED'}
+                for row in summary.get('steps', [])
+                if isinstance(row, dict) and isinstance(row.get('extras'), dict)
+                for item in row.get('extras', {}).get('canonical_steps', [])
+                if isinstance(item, dict) and isinstance(item.get('extras'), dict)
+            ) if isinstance(summary, dict) else False
             if (isinstance(summary, dict) and not summary.get("bounded")
                     and summary.get("verdict") is not None
+                    and not early_halt
                     and _mtime(top) >= (newest_netlist or 0)
                     and _phase3_record_matches_inputs(
                         top, current_inputs)):
@@ -947,6 +962,17 @@ def _requirement_producer_progress(project: Path, check: str
                     or not attempt.get("started_at")
                     or _mtime(path) < (newest_netlist or 0)):
                 continue
+            completed = path.with_name('outputs.json')
+            if completed.is_file():
+                retained = json.loads(completed.read_text())
+                result = retained.get('result') if isinstance(retained, dict) else None
+                if (isinstance(result, dict) and retained.get('status') == 'NOT_MEASURED'
+                        and result.get('producer_started') is False
+                        and result.get('preflight_verdict') == 'REFUSED'):
+                    # The retained refusal explicitly states no dispatch.
+                    # Do not infer this merely from an empty input mapping:
+                    # actual no-input producer attempts still make rows due.
+                    continue
             inputs = attempt.get("inputs")
             if not isinstance(inputs, dict):
                 continue

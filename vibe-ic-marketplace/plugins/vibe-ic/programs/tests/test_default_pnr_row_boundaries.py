@@ -352,7 +352,7 @@ def test_hold_retry_uses_the_cts_producer_state_after_a_previous_hold_run(tmp_pa
         producers._predecessor_state(tmp_path, 'post_cts.def')
 
 
-def _split_cts_owner_control(tmp_path, monkeypatch):
+def _split_cts_owner_control(tmp_path, monkeypatch, *, empty_ancillary_report=False):
     """Actual split producer/handoff/readers; only native writes are replaced."""
     import librelane_contract as ll
     pnr = tmp_path / 'phase3/stage3/pnr'
@@ -410,6 +410,10 @@ def _split_cts_owner_control(tmp_path, monkeypatch):
                 'clock__skew__worst_hold__corner:nom': .1,
                 'timing__hold__ws__corner:nom': .3 if lane.endswith('20') else .2}
             (folder / 'state_out.json').write_text(json.dumps(current))
+            if sid == 'OpenROAD.STAMidPNR' and empty_ancillary_report:
+                # Native transport fixture: no diagnostic entries, not a
+                # timing measurement. The real receipt binds these bytes.
+                (folder / 'unpropagated.rpt').write_bytes(b'')
             if sid == 'OpenROAD.CTS':
                 (folder / 'cts.rpt').write_text('Total number of Clock Roots: 1.\n'
                     'Total number of Buffers Inserted: 2.\nTotal number of Sinks: 9.\n')
@@ -542,6 +546,69 @@ def test_split_hold_issued_manifest_carries_cts_into_an_isolated_project(
     assert worker.resolve_input_contract(private, manifest['declarations'], manifest) == []
     import hold_closure_check
     assert hold_closure_check.evaluate(private)[0] == 'PASS'
+
+
+@pytest.mark.parametrize('changed', [None, 'missing', 'changed'])
+def test_empty_cts_report_is_copied_and_hash_bound_through_hold_transport(
+        tmp_path, monkeypatch, changed):
+    """Reuse the complete existing transport control with a real empty member."""
+    import sys
+    original = _split_cts_owner_control
+
+    def with_empty_report(*args):
+        result = original(*args, empty_ancillary_report=True)
+        ll, _, cts, _ = result
+        document = json.loads(cts.read_text())
+        folder = cts.parents[2] / document['chain']['OpenROAD.STAMidPNR']
+        # cts is <project>/reports/phase3/<name>; its parent chain identifies
+        # the original project without retaining an ambient external path.
+        report = folder / 'unpropagated.rpt'
+        assert report.is_file() and report.stat().st_size == 0
+        receipt = ll.validate_step_receipt(folder, 'OpenROAD.STAMidPNR')
+        assert receipt['sha256']['unpropagated.rpt'] == ll.digest(report)
+        return result
+
+    monkeypatch.setattr(sys.modules[__name__], '_split_cts_owner_control', with_empty_report)
+    test_split_hold_issued_manifest_carries_cts_into_an_isolated_project(
+        tmp_path, monkeypatch, changed)
+
+
+def test_an_empty_required_measurement_is_not_just_a_hash_bound_byte_member(tmp_path):
+    measurement = tmp_path / 'required_timing.rpt'
+    measurement.write_bytes(b'')
+    manifest = {'files': {'required_timing.rpt': worker.sha(measurement)}, 'missing': []}
+    assert worker.resolve_input_contract(
+        tmp_path, ['required_timing.rpt'], manifest) == ['required_timing.rpt']
+
+
+@pytest.mark.parametrize('damage', ['missing', 'changed'])
+def test_empty_cts_ancillary_member_still_refuses_absence_and_changed_bytes(
+        tmp_path, monkeypatch, damage):
+    ll, _, cts, seen = _split_cts_owner_control(
+        tmp_path, monkeypatch, empty_ancillary_report=True)
+    for rel in ('input/step_0_5ic_answers.json', 'input/submission_template/source.json'):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+    issued = {}
+    execution_policy._fixed_inputs(
+        {'project': tmp_path, 'policy': {'mode': 'default'}}, '20', parameters=issued)
+    manifest = issued['resolved_input_manifest']
+    assert manifest['missing'] == []
+    document = json.loads(cts.read_text())
+    folder = tmp_path / document['chain']['OpenROAD.STAMidPNR']
+    report = folder / 'unpropagated.rpt'
+    rel = report.relative_to(tmp_path).as_posix()
+    assert manifest['files'][rel] == ll.digest(report)
+    if damage == 'missing':
+        report.unlink()
+    else:
+        report.write_text('changed native report\n')
+    assert rel in worker.resolve_input_contract(
+        tmp_path, manifest['declarations'], manifest)
+    with pytest.raises(ll.Refusal, match='LL_STEP_OUTPUT_UNBOUND'):
+        ll.validate_step_receipt(folder, 'OpenROAD.STAMidPNR')
+    assert len(seen) == 1, 'only the Step19 transport ran; no Step20 producer was called'
 
 
 def test_rcx_publishes_its_current_native_spefs_for_the_existing_provenance_consumer(

@@ -165,3 +165,35 @@ def test_legacy_without_canonical_attempt_keeps_strict_behavior(tmp_path):
     rc, record = read(p, tmp_path)
     assert rc == 1
     assert outcomes(record)["DRC"] == "UNMET_NO_READING"
+
+
+@pytest.mark.parametrize('producer_started', [False, True])
+def test_preflight_refusal_is_not_a_signoff_producer_attempt(tmp_path, producer_started):
+    p, sdc = project(tmp_path)
+    attempt(p, sdc, '15', 'PASS')
+    row = versions.begin_step(p, '31', {})
+    versions.finish_step(p, row, verdict='NOT_MEASURED', result={
+        'producer_started': producer_started,
+        'preflight_verdict': 'READY' if producer_started else 'REFUSED',
+        'finding': 'PRODUCER_ATTEMPTED' if producer_started else 'REQUIRED_INPUT_ABSENT'})
+    rc, record = read(p, tmp_path)
+    assert rc == (1 if producer_started else 0)
+    assert outcomes(record)['DRC'] == (
+        'UNMET_NO_READING' if producer_started else 'NOT_YET_MEASURABLE')
+
+
+@pytest.mark.parametrize('status', ['NOT_MEASURED', 'FAIL'])
+def test_known_upstream_canonical_halt_does_not_attempt_later_signoff(tmp_path, status):
+    p, sdc = project(tmp_path)
+    attempt(p, sdc, '15', 'PASS')
+    attempt(p, sdc, '20', status)
+    summary = p / 'reports/orchestrator/phase3_one_shot.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'program': 'phase3_one_shot_runner',
+        'verdict': status, 'steps': [{'name': 'pnr', 'status': status,
+            'extras': {'canonical_steps': [{'name': 'default_step_20',
+                'status': status, 'extras': {'step_id': '20'}}]}}]}))
+    rc, record = read(p, tmp_path)
+    assert rc == 0
+    assert outcomes(record)['DRC'] == 'NOT_YET_MEASURABLE'
+    assert record['reason_class'] == 'ASKED_BEFORE_PRODUCER'

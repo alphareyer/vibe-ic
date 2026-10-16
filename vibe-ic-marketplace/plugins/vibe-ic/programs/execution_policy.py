@@ -639,7 +639,8 @@ def _fixed_inputs(runtime, step_id: str, *, parameters=None) -> dict:
             # collected and hash-bound below, without requiring a dummy file.
             declarations.append(
                 {'from': 'external', 'path': item, 'required': False}
-                if item in {'waivers.json', 'phase2/stage1/sim/tb'} else item)
+                if isinstance(item, str) and item in {
+                    'waivers.json', 'phase2/stage1/sim/tb'} else item)
     # Frontend adapters retain YAML mappings; native adapters declare paths.
     # Use the canonical expansion for upstream `outputs: all` and keep an
     # unchecked external declaration out of the filesystem search.

@@ -650,7 +650,7 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
 
 def backend_project_input_contract(project: Path, step_id: str, *,
                                    collect_missing: bool = False,
-                                   execution_mode: str = "ultra") -> tuple[str, ...]:
+                                   execution_mode: str = "ultra") -> tuple[object, ...]:
     """Add only the current synthesis receipt namespace to a worker manifest.
 
     The static adapter contract cannot know the design's published synthesis
@@ -661,7 +661,7 @@ def backend_project_input_contract(project: Path, step_id: str, *,
     handoff check; this helper never invents a path or receipt.
     """
     root = Path(project).resolve(strict=True)
-    result: list[str] = []
+    result: list[object] = []
 
     def carry_checkpoint_file(raw: str, *, allow_directory: bool = False) -> None:
         """Carry one issued checkpoint file after proving its namespace."""
@@ -981,7 +981,7 @@ def backend_project_input_contract(project: Path, step_id: str, *,
     # receipt; the resolved config is its explicit input fingerprint.
     if (root / "phase3/librelane/synthesis_resolved.json").is_file():
         result.append("phase3/librelane/synthesis_resolved.json")
-    unique: list[str] = []
+    unique: list[object] = []
     seen: set[str] = set()
     for item in result:
         key = str(item)
@@ -1106,6 +1106,8 @@ def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
     original_root = origins.pop()
     bound = {}
     files = [handoff_rel]
+    empty_ancillary_reports = set()
+    semantic_views = set()
 
     def carry(raw, digest):
         rel = Path(raw)
@@ -1131,7 +1133,10 @@ def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
         state = json.loads((folder / "state_out.json").read_text())
         files.append((rel / "vibeic_receipt.json").as_posix())
         for name, digest in receipt["sha256"].items():
-            carry((rel / name).as_posix(), digest)
+            member = (rel / name).as_posix()
+            carry(member, digest)
+            if name.endswith('.rpt') and digest == hashlib.sha256(b'').hexdigest():
+                empty_ancillary_reports.add(member)
         mapped = _mapped_receipt_state_files(root, folder, receipt, state,
                     collect_missing=collect_missing, original_root=original_root)
         files.extend(mapped)
@@ -1145,7 +1150,9 @@ def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
         recorded = Path(info["source"])
         if not recorded.is_absolute() or not recorded.is_relative_to(original_root):
             raise ValueError("CTS view source is outside its producer project")
-        carry(recorded.relative_to(original_root).as_posix(), info["source_sha256"])
+        source_rel = recorded.relative_to(original_root).as_posix()
+        semantic_views.update((source_rel, info['dest']))
+        carry(source_rel, info["source_sha256"])
         carry(info["dest"], info["dest_sha256"])
     carry(document["measured_state"], document["measured_state_sha256"])
     for state in states:
@@ -1153,6 +1160,7 @@ def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
             if not recorded.is_relative_to(original_root):
                 raise ValueError("CTS state view is outside its producer project")
             raw = recorded.relative_to(original_root).as_posix()
+            semantic_views.add(raw)
             if raw not in bound:
                 raise ValueError(f"CTS state view has no producer digest: {raw}")
     # clock_plan_check reads the selected CTS transcript in addition to its
@@ -1164,7 +1172,14 @@ def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
             or not transcript.is_file()):
         raise ValueError("CTS transcript is absent or unsafe")
     files.append(transcript.relative_to(root).as_posix())
-    return tuple(dict.fromkeys(files)), original_root
+    # A native report can legitimately contain zero diagnostic entries. Its
+    # producer receipt and the issued manifest still require the exact file
+    # bytes; it is not a standalone nonempty measurement declaration. Keep
+    # actual handoff/state views under their existing substantive-input rule.
+    return tuple(
+        {'from': 'external', 'path': raw, 'required': False}
+        if raw in empty_ancillary_reports and raw not in semantic_views else raw
+        for raw in dict.fromkeys(files)), original_root
 
 
 def register_backend_adapters(registry: em.Registry | None = None, *, source_sha: str,
