@@ -1214,6 +1214,7 @@ def _current_output_deadline_fixture(project, root, deadline):
     bound = {str(f.relative_to(folder)): contract.digest(f) for f in folder.rglob('*')
              if f.is_file() and f.name != 'vibeic_receipt.json'}
     put(folder / 'vibeic_receipt.json', {'sha256': bound, 'input': {
+        'step': 'OpenROAD.STAPostPNR',
         'state_files': {str(Path(f)): contract.digest(Path(f))
                         for f in [state['nl'], state['sdc'], *state['spef'].values()]},
         'liberty_files': {f: contract.digest(Path(f)) for group in libs.values() for f in group}}})
