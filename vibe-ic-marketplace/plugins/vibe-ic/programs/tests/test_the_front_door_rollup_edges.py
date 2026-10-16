@@ -152,6 +152,25 @@ def _drive_main(project: Path, monkeypatch, *, phase1, phase2, phase3=None,
     return rc, json.loads(out.read_text())
 
 
+def _checkpoint_contract(project, monkeypatch, doc='L1.json'):
+    """A neutral D1 contract through the real FCC, not a substitute verdict."""
+    import copy
+    import _flow_yaml
+    flow = copy.deepcopy(_flow_yaml.load())
+    row = next(r for r in flow['steps'] if str(r['id']) == 'D1')
+    row['required_inputs'] = [{'from': 'external', 'path': 'input/docs/*'}]
+    output = 'phase1/generated_docs/' + doc
+    row['required_outputs'] = [output]
+    row['program_outputs'] = []
+    row['gate'] = {'files_exist': [output,
+                                  'reports/phase1/mechanical-ready.json']}
+    monkeypatch.setattr(_flow_yaml, 'load', lambda *a, **k: flow)
+    ready = project / 'reports/phase1/mechanical-ready.json'
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    ready.write_text('{"scope":"SOURCE_CONTROL mechanical input"}\n')
+    return ready
+
+
 @pytest.mark.parametrize("review", ["PASS", "FAIL", "stale", "missing"])
 def test_reused_phase1_consumes_current_expert_review_before_phase2(
         project, monkeypatch, review):
@@ -165,6 +184,11 @@ def test_reused_phase1_consumes_current_expert_review_before_phase2(
     design_input.write_text("A small digital counter.\n")
     assert V._design_input_present(project) is True
     producer = _report(project, "phase1_one_shot.json", {"verdict": "PASS"})
+    _checkpoint_contract(project, monkeypatch)
+    # This existing review-only unit stages freshness explicitly. The actual
+    # producer/source identity is exercised below with the existing recorder.
+    (project / 'phase1/step_identity.json').write_text(
+        '{"scope":"SOURCE_CONTROL explicitly staged freshness"}\n')
     monkeypatch.setattr(V, "_phase1_freshness", lambda *a, **k: {
         "state": V._p1id.REUSE, "reason": "CURRENT", "why": "current producer"})
     if review != "missing":
@@ -184,6 +208,11 @@ def test_reused_phase1_consumes_current_expert_review_before_phase2(
         after_phase=called.append)
     if review == "PASS":
         assert called == ["phase2"], doc
+        import step_output_collector as versions
+        accepted = versions.latest_pass(project, 'D1')
+        assert accepted is not None, 'a signed resume must retain complete canonical acceptance'
+        assert accepted['current_inputs'] is True
+        assert doc['phase1_checkpoint_review']['canonical_acceptance']['verdict'] == 'PASS'
     else:
         assert called == [], doc
         assert rc == 1 and doc["halted_at"] == "phase1", doc
@@ -192,6 +221,150 @@ def test_reused_phase1_consumes_current_expert_review_before_phase2(
             "name": "phase1", "verdict": expected, "rc": 0}, doc
         assert doc["phase1_checkpoint_review"]["producer_reused"] is True
     assert {p: p.read_bytes() for p in retained} == retained
+
+
+def _recorded_d1_checkpoint(tmp_path, monkeypatch):
+    """Run the existing neutral software producer under its real identity recorder."""
+    import execution_backend_gates as gates
+    import execution_backend_worker as worker
+    import step_output_collector as versions
+    import _flow_yaml
+    from programs.tests.test_fx_stale_ldocs_generated_docs_are_reused_only_when_current import (
+        _plugin, _project, _phase1)
+    plugin, project = _plugin(tmp_path), _project(tmp_path)
+    stage_owner_route(project, 'ic')
+    ready = _checkpoint_contract(project, monkeypatch, 'L1_DOC.json')
+    knobs = {'ic_name': '', 'pdk': 'auto', 'mode': 'docs'}
+    monkeypatch.setattr(V, '_phase1_freshness', lambda p, k=None:
+                        V._p1id.assess(p, plugin / 'programs', k))
+    row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == 'D1')
+    inputs = worker._declared_input_files(project, row['required_inputs'])
+    attempt = versions.begin_step(project, 'D1', inputs)
+    with versions.active_steps(project, [attempt]):
+        _phase1(project, plugin, knobs=knobs)
+        versions.publish_producer_outputs(project, attempt)
+        consumer = gates.evaluate(project, row)
+        pending = versions.finish_step(
+            project, attempt, verdict=consumer['status'], canonical_pass=False,
+            result={'runner': 'phase1_one_shot_runner',
+                    'canonical_consumer': consumer})
+    assert pending['status'] == 'NOT_MEASURED'
+    assert consumer['step']['reason_class'] == 'awaiting_signed_judgement'
+    assert versions.latest_pass(project, 'D1') is None
+    original = project / 'steps' / pending['folder']
+    before = {p: p.read_bytes() for p in (original / 'outputs.json',
+                                        original / 'written.json',
+                                        project / 'phase1/step_identity.json')}
+    return project, plugin, ready, knobs, before
+
+
+def _sign_d1_checkpoint(project):
+    import ai_signed_judgement as ai
+    receipt = project / 'reports/audit/ai_judgements/D1.json'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({
+        'schema': ai.SCHEMA, 'step_id': 'D1', 'verdict': 'PASS',
+        'signed_by': 'independent neutral fixture reviewer',
+        'judgement': 'Reviewed the actual neutral producer output and input.',
+        'evidence_sha256': ai.evidence_sha256(project, 'D1')}))
+
+
+def test_signed_reused_d1_runs_complete_consumer_and_retains_current_pass(
+        tmp_path, monkeypatch):
+    import step_output_collector as versions
+    project, _, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    docs_before = V._p1id.docs_snapshot(project)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('FAIL', 1, None), phase2=('PASS', 0),
+        reuse_phase1=True, extra_argv=('--skip-phase3', '--skip-analog'),
+        after_phase=called.append)
+    assert called == ['phase2'], 'the producer and expert extraction must not rerun'
+    accepted = versions.latest_pass(project, 'D1')
+    assert accepted is not None, 'the signed checkpoint has no retained canonical PASS'
+    assert accepted['canonical_pass'] is True and accepted['current_inputs'] is True
+    assert doc['phase1_checkpoint_review']['canonical_acceptance']['verdict'] == 'PASS'
+    assert accepted['result']['canonical_consumer']['status'] == 'PASS'
+    assert accepted['result']['checkpoint']['producer_started'] is False
+    assert accepted['result']['checkpoint']['producer_reused'] is True
+    assert accepted['folder'] != accepted['result']['checkpoint']['prior_folder']
+    assert next(r for r in versions._read_index(project)['steps'] if r['id'] == 'D1')['status'] == 'PASS'
+    old_written = next(data for path, data in before.items() if path.name == 'written.json')
+    assert (project / 'steps' / accepted['folder'] / 'written.json').read_bytes() == old_written
+    assert V._p1id.docs_snapshot(project) == docs_before
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize('mutate_during_consumer', [False, True])
+def test_signed_d1_cannot_override_a_complete_gate_failure(
+        tmp_path, monkeypatch, mutate_during_consumer):
+    import execution_backend_gates as gates
+    import step_output_collector as versions
+    project, _, ready, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    ready.unlink()  # Outside the signed L-doc evidence; the full gate must refuse it.
+    consume = gates.evaluate
+    calls = []
+    def observe(project, row):
+        result = consume(project, row)
+        calls.append(result['status'])
+        if mutate_during_consumer:
+            (project / 'input/docs/spec.md').write_text('changed during the refused gate')
+        return result
+    monkeypatch.setattr(gates, 'evaluate', observe)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('PASS', 0, None), phase2=('PASS', 0),
+        reuse_phase1=True, extra_argv=('--skip-phase3', '--skip-analog'),
+        after_phase=called.append)
+    assert calls == ['FAIL'] and called == []
+    assert doc['halted_at'] == 'phase1'
+    assert doc['phase1_checkpoint_review']['verdict'] == 'FAIL'
+    assert doc['phase1_checkpoint_review']['canonical_acceptance']['verdict'] == 'FAIL'
+    assert versions.latest_pass(project, 'D1') is None
+    assert next(r for r in versions._read_index(project)['steps'] if r['id'] == 'D1')['status'] == 'FAIL'
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_d1_evidence_changed_during_revalidation_cannot_publish_pass(tmp_path, monkeypatch):
+    import execution_backend_gates as gates
+    import step_output_collector as versions
+    project, _, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    consume = gates.evaluate
+    def change(project, row):
+        result = consume(project, row)
+        assert result['status'] == 'PASS'
+        (project / 'input/docs/spec.md').write_text('changed after the full consumer')
+        return result
+    monkeypatch.setattr(gates, 'evaluate', change)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('PASS', 0, None), phase2=('PASS', 0),
+        reuse_phase1=True, extra_argv=('--skip-phase3', '--skip-analog'),
+        after_phase=called.append)
+    assert called == [] and doc['halted_at'] == 'phase1'
+    assert versions.latest_pass(project, 'D1') is None
+    accepted = versions.current_acceptance(project, 0)[0]
+    assert accepted['status'] == 'NOT_MEASURED'
+    assert accepted['result']['canonical_consumer']['status'] == 'NOT_MEASURED'
+    assert accepted['result']['observed_canonical_consumer']['status'] == 'PASS'
+
+
+@pytest.mark.parametrize('mutation', ['input', 'output', 'producer'])
+def test_d1_checkpoint_identity_still_refuses_changed_evidence(tmp_path, monkeypatch, mutation):
+    project, plugin, _, knobs, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    path = {'input': project / 'input/docs/spec.md',
+            'output': project / 'phase1/generated_docs/L1_DOC.json',
+            'producer': plugin / 'programs/fake_l_producer.py'}[mutation]
+    path.write_text(path.read_text() + '\nchanged\n')
+    fresh = V._phase1_freshness(project, knobs)
+    assert fresh['state'] != V._p1id.REUSE
+    run, mode = V._phase1_decision(project, False, knobs)
+    assert (run, mode) == ((False, V._P1_MODE_REFUSED) if mutation == 'output'
+                           else (True, 'docs'))
 
 
 def _save_complete_acceptance(project, sid, status, *, runner, excluded=""):

@@ -601,6 +601,108 @@ def _phase1_freshness(project: Path,
                 "why": f"the producer identity could not be read ({exc})"}
 
 
+def _revalidate_phase1_checkpoint(project: Path, knobs: Dict[str, Any]) -> dict:
+    """Recheck a current D1 checkpoint; this call produces no L documents.
+
+    Keep the original producer identity and write attribution. A signature is
+    one input to the unchanged complete consumer, never its replacement.
+    """
+    import _flow_yaml
+    import ai_signed_judgement as ai
+    import execution_backend_gates as gates
+    import execution_backend_worker as worker
+    import step_output_collector as versions
+
+    project = Path(project).resolve()
+    row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == 'D1')
+    inputs = worker._declared_input_files(project, row.get('required_inputs', ()))
+    prior = next((r for r in versions._read_index(project)['steps']
+                  if str(r.get('id')) == 'D1'), None)
+    root = versions._versions_root(project)
+    previous = root / prior['folder'] if prior else None
+    written = (previous / 'written.json').read_bytes() if (
+        previous is not None and (previous / 'written.json').is_file()) else None
+    authority = _p1id.sidecar_dir(project) / _p1id._si.SIDECAR
+    checkpoint = {'producer_started': False, 'producer_reused': True,
+                  'prior_folder': prior.get('folder') if prior else None}
+    error = None
+    try:
+        identity = authority.read_bytes()
+        checkpoint['producer_identity_sha256'] = hashlib.sha256(identity).hexdigest()
+        bound = gates.contracts(project, row)
+        if not inputs:
+            raise ValueError('D1 checkpoint has no resolved input identity')
+        if _phase1_freshness(project, knobs)['state'] != _p1id.REUSE:
+            raise ValueError('D1 producer checkpoint is no longer current')
+        if previous is not None and (previous / 'outputs.json').is_file():
+            retained = json.loads((previous / 'outputs.json').read_text())
+            if 'inputs' in retained and retained['inputs'] != inputs:
+                raise ValueError('D1 retained checkpoint inputs changed')
+            for output in retained.get('outputs', ()):
+                path = project / output['rel']
+                if not path.is_file() or versions._sha(path) != output['sha256']:
+                    raise ValueError('D1 retained checkpoint output changed: ' + output['rel'])
+    except (OSError, ValueError, KeyError) as exc:
+        error = f'D1_CHECKPOINT_BINDING_REFUSED: {exc}'
+    except gates.em.Refusal as exc:
+        error = f'D1_CHECKPOINT_BINDING_REFUSED: {exc}'
+
+    attempt = versions.begin_step(project, 'D1', inputs)
+    consumer = None
+    observed_consumer = None
+    try:
+        with versions.active_steps(project, [attempt]):
+            if authority.is_file():
+                versions.retain_before(project, 'D1', [authority])
+            if error is None:
+                consumer = gates.evaluate(project, row)
+                observed_consumer = consumer
+                # A measured FAIL stays FAIL even if a gate also changed data.
+                if consumer['status'] == 'PASS':
+                    outputs = gates.contracts(project, row)
+                    if (outputs != bound or authority.read_bytes() != identity
+                            or worker._declared_input_files(
+                                project, row.get('required_inputs', ())) != inputs
+                            or _phase1_freshness(project, knobs)['state'] != _p1id.REUSE
+                            or not ai.check(project, 'D1')[0]):
+                        error = 'D1_CHECKPOINT_BINDING_REFUSED: evidence changed during revalidation'
+                    else:
+                        consumer['outputs'] = outputs
+            status = consumer['status'] if consumer is not None else 'NOT_MEASURED'
+            if error is not None and status != 'FAIL':
+                status = 'NOT_MEASURED'
+                if consumer is not None:
+                    consumer = {**consumer, 'status': status,
+                                'step': {**consumer.get('step', {}), 'status': status,
+                                         'reason_class': 'checkpoint_binding_refused',
+                                         'reasons': [error]}}
+            if written is not None:
+                # Byte-for-byte old attribution, explicitly cited as reused;
+                # do not publish a new producer observation for a no-op.
+                (root / attempt['folder'] / 'written.json').write_bytes(written)
+                checkpoint['written_sha256'] = hashlib.sha256(written).hexdigest()
+            saved = versions.finish_step(
+                project, attempt, verdict=status,
+                result={'runner': 'vibe_ic_one_shot_runner',
+                        'site': 'phase1_checkpoint_revalidation',
+                        'checkpoint': checkpoint, 'detail': error or '',
+                        'observed_canonical_consumer': observed_consumer,
+                        'canonical_consumer': consumer},
+                canonical_pass=(status == 'PASS'))
+    except BaseException as exc:
+        if not (root / attempt['folder'] / 'outputs.json').exists():
+            versions.finish_step(project, attempt, verdict='INTERRUPTED',
+                                 result={'checkpoint': checkpoint,
+                                         'detail': f'{type(exc).__name__}: {exc}'})
+        raise
+    if saved['capture_errors']:
+        raise OSError('D1 checkpoint revalidation could not be retained: ' +
+                      '; '.join(saved['capture_errors']))
+    reasons = (consumer or {}).get('step', {}).get('reasons', ())
+    return {'verdict': status, 'detail': error or '; '.join(reasons),
+            'folder': saved['folder'], 'producer_reused': True}
+
+
 def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
     """The no-L-docs half of `_phase1_decision`: which design input exists.
 
@@ -2639,6 +2741,14 @@ def _main() -> int:
             review = "PASS" if credit else "FAIL" if rejected else "NOT_MEASURED"
             _phase1_checkpoint_review = {
                 "verdict": review, "detail": detail, "producer_reused": True}
+            if credit:
+                accepted = _revalidate_phase1_checkpoint(project, _p1_knobs)
+                _phase1_checkpoint_review['canonical_acceptance'] = accepted
+                review = accepted['verdict']
+                credit = review == 'PASS'
+                detail = accepted['detail']
+                _phase1_checkpoint_review.update(verdict=review, detail=detail)
+                plan[-1] = ("phase1", review, 0)
             if not credit:
                 # No producer process was rerun: rc remains zero. The row
                 # records the consumer verdict that stopped this transition.
