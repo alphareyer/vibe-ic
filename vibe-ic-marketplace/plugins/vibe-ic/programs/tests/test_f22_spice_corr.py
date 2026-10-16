@@ -519,3 +519,27 @@ def test_step30_current_consumer_rechecks_the_selected_extraction_corner(tmp_pat
     put(data, registry)
     assert ordinary.SC.main([str(project), '--no-spice', '--json', str(project / 'gate.json')]) == 1
     assert 'CURRENT_STEP30_INPUT_BYTES_CHANGED' in (project / 'gate.json').read_text()
+
+
+def test_step30_does_not_reload_the_extraction_style_between_layout_cells(tmp_path):
+    cells = ['neutral__logic', 'neutral__buffer', 'neutral__register']
+    style = 'ngspice(hrhc)'
+    actual = pst.extraction_tcl(['neutral.gds'], cells, tmp_path, extract_style=style)
+    commands = [line.strip() for line in actual.splitlines()
+                if line.strip() and not line.lstrip().startswith('#')]
+    # Reloading a style is a session-wide state change, even when its name
+    # is unchanged. No such reload may occur after a cell starts extracting.
+    assert [line for line in commands if line.startswith('extract style ')] == [
+        f'extract style {style}']
+    assert commands.index('gds read neutral.gds') < commands.index(f'extract style {style}')
+    assert commands.index(f'extract style {style}') < commands.index(f'load {cells[0]}')
+    # Each cell still receives the existing complete RC recipe, unchanged
+    # except that its shared session has already selected the technology.
+    for cell in cells:
+        recipe = pst._mx.build_extraction_tcl(
+            cell, str(tmp_path / f'{cell}.spice'),
+            pst._mx.MagicResimExtractOptions(extract_style=None))
+        assert recipe in actual
+    assert commands.count('extract all') == len(cells)
+    assert commands.count('extresist all') == len(cells)
+    assert commands.count('ext2spice extresist on') == len(cells)

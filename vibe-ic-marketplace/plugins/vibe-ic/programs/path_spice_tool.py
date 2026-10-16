@@ -464,10 +464,14 @@ def extraction_tcl(gds: Sequence[str], cells: Sequence[str], out_dir: Path, *,
     leaves the PDK rcfile's selection intact; it does not assert a corner."""
     lines = ['gds readonly true', 'gds rescale false']
     lines += [f'gds read {g}' for g in gds]
+    if (extract_style or '').strip():
+        # Style selection reloads Magic's technology and global extraction
+        # state. Select it once for this session, before extracting any cell.
+        lines.append(f'extract style {extract_style.strip()}')
     for cell in cells:
         lines += [f'extract path {out_dir}', _mx.build_extraction_tcl(
             cell, str(out_dir / f'{cell}.spice'),
-            _mx.MagicResimExtractOptions(extract_style=extract_style))]
+            _mx.MagicResimExtractOptions(extract_style=None))]
     return '\n'.join(lines + ['quit -noprompt']) + '\n'
 
 
