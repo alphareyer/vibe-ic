@@ -942,7 +942,11 @@ def _source_control_census(cmd):
 
 def test_cold_phase2_abc_witness_survives_claim_and_complete_stage_judge(tmp_path, monkeypatch):
     import drv_run_identity as identity
-    from test_drv_signoff_judge import _bundle, _install_test_freeze
+    from test_drv_signoff_judge import (
+        _bundle, _install_test_freeze, _synthetic_scene_profile)
+    # Reuse the complete judge fixture's explicit software-only scene/image
+    # setup here; importing its helpers does not activate its module autouse.
+    _synthetic_scene_profile.__wrapped__(tmp_path, monkeypatch)
     project, folder, netlist, sdc, _, _, calls = _cold_native_synthesis(tmp_path, monkeypatch)
     receipt = ll.validate_step_receipt(folder, 'Yosys.Synthesis')
     script = folder / receipts.PROBE_DIR / 'synth/abc.script'
@@ -962,11 +966,26 @@ def test_cold_phase2_abc_witness_survives_claim_and_complete_stage_judge(tmp_pat
     assert document['run_id'] == receipts.current_run(project)
     assert document['netlist']['sha256'] == receipts._sha(netlist)
     assert document['census_sdc']['sha256'] == receipts._sha(sdc)
-    bundle_root = tmp_path / 'judge'
+    # The remaining sign-off stages are the existing neutral bundle fixture,
+    # not native measurements. Keep them in this project and run without
+    # changing any of the cold producer's original inputs or retained files.
+    original = {path: path.read_bytes() for path in folder.rglob('*') if path.is_file()}
+    original[netlist] = netlist.read_bytes()
+    original[netlist.parent / 'synth_inputs.json'] = (netlist.parent / 'synth_inputs.json').read_bytes()
+    bundle_root = project
     bundle = _bundle(bundle_root)
+    run = plan._run_identity(project)
+    bundle['identity'].update({key: run[key] for key in
+                              ('run_id', 'run_started_at', 'tree_sha', 'spec_version')})
+    assert bundle['identity']['run_id'] == document['run_id']
     bundle['stages'] = [measured if row['name'] == 'synth' else row for row in bundle['stages']]
     _install_test_freeze(bundle, bundle_root, monkeypatch)
-    assert drv.judge(bundle)['verdict'] == 'PASS'
+    result = drv.judge(bundle)
+    (tmp_path / 'cold-abc-judge.observation.json').write_text(json.dumps({
+        'scope': 'SOURCE_CONTROL: native-process substitute; no EDA qualification',
+        'stage': measured, 'bundle': bundle, 'judge': result}, indent=2) + '\n')
+    assert {path: path.read_bytes() for path in original} == original
+    assert result['verdict'] == 'PASS', result
 
 
 @pytest.mark.parametrize('changed', ['wrapper', 'source', 'receipt', 'netlist', 'log', 'unreferenced'])
