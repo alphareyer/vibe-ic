@@ -1079,7 +1079,10 @@ def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
                      and (Path(host_root) / guest_pdk.relative_to(guest_root)).resolve()
                          == (pdk_root / pdk).resolve()
                      for host_root, guest_root in _tool['mounts'])
-    if image != _tool['image'] or config.get('PDK') != pdk or not mapped_pdk:
+    # The subject retains Stage23's producer image; this context records the
+    # current execution image. A tool update does not change retained bytes.
+    if (not isinstance(image, str) or not re.search(r'@sha256:[0-9a-f]{64}$', image)
+            or config.get('PDK') != pdk or not mapped_pdk):
         raise Refusal('CURRENT_STEP30_IMAGE_OR_PDK_MISMATCH', str(pdk_root))
     roles = {row['role']: row for row in subject['inputs']}
     for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc'), ('spef', 'spef')]:

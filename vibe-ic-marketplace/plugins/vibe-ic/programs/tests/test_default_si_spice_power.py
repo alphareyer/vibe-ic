@@ -873,6 +873,81 @@ def test_default_step30_explicit_native_paths_do_not_authorize_drift(tmp_path, m
     assert not gate.passed and gate.summary['measurement'] == 'NOT_MEASURED'
 
 
+def _step30_image_interop_subject(tmp_path, monkeypatch):
+    """Real retained/current readers; only tool processes are SOFTWARE_FIXTURE."""
+    import test_step30_r4_current_failures as current_fixture
+    p, folder, lib, paths = _explicit_step30_subject(tmp_path)
+    current_fixture.correlation_tool(p, folder, lib, monkeypatch,
+                                     mismatch='CORRELATED', companion='success')
+    root = p / 'fixture_pdk'
+    gds = write(root / 'neutral/cells.gds', 'SOFTWARE_FIXTURE_ONLY layout bytes\n')
+    model = write(root / 'neutral/cells.spice', '.subckt BUF A Z\nR1 A Z 1\n.ends\n')
+    config_path = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    config = json.loads(config_path.read_text())
+    config.update(CELL_GDS=['/pdk/neutral/cells.gds'],
+                  CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'])
+    put(config_path, config)
+    put(folder / 'config.json', config)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp['config'] = LC.digest(config_path)
+    fp['config_files'].update({'/pdk/neutral/cells.gds': LC.digest(gds),
+                             '/pdk/neutral/cells.spice': LC.digest(model)})
+    seal(folder, fp)
+    switch_path = p / 'phase3/librelane_switch.json'
+    switch = json.loads(switch_path.read_text())
+    switch.pop('image')
+    put(switch_path, switch)
+    put(p / 'phase3/librelane_pdk_root.provenance.json', {
+        'source': 'resolved', 'path': str(root),
+        'derivation': {'image': BF.IMAGE, 'pdk': 'neutral',
+                       'host_path': str(root / 'neutral')}})
+    return p, folder, lib, paths, gds, model
+
+
+@pytest.mark.parametrize('consumer', ['same', 'updated'])
+def test_step30_keeps_producer_provenance_with_current_consumer_image(tmp_path, monkeypatch, consumer):
+    p, folder, lib, paths, gds, model = _step30_image_interop_subject(tmp_path, monkeypatch)
+    image = BF.IMAGE if consumer == 'same' else 'ghcr.io/vibeic/vibeic-eda@sha256:' + 'b' * 64
+    monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', image)
+    original_receipt = (folder / 'vibeic_receipt.json').read_bytes()
+    doc = PST.run_current_step30(p, image, p / 'fixture_pdk', 'neutral')
+    receipt = json.loads((p / 'reports/phase3/spice_correlation.current.json').read_text())
+    assert doc['verdict'] == 'PASS'
+    assert doc['current_subject']['tool_image'] == BF.IMAGE
+    assert receipt['tool_image'] == BF.IMAGE
+    assert receipt['context']['image'] == image
+    assert (folder / 'vibeic_receipt.json').read_bytes() == original_receipt
+    gate = SC.run_audit(p, run_spice=False)
+    assert gate.summary['current_binding'] == 'CURRENT'
+    assert gate.summary['measurement'] == 'MEASURED'
+    assert gate.passed and gate.summary['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('damage', ['producer_image', 'netlist', 'sdc', 'liberty',
+                                    'cell_gds', 'model', 'pdk_root'])
+def test_step30_consumer_update_preserves_producer_and_material_refusals(tmp_path, monkeypatch, damage):
+    p, folder, lib, paths, gds, model = _step30_image_interop_subject(tmp_path, monkeypatch)
+    monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', BF.IMAGE)
+    assert PST.current_context(p, BF.IMAGE, p / 'fixture_pdk', 'neutral')[0]['tool_image'] == BF.IMAGE
+    root = p / 'fixture_pdk'
+    if damage == 'producer_image':
+        fp = json.loads((folder / 'input_fingerprint.json').read_text())
+        fp['image'] = 'ghcr.io/vibeic/vibeic-eda@sha256:' + 'c' * 64
+        seal(folder, fp)
+        reason = 'CURRENT_STAPOSTPNR_IMAGE_CHANGED|LL_PDK_IMAGE_OR_PROCESS_CHANGED'
+    elif damage == 'pdk_root':
+        root = p / 'other_root'
+        root.mkdir()
+        reason = 'CURRENT_STEP30_IMAGE_OR_PDK_MISMATCH'
+    else:
+        path = {'netlist': paths['nl'], 'sdc': paths['sdc'], 'liberty': lib,
+                'cell_gds': gds, 'model': model}[damage]
+        path.write_bytes(path.read_bytes() + b'\n ')
+        reason = 'LL_INPUT_CHANGED:'
+    with pytest.raises((LC.Refusal, ValueError), match=reason):
+        PST.current_context(p, BF.IMAGE, root, 'neutral')
+
+
 
 def test_step30_native_local_process_uses_its_declared_workdir(tmp_path):
     import os

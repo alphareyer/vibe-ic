@@ -283,8 +283,10 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     receipt = lc.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
     switch_path = project / 'phase3/librelane_switch.json'
     switch = json.loads(switch_path.read_text()) if switch_path.is_file() else {}
-    image = evidence._image(project, switch)
     fp = receipt['input']
+    # This image identifies the retained producer, not the tool consuming its
+    # material now. Keep its original PDK derivation and all byte checks below.
+    image = evidence._image(project, {**switch, 'image': fp.get('image')})
     if fp.get('image') != image:
         raise Refusal('CURRENT_STAPOSTPNR_IMAGE_CHANGED')
     mounts = evidence._pdk_mounts(project, switch, folder, image)
