@@ -30,13 +30,30 @@ END cutA
 """
 HEADER = "Node0 Layer,Node0 X location,Node0 Y location,Node1 Layer,Node1 X location,Node1 Y location,Current\n"
 DHEADER = "Layer,Node0 X,Node0 Y,Node1 X,Node1 Y,Current(A),Area(um^2),J(A/um^2),Jlimit(A/um^2),Ratio,Status,Cuts,Basis\n"
+PER_CUT_TECH = TECH.replace("LAYER cutA", "LAYER Via1").replace(
+    " TYPE CUT ;\nEND cutA", " TYPE CUT ;\n DCCURRENTDENSITY AVERAGE 0.18 ;\nEND Via1") + """LAYER wireB
+ TYPE ROUTING ;
+ WIDTH 1 ;
+ THICKNESS 1 ;
+ DCCURRENTDENSITY AVERAGE 1 ;
+END wireB
+VIA neutral_cut DEFAULT
+ LAYER wireA ;
+ RECT -0.2 -0.2 0.2 0.2 ;
+ LAYER Via1 ;
+ RECT -0.13 -0.13 0.13 0.13 ;
+ LAYER wireB ;
+ RECT -0.2 -0.2 0.2 0.2 ;
+END neutral_cut
+"""
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
+def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False,
+          per_cut=False, via_current=89.52e-6, kit=None, native_change=None):
     project = tmp_path / "run"
     pnr = R._pl.pnr_dir(project)
     rpt = R._pl.reports_phase3_dir(project)
@@ -48,12 +65,13 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
     extracted = R._pl.extracted_dir(project)
     extracted.mkdir(parents=True)
     (extracted / "unit.spef").write_text('*SPEF "IEEE 1481-1998"\n*DESIGN "unit"\n')
-    tech = tmp_path / "authority.tlef"; tech.write_text(TECH)
+    tech_text = PER_CUT_TECH if per_cut else TECH
+    tech = tmp_path / "authority.tlef"; tech.write_text(tech_text)
     stage = project / "phase3/pdk_stage"
-    stage.mkdir(); (stage / "authority.tlef").write_text(TECH)
+    stage.mkdir(); (stage / "authority.tlef").write_text(tech_text)
     cell = tmp_path / "cells.lef"; cell.write_text("VERSION 5.8 ;\n")
     lib = tmp_path / "cells.lib"; lib.write_text("library(unit) {}\n")
-    pdk = SimpleNamespace(name="declared-open-kit", tech_lef=str(tech), cell_lef=str(cell),
+    pdk = SimpleNamespace(name=kit or ("gf180mcuD" if per_cut else "declared-open-kit"), tech_lef=str(tech), cell_lef=str(cell),
                           liberty=str(lib), macro_lefs=[], macro_libs=[], metal_prefix="wire")
     calls = []
     if direct:
@@ -72,13 +90,34 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
         tcl = (rpt / "ir_em_unit.tcl").read_text()
         calls.append(tcl)
         (rpt / "em_segments_PWR.csv").write_text(HEADER + f"wireA,0,0,wireA,1,0,{current}\n" +
-                                                  ("wireA,0,0,wireB,0,0,0.000001\n" if via else ""))
+                                                  (f"wireA,0,0,wireB,0,0,{via_current}\n" if per_cut else
+                                                   "wireA,0,0,wireB,0,0,0.000001\n" if via else ""))
         (rpt / "em_pg_geometry.tsv").write_text("net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource\nPWR\twireA\t0\t-0.5\t2\t0.5\tspecial_wire\n")
         native = "check_current_density -net PWR" in tcl
         if native:
             (rpt / "em_openroad_density_PWR.csv").write_text(DHEADER +
                 f"wireA,0,0,1,0,{current},1,{current},0.0009,{current / 0.0009:.3f},{'VIOLATED' if stress else 'OK'},0,AREAL\n" +
                 ("cutA,0,0,0,0,0.000001,1,0.000001,0,0,NO_LIMIT,1,NO_LIMIT\n" if via else ""))
+            if per_cut:
+                limits = (rpt / "em_openroad_limits.txt").read_text().splitlines()
+                selected = next(line.split() for line in limits if line.startswith("Via1 "))
+                basis = "PER_CUT" if selected[1] == "per_cut" else "AREAL"
+                limit = float(selected[-1]); cuts = 8; area = cuts * 0.26 ** 2
+                density = via_current / (cuts if basis == "PER_CUT" else area)
+                if native_change == "zero_cuts":
+                    cuts = 0
+                elif native_change == "wrong_area":
+                    area *= 2
+                elif native_change == "wrong_density":
+                    density *= 1.17
+                elif native_change == "unknown_cut":
+                    selected[0] = "unknown_cut"
+                elif native_change == "wrong_basis":
+                    basis = "AREAL"
+                with (rpt / "em_openroad_density_PWR.csv").open("a") as stream:
+                    stream.write(f"{selected[0]},0,0,0,0,{via_current:.3e},{area:.4e},"
+                                 f"{density:.3e},{limit:.3e},{density / limit:.6f},"
+                                 f"{'VIOLATED' if density > limit else 'OK'},{cuts},{basis}\n")
         markers = []
         for stage, role, path in re.findall(r'EM_BOUND_(BEFORE|AFTER) (\w+) \[lindex \[exec sha256sum (.*?)\] 0\]', tcl):
             markers.append(f"EM_BOUND_{stage} {role} {digest(Path(path.strip('{}')))}")
@@ -87,7 +126,7 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
         log = ("\n".join(markers) + "\n=== PSM_NET PWR ===\n"
                "[INFO PSM-0040] All shapes on net PWR are connected.\n"
                "Net : PWR\nTotal power : 2 W\nSupply voltage : 5 V\n"
-               f"Worstcase IR drop: {0.781 if stress else 0.00001} V\nMaximum current : {current} A\n"
+               f"Worstcase IR drop: {0.781 if stress else 0.00001} V\nMaximum current : {max(current, via_current) if per_cut else current} A\n"
                "=== EM_POWER_BASIS ===\nTotal 0 0 0 2 100%\n=== EM_POWER_BASIS_END ===\n"
                "PSM_SOURCE_MODEL: promoted_supply_pins_excluded=0 placed_pads=0\n")
         (rpt / "ir_em.log").write_text(log)
@@ -197,3 +236,91 @@ def test_existing_ir_gate_preserves_bound_stress_failure(tmp_path, monkeypatch):
     import ir_drop_report_check as I
     project, _, _ = build(tmp_path, monkeypatch, via=True, stress=True)
     assert I._run_and_emit([str(project)]) == 1
+
+
+@pytest.mark.parametrize("current,expected", [
+    (89.52e-6, "PASS"), (0.00132, "FAIL"), (0.001296, "FAIL"),
+], ids=["recorded_8_cut_current", "over_limit", "margin_boundary"])
+def test_selected_per_cut_authority_reaches_native_and_both_consumers(
+        tmp_path, monkeypatch, current, expected):
+    project, pdk, _ = build(tmp_path, monkeypatch, direct=True,
+                            per_cut=True, via_current=current)
+    rpt = project / "reports/phase3"
+    limits = (rpt / "em_openroad_limits.txt").read_text()
+    assert "Via1 per_cut 0.000162\n" in limits  # 0.18 mA/cut, one 10% margin.
+    record = json.loads((rpt / "em_openroad_density.json").read_text())
+    rule = record["authority"]["per_cut"]
+    registry = json.loads(Path(E.__file__).with_name("pdk_registry.json").read_text())
+    selected = next(row for row in registry["pdks"] if row["name"] == pdk.name)
+    assert rule["source"] == selected["em_current_limits"]["source"]
+    assert rule["temperature_c"] == 125
+    assert rule["layers"]["via1"]["jmax_A_per_cut"] == pytest.approx(0.00018)
+    snapshot = project / record["authority"]["per_cut_snapshot"]
+    assert record["inputs"]["per_cut_authority"]["sha256"] == digest(snapshot)
+    native = E.validate_native_density(project)
+    assert native["valid"], native
+    result, density = E.evaluate(rpt / "em_segments.csv", None, Path(pdk.tech_lef),
+                                  0.1, 2.0, None, 20,
+                                  def_path=R._pl.pnr_dir(project) / "routed.def",
+                                  pg_geometry_path=rpt / "em_pg_geometry.tsv")
+    assert result == expected, density
+    result, report = authority(project, pdk)
+    assert result == expected, report
+    assert report["jmax_screen"]["summary"]["segments_screened"] == 2
+    assert report["jmax_screen"]["summary"]["segments_unscreened"] == 0
+    via = next(row for row in density["worst_segments"] if row["layer"] == "Via1")
+    assert via["basis"] == "per_cut" and via["cuts"] == 8
+    assert via["value_A_per_cut"] == pytest.approx(current / 8)
+    if current == 0.001296:
+        # The tool uses strict >; the existing retained >= boundary still FAILs.
+        assert native["verdict"] == "PASS"
+
+
+def test_unknown_pdk_keeps_literal_lef_areal_fallback(tmp_path, monkeypatch):
+    project, pdk, _ = build(tmp_path, monkeypatch, direct=True,
+                            per_cut=True, kit="unknown-open-kit")
+    rpt = project / "reports/phase3"
+    assert "Via1 0.000162\n" in (rpt / "em_openroad_limits.txt").read_text()
+    assert "per_cut" not in (rpt / "em_openroad_limits.txt").read_text()
+    native = E.validate_native_density(project)
+    assert native["valid"] and native["verdict"] == "FAIL", native
+    assert native.get("per_cut_authority") is None
+    result, report = authority(project, pdk)
+    assert result == "FAIL", report
+
+
+@pytest.mark.parametrize("change", ["zero_cuts", "wrong_area", "wrong_density",
+                                      "unknown_cut", "wrong_basis"])
+def test_bound_per_cut_native_geometry_cannot_be_substituted(tmp_path, monkeypatch, change):
+    project, pdk, _ = build(tmp_path, monkeypatch, direct=True,
+                            per_cut=True, native_change=change)
+    native = E.validate_native_density(project)
+    assert native["valid"] is False, native
+    result, report = authority(project, pdk)
+    assert result == "INCOMPLETE", report
+
+
+@pytest.mark.parametrize("changed", ["source", "snapshot", "missing_snapshot"])
+def test_per_cut_authority_requires_current_invocation_binding(tmp_path, monkeypatch, changed):
+    project, pdk, _ = build(tmp_path, monkeypatch, direct=True, per_cut=True)
+    path = project / "reports/phase3/em_openroad_density.json"
+    doc = json.loads(path.read_text())
+    if changed == "source":
+        doc["authority"].setdefault("per_cut", {}).setdefault("source", {})["sha256"] = "0" * 64
+        path.write_text(json.dumps(doc))
+    else:
+        snapshot = project / doc["authority"].get(
+            "per_cut_snapshot", "reports/phase3/em_native_per_cut_authority.json")
+        if changed == "missing_snapshot":
+            snapshot.unlink(missing_ok=True)
+        else:
+            snapshot.write_text("{}\n")
+    result, report = authority(project, pdk)
+    assert result == "INCOMPLETE", report
+
+
+def test_selected_rule_refuses_unsupported_cut_dimensions(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "PER_CUT_TECH", PER_CUT_TECH.replace(
+        "RECT -0.13 -0.13 0.13 0.13", "RECT -0.14 -0.14 0.14 0.14"))
+    with pytest.raises(ValueError, match="cut geometry is unsupported"):
+        build(tmp_path, monkeypatch, direct=True, per_cut=True)

@@ -562,6 +562,59 @@
           "metal5": [0.30, null],
           "metaltop": [0.30, null]
         }
+      },
+      "em_current_limits": {
+        "source": {
+          "url": "https://github.com/google/gf180mcu-pdk/blob/de3240d7529a6970437ac3344820aaae7839f215/docs/physical_verification/design_manual/tables_clear/54_Electro-migration2_151.csv",
+          "commit": "de3240d7529a6970437ac3344820aaae7839f215",
+          "sha256": "1aa912a39845770e0348614a291fa1c515af97c37e4f186b885ebf3207ed718e",
+          "section": "DRM 14.2, Table 14.4, Current Per Contact (mA), unidirectional 125 C",
+          "lifetime_note": "Chapter introduction states T0.1 > 100kh at 85 C; no measured 125 C lifetime is asserted."
+        },
+        "temperature_c": 125,
+        "direction": "unidirectional",
+        "layers": {
+          "Via1": {
+            "kind": "cut",
+            "jmax_mA_per_cut": 0.18,
+            "cut_size_um": [
+              0.26,
+              0.26
+            ]
+          },
+          "Via2": {
+            "kind": "cut",
+            "jmax_mA_per_cut": 0.18,
+            "cut_size_um": [
+              0.26,
+              0.26
+            ]
+          },
+          "Via3": {
+            "kind": "cut",
+            "jmax_mA_per_cut": 0.18,
+            "cut_size_um": [
+              0.26,
+              0.26
+            ]
+          },
+          "Via4": {
+            "kind": "cut",
+            "jmax_mA_per_cut": 0.18,
+            "cut_size_um": [
+              0.26,
+              0.26
+            ]
+          },
+          "Via5": {
+            "kind": "cut",
+            "jmax_mA_per_cut": 0.18,
+            "cut_size_um": [
+              0.26,
+              0.26
+            ]
+          }
+        }
       }
     },
     {

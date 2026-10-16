@@ -267,8 +267,9 @@ def _segment_geometry_key(net, layer0, layer1, points, current):
             abs(float(current)))
 
 
-def _native_density_roundtrip_matches(current: float, area: float, density: float) -> bool:
-    """Check I/area=J through the native CSV's .3e/.4e/.3e codec.
+def _native_density_roundtrip_matches(current: float, area: float, density: float,
+                                     *, exact_divisor: bool = False) -> bool:
+    """Check the native I/divisor=J codec; an integer cut count is exact.
 
     These rounding intervals only validate serialized observations. They do
     not modify a current, area, Jmax, margin, or the sign-off comparison.
@@ -282,7 +283,7 @@ def _native_density_roundtrip_matches(current: float, area: float, density: floa
         return max(0.0, value - half_ulp), value + half_ulp
 
     i_lo, i_hi = interval(abs(current), 3)
-    a_lo, a_hi = interval(area, 4)
+    a_lo, a_hi = (area, area) if exact_divisor else interval(area, 4)
     j_lo, j_hi = interval(density, 3)
     return a_lo > 0 and max(i_lo / a_hi, j_lo) <= min(i_hi / a_lo, j_hi)
 
@@ -956,14 +957,19 @@ def _screen_segment(seg: Dict[str, Any], table: Dict[str, Dict[str, Any]],
                     "limit": limit, "utilization": util,
                     "geometry_source": "bound_native_current_density",
                     "lifetime_ratio": _lifetime_ratio(util, blacks_n)}
-        # Compare the whole branch current with one cut's limit. No cut
-        # count or equal current sharing is inferred from a VIA master.
+        # The native tool owns its effective cut population. Offline inputs
+        # keep the conservative whole-branch screen; no VIA-master count is
+        # substituted for the measured native branch.
         limit = cut["jmax_per_cut_A"]
-        util = cur / limit if limit > 0 else math.inf
+        cuts = seg.get("native_cuts") if seg.get("native_basis") == "PER_CUT" else None
+        value = cur / cuts if isinstance(cuts, int) and cuts > 0 else cur
+        util = value / limit if limit > 0 else math.inf
         offender = util >= (1.0 - margin)
         return {"status": "offender" if offender else "ok", "net": net,
                 "layer": cut["orig_name"], "basis": "per_cut",
-                "current_A": cur, "value_A_per_cut": cur,
+                "current_A": cur, "value_A_per_cut": value,
+                **({"cuts": cuts, "geometry_source": "bound_native_current_density"}
+                   if cuts is not None else {}),
                 "limit_A_per_cut": limit, "utilization": util,
                 "lifetime_ratio": _lifetime_ratio(util, blacks_n)}
 
@@ -1024,13 +1030,79 @@ def _lifetime_ratio(util: float, n: float) -> Optional[float]:
         return None
 
 
-def native_limits(text: str, margin: float = _DEFAULT_MARGIN) -> str:
-    """Fork input: each routing or cut layer's own LEF areal authority."""
-    return "".join(
-        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - margin):.12g}\n"
-        for row in parse_lef_jmax(text).values()
-        if math.isfinite(row.get("jmax_areal_A_per_um2") or 0)
-        and (row.get("jmax_areal_A_per_um2") or 0) > 0)
+_PDK_REGISTRY = Path(__file__).with_name("pdk_registry.json")
+
+
+def native_jmax_table(text: str, pdk_name: Optional[str] = None
+                      ) -> Tuple[Dict[str, Dict[str, Any]], Optional[dict]]:
+    """Apply only a selected PDK's cited per-cut rule to its matching cuts.
+
+    Raw LEF semantics remain areal. An explicit registry rule is a separate
+    foundry authority, never an interpretation of the LEF's numeric value.
+    """
+    table = parse_lef_jmax(text)
+    registry = json.loads(_PDK_REGISTRY.read_text())
+    selected = next((row for row in registry.get("pdks", [])
+                     if row.get("name") == pdk_name), {})
+    rule = selected.get("em_current_limits")
+    if rule is None:
+        return table, None
+    if not isinstance(rule, dict) or not isinstance(rule.get("source"), dict):
+        raise ValueError("declared per-cut authority has no source")
+    source = rule["source"]
+    if (not source.get("url") or not source.get("section")
+            or not re.fullmatch(r"[a-f0-9]{40}", str(source.get("commit", "")))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(source.get("sha256", "")))
+            or not math.isfinite(float(rule["temperature_c"]))
+            or rule.get("direction") != "unidirectional"):
+        raise ValueError("declared per-cut authority provenance is incomplete")
+    sizes = {}
+    for via in _VIA_BLOCK_RE.finditer(text):
+        body = via.group(2)
+        layers = list(_VIA_LAYER_RE.finditer(body))
+        for i, layer in enumerate(layers):
+            part = body[layer.end():layers[i + 1].start() if i + 1 < len(layers) else len(body)]
+            for rect in re.finditer(r"\bRECT\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+"
+                                    r"([-+0-9.eE]+)\s+([-+0-9.eE]+)\s*;", part):
+                x0, y0, x1, y1 = map(float, rect.groups())
+                sizes.setdefault(layer.group(1).lower(), set()).add(
+                    tuple(sorted((round(abs(x1 - x0), 10), round(abs(y1 - y0), 10)))))
+    overrides = parse_json_jmax(rule)
+    applied = {}
+    for name, row in overrides.items():
+        prior = table.get(name)
+        if prior is None:
+            continue  # This metal-stack variant does not contain that cut.
+        if prior.get("kind") != "cut" or row.get("kind") != "cut":
+            raise ValueError("per-cut authority names a routing layer")
+        dimensions = tuple(sorted(map(float, rule["layers"][row["orig_name"]]["cut_size_um"])))
+        limit = row["jmax_per_cut_A"]
+        if (len(dimensions) != 2 or not all(math.isfinite(x) and x > 0 for x in dimensions)
+                or sizes.get(name) != {dimensions} or not math.isfinite(limit) or limit <= 0):
+            raise ValueError(f"per-cut authority cut geometry is unsupported: {name}")
+        replacement = dict(prior, **row, cut_size_um=list(dimensions))
+        replacement.pop("jmax_areal_A_per_um2", None)
+        table[name] = replacement
+        applied[name] = {"jmax_A_per_cut": limit, "cut_size_um": list(dimensions)}
+    if not applied:
+        raise ValueError("declared per-cut authority matches no current cut layer")
+    return table, {"registry_sha256": _native_sha(_PDK_REGISTRY),
+                   "source": source, "temperature_c": rule["temperature_c"],
+                   "direction": rule["direction"], "layers": applied}
+
+
+def native_limits(text: str, margin: float = _DEFAULT_MARGIN,
+                  pdk_name: Optional[str] = None) -> str:
+    """Fork limits: cited per-cut authority, otherwise literal LEF areal."""
+    table, _ = native_jmax_table(text, pdk_name)
+    result = []
+    for row in table.values():
+        per_cut = row.get("jmax_per_cut_A")
+        value = per_cut if per_cut is not None else row.get("jmax_areal_A_per_um2")
+        if value is not None and math.isfinite(value) and value > 0:
+            basis = " per_cut" if per_cut is not None else ""
+            result.append(f"{row['orig_name']}{basis} {value * (1 - margin):.12g}\n")
+    return "".join(result)
 
 
 def native_source_identity() -> Dict[str, str]:
@@ -1196,10 +1268,20 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
         if not doc["pdk"]["name"] or doc["pdk"]["tech_lef"] != doc["inputs"]["tech_lef"]["declared_path"]:
             raise ValueError("declared PDK identity disagrees")
         text = authority.read_text()
+        table, per_cut_authority = native_jmax_table(text, doc["pdk"]["name"])
+        if doc["authority"].get("per_cut") != per_cut_authority:
+            raise ValueError("selected PDK per-cut authority changed")
+        if per_cut_authority is not None:
+            per_cut_path = local(doc["authority"]["per_cut_snapshot"])
+            relative = str(per_cut_path.relative_to(project))
+            if (relative not in doc["outputs"] or "per_cut_authority" not in doc["inputs"]
+                    or json.loads(per_cut_path.read_text()) != per_cut_authority
+                    or doc["inputs"]["per_cut_authority"]["sha256"] != _native_sha(per_cut_path)):
+                raise ValueError("per-cut authority was not bound to the native invocation")
         if doc["margin"] != margin:
             raise ValueError("Jmax margin differs from native execution")
         limits = rpt / "em_openroad_limits.txt"
-        if limits.read_text() != native_limits(text, margin):
+        if limits.read_text() != native_limits(text, margin, doc["pdk"]["name"]):
             raise ValueError("native Jmax is not the declared routing authority")
         subject = json.loads((rpt / "em.json").read_text())
         static = json.loads((rpt / "ir_drop.json").read_text())
@@ -1243,7 +1325,6 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
             em_libs = {row["sha256"] for role, row in doc["inputs"].items() if role.startswith("liberty")}
             if not ll_libs or ll_libs != em_libs:
                 raise ValueError("LibreLane/EM library populations differ")
-        table = parse_lef_jmax(text)
         coverage = {}
         for net in doc["nets"]:
             if f"EM_DENSITY_DONE {net}" not in log:
@@ -1261,12 +1342,14 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
             for row, psm_row in zip(rows, psm):
                 layer = table.get(row["Layer"].lower(), {})
                 status = row["Status"]
-                if (segment_geometry is not None and layer
-                        and status in ("OK", "VIOLATED") and row["Basis"] == "AREAL"):
+                if ((segment_geometry is not None or row["Basis"] == "PER_CUT") and layer
+                        and status in ("OK", "VIOLATED") and row["Basis"] in ("AREAL", "PER_CUT")):
                     l0, l1 = (psm_row[name] for name in ("Node0 Layer", "Node1 Layer"))
                     points = tuple(tuple(float(psm_row[f"Node{node} {axis} location"])
                                          for axis in ("X", "Y")) for node in (0, 1))
                     current = abs(float(psm_row["Current"]))
+                    if row["Basis"] == "PER_CUT" and l0.lower() == l1.lower():
+                        raise ValueError("per-cut density has no routing-to-cut topology")
                     if (any(float(row[f"Node{node} {axis}"]) != points[node][axis_index]
                             for node in (0, 1) for axis_index, axis in enumerate(("X", "Y")))
                             or abs(float(row["Current(A)"])) != current):
@@ -1280,24 +1363,34 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
                             raise ValueError("native density layer disagrees with VIA topology")
                         area = float(row["Area(um^2)"])
                         cuts = int(row["Cuts"])
+                        per_cut = row["Basis"] == "PER_CUT"
+                        divisor = float(cuts) if per_cut else area
                         if (not math.isfinite(area) or area <= 0
                                 or not math.isfinite(current)
                                 or layer["kind"] == "cut" and cuts <= 0
+                                or per_cut and (layer["kind"] != "cut"
+                                    or not layer.get("jmax_per_cut_A")
+                                    or not math.isclose(area / cuts,
+                                        math.prod(layer["cut_size_um"]), rel_tol=0.0001))
                                 or not _native_density_roundtrip_matches(
-                                    current, area, float(row["J(A/um^2)"]))):
+                                    current, divisor, float(row["J(A/um^2)"]),
+                                    exact_divisor=per_cut)):
                             raise ValueError("native conductor cross section is unproven")
                         key = _segment_geometry_key(net, l0, l1, points, current)
                         geometry = {"native_area_um2": area, "native_cuts": cuts,
-                                    "native_layer": row["Layer"].lower()}
-                        if key in segment_geometry and segment_geometry[key] != geometry:
-                            raise ValueError("ambiguous native segment cross section")
-                        segment_geometry[key] = geometry
+                                    "native_layer": row["Layer"].lower(),
+                                    "native_basis": row["Basis"]}
+                        if segment_geometry is not None:
+                            if key in segment_geometry and segment_geometry[key] != geometry:
+                                raise ValueError("ambiguous native segment cross section")
+                            segment_geometry[key] = geometry
                 if status == "NO_LIMIT":
                     counts["no_limit"] += 1
                     continue
-                if status not in ("OK", "VIOLATED") or layer.get("kind") not in ("routing", "cut") or row["Basis"] != "AREAL":
+                expected_basis = "PER_CUT" if layer.get("jmax_per_cut_A") is not None else "AREAL"
+                if status not in ("OK", "VIOLATED") or layer.get("kind") not in ("routing", "cut") or row["Basis"] != expected_basis:
                     raise ValueError("wire-to-via substitution or invalid native status")
-                expected = layer["jmax_areal_A_per_um2"] * (1 - margin)
+                expected = layer["jmax_per_cut_A" if expected_basis == "PER_CUT" else "jmax_areal_A_per_um2"] * (1 - margin)
                 if not math.isclose(float(row["Jlimit(A/um^2)"]), expected, rel_tol=0.0006):
                     raise ValueError("native CSV Jmax differs from PDK authority")
                 ratio = float(row["Ratio"])
@@ -1319,7 +1412,8 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
                 "authority_sha256": authority_sha, "pdk": doc["pdk"],
                 "nets": coverage, "violations": violations,
                 "unmeasured_segments": missing, "power_basis_complete": bool(basis.get("complete")),
-                "source_identity": doc["source_identity"]}
+                "source_identity": doc["source_identity"],
+                "per_cut_authority": per_cut_authority}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"valid": False, "verdict": "NOT_MEASURED",
                 "reason": str(exc), "rule": "EM_NATIVE_BINDING_INVALID"}
@@ -1372,7 +1466,11 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         tech_lef, jmax_path = Path(native["authority"]), None
 
     # (2) Jmax reference present?
-    table, jmax_src, jerr = load_jmax_table(jmax_path, tech_lef)
+    if production is not None:
+        table, _ = native_jmax_table(tech_lef.read_text(), native["pdk"]["name"])
+        jmax_src, jerr = str(tech_lef), None
+    else:
+        table, jmax_src, jerr = load_jmax_table(jmax_path, tech_lef)
     rep["jmax_source"] = jmax_src
     if not table:
         rep["verdict"] = "SKIPPED"

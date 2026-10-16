@@ -72151,22 +72151,23 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # Default and dual use the same native PSM producer. There is no second
     # density run or user switch required for the ordinary Step-25 consumer.
     _audit_tool = _em_mode in ("direct", "dual")
-    # The OpenROAD fork's check_current_density consumes areal A/um^2 limits.
-    # LEF routing DCCURRENTDENSITY is mA/um: divide by declared THICKNESS.
+    # The fork accepts both literal LEF areal limits and a selected PDK's
+    # separately cited per-cut authority. Apply the same single margin below.
     # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
     import em_current_density_check as _emcd
     _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
-    _jmax = _emcd.parse_lef_jmax(_tlef)
+    _jmax, _per_cut_authority = _emcd.native_jmax_table(_tlef, pdk.name)
     _em_limits = out_dir / "em_openroad_limits.txt"
-    _limit_rows = _emcd.native_limits(_tlef).splitlines()
+    _limit_rows = _emcd.native_limits(_tlef, pdk_name=pdk.name).splitlines()
     _authority_snapshot = out_dir / "em_native_authority.tlef"
+    _per_cut_snapshot = out_dir / "em_native_per_cut_authority.json"
     if _audit_tool and not _limit_rows:
         notes.append("OpenROAD EM density NOT_MEASURED: tech LEF has no routing Jmax plus THICKNESS")
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
                 out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
-                out_dir / "em_openroad_ab.json", _em_limits, _authority_snapshot,
+                out_dir / "em_openroad_ab.json", _em_limits, _authority_snapshot, _per_cut_snapshot,
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
@@ -72178,6 +72179,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # Stage the exact authority on every solve, including a changed kit.
     # Its digest must also match the file the native session actually reads.
     _aa.write_text(_authority_snapshot, _tlef)
+    if _per_cut_authority is not None:
+        _aa.write_text(_per_cut_snapshot, json.dumps(_per_cut_authority, sort_keys=True) + "\n")
     # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
@@ -72260,6 +72263,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _native_inputs = {}
     _input_paths = {"layout": str(def_file), "tech_lef": str(pdk.tech_lef),
                     "cell_lef": str(pdk.cell_lef), "liberty0": _basis["liberty"]}
+    if _per_cut_authority is not None:
+        _input_paths["per_cut_authority"] = str(_per_cut_snapshot)
     for role in ("sdc", "spef"):
         if _basis[role]:
             _input_paths[role] = str(_basis[role])
@@ -72421,8 +72426,9 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
             else "NOT_MEASURED"),
         "mode": _em_mode,
-        "scope": "routing wires only",
-        "via_cut_status": "NOT_MEASURED: native areal table carries no per-cut authority",
+        "scope": "power-grid routing and cut layers on the recorded power basis",
+        "via_cut_status": ("PER_CUT: selected PDK's cited current-per-contact authority"
+                           if _per_cut_authority is not None else "LEF-native literal areal authority"),
         "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
         "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
         "pdk": {"name": pdk.name, "tech_lef": str(pdk.tech_lef)},
@@ -72431,6 +72437,10 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         "inputs": _native_inputs, "power_basis": _basis_record,
         "execution": {"argv": ["bash", "-c", cmd], "native_rc": rc},
     }
+    if _per_cut_authority is not None:
+        _native_density_record["authority"].update(
+            per_cut=_per_cut_authority,
+            per_cut_snapshot=str(_per_cut_snapshot.relative_to(project)))
     # Parse IR + EM numbers from PSM stdout (deterministic regex).
     # OpenROAD emits one record per line, but diagnostics are mixed into the
     # same stdout stream.  A line such as ``IR drop: not measured`` or
@@ -72752,6 +72762,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                 ir_rpt, ir_rpt.with_suffix(".json"), em_rpt, em_rpt.with_suffix(".json"),
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)]
+    if _per_cut_authority is not None:
+        _outputs.append(_per_cut_snapshot)
     if _primary_ir_mode != "direct":
         if em_only:
             # Retain the already measured primary as a bound scientific
