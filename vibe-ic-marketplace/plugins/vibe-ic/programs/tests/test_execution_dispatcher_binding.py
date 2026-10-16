@@ -75,15 +75,17 @@ def controller(*arms, fixture_root=None):
 
 
 def issued_context16(tmp_path):
-    declaration = tmp_path / 'declared_pdk.json'
-    # Bind the current input document, but keep the unresolved-PDK negative.
-    # The genuine producer refuses this identity before native execution;
-    # its actual clock-plan consumer must still report the missing plan.
-    declaration.write_text(json.dumps({
-        'fields': {'pdk_target': 'source_fixture_unresolved_pdk'}}))
-    ctx = backend.context16(tmp_path)
+    # Reuse the existing producer-ready PDK/floorplan/SDC fixture. Keep a
+    # real consumer negative in its INPUT, rather than blocking the producer
+    # on an unknown PDK and asking an unexecuted gate to report a failure.
+    # Same resolved-config schema as test_clock_plan_check: the SDC names clk,
+    # while this deliberately empty CTS clock set omits that declared source.
+    config = tmp_path / 'clock_config.json'
+    config.write_text(json.dumps({
+        'meta': {'step': 'OpenROAD.CTS'}, 'CLOCK_PORT': [], 'CLOCK_NET': None}))
+    ctx = backend.context16(tmp_path, native_clock=True)
     return replace(ctx, inputs={**ctx.inputs,
-        'project/phase1/generated_docs/L19_CONSTRAINTS_PDK.json': declaration})
+        'project/phase3/librelane/19-config/OpenROAD.CTS.json': config})
 
 
 def record(tmp_path, **facts):
@@ -103,8 +105,9 @@ def test_actual_dispatcher_alias_cannot_create_another_eligible_arm(tmp_path, mo
     record(tmp_path, style=style, plan=plan, result=result, receipt=receipt)
     assert len(plan['arms']) == 1
     assert plan['arms'] == ['release_16'], plan['arms']
-    # This source-only fixture intentionally has no resolvable PDK, so
-    # the canonical clock-plan gate remains a measured FAIL.  Alias admission
+    # This software fixture supplies producer-ready inputs and an explicit
+    # CTS clock-set mismatch, so the real clock-plan consumer must FAIL.
+    # Alias admission
     # is the contract under test: one source-bound arm runs, and the alias may
     # neither create a second arm nor mask the real gate failure.
     assert result['candidate_statuses'] == {'release_16': 'FAIL'}
@@ -113,6 +116,18 @@ def test_actual_dispatcher_alias_cannot_create_another_eligible_arm(tmp_path, mo
     assert len(receipt['processes']) == 1
     assert receipt['processes'][0]['rc'] == 0
     assert not (root / alias.arm_id).exists()
+    evidence = json.loads((root / original.arm_id / 'outputs/release-evidence.json').read_text())
+    assert evidence['missing_inputs'] == []
+    assert evidence['producer_verdict'] == 'PASS'
+    assert evidence['producer'][0]['rc'] == 0
+    assert 'phase3/stage3/cts/clock_plan.json' in evidence['outputs']
+    assert evidence['canonical_status'] == 'FAIL'
+    assert any(row['gate'] == 'clock_plan_check' and row['rc'] == 1
+               and row['verdict'] == 'FAIL' for row in evidence['canonical_gate_ledger'])
+    gate = json.loads((root / original.arm_id / 'outputs/project/reports/phase2/gates/clock_plan.json').read_text())
+    assert gate['verdict'] == 'FAIL'
+    assert any(f['rule'] == 'LIBRELANE_CLOCK_MISSING' and f['severity'] == 'FAIL'
+               for f in gate['findings'])
 
 
 def test_unregistered_executed_helper_has_terminal_refusal(tmp_path, monkeypatch):

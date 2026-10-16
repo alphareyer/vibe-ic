@@ -136,8 +136,9 @@ def test_relative_entry_binds_actual_output_cwd(tmp_path):
     receipt = json.loads((root / original.arm_id / 'receipt.json').read_text())
     assert plan['arms'] == [original.arm_id]
     assert next(row for row in plan['portfolio'] if row['arm_id'] == name)['admission'] == 'SAME_ENGINE_FAMILY'
-    # The source-only Step-16 fixture lacks a resolvable PDK.  Preserve
-    # that measured gate FAIL while proving the relative entry resolves to the
+    # The software Step-16 fixture has producer-ready inputs but deliberately
+    # omits its SDC clock from CTS config. Preserve that real consumer FAIL
+    # while proving the relative entry resolves to the
     # same current source closure and cannot become another provider.
     assert result['candidate_statuses'] == {original.arm_id: 'FAIL'}
     assert receipt['reason'] == 'GATE_FAIL'
@@ -148,6 +149,17 @@ def test_relative_entry_binds_actual_output_cwd(tmp_path):
     assert alias_receipt['status'] == 'REFUSED'
     assert alias_receipt['reason'] == 'SAME_ENGINE_FAMILY'
     assert alias_receipt['processes'] == []
+    evidence = json.loads((root / original.arm_id / 'outputs/release-evidence.json').read_text())
+    assert evidence['missing_inputs'] == []
+    assert evidence['producer_verdict'] == 'PASS'
+    assert 'phase3/stage3/cts/clock_plan.json' in evidence['outputs']
+    assert evidence['canonical_status'] == 'FAIL'
+    assert any(row['gate'] == 'clock_plan_check' and row['rc'] == 1
+               and row['verdict'] == 'FAIL' for row in evidence['canonical_gate_ledger'])
+    gate = json.loads((root / original.arm_id / 'outputs/project/reports/phase2/gates/clock_plan.json').read_text())
+    assert gate['verdict'] == 'FAIL'
+    assert any(f['rule'] == 'LIBRELANE_CLOCK_MISSING' and f['severity'] == 'FAIL'
+               for f in gate['findings'])
 
 
 def test_literal_search_path_selects_actual_shadow_package(tmp_path):
