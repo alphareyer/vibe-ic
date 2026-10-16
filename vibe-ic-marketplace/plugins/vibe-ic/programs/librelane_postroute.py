@@ -76,6 +76,7 @@ def gate_level_sim(project: Path, top: str, image: str, pdk_root: Path, pdk: str
     """Run the L10 suite against every STAPostPNR corner SDF (custom step),
     judge it, and write `reports/phase3/gls_corners.json`."""
     import sdf_gate_sim as sgs
+    import librelane_contract as contract
     sta_folder, state = stapostpnr_state(project)
     sdfs = corner_sdfs(state)
     netlist = Path(str(state.get('nl') or ''))
@@ -93,11 +94,13 @@ def gate_level_sim(project: Path, top: str, image: str, pdk_root: Path, pdk: str
                 for p in (config.get(key) or [])]
     host = {f'/pdk/{pdk}': str(pdk_root / pdk)}
     host_models = [Path(_map(str(p), host)) for p in declared]
+    # Match run_chain's actual execution namespace for every closure member.
+    local = contract._provider_for_image(image) is not None or contract._provider_route(project)
     # F21: the bench clock is the period of the SDC this STA state timed.
     manifest = sgs.tool_arm_manifest(project, top, netlist, host_models, gls_dir,
                                      sdc=Path(str(state.get('sdc') or '')),
                                      sdfs=[Path(p) for _, p in sorted(sdfs.items())],
-                                     path_map={v: k for k, v in host.items()})
+                                     path_map={} if local else {v: k for k, v in host.items()})
     folder = run_chain(project, image, [(GLS_STEP, configs[GLS_STEP],
                                          sta_folder / 'state_out.json')],
                        mounts=[(pdk_root.resolve(), PDK_GUEST_ROOT)], lane='29', pdk_root=PDK_GUEST_ROOT)[0]

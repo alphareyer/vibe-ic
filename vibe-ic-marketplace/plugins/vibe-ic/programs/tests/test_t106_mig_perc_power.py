@@ -873,3 +873,127 @@ def test_default_step29_binds_a_same_line_clock_before_complete_capture(
     assert manifest['cases'] and manifest['clock']['clocks_s']['clk'] == pytest.approx(24e-9)
     assert 'initial clk = 1\'b0; always #12 clk = ~clk;' in Path(
         manifest['cases'][0]['testbench']).read_text()
+
+
+from test_librelane_contract import local_image  # noqa: E402,F401
+
+
+@pytest.mark.parametrize('case', ['good', 'case_fail', 'missing_model', 'missing_include', 'docker_guest'])
+def test_default_gls_manifest_uses_the_compilers_execution_namespace(
+        tmp_path, monkeypatch, local_image, case):
+    """Real Icarus reads the complete LOCAL neutral SC/PAD/include closure.
+
+    Only the LibreLane configuration/step-process transport is substituted.
+    The custom GLS step, compiler, simulator, judge, publishers and canonical
+    consumer execute normally. The Docker branch preserves guest-path data.
+    """
+    import time
+    import _flow_yaml
+    import execution_backend_producers as backend
+    import execution_backend_worker as worker
+    import execution_policy
+    import phase3_one_shot_runner as runner
+    import step_output_collector as versions
+
+    project, root, declared = _gls_project(tmp_path)
+    local = case != 'docker_guest'
+    monkeypatch.setattr(contract._ce, 'no_container_route', lambda: local)
+    put(project / 'phase3/librelane_switch.json', {
+        'image': local_image.image, 'pdk_root_host': str(root), 'pdk': 'x'})
+    put(project / 'input/step_0_5ic_answers.json', {})
+    write(project / 'phase2/stage2/synth/post_dft_netlist.v', CHIP_TOP)
+    cfg = SimpleNamespace(name='x')
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *_: {
+        'pdk_name': 'x', 'pdk_root': str(root), 'image_id': local_image.image})
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, contract, cfg, 'SOURCE_FIXTURE_ONLY'))
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    header = write(root / 'x/libs.ref/cells/verilog/model_constants.vh',
+                   '`define SOURCE_FIXTURE_PAD_DELAY 1\n')
+    if local:
+        cells = root / 'x/libs.ref/cells/verilog/cells.v'
+        cells.write_text(f'`include "{header}"\n' + cells.read_text())
+        pads = root / 'x/libs.ref/pads/verilog/pads.v'
+        pads.write_text('module cells__in_c (PAD, Y); input PAD; output Y;\n'
+                        '  buf (Y, PAD);\n'
+                        '  specify (PAD => Y) = (`SOURCE_FIXTURE_PAD_DELAY, `SOURCE_FIXTURE_PAD_DELAY); endspecify\n'
+                        'endmodule\n')
+    state_path = Path(json.loads((project / postroute.STEP23_RECORD).read_text())['sta_state'])
+    state = json.loads(state_path.read_text())
+    for sdf in state['sdf'].values():
+        write(Path(sdf), '(DELAYFILE\n (SDFVERSION "3.0") (DESIGN "chip_top")\n'
+              ' (DIVIDER .) (TIMESCALE 1ns)\n'
+              ' (CELL (CELLTYPE "cells__in_c") (INSTANCE u_pad_x)\n'
+              '  (DELAY (ABSOLUTE (IOPATH PAD Y (0.1:0.1:0.1) (0.1:0.1:0.1)))))\n)\n')
+    if case == 'case_fail':
+        bench = project / 'phase2/stage1/sim/tb_case.v'
+        bench.write_text(bench.read_text().replace('pass=1/1', 'pass=0/1'))
+    resolved_models = [str(root / path.removeprefix('/pdk/')) for path in declared] if local else declared
+    edge, calls = _gls_edge(resolved_models, lambda c: VVP_PASS)
+    executions = []
+    def process_edge(argv, **kwargs):
+        if any('from librelane.flows.chip import Chip' in str(arg) for arg in argv):
+            return edge(argv[:-1], **kwargs)
+        if '--id' not in argv or not local:
+            return edge(argv, **kwargs)
+        from librelane.state import DesignFormat
+        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
+        from librelane_plugin_vibeic import GateLevelSim
+        folder = Path(argv[argv.index('-o') + 1])
+        folder.mkdir(parents=True, exist_ok=True)
+        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        manifest = json.loads(Path(config['VIBEIC_GLS_MANIFEST']).read_text())
+        if case == 'missing_model':
+            (root / 'x/libs.ref/pads/verilog/pads.v').unlink()
+        elif case == 'missing_include':
+            header.unlink()
+        instance = SimpleNamespace(config={
+            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
+            step_dir=str(folder), _run=GateLevelSim._run)
+        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
+        put(folder / 'state_out.json', incoming)
+        executions.append(folder)
+        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus GLS completed\n', stderr='')
+    monkeypatch.setattr(contract, 'run_container', process_edge)
+    gate = project / 'reports/phase2/gates/post_layout_sim.json'
+    assert not gate.exists()
+    began = time.time()
+    row = runner._default_pnr_rows(project, 'spm', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
+    manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
+    expected = [str(root / 'x/libs.ref/cells/verilog/cells.v'),
+                str(root / 'x/libs.ref/cells/verilog/primitives.v'),
+                str(root / 'x/libs.ref/pads/verilog/pads.v')]
+    assert manifest['models'] == (expected if local else [
+        '/pdk/x/libs.ref/cells/verilog/cells.v', '/pdk/x/libs.ref/cells/verilog/primitives.v',
+        '/pdk/x/libs.ref/pads/verilog/pads.v'])
+    assert Path(manifest['netlist']).is_file() and Path(manifest['stubs']).is_file()
+    assert all(Path(c['testbench']).is_file() for c in manifest['cases'])
+    judged = json.loads((project / 'reports/phase3/gls_corners.json').read_text())
+    good = case in ('good', 'docker_guest')
+    assert row.status == ('PASS' if good else 'FAIL'), row.detail
+    assert judged['verdict'] == ('PASS' if good else 'FAIL')
+    if local:
+        assert len(executions) == 1
+        runs = json.loads((executions[0] / 'gls_runs.json').read_text())['runs']
+        assert len(runs) == 3
+        for run in runs:
+            log = Path(run['compile_log']).read_text()
+            if case in ('missing_model', 'missing_include'):
+                assert run['compile_rc'] != 0 and run['sim_rc'] is None
+                assert ('pads.v' if case == 'missing_model' else 'model_constants.vh') in log
+            else:
+                assert run['compile_rc'] == run['sim_rc'] == 0, log
+                assert Path(run['stdout']).is_file()
+                assert judged['corners'][run['corner']]['delays_applied'] > 0
+    definition = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '29')
+    _, missing = worker.resolve_contract(project, definition['required_outputs'])
+    assert missing == [] and gate.is_file()
+    assert json.loads(gate.read_text())['verdict'] == ('PASS' if good else 'FAIL')
+    if good:
+        accepted = next(r for r in versions.current_acceptance(project, began) if r['id'] == '29')
+        assert accepted['canonical_pass'] is True
+    else:
+        assert versions.latest_pass(project, '29') is None
+    put(project / 'local_namespace_observation.json', {
+        'case': case, 'local': local, 'models': manifest['models'],
+        'actual_iverilog_vvp': local, 'verdict': row.status, 'ic_native_claim': False})
