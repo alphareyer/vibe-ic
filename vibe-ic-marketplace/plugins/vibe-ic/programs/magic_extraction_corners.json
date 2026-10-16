@@ -1,0 +1,23 @@
+{
+  "pdks": [
+    {
+      "name": "gf180mcuD",
+      "magic_extraction": {
+        "source": {
+          "url": "https://github.com/fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_sc_mcu7t5v0/blob/0ef8889a8df0acf959683fbe73013f342a2206a2/docs/spec/corners.rst",
+          "commit": "0ef8889a8df0acf959683fbe73013f342a2206a2",
+          "sha256": "1a3664673118abb01cd7453cf12e52d6d1306a93da808a982ceadfe9e708b225",
+          "scope": "SC library characterization PEX: SS Worst RC, TT Typical RC, FF Best RC. Metadata records the primary source; it does not pin the runtime PDK revision.",
+          "technology_source": "open_pdks b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0, gf180mcuD.tech: hrhc high-R/high-C; lrlc low-R/low-C; empty variant typical.",
+          "technology_sha256": "2662e35e3dc94c88d55fc795e30ac22378561be4556bb3b5f248a1daa2ac1cd8"
+        },
+        "tech": "libs.tech/magic/gf180mcuD.tech",
+        "liberties": {
+          "gf180mcu_fd_sc_mcu7t5v0__ss_125C_4v50.lib": "ngspice(hrhc)",
+          "gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib": "ngspice()",
+          "gf180mcu_fd_sc_mcu7t5v0__ff_n40C_5v50.lib": "ngspice(lrlc)"
+        }
+      }
+    }
+  ]
+}

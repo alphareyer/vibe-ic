@@ -123,7 +123,7 @@ def test_the_layout_view_takes_the_schematic_subckts_place_in_the_schematic_port
     assert env == {'PDK_ROOT': '/pdk'}
     tcl = Path(argv[-1]).read_text()
     assert 'gds read /pdk/x/libs.ref/cells/gds/cells.gds' in tcl
-    assert 'ext2spice cthresh 0' in tcl and 'ext2spice extresist off' in tcl
+    assert 'ext2spice cthresh 0' in tcl and 'ext2spice extresist on' in tcl
     # A cell with no device in its declared netlist is not extracted at all.
     assert 'load cells__fill_1' not in tcl
     assert view['extracted'] == ['cells__nand2_1']
@@ -370,3 +370,152 @@ def test_step_30_writes_the_step_verdict_not_a_selection(tmp_path, monkeypatch):
     assert (written['verdict'], written['verdict_basis'], written['reported_arm']) == (
         'PASS', 'SINGLE_ARM', 'ngspice')
     assert written['not_measured'] == ['xyce']
+
+
+# The Step-30 producer must publish the native full-RC cell through the same
+# public interface, without shorting resistance-split well contacts.
+def _full_rc_arm(tmp_path, monkeypatch, *, style='ngspice(hrhc)',
+                 registered_pdk='x', registered_lib='cells__ss_125C_4v50.lib',
+                 declared_styles='(),(hrhc),(lrlc)', resistor='R0 VNW well_contact 125',
+                 external_port=False):
+    project = tmp_path / 'design'
+    folder, _ = t106._stapostpnr(project)
+    root = tmp_path / 'pdkroot'
+    lib = '/pdk/x/libs.ref/cells/lib/cells__ss_125C_4v50.lib'
+    write(root / 'x/libs.ref/cells/lib/cells__ss_125C_4v50.lib', t106.LIBERTY)
+    source = write(root / 'x/libs.ref/cells/spice/cells.spice',
+                   '.subckt cells__dffq_1 D CLK Q VDD VNW VPW VSS\n'
+                   'X0 Q D VSS VPW nfet_05v0 W=1u L=0.6u\n.ends\n')
+    write(root / 'x/libs.tech/ngspice/m.ngspice', t106.MODELS)
+    write(root / 'x/libs.tech/librelane/config.tcl', CONFIG_TCL)
+    write(root / 'x/libs.tech/magic/x.tech',
+          f'extract\n style ngspice variants {declared_styles}\nend\n')
+    registry = put(tmp_path / 'registry.json', {'pdks': [{
+        'name': registered_pdk, 'magic_extraction': {
+            'tech': 'libs.tech/magic/x.tech',
+            'source': {'scope': 'SOURCE_FIXTURE_ONLY explicit neutral PDK declaration'},
+            'liberties': {registered_lib: style}}}]})
+    monkeypatch.setattr(pst, '_EXTRACTION_CORNERS', registry, raising=False)
+    config = json.loads((folder / 'config.json').read_text())
+    config.update(CELL_SPICE_MODELS=['/pdk/x/libs.ref/cells/spice/cells.spice'],
+                  CELL_GDS=['/pdk/x/libs.ref/cells/gds/cells.gds'])
+    put(folder / 'config.json', config)
+    # This is a neutral process substitution, not a native Magic result.
+    # The extra port is deliberately not a guessed '.tN' name.
+    native = ('.subckt cells__dffq_1 VDD VSS Q D CLK VNW VPW\n'
+              '+ well_contact\n'
+              'X0 Q D VSS well_contact nfet_05v0 W=1u L=0.6u\n'
+              + resistor + '\nC0 Q well_contact 0.05f\n.ends\n')
+    contact = 'TEST' if external_port else 'well_contact'
+    native = native.replace('well_contact', contact)
+    calls = []
+    def tool(image, project_, mounts, argv, cwd, docker='docker', env=None):
+        calls.append(argv)
+        if argv[0] == 'magic':
+            write(Path(cwd) / 'cells__dffq_1.spice', native)
+            public = ['D', 'CLK', 'Q', 'VDD', 'VNW', 'VPW', 'VSS']
+            if external_port:
+                public.append(contact)
+            write(Path(cwd) / 'cells__dffq_1.ext',
+                  '\n'.join(f'port "{name}" {i} 0 0 0 0 m1'
+                            for i, name in enumerate(public, 1)) + '\n')
+            write(Path(cwd) / 'cells__dffq_1.res.ext', f'rnode "{contact}" 0 0 0 0 0\n')
+        else:
+            assert argv[0] == 'sta'
+        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY\n', stderr='')
+    monkeypatch.setattr(pst, '_docker', tool)
+    def run():
+        arm = pst.prepare_arm(project, 'img', folder / 'state_out.json',
+                              'max_ss_125C_4v50', pdk_root=root, pdk='x',
+                              out_dir=tmp_path / 'arm', paths=1)
+        tcl = (tmp_path / 'arm/extract/extract.tcl').read_text()
+        return arm, tcl, calls, lib, source
+    return run
+
+
+@pytest.mark.parametrize('style', ['ngspice(hrhc)', 'ngspice()', 'ngspice(lrlc)'])
+def test_step30_uses_the_selected_library_declared_style_and_full_rc(tmp_path, monkeypatch, style):
+    arm, tcl, calls, lib, source = _full_rc_arm(tmp_path, monkeypatch, style=style)()
+    assert f'extract style {style}\n' in tcl
+    order = ['extract do resistance', 'extract all', 'extresist extout on',
+             'extresist threshold 0', 'extresist all', 'ext2spice scale off',
+             'ext2spice lvs', 'ext2spice cthresh 0', 'ext2spice rthresh 0',
+             'ext2spice extresist on']
+    commands = [line.strip() for line in tcl.splitlines()
+                if line.strip() and not line.lstrip().startswith('#')]
+    offsets = [next(i for i, line in enumerate(commands) if line.startswith(command))
+               for command in order]
+    assert offsets == sorted(offsets)
+    view = arm['cells']['cell_view']
+    assert view['extraction_corner']['status'] == 'QUALIFIED'
+    assert view['extraction_corner']['liberty'] == lib
+    assert view['extraction_corner']['style'] == style
+    assert view['view'] == 'layout-extracted' and view['kept_schematic'] == {}
+    canonical = Path(view['path']).read_text()
+    assert '.subckt cells__dffq_1 D CLK Q VDD VNW VPW VSS\n' in canonical
+    assert 'R0 VNW well_contact 125\n' in canonical
+    assert 'X0 Q D VSS well_contact nfet_05v0 W=1u L=0.6u\n' in canonical
+    folded = Path(arm['cells']['path']).read_text()
+    assert '.subckt cells__dffq_1 D CLK Q VDD VSS\n' in folded
+    assert 'R0 VDD well_contact 125\n' in folded
+    assert 'X0 Q D VSS well_contact nfet_05v0' in folded
+    assert arm['cells']['cell_view']['missing_exports'] == []
+    assert [command[0] for command in calls] == ['magic', 'sta']
+
+
+@pytest.mark.parametrize('missing', ['kit', 'library'])
+def test_step30_does_not_borrow_another_kit_or_library_extraction_corner(tmp_path, monkeypatch, missing):
+    kwargs = {'registered_pdk': 'other'} if missing == 'kit' else {'registered_lib': 'other__ss.lib'}
+    arm, tcl, _, _, _ = _full_rc_arm(tmp_path, monkeypatch, **kwargs)()
+    assert '\nextract style ' not in tcl
+    assert arm['cells']['cell_view'].get('extraction_corner', {}).get('status') == 'UNQUALIFIED'
+    assert arm['cells']['cell_view']['extraction_corner']['style'] is None
+    assert 'ext2spice extresist on' in tcl
+
+
+def test_step30_refuses_a_bound_style_absent_from_the_installed_technology(tmp_path, monkeypatch):
+    run = _full_rc_arm(tmp_path, monkeypatch, declared_styles='()')
+    with pytest.raises(pst.Refusal) as err:
+        run()
+    assert err.value.code == 'LL_SPICE_EXTRACTION_STYLE_UNDECLARED'
+
+
+@pytest.mark.parametrize('resistor', ['', 'R0 VNW well_contact 125\nR1 well_contact Q 50'])
+def test_step30_does_not_hide_unconnected_or_ambiguous_extra_public_ports(tmp_path, monkeypatch, resistor):
+    arm, _, _, _, source = _full_rc_arm(tmp_path, monkeypatch, resistor=resistor)()
+    view = arm['cells']['cell_view']
+    assert view['extracted'] == []
+    assert view['view'] == 'schematic'
+    assert 'not the schematic ports' in view['kept_schematic']['cells__dffq_1']
+    assert 'well_contact' not in Path(arm['cells']['path']).read_text()
+
+
+def test_step30_keeps_a_real_extra_external_pin_mismatched_even_when_resistively_tied(tmp_path, monkeypatch):
+    arm, _, _, _, _ = _full_rc_arm(tmp_path, monkeypatch, external_port=True)()
+    view = arm['cells']['cell_view']
+    assert view['extracted'] == []
+    assert view['view'] == 'schematic'
+    assert 'TEST' in view['kept_schematic']['cells__dffq_1']
+    assert 'not the schematic ports' in view['kept_schematic']['cells__dffq_1']
+
+
+def test_step30_current_consumer_rechecks_the_selected_extraction_corner(tmp_path, monkeypatch):
+    import test_default_si_spice_power as ordinary
+    project, folder, lib = ordinary.project(tmp_path)
+    root = project / 'fixture_pdk'
+    write(root / 'neutral/libs.tech/magic/neutral.tech',
+          'extract\n style ngspice variants (),(hrhc)\nend\n')
+    registry = {'pdks': [{'name': 'neutral', 'magic_extraction': {
+        'tech': 'libs.tech/magic/neutral.tech',
+        'source': {'scope': 'SOURCE_FIXTURE_ONLY neutral corner declaration'},
+        'liberties': {lib.name: 'ngspice()'}}}]}
+    data = put(tmp_path / 'extraction-corners.json', registry)
+    monkeypatch.setattr(pst, '_EXTRACTION_CORNERS', data, raising=False)
+    assert ordinary.spice_produce(project, folder, lib, monkeypatch)['status'] == 'RAN'
+    assert ordinary.SC.main([str(project), '--no-spice', '--json', str(project / 'gate.json')]) == 0
+    # No PDK/Liberty/tool output changes: only the actual selected owner data
+    # changes. The existing consumer must reject its previous current result.
+    registry['pdks'][0]['magic_extraction']['liberties'][lib.name] = 'ngspice(hrhc)'
+    put(data, registry)
+    assert ordinary.SC.main([str(project), '--no-spice', '--json', str(project / 'gate.json')]) == 1
+    assert 'CURRENT_STEP30_INPUT_BYTES_CHANGED' in (project / 'gate.json').read_text()

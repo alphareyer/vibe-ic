@@ -88,6 +88,7 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 from _atomic_artefact import write_json  # noqa: E402
 from librelane_contract import Refusal, _load, digest, post_pnr_timing_inputs  # noqa: E402
 import spice_correlation_check as _scc  # noqa: E402 — the gate's pure helpers
+import magic_extract_spice_emit as _mx  # noqa: E402
 
 SIMULATORS = ('ngspice', 'xyce')
 #: Every capacitance doubled. The CT-08 lesson scaled by 10; MEASURED on spm
@@ -370,6 +371,7 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
 
 #: Where a PDK declares its Magic rcfile for its own flow.
 _PDK_FLOW_CONFIGS = ('libs.tech/librelane/config.tcl', 'libs.tech/openlane/config.tcl')
+_EXTRACTION_CORNERS = Path(__file__).with_name('magic_extraction_corners.json')
 _MAGICRC_RE = re.compile(r'^\s*set\s+::env\(MAGICRC\)\s+"?([^"\s]+)"?', re.M)
 _INSTANCE_RE = re.compile(r'^\s*([A-Za-z_][\w$]*)\s+(?:#\s*\(.*?\)\s*)?\\?\S+\s*\(', re.M)
 
@@ -401,7 +403,8 @@ def subckt_devices(text: str) -> Dict[str, Tuple[List[str], int]]:
     -- transistor, diode or subckt call -- it holds)}. First definition wins."""
     out: Dict[str, Tuple[List[str], int]] = {}
     current = None
-    for line in text.splitlines():
+    from analog_a7_post_layout_emit import _joined_lines
+    for line in _joined_lines(text):
         m = _SUBCKT_RE.match(line)
         if m:
             current = None if m.group(1) in out else m.group(1)
@@ -415,29 +418,87 @@ def subckt_devices(text: str) -> Dict[str, Tuple[List[str], int]]:
     return out
 
 
+def _resistive_internal_ports(body: str, extra: set, public: set) -> bool:
+    """Magic may expose resistance-split contact nodes as extra ports.
+
+    They can stay internal to the original public cell interface only when
+    each has a positive-resistance path to exactly one public port. Keep
+    the native node names and all resistor/device lines unchanged.
+    """
+    graph: Dict[str, set] = {}
+    for line in body.splitlines():
+        words = line.split()
+        if len(words) != 4 or not words[0].lower().startswith('r'):
+            continue
+        try:
+            value = float(words[3])
+        except ValueError:
+            continue
+        if not math.isfinite(value) or value <= 0:
+            continue
+        a, b = words[1:3]
+        graph.setdefault(a, set()).add(b)
+        graph.setdefault(b, set()).add(a)
+    for node in extra:
+        seen, pending = set(), [node]
+        while pending:
+            item = pending.pop()
+            if item not in seen:
+                seen.add(item)
+                pending.extend(graph.get(item, set()) - seen)
+        if len(seen & public) != 1:
+            return False
+    return True
+
+
 def netlist_cells(netlist_text: str, known: Sequence[str]) -> List[str]:
     """The cells among `known` the structural netlist instantiates."""
     used = set(_INSTANCE_RE.findall(netlist_text))
     return sorted(c for c in known if c in used)
 
 
-def extraction_tcl(gds: Sequence[str], cells: Sequence[str], out_dir: Path) -> str:
+def extraction_tcl(gds: Sequence[str], cells: Sequence[str], out_dir: Path, *,
+                   extract_style: Optional[str] = None) -> str:
     """One Magic session: the declared cell GDS read once, then each cell
-    extracted with its device geometry (AS/AD/PS/PD) and every coupling and
-    ground capacitance (`cthresh 0`), no resistance."""
+    extracted with the existing full parasitic-RC recipe. An absent style
+    leaves the PDK rcfile's selection intact; it does not assert a corner."""
     lines = ['gds readonly true', 'gds rescale false']
     lines += [f'gds read {g}' for g in gds]
     for cell in cells:
-        lines += [f'load {cell}', 'select top cell', f'extract path {out_dir}', 'extract all',
-                  'ext2spice lvs', 'ext2spice cthresh 0', 'ext2spice extresist off',
-                  f'ext2spice -p {out_dir} -o {out_dir}/{cell}.spice']
+        lines += [f'extract path {out_dir}', _mx.build_extraction_tcl(
+            cell, str(out_dir / f'{cell}.spice'),
+            _mx.MagicResimExtractOptions(extract_style=extract_style))]
     return '\n'.join(lines + ['quit -noprompt']) + '\n'
+
+
+def extraction_corner(pdk: str, pdk_dir: Path, liberty: str) -> dict:
+    """Only the selected kit/library's cited PEX declaration selects a style.
+
+    SS alone is not a parasitic corner. The registry carries the PDK's own
+    library-corner mapping; its primary revision/hash are provenance, not a
+    runtime revision-pinning gate.
+    """
+    registry = _load(_EXTRACTION_CORNERS)
+    selected = next((row for row in registry.get('pdks', []) if row.get('name') == pdk), {})
+    binding = selected.get('magic_extraction') or {}
+    style = binding.get('liberties', {}).get(Path(liberty).name)
+    if not style:
+        return {'status': 'UNQUALIFIED', 'liberty': liberty, 'style': None,
+                'reason': 'no declared PDK/library extraction-corner mapping'}
+    # Reuse the existing technology reader; a declaration cannot select a
+    # style absent from the installed technology.
+    from analog_a7_post_layout_emit import extraction_styles
+    tech = pdk_dir / binding['tech']
+    if style not in extraction_styles(tech):
+        raise Refusal('LL_SPICE_EXTRACTION_STYLE_UNDECLARED', f'{style}: {tech}')
+    return {'status': 'QUALIFIED', 'liberty': liberty, 'style': style,
+            'tech': str(tech), 'source': binding['source']}
 
 
 def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
                   gds: Sequence[str], magicrc: str, guest_root: str,
                   schematic: Dict[str, List[str]], cells: Sequence[str],
-                  out_dir: Path) -> Dict[str, Any]:
+                  out_dir: Path, extract_style: Optional[str] = None) -> Dict[str, Any]:
     """The layout view of `cells`, one subckt per cell in the schematic's
     port order, written to `out_dir/cells_extracted.spice`. A cell whose
     extraction has no device, or whose ports are not the schematic's, is
@@ -447,11 +508,11 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
     # These exports belong to this producer. Absence before Magic makes a
     # subsequently consumed export evidence of this invocation, not a retry's.
     for cell in cells:
-        for suffix in ('.spice', '.ext'):
+        for suffix in ('.spice', '.ext', '.res.ext'):
             (work / (cell + suffix)).unlink(missing_ok=True)
     (out_dir / 'cells_extracted.spice').unlink(missing_ok=True)
     tcl = work / 'extract.tcl'
-    tcl.write_text(extraction_tcl(gds, cells, work))
+    tcl.write_text(extraction_tcl(gds, cells, work, extract_style=extract_style))
     run = _docker(image, project, mounts,
                   ['magic', '-dnull', '-noconsole', '-rcfile', magicrc, str(tcl)], work,
                   env={'PDK_ROOT': guest_root})
@@ -465,13 +526,29 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
             missing_exports.append(cell)
         text = path.read_text(errors='replace') if path.is_file() else ''
         ports, devices = subckt_devices(text).get(cell, ([], 0))
-        start = re.search(r'^\.subckt\s+' + re.escape(cell) + r'\b.*$', text, re.M | re.I)
+        start = re.search(r'^\.subckt\s+' + re.escape(cell)
+                          + r'\b[^\n]*(?:\n\+[^\n]*)*', text, re.M | re.I)
         end = re.search(r'^\.ends\b.*$', text[start.end():], re.M | re.I) if start else None
         inner = text[start.end():start.end() + end.start()].strip('\n') if end else ''
         if not ports or not devices:
             kept[cell] = 'no device extracted from the declared layout'
             continue
-        if set(ports) != set(schematic[cell]):
+        public = set(schematic[cell])
+        extra = set(ports) - public
+        generated = not extra
+        if extra:
+            original = work / f'{cell}.ext'
+            resistance = work / f'{cell}.res.ext'
+            original_text = original.read_text(errors='replace') if original.is_file() else ''
+            resistance_text = resistance.read_text(errors='replace') if resistance.is_file() else ''
+            original_ports = set(re.findall(r'^port\s+"([^"]+)"', original_text, re.M))
+            original_nodes = set(re.findall(r'^(?:port|node|substrate)\s+"([^"]+)"',
+                                            original_text, re.M))
+            split_nodes = set(re.findall(r'^rnode\s+"([^"]+)"', resistance_text, re.M))
+            generated = original_ports == public and extra <= split_nodes - original_nodes
+        if (not public <= set(ports)
+                or not generated
+                or not _resistive_internal_ports(inner, extra, public)):
             kept[cell] = f'layout ports {sorted(ports)} are not the schematic ports'
             continue
         body += [f'.subckt {cell} ' + ' '.join(schematic[cell]), inner, '.ends']
@@ -488,7 +565,8 @@ def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
 
 def cell_view(image: str, project: Path, mounts: List[Tuple[Path, str]], *, config: dict,
               pdk_dir: Path, guest_root: str, pdk: str, netlist: Path,
-              cell_sources: Sequence[Path], out_dir: Path) -> Dict[str, Any]:
+              cell_sources: Sequence[Path], out_dir: Path,
+              liberty: str = '') -> Dict[str, Any]:
     """Which standard-cell netlists the deck simulates, and why (module
     docstring). `cell_sources` are the declared `CELL_SPICE_MODELS`; pads keep
     their declared netlists (the arm's subject is register to register)."""
@@ -510,12 +588,14 @@ def cell_view(image: str, project: Path, mounts: List[Tuple[Path, str]], *, conf
                            'no MAGICRC declared in ' + ' or '.join(_PDK_FLOW_CONFIGS))}
     used = netlist_cells(Path(netlist).read_text(errors='replace'),
                          [c for c in schematic if c not in inert])
+    corner = extraction_corner(pdk, pdk_dir, liberty)
     got = extract_cells(image, project, mounts, gds=gds, magicrc=rc[0], guest_root=guest_root,
-                        schematic=schematic, cells=used, out_dir=out_dir)
+                        schematic=schematic, cells=used, out_dir=out_dir,
+                        extract_style=corner['style'])
     view = ('layout-extracted' if got['extracted'] and not got['kept_schematic'] else
             'mixed' if got['extracted'] else 'schematic')
     return {'view': view, 'sources': [Path(got['path'])] if got['extracted'] else [],
-            'magicrc_source': rc[1], 'gds': gds, **got}
+            'magicrc_source': rc[1], 'gds': gds, 'extraction_corner': corner, **got}
 
 
 # --- waveform and measurement --------------------------------------------
@@ -774,7 +854,7 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     view = cell_view(image, project, mounts, config=config, pdk_dir=pdk_root / pdk,
                      guest_root=execution_root, pdk=pdk,
                      netlist=project / inputs['sta_netlist'], cell_sources=cell_sources,
-                     out_dir=out_dir)
+                     out_dir=out_dir, liberty=inputs['liberties'][0])
     if view.get('missing_exports'):
         raise Refusal('LL_SPICE_CURRENT_CELL_EXPORT_MISSING', str(view['missing_exports']))
     cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
@@ -1109,7 +1189,8 @@ def current_context(project: Path, image: str, pdk_root: Path, pdk: str):
     if not sources:
         raise Refusal('CURRENT_STEP30_MODELS_MISSING', str(pdk_root))
     return subject, {'image': image, 'pdk_root': str(pdk_root), 'pdk': pdk,
-                     'corner': corner, 'sources': sources}
+                     'corner': corner, 'sources': sources,
+                     'extraction_corner': extraction_corner(pdk, pdk_root / pdk, inputs['liberties'][0])}
 
 
 def _current_products(project: Path, tool: dict):
