@@ -780,45 +780,84 @@ def _revalidate_step5_checkpoint(project: Path) -> Optional[dict]:
                 'detail': f'STEP5_CHECKPOINT_BINDING_REFUSED: {exc}',
                 'producer_reused': True}
 
-    consumer = gates.evaluate(project, row)
-    observed = consumer
-    error = ''
-    # A measured scientific FAIL stays FAIL, including during a changed readset.
-    if consumer['status'] == 'PASS':
-        try:
-            if (gates.contracts(project, row) != bound
-                    or worker._declared_input_files(project, row.get('required_inputs', ())) != inputs
-                    or (previous / 'written.json').read_bytes() != written
-                    or (previous / 'outputs.json').read_bytes() != retained_bytes
-                    or ai.evidence_sha256(project, '5') != evidence
-                    or not ai.check(project, '5')[0]
-                    or any(not (project / r['rel']).is_file()
-                           or (project / r['rel']).is_symlink()
-                           or versions._sha(project / r['rel']) != r['sha256']
-                           for r in retained['outputs'])):
-                raise ValueError('evidence changed during complete revalidation')
-            consumer['outputs'] = bound
-        except (OSError, ValueError, KeyError, gates.em.Refusal) as exc:
-            error = f'STEP5_CHECKPOINT_BINDING_REFUSED: {exc}'
-            consumer = {**consumer, 'status': 'NOT_MEASURED',
-                        'step': {**consumer['step'], 'status': 'NOT_MEASURED',
-                                 'reason_class': 'checkpoint_binding_refused',
-                                 'reasons': [error]}}
+    # Retain the resolved preimage before any complete consumer can mutate it.
+    # Starting an attempt does not publish a new producer or replace its index.
     attempt = versions.begin_step(project, '5', inputs)
     checkpoint['written_sha256'] = hashlib.sha256(written).hexdigest()
-    (root / attempt['folder'] / 'written.json').write_bytes(written)
-    saved = versions.finish_step(
-        project, attempt, verdict=consumer['status'],
-        result={'runner': 'vibe_ic_one_shot_runner',
-                'site': 'step5_checkpoint_revalidation', 'checkpoint': checkpoint,
-                'detail': error, 'observed_canonical_consumer': observed,
-                'canonical_consumer': consumer},
-        canonical_pass=consumer['status'] == 'PASS')
+    try:
+        with versions.active_steps(project, [attempt]):
+            (root / attempt['folder'] / 'written.json').write_bytes(written)
+            consumer = gates.evaluate(project, row)
+            observed = consumer
+            error = ''
+            # A measured scientific FAIL stays FAIL, including during a changed readset.
+            if consumer['status'] == 'PASS':
+                try:
+                    if (gates.contracts(project, row) != bound
+                            or worker._declared_input_files(project, row.get('required_inputs', ())) != inputs
+                            or (previous / 'written.json').read_bytes() != written
+                            or (previous / 'outputs.json').read_bytes() != retained_bytes
+                            or ai.evidence_sha256(project, '5') != evidence
+                            or not ai.check(project, '5')[0]
+                            or any(not (project / r['rel']).is_file()
+                                   or (project / r['rel']).is_symlink()
+                                   or versions._sha(project / r['rel']) != r['sha256']
+                                   for r in retained['outputs'])):
+                        raise ValueError('evidence changed during complete revalidation')
+                    consumer['outputs'] = bound
+                except (OSError, ValueError, KeyError, gates.em.Refusal) as exc:
+                    error = f'STEP5_CHECKPOINT_BINDING_REFUSED: {exc}'
+                    consumer = {**consumer, 'status': 'NOT_MEASURED',
+                                'step': {**consumer['step'], 'status': 'NOT_MEASURED',
+                                         'reason_class': 'checkpoint_binding_refused',
+                                         'reasons': [error]}}
+            saved = versions.finish_step(
+                project, attempt, verdict=consumer['status'],
+                result={'runner': 'vibe_ic_one_shot_runner',
+                        'site': 'step5_checkpoint_revalidation', 'checkpoint': checkpoint,
+                        'detail': error, 'observed_canonical_consumer': observed,
+                        'canonical_consumer': consumer},
+                canonical_pass=consumer['status'] == 'PASS')
+    except BaseException as exc:
+        if not (root / attempt['folder'] / 'outputs.json').exists():
+            versions.finish_step(project, attempt, verdict='INTERRUPTED',
+                                 result={'checkpoint': checkpoint,
+                                         'detail': f'{type(exc).__name__}: {exc}'})
+        raise
     if saved['capture_errors']:
         raise OSError('Step5 revalidation could not be retained: ' + '; '.join(saved['capture_errors']))
     return {'verdict': saved['status'], 'folder': saved['folder'],
             'detail': error or '; '.join(consumer['step'].get('reasons', ())),
             'producer_reused': True}
+
+
+def _complete_step14_handoff(project: Path) -> dict:
+    """Run the existing synthesis audits and retain their complete consumer.
+
+    This closes the Phase2 handoff before the existing Phase3 head15. It does
+    not synthesize a new netlist or add a runner entry at canonical Step14.
+    """
+    import flow_declared_producer_run as declared
+    import step_output_collector as versions
+    import step_preflight as preflight
+
+    def produce_handoff():
+        census = declared.run_for_step(project, '14', timeout=_pl.audit_timeout_s(project))
+        from execution_backend_producers import _current_step_producer_authority
+        allowed, reason, authority = _current_step_producer_authority(census, project=project)
+        return {'rc': 0 if allowed else 1 if authority == 'FAIL' else 2,
+                'authority_verdict': authority, 'authority_detail': reason,
+                'current_step_producers': census}
+
+    preflight.retained_call(project, '14', produce_handoff, canonical_acceptance=True)
+    current = next(r for r in versions._read_index(project)['steps'] if str(r['id']) == '14')
+    record = json.loads((versions._versions_root(project) / current['folder'] / 'outputs.json').read_text())
+    consumer = record['result'].get('canonical_consumer') or {}
+    status = ('PASS' if record.get('canonical_pass') and record['status'] == 'PASS'
+              else 'FAIL' if record['status'] == 'FAIL' else 'NOT_MEASURED')
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
+                      or str(record['result'].get('producer_return', {}))}
 
 
 def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
@@ -2448,7 +2487,7 @@ def _main() -> int:
             return 2
         step5_acceptance = (_revalidate_step5_checkpoint(project)
                             if execution_policy_value['mode'] == 'default'
-                            and str(args.entry_step) == '14' else None)
+                            and str(args.entry_step) == '15' else None)
         if step5_acceptance is not None and step5_acceptance['verdict'] != 'PASS':
             out = _pl.report_path(project, "vibe_ic_one_shot.json")
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -2461,6 +2500,23 @@ def _main() -> int:
                 'whole_flow_verdict': 'NOT_MEASURED'}, project)
             lock.release()
             return 1 if step5_acceptance['verdict'] == 'FAIL' else 2
+        # Only the signed Phase2 handoff adds Step14 here. Isolated backend
+        # repairs without that checkpoint retain their existing entry scope.
+        step14_acceptance = (_complete_step14_handoff(project)
+                             if step5_acceptance is not None else None)
+        if step14_acceptance is not None and step14_acceptance['verdict'] != 'PASS':
+            out = _pl.report_path(project, "vibe_ic_one_shot.json")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_runner_summary(out, {
+                'program': 'vibe_ic_one_shot_runner', 'bounded': False,
+                'verdict': step14_acceptance['verdict'], 'halted_at': 'phase2',
+                'phases': [{'name': 'phase2', 'verdict': step14_acceptance['verdict'],
+                            'rc': 1 if step14_acceptance['verdict'] == 'FAIL' else 2}],
+                'step5_checkpoint_review': step5_acceptance,
+                'step14_handoff': step14_acceptance,
+                'whole_flow_verdict': 'NOT_MEASURED'}, project)
+            lock.release()
+            return 1 if step14_acceptance['verdict'] == 'FAIL' else 2
         p3_args = [str(project), "--top-name", args.top_name,
                    "--ic-name", args.ic_name, "--container", args.container,
                    "--die-um", args.die_um, "--util", str(args.util),
@@ -2509,6 +2565,8 @@ def _main() -> int:
                    "stale_downstream": p3_stale}
         if step5_acceptance is not None:
             summary['step5_checkpoint_review'] = step5_acceptance
+        if step14_acceptance is not None:
+            summary['step14_handoff'] = step14_acceptance
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_runner_summary(out, summary, project)

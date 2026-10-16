@@ -2007,7 +2007,7 @@ def test_step5_revalidation_keeps_measured_fail_before_changed_evidence(
         tmp_path, monkeypatch, science_passes):
     import execution_backend_gates as gates
     import step_output_collector as versions
-    project, source, ready, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    project, source, ready, old, before = _pending_step5_checkpoint(tmp_path, monkeypatch)
     _sign_step5_checkpoint(project)
     if not science_passes:
         ready.write_text('{"ready":false}\n')
@@ -2023,6 +2023,49 @@ def test_step5_revalidation_keeps_measured_fail_before_changed_evidence(
     record = json.loads((project / 'steps' / refused['folder'] / 'outputs.json').read_text())
     assert record['result']['observed_canonical_consumer']['status'] == ('PASS' if science_passes else 'FAIL')
     assert record['canonical_pass'] is False
+    assert record['input_files'][0]['sha256'] == record['inputs']['input/neutral.v']
+    assert versions._sha(source) != record['inputs']['input/neutral.v']
+    new = project / 'steps' / refused['folder']
+    assert (new / 'written.json').read_bytes() == before[old / 'written.json']
+
+
+def _step14_handoff_source_control(tmp_path, monkeypatch, project, *, ready=True):
+    """Use the real declared-producer census and FCC; replace only its process.
+
+    The neutral report is software fixture evidence, not a Yosys measurement.
+    Both declaration readers consume the same physical fixture flow.
+    """
+    import _gate_authorship as authorship
+    import flow_declared_producer_run as declared
+    import yaml
+    fixture_flow = tmp_path / 'step5-flow.yaml'
+    flow = yaml.safe_load(fixture_flow.read_text())
+    row = next(r for r in flow['steps'] if str(r['id']) == '14')
+    raw = 'reports/step14_source_control.json'
+    program = 'yosys_hilomap_required_check'
+    row.update(required_inputs=[{'from': 'external', 'path': 'input/neutral.v'}],
+               required_outputs=[raw], programs=[program],
+               program_outputs=[{'program': program, 'path': raw,
+                   'producer_command': program + ' . --json ' + raw}],
+               gate={'all_of': [{'files_exist': [raw]}, {'json_field_true': {
+                   'file': raw, 'field': 'ready'}}]})
+    fixture_flow.write_text(yaml.safe_dump(flow, sort_keys=False))
+    clauses = declared.declared_producer_clauses
+    monkeypatch.setattr(declared, 'declared_producer_clauses', lambda: clauses(fixture_flow))
+    calls = []
+    def neutral_process(project, clause, timeout):
+        assert clause['step'] == '14' and clause['program'] == program
+        calls.append(clause['target'])
+        target = project / clause['target']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(authorship.stamp({
+            'program': program, 'ready': ready,
+            'scope': 'SOURCE_CONTROL neutral software process'},
+            role=authorship.ROLE_PRODUCER)))
+        return {'executed': True, 'rc': 0, 'target_exists_after': True,
+                'authorship': authorship.ROLE_PRODUCER, 'program': program}
+    monkeypatch.setattr(declared, '_run_one', neutral_process)
+    return calls
 
 
 @pytest.mark.parametrize('mechanical_ready', [False, True])
@@ -2030,6 +2073,7 @@ def test_phase3_entry_revalidates_pending_step5_before_dispatch(
         tmp_path, monkeypatch, mechanical_ready):
     import step_output_collector as versions
     project, _, ready, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    handoff_calls = _step14_handoff_source_control(tmp_path, monkeypatch, project)
     _sign_step5_checkpoint(project)
     if not mechanical_ready:
         ready.write_text('{"ready":false}\n')
@@ -2041,12 +2085,14 @@ def test_phase3_entry_revalidates_pending_step5_before_dispatch(
         assert runner.name == 'phase3_one_shot_runner.py', 'Step4/5 producer must not restart'
         if mechanical_ready:
             assert versions.latest_pass(project, '5')['canonical_pass']
+            assert versions.latest_pass(project, '14')['canonical_pass']
+            assert handoff_calls == ['reports/step14_source_control.json']
         else:
             assert versions.latest_pass(project, '5') is None
         raise ReachedExistingBackend
     monkeypatch.setattr(V, '_run_phase', phase3_only)
     monkeypatch.setattr(sys, 'argv', ['vibe_ic_one_shot_runner', str(project),
-                        '--entry-step', '14', '--exit-step', '14', '--no-dashboard',
+                        '--entry-step', '15', '--exit-step', '15', '--no-dashboard',
                         '--skip-hardware', '--skip-analog'])
     real_entry('IC', 'default', project)
     if mechanical_ready:
@@ -2056,6 +2102,44 @@ def test_phase3_entry_revalidates_pending_step5_before_dispatch(
     else:
         assert V.main() == 1
         assert called == []
+        assert handoff_calls == []
         report = json.loads(_pl.report_path(project, 'vibe_ic_one_shot.json').read_text())
         assert report['step5_checkpoint_review']['verdict'] == 'FAIL'
         assert report['halted_at'] == 'phase2'
+
+
+def test_phase3_handoff_refuses_a_real_step14_complete_gate_failure(tmp_path, monkeypatch):
+    import step_output_collector as versions
+    project, _, _, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    calls = _step14_handoff_source_control(tmp_path, monkeypatch, project, ready=False)
+    _sign_step5_checkpoint(project)
+    dispatched = []
+    monkeypatch.setattr(V, '_run_phase', lambda *a, **k: dispatched.append(a))
+    monkeypatch.setattr(sys, 'argv', ['vibe_ic_one_shot_runner', str(project),
+                        '--entry-step', '15', '--exit-step', '15', '--no-dashboard',
+                        '--skip-hardware', '--skip-analog'])
+    real_entry('IC', 'default', project)
+    assert V.main() == 1
+    assert calls == ['reports/step14_source_control.json']
+    assert versions.latest_pass(project, '5')['canonical_pass']
+    assert versions.latest_pass(project, '14') is None
+    assert dispatched == []
+    acceptance = next(r for r in versions.current_acceptance(project, 0) if r['id'] == '14')
+    assert acceptance['result']['producer_return']['rc'] == 0
+    assert acceptance['result']['canonical_consumer']['status'] == 'FAIL'
+    report = json.loads(_pl.report_path(project, 'vibe_ic_one_shot.json').read_text())
+    assert report['step14_handoff']['verdict'] == 'FAIL'
+    assert report['halted_at'] == 'phase2'
+
+
+def test_step14_remains_unsupported_as_a_runner_entry(tmp_path, monkeypatch, capsys):
+    project, _, _, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    dispatched = []
+    monkeypatch.setattr(V, '_run_phase', lambda *a, **k: dispatched.append(a))
+    monkeypatch.setattr(sys, 'argv', ['vibe_ic_one_shot_runner', str(project),
+                        '--entry-step', '14', '--exit-step', '14', '--no-dashboard',
+                        '--skip-hardware', '--skip-analog'])
+    real_entry('IC', 'default', project)
+    assert V.main() == 2
+    assert "no runner can be entered at step '14'" in capsys.readouterr().err
+    assert dispatched == []
