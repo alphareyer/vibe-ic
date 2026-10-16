@@ -517,8 +517,12 @@ def _local_step23_for_default_si(tmp_path, monkeypatch, local_image, *, case='go
     record_path = p / LP.STEP23_RECORD
     record = json.loads(record_path.read_text())
     previous = Path(record['sta_state']).parent
-    state = put(p / 'phase3/librelane/local-si-input.json',
-                json.loads((previous / 'state_in.json').read_text()))
+    before = json.loads((previous / 'state_in.json').read_text())
+    before['odb'] = str(write(p / 'phase3/stage3/pnr/neutral.odb',
+                              'SOURCE_FIXTURE_ONLY retained ODB process input\n'))
+    before['def'] = str(write(p / 'phase3/stage3/pnr/neutral.def',
+                              'VERSION 5.8 ;\nDESIGN neutral ;\nEND DESIGN\n'))
+    state = put(p / 'phase3/librelane/local-si-input.json', before)
     config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
     switch = json.loads((p / 'phase3/librelane_switch.json').read_text())
     switch['image'] = local_image.image
