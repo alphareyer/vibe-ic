@@ -1390,6 +1390,8 @@ def produce_signoff(project, params):
         voltage = R._pdk_nominal_voltage(pdk, container)
         if voltage is None:
             raise em.Refusal('BACKEND_SI_VOLTAGE_UNSTATED', sid)
+        mcf_inputs = dict(spef=str(spef), netlist=str(nl), sdc=str(sdc),
+                          liberty=pdk.liberty, top=top, macro_libs=pdk.macro_libs)
         if params.get('execution_mode') == 'default':
             # The current SI owner publishes the compound report and the
             # timing-consumption receipt required by the unchanged full gate.
@@ -1397,6 +1399,17 @@ def produce_signoff(project, params):
                     project, top, _require(spef), rpt / 'ir_drop.rpt',
                     rpt / 'si_crosstalk.rpt', notes, pdk=pdk, container=container, vdd_v=voltage):
                 return {'verdict': 'NOT_MEASURED', 'detail': '; '.join(notes)}
+            import _opensta_current as current
+            subject = current.si_binding(project)
+            inputs = {row['role']: row['path'] for row in subject['inputs']}
+            liberties = [inputs[f'liberty:{i}'] for i in
+                         range(sum(role.startswith('liberty:') for role in inputs))]
+            # The logical artifact stem can differ from the module and corner
+            # the native STA actually linked. MCF must consume that same
+            # validated subject, not reconstruct it from nominal aliases.
+            mcf_inputs = dict(spef=inputs['spef'], netlist=inputs['netlist'],
+                sdc=inputs['sdc'], liberty=liberties[0], macro_libs=liberties[1:],
+                top=subject.get('physical_top', subject['top']))
         else:
             import si_signoff_timing_aware as si
             timing = rpt / 'si_timing.json'
@@ -1404,8 +1417,7 @@ def produce_signoff(project, params):
                 raise em.Refusal('BACKEND_SI_NATIVE_UNMEASURED', sid)
             si.run_si_signoff_timing_aware(spef, timing, vdd_v=voltage,
                             out_json=rpt / 'si_crosstalk.json', out_rpt=rpt / 'si_crosstalk.rpt')
-        mcf.run(project, container=container, spef=str(spef), netlist=str(nl),
-                sdc=str(sdc), liberty=pdk.liberty, top=top, macro_libs=pdk.macro_libs,
+        mcf.run(project, container=container, **mcf_inputs,
                 vdd_v=voltage, out_json=rpt / 'si_mcf_sta.json', timeout=int(params['timeout_s']))
     elif sid == '28':
         if not R._emit_perc_equivalent(project, top, pdk, container, notes):

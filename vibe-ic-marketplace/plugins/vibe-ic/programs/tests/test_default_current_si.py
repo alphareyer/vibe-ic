@@ -623,3 +623,148 @@ def test_default_si_local_pdk_mapping_or_receipt_damage_stays_unmeasured(
     assert observed['mcf_timeouts'] == [] and observed['sta_calls'] == []
     assert SG.main([str(p)]) == 1
     assert not (p / 'reports/phase3/si_crosstalk.current.json').exists()
+
+
+def _default_mcf_physical_subject(tmp_path, monkeypatch, *, physical, case):
+    """Real MCF Tcl/fold/report; neutral process edge checks the linked module."""
+    import shlex
+    import gate_utils
+    import librelane_contract as LC
+    import librelane_postroute as LP
+    import si_mcf_sta as mcf
+    from test_default_current_power import seal
+    actual_windows, actual_slack = mcf._run_windows, mcf._run_sta_slack
+    fixture_case = case if case in ('delta_fail', 'mcf_bad_fold') else 'good'
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch, case=fixture_case)
+    record_path = p / LP.STEP23_RECORD
+    record = json.loads(record_path.read_text())
+    folder = Path(record['sta_state']).parent
+    nl = p / 'phase3/stage3/pnr/neutral_pnr.v'
+    nl.write_text(nl.read_text().replace('module neutral(', f'module {physical}('))
+    nominal = p / 'phase3/stage3/extracted/neutral.spef'
+    nominal.write_text(nominal.read_text().replace('*DESIGN "neutral"', f'*DESIGN "{physical}"'))
+    selected = write(nominal.parent / 'spef_corners/neutral.max.spef',
+                     nominal.read_text().replace('0.01', '0.02'))
+    primary = write(p / 'fixture_pdk/neutral/selected.lib',
+                    'library(selected_max) { nom_voltage : 5.0; }\n')
+    extra = write(p / 'fixture_pdk/neutral/selected_macro.lib',
+                  'library(selected_macro) { nom_voltage : 5.0; }\n')
+    guests = ['/pdk/neutral/selected.lib', '/pdk/neutral/selected_macro.lib']
+    config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    raw = json.loads(config.read_text())
+    raw.update(DESIGN_NAME=physical,
+               CELL_LIBS={'nom_*': ['/pdk/neutral/neutral.lib'], 'max_*': guests})
+    put(config, raw)
+    put(folder / 'config.json', raw)
+    state_path = folder / 'state_out.json'
+    state = json.loads(state_path.read_text())
+    state['spef'] = {'nom_*': str(nominal), 'max_*': str(selected)}
+    put(state_path, state)
+    write(folder / 'max_typ/sta.log', 'SOURCE_FIXTURE_ONLY\n' + ''.join(
+        f"Reading cell library for the 'max_typ' corner at '{guest}'\n" for guest in guests))
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp['config'] = LC.digest(config)
+    fp['state_files'] = {path: LC.digest(Path(path)) for path in fp['state_files']}
+    fp['state_files'][str(selected)] = LC.digest(selected)
+    for guest, lib in zip(guests, (primary, extra)):
+        fp['config_files'][guest] = LC.digest(lib)
+        fp['liberty_files'][guest] = LC.digest(lib)
+    seal(folder, fp)
+    record.update(sta_state_sha256=LC.digest(state_path),
+                  judgment={'worst_setup': {'corner': 'max_typ'}})
+    put(record_path, record)
+    observed['mcf_processes'] = []
+
+    def sta_edge(container, command, **kwargs):
+        # The external tool edge is explicit neutral data. The real MCF
+        # functions build every Tcl, parse rc/slacks, fold and publish outputs.
+        words = shlex.split(command)
+        script = Path(words[words.index('-exit') + 1])
+        log = Path(words[words.index('>') + 1])
+        text = script.read_text()
+        linked = re.search(r'^link_design (\S+)$', text, re.M)[1]
+        source = Path(re.search(r'^read_verilog (.+)$', text, re.M)[1])
+        libraries = re.findall(r'^read_liberty (.+)$', text, re.M)
+        sdc = re.search(r'^read_sdc (.+)$', text, re.M)[1]
+        spef = re.search(r'^read_spef (.+)$', text, re.M)[1]
+        observed['mcf_processes'].append({'script': str(script), 'top': linked,
+            'netlist': str(source), 'libraries': libraries, 'sdc': sdc, 'spef': spef})
+        modules = {span.name for span in gate_utils.find_modules(source.read_text())}
+        if case == 'tool_error' or linked not in modules:
+            message = f'Error: SOURCE_FIXTURE_ONLY {linked} is not a verilog module.\n'
+            write(log, message)
+            return 1, '', message
+        if script.name == 'si_mcf_windows.tcl':
+            output = Path(re.search(r'set _mcf_o \[open (.+) w\]', text)[1])
+            put(output, {'design': linked, 'pins': {pin: {
+                'arr_rise_min': 1.0, 'arr_rise_max': 1.2,
+                'arr_fall_min': 1.0, 'arr_fall_max': 1.2,
+                'slew_rise_max': 0.1, 'slew_fall_max': 0.1}
+                for pin in ('u0:Z', 'u1:Z', 'u2:A', 'z')}})
+            message = 'SOURCE_FIXTURE_ONLY\nMCF_WINDOW_EMIT_DONE\n'
+        else:
+            message = 'SOURCE_FIXTURE_ONLY\nworst slack max 1.0\nworst slack min 1.0\n'
+        write(log, message)
+        return 0, message, ''
+
+    monkeypatch.setattr(mcf, '_run_windows', actual_windows)
+    monkeypatch.setattr(mcf, '_run_sta_slack', actual_slack)
+    monkeypatch.setattr(mcf, '_docker_exec', sta_edge)
+    return p, cfg, observed, selected, primary, extra
+
+
+@pytest.mark.parametrize('physical,case,expected', [
+    ('package_shell', 'good', 'PASS'), ('neutral', 'good', 'PASS'),
+    ('package_shell', 'delta_fail', 'FAIL'),
+    ('package_shell', 'mcf_bad_fold', 'FAIL'),
+    ('package_shell', 'tool_error', 'NOT_MEASURED')])
+def test_default_mcf_uses_current_physical_subject_and_owns_all_outputs(
+        tmp_path, monkeypatch, physical, case, expected):
+    import time
+    import _flow_yaml
+    import _opensta_current as current
+    import execution_backend_worker as worker
+    import step_output_collector as versions
+    import _sta_basis
+    p, cfg, observed, selected, primary, extra = _default_mcf_physical_subject(
+        tmp_path, monkeypatch, physical=physical, case=case)
+    began = time.time()
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == expected, row.detail
+    assert current.si_binding(p).get('physical_top', 'neutral') == physical
+    calls = observed['mcf_processes']
+    assert len(calls) == 4
+    assert all(c['top'] == physical for c in calls)
+    assert all(c['libraries'] == [str(primary), str(extra)] for c in calls)
+    assert all(c['netlist'] == str(p / 'phase3/stage3/pnr/neutral_pnr.v')
+               and c['sdc'] == str(p / 'phase3/stage3/pnr/constraint.sdc') for c in calls)
+    assert calls[0]['spef'] == calls[1]['spef'] == str(selected)
+    report = json.loads((p / 'reports/phase3/si_mcf_sta.json').read_text())
+    assert report['design_top'] == physical and report['spef'] == str(selected)
+    assert report['vdd_v'] == 5.0
+    definition = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '27')
+    files, missing = worker.resolve_contract(p, definition['required_outputs'])
+    output = p / 'reports/phase3/si_mcf_sta.rpt'
+    if case == 'tool_error':
+        assert report['verdict'] == 'ERROR'
+        assert report['windows_rc'] == report['nominal']['sta_rc'] == 1
+        assert all(c['sta_rc'] == 1 for c in report['corners'].values())
+        assert not output.exists()
+        assert missing == ['reports/phase3/si_mcf_sta.rpt']
+        assert versions.latest_pass(p, '27') is None
+    else:
+        assert missing == []
+        assert 'reports/phase3/si_mcf_sta.rpt' in files and output.stat().st_size > 0
+        assert _sta_basis.declared_basis(output.read_text()) == 'POST_ROUTE'
+        assert f'design_top: {physical}' in output.read_text()
+        accepted = next(r for r in versions.current_acceptance(p, began) if r['id'] == '27')
+        assert accepted['status'] == expected and accepted['canonical_pass'] == (expected == 'PASS')
+        captured = {r['rel'] for r in accepted['outputs']}
+        assert {'reports/phase3/si_mcf_sta.json', 'reports/phase3/si_mcf_sta.rpt'} <= captured
+        if case == 'delta_fail':
+            assert 'SI_DELTA_DELAY_FAIL' in (p / 'reports/phase2/gates/si_crosstalk.json').read_text()
+        elif case == 'mcf_bad_fold':
+            assert 'FOLD_NOT_APPLIED' in (p / 'reports/phase3/si_mcf_sta_check.json').read_text()
+        else:
+            assert report['verdict'] == 'PASS'
+            assert versions.latest_pass(p, '27')['current_inputs'] is True
