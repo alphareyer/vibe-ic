@@ -297,7 +297,11 @@ def test_signed_reused_d1_runs_complete_consumer_and_retains_current_pass(
     assert accepted['result']['checkpoint']['producer_started'] is False
     assert accepted['result']['checkpoint']['producer_reused'] is True
     assert accepted['folder'] != accepted['result']['checkpoint']['prior_folder']
-    assert next(r for r in versions._read_index(project)['steps'] if r['id'] == 'D1')['status'] == 'PASS'
+    # The view index can hold the enclosing materializer's partial observation.
+    # Complete acceptance belongs to the retained canonical-consumer record.
+    consumed = next(r for r in versions.current_acceptance(project, 0) if r['id'] == 'D1')
+    assert consumed['status'] == 'PASS'
+    assert consumed['folder'] == accepted['folder']
     old_written = next(data for path, data in before.items() if path.name == 'written.json')
     assert (project / 'steps' / accepted['folder'] / 'written.json').read_bytes() == old_written
     assert V._p1id.docs_snapshot(project) == docs_before
@@ -331,7 +335,10 @@ def test_signed_d1_cannot_override_a_complete_gate_failure(
     assert doc['phase1_checkpoint_review']['verdict'] == 'FAIL'
     assert doc['phase1_checkpoint_review']['canonical_acceptance']['verdict'] == 'FAIL'
     assert versions.latest_pass(project, 'D1') is None
-    assert next(r for r in versions._read_index(project)['steps'] if r['id'] == 'D1')['status'] == 'FAIL'
+    consumed = next(r for r in versions.current_acceptance(project, 0) if r['id'] == 'D1')
+    assert consumed['status'] == 'FAIL'
+    assert consumed['canonical_pass'] is False
+    assert consumed['result']['canonical_consumer']['status'] == 'FAIL'
     assert {p: p.read_bytes() for p in before} == before
 
 
