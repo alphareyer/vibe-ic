@@ -1015,6 +1015,14 @@ def _declared_observation_gls_project(tmp_path, mode):
     cases = _timed_input(project, 'wrapped8_delayed',
                          mode='wrong_product' if mode == 'case_fail' else 'good')
     case = next(c for c in cases if c['name'] == 'transaction_sequence')
+    if mode == 'random':
+        case = {'name': 'transaction_sequence', 'kind': 'functional_vector',
+                'stimulus': 'Random at least 10000 operand pairs using the stated serial framing.',
+                'expected': '100% PASS'}
+    elif mode == 'combined':
+        case = {'name': 'transaction_sequence', 'kind': 'functional_vector',
+                'coverage_scope': 'Operand boundaries: zero, one, MAX; all Cartesian combinations. Consecutive transactions: at least 16 operand pairs using declared rearm, no extra idle cycles. Synchronous reset held, released, and asserted during computation; between-edge reset pulses must not reset.',
+                'expected': '100% PASS'}
     put(project / 'phase1/generated_docs/L10_TEST_CASES.json', {'test_cases': [case]})
     l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
     doc = json.loads(l9.read_text())
@@ -1224,7 +1232,7 @@ def _current_output_deadline_fixture(project, root, deadline):
     return folder
 
 
-@pytest.mark.parametrize('case', ['good', 'case_fail', 'wrong_cycle', 'late', 'missing_corner', 'changed_corner', 'wrong_output', 'wrong_clock'])
+@pytest.mark.parametrize('case', ['good', 'random', 'combined', 'case_fail', 'wrong_cycle', 'late', 'missing_corner', 'changed_corner', 'wrong_output', 'wrong_clock'])
 def test_default_gls_observes_the_current_output_deadline(
         tmp_path, monkeypatch, local_image, case):
     """Actual Default capture, typed INPUT schedule and real Icarus verdicts."""
@@ -1299,7 +1307,7 @@ def test_default_gls_observes_the_current_output_deadline(
     assert bench.read_bytes() == original_bytes
     assert original_plan['observation']['sample_offset_ns'] == 1
     assert original_plan['framing']['settled_latency'] == 1
-    good = case == 'good'
+    good = case in ('good', 'random', 'combined')
     assert result.status == ('PASS' if good else 'FAIL'), result.detail
     if case in ('missing_corner', 'changed_corner', 'wrong_output', 'wrong_clock'):
         assert manifest['cases'] == []
@@ -1313,8 +1321,8 @@ def test_default_gls_observes_the_current_output_deadline(
             assert set(plan['observation']['postlayout_deadline']['required_time_ns']) == set(CORNERS)
             assert plan['framing'] == original_plan['framing']
             assert plan['pairs'] == json.loads(json.dumps(original_plan['pairs']))
-            assert plan['transactions'] == original_plan['transactions'] == 16
-            assert plan['comparisons'] == original_plan['comparisons'] == 128
+            assert plan['transactions'] == original_plan['transactions']
+            assert plan['comparisons'] == original_plan['comparisons']
             assert '.chip_clock(i_clk)' in prepared.read_text()
             assert '.chip_result(result_bit)' in prepared.read_text()
             assert manifest['cases'][0]['observation'] == plan['observation']
@@ -1331,7 +1339,7 @@ def test_default_gls_observes_the_current_output_deadline(
                                    Path(manifest['netlist']).read_text(), manifest['dut_binding'])
         drives = []
         for label, tb in [('model_only', old), ('deadline', source)]:
-            path = write(tmp_path / f'{label}.v', __import__('re').sub(r'\$sdf_annotate\([^;]+;', '', tb) + monitor)
+            path = write(tmp_path / f'{label}.v', __import__('re').sub(r'(?m)^\s*initial\s+\$sdf_annotate[^;]+;[^\n]*\n', '', tb) + monitor)
             # Separate cadence observation: no change to the real GLS run above.
             binary = tmp_path / f'{label}.vvp'
             c = subprocess.run(['iverilog', '-g2012', '-gspecify', '-s', 'transaction_sequence', '-s', 'drive_monitor',
@@ -1349,7 +1357,12 @@ def test_default_gls_observes_the_current_output_deadline(
             assert run['compile_rc'] == 0, Path(run['compile_log']).read_text()
             assert run['sim_rc'] == (0 if good else 1)
             transcript = Path(run['stdout']).read_text()
-            assert 'transactions=16 comparisons=128' in transcript
+            assert f"transactions={original_plan['transactions']} comparisons={original_plan['comparisons']}" in transcript
+            if case == 'random':
+                assert 'ORACLE_TB_DONE pass=10000/10000' in transcript
+            if case == 'combined':
+                measured, detail = arith.capture_arithmetic_scenario_execution(project, prepared, Path(run['stdout']), {})
+                assert measured is not None and measured['verdict'] == ('PASS' if good else 'FAIL'), detail
     gate = json.loads((project / 'reports/phase2/gates/post_layout_sim.json').read_text())
     assert gate['verdict'] == ('PASS' if good else 'FAIL')
     latest = versions.latest_pass(project, '29')
