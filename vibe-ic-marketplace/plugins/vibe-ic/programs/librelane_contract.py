@@ -4035,6 +4035,11 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             retained = validate_step_receipt(folder, step_id) if receipt.exists() else None
         except Refusal:
             retained = None
+        if (retained is not None and step_id == 'Yosys.Synthesis'
+                and _drv_stages.native_abc_script(folder, retained) is None):
+            # Old/partial synthesis caches cannot recreate an executed script
+            # from the recipe or log. Preserve them and run the real producer.
+            retained = None
         if (retained is not None
                 and _step_input_identity(retained['input']) == _step_input_identity(fingerprint)
                 and (folder / 'state_out.json').exists()
@@ -4145,6 +4150,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             commands = folder / 'COMMANDS'
             if commands.is_file() and commands.stat().st_size:
                 hashes['COMMANDS'] = digest(commands)
+            for path in (folder / _drv_stages.PROBE_DIR / 'synth').glob('*'):
+                if path.is_file():
+                    hashes[str(path.relative_to(folder))] = digest(path)
         record = {'input': fingerprint, 'sha256': hashes}
         if lane == '37.3-compare' and step_id == 'KLayout.XOR':
             record = bind_xor_report(folder, record)

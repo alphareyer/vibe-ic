@@ -601,6 +601,9 @@ def test_a_copied_run_rebases_report_evidence_with_its_reports_folder(tmp_path):
 def test_synth_stage_runs_the_census_deck_and_binds_the_receipt(tmp_path):
     project = tmp_path / "proj"
     receipts.claim(project)
+    # This fixture is the existing direct Yosys producer, not a native handoff.
+    (project / 'phase3').mkdir(parents=True, exist_ok=True)
+    (project / 'phase3/librelane_switch.json').write_text(json.dumps({'steps': {'9': 'direct'}}))
     synth = project / "phase2/stage2/synth"
     synth.mkdir(parents=True)
     (synth / "_tmp_yosys-abc-A1/").mkdir()
@@ -640,6 +643,9 @@ def test_pnr_synth_census_uses_the_supervised_deck(tmp_path, monkeypatch, tool_r
     import phase3_one_shot_runner as runner
     project = tmp_path / "proj"
     receipts.claim(project)
+    # This fixture is the existing direct Yosys producer, not a native handoff.
+    (project / 'phase3').mkdir(parents=True, exist_ok=True)
+    (project / 'phase3/librelane_switch.json').write_text(json.dumps({'steps': {'9': 'direct'}}))
     netlist = runner._pl.synth_dir(project) / "top_synth.v"
     netlist.parent.mkdir(parents=True)
     netlist.write_text("module top; endmodule\n")
@@ -861,3 +867,158 @@ def test_io_library_cells_without_pad_cell_are_io_class(tmp_path):
     env = {"PAD_LIBS": "/pdk/p/libs.ref/io/lib/io__tt.lib /pdk/p/libs.ref/io/lib/io__ss.lib",
            "CELL_LIBS": "/pdk/p/libs.ref/std/lib/std__tt.lib"}
     assert plan._pad_lib_paths(env, tmp_path, "p", "tt") == [tmp_path / "p/libs.ref/io/lib/io__tt.lib"]
+
+
+def _cold_native_synthesis(tmp_path, monkeypatch):
+    """Actual chain/receipt/handoff; only the native process writes are neutral.
+
+    No ABC/EDA/native qualification is claimed by this software fixture.
+    Synthesis intentionally precedes the first Phase3 run claim.
+    """
+    from types import SimpleNamespace
+    import synth_handoff_netlist_check as handoff
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
+    project = (tmp_path / 'cold-project').resolve()
+    rtl = project / 'phase2/stage1/rtl/core.v'
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text('module core(input a, output y); assign y = a; endmodule\n')
+    def put(path, document):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        return path
+    put(project / 'input/project.json', {'pdk': 'neutral'})
+    put(project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'core'})
+    header = put(project / 'header.json', {'module': 'core'})
+    state = put(project / 'initial.json', {'json_h': str(header)})
+    config = put(project / 'phase3/librelane/synthesis_resolved.json', {
+        'meta': {'step': 'Yosys.Synthesis'}, 'PDK': 'neutral',
+        'DESIGN_NAME': 'core', 'VERILOG_FILES': [str(rtl)],
+        'SYNTH_TIEHI_CELL': 'TIE_H/Y', 'SYNTH_TIELO_CELL': 'TIE_L/Y'})
+    calls = []
+    netlist = 'module core(input a, output y);\nBUF_X1 u_buf (.A(a), .Y(y));\nendmodule\n'
+    def tool(cmd, **kwargs):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        calls.append(str(folder))
+        shutil.copyfile(config, folder / 'config.json')
+        raw = folder / 'core.nl.v'
+        raw.write_text(netlist)
+        put(folder / 'state_out.json', {'nl': str(raw), 'metrics': {
+            'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
+        put(folder / 'reports/stat.json', {'modules': {'\\core': {'num_submodules': 0}}})
+        temp = folder / '_tmp_yosys-abc-neutral'
+        temp.mkdir()
+        recipe = temp / 'mapping.abc'
+        recipe.write_text('strash\nbuffer -N 4 -S 3000\n')
+        wrapper = temp / 'abc.script'
+        wrapper.write_text(f'echo + source {recipe}\nsource {recipe}\n')
+        (folder / 'COMMANDS').write_text('yosys SOURCE_CONTROL native-process substitute\n')
+        return SimpleNamespace(returncode=0,
+            stdout=f'Running ABC script: {wrapper}\n', stderr='')
+    monkeypatch.setattr(ll, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(ll, 'run_container', tool)
+    assert receipts.current_run(project) is None
+    folder = ll.run_chain(project, 'candidate', [('Yosys.Synthesis', config, state)],
+                          pdk_root='/pdk')[0]
+    mapped = project / 'phase2/stage2/synth/core_synth.v'
+    mapped.parent.mkdir(parents=True)
+    mapped.write_text(netlist)
+    put(mapped.parent / 'synth_inputs.json', {'netlist': mapped.name})
+    handoff.publish_handoff(project, folder, mapped, 'core')
+    assert handoff.bound_handoff(project)['verdict'] == 'PASS'
+    sdc = project / 'constraint.sdc'
+    sdc.write_text('create_clock -period 24 [get_ports clk]\nset_max_fanout 4 [current_design]\n')
+    return project, folder, mapped, sdc, config, state, calls
+
+
+def _source_control_census(cmd):
+    """Write only the current deck's behavior file; the producer owns the deck."""
+    deck = Path(cmd.split()[-1])
+    target = Path(deck.read_text().split('synth_census {')[1].split('}')[0])
+    target.write_text('clocks 1\nclock clk is_propagated=0\n' + drv._COMMAND + '\n'
+                      + ''.join(f'{kind} violators=0\n' for kind in drv.KINDS))
+    return 0, 'SOURCE_CONTROL census process completed\n', ''
+
+
+def test_cold_phase2_abc_witness_survives_claim_and_complete_stage_judge(tmp_path, monkeypatch):
+    import drv_run_identity as identity
+    from test_drv_signoff_judge import _bundle, _install_test_freeze
+    project, folder, netlist, sdc, _, _, calls = _cold_native_synthesis(tmp_path, monkeypatch)
+    receipt = ll.validate_step_receipt(folder, 'Yosys.Synthesis')
+    script = folder / receipts.PROBE_DIR / 'synth/abc.script'
+    assert script.is_file(), 'Phase2 deleted its only executed ABC wrapper before a run claim'
+    assert receipt['sha256'][str(script.relative_to(folder))] == receipts._sha(script)
+    assert not receipts.abc_script_path(project).exists()
+    before = {path: path.read_bytes() for path in script.parent.iterdir()}
+    identity.start(project, continue_steps=['15'])
+    saved = receipts.synth_stage(project, netlist=netlist, top='core', liberties=[],
+        sdc=sdc, to_container=str, execute=_source_control_census)
+    assert saved is not None and len(calls) == 1
+    measured = plan._stages(project, False)[0][0]
+    assert measured['ran'] and measured['applied']['fanout'] == 4
+    assert measured['synth_abc_buffering'] and measured['ideal_clock_excluded']
+    assert {path: path.read_bytes() for path in before} == before
+    document = json.loads(saved.read_text())
+    assert document['run_id'] == receipts.current_run(project)
+    assert document['netlist']['sha256'] == receipts._sha(netlist)
+    assert document['census_sdc']['sha256'] == receipts._sha(sdc)
+    bundle_root = tmp_path / 'judge'
+    bundle = _bundle(bundle_root)
+    bundle['stages'] = [measured if row['name'] == 'synth' else row for row in bundle['stages']]
+    _install_test_freeze(bundle, bundle_root, monkeypatch)
+    assert drv.judge(bundle)['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('changed', ['wrapper', 'source', 'receipt', 'netlist', 'log', 'unreferenced'])
+def test_cold_native_abc_witness_cannot_borrow_other_or_changed_evidence(tmp_path, monkeypatch, changed):
+    project, folder, netlist, sdc, _, _, _ = _cold_native_synthesis(tmp_path, monkeypatch)
+    witness = folder / receipts.PROBE_DIR / 'synth'
+    assert (witness / 'abc.script').is_file(), 'executed Phase2 graph was not retained'
+    if changed == 'wrapper':
+        (witness / 'abc.script').unlink()
+    elif changed == 'source':
+        (witness / 'abc_source_0.script').write_text('buffer -N 100\n')
+    elif changed == 'receipt':
+        path = folder / 'vibeic_receipt.json'
+        path.write_text(path.read_text() + ' ')
+    elif changed == 'netlist':
+        netlist.write_text(netlist.read_text() + '// changed handoff bytes\n')
+    elif changed == 'log':
+        (folder / 'invocation.log').write_text('Running ABC script: unmeasured-other/abc.script\n')
+    else:
+        # A recipe present in the native folder is not a receipt-bound wrapper.
+        (witness / 'abc.script').unlink()
+        (folder / 'AREA_0.abc').write_text('buffer -N 4\n')
+    receipts.claim(project)
+    # A different live claim must not supply a convenient old wrapper either.
+    decoy = receipts.abc_script_path(project)
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text('buffer -N 4\n')
+    receipts.synth_stage(project, netlist=netlist, top='core', liberties=[],
+        sdc=sdc, to_container=str, execute=_source_control_census)
+    measured = plan._stages(project, False)[0][0]
+    assert measured['ran'] is False
+    assert measured['synth_abc_buffering'] is False
+    assert measured['applied']['fanout'] is None
+
+
+@pytest.mark.parametrize('changed', [None, 'legacy', 'source'])
+def test_synthesis_cache_requires_original_executed_abc_witness(tmp_path, monkeypatch, changed):
+    project, folder, _, _, config, state, calls = _cold_native_synthesis(tmp_path, monkeypatch)
+    original = (folder / 'vibeic_receipt.json').read_bytes()
+    assert (folder / receipts.PROBE_DIR / 'synth/abc.script').is_file(), 'native graph missing before cache exercise'
+    if changed == 'legacy':
+        # A pre-fix receipt never bound an executed graph. Do not rehash it.
+        shutil.rmtree(folder / receipts.PROBE_DIR)
+    elif changed == 'source':
+        (folder / receipts.PROBE_DIR / 'synth/abc_source_0.script').write_text('buffer -N 100\n')
+    selected = ll.run_chain(project, 'candidate', [('Yosys.Synthesis', config, state)],
+                            pdk_root='/pdk')[0]
+    assert selected == folder
+    assert len(calls) == (1 if changed is None else 2)
+    receipt = ll.validate_step_receipt(folder, 'Yosys.Synthesis')
+    script = folder / receipts.PROBE_DIR / 'synth/abc.script'
+    assert receipt['sha256'][str(script.relative_to(folder))] == receipts._sha(script)
+    if changed is not None:
+        archived = list(folder.parent.glob('attempts/*/vibeic_receipt.json'))
+        assert len(archived) == 1 and archived[0].read_bytes() == original

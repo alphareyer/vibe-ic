@@ -358,23 +358,78 @@ def abc_script_graph(script: str, sources: List[dict], read_text) -> List[str]:
     return scripts
 
 
+def _copy_abc_graph(source: Path, target: Path) -> Path:
+    """Copy retained bytes, keeping source names but rebasing their file refs."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    sources = json.loads(source.with_name("abc_sources.json").read_text())
+    copied = []
+    for index, item in enumerate(sources):
+        ref = item.get("script")
+        if ref is not None:
+            leaf = source.parent / Path(ref["path"]).name
+            if _sha(leaf) != ref["sha256"]:
+                raise ValueError("retained ABC source bytes changed")
+            output = target.with_name(f"abc_source_{index}.script")
+            shutil.copyfile(leaf, output)
+            ref = _ref(output)
+        copied.append({"source": item["source"], "script": ref})
+    target.with_name("abc_sources.json").write_text(json.dumps(copied, indent=2) + "\n")
+    return target
+
+
+def native_abc_script(folder: Path, receipt: dict) -> Optional[Path]:
+    """The executed graph covered by this native synthesis receipt, if complete.
+
+    Both cache reuse and a later claimed census use the original recorded
+    digests. An unrelated recipe, newly computed hash, or older run cannot
+    supply the missing executed wrapper.
+    """
+    script = folder / PROBE_DIR / "synth" / "abc.script"
+    hashes = receipt.get("sha256") or {}
+    def bound(path):
+        return (path.is_file() and not path.is_symlink()
+                and hashes.get(str(path.relative_to(folder))) == _sha(path))
+    try:
+        index = script.with_name("abc_sources.json")
+        log = folder / "invocation.log"
+        if not all(bound(path) for path in (script, index, log)):
+            return None
+        if not _ABC_SCRIPT.findall(log.read_text(errors="replace")):
+            return None
+        sources = json.loads(index.read_text())
+        def read(ref):
+            if not isinstance(ref, dict):
+                return ""
+            path = script.parent / Path(ref["path"]).name
+            return path.read_text() if bound(path) and _sha(path) == ref["sha256"] else ""
+        return script if abc_script_graph(script.read_text(), sources, read) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def keep_abc_script(project: Path, synth_dir: Path, log_text: str) -> Optional[Path]:
-    """Copy the script the mapping ABC call ran (the last one the yosys log
-    names) into the run's evidence and drop yosys's kept temp folders."""
-    target = abc_script_path(project)
+    """Retain the executed graph in its native folder before cleaning temp.
+
+    Phase2 synthesis precedes Phase3's run claim. Its native receipt must
+    retain these bytes independently of the later active-stage directory.
+    """
+    target = synth_dir / PROBE_DIR / "synth" / "abc.script"
     target.unlink(missing_ok=True)
     sources_index = target.with_name("abc_sources.json")
     sources_index.unlink(missing_ok=True)
+    active = abc_script_path(project) if current_run(project) is not None else None
+    if active is not None:
+        active.unlink(missing_ok=True)
+        active.with_name("abc_sources.json").unlink(missing_ok=True)
     names = _ABC_SCRIPT.findall(log_text)
     kept = None
-    if names and current_run(project) is not None:
+    if names:
         source = Path(names[-1])
         source = source if source.is_absolute() else synth_dir / source
         if source.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-            # LibreLane's wrapper sources its generated mapping recipe. Keep
-            # those exact bytes before cleaning up the Yosys temporary files.
             sources = []
             pending = abc_source_names(source.read_text())
             seen = set()
@@ -393,10 +448,37 @@ def keep_abc_script(project: Path, synth_dir: Path, log_text: str) -> Optional[P
                     pending.extend(abc_source_names(copy.read_text()))
                 sources.append({"source": name, "script": ref})
             sources_index.write_text(json.dumps(sources, indent=2) + "\n")
-            kept = target
+            kept = _copy_abc_graph(target, active) if active is not None else target
     for folder in synth_dir.glob("_tmp_yosys-abc-*"):
         shutil.rmtree(folder, ignore_errors=True)
     return kept
+
+
+def _synth_abc_for_current_handoff(project: Path, netlist: Path) -> Optional[Path]:
+    """Adopt only the graph bound to the existing current native handoff."""
+    import synth_handoff_netlist_check as handoff
+    report = handoff.bound_handoff(project)
+    if report is None:
+        # The existing direct Yosys producer already copied into this claim.
+        script = abc_script_path(project)
+        return script if script.is_file() else None
+    if report.get("verdict") != "PASS":
+        raise ValueError("current synthesis handoff refused: " + str(report.get("findings")))
+    if Path(report["mapped"]).resolve() != netlist.resolve():
+        raise ValueError("synthesis census netlist differs from the current handoff")
+    binding = json.loads((netlist.parent / "synth_inputs.json").read_text())["librelane_synthesis"]
+    folder = project / binding["folder"]
+    import librelane_contract as contract
+    try:
+        receipt = contract.validate_step_receipt(folder, "Yosys.Synthesis")
+    except contract.Refusal as exc:
+        raise ValueError(str(exc)) from exc
+    if _sha(folder / "vibeic_receipt.json") != binding["receipt_sha256"]:
+        raise ValueError("native synthesis receipt changed after handoff validation")
+    script = native_abc_script(folder, receipt)
+    if script is None:
+        raise ValueError("current native synthesis receipt lacks its executed ABC graph")
+    return _copy_abc_graph(script, abc_script_path(project))
 
 
 def synth_census_tcl(*, liberties: List[str], netlist: str, top: str, sdc: str,
@@ -410,7 +492,8 @@ def synth_census_tcl(*, liberties: List[str], netlist: str, top: str, sdc: str,
 
 
 def record_synth(project: Path, *, abc_script: Optional[Path],
-                 behavior: Optional[Path], netlist: Path, sdc: Path) -> Optional[Path]:
+                 behavior: Optional[Path], netlist: Path, sdc: Path,
+                 reason: Optional[str] = None) -> Optional[Path]:
     """The synth receipt: the script ABC executed and the census of the
     netlist it produced."""
     doc: dict = {"ran": abc_script is not None,
@@ -422,7 +505,7 @@ def record_synth(project: Path, *, abc_script: Optional[Path],
         if sources_index.is_file():
             doc["abc_sources"] = json.loads(sources_index.read_text())
     else:
-        doc["reason"] = "the synthesis log names no ABC script ABC ran"
+        doc["reason"] = reason or "the synthesis log names no ABC script ABC ran"
     if behavior is not None and behavior.is_file():
         doc["behavior_report"] = _ref(behavior)
     return _write_receipt(project, "synth", doc)
@@ -454,8 +537,13 @@ def synth_stage(project: Path, *, netlist: Path, top: str, liberties: List[str],
     synth receipt.  Outside a claimed run nothing is written."""
     if current_run(project) is None:
         return None
-    abc = abc_script_path(project)
-    evidence = abc.parent
+    reason = None
+    try:
+        abc = _synth_abc_for_current_handoff(project, netlist)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        abc = None
+        reason = f"current synthesis ABC witness refused: {exc}"
+    evidence = abc_script_path(project).parent
     evidence.mkdir(parents=True, exist_ok=True)
     behavior = evidence / "behavior.rpt"
     behavior.unlink(missing_ok=True)
@@ -471,9 +559,9 @@ def synth_stage(project: Path, *, netlist: Path, top: str, liberties: List[str],
         write_text(evidence / "census.log", f"rc={rc}\n{out}\n{err}")
         if rc:
             behavior.unlink(missing_ok=True)
-    return record_synth(project, abc_script=abc if abc.is_file() else None,
+    return record_synth(project, abc_script=abc,
                         behavior=behavior if behavior.is_file() else None,
-                        netlist=netlist, sdc=sdc)
+                        netlist=netlist, sdc=sdc, reason=reason)
 
 
 # --- step 32 ---------------------------------------------------------------------
