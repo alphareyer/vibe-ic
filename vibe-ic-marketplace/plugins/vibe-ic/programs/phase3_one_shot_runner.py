@@ -73947,7 +73947,7 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
 def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
                               ir_rpt: Path, si_rpt: Path, notes: List[str],
                               pdk: Optional[PdkConfig] = None,
-                              container: Optional[str] = None) -> bool:
+                              container: Optional[str] = None, *, vdd_v: Optional[float] = None) -> bool:
     """Step 27's coupling screen, bound to current native OpenSTA windows.
 
     The noise screen remains advisory. Missing execution or material inputs
@@ -73968,6 +73968,10 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             raise current.Refusal('CURRENT_SI_BASIS_MISSING' +
                                   (': inspected supplied arguments pdk/container/spef; '
                                    + ', '.join(missing)))
+        if vdd_v is None:
+            vdd_v = _pdk_nominal_voltage(pdk, container)
+        if vdd_v is None:
+            raise current.Refusal('CURRENT_SI_VOLTAGE_UNSTATED')
         if si_rpt.absolute() != (_pl.reports_phase3_dir(project) / 'si_crosstalk.rpt').absolute():
             raise current.Refusal('CURRENT_SI_OUTPUT_PATH_MISMATCH')
         subject, _ = current.tool_subject(project, top, coupling=True)
@@ -73984,12 +73988,12 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             raise current.Refusal('CURRENT_SPEF_COUPLING_MISSING' +
                                   f': inspected selected SPEF {selected_spef}; '
                                   'parsed coupling capacitance population is empty')
-        m = _si_coupling_metrics(cg, cc)
+        m = _si_coupling_metrics(cg, cc, vdd_mv=vdd_v * 1000.0)
         body.update(verdict='ADVISORY_SCREEN_ONLY', spef=str(spef),
                     max_crosstalk_noise=m['max_crosstalk_noise_mv'],
                     max_coupling_ratio=m['max_coupling_ratio'],
                     mean_coupling_ratio=m['mean_coupling_ratio'], nets_analyzed=m['nets'])
-        _merge_si_timing_aware(project, top, pdk, container, spef, body, notes)
+        _merge_si_timing_aware(project, top, pdk, container, spef, body, notes, vdd_v=vdd_v)
         if body['verdict'] == 'NOT_MEASURED':
             raise current.Refusal(body['current_input_reason'])
         timing = _pl.extracted_dir(project) / f'{top}_si_timing.json'
@@ -78849,7 +78853,9 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
 
     t0 = time.time()
     flow_rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
-    params = {**_backend_parameter_values(project, pdk), 'top': top,
+    from execution_adapters_backend import BACKEND_PARAMETER_DEFAULTS
+    params = {'timeout_s': BACKEND_PARAMETER_DEFAULTS['timeout_s'],
+              **_backend_parameter_values(project, pdk), 'top': top,
               'container': container, 'die_um': die_um, 'util': util,
               'spare_density': spare_density}
     rows: List[StepResult] = []

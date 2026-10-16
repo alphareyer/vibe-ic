@@ -86,7 +86,7 @@ def seal(folder, fp):
         if p.is_file() and p.name != 'vibeic_receipt.json'}})
 
 
-def project(tmp_path):
+def project(tmp_path, *, voltage=1.8):
     p = tmp_path / 'p'
     nl = write(p / 'phase3/stage3/pnr/neutral_pnr.v', NETLIST)
     spef = write(p / 'phase3/stage3/extracted/neutral.spef', SPEF)
@@ -94,7 +94,7 @@ def project(tmp_path):
     views = {'nl': str(nl), 'sdc': str(sdc), 'spef': {'*': str(spef)}, 'metrics': {}}
     folder, _ = BF.producer(p, 'OpenROAD.STAPostPNR', views, views,
                            lane='22-23/01-openroad-stapostpnr', config_folder='22-config', name='neutral')
-    lib = write(p / 'fixture_pdk/neutral/neutral.lib', 'library(neutral_typ) { default_operating_conditions: typ; }\n')
+    lib = write(p / 'fixture_pdk/neutral/neutral.lib', 'library(neutral_typ) {\n' + (f' nom_voltage : {voltage};\n' if voltage is not None else '') + ' default_operating_conditions: typ;\n}\n')
     corner = 'nom_typ'
     guest = '/pdk/neutral/neutral.lib'
     write(folder / corner / 'sta.log', f"SOURCE_FIXTURE_ONLY\nReading cell library for the '{corner}' corner at '{guest}'\n")

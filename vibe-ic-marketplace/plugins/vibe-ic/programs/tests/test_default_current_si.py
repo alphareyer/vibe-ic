@@ -337,3 +337,171 @@ def test_si_corner_consumer_rejects_stale_or_mixed_scene(tmp_path, monkeypatch, 
         put(path, receipt)
     assert SG.main([str(p)]) == 1
     assert R._step27_current_si_due(p) is True
+
+
+def _default_step27_transport(tmp_path, monkeypatch, *, case='good', timeout='omitted'):
+    """Real row/owner/gates; only STA process transport is neutral software data."""
+    import contextlib
+    import io
+    import execution_backend_producers as backend
+    import execution_policy
+    import flow_compliance_check as compliance
+    import si_mcf_sta as mcf
+    from test_default_si_spice_power import current_row_inputs
+    p, folder, lib = project(tmp_path, voltage=5.0)
+    current_row_inputs(p, monkeypatch)
+    cfg = pdk(lib)
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (R, None, cfg, 'SOFTWARE_FIXTURE_ONLY'))
+    monkeypatch.setattr(backend, '_step15_sdc', lambda *_: p / 'phase3/stage3/pnr/constraint.sdc')
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    if timeout != 'omitted':
+        supplied = R._backend_parameter_values(p, cfg)
+        monkeypatch.setattr(R, '_backend_parameter_values', lambda *_: {**supplied, 'timeout_s': timeout})
+    data = {'pins': {pin: {'arr_rise_min': 1.0, 'arr_rise_max': 1.2,
+        'arr_fall_min': 1.0, 'arr_fall_max': 1.2, 'slew_rise_max': 0.1,
+        'slack_max': 1e-12 if case == 'delta_fail' else 4.0}
+        for pin in ('u0:Z', 'u1:Z', 'u2:A', 'z')}}
+    observed = {'mcf_timeouts': [], 'si_checks': 0, 'sta_calls': []}
+
+    def windows_transport(project_path, image, mounts, script, log, **kwargs):
+        put(p / 'phase3/stage3/extracted/neutral_si_timing.json', data)
+        marker = re.search(r'VIBEIC_CURRENT_DONE [a-f0-9]+', script.read_text())[0]
+        text = 'SOURCE_FIXTURE_ONLY\nSI_TIMING_JSON_EMIT_DONE\n' + marker + '\n'
+        write(log, text)
+        return SimpleNamespace(returncode=0, stdout=text, stderr='')
+
+    def mcf_windows(*args):
+        put(args[9], data)
+        return data, 0
+
+    def sta_transport(container, work, tag, *args):
+        observed['sta_calls'].append(tag)
+        rc = 1 if case == 'mcf_unmeasured' else 0
+        text = 'SOURCE_FIXTURE_ONLY\nworst setup slack 1.0\nworst hold slack 1.0\n'
+        write(work / f'si_mcf_sta_{tag}.rpt', text)
+        return 1.0, 1.0, text, rc
+
+    monkeypatch.setattr(LS, 'run_sta_script', windows_transport)
+    monkeypatch.setattr(mcf, '_to_container_path', lambda value, *_: value)
+    monkeypatch.setattr(mcf, '_run_windows', mcf_windows)
+    monkeypatch.setattr(mcf, '_run_sta_slack', sta_transport)
+    actual_mcf = mcf.run
+    def mcf_observed(*args, **kwargs):
+        observed['mcf_timeouts'].append(kwargs['timeout'])
+        result = actual_mcf(*args, **kwargs)
+        if case == 'mcf_bad_fold':
+            # An actual recount must refuse a measured report whose bounded
+            # SPEF no longer carries the fold the producer just computed.
+            Path(result['corners']['setup']['bounded_spef']).write_text(
+                Path(result['spef']).read_text())
+        if case == 'missing_si_receipt':
+            (p / 'reports/phase3/si_crosstalk.current.json').unlink(missing_ok=True)
+        elif case == 'changed_timing':
+            path = p / 'phase3/stage3/extracted/neutral_si_timing.json'
+            path.write_text(path.read_text() + '\n ')
+        return result
+    monkeypatch.setattr(mcf, 'run', mcf_observed)
+    actual_transport = compliance._watchdog.run_host_supervised
+    def gate_transport(argv, **kwargs):
+        if Path(argv[1]).name != 'si_crosstalk_check.py':
+            return actual_transport(argv, **kwargs)
+        observed['si_checks'] += 1
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with monkeypatch.context() as transport_context:
+            transport_context.chdir(kwargs['cwd'])
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = SG.main(argv[2:])
+        return compliance._watchdog.SupervisedResult(
+            rc=rc, out=stdout.getvalue(), err=stderr.getvalue(), outcome='natural')
+    monkeypatch.setattr(compliance._watchdog, 'run_host_supervised', gate_transport)
+    return p, cfg, observed
+
+
+@pytest.mark.parametrize('case,expected', [('good', 'PASS'), ('delta_fail', 'FAIL'),
+    ('missing_si_receipt', 'FAIL'), ('changed_timing', 'FAIL'), ('mcf_bad_fold', 'FAIL'), ('mcf_unmeasured', 'NOT_MEASURED')])
+def test_default_row27_uses_the_complete_current_si_owner(tmp_path, monkeypatch, case, expected):
+    import execution_adapters_backend as adapters
+    import _opensta_current as current
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch, case=case)
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == expected, row.detail
+    assert observed['mcf_timeouts'] == [adapters.BACKEND_PARAMETER_DEFAULTS['timeout_s']]
+    assert observed['sta_calls'] == ['nominal', 'mcf_setup', 'mcf_hold']
+    assert observed['si_checks'] == (0 if case == 'mcf_unmeasured' else 1)
+    receipt = json.loads((p / 'reports/phase3/default_steps/27/backend_result.json').read_text())
+    assert receipt['verdict'] == expected
+    report = json.loads((p / 'reports/phase3/si_crosstalk.json').read_text())
+    assert report['timing_aware_advisory']['timing_json'].endswith('neutral_si_timing.json')
+    assert report['timing_aware_advisory']['vdd_v'] == 5.0
+    assert report['delta_delay']['vdd_v'] == 5.0
+    assert report['max_crosstalk_noise'] == pytest.approx(10000 / 3, abs=0.01)
+    assert json.loads((p / 'reports/phase3/si_mcf_sta.json').read_text())['vdd_v'] == 5.0
+    if case in ('good', 'mcf_bad_fold', 'mcf_unmeasured', 'delta_fail'):
+        assert current.si_binding(p)['step'] == '27'
+    if case == 'good':
+        assert SG.main([str(p)]) == 0
+        assert report['delta_delay_verdict'] == 'PASS'
+    elif case == 'delta_fail':
+        assert report['delta_delay_verdict'] == 'FAIL'
+        assert SG.main([str(p)]) == 1
+        assert 'SI_DELTA_DELAY_FAIL' in (p / 'reports/phase2/gates/si_crosstalk.json').read_text()
+    elif case == 'mcf_bad_fold':
+        assert SG.main([str(p)]) == 0
+        assert 'FOLD_NOT_APPLIED' in (p / 'reports/phase3/si_mcf_sta_check.json').read_text()
+    elif case == 'mcf_unmeasured':
+        assert SG.main([str(p)]) == 0
+        assert not (p / 'reports/phase3/si_mcf_sta.rpt').exists()
+    else:
+        assert SG.main([str(p)]) == 1
+
+
+def test_default_row27_missing_spef_does_not_start_native_or_mcf(tmp_path, monkeypatch):
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch)
+    (p / 'phase3/stage3/extracted/neutral.spef').unlink()
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == 'NOT_MEASURED', row.detail
+    assert observed['mcf_timeouts'] == [] and observed['sta_calls'] == []
+    assert not (p / 'reports/phase3/si_crosstalk.current.json').exists()
+
+
+def test_default_row27_explicit_invalid_timeout_is_not_defaulted(tmp_path, monkeypatch):
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch, timeout=None)
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == 'NOT_MEASURED'
+    assert 'TypeError: int() argument' in row.detail
+    assert observed['mcf_timeouts'] == []
+
+
+def test_ultra_row27_keeps_the_existing_flat_producer(tmp_path, monkeypatch):
+    import execution_backend_producers as backend
+    import si_mcf_sta as mcf
+    p, cfg, _ = _default_step27_transport(tmp_path, monkeypatch)
+    calls = []
+    def timing(project_path, top, config, container, spef, sdc, nl, out, notes, voltage):
+        put(out, {'pins': {pin: {'arr_rise_min': 1.0, 'arr_rise_max': 1.2,
+            'arr_fall_min': 1.0, 'arr_fall_max': 1.2, 'slew_rise_max': 0.1,
+            'slack_max': 4.0} for pin in ('u0:Z', 'u1:Z', 'u2:A', 'z')}})
+        calls.append('flat_timing')
+        return True
+    monkeypatch.setattr(R, '_emit_si_timing_json', timing)
+    monkeypatch.setattr(R, '_emit_si_crosstalk_report', lambda *a, **k: pytest.fail('Ultra called the Default owner'))
+    monkeypatch.setattr(mcf, 'run', lambda *a, **k: calls.append(('mcf', k['timeout'])))
+    result = backend.produce_signoff(p, {'step_id': '27', 'top': 'neutral',
+        'pdk_root': str(p / 'fixture_pdk'), 'image_id': 'SOURCE_FIXTURE_ONLY',
+        'execution_mode': 'ultra', 'timeout_s': 73})
+    assert result['verdict'] == 'PASS'
+    assert calls == ['flat_timing', ('mcf', 73)]
+    data = json.loads((p / 'reports/phase3/si_crosstalk.json').read_text())
+    assert 'timing_json' in data and 'timing_aware_advisory' not in data
+
+
+def test_complete_si_owner_does_not_invent_an_undeclared_voltage(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path, voltage=None)
+    fake_windows(monkeypatch, p)
+    report = p / 'reports/phase3/si_crosstalk.rpt'
+    notes = []
+    assert R._emit_si_crosstalk_report(p, 'neutral',
+        p / 'phase3/stage3/extracted/neutral.spef', report.parent / 'ir_drop.rpt',
+        report, notes, pdk=pdk(lib), container='SOFTWARE_FIXTURE_ONLY') is False
+    assert 'CURRENT_SI_VOLTAGE_UNSTATED' in '; '.join(notes)
+    assert not report.with_suffix('.current.json').exists()
