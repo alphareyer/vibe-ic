@@ -238,3 +238,159 @@ def test_default_phase2_caller_does_not_start_synthesis_for_analog_compliance(
     assert seen[0].get('schema') != 'vibeic/current-step-producer-census/1'
     assert not any((project / r).exists() for r in REPORTS)
     assert not (project / 'phase2/stage2/synth/netlist.v').exists()
+
+
+def _latest_retained_handoff(project):
+    import step_output_collector as versions
+    rows = [row for row in versions._read_index(project)['steps']
+            if str(row['id']) == '14']
+    assert len(rows) == 1, 'the normal Default caller must retain Step14 itself'
+    folder = versions._versions_root(project) / rows[0]['folder']
+    record = json.loads((folder / 'outputs.json').read_text())
+    assert record['capture_errors'] == []
+    return folder, record
+
+
+def test_normal_default_retains_complete_step14_and_unchanged_history(tmp_path, monkeypatch):
+    import hashlib
+    import step_output_collector as versions
+    from test_step14_report_producer_authorship import project_fixture
+    project, _ = project_fixture(tmp_path)
+    netlist = project / 'phase2/stage2/synth/netlist.v'
+    original = netlist.read_bytes()
+    result, consumer = _default_handoff_audit(project, monkeypatch)
+    assert result.status == consumer['status'] == 'PASS', consumer
+    folder, record = _latest_retained_handoff(project)
+    assert record['status'] == 'PASS' and record['canonical_pass'] is True
+    assert record['inputs']['phase2/stage2/synth/netlist.v'] == hashlib.sha256(original).hexdigest()
+    saved_input = next(row for row in record['input_files']
+                       if row['rel'] == 'phase2/stage2/synth/netlist.v')
+    assert (folder / saved_input['snapshot']).read_bytes() == original
+    assert record['result']['producer_return']['rc'] == 0
+    assert record['result']['canonical_consumer']['status'] == 'PASS'
+    assert len(record['result']['canonical_consumer']['ledger']) > 0
+    assert versions.latest_pass(project, '14')['current_inputs'] is True
+    before = {path: path.read_bytes() for path in folder.rglob('*') if path.is_file()}
+    repeated, again = _default_handoff_audit(project, monkeypatch)
+    next_folder, next_record = _latest_retained_handoff(project)
+    assert repeated.status == again['status'] == 'PASS'
+    assert next_folder != folder and next_record['canonical_pass'] is True
+    assert {path: path.read_bytes() for path in before} == before
+    assert netlist.read_bytes() == original
+
+
+@pytest.mark.parametrize('failure_at', ['producer', 'consumer'])
+def test_normal_default_retains_real_step14_failure_without_canonical_pass(
+        tmp_path, monkeypatch, failure_at):
+    import step_output_collector as versions
+    from test_step14_report_producer_authorship import project_fixture
+    project, _ = project_fixture(tmp_path)
+    netlist = project / 'phase2/stage2/synth/netlist.v'
+    original = netlist.read_bytes()
+    if failure_at == 'producer':
+        rtl = project / 'phase2/stage1/rtl/core.v'
+        rtl.write_text(rtl.read_text() + '// changed after synthesis\n')
+    else:
+        produce = producers.run_for_step
+
+        def produce_then_change_native_output(*args, **kwargs):
+            census = produce(*args, **kwargs)
+            assert census['verdict'] == 'PRODUCED'
+            raw = project / 'phase3/librelane/02-yosys-synthesis/core.nl.v'
+            raw.write_text(raw.read_text() + '// changed before the consumer\n')
+            return census
+
+        monkeypatch.setattr(producers, 'run_for_step', produce_then_change_native_output)
+    result, consumer = _default_handoff_audit(project, monkeypatch)
+    assert result.status == consumer['status'] == 'FAIL', consumer
+    _, record = _latest_retained_handoff(project)
+    assert record['status'] == 'FAIL' and record['canonical_pass'] is False
+    assert versions.latest_pass(project, '14') is None
+    assert record['result']['producer_return']['rc'] == (1 if failure_at == 'producer' else 0)
+    complete = record['result']['canonical_consumer']
+    if failure_at == 'producer':
+        assert complete is None
+    else:
+        assert complete['status'] == 'FAIL' and complete['ledger']
+    assert netlist.read_bytes() == original
+
+
+@pytest.mark.parametrize('handoff_state, expected', [
+    ('complete', 'PASS'), ('producer_failure', 'FAIL'),
+    ('consumer_failure', 'FAIL'), ('producer_unmeasured', 'NOT_MEASURED')])
+def test_complete_step14_controls_the_real_phase2_audit_return(
+        tmp_path, monkeypatch, handoff_state, expected):
+    """Real Step14 producer/FCC, with a neutral structural-audit transport.
+
+    The actual step_final_audit wrapper still parses the phase=2 result. Its
+    1..6 structural population does not stand in for the separate Step14 row.
+    """
+    import design_one_shot_runner as runner
+    import _gate_authorship as authorship
+    from test_step14_report_producer_authorship import project_fixture
+    project, _ = project_fixture(tmp_path)
+    l5 = project / 'phase1/generated_docs/L5_ADI_SPEC.json'
+    l5.write_text(json.dumps({'no_analog': True, 'analog_blocks_detected': False,
+                             'analog_blocks': []}) + '\n')
+    monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(policy, '_ordinary_runtime', {
+        'project': str(project), 'policy': {'mode': 'default'},
+        'parameters': {'skip_analog': True}})
+    monkeypatch.setattr(runner, '_finish_selected_interface_currentness',
+                        lambda _: runner.StepResult('phase1_currentness', 'NOT_APPLICABLE',
+                            declared_by='neutral INPUT scopes this control to Step14'))
+    monkeypatch.setattr(runner._pl, 'emit_final_summary', lambda *args: None)
+    audit_calls = []
+
+    def structural_audit_transport(argv, **kwargs):
+        assert Path(argv[1]).name == 'flow_compliance_check.py'
+        assert argv[argv.index('--phase') + 1] == '2'
+        assert '--strict-structural' in argv
+        audit_calls.append(argv)
+        return (0, 'Overall: PASS\n'
+                'STRUCTURAL MEASUREMENT: registered=1 invoked=1 no_verdict=0\n', '')
+
+    monkeypatch.setattr(runner, '_run', structural_audit_transport)
+    if handoff_state == 'producer_failure':
+        rtl = project / 'phase2/stage1/rtl/core.v'
+        rtl.write_text(rtl.read_text() + '// invalid current native input\n')
+    elif handoff_state == 'consumer_failure':
+        produce = producers.run_for_step
+
+        def produce_then_change_native_output(*args, **kwargs):
+            census = produce(*args, **kwargs)
+            assert census['verdict'] == 'PRODUCED'
+            raw = project / 'phase3/librelane/02-yosys-synthesis/core.nl.v'
+            raw.write_text(raw.read_text() + '// changed before full consumer\n')
+            return census
+
+        monkeypatch.setattr(producers, 'run_for_step', produce_then_change_native_output)
+    elif handoff_state == 'producer_unmeasured':
+        monkeypatch.setenv(authorship.ROLE_ENV, authorship.ROLE_AUDIT)
+    result = runner._audit_after_declared_producers(project, True)
+    _, record = _latest_retained_handoff(project)
+    assert len(audit_calls) == 1
+    assert result.status == record['status'] == expected
+    assert result.extras['step14_handoff']['verdict'] == expected
+    assert record['canonical_pass'] is (expected == 'PASS')
+    if handoff_state == 'consumer_failure':
+        assert record['result']['producer_return']['rc'] == 0
+        assert record['result']['canonical_consumer']['status'] == 'FAIL'
+
+
+def test_real_synthesis_input_change_still_invalidates_retained_producer_reuse(
+        tmp_path, monkeypatch):
+    from execution_backend_producers import _current_step_producer_authority
+    from test_step14_report_producer_authorship import project_fixture
+    project, _ = project_fixture(tmp_path)
+    result, consumer = _default_handoff_audit(project, monkeypatch)
+    assert result.status == consumer['status'] == 'PASS'
+    original = json.loads((project / producers.REPORT_REL).read_text())
+    source = project / 'phase2/stage1/rtl/core.v'
+    source.write_text(source.read_text() + '// real input changed after capture\n')
+    changed = producers.run_for_step(project, '14', timeout=30)
+    assert changed['input_identity'] != original['input_identity']
+    assert changed['executed'] == 4 and changed['already_produced_by_the_run'] == 0
+    assert changed['verdict'] == 'INCOMPLETE'
+    allowed, _, authority = _current_step_producer_authority(changed, project=project)
+    assert allowed is False and authority == 'FAIL'

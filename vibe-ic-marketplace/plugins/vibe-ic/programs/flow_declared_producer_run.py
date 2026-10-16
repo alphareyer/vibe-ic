@@ -667,6 +667,12 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
             relative = path.relative_to(project).as_posix()
             if relative in excluded:
                 continue
+        # Retained versions and auditor receipts describe this invocation;
+        # they are not new inputs to its report producers. Canonical aliases
+        # above still bind their resolved, live design path exactly once.
+        if (relative == 'steps' or relative.startswith(('steps/',
+                'reports/step_versions/', '.vibeic-state/audit_receipts/'))):
+            continue
         if path.is_file():
             # The audit can leave gate reports beside the producer's real
             # inputs.  Including those bytes makes a later audit rewrite the

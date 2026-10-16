@@ -25913,12 +25913,37 @@ def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepRes
     # through the existing producer API; its unchanged consumer still decides
     # whether the native input and the resulting reports are acceptable.
     import execution_policy
+    handoff_acceptance = None
     if (execution_policy.request()['mode'] == 'default'
             and (_pl.synth_dir(project) / 'netlist.v').is_file()):
+        handoff_acceptance = {'verdict': 'NOT_MEASURED',
+                              'detail': 'Step14 complete capture did not finish'}
         try:
             import flow_declared_producer_run as declared
-            handoff_producers = declared.run_for_step(
-                project, '14', timeout=_pl.audit_timeout_s(project))
+            import step_output_collector as versions
+            from execution_backend_producers import _current_step_producer_authority
+
+            def produce_handoff():
+                census = declared.run_for_step(
+                    project, '14', timeout=_pl.audit_timeout_s(project))
+                allowed, reason, authority = _current_step_producer_authority(
+                    census, project=project)
+                return {'rc': 0 if allowed else 1 if authority == 'FAIL' else 2,
+                        'authority_verdict': authority, 'authority_detail': reason,
+                        'current_step_producers': census}
+
+            # Capture the real synthesis input before these report producers
+            # write, then retain the unchanged complete Step14 consumer.
+            retained = _spf.retained_call(
+                project, '14', produce_handoff, canonical_acceptance=True)
+            handoff_producers = retained['current_step_producers']
+            current = next(row for row in versions._read_index(project)['steps']
+                           if str(row['id']) == '14')
+            record = json.loads((versions._versions_root(project) /
+                                 current['folder'] / 'outputs.json').read_text())
+            status = ('PASS' if record.get('canonical_pass') and record['status'] == 'PASS'
+                      else 'FAIL' if record['status'] == 'FAIL' else 'NOT_MEASURED')
+            handoff_acceptance = {'verdict': status, 'folder': current['folder']}
             print('[phase2] Step14 handoff producers: '
                   f"{handoff_producers['verdict']}; "
                   f"{handoff_producers['executed']} executed")
@@ -25929,6 +25954,17 @@ def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepRes
     # read a summary of that resulting tree, even when the sweep exits nonzero.
     _pl.emit_final_summary(project, PROGRAMS_DIR)
     audit = step_final_audit(project, phase=2, skip_analog=skip_analog)
+    # The phase=2 structural audit covers its existing 1..6 scope, not Step14.
+    # Its PASS cannot override this handoff's separately completed consumer.
+    if handoff_acceptance is not None:
+        audit.extras['step14_handoff'] = handoff_acceptance
+        if handoff_acceptance['verdict'] == 'FAIL':
+            audit.status = 'FAIL'
+        elif (handoff_acceptance['verdict'] != 'PASS'
+              and audit.status in ('PASS', 'PASS_WITH_WAIVERS')):
+            audit.status = 'NOT_MEASURED'
+        if handoff_acceptance['verdict'] != 'PASS':
+            audit.detail += '; Step14 complete handoff: ' + handoff_acceptance['verdict']
     audit.extras['phase1_currentness'] = asdict(currentness)
     if currentness.status == 'FAIL':
         audit.status = 'FAIL'
