@@ -84,7 +84,7 @@ def project(tmp_path, *, corner='nom_typ', liberty_name='neutral.lib'):
                            lane='22-23/01-openroad-stapostpnr', config_folder='22-config', name='neutral')
     library = 'neutral_typ' if liberty_name == 'neutral.lib' else 'neutral_' + Path(liberty_name).stem
     lib = write(p / 'fixture_pdk/neutral' / liberty_name,
-                f'library({library}) {{ default_operating_conditions: typ; }}\n')
+                f'library({library}) {{\n nom_voltage : 1.8;\n default_operating_conditions: typ;\n}}\n')
     guest = '/pdk/neutral/' + liberty_name
     write(folder / corner / 'sta.log', f"SOURCE_FIXTURE_ONLY\nReading cell library for the '{corner}' corner at '{guest}'\n")
     write(folder / corner / 'power.rpt', POWER)
