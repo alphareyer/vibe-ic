@@ -421,7 +421,9 @@ def test_split_hold_refuses_missing_or_changed_original_cts_before_native(tmp_pa
         (tmp_path / doc['measured_state']).write_text('{}\n')
     params = {**params, 'step_id': '20'}
     params.pop('state_in')
-    with pytest.raises(producers.em.Refusal, match='BACKEND_PREDECESSOR_STATE_UNBOUND'):
+    reason = ('BACKEND_PRODUCER_INPUT_ABSENT' if changed == 'receipt_missing'
+              else 'BACKEND_PREDECESSOR_STATE_UNBOUND')
+    with pytest.raises(producers.em.Refusal, match=reason):
         producers._cts_split(tmp_path, params, runner, ll, SimpleNamespace(name='neutral'), {})
     assert len(seen) == 1
 
