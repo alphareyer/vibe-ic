@@ -775,6 +775,10 @@ def test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypa
                   if case == 'case_fail' else VVP_PASS)
     edge, calls = _gls_edge(declared, transcript)
     def process_edge(argv, **kwargs):
+        if any('from librelane.flows.chip import Chip' in str(arg) for arg in argv):
+            # The current resolver also passes its image identity. The older
+            # shared edge models the preceding five resolver arguments.
+            return edge(argv[:-1], **kwargs)
         if '--id' in argv and case == 'tool_error':
             calls.append(argv)
             return SimpleNamespace(returncode=1, stdout='', stderr='SOURCE_FIXTURE_ONLY: simulation tool stopped')
