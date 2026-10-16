@@ -64,6 +64,7 @@ part number appears.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -98,12 +99,9 @@ _PRE_LAYOUT_HEADER = (
 class _Pdk:
     """Minimal PdkConfig stand-in: the fields this step actually reads.
 
-    Deliberately NOT a real PDK name or a real Liberty path. Nothing here
-    depends on which PDK is mounted — the corners are staged under the
-    project's own `input/pdk/liberty/`, and `name`/`liberty` only reach the SDC
-    branch, which `_rerun_project` has already made a no-op. Naming a shipped
-    PDK here would put a PDK literal in a test that has no PDK-dependent
-    behaviour to pin."""
+    The run supplies its real neutral staged Liberty to the SDC reader;
+    no image PDK or native measurement is used by this direct-process unit.
+    Nothing here depends on which PDK is mounted."""
     name = "harness-pdk"
     liberty = "/foss/pdks/harness-pdk/lib/x__tt.lib"
     macro_libs: list = []
@@ -154,14 +152,8 @@ def _fake_opensta(calls: list, fail_corners=()):
         tcl = rpt.parent / f"sta_{corner}.tcl"
         m = re.search(r'puts \$_bf "STA_BASIS: ([A-Z_]+)"', tcl.read_text())
         assert m, f"runner emitted no STA_BASIS stamp for {corner}"
-        _write(rpt,
-               "Startpoint: reg_a (rising edge-triggered flip-flop)\n"
-               "Endpoint: reg_b (rising edge-triggered flip-flop)\n"
-               f"  {dict(SS=0.42, TT=0.52, FF=0.62)[corner]}   slack (MET)\n"
-               "tns 0.00\n"
-               "wns 0.00\n"
-               f"STA_BASIS: {m.group(1)}\n"
-               "STA_BASIS_NOTE: harness stand-in for the container tool\n")
+        _write(rpt, _healthy_body(f"STA_BASIS: {m.group(1)}",
+                                 slack=dict(SS=0.42, TT=0.52, FF=0.62)[corner]))
         return (0, "", "")
     return _run
 
@@ -172,10 +164,15 @@ def _rerun_project(root: Path, *, per_corner_bodies: dict,
     sitting beside the synth netlist, with whatever STA artefacts that round
     left behind."""
     proj = root / "proj"
+    # This module substitutes the direct OpenSTA edge, not a native LL run.
+    _write(proj / 'phase3/librelane_switch.json', json.dumps({
+        'steps': {sid: 'direct' for sid in ('7', '8', '10')}}))
     # two staged corners -> the step uses them directly (no container probe)
-    _write(proj / "input" / "pdk" / "liberty" / "x__ss.lib", "library(ss){}")
-    _write(proj / "input" / "pdk" / "liberty" / "x__tt.lib", "library(tt){}")
-    # the deck already exists, so the SDC branch is a no-op (hermetic)
+    _write(proj / "input" / "pdk" / "liberty" / "x__ss.lib",
+           'library(ss) { time_unit : "1ns"; }\n')
+    _write(proj / "input" / "pdk" / "liberty" / "x__tt.lib",
+           'library(tt) { time_unit : "1ns"; }\n')
+    # Preserve the existing working deck while Step7 binds its selected input.
     _write(R._pl.pnr_dir(proj) / "constraint.sdc",
            "create_clock -name core_clk -period 10.0 [get_ports clk]\n")
     _write(R._pl.synth_dir(proj) / f"{TOP}_synth.v", "// synth netlist\n")
@@ -195,7 +192,9 @@ def _hermetic(monkeypatch, calls, fail_corners=()):
 
 
 def _run_step(proj):
-    return R.step_prelayout_signoff(proj, TOP, _Pdk(), "harness-container")
+    pdk = _Pdk()
+    pdk.liberty = str(proj / 'input/pdk/liberty/x__tt.lib')
+    return R.step_prelayout_signoff(proj, TOP, pdk, "harness-container")
 
 
 # ---------------------------------------------------------------------------
@@ -338,12 +337,27 @@ def test_undeclared_pre_pnr_is_reported_not_deleted(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _healthy_body(stamp_line: str, *, slack=0.42) -> str:
-    return ("Startpoint: reg_a (rising edge-triggered flip-flop)\n"
-            "Endpoint: reg_b (rising edge-triggered flip-flop)\n"
-            f"  {slack}   slack (MET)\n"
-            "tns 0.00\n"
-            f"{stamp_line}\n"
-            "STA_BASIS_NOTE: pre-layout basis FORCED (Step 10)\n")
+    # Source-control process output, including both path types required by
+    # the real summary reader. The runner still determines the basis stamp.
+    sections = [f"{stamp_line}\nSTA_TIME_UNIT: ns\nOpenSTA report_checks\n"]
+    for kind, arrival, required, value in (
+            ('max', 2.5, 2.5 + slack, slack), ('min', .35, .10, .25)):
+        sections.append(
+            "Startpoint: reg_a (rising edge-triggered flip-flop clocked by clk)\n"
+            "Endpoint: reg_b (rising edge-triggered flip-flop clocked by clk)\n"
+            f"Path Group: clk\nPath Type: {kind}\n\n"
+            "  Delay    Time   Description\n"
+            "---------------------------------------------------------\n"
+            "   0.00    0.00   clock clk (rise edge)\n"
+            "   0.00    0.00   clock network delay (ideal)\n"
+            f"   {arrival:.2f}    {arrival:.2f}   reg_a/Q -> reg_b/D\n"
+            f"           {arrival:.2f}   data arrival time\n"
+            f"           {required:.2f}   data required time\n"
+            "---------------------------------------------------------\n"
+            f"           {value:.2f}   slack (MET)\n\n")
+    sections.append(f"wns max {slack:.2f}\ntns max 0.00\nwns min 0.25\ntns min 0.00\n"
+                    "STA_BASIS_NOTE: software fixture, not native STA measurement\n")
+    return ''.join(sections)
 
 
 def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,

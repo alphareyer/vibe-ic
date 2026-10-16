@@ -58,6 +58,8 @@ def test_emit_config_before_the_pad_producer_has_run(tmp_path):
 
 
 def test_edited_config_file_reruns_the_step(tmp_path, monkeypatch):
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     """A step config that names a file (SDC, EQY script) must not resume stale."""
     p = design(tmp_path)
     netlist = put(p / "a.nl.v", "module cal_chain; endmodule\n")
@@ -71,7 +73,8 @@ def test_edited_config_file_reruns_the_step(tmp_path, monkeypatch):
         calls.append(cmd)
         folder = Path(cmd[cmd.index("-o") + 1])
         put(folder / "state_out.json", {"nl": str(netlist), "metrics": {}})
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0,
+                               stdout="SOFTWARE_FIXTURE: state write completed\n", stderr="")
 
     monkeypatch.setattr(contract, "image_capability", lambda *a: None)
     monkeypatch.setattr(contract.subprocess, "run", tool)
@@ -210,6 +213,10 @@ def test_sdc_syntax_check_defers_to_opensta_when_step8_is_switched(tmp_path):
 
 
 def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypatch):
+    from _stated_eda_image import mock_docker_route
+    # This test substitutes the image process edge; it is not a LOCAL image
+    # attestation control and must not borrow the enclosing QA container's CID.
+    mock_docker_route(monkeypatch)
     runner = importlib.import_module("phase3_one_shot_runner")
     p = design(tmp_path)
     libs = p / "input/pdk/liberty"
@@ -401,6 +408,8 @@ def test_combine_keeps_the_conclusive_arm_and_never_outvotes_a_counterexample(a,
 
 
 def test_step13_row_takes_the_eqy_counterexample(tmp_path, monkeypatch):
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     runner = importlib.import_module("design_one_shot_runner")
     p = tmp_path / "proj"
     (tmp_path / "pdkroot").mkdir()          # stated: image and PDK root declared

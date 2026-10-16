@@ -548,10 +548,13 @@ def test_cts_local_route_binds_the_resolved_pdk_root_at_the_cli_root(tmp_path, m
     pdk_name = 'pdkX'
     (pdk_root / pdk_name).mkdir(exist_ok=True)
     image = 'img@sha256:' + '7c' * 32
+    # This substituted LOCAL process has one stated finite envelope; do not
+    # inherit the shipping container's unrelated memory request.
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '1g')
     attestation = {'image': image, 'image_id': 'sha256:' + '7c' * 32,
                    'repo_digests': [image], 'cid': 'ab' * 32,
-                   'network_mode': 'none', 'memory': 64 * 1024**3,
-                   'memory_swap': 64 * 1024**3, 'auto_remove': True}
+                   'network_mode': 'none', 'memory': 1024**3,
+                   'memory_swap': 1024**3, 'auto_remove': True}
     monkeypatch.setattr(contract._ce, 'no_container_route', lambda: True)
     monkeypatch.setattr(contract, 'local_image_attestation', lambda _image: attestation)
     monkeypatch.setattr(contract, 'image_capability', lambda *_a, **_k: None)

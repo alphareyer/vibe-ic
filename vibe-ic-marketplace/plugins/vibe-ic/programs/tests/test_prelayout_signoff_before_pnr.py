@@ -85,8 +85,15 @@ def test_container_builtin_corners_are_used_when_none_are_staged(tmp_path,
 
     class _Pdk:
         name = "sky130A"
-        liberty = "/foss/pdks/sky130A/libs.ref/lib/x__tt_025C_1v80.lib"
+        liberty = str(tmp_path / 'fixture_pdk/x__tt_025C_1v80.lib')
         macro_libs: list = []
+
+    selected = Path(_Pdk.liberty)
+    selected.parent.mkdir()
+    selected.write_text('library(neutral) { time_unit : "1ns"; }\n')
+    (proj / 'phase3').mkdir()
+    (proj / 'phase3/librelane_switch.json').write_text(json.dumps({
+        'steps': {sid: 'direct' for sid in ('7', '8', '10')}}))
 
     # The container exposes two distinct process corners. Patch the SAME
     # discovery pair the pvt_matrix emitter uses, so the test proves the step
@@ -128,7 +135,7 @@ def test_skip_message_names_both_corner_sources(tmp_path):
     assert "staged" in res.detail and "container built-in" in res.detail, res.detail
 
 
-def _corner_pdk(monkeypatch, liberty: str):
+def _corner_pdk(monkeypatch, liberty: str, *, project=None):
     """Two container corners + no container round-trips. Returns the PdkConfig
     stand-in the step is called with."""
     monkeypatch.setattr(R, "_discover_container_corner_libs",
@@ -142,6 +149,19 @@ def _corner_pdk(monkeypatch, liberty: str):
         macro_libs: list = []
 
     _Pdk.liberty = liberty
+    if project is not None:
+        # These unit callers supply a direct STA process model. Bind a real
+        # selected Liberty asset instead of borrowing the image's PDK path.
+        if not Path(liberty).is_file():
+            selected = project.parent / 'fixture_pdk' / Path(liberty).name
+            selected.parent.mkdir(exist_ok=True)
+            selected.write_text('library(neutral) { time_unit : "1ns"; }\n')
+            _Pdk.liberty = str(selected)
+        (project / 'phase3').mkdir(parents=True, exist_ok=True)
+        (project / 'phase3/librelane_switch.json').write_text(json.dumps({
+            'steps': {sid: 'direct' for sid in ('7', '8', '10')}}))
+        from test_step7_asic_sdc_is_authored_once_at_step7 import _fixture_corner_sta
+        monkeypatch.setattr(R, '_emit_multi_corner_sta', _fixture_corner_sta)
     return _Pdk()
 
 
@@ -187,7 +207,7 @@ def test_design_staged_sdc_reaches_the_canonical_step7_artefact(tmp_path,
         _EDGE_LLM_ACCEL_SDC)
 
     res = R.step_prelayout_signoff(
-        proj, "chip_top", _corner_pdk(monkeypatch, "/foss/pdks/x/nom.lib"),
+        proj, "chip_top", _corner_pdk(monkeypatch, "/foss/pdks/x/nom.lib", project=proj),
         "some-container")
     assert res.status == "PASS", res.detail
 
@@ -225,7 +245,7 @@ def test_a_design_declared_io_delay_is_never_replaced(tmp_path, monkeypatch):
         + "set_input_delay 1.0 -clock core_clock [get_ports rst_n]\n")
 
     R.step_prelayout_signoff(
-        proj, "chip_top", _corner_pdk(monkeypatch, "/foss/pdks/x/nom.lib"),
+        proj, "chip_top", _corner_pdk(monkeypatch, "/foss/pdks/x/nom.lib", project=proj),
         "some-container")
 
     for rel in ("phase3/stage3/pnr/constraint.sdc",
@@ -265,7 +285,7 @@ def test_staged_sdc_is_rescaled_into_the_liberty_units(tmp_path, monkeypatch):
         + "set_output_delay 3.5 -clock core_clock [all_outputs]\n")
 
     R.step_prelayout_signoff(
-        proj, "chip_top", _corner_pdk(monkeypatch, str(lib)), "some-container")
+        proj, "chip_top", _corner_pdk(monkeypatch, str(lib), project=proj), "some-container")
 
     text = (proj / "phase3" / "stage3" / "pnr" / "constraint.sdc").read_text()
     clk = [ln for ln in text.splitlines() if "create_clock" in ln][0]
@@ -304,7 +324,7 @@ def test_a_fabricated_sdc_is_never_promoted_to_design_staged(tmp_path,
 
     assert R._resolve_staged_silicon_sdc(proj) is None
     res = R.step_prelayout_signoff(
-        proj, "chip_top", _corner_pdk(monkeypatch, str(lib)), "some-container")
+        proj, "chip_top", _corner_pdk(monkeypatch, str(lib), project=proj), "some-container")
     # the step still does its job: the deck the pre-layout STA reads exists
     assert res.status == "PASS", res.detail
     assert (proj / "phase3" / "stage3" / "pnr" / "constraint.sdc").is_file()

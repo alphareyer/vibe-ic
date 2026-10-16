@@ -50,8 +50,15 @@ def _run(project, monkeypatch, *, corners=None, stop=None):
     monkeypatch.setattr(R, "_prepare_prelayout_librelane", prepare, raising=False)
     monkeypatch.setattr(R, "_prelayout_librelane", tool)
     monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {})
-    monkeypatch.setattr(R, "_emit_multi_corner_sta", lambda *a, **k: False)
-    monkeypatch.setattr(LP, "compose_corner_reports", lambda *a, **k: [])
+    # The fixture must supply the same complete neutral path grammar as the
+    # existing owning tests; the real scoped summary and consumer still judge it.
+    from test_step7_asic_sdc_is_authored_once_at_step7 import _fixture_corner_sta
+    monkeypatch.setattr(R, "_emit_multi_corner_sta", _fixture_corner_sta)
+    def compose(_source, output, _classify):
+        _fixture_corner_sta(project, "top", pdk, "SOFTWARE_FIXTURE",
+                            sorted(libs.glob("*.lib")), output, [], force_prelayout=True)
+        return {label: output / f"sta_{label}.rpt" for label in ("SS", "TT")}
+    monkeypatch.setattr(LP, "compose_corner_reports", compose)
     result = R.step_prelayout_signoff(project, "top", pdk, "unused-container")
     path = project / "phase2/stage2/constraints/pvt_matrix.json"
     return result, json.loads(path.read_text()) if path.is_file() else None, calls

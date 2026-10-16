@@ -675,6 +675,7 @@ def _resolved_pvt_compound_fixture(current, monkeypatch, *, refuse=None):
         'clock_domains': [{'role': 'primary', 'period_ns': 10, 'source_pin': 'clk'}]})
     put(current / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'widget'})
     put(current / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {'fields': {}})
+    put(current / 'input/submission_template/tapeout_declaration.json', {'answers': {}})
     mapped = current / 'phase2/stage2/synth/widget_synth.v'
     D.step_yosys_synth(current, 'widget')
     put(current / 'phase2/stage2/synth/netlist.v', mapped.read_text())
