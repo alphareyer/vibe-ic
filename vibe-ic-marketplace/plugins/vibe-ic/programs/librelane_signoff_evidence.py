@@ -151,9 +151,24 @@ def _pdk_mounts(project: Path, switch: dict, folder: Path, image: str) -> list:
         _require(root_rec.get('source') == 'declared' and root_rec.get('pdk') == pdk,
                  'LL_PDK_ROOT_UNBOUND')
     rec = _read(folder / 'pdk_root.json')
-    _require(rec.get('cli_pdk_root') == '/pdk'
-             and rec.get('stated_by') == 'run_chain(pdk_root=...)', 'LL_PDK_ROOT_UNSTATED')
+    _require(rec.get('stated_by') == 'run_chain(pdk_root=...)', 'LL_PDK_ROOT_UNSTATED')
     mounts = rec.get('mounts_under_it')
+    if rec.get('execution_route') == 'LOCAL':
+        # run_chain retains the requested container mapping alongside the
+        # actual LOCAL paths. Validate that translation, then use the same
+        # canonical mapping to read the receipt's /pdk input fingerprints.
+        import _container_exec as ce
+        requested = rec.get('requested_mounts')
+        _require(rec.get('requested_pdk_root') == '/pdk'
+                 and isinstance(requested, list) and requested, 'LL_PDK_ROOT_UNSTATED')
+        translations = [(guest, str(Path(host).resolve())) for host, guest in requested]
+        _require(rec.get('cli_pdk_root') == ce.localise_mounted_paths('/pdk', translations)
+                 and mounts == [[str(Path(host).resolve()),
+                     ce.localise_mounted_paths(guest, translations)]
+                     for host, guest in requested], 'LL_PDK_MOUNT_CHANGED')
+        mounts = requested
+    else:
+        _require(rec.get('cli_pdk_root') == '/pdk', 'LL_PDK_ROOT_UNSTATED')
     _require(isinstance(mounts, list) and mounts, 'LL_PDK_MOUNT_MISSING')
     expected = (root / pdk).resolve()
     matches = []

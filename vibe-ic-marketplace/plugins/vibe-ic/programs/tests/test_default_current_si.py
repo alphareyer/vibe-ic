@@ -14,6 +14,7 @@ import librelane_signoff as LS
 import si_crosstalk_check as SG
 from test_default_current_power import project, pdk, put, write
 from test_default_backend_composition import ReachedFollowingRow
+from test_librelane_contract import local_image
 
 
 def fake_windows(monkeypatch, p):
@@ -505,3 +506,116 @@ def test_complete_si_owner_does_not_invent_an_undeclared_voltage(tmp_path, monke
         report, notes, pdk=pdk(lib), container='SOFTWARE_FIXTURE_ONLY') is False
     assert 'CURRENT_SI_VOLTAGE_UNSTATED' in '; '.join(notes)
     assert not report.with_suffix('.current.json').exists()
+
+
+def _local_step23_for_default_si(tmp_path, monkeypatch, local_image, *, case='good'):
+    """Actual run_chain owns LOCAL root/receipt; only tool process is neutral."""
+    import subprocess
+    import librelane_contract as LC
+    import librelane_postroute as LP
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch, case=case)
+    record_path = p / LP.STEP23_RECORD
+    record = json.loads(record_path.read_text())
+    previous = Path(record['sta_state']).parent
+    state = put(p / 'phase3/librelane/local-si-input.json',
+                json.loads((previous / 'state_in.json').read_text()))
+    config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    switch = json.loads((p / 'phase3/librelane_switch.json').read_text())
+    switch['image'] = local_image.image
+    put(p / 'phase3/librelane_switch.json', switch)
+
+    def external_edge(command, **kwargs):
+        assert command[command.index('--pdk-root') + 1] == str(p / 'fixture_pdk')
+        folder = Path(command[command.index('-o') + 1])
+        before = json.loads(Path(command[command.index('-i') + 1]).read_text())
+        put(folder / 'state_in.json', before)
+        put(folder / 'state_out.json', before)
+        put(folder / 'config.json', json.loads(config.read_text()))
+        write(folder / 'nom_typ/sta.log', (previous / 'nom_typ/sta.log').read_text())
+        write(folder / 'nom_typ/power.rpt', (previous / 'nom_typ/power.rpt').read_text())
+        return subprocess.CompletedProcess(command, 0, 'SOURCE_FIXTURE_ONLY LOCAL STA edge', '')
+
+    monkeypatch.setattr(LC, 'image_capability', lambda *a, **kw: {})
+    monkeypatch.setattr(LC, 'openroad_home', lambda *a, **kw: None)
+    monkeypatch.setattr(LC, 'run_container', external_edge)
+    folder = LC.run_chain(p, local_image.image,
+        [('OpenROAD.STAPostPNR', config, state)], lane='23', pdk_root='/pdk',
+        mounts=[(p / 'fixture_pdk', '/pdk')])[0]
+    record.update(sta_state=str(folder / 'state_out.json'),
+                  sta_state_sha256=LC.digest(folder / 'state_out.json'))
+    put(record_path, record)
+    root = json.loads((folder / 'pdk_root.json').read_text())
+    assert root['execution_route'] == 'LOCAL'
+    assert root['cli_pdk_root'] == str(p / 'fixture_pdk')
+    assert root['requested_pdk_root'] == '/pdk'
+    assert root['mounts_under_it'] == [[str(p / 'fixture_pdk'), str(p / 'fixture_pdk')]]
+    assert root['requested_mounts'] == [[str(p / 'fixture_pdk'), '/pdk']]
+    assert LC.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')['sha256']['pdk_root.json'] == LC.digest(folder / 'pdk_root.json')
+    return p, cfg, observed, folder
+
+
+@pytest.mark.parametrize('case,expected', [('good', 'PASS'), ('delta_fail', 'FAIL')])
+def test_default_si_consumes_run_chain_local_pdk_root(tmp_path, monkeypatch, local_image, case, expected):
+    import _opensta_current as current
+    p, cfg, observed, folder = _local_step23_for_default_si(
+        tmp_path, monkeypatch, local_image, case=case)
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == expected, row.detail
+    subject, tool = current.tool_subject(p, 'neutral', coupling=True)
+    assert tool['mounts'] == [(p / 'fixture_pdk', '/pdk')]
+    assert subject['tool_image'] == local_image.image
+    assert current.si_binding(p)['step'] == '27'
+    assert SG.main([str(p)]) == (0 if case == 'good' else 1)
+    assert observed['sta_calls'] == ['nominal', 'mcf_setup', 'mcf_hold']
+    assert observed['si_checks'] == 1
+    if case == 'delta_fail':
+        assert 'SI_DELTA_DELAY_FAIL' in (p / 'reports/phase2/gates/si_crosstalk.json').read_text()
+
+
+@pytest.mark.parametrize('damage', ['requested_root', 'requested_mounts', 'cli_root',
+    'executed_mount', 'foreign_mapping', 'provenance_pdk', 'image', 'root_bytes'])
+def test_default_si_local_pdk_mapping_or_receipt_damage_stays_unmeasured(
+        tmp_path, monkeypatch, local_image, damage):
+    import librelane_contract as LC
+    p, cfg, observed, folder = _local_step23_for_default_si(tmp_path, monkeypatch, local_image)
+    root_path = folder / 'pdk_root.json'
+    root = json.loads(root_path.read_text())
+    if damage == 'requested_root':
+        root.pop('requested_pdk_root')
+    elif damage == 'requested_mounts':
+        root.pop('requested_mounts')
+    elif damage == 'cli_root':
+        root['cli_pdk_root'] = '/foreign-pdks'
+    elif damage == 'executed_mount':
+        root['mounts_under_it'][0][1] = '/foreign-pdks'
+    elif damage == 'foreign_mapping':
+        foreign = p / 'foreign-pdk'
+        (foreign / 'neutral').mkdir(parents=True)
+        root['cli_pdk_root'] = str(foreign)
+        root['requested_mounts'] = [[str(foreign), '/pdk']]
+        root['mounts_under_it'] = [[str(foreign), str(foreign)]]
+    elif damage == 'provenance_pdk':
+        path = p / 'phase3/librelane_pdk_root.provenance.json'
+        doc = json.loads(path.read_text())
+        doc['pdk'] = 'foreign'
+        put(path, doc)
+    elif damage == 'image':
+        path = p / 'phase3/librelane_switch.json'
+        doc = json.loads(path.read_text())
+        doc['image'] = 'example.invalid/changed@sha256:' + 'b' * 64
+        put(path, doc)
+    put(root_path, root)
+    if damage != 'root_bytes':
+        # A producer-bound malformed mapping must also be refused. For the
+        # root_bytes case leave the original receipt hash untouched instead.
+        path = folder / 'vibeic_receipt.json'
+        receipt = json.loads(path.read_text())
+        receipt['sha256']['pdk_root.json'] = LC.digest(root_path)
+        put(path, receipt)
+    else:
+        root_path.write_text(root_path.read_text() + '\n ')
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    assert row.status == 'NOT_MEASURED', row.detail
+    assert observed['mcf_timeouts'] == [] and observed['sta_calls'] == []
+    assert SG.main([str(p)]) == 1
+    assert not (p / 'reports/phase3/si_crosstalk.current.json').exists()
