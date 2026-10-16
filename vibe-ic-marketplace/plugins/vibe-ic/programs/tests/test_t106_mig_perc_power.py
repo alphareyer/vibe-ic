@@ -860,7 +860,7 @@ def test_default_step29_binds_a_same_line_clock_before_complete_capture(
         project, root, declared = original(path)
         bench = project / 'phase2/stage1/sim/tb_case.v'
         text = bench.read_text().replace(
-            '  initial clk = 1\'b0;\n  always #5 clk = ~clk;',
+            '  always #5 clk = ~clk;',
             '  initial clk = 1\'b0; always #12 clk = ~clk;')
         assert text != bench.read_text()
         bench.write_text(text)
