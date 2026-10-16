@@ -203,3 +203,73 @@ def test_default_reads_semantic_image_live_but_keeps_explicit_file_bindings(tmp_
     doc["inputs"]["reports/container_image.json"] = _sha(report)
     step7.write_text(json.dumps(doc))
     assert "reports/container_image.json" in _contract(project, "default")
+
+
+@pytest.mark.parametrize("changed", ["em_current_density_check.py",
+                                    "em_peak_current_authority_check.py",
+                                    "_emit_em_current_authority"])
+def test_current_ir_keeps_its_measured_failure_after_em_only_source_changes(
+        tmp_path, monkeypatch, changed):
+    # The existing real adoption/consumer fixture establishes a current FAIL.
+    # Reading it under a later EM-only source must preserve that measured FAIL,
+    # without upgrading or rewriting the retained native receipt.
+    test_default_step24_adopts_its_current_native_primary(tmp_path, monkeypatch, "native_fail")
+    project = tmp_path / "project"
+    receipt = project / "reports/phase3/ir_drop_librelane.json"
+    original_bytes = receipt.read_bytes()
+    current = emc.native_source_identity()
+    assert changed in current
+    current[changed] = "0" * 64
+    monkeypatch.setattr(emc, "native_source_identity", lambda: dict(current))
+    result = emc.validate_primary_ir(project)
+    assert result["valid"] is True, result
+    assert result["verdict"] == "FAIL", result
+    assert receipt.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed", "both_missing", "empty_both"])
+def test_current_ir_requires_each_actual_ir_source_owner(tmp_path, monkeypatch, damage):
+    test_default_step24_adopts_its_current_native_primary(tmp_path, monkeypatch, "native_fail")
+    project = tmp_path / "project"
+    receipt = project / "reports/phase3/ir_drop_librelane.json"
+    original = json.loads(receipt.read_text())
+    current = emc.native_source_identity()
+    # These are existing identity keys, not a new receipt schema. Listing them
+    # independently makes the refusal controls cover every real IR owner.
+    required = ("_librelane_step24_record", "_librelane_step24_refusal_publish",
+                "_librelane_step24_publish", "_step24_primary_mode", "_step24_adopt_primary",
+                "_step24_basis_inputs", "_step24_transient_argv", "_emit_ir_em_reports",
+                "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py", "ir_drop_report_check.py")
+    assert all(name in current and name in original["source_identity"] for name in required)
+    for name in required if damage != "empty_both" else (None,):
+        doc = json.loads(json.dumps(original))
+        observed_current = dict(current)
+        if damage == "empty_both":
+            doc["source_identity"] = {}
+            observed_current = {}
+        elif damage == "changed":
+            doc["source_identity"][name] = "0" * 64
+        else:
+            doc["source_identity"].pop(name)
+            if damage == "both_missing":
+                observed_current.pop(name)
+        receipt.write_text(json.dumps(doc))
+        monkeypatch.setattr(emc, "native_source_identity", lambda: dict(observed_current))
+        result = emc.validate_primary_ir(project)
+        assert result["valid"] is False, (name, result)
+        assert result["verdict"] == "NOT_MEASURED", (name, result)
+
+
+@pytest.mark.parametrize("changed", ["em_current_density_check.py",
+                                    "em_peak_current_authority_check.py"])
+def test_step25_keeps_its_complete_native_source_binding(tmp_path, monkeypatch, changed):
+    from test_default_power_density import build
+    project, _, _ = build(tmp_path, monkeypatch, direct=True)
+    assert emc.validate_native_density(project)["valid"] is True
+    current = emc.native_source_identity()
+    current[changed] = "0" * 64
+    monkeypatch.setattr(emc, "native_source_identity", lambda: dict(current))
+    result = emc.validate_native_density(project)
+    assert result["valid"] is False, result
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert result["reason"] == "native producer/consumer source changed"

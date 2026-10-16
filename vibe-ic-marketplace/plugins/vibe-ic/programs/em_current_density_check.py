@@ -1055,6 +1055,17 @@ def native_source_identity() -> Dict[str, str]:
     return result
 
 
+# Step 24 consumes its IR producers/readers from the existing joint identity.
+# The EM-only consumers remain mandatory for Step 25, not for an unchanged
+# adopted IR measurement. Missing required keys never compare equal by absence.
+_PRIMARY_IR_SOURCE_KEYS = (
+    "_librelane_step24_record", "_librelane_step24_refusal_publish",
+    "_librelane_step24_publish", "_step24_primary_mode", "_step24_adopt_primary",
+    "_step24_basis_inputs", "_step24_transient_argv", "_emit_ir_em_reports",
+    "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py", "ir_drop_report_check.py",
+)
+
+
 def _native_sha(path: Path) -> Optional[str]:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1092,7 +1103,12 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
     """
     try:
         doc = json.loads((project / "reports/phase3/ir_drop_librelane.json").read_text())
-        if not doc.get("adopted") or doc.get("source_identity") != native_source_identity():
+        recorded_source = doc.get("source_identity")
+        current_source = native_source_identity()
+        if (not doc.get("adopted") or not isinstance(recorded_source, dict)
+                or any(not current_source.get(name)
+                       or recorded_source.get(name) != current_source[name]
+                       for name in _PRIMARY_IR_SOURCE_KEYS)):
             raise ValueError("LibreLane IR primary was not adopted by current source")
         if (not {"def", "netlist", "sdc", "spef"}.issubset(doc["inputs"])
                 or not {"reports/phase3/ir_drop.json", "reports/phase3/ir_drop.rpt"}.issubset(doc["published"])):
