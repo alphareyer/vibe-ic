@@ -995,3 +995,138 @@ def test_optional_tcl_stall_preserves_primary_cli_admission(tmp_path, monkeypatc
     put(tmp_path / 'primary-failed.json', {
         'primary_rc': 7, 'refusal_code': refused.value.code,
         'optional_stage_called': False, 'scope': 'neutral source/API mock'})
+
+
+def _declare_vertical_pdn_width(project, value, *, scope=None):
+    path = project / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json'
+    doc = json.loads(path.read_text())
+    declarations = doc['fields']['constraint_declarations']
+    declarations[:] = [row for row in declarations if row['token'] != 'PDN_VWIDTH']
+    declarations.append({'token': 'PDN_VWIDTH', 'scope': scope, 'value': value,
+                         'source': 'input/docs/pdn.md', 'line': 4})
+    put(path, doc)
+
+
+def test_vertical_pdn_width_flows_from_input_through_l19_and_normal_builder(tmp_path):
+    import l19_constraint_token_emit as l19
+    project = design(tmp_path)
+    source = project / 'input/docs/pdn.md'
+    source.parent.mkdir(parents=True)
+    source.write_text('# PDN constraints\n\n| setting | value |\n'
+                      '|---|---|\n| `PDN_VWIDTH` | 2.75 |\n')
+    emitted = l19.run(project)
+    assert emitted['status'] != 'ERROR', emitted
+    doc = json.loads((project / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json').read_text())
+    row = next(r for r in doc['fields']['constraint_declarations'] if r['token'] == 'PDN_VWIDTH')
+    assert float(row['value']) == 2.75 and row['source'] == 'input/docs/pdn.md'
+    output = project / 'phase3/librelane/15-config/design.json'
+    resolved = contract.emit_config(project, 'processA', output)
+    assert resolved['PDN_VWIDTH'] == 2.75
+    provenance = json.loads(output.with_suffix('.provenance.json').read_text())
+    assert 'input/docs/pdn.md' in provenance['PDN_VWIDTH']
+    assert not any(key in resolved for key in ('PDN_VPITCH', 'PDN_HWIDTH', 'PDN_HPITCH'))
+
+
+@pytest.mark.parametrize('value', ['0', '-0.1', 'NaN', 'inf', '-inf', '3%', 'true', True, 'bad'])
+def test_vertical_pdn_width_refuses_invalid_declared_values(tmp_path, value):
+    project = design(tmp_path)
+    _declare_vertical_pdn_width(project, value)
+    with pytest.raises(contract.Refusal, match='LL_PDN_VERTICAL_WIDTH_INVALID'):
+        contract.emit_config(project, 'processA', project / 'config.json')
+
+
+@pytest.mark.parametrize('value, scope', [('', None), ('not_determined', None),
+                                        ('2.75', 'other_process*')])
+def test_unspecified_vertical_pdn_width_keeps_existing_defaults(tmp_path, value, scope):
+    project = design(tmp_path)
+    output = project / 'config.json'
+    before = contract.emit_config(project, 'processA', output)
+    before_sources = output.with_suffix('.provenance.json').read_bytes()
+    assert 'PDN_VWIDTH' not in before
+    _declare_vertical_pdn_width(project, value, scope=scope)
+    assert contract.emit_config(project, 'processA', output) == before
+    assert output.with_suffix('.provenance.json').read_bytes() == before_sources
+
+
+@pytest.mark.parametrize('change', ['width', 'recipe'])
+def test_resolved_vertical_pdn_width_and_recipe_invalidate_native_cache(
+        local_image, monkeypatch, change):
+    """Real config builder, fingerprint/cache/archive; process writes are neutral.
+
+    This source-control transport does not run Chip, GeneratePDN or a solver,
+    and its widths are neutral fixtures, not a proposed physical repair size.
+    """
+    project = design(local_image.tmp)
+    _declare_vertical_pdn_width(project, '1.25')
+    pdk_root = local_image.tmp / 'pdks'
+    (pdk_root / 'processA').mkdir(parents=True)
+    recipe = project / 'source/pdn.tcl'
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text('# neutral recipe\nadd_pdn_stripe -width $::env(PDN_VWIDTH)\n')
+    state_views = {}
+    for view in ('odb', 'def', 'nl', 'sdc'):
+        path = project / 'source' / ('neutral.' + view)
+        path.write_text('SOURCE_CONTROL ' + view + '\n')
+        state_views[view] = str(path)
+    initial = put(project / 'initial.json', state_views)
+    step = 'OpenROAD.GeneratePDN'
+    native_calls = []
+
+    def process_transport(argv, **_kwargs):
+        if '-o' not in argv:
+            # The resolver's process edge consumes the actual design emitted
+            # by resolve_step_configs; it does not supply a preselected width.
+            declared = json.loads(Path(argv[-6]).read_text())
+            requested = json.loads(Path(argv[-5]).read_text())
+            target = Path(argv[-4])
+            assert requested == [step]
+            selected = {key: declared[key] for key in ('PDN_CFG', 'PDN_VWIDTH') if key in declared}
+            put(target / (step + '.json'), {**selected, 'meta': {'step': step}})
+            put(target / (step + '.views.json'), {'inputs': ['odb'], 'outputs': ['odb']})
+        else:
+            folder = Path(argv[argv.index('-o') + 1])
+            config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+            native_calls.append(config)
+            views = {}
+            for view in state_views:
+                path = folder / ('result.' + view)
+                path.write_text('SOURCE_CONTROL neutral ' + view + '\n')
+                views[view] = str(path)
+            put(folder / 'state_out.json', views)
+            put(folder / 'config.json', config)
+        return SimpleNamespace(returncode=0, stdout='SOURCE_CONTROL process output', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *_a, **_k: None)
+    monkeypatch.setattr(contract, 'run_container', process_transport)
+
+    def invoke():
+        configs = contract.resolve_step_configs(project, local_image.image, 'processA',
+            [step], pdk_root=pdk_root, folder='15-config',
+            overlay={'PDN_CFG': (str(recipe), 'source-owned neutral PDN recipe')})
+        return contract.run_chain(project, local_image.image,
+            [(step, configs[step], initial)], pdk_root='/pdk')[0]
+
+    folder = invoke()
+    assert len(native_calls) == 1
+    old_receipt = (folder / 'vibeic_receipt.json').read_bytes()
+    old = json.loads(old_receipt)
+    assert old['input']['config_files'][str(recipe)] == contract.digest(recipe)
+    assert invoke() == folder and len(native_calls) == 1
+    assert (folder / 'vibeic_receipt.json').read_bytes() == old_receipt
+    if change == 'width':
+        _declare_vertical_pdn_width(project, '2.75')
+    else:
+        recipe.write_text(recipe.read_text() + '# changed source recipe\n')
+    assert invoke() == folder
+    assert len(native_calls) == 2, 'changed declared width or recipe must execute the native process edge'
+    current = contract.validate_step_receipt(folder, step)
+    if change == 'width':
+        assert native_calls[0]['PDN_VWIDTH'] == 1.25 and native_calls[1]['PDN_VWIDTH'] == 2.75
+        assert old['input']['config'] != current['input']['config']
+        assert old['input']['config_files'] == current['input']['config_files']
+    else:
+        assert old['input']['config'] == current['input']['config']
+        assert old['input']['config_files'][str(recipe)] != current['input']['config_files'][str(recipe)]
+    archives = list((folder.parent / 'attempts').glob(folder.name + '-*'))
+    assert len(archives) == 1
+    assert (archives[0] / 'vibeic_receipt.json').read_bytes() == old_receipt

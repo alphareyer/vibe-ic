@@ -1389,7 +1389,7 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
                  'MAX_CAPACITANCE_CONSTRAINT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
                  'PDN_VOFFSET', 'PDN_HOFFSET', 'PDN_CORE_RING',
                  'PDN_CORE_RING_CONNECT_TO_PADS', 'PDN_SKIPTRIM', 'FP_PDN_SKIPTRIM',
-                 'FP_PDN_VOFFSET', 'FP_PDN_HOFFSET'}
+                 'FP_PDN_VOFFSET', 'FP_PDN_HOFFSET', 'PDN_VWIDTH'}
     chosen: dict[str, list[tuple[int, Any, str]]] = {}
     for row in declarations:
         key = row.get('token')
@@ -1405,10 +1405,17 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         key = {'FP_PDN_SKIPTRIM': 'PDN_SKIPTRIM', 'FP_PDN_VOFFSET': 'PDN_VOFFSET',
                'FP_PDN_HOFFSET': 'PDN_HOFFSET'}.get(key, key)
         try:
-            parsed: Any = float(value.rstrip('%'))
+            # Native GeneratePDN consumes this width in micrometres, not a
+            # percentage or boolean. Keep omitted/default declarations absent.
+            parsed: Any = float(value if key == 'PDN_VWIDTH' else value.rstrip('%'))
+            if key == 'PDN_VWIDTH' and (not math.isfinite(parsed) or parsed <= 0):
+                raise ValueError('width must be positive and finite')
             if parsed.is_integer():
                 parsed = int(parsed)
         except ValueError:
+            if key == 'PDN_VWIDTH':
+                raise Refusal('LL_PDN_VERTICAL_WIDTH_INVALID',
+                              'PDN_VWIDTH must be a positive finite number in um') from None
             if value.lower().startswith('true'):
                 parsed = True
             elif value.lower().startswith('false'):
