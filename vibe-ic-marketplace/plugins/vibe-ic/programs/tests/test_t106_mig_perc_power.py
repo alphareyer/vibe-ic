@@ -816,7 +816,8 @@ def test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypa
     assert report['verdict'] == ('PASS' if case == 'good' else 'FAIL'), report
     row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '29')
     files, missing = worker.resolve_contract(project, row['required_outputs'])
-    accepted = next(r for r in versions.current_acceptance(project, began) if r['id'] == '29')
+    version_folder = result.extras['canonical_steps'][0]['extras']['output_version']
+    accepted = json.loads((project / 'steps' / version_folder / 'outputs.json').read_text())
     assert accepted['status'] == result.status
     assert accepted['canonical_pass'] is (case == 'good')
     sim = runner._pl.sim_postlayout_dir(project)
@@ -834,6 +835,8 @@ def test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypa
             assert (sim / f'spm__{corner}.sdf').read_bytes() == Path(sdf).read_bytes()
         assert state_path.read_bytes() == original_state
     if case == 'good':
+        complete = next(r for r in versions.current_acceptance(project, began) if r['id'] == '29')
+        assert complete['canonical_pass'] is True and complete['status'] == 'PASS'
         assert (sim / 'pass.flag').is_file()
         assert versions.latest_pass(project, '29')['current_inputs'] is True
         assert {r['rel'] for r in accepted['outputs']} >= {
