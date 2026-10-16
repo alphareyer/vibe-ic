@@ -1101,6 +1101,7 @@ module public_surface (chip_clock, chip_reset, chip_word, chip_serial, chip_resu
   (DELAY (ABSOLUTE (IOPATH A Y (1.8:1.8:1.8) (1.8:1.8:1.8)))))
 )
 ''')
+    _current_output_deadline_fixture(project, root, 4)
     return project, root, models, bench, original_plan
 
 
@@ -1184,3 +1185,177 @@ def test_default_gls_uses_the_declared_physical_observation(
         'case': case, 'status': result.status, 'physical_contract':
         manifest['cases'][0].get('observation') if manifest['cases'] else None,
         'original_tb_unchanged': True, 'native_claim': False})
+
+
+def _current_output_deadline_fixture(project, root, deadline):
+    """Neutral native grammar; real current-scene reader, never a timing result."""
+    folder = next((project / 'phase3/librelane').glob('22-23/*stapostpnr'))
+    state = json.loads((folder / 'state_out.json').read_text())
+    state['spef'] = {p: str(write(folder / f'public_surface.{p[:-2]}.spef', '*SPEF fixture'))
+                     for p in ('nom_*', 'min_*', 'max_*')}
+    libs = {}
+    for corner in CORNERS:
+        process, temp, voltage = corner.split('_')[1:]
+        lib = write(root / 'x/libs.ref/cells/lib' / _lib_of(corner),
+                    f'library(fixture) {{\n nom_process : 1;\n nom_voltage : {float(voltage[:-2].replace("v", "."))};\n'
+                    f' nom_temperature : {(-float(temp[1:-1]) if temp.startswith("n") else float(temp[:-1]))};\n}}\n')
+        libs[corner] = [str(lib)]
+        spef = state['spef'][corner.split('_')[0] + '_*']
+        write(folder / corner / 'sta.log',
+              f"Reading cell library for the '{corner}' corner at '{lib}'\n"
+              f"Reading top-level design parasitics for the '{corner}' corner at '{spef}'\n")
+        write(folder / corner / 'max.rpt',
+              'Startpoint: result_ff (rising edge-triggered flip-flop clocked by clk)\n'
+              'Endpoint: chip_result (output port clocked by clk)\nPath Group: clk\nPath Type: max\n'
+              f' {deadline:.6f} data required time\n 1.000000 data arrival time\n 1.000000 slack (MET)\n')
+    put(folder / 'state_out.json', state)
+    put(folder / 'config.json', {'meta': {'step': 'OpenROAD.STAPostPNR'},
+         'STA_CORNERS': list(CORNERS), 'CELL_LIBS': libs})
+    bound = {str(f.relative_to(folder)): contract.digest(f) for f in folder.rglob('*')
+             if f.is_file() and f.name != 'vibeic_receipt.json'}
+    put(folder / 'vibeic_receipt.json', {'sha256': bound, 'input': {
+        'state_files': {str(Path(f)): contract.digest(Path(f))
+                        for f in [state['nl'], state['sdc'], *state['spef'].values()]},
+        'liberty_files': {f: contract.digest(Path(f)) for group in libs.values() for f in group}}})
+    put(project / postroute.STEP23_RECORD, {'mode': 'librelane',
+         'sta_state': str(folder / 'state_out.json'),
+         'sta_state_sha256': contract.digest(folder / 'state_out.json')})
+    return folder
+
+
+@pytest.mark.parametrize('case', ['good', 'case_fail', 'wrong_cycle', 'late', 'missing_corner', 'changed_corner', 'wrong_output', 'wrong_clock'])
+def test_default_gls_observes_the_current_output_deadline(
+        tmp_path, monkeypatch, local_image, case):
+    """Actual Default capture, typed INPUT schedule and real Icarus verdicts."""
+    import execution_backend_producers as backend
+    import execution_policy
+    import phase3_one_shot_runner as runner
+    import step_output_collector as versions
+    import arith_oracle_tb_gen as arith
+
+    project, root, model, bench, original_plan = _declared_observation_gls_project(tmp_path, case)
+    # Keep the same input timing, arithmetic population, comparator and latency.
+    # A slow-but-on-time output crosses the half period; a later one must fail.
+    text = model.read_text().replace('(1.8,1.8)', '(19.5,19.5)' if case == 'late' else '(14.0,14.0)')
+    model.write_text(text)
+    decl_path = project / 'plugin_output/declaration.json'
+    decl = json.loads(decl_path.read_text())
+    decl['verification_stimuli']['arithmetic_observation']['public_surface']['binding'][str(model.resolve())] = contract.digest(model)
+    put(decl_path, decl)
+    folder = _current_output_deadline_fixture(project, root, 18.949999)
+    for sdf in folder.rglob('*.sdf'):
+        sdf.write_text(sdf.read_text().replace('(1.8:1.8:1.8)', '(19.5:19.5:19.5)' if case == 'late' else '(14.0:14.0:14.0)'))
+    if case == 'wrong_cycle':
+        nl = Path(json.loads((folder / 'state_out.json').read_text())['nl'])
+        body = nl.read_text().replace('PUBLIC_OUT output_pad (.A(result_bit)',
+                  'reg extra_bit=0; always @(posedge i_clk) extra_bit<=result_bit;\n PUBLIC_OUT output_pad (.A(extra_bit)')
+        nl.write_text(body)
+    # Bind neutral producer bytes before testing absence / tampering.
+    _current_output_deadline_fixture(project, root, 18.949999)
+    report = folder / CORNERS[-1] / 'max.rpt'
+    if case == 'missing_corner':
+        report.unlink()
+    elif case in ('changed_corner', 'wrong_output', 'wrong_clock'):
+        report.write_text(report.read_text().replace('chip_result', 'another_output') if case == 'wrong_output'
+                          else report.read_text().replace('clocked by clk', 'clocked by other') if case == 'wrong_clock'
+                          else report.read_text() + '\nchanged bytes\n')
+        if case in ('wrong_output', 'wrong_clock'):
+            receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+            receipt['sha256'][str(report.relative_to(folder))] = contract.digest(report)
+            put(folder / 'vibeic_receipt.json', receipt)
+    original_bytes = bench.read_bytes()
+    put(project / 'phase3/librelane_switch.json', {
+        'image': local_image.image, 'pdk_root_host': str(root), 'pdk': 'x'})
+    cfg = SimpleNamespace(name='x')
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *_: {
+        'pdk_name': 'x', 'pdk_root': str(root), 'image_id': local_image.image})
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, contract, cfg, 'SOURCE_FIXTURE_ONLY'))
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    edge, _ = _gls_edge([str(model)], lambda c: VVP_PASS)
+    native = []
+    def process_edge(argv, **kwargs):
+        if any('from librelane.flows.chip import Chip' in str(arg) for arg in argv):
+            return edge(argv[:-1], **kwargs)
+        if '--id' not in argv:
+            return edge(argv, **kwargs)
+        from librelane.state import DesignFormat
+        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
+        from librelane_plugin_vibeic import GateLevelSim
+        folder = Path(argv[argv.index('-o') + 1])
+        folder.mkdir(parents=True, exist_ok=True)
+        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        instance = SimpleNamespace(config={
+            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
+            step_dir=str(folder), _run=GateLevelSim._run)
+        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
+        put(folder / 'state_out.json', incoming)
+        native.append(folder)
+        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus completed\n', stderr='')
+    monkeypatch.setattr(contract, 'run_container', process_edge)
+    result = runner._default_pnr_rows(project, 'public_serial_product', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
+    manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
+    assert bench.read_bytes() == original_bytes
+    assert original_plan['observation']['sample_offset_ns'] == 1
+    assert original_plan['framing']['settled_latency'] == 1
+    good = case == 'good'
+    assert result.status == ('PASS' if good else 'FAIL'), result.detail
+    if case in ('missing_corner', 'changed_corner', 'wrong_output', 'wrong_clock'):
+        assert manifest['cases'] == []
+        assert 'POSTLAYOUT_OBSERVATION_UNMEASURED' in manifest['not_a_subject'][0]['detail']
+    else:
+        prepared = Path(manifest['cases'][0]['testbench'])
+        plan = arith._scenario_header(prepared)
+        if case == 'good' or manifest['cases'][0].get('observation') is not None:
+            assert plan['observation']['top'] == 'public_surface'
+            assert plan['observation']['sample_offset_ns'] == 18.949
+            assert set(plan['observation']['postlayout_deadline']['required_time_ns']) == set(CORNERS)
+            assert plan['framing'] == original_plan['framing']
+            assert plan['pairs'] == json.loads(json.dumps(original_plan['pairs']))
+            assert plan['transactions'] == original_plan['transactions'] == 16
+            assert plan['comparisons'] == original_plan['comparisons'] == 128
+            assert '.chip_clock(i_clk)' in prepared.read_text()
+            assert '.chip_result(result_bit)' in prepared.read_text()
+            assert manifest['cases'][0]['observation'] == plan['observation']
+        import subprocess
+        source = prepared.read_text()
+        monitor = ('\nmodule drive_monitor; always @(negedge transaction_sequence.i_clk) #0 '
+                   '$strobe("DRIVE %0t %b %b %b",$time,transaction_sequence.i_rst,'
+                   'transaction_sequence.operand_word,transaction_sequence.serial_bit); endmodule\n')
+        old_plan = json.loads(json.dumps(plan))
+        old_plan['observation'].pop('postlayout_deadline')
+        old_plan['observation']['sample_offset_ns'] = 4
+        old = arith.emit_arithmetic_scenario_module('transaction_sequence', old_plan, dut_module='public_serial_product')
+        old, _ = sgs.bind_dut_module(old, 'public_serial_product', 'dut',
+                                   Path(manifest['netlist']).read_text(), manifest['dut_binding'])
+        drives = []
+        for label, tb in [('model_only', old), ('deadline', source)]:
+            path = write(tmp_path / f'{label}.v', tb.replace('$sdf_annotate', '// disabled annotation in cadence-only monitor\n // $sdf_annotate') + monitor)
+            # Separate cadence observation: no change to the real GLS run above.
+            binary = tmp_path / f'{label}.vvp'
+            c = subprocess.run(['iverilog', '-g2012', '-gspecify', '-s', 'transaction_sequence', '-s', 'drive_monitor',
+                                '-o', str(binary), str(path), manifest['netlist'], str(model)], capture_output=True, text=True)
+            assert c.returncode == 0, c.stderr
+            run = subprocess.run(['vvp', str(binary)], capture_output=True, text=True)
+            drives.append([line for line in run.stdout.splitlines() if line.startswith('DRIVE ')])
+        # The last observer may finish after the driver's last negedge. Compare
+        # all original drive instants and require no inserted/missed update.
+        assert drives[1][:len(drives[0])] == drives[0]
+        assert len(drives[1]) == len(drives[0])
+        runs = json.loads((native[0] / 'gls_runs.json').read_text())['runs']
+        assert len(runs) == len(CORNERS)
+        for run in runs:
+            assert run['compile_rc'] == 0, Path(run['compile_log']).read_text()
+            assert run['sim_rc'] == (0 if good else 1)
+            transcript = Path(run['stdout']).read_text()
+            assert 'transactions=16 comparisons=128' in transcript
+    gate = json.loads((project / 'reports/phase2/gates/post_layout_sim.json').read_text())
+    assert gate['verdict'] == ('PASS' if good else 'FAIL')
+    latest = versions.latest_pass(project, '29')
+    assert (latest is not None) is good
+    assert (runner._pl.sim_postlayout_dir(project) / 'pass.flag').exists() is good
+    put(project / 'observation_adapter_readback.json', {
+        'case': case, 'status': result.status, 'physical_contract':
+        manifest['cases'][0].get('observation') if manifest['cases'] else None,
+        'original_tb_unchanged': True, 'native_claim': False})
+

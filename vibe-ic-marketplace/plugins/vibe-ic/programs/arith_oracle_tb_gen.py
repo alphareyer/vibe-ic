@@ -1632,6 +1632,7 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
     latency = framing['settled_latency']; pairs = plan['pairs']
     random_vectors = plan['scenario'] == 'random_transactions'
     observation = plan['observation']
+    deadline = bool(observation.get('postlayout_deadline'))
     half = format(observation['clock_period_ns'] / 2, '.12g')
     sample = format(observation['sample_offset_ns'], '.12g')
     on, off = (0, 1) if spec['reset_active_low'] else (1, 0)
@@ -1657,31 +1658,77 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
               f'initial {clk}=0; always #{half} {clk}=~{clk};',
               'reg [N-1:0] av[0:NV-1], bv[0:NV-1], gv[0:NV-1];',
               'integer errors=0, comparisons=0, transactions=0, held_edges=0;',
-              'integer vi,k,h,a; reg held_value;',
-              'task clear_state(input integer holds); begin',
-              f" {rst}=1'b{on}; {sin}=0; {par}=0;",
-              ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk}); #{sample};',
-              f"  if ({sout} !== 1'b0 && {sout} !== 1'b1) errors=errors+1;",
-              f'  if(h>0 && {sout} !== held_value) errors=errors+1;',
-              f'  held_value={sout}; held_edges=held_edges+1; @(negedge {clk});',
-              ' end', f" {rst}=1'b{off};", 'end endtask',
-              'task compare_transaction(input integer v,input integer reset_first,input integer pulse); begin',
-              f' if(reset_first) clear_state({reset_cycles});', f' {par}=av[v];',
-              ' for(k=0;k<N+L;k=k+1) begin',
-              f"  {sin}=(k<N) ? bv[v][{'k' if lsb else 'N-1-k'}] : 0;",
-              f"  if(pulse>0 && k==pulse) begin {rst}=1'b{on}; #1; {rst}=1'b{off}; #1; end",
-              f'  @(posedge {clk}); #{sample};', '  if(k>=L) begin',
-              f"   if({sout} !== gv[v][{'k-L' if lsb else 'N-1-(k-L)'}]) begin",
-              '    errors=errors+1;', f'    $display("FAIL: {module_name} fixed-window bit=%0d",k-L);',
-              '   end', '   comparisons=comparisons+1;', '  end',
-              f'  @(negedge {clk});', ' end', ' transactions=transactions+1;', 'end endtask',
-              'task interrupted(input integer v,input integer position,input integer holds); begin',
-              f' {par}=~av[v];', ' for(a=0;a<position;a=a+1) begin',
-              f"  {sin}=~bv[v][{'a' if lsb else 'N-1-a'}];",
-              f'  @(posedge {clk}); #{sample}; @(negedge {clk});', ' end',
-              ' clear_state(holds); compare_transaction(v,0,0);', 'end endtask',
-              'initial begin']
-    if random_vectors:
+              'integer vi,k,h,a; reg held_value;']
+    if deadline:
+        # The driver retains every original negedge. Automatic observer args
+        # snapshot the expected bit/window before the driver advances. Required
+        # time is a conformance deadline, not a promise that the model settles.
+        lines += ['integer pending_observers=0;',
+                  'integer passed_transactions=0, prior_errors;',
+                  'task automatic begin_transaction; begin',
+                  f' #{sample}; prior_errors=errors; pending_observers=pending_observers-1;',
+                  'end endtask',
+                  'task automatic observe_hold(input integer hold_index); begin',
+                  f' #{sample};',
+                  f" if ({sout} !== 1'b0 && {sout} !== 1'b1) errors=errors+1;",
+                  f' if(hold_index>0 && {sout} !== held_value) errors=errors+1;',
+                  f' held_value={sout}; held_edges=held_edges+1;',
+                  ' pending_observers=pending_observers-1;', 'end endtask',
+                  'task automatic observe_product(input integer bit_index,input expected_bit); begin',
+                  f' #{sample};', ' if(bit_index>=L) begin',
+                  f'  if({sout} !== expected_bit) begin', '   errors=errors+1;',
+                  f'   $display("FAIL: {module_name} fixed-window bit=%0d",bit_index-L);',
+                  '  end', '  comparisons=comparisons+1;', ' end',
+                  ' if(bit_index==N+L-1) begin', '  transactions=transactions+1;',
+                  '  if(errors==prior_errors) passed_transactions=passed_transactions+1;',
+                  ' end', ' pending_observers=pending_observers-1;', 'end endtask',
+                  'task clear_state(input integer holds); begin',
+                  f" {rst}=1'b{on}; {sin}=0; {par}=0;",
+                  ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk});',
+                  '  pending_observers=pending_observers+1;',
+                  '  fork observe_hold(h); join_none', f'  @(negedge {clk});',
+                  ' end', f" {rst}=1'b{off};", 'end endtask',
+                  'task compare_transaction(input integer v,input integer reset_first,input integer pulse); begin',
+                  ' pending_observers=pending_observers+1;',
+                  ' fork begin_transaction(); join_none',
+                  f' if(reset_first) clear_state({reset_cycles});', f' {par}=av[v];',
+                  ' for(k=0;k<N+L;k=k+1) begin',
+                  f"  {sin}=(k<N) ? bv[v][{'k' if lsb else 'N-1-k'}] : 0;",
+                  f"  if(pulse>0 && k==pulse) begin {rst}=1'b{on}; #1; {rst}=1'b{off}; #1; end",
+                  f'  @(posedge {clk});', '  pending_observers=pending_observers+1;',
+                  f"  fork observe_product(k,gv[v][{'k-L' if lsb else 'N-1-(k-L)'}]); join_none",
+                  f'  @(negedge {clk});', ' end', 'end endtask',
+                  'task interrupted(input integer v,input integer position,input integer holds); begin',
+                  f' {par}=~av[v];', ' for(a=0;a<position;a=a+1) begin',
+                  f"  {sin}=~bv[v][{'a' if lsb else 'N-1-a'}];",
+                  f'  @(posedge {clk}); @(negedge {clk});', ' end',
+                  ' clear_state(holds); compare_transaction(v,0,0);', 'end endtask',
+                  'initial begin']
+    else:
+            lines += ['task clear_state(input integer holds); begin',
+                  f" {rst}=1'b{on}; {sin}=0; {par}=0;",
+                  ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk}); #{sample};',
+                  f"  if ({sout} !== 1'b0 && {sout} !== 1'b1) errors=errors+1;",
+                  f'  if(h>0 && {sout} !== held_value) errors=errors+1;',
+                  f'  held_value={sout}; held_edges=held_edges+1; @(negedge {clk});',
+                  ' end', f" {rst}=1'b{off};", 'end endtask',
+                  'task compare_transaction(input integer v,input integer reset_first,input integer pulse); begin',
+                  f' if(reset_first) clear_state({reset_cycles});', f' {par}=av[v];',
+                  ' for(k=0;k<N+L;k=k+1) begin',
+                  f"  {sin}=(k<N) ? bv[v][{'k' if lsb else 'N-1-k'}] : 0;",
+                  f"  if(pulse>0 && k==pulse) begin {rst}=1'b{on}; #1; {rst}=1'b{off}; #1; end",
+                  f'  @(posedge {clk}); #{sample};', '  if(k>=L) begin',
+                  f"   if({sout} !== gv[v][{'k-L' if lsb else 'N-1-(k-L)'}]) begin",
+                  '    errors=errors+1;', f'    $display("FAIL: {module_name} fixed-window bit=%0d",k-L);',
+                  '   end', '   comparisons=comparisons+1;', '  end',
+                  f'  @(negedge {clk});', ' end', ' transactions=transactions+1;', 'end endtask',
+                  'task interrupted(input integer v,input integer position,input integer holds); begin',
+                  f' {par}=~av[v];', ' for(a=0;a<position;a=a+1) begin',
+                  f"  {sin}=~bv[v][{'a' if lsb else 'N-1-a'}];",
+                  f'  @(posedge {clk}); #{sample}; @(negedge {clk});', ' end',
+                  ' clear_state(holds); compare_transaction(v,0,0);', 'end endtask',
+                  'initial begin']
+    if random_vectors and not deadline:
         lines.insert(lines.index('task clear_state(input integer holds); begin'),
                      'integer passed_transactions=0, prior_errors;')
         task_start = lines.index('task compare_transaction(input integer v,input integer reset_first,input integer pulse); begin')
@@ -1700,11 +1747,30 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
                                        'first_vector': 0, 'vectors': len(pairs)}]
     if plan.get('populations'):
         # Same case and comparator tasks, with actual per-family populations.
-        lines.insert(lines.index('initial begin'),
-                     'integer phase_transactions,phase_comparisons,phase_errors;')
+        if deadline:
+            count = len(phases)
+            tasks = [f'integer phase_transactions[0:{count-1}],phase_comparisons[0:{count-1}],phase_errors[0:{count-1}];',
+                     'task automatic phase_begin(input integer phase_id); begin',
+                     f' #{sample}; phase_transactions[phase_id]=transactions;',
+                     ' phase_comparisons[phase_id]=comparisons; phase_errors[phase_id]=errors;',
+                     ' pending_observers=pending_observers-1;', 'end endtask',
+                     'task automatic phase_end(input integer phase_id); begin', f' #{sample};',
+                     ' case(phase_id)']
+            for i, phase in enumerate(phases):
+                tasks += [f'{i}: $display("ARITH_SCENARIO_POPULATION family={phase["scenario"]} transactions=%0d comparisons=%0d errors=%0d",',
+                          ' transactions-phase_transactions[phase_id],comparisons-phase_comparisons[phase_id],errors-phase_errors[phase_id]);']
+            tasks += [' endcase', ' pending_observers=pending_observers-1;', 'end endtask']
+            lines[lines.index('initial begin'):lines.index('initial begin')] = tasks
+        else:
+            lines.insert(lines.index('initial begin'),
+                         'integer phase_transactions,phase_comparisons,phase_errors;')
     lines.append(f' @(negedge {clk}); clear_state({reset_cycles});')
-    for phase in phases:
-        if plan.get('populations'):
+    for phase_index, phase in enumerate(phases):
+        if deadline and plan.get('populations'):
+            lines += [' pending_observers=pending_observers+1;',
+                      f' fork phase_begin({phase_index}); join_none',
+                      f' clear_state({reset_cycles});']
+        elif plan.get('populations'):
             lines += [' phase_transactions=transactions; phase_comparisons=comparisons;',
                       f' phase_errors=errors; clear_state({reset_cycles});']
         first = phase['first_vector']; last = first + phase['vectors']
@@ -1719,9 +1785,14 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
         else:
             lines.append(f' compare_transaction(vi,{rearm},0);')
         lines.append(' end')
-        if plan.get('populations'):
+        if deadline and plan.get('populations'):
+            lines += [' pending_observers=pending_observers+1;',
+                      f' fork phase_end({phase_index}); join_none']
+        elif plan.get('populations'):
             lines += [f'$display("ARITH_SCENARIO_POPULATION family={phase["scenario"]} transactions=%0d comparisons=%0d errors=%0d",',
                       ' transactions-phase_transactions,comparisons-phase_comparisons,errors-phase_errors);']
+    if deadline:
+        lines.append(' wait(pending_observers==0);')
     if random_vectors:
         order = 0 if lsb else 1
         lines += ['$display("ORACLE_TB_DONE pass=%0d/%0d", passed_transactions,transactions);',

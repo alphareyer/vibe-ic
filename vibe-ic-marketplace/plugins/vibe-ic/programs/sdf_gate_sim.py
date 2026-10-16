@@ -2415,8 +2415,78 @@ def verilog_model_closure_of_texts(candidates: List[str], texts: Dict[str, str],
             "clashes": clashes}
 
 
+def _postlayout_output_deadline(project: Path, plan: dict, declared: dict,
+                                netlist: Path, sdc: Path, sdfs: List[Path]) -> dict:
+    """The current STA output's required time, not an inferred settling bound.
+
+    A common bench observes no later than the earliest declared scene's
+    interface deadline. Native receipts own the reports, timed views and SDFs;
+    a missing scene or another output/clock cannot supply this authority.
+    """
+    from decimal import Decimal, ROUND_FLOOR
+    import librelane_signoff as signoff
+    import librelane_contract as contract
+    import sdc_constraints
+    try:
+        arm = signoff.step23_tool_arm(project, artefacts=('max.rpt',))
+        if not arm or not arm['corners']:
+            raise ValueError('no current native STA scenes')
+        folder = Path(arm['folder'])
+        state = json.loads((folder / 'state_out.json').read_text())
+        receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+        if (Path(state['nl']).resolve() != netlist.resolve() or
+                Path(state['sdc']).resolve() != sdc.resolve() or
+                {Path(f).resolve() for f in state['sdf'].values()} !=
+                {f.resolve() for f in sdfs}):
+            raise ValueError('GLS and STA do not use the same timed views')
+        for sdf in sdfs:
+            relative = str(sdf.relative_to(folder))
+            if receipt['sha256'].get(relative) != contract.digest(sdf):
+                raise ValueError('SDF differs from the native STA receipt')
+        clocks = declared_sdc_clocks(sdc, [f.read_text() for f in sdfs])
+        port = declared['port_map'][plan['spec']['serial_out']]
+        clock_port = declared['port_map'][plan['spec']['clk']]
+        named = [c for c in sdc_constraints.create_clocks_in_text(sdc.read_text())
+                 if c['port_name'] == clock_port]
+        if len(named) != 1 or not named[0]['name']:
+            raise ValueError('selected output needs one named SDC clock')
+        clock = named[0]['name']
+        unit_ns = Decimal(str(clocks['unit_s'])) / Decimal('1e-9')
+        period = Decimal(str(clocks['clocks_s'][clock_port])) / Decimal('1e-9')
+        if period != Decimal(str(plan['observation']['clock_period_ns'])):
+            raise ValueError('INPUT and current STA clock periods disagree')
+        deadlines = {}
+        for name, row in arm['corners'].items():
+            if row['scope_gaps']:
+                raise ValueError(f'{name}: incomplete native STA scope')
+            values = []
+            for block in re.split(r'(?m)^Startpoint: ', row['files']['max.rpt']['text'])[1:]:
+                endpoint = re.search(r'(?m)^Endpoint: (\S+) \(output port clocked by ([^)]+)\)', block)
+                if not endpoint or endpoint.group(1) != port:
+                    continue
+                required = re.findall(r'(?m)^\s*([+-]?[\d.]+)\s+data required time\s*$', block)
+                group = re.search(r'(?m)^Path Group: (\S+)\s*$', block)
+                kind = re.search(r'(?m)^Path Type: (\S+)\s*$', block)
+                if (endpoint.group(2) != clock or not group or group.group(1) != clock or
+                        not kind or kind.group(1) != 'max' or len(required) != 1):
+                    raise ValueError(f'{name}: selected output deadline is ambiguous')
+                values.append(Decimal(required[0]) * unit_ns)
+            if not values or any(not v.is_finite() or not 0 < v < period for v in values):
+                raise ValueError(f'{name}: selected output has no single-cycle deadline')
+            deadlines[name] = str(min(values))
+        sample = (min(Decimal(v) for v in deadlines.values()) * 1000).to_integral_value(
+            rounding=ROUND_FLOOR) / 1000
+        if sample <= 0:
+            raise ValueError('no representable positive deadline at 1 ps resolution')
+        return {'sample_offset_ns': float(sample), 'output': port, 'clock': clock,
+                'required_time_ns': deadlines, 'basis': signoff.tool_arm_basis(arm)}
+    except (OSError, KeyError, TypeError, ValueError, contract.Refusal) as exc:
+        raise ValueError(f'POSTLAYOUT_OBSERVATION_UNMEASURED: {exc}') from exc
+
+
 def _bound_arithmetic_case(project: Path, case: Dict[str, object], top: str,
-                           declared: Dict[str, object], model_files: List[str]
+                           declared: Dict[str, object], model_files: List[str],
+                           *, netlist: Path, sdc: Path, sdfs: List[Path]
                            ) -> Tuple[str, Optional[Dict[str, object]]]:
     """Prepare a generated arithmetic case for its declared physical surface.
 
@@ -2445,6 +2515,10 @@ def _bound_arithmetic_case(project: Path, case: Dict[str, object], top: str,
     if plan is None:
         raise ValueError('MISSING_OBSERVATION_CONTRACT: ' + '; '.join(
             request.get('unsupported_requirements') or ['unsupported selected observation']))
+    deadline = _postlayout_output_deadline(project, plan, declared, netlist, sdc, sdfs)
+    plan['observation'] = {**plan['observation'],
+                           'sample_offset_ns': deadline['sample_offset_ns'],
+                           'postlayout_deadline': deadline}
     # Keep the physical subject in the plan; the normal binder below owns
     # changing this logical placeholder and mapping every pad port.
     return (arith.emit_arithmetic_scenario_module(str(case['module']), plan,
@@ -2483,7 +2557,8 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
         cid = str(case["id"])
         try:
             text, observation = _bound_arithmetic_case(project, case, top,
-                                                       declared, closure['files'])
+                                                       declared, closure['files'],
+                                                       netlist=netlist, sdc=sdc, sdfs=sdfs)
             text, binding = bind_dut_module(text, top,
                                             str(case["dut_instance"]), ntext,
                                             declared)
