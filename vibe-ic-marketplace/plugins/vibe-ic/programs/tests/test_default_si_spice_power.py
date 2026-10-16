@@ -902,7 +902,7 @@ def test_step30_model_publication_matches_the_selected_execution_namespace(tmp_p
     write(tech / 'design.ngspice', '.param neutral_scale=1\n')
     write(tech / 'models.ngspice', '.lib typ\n.model neutral nmos level=1\n.endl typ\n')
     write(root / 'neutral/cells.spice', '.subckt BUF A Z VDD VSS\nM0 Z A VSS VSS neutral W=1u L=1u\n.ends\n')
-    write(lib, 'library(neutral_typ) {\n operating_conditions(typ) { voltage: 1.8; }\n}\n')
+    write(lib, 'library(neutral_typ) {\n voltage_map(VDD, 1.8);\n voltage_map(VSS, 0);\n operating_conditions(typ) { voltage: 1.8; }\n}\n')
     config = json.loads((folder / 'config.json').read_text())
     config.update(VDD_PIN='VDD', GND_PIN='VSS', CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'])
     put(folder / 'config.json', config)
