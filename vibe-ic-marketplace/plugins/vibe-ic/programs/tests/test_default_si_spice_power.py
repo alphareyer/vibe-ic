@@ -855,7 +855,7 @@ def test_default_step30_explicit_native_paths_do_not_authorize_drift(tmp_path, m
         record = json.loads((p / LP.STEP23_RECORD).read_text())
         record['sta_state_sha256'] = LC.digest(folder / 'state_out.json')
         put(p / LP.STEP23_RECORD, record)
-    with pytest.raises((current.Refusal, LC.Refusal, OSError)):
+    with pytest.raises((ValueError, LC.Refusal, OSError)):
         PST.current_context(p, BF.IMAGE, p / 'fixture_pdk', 'neutral')
     result = _current_backend_step30(p, lib, monkeypatch)
     assert result['verdict'] == 'NOT_MEASURED', result
