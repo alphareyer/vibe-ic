@@ -351,7 +351,7 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
     for key, value in (env or {}).items():
         volumes += ['-e', f'{key}={value}']
     command = [docker, 'run', '--rm', '--network', 'none',
-               *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
+               *_dmem.docker_memory_flags(), *volumes, '--workdir', str(cwd),
                '--entrypoint', argv[0], image, *argv[1:]]
     # The producer is called inside execution_resource_lease.native_boundary.
     # Calling the source-owned runner lets that boundary bind the issued

@@ -871,3 +871,23 @@ def test_default_step30_explicit_native_paths_do_not_authorize_drift(tmp_path, m
     assert not (p / 'reports/phase3/spice_correlation.current.json').exists()
     gate = SC.run_audit(p, run_spice=False)
     assert not gate.passed and gate.summary['measurement'] == 'NOT_MEASURED'
+
+
+
+def test_step30_native_local_process_uses_its_declared_workdir(tmp_path):
+    import os
+    # A real LOCAL child runs inside the attested test image. This neutral
+    # process control measures the native transport, not an IC or SPICE result.
+    p = tmp_path / 'project'
+    work = p / 'phase3/tool_arms/30/ngspice/base'
+    work.mkdir(parents=True)
+    program = ("import json,os; from pathlib import Path; "
+               "Path('process.json').write_text(json.dumps({'cwd':os.getcwd(), "
+               "'scope':'SOURCE_FIXTURE_ONLY'})); print('LOCAL_PROCESS_DONE')")
+    result = PST._docker(os.environ['VIBEIC_LIBRELANE_IMAGE'], p, [],
+                         ['python3', '-c', program], work)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'LOCAL_PROCESS_DONE' in result.stdout
+    assert json.loads((work / 'process.json').read_text()) == {
+        'cwd': str(work), 'scope': 'SOURCE_FIXTURE_ONLY'}
+    assert result._vibeic_lifecycle['rc'] == 0
