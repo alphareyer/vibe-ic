@@ -296,7 +296,7 @@ def _cts_project(tmp_path: Path, stem: str, monkeypatch=None) -> Path:
     shutil.copyfile(CAL / "cal_two_clocks.sdc", sdc)
     if monkeypatch is not None:
         current_fixture(monkeypatch, p, sdc.read_text(), preserve_plan=True)
-    receipt = p / "reports/phase3/librelane_cts_hold_handoff.json"
+    receipt = p / "reports/phase3/librelane_cts_handoff.json"
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(json.dumps({
         "chain": {"OpenROAD.CTS": CTS_STEP},
@@ -359,7 +359,7 @@ def test_an_unbound_transcript_is_never_read_and_fails_closed(tmp_path, break_it
     elif break_it == "log":
         (p / CTS_STEP / "openroad-cts.log").unlink()
     else:
-        (p / "reports/phase3/librelane_cts_hold_handoff.json").write_text("{")
+        (p / "reports/phase3/librelane_cts_handoff.json").write_text("{")
     rc, rules = _clock_gate(p)
     assert rc == 1 and "CTS_CLOCK_MISSING" in rules
     assert why in rules["CTS_CLOCK_MISSING"]
@@ -370,7 +370,7 @@ def test_without_a_receipt_the_report_is_the_transcript(tmp_path, monkeypatch):
     """The direct path is unchanged: its clock_tree.rpt carries the CTS lines
     itself, and no receipt means that file is read as it is."""
     p = _cts_project(tmp_path, SEEN, monkeypatch)
-    (p / "reports/phase3/librelane_cts_hold_handoff.json").unlink()
+    (p / "reports/phase3/librelane_cts_handoff.json").unlink()
     rc, rules = _clock_gate(p)
     assert rc == 1 and "CTS_CLOCK_MISSING" in rules
     shutil.copyfile(CAL / "cts_clock_roots_seen_negative.log",

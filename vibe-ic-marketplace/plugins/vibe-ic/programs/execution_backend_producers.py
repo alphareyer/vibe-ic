@@ -443,7 +443,7 @@ def _predecessor_state(project, predecessor):
     names = {
         'placed.def': ('librelane_placement_handoff.json', 'def'),
         'post_spare.def': ('librelane_spare_handoff.json', 'def'),
-        'post_cts.def': ('librelane_cts_hold_handoff.json', 'post_cts_def'),
+        'post_cts.def': ('librelane_cts_handoff.json', 'post_cts_def'),
         'post_hold.def': ('librelane_cts_hold_handoff.json', 'post_hold_def'),
     }
     receipt_name, view_name = names[predecessor]
@@ -458,15 +458,11 @@ def _predecessor_state(project, predecessor):
             raise ValueError('predecessor DEF changed after its handoff')
         raw = document.get('measured_state', document.get('state'))
         expected = document.get('measured_state_sha256', document.get('state_sha256'))
-        if predecessor == 'post_cts.def' and 'post_hold_def' in document['views']:
-            # The shared report's latest measurement is now Hold. A Hold
-            # retry must start at the CTS view's own native producer state.
+        if predecessor == 'post_cts.def':
+            # Hold always starts at immutable CTS, including on a retry.
             source = _require(project / view['source'])
             if snap.sha(source) != view['source_sha256'] or snap.sha(source) != snap.sha(canonical):
                 raise ValueError('CTS source differs from its handed checkpoint')
-            raw = source.parent / 'state_out.json'
-            native = json.loads(_require(source.parent / 'vibeic_receipt.json').read_text())
-            expected = native['sha256']['state_out.json']
         state = _require(project / raw)
         if expected != snap.sha(state):
             raise ValueError('predecessor native state changed after its handoff')
@@ -973,8 +969,9 @@ def _cts_split(project, params, R, ll, pdk, overlay):
     names = {'def': PNR + ('post_cts.def' if sid == '19' else 'post_hold.def'),
              'odb': PNR + ('post_cts.odb' if sid == '19' else 'post_hold.odb')}
     handoff = _handoff(project, ll, production, names)
-    receipt_path = project / RPT / 'librelane_cts_hold_handoff.json'
-    previous = json.loads(receipt_path.read_text()) if sid == '20' and receipt_path.is_file() else {}
+    cts_path = project / RPT / 'librelane_cts_handoff.json'
+    receipt_path = cts_path if sid == '19' else project / RPT / 'librelane_cts_hold_handoff.json'
+    previous = json.loads(_require(cts_path).read_text()) if sid == '20' else {}
     receipt = {**previous, 'program': 'execution_backend_producers._cts_split',
                'modes': {'19': 'librelane', '20': 'librelane'}, 'selected': 'librelane',
                'image': image, 'steps': [s for s, _ in chain], 'corners': corners,

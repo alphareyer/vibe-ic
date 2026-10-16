@@ -37,6 +37,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 RECEIPT_REL = "reports/phase3/librelane_cts_hold_handoff.json"
+CTS_RECEIPT_REL = "reports/phase3/librelane_cts_handoff.json"
 STEPS = ("19", "20")
 
 
@@ -55,19 +56,20 @@ def modes(project: Path) -> Dict[str, str]:
     return {step: _ll.selected_mode(project, step) for step in STEPS}
 
 
-def evidence(project: Path) -> Optional[Dict[str, Any]]:
+def evidence(project: Path, *, step: str = "20") -> Optional[Dict[str, Any]]:
     """None when both steps are direct; else a dict with ``problem`` (str or
     None), the receipt, and the measured metrics of the selected arm."""
     selected = modes(project)
     if set(selected.values()) == {"direct"}:
         return None
+    receipt_rel = CTS_RECEIPT_REL if step == "19" else RECEIPT_REL
     out: Dict[str, Any] = {"modes": selected, "problem": None,
-                           "receipt_path": RECEIPT_REL}
-    path = project / RECEIPT_REL
+                           "receipt_path": receipt_rel}
+    path = project / receipt_rel
     try:
         receipt = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        out["problem"] = f"RECEIPT_UNREADABLE: {RECEIPT_REL}: {exc}"
+        out["problem"] = f"RECEIPT_UNREADABLE: {receipt_rel}: {exc}"
         return out
     out["receipt"] = receipt
     stale: List[str] = []
@@ -79,6 +81,10 @@ def evidence(project: Path) -> Optional[Dict[str, Any]]:
         out["problem"] = ("HANDOFF_STALE: these files no longer carry the bytes "
                           f"LibreLane handed over: {', '.join(stale)}")
         return out
+    if step == "19" and receipt.get("selected") == "openroad":
+        # The selected legacy direct arm has its actual CTS DEF/report, not
+        # LibreLane CTS metrics. Their ordinary strict reader still judges it.
+        return None
     measured = project / str(receipt.get("measured_state", ""))
     try:
         state = json.loads(measured.read_text())

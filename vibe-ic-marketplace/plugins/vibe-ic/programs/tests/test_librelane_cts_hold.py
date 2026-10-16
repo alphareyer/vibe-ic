@@ -496,6 +496,15 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     assert not any('/pnr.tcl ' in c for c in run.execs)
     receipt = json.loads((run.project / llev.RECEIPT_REL).read_text())
     base = run.project / 'phase3/librelane/19-cts-hold'
+    cts_path = run.project / 'reports/phase3/librelane_cts_handoff.json'
+    assert cts_path.is_file(), 'the CTS owner must publish its independent handoff'
+    cts_receipt = json.loads(cts_path.read_text())
+    assert cts_receipt['measured_state'] == str(
+        (base / '03-vibeic-externalcapturelaunchretap/state_out.json').relative_to(run.project))
+    assert cts_receipt['measured_state_sha256'] == contract.digest(
+        run.project / cts_receipt['measured_state'])
+    assert set(cts_receipt['views']) == {'post_cts_def', 'cts_rpt'}
+    assert 'OpenROAD.ResizerTimingPostCTS' not in cts_receipt['chain']
     assert (run.out_dir / 'post_cts.def').read_text() == \
         (base / '03-vibeic-externalcapturelaunchretap/chip_top.def').read_text()
     assert (run.out_dir / 'post_hold.odb').read_text() == \
@@ -709,6 +718,13 @@ def test_dual_judges_both_arms_by_the_same_sta_and_hands_over_the_winner(tmp_pat
     receipt = json.loads((run2.project / llev.RECEIPT_REL).read_text())
     assert receipt['selected'] == 'openroad' and 'cts_rpt' not in receipt['views']
     assert 'direct-arm' in receipt['measured_state']
+    cts_path = run2.project / 'reports/phase3/librelane_cts_handoff.json'
+    assert cts_path.is_file(), 'the selected direct CTS view also needs its own owner record'
+    cts_receipt = json.loads(cts_path.read_text())
+    assert cts_receipt['selected'] == 'openroad'
+    assert set(cts_receipt['views']) == {'post_cts_def'}
+    assert 'direct arm' in (run2.project / cts_receipt['views']['post_cts_def']['dest']).read_text()
+    assert 'measured_state' not in cts_receipt and not cts_receipt['chain']
 
 
 # ------------------------------------------------------------------ gates ---
@@ -746,6 +762,14 @@ def _handoff(project, hold, *, stale=False, corners=CORNERS, extra=None,
                           ('post_hold_def', defs['post_hold.def']), ('cts_rpt', rpt))}
     put(project / llev.RECEIPT_REL, {
         'selected': 'librelane', 'corners': corners, 'views': views,
+        'chain': {'OpenROAD.CTS': str(cts_folder.relative_to(project))},
+        'measured_state': str(state.relative_to(project)),
+        'measured_state_sha256': contract.digest(state)})
+    # This neutral fixture supplies both actual ownership contracts; CTS
+    # never inherits the independently mutable post-hold view population.
+    put(project / llev.CTS_RECEIPT_REL, {
+        'selected': 'librelane', 'corners': corners,
+        'views': {name: view for name, view in views.items() if name != 'post_hold_def'},
         'chain': {'OpenROAD.CTS': str(cts_folder.relative_to(project))},
         'measured_state': str(state.relative_to(project)),
         'measured_state_sha256': contract.digest(state)})
@@ -813,6 +837,11 @@ def test_cts_gate_fails_zero_buffers_and_a_stale_handoff(tmp_path):
     rpt.write_text(rpt.read_text().replace('Inserted: 2', 'Inserted: 20'))
     rc, _, text = _gate('cts_quality_check', tmp_path / 'b')
     assert rc == 1 and 'HANDOFF_STALE' in text      # the receipt binds the report
+    _handoff(tmp_path / 'c', {c: .15 for c in CORNERS})
+    (tmp_path / 'c' / llev.CTS_RECEIPT_REL).unlink()
+    assert (tmp_path / 'c' / llev.RECEIPT_REL).is_file()
+    rc, _, text = _gate('cts_quality_check', tmp_path / 'c')
+    assert rc == 1 and 'RECEIPT_UNREADABLE' in text  # hold cannot vouch for missing CTS
 
 
 @pytest.mark.parametrize('kwargs,rule', [

@@ -5320,7 +5320,7 @@ steps:
       - cts_quality_check
     program_outputs:
       - program: execution_backend_producers
-        path: "reports/phase3/librelane_cts_hold_handoff.json"
+        path: "reports/phase3/librelane_cts_handoff.json"
     required_outputs:
       - "phase3/stage3/pnr/post_cts.def"
       - "phase3/stage3/cts/clock_tree.rpt"

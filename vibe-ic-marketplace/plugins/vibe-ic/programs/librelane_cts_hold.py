@@ -604,6 +604,26 @@ def execute(
     handoff = project / "reports/phase3/librelane_cts_hold_handoff.json"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     R._aa.write_text(handoff, json.dumps(receipt, indent=2) + "\n")
+    # Step19 owns CTS evidence independently of the later hold handoff. Use
+    # the selected arm's real pre-hold state, never the post-hold measurement.
+    cts_receipt = dict(receipt, views={name: view for name, view in receipt['views'].items()
+                                     if name in ('post_cts_def', 'cts_rpt')})
+    if selected == 'librelane':
+        cts_state = retap_folder / 'state_out.json'
+        cts_receipt['steps'] = [step for step, _ in chain[:3]]
+        cts_receipt['chain'] = {step: str(folder.relative_to(project))
+                                for (step, _), folder in zip(chain[:3], folders[:3])}
+        cts_receipt['measured_state'] = str(cts_state.relative_to(project))
+        cts_receipt['measured_state_sha256'] = _ll.digest(cts_state)
+    else:
+        # The direct deck records CTS in its DEF/report, not a structured
+        # pre-hold state. Its existing direct readers judge those actual files.
+        cts_receipt.pop('measured_state', None)
+        cts_receipt.pop('measured_state_sha256', None)
+        cts_receipt['steps'] = []
+        cts_receipt['chain'] = {}
+    R._aa.write_text(handoff.with_name('librelane_cts_handoff.json'),
+                    json.dumps(cts_receipt, indent=2) + "\n")
     if selected == "librelane":
         # hold_area_budget_check's producer (#1980): the resizer step's own
         # standard-cell area metric before and after it ran.  The step repairs setup

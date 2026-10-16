@@ -431,7 +431,7 @@ def cts_clock_roots(text: str):
 # none and every LibreLane CTS run read CTS_CLOCK_MISSING. The roots are in the
 # SAME step's transcript, `openroad-cts.log`, beside the report the receipt
 # bound -- the tool's own `clock_tree_synthesis` lines, the same grammar.
-_LL_CTS_HANDOFF_REL = "reports/phase3/librelane_cts_hold_handoff.json"
+_LL_CTS_HANDOFF_REL = "reports/phase3/librelane_cts_handoff.json"
 _LL_CTS_STEP = "OpenROAD.CTS"
 _LL_CTS_LOG = "openroad-cts.log"
 

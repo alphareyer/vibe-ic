@@ -310,11 +310,120 @@ def test_hold_retry_uses_the_cts_producer_state_after_a_previous_hold_run(tmp_pa
     receipt.write_text(json.dumps({
         'measured_state': str(hold_state), 'measured_state_sha256': sha(hold_state),
         'views': views}))
+    receipt.with_name('librelane_cts_handoff.json').write_text(json.dumps({
+        'measured_state': str(cts_state), 'measured_state_sha256': sha(cts_state),
+        'views': {'post_cts_def': views['post_cts_def']}}))
     assert producers._predecessor_state(tmp_path, 'post_cts.def') == cts_state
     assert producers._predecessor_state(tmp_path, 'post_hold.def') == hold_state
     cts_def.write_text('changed after its handoff\n')
     with pytest.raises(producers.em.Refusal, match='BACKEND_PREDECESSOR_STATE_UNBOUND'):
         producers._predecessor_state(tmp_path, 'post_cts.def')
+
+
+def _split_cts_owner_control(tmp_path, monkeypatch):
+    """Actual split producer/handoff/readers; only native writes are replaced."""
+    import librelane_contract as ll
+    pnr = tmp_path / 'phase3/stage3/pnr'
+    pnr.mkdir(parents=True)
+    (tmp_path / 'phase3/librelane_switch.json').write_text(json.dumps({
+        'steps': {'19': 'librelane', '20': 'librelane'}}))
+    body = ('VERSION 5.8 ;\nDESIGN unit ;\nCOMPONENTS 2 ;\n'
+            '- u1 clkbuf_8 + PLACED ( 0 0 ) N ;\n'
+            '- u2 clkbuf_8 + PLACED ( 1 0 ) N ;\nEND COMPONENTS\nEND DESIGN\n')
+    (pnr / 'post_spare.def').write_text(body)
+    (pnr / 'constraint.sdc').write_text('create_clock -period 10 [get_ports clk]\n')
+    initial = tmp_path / 'initial-state.json'
+    initial.write_text(json.dumps({'metrics': {'design__instance__area__stdcell': 2}}))
+    seen = []
+
+    def resolve(project, image, pdk, ids, *, folder, **kwargs):
+        root = project / 'phase3/librelane' / folder
+        root.mkdir(parents=True, exist_ok=True)
+        result = {}
+        for sid in ids:
+            path = root / (sid + '.json')
+            path.write_text(json.dumps({'meta': {'step': sid}, 'STA_CORNERS': ['nom'],
+                                        'MAX_FANOUT_CONSTRAINT': 4}))
+            result[sid] = path
+        return result
+
+    def native(project, image, chain, *, lane, **kwargs):
+        seen.append({'ids': [s for s, _, _ in chain], 'input': chain[0][2]})
+        current = json.loads(Path(chain[0][2]).read_text())
+        folders = []
+        for index, (sid, config, _) in enumerate(chain):
+            folder = project / 'phase3/librelane' / lane / f'{index:02d}-{sid}'
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / 'config.json').write_bytes(config.read_bytes())
+            if sid != 'OpenROAD.STAMidPNR':
+                for view in ('def', 'odb'):
+                    path = folder / ('unit.' + view)
+                    path.write_text(body if view == 'def' else lane + ' ODB\n')
+                    current[view] = str(path)
+            current['metrics'] = {
+                'design__instance__area__stdcell': 2,
+                'design__instance__count__hold_buffer': int(lane.endswith('20')),
+                'vibeic__cts__max_fanout': 3,
+                'clock__skew__worst_setup__corner:nom': .1,
+                'clock__skew__worst_hold__corner:nom': .1,
+                'timing__hold__ws__corner:nom': .3 if lane.endswith('20') else .2}
+            (folder / 'state_out.json').write_text(json.dumps(current))
+            if sid == 'OpenROAD.CTS':
+                (folder / 'cts.rpt').write_text('Total number of Clock Roots: 1.\n'
+                    'Total number of Buffers Inserted: 2.\nTotal number of Sinks: 9.\n')
+            folders.append(folder)
+        return folders
+
+    monkeypatch.setattr(ll, 'resolve_step_configs', resolve)
+    monkeypatch.setattr(ll, 'run_chain', native)
+    monkeypatch.setattr(runner, '_resolved_cell_policy', lambda configs, *a, **k: (configs, []))
+    params = {'step_id': '19', 'top': 'unit', 'image_id': 'SOURCE_CONTROL',
+              'pdk_root': str(tmp_path / 'neutral-pdk'), 'state_in': str(initial)}
+    producers._cts_split(tmp_path, params, runner, ll, SimpleNamespace(name='neutral'), {})
+    cts = tmp_path / 'reports/phase3/librelane_cts_handoff.json'
+    assert cts.is_file(), 'Step19 must publish its own immutable CTS handoff'
+    return ll, params, cts, seen
+
+
+def test_split_hold_preserves_cts_output_and_retries_from_the_original_state(tmp_path, monkeypatch):
+    import _librelane_cts_hold_evidence as evidence
+    import cts_quality_check
+    import hold_closure_check
+    ll, params, cts, seen = _split_cts_owner_control(tmp_path, monkeypatch)
+    original = cts.read_bytes()
+    cts_state = producers._predecessor_state(tmp_path, 'post_cts.def')
+    params = {**params, 'step_id': '20'}
+    params.pop('state_in')
+    for _ in range(2):
+        producers._cts_split(tmp_path, params, runner, ll, SimpleNamespace(name='neutral'), {})
+        assert cts.read_bytes() == original
+        assert seen[-1]['input'] == cts_state
+        assert 'OpenROAD.CTS' not in seen[-1]['ids']
+        assert producers._predecessor_state(tmp_path, 'post_cts.def') == cts_state
+        assert producers._predecessor_state(tmp_path, 'post_hold.def') != cts_state
+        cts_ev, hold_ev = evidence.evidence(tmp_path, step='19'), evidence.evidence(tmp_path)
+        assert cts_ev['problem'] is None and hold_ev['problem'] is None
+        assert cts_ev['metrics']['timing__hold__ws__corner:nom'] == .2
+        assert hold_ev['metrics']['timing__hold__ws__corner:nom'] == .3
+    assert cts_quality_check.main([str(tmp_path), '--json', str(tmp_path / 'cts.json')]) == 0
+    assert hold_closure_check.evaluate(tmp_path)[0] == 'PASS'
+
+
+@pytest.mark.parametrize('changed', ['receipt_missing', 'cts_source', 'cts_state'])
+def test_split_hold_refuses_missing_or_changed_original_cts_before_native(tmp_path, monkeypatch, changed):
+    ll, params, cts, seen = _split_cts_owner_control(tmp_path, monkeypatch)
+    doc = json.loads(cts.read_text())
+    if changed == 'receipt_missing':
+        cts.unlink()
+    elif changed == 'cts_source':
+        Path(doc['views']['post_cts_def']['source']).write_text('changed CTS\n')
+    else:
+        (tmp_path / doc['measured_state']).write_text('{}\n')
+    params = {**params, 'step_id': '20'}
+    params.pop('state_in')
+    with pytest.raises(producers.em.Refusal, match='BACKEND_PREDECESSOR_STATE_UNBOUND'):
+        producers._cts_split(tmp_path, params, runner, ll, SimpleNamespace(name='neutral'), {})
+    assert len(seen) == 1
 
 
 def test_rcx_publishes_its_current_native_spefs_for_the_existing_provenance_consumer(

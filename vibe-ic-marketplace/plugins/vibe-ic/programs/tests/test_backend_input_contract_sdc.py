@@ -86,3 +86,46 @@ def test_step15_contract_carries_and_requires_stage_analog_producer_proof(tmp_pa
     (root / 'reports/analog/stage_analog_compliance.json').unlink()
     with pytest.raises(ValueError):
         backend.backend_project_input_contract(root, '15')
+
+
+def test_default15_cold_working_sdc_publication_keeps_issued_inputs_current(tmp_path):
+    """The actual working-deck publisher cannot change Default15's inputs."""
+    import hashlib
+    from _ppa import timing
+    root = _project(tmp_path)
+    working = root / 'phase3/stage3/pnr/constraint.sdc'
+    working.unlink()
+    paths = backend.backend_project_input_contract(root, '15', execution_mode='default')
+    assert 'phase3/stage3/pnr/constraint.sdc' not in paths
+    assert 'phase2/stage2/constraints/spm.asic.sdc' in paths
+    assert 'phase2/stage2/constraints/asic_sdc.json' in paths
+    before = {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+              for p in paths if (root / p).is_file()}
+    record = {'path': 'phase2/stage2/constraints/spm.asic.sdc',
+              'text': 'create_clock -period 10 [get_ports clk]\n',
+              'step7_sha256': before['phase2/stage2/constraints/spm.asic.sdc'],
+              'deck_sha256': 'source-control-deck', 'regenerated': None,
+              'derivation': {'name': 'pad_ring_supply_port_drv_scope'}}
+    assert timing.publish_pnr_sdc(record, working.parent) == working
+    assert working.read_text() == record['text']
+    assert backend.backend_project_input_contract(root, '15', execution_mode='default') == paths
+    assert {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in before} == before
+
+
+@pytest.mark.parametrize('source', ['phase2/stage2/constraints/spm.asic.sdc',
+                                   'phase2/stage2/constraints/asic_sdc.json'])
+@pytest.mark.parametrize('missing', [False, True])
+def test_default15_still_requires_the_real_step7_input(tmp_path, source, missing):
+    import hashlib
+    from execution_backend_worker import resolve_input_contract
+    root = _project(tmp_path)
+    paths = backend.backend_project_input_contract(root, '15', execution_mode='default')
+    manifest = {'declarations': list(paths), 'missing': [], 'files': {
+        p: hashlib.sha256((root / p).read_bytes()).hexdigest()
+        for p in paths if (root / p).is_file()}}
+    assert resolve_input_contract(root, paths, manifest) == []
+    if missing:
+        (root / source).unlink()
+    else:
+        (root / source).write_text('changed after issuance\n')
+    assert source in resolve_input_contract(root, paths, manifest)

@@ -790,7 +790,10 @@ def backend_project_input_contract(project: Path, step_id: str, *,
             "phase3/librelane/prelayout/gates/step8_sdc_opensta.json",
             "phase2/stage2/constraints/asic_sdc.json",
             issued_constraint,
-            *(("phase3/stage3/pnr/constraint.sdc",) if step_id == "15" else ()),
+            # Default15 derives this working deck from the bound Step7/PDK/
+            # pad inputs below. Its own publication is not an issued input.
+            *(("phase3/stage3/pnr/constraint.sdc",)
+              if step_id == "15" and execution_mode != "default" else ()),
         ):
             carry_checkpoint_file(raw)
         if step_id == "15":
