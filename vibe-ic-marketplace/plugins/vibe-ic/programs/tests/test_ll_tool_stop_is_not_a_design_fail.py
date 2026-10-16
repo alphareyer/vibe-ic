@@ -125,6 +125,7 @@ def test_opt_in_prelayout_step_result_keeps_tool_stop(tmp_path, monkeypatch,
            {'steps': {'7': 'librelane', '8': 'librelane', '10': 'librelane'}})
     SB.write(project / 'input/constraints/clock.sdc',
              'create_clock -name neutral_clk -period 10 [get_ports clk]\n')
+    SB.write(tmp_path / 'cell__tt.lib', 'library(neutral) { time_unit : "1ns"; }\n')
     pdk = PRE._corner_pdk(monkeypatch, str(tmp_path / 'cell__tt.lib'))
     monkeypatch.setattr(contract, 'resolve_image', lambda p: SB.stated_image())
     monkeypatch.setattr(contract, 'pdk_root_resolution', _refusing(code))
@@ -145,6 +146,8 @@ def test_step_pnr_preserves_the_pad_rows_verdict(tmp_path, monkeypatch, code, re
     SB.put(project / 'phase3/librelane_switch.json',
            {'steps': {'15': 'librelane', '15.5ic': 'librelane'}})
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    pdk.liberty = str(SB.write(tmp_path / 'pad-row-neutral.lib',
+                              'library(neutral) { time_unit : "1ns"; }\n'))
     netlist = SB.write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
     for name, value in {
         'pnr_input_netlist': lambda *a: (netlist, 'test DUT', False),
@@ -154,7 +157,8 @@ def test_step_pnr_preserves_the_pad_rows_verdict(tmp_path, monkeypatch, code, re
         '_macro_supply_preroute_decision': lambda *a, **k: None,
         '_resolve_staged_silicon_sdc': lambda *a: None,
         '_liberty_drv_limits': lambda *a: {},
-        '_build_auto_silicon_sdc': lambda *a, **k: '',
+        '_build_auto_silicon_sdc': lambda *a, **k:
+            'create_clock -name neutral_clk -period 10 [get_ports clk]\n',
         '_docker_exec': lambda *a, **k: (1, '', 'no container in this test'),
         '_docker_exec_raw': lambda *a, **k: (1, '', 'no container in this test'),
         '_chip_path_requests_pad_ring': lambda *a: True,

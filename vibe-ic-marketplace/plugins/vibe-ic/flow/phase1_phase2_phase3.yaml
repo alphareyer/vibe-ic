@@ -5324,6 +5324,7 @@ steps:
     required_outputs:
       - "phase3/stage3/pnr/post_cts.def"
       - "phase3/stage3/cts/clock_tree.rpt"
+      - "reports/phase3/librelane_cts_handoff.json"
     gate:
       all_of:
         # File presence is a precondition (the checker also FAILs honestly
