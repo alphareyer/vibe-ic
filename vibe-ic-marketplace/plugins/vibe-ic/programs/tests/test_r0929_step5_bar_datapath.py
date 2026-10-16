@@ -85,8 +85,10 @@ UNGROUNDED = {"widget_glow", "fw_blink", "opt_m_mul"}
 def _die(tmp_path, extra, decl=None):
     proj = base._mk_project(tmp_path, die=True, cases=base.CASES + extra)
     if decl is not None:
-        base._write(proj / "plugin_output" / "declaration.json",
-                    json.dumps(decl))
+        declaration_path = proj / "plugin_output" / "declaration.json"
+        declaration = json.loads(declaration_path.read_text())
+        declaration.update(decl)
+        base._write(declaration_path, json.dumps(declaration))
     return proj
 
 
