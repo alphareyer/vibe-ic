@@ -82,7 +82,8 @@ def _install_common_fakes(monkeypatch) -> None:
 
 def _install_solve_fakes(monkeypatch, intervals: dict[str, tuple[float, float]],
                          *, fail_pid: str | None = None,
-                         seen_env: dict[str, dict] | None = None) -> None:
+                         seen_env: dict[str, dict] | None = None,
+                         parallel_rendezvous: threading.Barrier | None = None) -> None:
     _install_common_fakes(monkeypatch)
 
     def prepare(_bench, _dataset, run, _fmt, _limit):
@@ -131,6 +132,14 @@ def _install_solve_fakes(monkeypatch, intervals: dict[str, tuple[float, float]],
         pid = project.name
         run_name = project.parents[1].name
         started = time.monotonic()
+        if parallel_rendezvous is not None and run_name == "parallel":
+            # Record both actual entries before either fake can finish. Short
+            # sleeps alone do not bound skew in the real pre-launch checks.
+            # A serialized dispatcher must fail the bounded rendezvous.
+            try:
+                parallel_rendezvous.wait()
+            except threading.BrokenBarrierError as exc:
+                raise AssertionError("parallel runner rendezvous did not complete") from exc
         time.sleep(0.18 if pid == "p1" else 0.06)
         finished = time.monotonic()
         with interval_lock:
@@ -421,7 +430,8 @@ def test_cli_exposes_jobs_for_solve_and_resume() -> None:
 def test_solve_jobs_overlap_and_commit_shared_artifacts_in_dataset_order(
         tmp_path, monkeypatch) -> None:
     intervals: dict[str, tuple[float, float]] = {}
-    _install_solve_fakes(monkeypatch, intervals)
+    _install_solve_fakes(monkeypatch, intervals,
+                         parallel_rendezvous=threading.Barrier(2, timeout=10))
     dataset = tmp_path / "dataset"
     dataset.mkdir()
     serial = tmp_path / "serial"
