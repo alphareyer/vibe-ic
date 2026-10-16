@@ -1216,7 +1216,7 @@ def _current_output_deadline_fixture(project, root, deadline):
     put(folder / 'vibeic_receipt.json', {'sha256': bound, 'input': {
         'step': 'OpenROAD.STAPostPNR',
         'state_files': {str(Path(f)): contract.digest(Path(f))
-                        for f in [state['nl'], state['sdc'], *state['spef'].values()]},
+                        for f in [*(state[v] for v in ('nl', 'sdc', 'odb', 'def')), *state['spef'].values()]},
         'liberty_files': {f: contract.digest(Path(f)) for group in libs.values() for f in group}}})
     put(project / postroute.STEP23_RECORD, {'mode': 'librelane',
          'sta_state': str(folder / 'state_out.json'),
