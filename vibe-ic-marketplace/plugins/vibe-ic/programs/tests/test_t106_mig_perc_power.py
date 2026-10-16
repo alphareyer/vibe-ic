@@ -1362,7 +1362,7 @@ def test_default_gls_observes_the_current_output_deadline(
                 assert 'ORACLE_TB_DONE pass=10000/10000' in transcript
             if case == 'combined':
                 measured, detail = arith.capture_arithmetic_scenario_execution(project, prepared, Path(run['stdout']), {})
-                assert measured is not None and measured['verdict'] == ('PASS' if good else 'FAIL'), detail
+                assert measured is not None and measured['complete'] is True and measured['errors'] == 0, detail
     gate = json.loads((project / 'reports/phase2/gates/post_layout_sim.json').read_text())
     assert gate['verdict'] == ('PASS' if good else 'FAIL')
     latest = versions.latest_pass(project, '29')

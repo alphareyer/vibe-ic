@@ -1643,7 +1643,7 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
     # exact JSON as short comment chunks; the same reader joins them losslessly.
     encoded_plan = json.dumps(plan, sort_keys=True)
     headers = ([ARITHMETIC_SCENARIO_HEADER + encoded_plan[i:i+2048]
-                for i in range(0, len(encoded_plan), 2048)] if random_vectors
+                for i in range(0, len(encoded_plan), 2048)] if random_vectors or len(encoded_plan) > 2048
                else [ARITHMETIC_SCENARIO_HEADER + encoded_plan])
     lines = ['`timescale 1ns/1ps', *headers,
              f'module {module_name};', f'localparam integer N={n}, NV={len(pairs)}, L={latency};']
