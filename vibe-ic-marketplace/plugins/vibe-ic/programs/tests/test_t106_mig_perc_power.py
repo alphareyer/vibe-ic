@@ -736,3 +736,109 @@ def test_step_30_runs_the_tool_deck_and_the_spef_mutation_and_records_every_arm(
     sta_runs = [c for c in calls if c[0] == 'sta']
     assert '-fall_from u_core/_417_/Q -fall_to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
     assert json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())['step'] == '30'
+
+
+@pytest.mark.parametrize('case', [
+    'good', 'case_fail', 'missing_sdf', 'changed_state', 'missing_model', 'tool_error'])
+def test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypatch, case):
+    """Actual Default row, LL manifest/judge/publisher and both canonical clauses.
+
+    Only the LL process edge writes neutral tool-format data. No gate JSON or
+    accepted step record is seeded; the normal declared producer writes it.
+    """
+    import time
+    import _flow_yaml
+    import execution_backend_producers as backend
+    import execution_backend_worker as worker
+    import execution_policy
+    import phase3_one_shot_runner as runner
+    import step_output_collector as versions
+    from _stated_eda_image import mock_docker_route
+
+    mock_docker_route(monkeypatch)
+    project, root, declared = _gls_project(tmp_path)
+    put(project / 'phase3/librelane_switch.json', {
+        'image': 'img', 'pdk_root_host': str(root), 'pdk': 'x'})
+    put(project / 'input/step_0_5ic_answers.json', {})
+    write(project / 'phase2/stage2/synth/post_dft_netlist.v', CHIP_TOP)
+    cfg = SimpleNamespace(name='x')
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *_: {
+        'pdk_name': 'x', 'pdk_root': str(root), 'image_id': 'img'})
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, contract, cfg, 'SOURCE_FIXTURE_ONLY'))
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    direct_calls = []
+    def unavailable_direct(*args):
+        direct_calls.append(True)
+        return False
+    monkeypatch.setattr(runner, '_emit_sdf', unavailable_direct)
+    transcript = (lambda c: VVP_PASS.replace('28/28', '11/28')
+                  if case == 'case_fail' else VVP_PASS)
+    edge, calls = _gls_edge(declared, transcript)
+    def process_edge(argv, **kwargs):
+        if '--id' in argv and case == 'tool_error':
+            calls.append(argv)
+            return SimpleNamespace(returncode=1, stdout='', stderr='SOURCE_FIXTURE_ONLY: simulation tool stopped')
+        completed = edge(argv, **kwargs)
+        if '--id' in argv and case == 'missing_model':
+            folder = Path(argv[argv.index('-o') + 1])
+            config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+            manifest = json.loads(Path(config['VIBEIC_GLS_MANIFEST']).read_text())
+            assert manifest['model_closure']['unresolved']
+            runs = json.loads((folder / 'gls_runs.json').read_text())
+            for row in runs['runs']:
+                row['compile_rc'] = 1
+                write(Path(row['stdout']), 'SOURCE_FIXTURE_ONLY: unresolved cell module\n')
+            put(folder / 'gls_runs.json', runs)
+        return completed
+    monkeypatch.setattr(contract, 'run_container', process_edge)
+    record = project / postroute.STEP23_RECORD
+    state_path = Path(json.loads(record.read_text())['sta_state'])
+    state = json.loads(state_path.read_text())
+    original_state = state_path.read_bytes()
+    if case == 'missing_sdf':
+        Path(next(iter(state['sdf'].values()))).unlink()
+    elif case == 'changed_state':
+        state_path.write_text(state_path.read_text() + '\n ')
+    elif case == 'missing_model':
+        (root / 'x/libs.ref/cells/verilog/cells.v').unlink()
+    gate = project / 'reports/phase2/gates/post_layout_sim.json'
+    assert not gate.exists()
+    began = time.time()
+    result = runner._default_pnr_rows(project, 'spm', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
+    assert direct_calls == [], result.detail
+    assert result.status == ('PASS' if case == 'good' else 'FAIL'), result.detail
+    assert gate.is_file(), result.detail
+    report = json.loads(gate.read_text())
+    assert report['verdict'] == ('PASS' if case == 'good' else 'FAIL'), report
+    row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '29')
+    files, missing = worker.resolve_contract(project, row['required_outputs'])
+    accepted = next(r for r in versions.current_acceptance(project, began) if r['id'] == '29')
+    assert accepted['status'] == result.status
+    assert accepted['canonical_pass'] is (case == 'good')
+    sim = runner._pl.sim_postlayout_dir(project)
+    if case in ('good', 'case_fail', 'missing_model'):
+        assert missing == []
+        assert 'reports/phase2/gates/post_layout_sim.json' in files
+        assert (sim / 'results.log').is_file()
+        judged = json.loads((project / 'reports/phase3/gls_corners.json').read_text())
+        assert judged['coverage'] == {'tool_sdf_corners': 3, 'direct_sdf_corners': 0}
+        assert judged['dut_binding']['dut_module'] == 'chip_top'
+        manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
+        assert manifest['top'] == 'spm'
+        assert sorted(judged['corners']) == sorted(CORNERS)
+        for corner, sdf in state['sdf'].items():
+            assert (sim / f'spm__{corner}.sdf').read_bytes() == Path(sdf).read_bytes()
+        assert state_path.read_bytes() == original_state
+    if case == 'good':
+        assert (sim / 'pass.flag').is_file()
+        assert versions.latest_pass(project, '29')['current_inputs'] is True
+        assert {r['rel'] for r in accepted['outputs']} >= {
+            'phase3/stage3/sim_postlayout/results.log',
+            'reports/phase2/gates/post_layout_sim.json'}
+    else:
+        assert not (sim / 'pass.flag').exists()
+        assert versions.latest_pass(project, '29') is None
+    # Preserve a compact source-control observation alongside pytest's raw XML.
+    put(project / 'source_control_observation.json', {
+        'case': case, 'status': result.status, 'missing': missing,
+        'captured': accepted, 'native_claim': False})

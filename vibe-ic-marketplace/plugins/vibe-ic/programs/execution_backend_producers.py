@@ -1425,9 +1425,13 @@ def produce_signoff(project, params):
     elif sid == '29':
         sim = project / 'phase3/stage3/sim_postlayout'
         sim.mkdir(parents=True, exist_ok=True)
-        sdf = sim / (top + '.sdf')
-        if not R._emit_sdf(project, top, pdk, container, sdf, notes):
-            raise em.Refusal('BACKEND_SDF_NATIVE_UNMEASURED', sid)
+        sdf = None
+        if params.get('execution_mode') != 'default':
+            sdf = sim / (top + '.sdf')
+            if not R._emit_sdf(project, top, pdk, container, sdf, notes):
+                raise em.Refusal('BACKEND_SDF_NATIVE_UNMEASURED', sid)
+        # Default consumes the full-PDK STAPostPNR corner SDFs through the
+        # existing tool arm; the optional direct arm only compares coverage.
         R._step29_tool_arm(project, top, pdk, 'librelane', sim, sdf, written, notes)
     elif sid == '30':
         if params.get('execution_mode', 'default') == 'default':

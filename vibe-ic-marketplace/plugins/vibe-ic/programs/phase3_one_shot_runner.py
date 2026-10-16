@@ -71184,7 +71184,7 @@ def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
 
 
 def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
-                     sim_dir: Path, direct_sdf: Path, written: List[str],
+                     sim_dir: Path, direct_sdf: Optional[Path], written: List[str],
                      notes: List[str]) -> None:
     """Step 29 on the tool (T106): the L10 suite against every STAPostPNR
     corner SDF as the LibreLane custom step `Vibeic.GateLevelSim`
@@ -71204,7 +71204,8 @@ def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
                               f"step 29 on LibreLane: {exc}") from None
         # The direct arm writes ONE SDF (`_emit_sdf`, the PDK's default liberty).
         judged = _lp.gate_level_sim(project, top, image,
-                                    Path(root), pdk.name, direct_sdfs=[direct_sdf])
+                                    Path(root), pdk.name,
+                                    direct_sdfs=[direct_sdf] if direct_sdf is not None else [])
         written.append(str(project / "reports/phase3/gls_corners.json"))
         if mode == "librelane":
             written.extend(_sgs.write_tool_arm_results(sim_dir, judged, top))
