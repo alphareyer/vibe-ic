@@ -914,6 +914,9 @@ def backend_project_input_contract(project: Path, step_id: str, *,
                     or not resolved.is_file()):
                 raise ValueError(f"pad-ring input path is unsafe: {raw!r}")
             result.append(rel.as_posix())
+    if step_id == "20" and execution_mode == "default":
+        cts_paths, _ = _cts_handoff_input_files(root, collect_missing=collect_missing)
+        result.extend(cts_paths)
     sidecar = root / "phase2/stage2/synth/synth_inputs.json"
     try:
         doc = json.loads(sidecar.read_text())
@@ -990,7 +993,8 @@ def backend_project_input_contract(project: Path, step_id: str, *,
 
 def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[str, object],
                                 state: Mapping[str, object], *,
-                                collect_missing: bool = False) -> tuple[str, ...]:
+                                collect_missing: bool = False,
+                                original_root: Path | None = None) -> tuple[str, ...]:
     """Admit receipt state files only after lexical, containment, and digest proof.
 
     The producer records absolute paths from its own project namespace.  The
@@ -1004,20 +1008,21 @@ def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[st
     librelane = (project / "phase3/librelane").resolve(strict=True)
     if not folder.is_relative_to(librelane):
         raise ValueError("native receipt producer folder is outside project")
-    netlist_value = state.get("nl") if isinstance(state, Mapping) else None
-    recorded = Path(netlist_value) if isinstance(netlist_value, str) else Path()
-    rel_folder = folder.relative_to(project)
-    if (not isinstance(netlist_value, str) or not recorded.is_absolute()
-            or ".." in recorded.parts or str(recorded) != netlist_value):
-        raise ValueError("native state netlist path is not absolute")
-    recorded_parent = recorded.parent
-    if len(recorded_parent.parts) <= len(rel_folder.parts):
-        raise ValueError("native state netlist has no project prefix")
-    original_root = recorded_parent
-    for _ in rel_folder.parts:
-        original_root = original_root.parent
-    if original_root / rel_folder != recorded_parent:
-        raise ValueError("native state netlist folder is not canonical")
+    if original_root is None:
+        netlist_value = state.get("nl") if isinstance(state, Mapping) else None
+        recorded = Path(netlist_value) if isinstance(netlist_value, str) else Path()
+        rel_folder = folder.relative_to(project)
+        if (not isinstance(netlist_value, str) or not recorded.is_absolute()
+                or ".." in recorded.parts or str(recorded) != netlist_value):
+            raise ValueError("native state netlist path is not absolute")
+        recorded_parent = recorded.parent
+        if len(recorded_parent.parts) <= len(rel_folder.parts):
+            raise ValueError("native state netlist has no project prefix")
+        original_root = recorded_parent
+        for _ in rel_folder.parts:
+            original_root = original_root.parent
+        if original_root / rel_folder != recorded_parent:
+            raise ValueError("native state netlist folder is not canonical")
     inp = receipt.get("input") if isinstance(receipt, Mapping) else None
     state_files = inp.get("state_files") if isinstance(inp, Mapping) else None
     if not isinstance(state_files, Mapping):
@@ -1060,6 +1065,106 @@ def _mapped_receipt_state_files(project: Path, folder: Path, receipt: Mapping[st
         seen.add(rel)
         mapped.append(rel)
     return tuple(mapped)
+
+
+def _cts_handoff_input_files(project: Path, *, collect_missing: bool = False):
+    """Resolve Step 19's selected native proof into the one issued manifest.
+
+    The handoff's source view and its named chain establish the producer's
+    lexical project root. The existing receipt mapper then binds its exact
+    inputs; native output digests remain the producer's recorded digests.
+    No history search or recursive native-directory declaration is involved.
+    """
+    import librelane_contract as ll
+    root = Path(project).resolve(strict=True)
+    handoff_rel = "reports/phase3/librelane_cts_handoff.json"
+    path = root / handoff_rel
+    if not path.exists() and collect_missing:
+        return (handoff_rel,), None
+    document = json.loads(path.read_text())
+    chain = document["chain"]
+    view = document["views"]["post_cts_def"]
+    source = Path(view["source"])
+    if (not source.is_absolute() or ".." in source.parts
+            or str(source) != view["source"] or not isinstance(chain, dict) or not chain):
+        raise ValueError("CTS handoff source/chain is unsafe")
+    folders = []
+    origins = set()
+    for step, raw in chain.items():
+        rel = Path(raw)
+        if (rel.is_absolute() or ".." in rel.parts or rel.as_posix() != raw
+                or not rel.is_relative_to("phase3/librelane")):
+            raise ValueError(f"CTS native folder is unsafe: {raw!r}")
+        folders.append((step, rel))
+        if tuple(source.parent.parts[-len(rel.parts):]) == rel.parts:
+            origin = source.parent
+            for _ in rel.parts:
+                origin = origin.parent
+            origins.add(origin)
+    if len(origins) != 1:
+        raise ValueError("CTS source is not bound to its selected native chain")
+    original_root = origins.pop()
+    bound = {}
+    files = [handoff_rel]
+
+    def carry(raw, digest):
+        rel = Path(raw)
+        if (rel.is_absolute() or not raw or ".." in rel.parts or rel.as_posix() != raw
+                or not re.fullmatch("[0-9a-f]{64}", str(digest))):
+            raise ValueError(f"CTS proof path/digest is unsafe: {raw!r}")
+        target = root / rel
+        if not target.exists() and collect_missing:
+            files.append(raw)
+            return
+        if (target.is_symlink() or target.resolve(strict=True) != target
+                or not target.is_file() or em.digest(target) != digest):
+            raise ValueError(f"CTS proof file is absent or changed: {raw}")
+        if raw in bound and bound[raw] != digest:
+            raise ValueError(f"CTS proof has conflicting bindings: {raw}")
+        bound[raw] = digest
+        files.append(raw)
+
+    states = []
+    for step, rel in folders:
+        folder = root / rel
+        receipt = ll.validate_step_receipt(folder, step)
+        state = json.loads((folder / "state_out.json").read_text())
+        files.append((rel / "vibeic_receipt.json").as_posix())
+        for name, digest in receipt["sha256"].items():
+            carry((rel / name).as_posix(), digest)
+        mapped = _mapped_receipt_state_files(root, folder, receipt, state,
+                    collect_missing=collect_missing, original_root=original_root)
+        files.extend(mapped)
+        for name, digest in {**receipt["input"].get("config_files", {}),
+                             **receipt["input"]["state_files"]}.items():
+            recorded = Path(name)
+            if recorded.is_relative_to(original_root):
+                carry(recorded.relative_to(original_root).as_posix(), digest)
+        states.append(state)
+    for info in document["views"].values():
+        recorded = Path(info["source"])
+        if not recorded.is_absolute() or not recorded.is_relative_to(original_root):
+            raise ValueError("CTS view source is outside its producer project")
+        carry(recorded.relative_to(original_root).as_posix(), info["source_sha256"])
+        carry(info["dest"], info["dest_sha256"])
+    carry(document["measured_state"], document["measured_state_sha256"])
+    for state in states:
+        for recorded in ll._walk_paths({k: v for k, v in state.items() if k != "metrics"}):
+            if not recorded.is_relative_to(original_root):
+                raise ValueError("CTS state view is outside its producer project")
+            raw = recorded.relative_to(original_root).as_posix()
+            if raw not in bound:
+                raise ValueError(f"CTS state view has no producer digest: {raw}")
+    # clock_plan_check reads the selected CTS transcript in addition to its
+    # bound cts.rpt. It is an issued input, not a newly invented native result.
+    import clock_plan_check as clock_reader
+    cts_folder = root / chain[clock_reader._LL_CTS_STEP]
+    transcript = cts_folder / clock_reader._LL_CTS_LOG
+    if (transcript.is_symlink() or transcript.resolve(strict=True) != transcript
+            or not transcript.is_file()):
+        raise ValueError("CTS transcript is absent or unsafe")
+    files.append(transcript.relative_to(root).as_posix())
+    return tuple(dict.fromkeys(files)), original_root
 
 
 def register_backend_adapters(registry: em.Registry | None = None, *, source_sha: str,

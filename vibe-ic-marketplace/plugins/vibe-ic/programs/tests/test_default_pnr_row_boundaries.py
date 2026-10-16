@@ -332,8 +332,13 @@ def _split_cts_owner_control(tmp_path, monkeypatch):
             '- u2 clkbuf_8 + PLACED ( 1 0 ) N ;\nEND COMPONENTS\nEND DESIGN\n')
     (pnr / 'post_spare.def').write_text(body)
     (pnr / 'constraint.sdc').write_text('create_clock -period 10 [get_ports clk]\n')
+    (pnr / 'unit_pnr.v').write_text('module unit(input clk); endmodule\n')
+    (pnr / 'post_spare.odb').write_text('SOURCE_CONTROL predecessor ODB\n')
     initial = tmp_path / 'initial-state.json'
-    initial.write_text(json.dumps({'metrics': {'design__instance__area__stdcell': 2}}))
+    initial.write_text(json.dumps({'def': str(pnr / 'post_spare.def'),
+        'odb': str(pnr / 'post_spare.odb'), 'nl': str(pnr / 'unit_pnr.v'),
+        'sdc': str(pnr / 'constraint.sdc'),
+        'metrics': {'design__instance__area__stdcell': 2}}))
     seen = []
 
     def resolve(project, image, pdk, ids, *, folder, **kwargs):
@@ -352,6 +357,11 @@ def _split_cts_owner_control(tmp_path, monkeypatch):
         current = json.loads(Path(chain[0][2]).read_text())
         folders = []
         for index, (sid, config, _) in enumerate(chain):
+            fingerprint = {'step': sid, 'config': ll.digest(config),
+                'state_files': {str(p): ll.digest(p) for p in ll._walk_paths(
+                    {k: v for k, v in current.items() if k != 'metrics'})},
+                'config_files': {}}
+            assert all(Path(p).is_relative_to(project) for p in fingerprint['state_files'])
             folder = project / 'phase3/librelane' / lane / f'{index:02d}-{sid}'
             folder.mkdir(parents=True, exist_ok=True)
             (folder / 'config.json').write_bytes(config.read_bytes())
@@ -371,6 +381,13 @@ def _split_cts_owner_control(tmp_path, monkeypatch):
             if sid == 'OpenROAD.CTS':
                 (folder / 'cts.rpt').write_text('Total number of Clock Roots: 1.\n'
                     'Total number of Buffers Inserted: 2.\nTotal number of Sinks: 9.\n')
+                (folder / 'openroad-cts.log').write_text('SOURCE_CONTROL CTS transport\n')
+            ll.write_json(folder / 'input_fingerprint.json', fingerprint)
+            ll.write_json(folder / 'pdk_root.json', {'source_control': True})
+            (folder / 'invocation.log').write_text('SOURCE_CONTROL native writes only\n')
+            ll.write_json(folder / 'vibeic_receipt.json', {'input': fingerprint,
+                'sha256': {str(p.relative_to(folder)): ll.digest(p)
+                           for p in folder.iterdir() if p.is_file()}})
             folders.append(folder)
         return folders
 
@@ -426,6 +443,73 @@ def test_split_hold_refuses_missing_or_changed_original_cts_before_native(tmp_pa
     with pytest.raises(producers.em.Refusal, match=reason):
         producers._cts_split(tmp_path, params, runner, ll, SimpleNamespace(name='neutral'), {})
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize('changed', [None, 'missing', 'changed'])
+def test_split_hold_issued_manifest_carries_cts_into_an_isolated_project(
+        tmp_path, monkeypatch, changed):
+    """Software transport control; real resolver, copy, preflight and producer."""
+    import shutil
+    source = tmp_path / 'original'
+    ll, params, cts, seen = _split_cts_owner_control(source, monkeypatch)
+    for rel in ('input/step_0_5ic_answers.json', 'input/submission_template/source.json'):
+        path = source / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+    params = {**params, 'step_id': '20'}
+    params.pop('state_in')
+    issued = {}
+    files = execution_policy._fixed_inputs(
+        {'project': source, 'registry': None, 'policy': {'mode': 'default'}},
+        '20', parameters=issued)
+    manifest = issued['resolved_input_manifest']
+    assert manifest['missing'] == []
+    assert str(cts.relative_to(source)) in manifest['files']
+    document = json.loads(cts.read_text())
+    for folder in document['chain'].values():
+        native = source / folder
+        receipt = ll.validate_step_receipt(native, json.loads(
+            (native / 'input_fingerprint.json').read_text())['step'])
+        assert {str((native / p).relative_to(source)) for p in receipt['sha256']}.issubset(files)
+        assert str((native / 'vibeic_receipt.json').relative_to(source)) in files
+    inputs = tmp_path / 'inputs'
+    for rel, original in files.items():
+        target = inputs / 'project' / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(original, target)
+    private = tmp_path / 'private'
+    worker._copy_input_tree(inputs, private)
+    source.rename(tmp_path / 'unavailable-original')
+    assert not source.exists(), 'the consumer must not reopen ambient original paths'
+    native_rel = Path(document['views']['post_cts_def']['source']).relative_to(source)
+    native_def = private / native_rel
+    if changed == 'missing':
+        native_def.unlink()
+    elif changed == 'changed':
+        native_def.write_text('changed original CTS view\n')
+    missing = worker.resolve_input_contract(private, manifest['declarations'], manifest)
+    if changed:
+        assert str(native_rel) in missing
+        with pytest.raises((producers.em.Refusal, ValueError)):
+            producers._predecessor_state(private, 'post_cts.def')
+        assert len(seen) == 1
+        return
+    assert missing == []
+    original_receipt = (private / cts.relative_to(source)).read_bytes()
+    measured = private / document['measured_state']
+    original_state = measured.read_bytes()
+    mapped = producers._predecessor_state(private, 'post_cts.def')
+    assert mapped != measured
+    assert all(p.is_file() and p.is_relative_to(private) for p in ll._walk_paths(
+        {k: v for k, v in json.loads(mapped.read_text()).items() if k != 'metrics'}))
+    producers._cts_split(private, params, runner, ll, SimpleNamespace(name='neutral'), {})
+    assert seen[-1]['input'] == mapped
+    assert 'OpenROAD.CTS' not in seen[-1]['ids']
+    assert (private / cts.relative_to(source)).read_bytes() == original_receipt
+    assert measured.read_bytes() == original_state
+    assert worker.resolve_input_contract(private, manifest['declarations'], manifest) == []
+    import hold_closure_check
+    assert hold_closure_check.evaluate(private)[0] == 'PASS'
 
 
 def test_rcx_publishes_its_current_native_spefs_for_the_existing_provenance_consumer(

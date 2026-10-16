@@ -5345,6 +5345,8 @@ steps:
     required_inputs:
       - from: 19
         path: "phase3/stage3/pnr/post_cts.def"
+      - from: 19
+        path: "reports/phase3/librelane_cts_handoff.json"
     closed_loop:
       fallback_to: 19
       trigger: "Hold violation; insert delay cell or re-CTS"

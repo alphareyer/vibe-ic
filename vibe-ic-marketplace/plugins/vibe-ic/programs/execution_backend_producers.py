@@ -460,12 +460,33 @@ def _predecessor_state(project, predecessor):
         expected = document.get('measured_state_sha256', document.get('state_sha256'))
         if predecessor == 'post_cts.def':
             # Hold always starts at immutable CTS, including on a retry.
-            source = _require(project / view['source'])
+            source = Path(view['source'])
+            original_root = None
+            if source.is_absolute() and not source.is_relative_to(project.resolve()):
+                from execution_adapters_backend import _cts_handoff_input_files
+                _, original_root = _cts_handoff_input_files(project)
+                source = project / source.relative_to(original_root)
+            source = _require(project / source)
             if snap.sha(source) != view['source_sha256'] or snap.sha(source) != snap.sha(canonical):
                 raise ValueError('CTS source differs from its handed checkpoint')
         state = _require(project / raw)
         if expected != snap.sha(state):
             raise ValueError('predecessor native state changed after its handoff')
+        if predecessor == 'post_cts.def' and original_root is not None:
+            # Preserve the measured state and receipt bytes. Only the next
+            # producer's input state is derived into its staged namespace.
+            def relocate(value):
+                if isinstance(value, dict):
+                    return {k: relocate(v) if k != 'metrics' else v for k, v in value.items()}
+                if isinstance(value, list):
+                    return [relocate(v) for v in value]
+                if isinstance(value, str) and value.startswith('/'):
+                    return str(project / Path(value).relative_to(original_root))
+                return value
+            import librelane_contract as ll
+            mapped = project / 'phase3/librelane/execution-backend-20-config/cts-state-in.json'
+            ll.write_json(mapped, relocate(json.loads(state.read_text())))
+            return mapped
         return state
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise em.Refusal('BACKEND_PREDECESSOR_STATE_UNBOUND',
