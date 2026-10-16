@@ -100,6 +100,7 @@ def _tree(tmp_path: Path, *, mapped: bool = True,
 @pytest.fixture()
 def lec_runs(monkeypatch):
     seen: list = []
+    real_run = R.subprocess.run
 
     def _run(argv, *a, **k):
         argv = [str(x) for x in argv]
@@ -118,7 +119,10 @@ def lec_runs(monkeypatch):
             (proj / "reports/lec.json").write_text(json.dumps(doc))
             (proj / "reports/lec.rpt").write_text(
                 "Equivalence successfully proven!\nProved 1 $equiv cells.\n")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        # Only LEC is simulated. Source-authority Git reads and all unrelated
+        # commands must retain their real output, including in a fresh process.
+        return real_run(argv, *a, **k)
 
     monkeypatch.setattr(R.subprocess, "run", _run)
     return seen
