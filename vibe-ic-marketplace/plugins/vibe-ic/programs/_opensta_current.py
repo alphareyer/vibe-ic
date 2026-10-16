@@ -64,22 +64,22 @@ def corner_identity(liberties):
 
 
 def basis(project, top, liberties, *, coupling=False, extra_inputs=(), physical_top=None,
-          spef=None):
+          spef=None, netlist=None, sdc=None):
     """Bind logical artifact paths and the module those bytes actually describe.
 
     A distinct physical top is supplied by the validated tool configuration;
     receipt validation re-derives it from that authority, never from filenames.
-    A tool-selected SPEF is similarly re-derived from the validated corner State;
-    the logical artifact alias need not represent that extraction corner.
+    Tool-selected netlist, SDC and SPEF paths are re-derived from the validated
+    corner State; the artifact alias need not name those material files.
     """
     project = Path(project).resolve(strict=True)
     physical_top = top if physical_top is None else physical_top
     if any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][\w$]*', name)
            for name in (top, physical_top)):
         raise Refusal("CURRENT_DESIGN_NAME_INVALID")
-    paths = {"netlist": pl.pnr_dir(project) / f"{top}_pnr.v",
+    paths = {"netlist": Path(netlist) if netlist is not None else pl.pnr_dir(project) / f"{top}_pnr.v",
              "spef": Path(spef) if spef is not None else pl.extracted_dir(project) / f"{top}.spef",
-             "sdc": pl.pnr_dir(project) / "constraint.sdc"}
+             "sdc": Path(sdc) if sdc is not None else pl.pnr_dir(project) / "constraint.sdc"}
     inputs = [file_record(p, role, project) for role, p in paths.items()]
     if not re.search(r'\bmodule\s+' + re.escape(physical_top) + r'\b', paths['netlist'].read_text()):
         raise Refusal("CURRENT_NETLIST_DESIGN_MISMATCH")
@@ -328,10 +328,12 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     if fp['state_files'].get(str(selected_spef)) != digest(selected_spef):
         raise Refusal('CURRENT_STAPOSTPNR_SPEF_HANDOFF_MISMATCH')
     subject = basis(project, top, libs, coupling=coupling, physical_top=physical_top,
-                    spef=selected_spef)
+                    spef=selected_spef, netlist=project / inputs['sta_netlist'],
+                    sdc=project / inputs['sdc'])
     roles = {r['role']: r for r in subject['inputs']}
     for role, key in [('netlist', 'sta_netlist'), ('sdc', 'sdc')]:
-        if digest(project / inputs[key]) != roles[role]['sha256']:
+        if (digest(project / inputs[key]) != roles[role]['sha256']
+                or fp['state_files'].get(str(project / inputs[key])) != roles[role]['sha256']):
             raise Refusal(f'CURRENT_STAPOSTPNR_{role.upper()}_HANDOFF_MISMATCH')
     subject['inputs'] += [file_record(path, role, project) for role, path in [
         ('tool_state', folder / 'state_out.json'), ('tool_config', folder / 'config.json'),

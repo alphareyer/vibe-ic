@@ -762,3 +762,103 @@ def test_si_coupling_absence_diagnostic_names_selected_spef(tmp_path, monkeypatc
     reason = body['current_input_reason']
     assert reason.startswith('CURRENT_SPEF_COUPLING_MISSING'), reason
     assert str(selected) in reason and 'coupling' in reason and 'inspected' in reason, reason
+
+
+
+def _explicit_step30_subject(tmp_path):
+    """SOURCE_FIXTURE_ONLY native inputs with independent module and filenames."""
+    p, folder, lib = project(tmp_path)
+    old_paths = {'nl': p / 'phase3/stage3/pnr/neutral_pnr.v',
+                 'sdc': p / 'phase3/stage3/pnr/constraint.sdc',
+                 'spef': p / 'phase3/stage3/extracted/neutral.spef'}
+    paths = {'nl': p / 'phase3/stage3/pnr/retained_route_bytes.v',
+             'sdc': p / 'phase3/stage3/pnr/selected_scene.sdc',
+             'spef': p / 'phase3/stage3/extracted/selected.max.spef'}
+    for role, old in old_paths.items():
+        text = old.read_text()
+        if role in ('nl', 'spef'):
+            text = text.replace('neutral', 'package_shell')
+        write(paths[role], text)
+        old.unlink()
+    for name in ('state_in.json', 'state_out.json'):
+        state = json.loads((folder / name).read_text())
+        state.update(nl=str(paths['nl']), sdc=str(paths['sdc']), spef={'*': str(paths['spef'])})
+        put(folder / name, state)
+    config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    data = json.loads(config.read_text())
+    data['DESIGN_NAME'] = 'package_shell'
+    put(config, data)
+    put(folder / 'config.json', data)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(config=LC.digest(config), state_files={str(path): LC.digest(path) for path in paths.values()})
+    seal(folder, fp)
+    record = json.loads((p / LP.STEP23_RECORD).read_text())
+    record['sta_state_sha256'] = LC.digest(folder / 'state_out.json')
+    put(p / LP.STEP23_RECORD, record)
+    return p, folder, lib, paths
+
+
+@pytest.mark.parametrize('kind,expected', [('CORRELATED', 'PASS'), ('MISMATCH', 'FAIL')])
+def test_default_step30_consumes_explicit_native_timed_paths(tmp_path, monkeypatch, kind, expected):
+    import _opensta_current as current
+    import test_step30_r4_current_failures as current_fixture
+    p, folder, lib, paths = _explicit_step30_subject(tmp_path)
+    # Transport substitutes STA/SPICE only; the actual current producer,
+    # Default adopter, publication and strict consumer all run below.
+    current_fixture.correlation_tool(p, folder, lib, monkeypatch, mismatch=kind, companion='success')
+    subject, _ = current.tool_subject(p, 'neutral')
+    assert subject['top'] == 'neutral' and subject['physical_top'] == 'package_shell'
+    roles = {row['role']: row for row in subject['inputs']}
+    for role, key in [('netlist', 'nl'), ('sdc', 'sdc'), ('spef', 'spef')]:
+        assert roles[role]['path'] == str(paths[key])
+        assert roles[role]['sha256'] == LC.digest(paths[key])
+    assert not (paths['nl'].parent / 'neutral_pnr.v').exists()
+    assert not (paths['nl'].parent / 'package_shell_pnr.v').exists()
+    for name in ('reports/phase3/spice_correlation.current.json',
+                 'reports/phase3/spice_correlation.json', 'phase3/stage3/spice/correlation.json'):
+        (p / name).unlink(missing_ok=True)
+    result = _current_backend_step30(p, lib, monkeypatch)
+    assert result['verdict'] == expected, result
+    receipt = json.loads((p / 'reports/phase3/spice_correlation.current.json').read_text())
+    assert receipt['top'] == 'package_shell'
+    consumed = {row['role']: row for row in receipt['inputs']}
+    assert all(consumed[role]['path'] == str(paths[key]) for role, key in
+               [('netlist', 'nl'), ('sdc', 'sdc'), ('spef', 'spef')])
+    gate = SC.run_audit(p, run_spice=False)
+    assert gate.summary['current_binding'] == 'CURRENT' and gate.summary['measurement'] == 'MEASURED'
+    assert gate.summary['verdict'] == expected and gate.passed is (expected == 'PASS')
+
+
+@pytest.mark.parametrize('damage', ['missing_netlist', 'netlist_hash', 'sdc_hash', 'spef_hash',
+                                    'unbound_netlist', 'wrong_module'])
+def test_default_step30_explicit_native_paths_do_not_authorize_drift(tmp_path, monkeypatch, damage):
+    import _opensta_current as current
+    p, folder, lib, paths = _explicit_step30_subject(tmp_path)
+    # Establish valid context before applying one adversarial input change.
+    assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
+    if damage == 'missing_netlist':
+        paths['nl'].unlink()
+    elif damage.endswith('_hash'):
+        key = {'netlist_hash': 'nl', 'sdc_hash': 'sdc', 'spef_hash': 'spef'}[damage]
+        paths[key].write_text(paths[key].read_text() + '\n// changed input bytes\n')
+    else:
+        fp = json.loads((folder / 'input_fingerprint.json').read_text())
+        if damage == 'unbound_netlist':
+            foreign = write(paths['nl'].with_name('another_route.v'), paths['nl'].read_text())
+            state = json.loads((folder / 'state_out.json').read_text())
+            state['nl'] = str(foreign)
+            put(folder / 'state_out.json', state)
+        else:
+            paths['nl'].write_text(paths['nl'].read_text().replace('module package_shell', 'module other_shell'))
+            fp['state_files'][str(paths['nl'])] = LC.digest(paths['nl'])
+        seal(folder, fp)
+        record = json.loads((p / LP.STEP23_RECORD).read_text())
+        record['sta_state_sha256'] = LC.digest(folder / 'state_out.json')
+        put(p / LP.STEP23_RECORD, record)
+    with pytest.raises((current.Refusal, LC.Refusal, OSError)):
+        PST.current_context(p, BF.IMAGE, p / 'fixture_pdk', 'neutral')
+    result = _current_backend_step30(p, lib, monkeypatch)
+    assert result['verdict'] == 'NOT_MEASURED', result
+    assert not (p / 'reports/phase3/spice_correlation.current.json').exists()
+    gate = SC.run_audit(p, run_spice=False)
+    assert not gate.passed and gate.summary['measurement'] == 'NOT_MEASURED'
