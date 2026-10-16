@@ -156,7 +156,10 @@ def _checkpoint_contract(project, monkeypatch, doc='L1.json'):
     """A neutral D1 contract through the real FCC, not a substitute verdict."""
     import copy
     import _flow_yaml
-    flow = copy.deepcopy(_flow_yaml.load())
+    import step_write_ledger
+    import yaml
+    load = _flow_yaml.load
+    flow = copy.deepcopy(load())
     row = next(r for r in flow['steps'] if str(r['id']) == 'D1')
     row['required_inputs'] = [{'from': 'external', 'path': 'input/docs/*'}]
     output = 'phase1/generated_docs/' + doc
@@ -164,7 +167,12 @@ def _checkpoint_contract(project, monkeypatch, doc='L1.json'):
     row['program_outputs'] = []
     row['gate'] = {'files_exist': [output,
                                   'reports/phase1/mechanical-ready.json']}
-    monkeypatch.setattr(_flow_yaml, 'load', lambda *a, **k: flow)
+    # Both real readers must observe this same contract: the write ledger
+    # independently reads its YAML path instead of using _flow_yaml.load.
+    fixture_flow = project.parent / (project.name + '-checkpoint-flow.yaml')
+    fixture_flow.write_text(yaml.safe_dump(flow, sort_keys=False))
+    monkeypatch.setattr(_flow_yaml, 'load', lambda *a, **k: load(fixture_flow))
+    monkeypatch.setattr(step_write_ledger, '_flow_yaml_path', lambda: fixture_flow)
     ready = project / 'reports/phase1/mechanical-ready.json'
     ready.parent.mkdir(parents=True, exist_ok=True)
     ready.write_text('{"scope":"SOURCE_CONTROL mechanical input"}\n')
