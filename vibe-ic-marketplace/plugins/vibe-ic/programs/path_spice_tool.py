@@ -767,9 +767,12 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
             stale.unlink()
     cell_sources = [host(p) for p in (config.get('CELL_SPICE_MODELS') or [])]
     spice_sources = cell_sources + [host(p) for p in (config.get('PAD_SPICE_MODELS') or [])]
+    import librelane_contract as lc
+    local = lc._provider_for_image(image) is not None or lc._provider_route(project)
+    execution_root = str(pdk_root) if local else str(Path(guest).parent)
     mounts = [(pdk_root / pdk, guest)]
     view = cell_view(image, project, mounts, config=config, pdk_dir=pdk_root / pdk,
-                     guest_root=str(Path(guest).parent), pdk=pdk,
+                     guest_root=execution_root, pdk=pdk,
                      netlist=project / inputs['sta_netlist'], cell_sources=cell_sources,
                      out_dir=out_dir)
     if view.get('missing_exports'):
@@ -777,9 +780,7 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
                          ground, out_dir / 'cells_folded.spice')
     cells['cell_view'] = {k: v for k, v in view.items() if k != 'sources'}
-    import librelane_contract as lc
-    local = lc._provider_for_image(image) is not None or lc._provider_route(project)
-    model_root = str(pdk_root / pdk) if local else guest
+    model_root = str(Path(execution_root) / pdk)
     models = model_file(pdk_root / pdk / 'libs.tech' / simulator, f'{model_root}/libs.tech/{simulator}',
                         simulator, Path(inputs['liberties'][0]).name,
                         device_names(Path(cells['path']).read_text()),

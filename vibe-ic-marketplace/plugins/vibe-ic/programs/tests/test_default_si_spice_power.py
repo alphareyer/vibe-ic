@@ -898,20 +898,57 @@ def test_step30_native_local_process_uses_its_declared_workdir(tmp_path):
 def test_step30_model_publication_matches_the_selected_execution_namespace(tmp_path, monkeypatch, route):
     p, folder, lib = project(tmp_path)
     root = p / 'fixture_pdk'
+    nl = p / 'phase3/stage3/pnr/neutral_pnr.v'
+    nl.write_text(nl.read_text().replace('BUF ', '\nBUF '))
     tech = root / 'neutral/libs.tech/ngspice'
     write(tech / 'design.ngspice', '.param neutral_scale=1\n')
     write(tech / 'models.ngspice', '.lib typ\n.model neutral nmos level=1\n.endl typ\n')
     write(root / 'neutral/cells.spice', '.subckt BUF A Z VDD VSS\nM0 Z A VSS VSS neutral W=1u L=1u\n.ends\n')
     write(lib, 'library(neutral_typ) {\n voltage_map(VDD, 1.8);\n voltage_map(VSS, 0);\n operating_conditions(typ) { voltage: 1.8; }\n}\n')
+    gds = write(root / 'neutral/cells.gds', 'SOURCE_FIXTURE_ONLY original declared cell geometry\n')
+    magicrc = write(root / 'neutral/libs.tech/magic/neutral.magicrc',
+                    'SOURCE_FIXTURE_ONLY technology uses PDK_ROOT/neutral/libs.tech/magic/neutral.tech\n')
+    technology = write(magicrc.with_suffix('.tech'), 'SOURCE_FIXTURE_ONLY unchanged technology\n')
+    write(root / 'neutral/libs.tech/librelane/config.tcl',
+          'set ::env(MAGICRC) "$::env(PDK_ROOT)/$::env(PDK)/libs.tech/magic/neutral.magicrc"\n')
     config = json.loads((folder / 'config.json').read_text())
-    config.update(VDD_PIN='VDD', GND_PIN='VSS', CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'])
+    config.update(VDD_PIN='VDD', GND_PIN='VSS', CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'],
+                  CELL_GDS=[str(gds)])
     put(folder / 'config.json', config)
+    original = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    put(original, config)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(config=LC.digest(original), config_files=LC.config_file_hashes(config, [(root / 'neutral', '/pdk/neutral')]),
+              liberty_files={'/pdk/neutral/neutral.lib': LC.digest(lib)})
+    fp['state_files'][str(nl)] = LC.digest(nl)
+    seal(folder, fp)
     # Only the tool process is substituted; the real normal prepare_arm and
     # model-section reader/publication execute in the selected namespace.
     monkeypatch.setattr(LC, '_provider_for_image', lambda *_: None)
     monkeypatch.setattr(LC, '_provider_route', lambda *_: route == 'LOCAL')
-    calls = []
+    calls, magic_calls = [], []
     def sta(image, project, mounts, argv, cwd, **kwargs):
+        if argv[0] == 'magic':
+            import _container_exec as ce
+            translations = [(guest, str(host)) for host, guest in mounts]
+            declared_root = kwargs['env']['PDK_ROOT']
+            # LOCAL rewrites env values, not paths assembled inside the rcfile.
+            # Docker has the declared guest view; emulate only its file lookup.
+            loaded_root = ce.localise_mounted_paths(declared_root, translations) if route == 'LOCAL' else declared_root
+            tech_path = str(Path(loaded_root) / 'neutral/libs.tech/magic/neutral.tech')
+            if route == 'DOCKER':
+                tech_path = ce.localise_mounted_paths(tech_path, translations)
+            magic_calls.append({'argv': argv, 'env': kwargs['env'], 'tech': tech_path})
+            if not Path(tech_path).is_file():
+                return SimpleNamespace(returncode=1,
+                    stdout=f'SOURCE_FIXTURE_ONLY: Could not find file {tech_path}\n', stderr='')
+            assert Path(tech_path).read_bytes() == technology.read_bytes()
+            assert f'gds read {gds}\n' in Path(argv[-1]).read_text()
+            # This neutral process substitution emits only a source fixture;
+            # production extract_cells must read this invocation's export.
+            write(Path(cwd) / 'BUF.spice', '* SOURCE_FIXTURE_ONLY current export\n'
+                  + (root / 'neutral/cells.spice').read_text())
+            return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY extraction\n', stderr='')
         assert argv[0] == 'sta'
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY STA transport\n', stderr='')
@@ -929,3 +966,10 @@ def test_step30_model_publication_matches_the_selected_execution_namespace(tmp_p
         for line in text.splitlines():
             if line.startswith(('.include ', '.lib ')):
                 assert Path(line.split()[1]).is_file()
+
+    expected_root = str(root) if route == 'LOCAL' else '/pdk'
+    assert len(magic_calls) == 1
+    assert magic_calls[0]['env']['PDK_ROOT'] == expected_root
+    assert magic_calls[0]['argv'][4] == expected_root + '/neutral/libs.tech/magic/neutral.magicrc'
+    assert arm['cells']['cell_view']['extracted'] == ['BUF']
+    assert arm['cells']['cell_view']['missing_exports'] == []
