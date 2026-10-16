@@ -791,6 +791,10 @@ def _explicit_step30_subject(tmp_path):
     put(folder / 'config.json', data)
     fp = json.loads((folder / 'input_fingerprint.json').read_text())
     fp.update(config=LC.digest(config), state_files={str(path): LC.digest(path) for path in paths.values()})
+    # run_chain may declare the whole PDK root, not only one process subtree.
+    put(folder / 'pdk_root.json', {'cli_pdk_root': '/pdk',
+        'stated_by': 'run_chain(pdk_root=...)',
+        'mounts_under_it': [[str(p / 'fixture_pdk'), '/pdk']]})
     seal(folder, fp)
     record = json.loads((p / LP.STEP23_RECORD).read_text())
     record['sta_state_sha256'] = LC.digest(folder / 'state_out.json')
@@ -814,6 +818,9 @@ def test_default_step30_consumes_explicit_native_timed_paths(tmp_path, monkeypat
         assert roles[role]['sha256'] == LC.digest(paths[key])
     assert not (paths['nl'].parent / 'neutral_pnr.v').exists()
     assert not (paths['nl'].parent / 'package_shell_pnr.v').exists()
+    for image, root in [(BF.IMAGE, p / 'foreign_pdk_root'), ('different-image', p / 'fixture_pdk')]:
+        with pytest.raises(LC.Refusal, match='CURRENT_STEP30_IMAGE_OR_PDK_MISMATCH'):
+            PST.current_context(p, image, root, 'neutral')
     for name in ('reports/phase3/spice_correlation.current.json',
                  'reports/phase3/spice_correlation.json', 'phase3/stage3/spice/correlation.json'):
         (p / name).unlink(missing_ok=True)
@@ -855,7 +862,9 @@ def test_default_step30_explicit_native_paths_do_not_authorize_drift(tmp_path, m
         record = json.loads((p / LP.STEP23_RECORD).read_text())
         record['sta_state_sha256'] = LC.digest(folder / 'state_out.json')
         put(p / LP.STEP23_RECORD, record)
-    with pytest.raises((ValueError, LC.Refusal, OSError)):
+    expected_error = ValueError if damage.endswith('_hash') else (current.Refusal, LC.Refusal, OSError)
+    expected_reason = 'LL_INPUT_CHANGED:' if damage.endswith('_hash') else None
+    with pytest.raises(expected_error, match=expected_reason):
         PST.current_context(p, BF.IMAGE, p / 'fixture_pdk', 'neutral')
     result = _current_backend_step30(p, lib, monkeypatch)
     assert result['verdict'] == 'NOT_MEASURED', result
