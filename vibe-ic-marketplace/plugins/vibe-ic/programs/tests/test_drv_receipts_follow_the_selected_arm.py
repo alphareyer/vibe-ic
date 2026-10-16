@@ -54,6 +54,9 @@ def _with_receipts(monkeypatch):
 
 
 def _run(tmp_path, monkeypatch, **kw):
+    # Imported helpers do not activate their module's transport fixtures.
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     _with_receipts(monkeypatch)
     (tmp_path / "proj").mkdir(parents=True, exist_ok=True)
     S.claim(tmp_path / "proj")
@@ -115,6 +118,9 @@ import test_librelane_cts_hold as C  # noqa: E402
 
 
 def _cts(tmp_path, monkeypatch, *, hold, arm_hold):
+    # The CTS process is substituted here; it does not attest a LOCAL image.
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     real = C._fake_tool_run
 
     def fake(project, corners, **kw):

@@ -180,6 +180,9 @@ json.dump(state, open(os.path.join(out, "state_out.json"), "w"))
 
 
 def _fake_docker(tmp_path, monkeypatch):
+    # This fixture substitutes Docker with Tcl stand-ins, not a LOCAL image.
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     docker = tmp_path / "bin" / "docker"
     docker.parent.mkdir()
     docker.write_text(_FAKE_DOCKER)
