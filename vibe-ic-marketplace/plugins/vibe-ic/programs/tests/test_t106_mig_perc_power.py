@@ -849,3 +849,27 @@ def test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypa
     put(project / 'source_control_observation.json', {
         'case': case, 'status': result.status, 'missing': missing,
         'captured': accepted, 'native_claim': False})
+
+
+@pytest.mark.parametrize('case', ['good', 'case_fail'])
+def test_default_step29_binds_a_same_line_clock_before_complete_capture(
+        tmp_path, monkeypatch, case):
+    """Reuse the full row control with valid single-line HDL statements."""
+    original = _gls_project
+    def same_line_project(path):
+        project, root, declared = original(path)
+        bench = project / 'phase2/stage1/sim/tb_case.v'
+        text = bench.read_text().replace(
+            '  initial clk = 1\'b0;\n  always #5 clk = ~clk;',
+            '  initial clk = 1\'b0; always #12 clk = ~clk;')
+        assert text != bench.read_text()
+        bench.write_text(text)
+        return project, root, declared
+    monkeypatch.setattr(sys.modules[__name__], '_gls_project', same_line_project)
+    test_default_step29_consumes_the_complete_librelane_owner(tmp_path, monkeypatch, case)
+    project = tmp_path / 'design'
+    manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
+    assert manifest['not_a_subject'] == []
+    assert manifest['cases'] and manifest['clock']['clocks_s']['clk'] == pytest.approx(24e-9)
+    assert 'initial clk = 1\'b0; always #12 clk = ~clk;' in Path(
+        manifest['cases'][0]['testbench']).read_text()

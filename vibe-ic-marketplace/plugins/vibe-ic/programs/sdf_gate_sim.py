@@ -1987,7 +1987,7 @@ _SDF_TIMESCALE_RE = re.compile(
 _SDC_SET_UNITS_TIME_RE = re.compile(
     r"^\s*set_units\b[^\n]*?-time\s+\{?\s*(\d*\.?\d+)?\s*(s|ms|us|ns|ps|fs)\b", re.M)
 _CLOCK_GEN_RE = re.compile(
-    r"(?m)^(\s*always\s*#\s*)(\(\s*[0-9.]+\s*\)|[0-9.]+)(\s*)([A-Za-z_][\w$]*)"
+    r"(?m)(?:^|(?<=;))(\s*always\s*#\s*)(\(\s*[0-9.]+\s*\)|[0-9.]+)(\s*)([A-Za-z_][\w$]*)"
     r"(\s*<?=\s*[~!]\s*)([A-Za-z_][\w$]*)(\s*;)")
 
 
@@ -2064,7 +2064,11 @@ def bind_bench_clock(tb_text: str, dut_instance: str, declared: Dict[str, object
         raise ValueError(f"no DUT instance `{dut_instance}` in the bench")
     conns = {p: e.strip() for p, e in _CONN_RE.findall(
         tb_text[inst.end():tb_text.find(";", inst.end())])}
-    gens = {m.group(4): m for m in _CLOCK_GEN_RE.finditer(tb_text)
+    # Scan real statements, preserving offsets for the original-text edits.
+    # A legal always may follow another statement on the same source line.
+    from _hdl_code_text import strip_hdl_comments_and_strings
+    code = strip_hdl_comments_and_strings(tb_text)
+    gens = {m.group(4): m for m in _CLOCK_GEN_RE.finditer(code)
             if m.group(4) == m.group(6)}
     driven = {sig: port for port, sig in conns.items() if sig in gens}
     stray = sorted(port for sig, port in driven.items()

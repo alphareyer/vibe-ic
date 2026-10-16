@@ -492,3 +492,38 @@ def test_a_divider_past_the_first_4096_bytes_is_still_the_sdfs_divider():
     assert moved.index('DIVIDER') > 4096
     got = _classify(bundle, sdf_text=moved)
     assert got['by_class'].get('INOUT_PORT_INTERCONNECT') == 1, got
+
+
+@pytest.mark.parametrize('prefix,half,period_ns,expected', [
+    ('initial clk=0;', '12', 24, '12'),
+    ('initial clk=0;', '5', 12, '6'),
+    ('initial clk=0; /* preserve offsets */', '(5)', 24, '12')])
+def test_clock_binding_uses_statement_boundaries_with_the_same_sdc_policy(
+        tmp_path, prefix, half, period_ns, expected):
+    original = TB.replace('  always #5 clk = ~clk;',
+                          f'  {prefix} always #{half} clk = ~clk;')
+    bound = original.replace('core dut (.clk_i(clk), .x_i(x), .p_o(p))',
+                            'chip_top dut (.clk(clk), .x(x), .p(p))')
+    sdc = write(tmp_path / 'clock.sdc',
+                f'create_clock -period {period_ns} [get_ports clk]\n')
+    clocks = sgs.declared_sdc_clocks(sdc, [SDF_HEAD])
+    text, info = sgs.bind_bench_clock(bound, 'dut', clocks)
+    assert text == bound.replace(f'#{half} clk', f'#{expected} clk')
+    assert info['clocks'][0]['bench_default'] == half.strip('()')
+    assert info['clocks'][0]['period_s'] == pytest.approx(period_ns * 1e-9)
+    assert prefix in text
+
+
+@pytest.mark.parametrize('generator,clocks,code', [
+    ('initial clk=0; always #12 clk = ~clk;', {'clk': 24.0005e-9}, 'BENCH_PRECISION'),
+    ('initial clk=0; always #12 clk = ~clk;', {'x': 24e-9}, 'BENCH_CLOCK_UNDECLARED'),
+    ('initial clk=0; /* always #12 clk = ~clk; */', {'clk': 24e-9}, 'BENCH_CLOCK_NOT_BOUND'),
+    ('initial $display("; always #12 clk = ~clk;");', {'clk': 24e-9}, 'BENCH_CLOCK_NOT_BOUND')])
+def test_statement_clock_binding_keeps_unmeasured_or_unrepresentable_clocks_refused(
+        generator, clocks, code):
+    text = TB.replace('  always #5 clk = ~clk;', '  ' + generator)
+    text = text.replace('core dut (.clk_i(clk), .x_i(x), .p_o(p))',
+                        'chip_top dut (.clk(clk), .x(x), .p(p))')
+    with pytest.raises(ValueError, match=code):
+        sgs.bind_bench_clock(text, 'dut', {
+            'sdc': 'source-control.sdc', 'unit_source': 'declared SDC', 'clocks_s': clocks})
