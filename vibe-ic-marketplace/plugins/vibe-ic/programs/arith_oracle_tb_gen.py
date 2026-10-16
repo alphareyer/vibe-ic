@@ -1623,7 +1623,8 @@ def arithmetic_scenario_plan(project: Path, ic_class: Optional[str], case: dict,
     return plan
 
 
-def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
+def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
+                                    dut_module: Optional[str] = None) -> str:
     """One fixed declared window; independent golden for every scenario bit."""
     spec = plan['spec']; framing = plan['framing']; n = spec['width']
     par, sin, sout, clk, rst = (spec[k] for k in
@@ -1649,7 +1650,10 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict) -> str:
         width = n if p['name'] == par else int(p.get('numeric_width') or 1)
         lines.append(f"{'reg' if p['dir'] == 'input' else 'wire'} "
                      f"{'['+str(width-1)+':0] ' if width > 1 else ''}{p['name']};")
-    lines += [f"{observation['top']} dut (" + ', '.join(f".{p['name']}({p['name']})" for p in spec['ports']) + ');',
+    # A gate-level adapter may retain the logical module as a temporary
+    # placeholder for its declared pad-port binder. The observation/header
+    # still identifies the physical surface whose schedule was validated.
+    lines += [f"{dut_module or observation['top']} dut (" + ', '.join(f".{p['name']}({p['name']})" for p in spec['ports']) + ');',
               f'initial {clk}=0; always #{half} {clk}=~{clk};',
               'reg [N-1:0] av[0:NV-1], bv[0:NV-1], gv[0:NV-1];',
               'integer errors=0, comparisons=0, transactions=0, held_edges=0;',

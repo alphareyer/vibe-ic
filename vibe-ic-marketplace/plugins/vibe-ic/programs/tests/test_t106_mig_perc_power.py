@@ -999,3 +999,187 @@ def test_default_gls_manifest_uses_the_compilers_execution_namespace(
     put(project / 'local_namespace_observation.json', {
         'case': case, 'local': local, 'models': manifest['models'],
         'actual_iverilog_vvp': local, 'verdict': row.status, 'ic_native_claim': False})
+
+
+def _declared_observation_gls_project(tmp_path, mode):
+    """Public INPUT-defined 24 ns multiplier, delayed pads and renamed pins.
+
+    The schedule is chosen before execution: 1.2 ns clock-pad plus 1.8 ns
+    output-pad delay, observed at the declared 4 ns point. No field design,
+    waveform search or expected-result file is used.
+    """
+    import arith_oracle_tb_gen as arith
+    from test_fullstacktb_functional_population import _timed_input
+
+    project = tmp_path / 'design'
+    cases = _timed_input(project, 'wrapped8_delayed',
+                         mode='wrong_product' if mode == 'case_fail' else 'good')
+    case = next(c for c in cases if c['name'] == 'transaction_sequence')
+    put(project / 'phase1/generated_docs/L10_TEST_CASES.json', {'test_cases': [case]})
+    l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    doc = json.loads(l9.read_text())
+    doc['clocks'][0]['period_ns'] = 24
+    put(l9, doc)
+    put(project / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json',
+        {'clock_domains': [{'role': 'primary', 'period_ns': 24, 'source_pin': 'i_clk'}]})
+    put(project / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {})
+    put(project / 'input/submission_template/tapeout_declaration.json',
+        {'answers': {'top_cell': 'public_surface'}})
+    put(project / 'input/step_0_5ic_answers.json', {})
+    root = tmp_path / 'pdkroot'
+    models = write(root / 'x/libs.ref/cells/verilog/public_pads.v', '''`timescale 1ns/1ps
+module PUBLIC_CLK(input A, output Y);
+ buf (Y,A); specify (A => Y) = (1.2,1.2); endspecify
+endmodule
+module PUBLIC_OUT(input A, output Y);
+ buf (Y,A); specify (A => Y) = (1.8,1.8); endspecify
+endmodule
+''')
+    wrapper = project / 'phase3/stage3/pnr/public_surface.v'
+    wrapper.write_text('''module public_surface (chip_clock, chip_reset, chip_word, chip_serial, chip_result);
+ input chip_clock, chip_reset, chip_serial;
+ input [7:0] chip_word;
+ output chip_result;
+ wire selected_clock, core_result;
+ PUBLIC_CLK clock_pad (.A(chip_clock), .Y(selected_clock));
+ public_serial_product core (.i_clk(selected_clock), .i_rst(chip_reset), .operand_word(chip_word), .serial_bit(chip_serial), .result_bit(core_result));
+ PUBLIC_OUT output_pad (.A(core_result), .Y(chip_result));
+endmodule
+''')
+    put(project / sgs.CHIP_TOP_RECORD_REL, {
+        'verdict': 'WROTE', 'core_module': 'public_serial_product',
+        'chip_top_module': 'public_surface', 'chip_top_verilog': str(wrapper.relative_to(project)),
+        'pad_instances': {
+            'clock_pad': {'core_pin': 'Y', 'terminal': 'A'},
+            'output_pad': {'core_pin': 'A', 'terminal': 'Y'}}})
+    declaration = json.loads((project / 'plugin_output/declaration.json').read_text())
+    declaration['verification_stimuli']['arithmetic_observation']['public_surface'] = {
+        'clock': 'i_clk', 'output': 'result_bit', 'settle_ns': 3,
+        'sample_offset_ns': 4, 'binding': {
+            str(f.resolve()): contract.digest(f) for f in (wrapper, models)}}
+    if mode == 'missing_contract':
+        declaration['verification_stimuli']['arithmetic_observation'] = {}
+    elif mode == 'changed_binding':
+        declaration['verification_stimuli']['arithmetic_observation']['public_surface']['binding'][str(models.resolve())] = '0' * 64
+    put(project / 'plugin_output/declaration.json', declaration)
+    # The original L10/core plan is produced normally and remains immutable.
+    original_plan = arith.arithmetic_scenario_plan(project, 'digital_arithmetic_primitive', case)
+    assert original_plan is not None
+    bench = write(project / 'phase2/stage1/sim/tb/transaction_sequence.v',
+                  arith.emit_arithmetic_scenario_module(case['name'], original_plan))
+    put(project / 'reports/phase2/sim/l10_execution.json', {'cases': [{
+        'id': case['name'], 'sim_executed': True, 'tb_file': str(bench),
+        'tb_provenance': 'generated', 'tb_sha256': contract.digest(bench)}]})
+    folder, _ = _stapostpnr(project)
+    state_path = folder / 'state_out.json'
+    state = json.loads(state_path.read_text())
+    # A neutral flattened physical implementation of the same public core.
+    core = (project / 'phase2/stage1/rtl/public_serial_product.v').read_text()
+    body = core.split(';', 1)[1].rsplit('endmodule', 1)[0]
+    physical = '''`timescale 1ns/1ps
+module public_surface (chip_clock, chip_reset, chip_word, chip_serial, chip_result);
+ input chip_clock, chip_reset, chip_serial;
+ input [7:0] chip_word;
+ output chip_result;
+ wire i_clk, i_rst=chip_reset, serial_bit=chip_serial;
+ wire [7:0] operand_word=chip_word;
+ reg result_bit=0;
+ PUBLIC_CLK clock_pad (.A(chip_clock), .Y(i_clk));
+ PUBLIC_OUT output_pad (.A(result_bit), .Y(chip_result));
+''' + body + '\nendmodule\n'
+    write(Path(state['nl']), physical)
+    write(project / 'phase2/stage2/synth/post_dft_netlist.v', physical)
+    write(Path(state['sdc']), 'create_clock -name clk -period 24 [get_ports chip_clock]\n')
+    for sdf in state['sdf'].values():
+        write(Path(sdf), '''(DELAYFILE
+ (SDFVERSION "3.0") (DESIGN "public_surface") (DIVIDER .) (TIMESCALE 1ns)
+ (CELL (CELLTYPE "public_surface") (INSTANCE)
+  (DELAY (ABSOLUTE (INTERCONNECT chip_clock clock_pad.A (0:0:0)))))
+ (CELL (CELLTYPE "PUBLIC_CLK") (INSTANCE clock_pad)
+  (DELAY (ABSOLUTE (IOPATH A Y (1.2:1.2:1.2) (1.2:1.2:1.2)))))
+ (CELL (CELLTYPE "PUBLIC_OUT") (INSTANCE output_pad)
+  (DELAY (ABSOLUTE (IOPATH A Y (1.8:1.8:1.8) (1.8:1.8:1.8)))))
+)
+''')
+    return project, root, models, bench, original_plan
+
+
+@pytest.mark.parametrize('case', ['good', 'case_fail', 'missing_contract', 'changed_binding'])
+def test_default_gls_uses_the_declared_physical_observation(
+        tmp_path, monkeypatch, local_image, case):
+    """Actual Default capture, typed INPUT schedule and real Icarus verdicts."""
+    import execution_backend_producers as backend
+    import execution_policy
+    import phase3_one_shot_runner as runner
+    import step_output_collector as versions
+    import arith_oracle_tb_gen as arith
+
+    project, root, model, bench, original_plan = _declared_observation_gls_project(tmp_path, case)
+    original_bytes = bench.read_bytes()
+    put(project / 'phase3/librelane_switch.json', {
+        'image': local_image.image, 'pdk_root_host': str(root), 'pdk': 'x'})
+    cfg = SimpleNamespace(name='x')
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *_: {
+        'pdk_name': 'x', 'pdk_root': str(root), 'image_id': local_image.image})
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, contract, cfg, 'SOURCE_FIXTURE_ONLY'))
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    edge, _ = _gls_edge([str(model)], lambda c: VVP_PASS)
+    native = []
+    def process_edge(argv, **kwargs):
+        if any('from librelane.flows.chip import Chip' in str(arg) for arg in argv):
+            return edge(argv[:-1], **kwargs)
+        if '--id' not in argv:
+            return edge(argv, **kwargs)
+        from librelane.state import DesignFormat
+        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
+        from librelane_plugin_vibeic import GateLevelSim
+        folder = Path(argv[argv.index('-o') + 1])
+        folder.mkdir(parents=True, exist_ok=True)
+        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        instance = SimpleNamespace(config={
+            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
+            step_dir=str(folder), _run=GateLevelSim._run)
+        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
+        put(folder / 'state_out.json', incoming)
+        native.append(folder)
+        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus completed\n', stderr='')
+    monkeypatch.setattr(contract, 'run_container', process_edge)
+    result = runner._default_pnr_rows(project, 'public_serial_product', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
+    manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
+    assert bench.read_bytes() == original_bytes
+    assert original_plan['observation']['sample_offset_ns'] == 1
+    assert original_plan['framing']['settled_latency'] == 1
+    good = case == 'good'
+    assert result.status == ('PASS' if good else 'FAIL'), result.detail
+    if case in ('missing_contract', 'changed_binding'):
+        assert manifest['cases'] == []
+        assert 'MISSING_OBSERVATION_CONTRACT' in manifest['not_a_subject'][0]['detail']
+    else:
+        prepared = Path(manifest['cases'][0]['testbench'])
+        plan = arith._scenario_header(prepared)
+        assert plan['observation']['top'] == 'public_surface'
+        assert plan['observation']['sample_offset_ns'] == 4
+        assert plan['framing'] == original_plan['framing']
+        assert plan['pairs'] == json.loads(json.dumps(original_plan['pairs']))
+        assert plan['transactions'] == original_plan['transactions'] == 16
+        assert plan['comparisons'] == original_plan['comparisons'] == 128
+        assert '.chip_clock(i_clk)' in prepared.read_text()
+        assert '.chip_result(result_bit)' in prepared.read_text()
+        assert manifest['cases'][0]['observation'] == plan['observation']
+        runs = json.loads((native[0] / 'gls_runs.json').read_text())['runs']
+        assert len(runs) == len(CORNERS)
+        for run in runs:
+            assert run['compile_rc'] == 0, Path(run['compile_log']).read_text()
+            assert run['sim_rc'] == (0 if good else 1)
+            transcript = Path(run['stdout']).read_text()
+            assert 'transactions=16 comparisons=128' in transcript
+    gate = json.loads((project / 'reports/phase2/gates/post_layout_sim.json').read_text())
+    assert gate['verdict'] == ('PASS' if good else 'FAIL')
+    latest = versions.latest_pass(project, '29')
+    assert (latest is not None) is good
+    assert (runner._pl.sim_postlayout_dir(project) / 'pass.flag').exists() is good
+    put(project / 'observation_adapter_readback.json', {
+        'case': case, 'status': result.status, 'physical_contract':
+        manifest['cases'][0].get('observation') if manifest['cases'] else None,
+        'original_tb_unchanged': True, 'native_claim': False})

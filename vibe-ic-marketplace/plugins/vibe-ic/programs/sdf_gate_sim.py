@@ -2415,6 +2415,43 @@ def verilog_model_closure_of_texts(candidates: List[str], texts: Dict[str, str],
             "clashes": clashes}
 
 
+def _bound_arithmetic_case(project: Path, case: Dict[str, object], top: str,
+                           declared: Dict[str, object], model_files: List[str]
+                           ) -> Tuple[str, Optional[Dict[str, object]]]:
+    """Prepare a generated arithmetic case for its declared physical surface.
+
+    Reuse the same INPUT-derived population, framing and comparator emitter.
+    The core's observation schedule cannot follow a DUT rebind to a pad ring;
+    the existing typed observation reader must bind the wrapper/model bytes.
+    Authored cases and cases on their original surface keep their own text.
+    """
+    import arith_oracle_tb_gen as arith
+    if not declared.get('rebound') or arith._scenario_header(Path(case['path'])) is None:
+        return str(case['text']), None
+    import hashlib
+    import testbench_gen as tbg
+    rows = [r for r in (tbg.load_l10_cases(project) or [])
+            if str(r.get('name') or r.get('id')) == str(case['id'])]
+    if len(rows) != 1:
+        raise ValueError('MISSING_OBSERVATION_CONTRACT: no unique current L10 row')
+    record = json.loads((project / CHIP_TOP_RECORD_REL).read_text())
+    wrapper = project / str(record['chip_top_verilog'])
+    sources = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest()
+               for p in [wrapper, *(Path(f) for f in model_files)]}
+    request: Dict[str, object] = {}
+    plan = arith.arithmetic_scenario_plan(
+        project, tbg._detect_ic_class(project), rows[0], request=request,
+        observation_top=str(declared['dut_module']), observation_sources=sources)
+    if plan is None:
+        raise ValueError('MISSING_OBSERVATION_CONTRACT: ' + '; '.join(
+            request.get('unsupported_requirements') or ['unsupported selected observation']))
+    # Keep the physical subject in the plan; the normal binder below owns
+    # changing this logical placeholder and mapping every pad port.
+    return (arith.emit_arithmetic_scenario_module(str(case['module']), plan,
+                                                 dut_module=top),
+            plan['observation'])
+
+
 def tool_arm_manifest(project: Path, top: str, netlist: Path,
                       declared_models: List[Path], out: Path,
                       *, sdc: Path, sdfs: List[Path],
@@ -2445,7 +2482,9 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
     for case in suite["cases"]:
         cid = str(case["id"])
         try:
-            text, binding = bind_dut_module(str(case["text"]), top,
+            text, observation = _bound_arithmetic_case(project, case, top,
+                                                       declared, closure['files'])
+            text, binding = bind_dut_module(text, top,
                                             str(case["dut_instance"]), ntext,
                                             declared)
             text, clock = bind_bench_clock(text, str(case["dut_instance"]), clocks)
@@ -2458,7 +2497,8 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
         tb = out / f"{cid}_tb.v"
         _aa.write_text(tb, text)
         cases.append({"id": cid, "module": str(case["module"]),
-                      "testbench": str(tb), "binding": binding, "clock": clock})
+                      "testbench": str(tb), "binding": binding, "clock": clock,
+                      **({'observation': observation} if observation is not None else {})})
 
     def _mapped(p: str) -> str:
         for host, guest in (path_map or {}).items():
