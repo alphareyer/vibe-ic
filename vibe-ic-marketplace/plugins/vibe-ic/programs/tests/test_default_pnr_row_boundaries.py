@@ -11,6 +11,113 @@ import execution_backend_gates as gates
 import execution_policy
 
 
+def _at_speed_condition_project(tmp_path, monkeypatch):
+    """Real condition/readers; downstream transport never executes an EDA tool."""
+    import _flow_yaml
+    docs = tmp_path / 'input/docs'
+    docs.mkdir(parents=True)
+    input_doc = docs / 'product.md'
+    input_doc.write_text('A small arithmetic core multiplies two numbers.\n')
+    layer = tmp_path / 'phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json'
+    layer.parent.mkdir(parents=True)
+    document = {'doc_id': 'L20', 'applicability': 'APPLICABLE', 'fields': {
+        'dft_present': False, 'scan_chains': [], 'bist_mbist': [], 'jtag_tap': None}}
+    layer.write_text(json.dumps(document))
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *a: {})
+    rows = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    calls = []
+
+    def downstream_transport(project, sid, *, parameters):
+        calls.append(sid)
+        parameters['resolved_input_manifest'] = {
+            'files': {}, 'missing': ['source-control: downstream native input absent']}
+        return {}
+
+    monkeypatch.setattr(execution_policy, '_fixed_inputs', downstream_transport)
+    return input_doc, layer, document, rows, calls
+
+
+def test_default_at_speed_design_absence_continues_to_the_next_physical_row(
+        tmp_path, monkeypatch):
+    import flow_compliance_check as compliance
+    import step_output_collector as versions
+    _, layer, _, rows, calls = _at_speed_condition_project(tmp_path, monkeypatch)
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='source-control'), '', ['DT2', 'DT3', '24'])
+    assert calls == ['24']
+    assert [row['status'] for row in result.extras['canonical_steps']] == [
+        'NOT_APPLICABLE', 'NOT_APPLICABLE', 'NOT_MEASURED']
+    assert result.status == 'NOT_MEASURED' and result.extras['canonical_steps'][-1]['extras']['step_id'] == '24'
+    for sid in ('DT2', 'DT3'):
+        complete = compliance.check_step(tmp_path, rows[sid], {})
+        assert complete.status == 'NOT_APPLICABLE', complete
+        assert any('design-declared NOT_APPLICABLE' in reason for reason in complete.reasons)
+        assert str(layer.relative_to(tmp_path)) in result.extras['canonical_gate_checks'][sid]['reasons'][0]
+        indexed = next(row for row in versions._read_index(tmp_path)['steps']
+                       if str(row['id']) == sid)
+        saved = json.loads((tmp_path / 'steps' / indexed['folder'] / 'outputs.json').read_text())
+        assert saved['status'] == 'NOT_APPLICABLE' and saved['canonical_pass'] is False
+        assert versions.latest_pass(tmp_path, sid) is None
+
+
+@pytest.mark.parametrize('sid', ['DT2', 'DT3'])
+@pytest.mark.parametrize('damage', [
+    'missing', 'invalid', 'incomplete', 'contradictory', 'input_declares_dft', 'empty_input'])
+def test_default_at_speed_unknown_or_asserted_dft_still_stops_on_missing_dependency(
+        tmp_path, monkeypatch, sid, damage):
+    import flow_compliance_check as compliance
+    input_doc, layer, document, rows, calls = _at_speed_condition_project(tmp_path, monkeypatch)
+    if damage == 'missing':
+        layer.unlink()
+    elif damage == 'invalid':
+        layer.write_text('{not JSON')
+    elif damage == 'incomplete':
+        del document['fields']['jtag_tap']
+        layer.write_text(json.dumps(document))
+    elif damage == 'contradictory':
+        document['fields']['scan_chains'] = [{'name': 'chain0', 'length': 8}]
+        layer.write_text(json.dumps(document))
+    elif damage == 'input_declares_dft':
+        input_doc.write_text('The design requires scan insertion.\n')
+    else:
+        input_doc.unlink()
+    assert compliance._l_doc_declares_absence(
+        tmp_path, rows[sid]['condition']['l_doc_declares']) is None
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='source-control'), '', [sid, '24'])
+    assert result.status == 'NOT_MEASURED'
+    assert calls == []
+    assert [row['extras']['step_id'] for row in result.extras['canonical_steps']] == [sid]
+    assert result.extras['canonical_gate_checks'][sid]['status'] == 'NOT_MEASURED'
+    assert 'dependency condition is not ready' in result.detail
+
+
+@pytest.mark.parametrize('sid', ['DT2', 'DT3'])
+def test_default_at_speed_present_dependencies_still_enter_the_actual_producer(
+        tmp_path, monkeypatch, sid):
+    import flow_compliance_check as compliance
+    _, layer, document, rows, calls = _at_speed_condition_project(tmp_path, monkeypatch)
+    document['fields']['dft_present'] = True
+    layer.write_text(json.dumps(document))
+    for pattern in rows[sid]['condition']['files_exist']:
+        path = tmp_path / pattern.replace('*', 'unit')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('Source-control dependency bytes; no native measurement.\n')
+    assert compliance._check_condition(tmp_path, rows[sid]['condition']) is True
+    produced = []
+
+    def native_transport(project, step, *args):
+        produced.append(step)
+        return {'rc': 2, 'reason': 'source-control native transport not measured'}
+
+    monkeypatch.setattr(runner, '_run_at_speed_atpg_producer', native_transport)
+    result = runner._default_pnr_rows(
+        tmp_path, 'unit', SimpleNamespace(name='source-control'), '', [sid, '24'])
+    assert produced == [sid] and calls == []
+    assert result.status == 'NOT_MEASURED'
+    assert [row['extras']['step_id'] for row in result.extras['canonical_steps']] == [sid]
+
+
 def test_current_flow_declares_the_immutable_cts_handoff_as_a_step19_output():
     """Use the actual front-door declaration reader on the complete source flow."""
     import step_required_inputs_check as inputs

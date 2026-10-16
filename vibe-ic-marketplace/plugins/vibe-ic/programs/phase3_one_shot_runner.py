@@ -78846,14 +78846,25 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
     for sid in step_ids:
         row_def = flow_rows[sid]
         if not compliance._check_condition(project, row_def.get('condition')):
+            # The same input-corroborated absence that stands this row down
+            # in the full consumer is not a missing upstream dependency.
+            condition = row_def.get('condition') or {}
+            declared_absence = (compliance._l_doc_declares_absence(
+                project, condition.get('l_doc_declares')) or
+                compliance._delivery_declares_absence(
+                    project, condition.get('delivery_declares')))
             route_unresolved = (sid == '37.5ic' and not compliance._delivery_declares_absence(
                 project, (row_def.get('condition') or {}).get('delivery_declares')))
             dependency_gap = (row_def.get('condition_kind') == 'dependency_required'
+                              and declared_absence is None
                               or route_unresolved)
             condition_status = 'NOT_MEASURED' if dependency_gap else 'NOT_APPLICABLE'
             condition_detail = ('canonical upstream dependency condition is not ready'
                                 if dependency_gap else
                                 'canonical design condition is not applicable')
+            if declared_absence is not None:
+                condition_detail += (f': {declared_absence[0]} records '
+                                     f'{declared_absence[1]}')
             rows.append(StepResult(
                 f'default_step_{sid}', condition_status, 0.0, condition_detail,
                 extras={'step_id': sid},
