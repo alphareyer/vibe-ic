@@ -1857,3 +1857,198 @@ def test_bounded_success_keeps_whole_flow_unmeasured_without_stale_rows(
     assert obs["summary"]["dispatched_verdict"] == verdict, obs
     assert obs["summary"]["verdict"] == "NOT_MEASURED", obs
     assert obs["summary"]["whole_flow_verdict"] == "NOT_MEASURED", obs
+
+
+def _pending_step5_checkpoint(tmp_path, monkeypatch):
+    """Real recorder/FCC handoff over a neutral software-only Step5 contract."""
+    import copy
+    import _flow_yaml
+    import execution_backend_gates as gates
+    import execution_backend_worker as worker
+    import execution_policy
+    import step_output_collector as versions
+    import step_write_ledger
+    import yaml
+    project = tmp_path / 'step5_project'
+    stage_owner_route(project, 'ic')
+    source = project / 'input/neutral.v'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text('module neutral(input clk, rst, output p); assign p = rst; endmodule\n')
+    load = _flow_yaml.load
+    flow = copy.deepcopy(load())
+    row = next(r for r in flow['steps'] if str(r['id']) == '5')
+    raw = 'reports/step5_source_control.json'
+    ready = project / 'reports/step5_mechanical_ready.json'
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    ready.write_text('{"ready":true,"scope":"SOURCE_CONTROL software consumer"}\n')
+    row.update(required_inputs=[{'from': 'external', 'path': 'input/neutral.v'}],
+               required_outputs=[raw], program_outputs=[],
+               gate={'all_of': [{'files_exist': [raw]}, {'json_field_true': {
+                   'file': str(ready.relative_to(project)), 'field': 'ready'}}]})
+    fixture_flow = tmp_path / 'step5-flow.yaml'
+    fixture_flow.write_text(yaml.safe_dump(flow, sort_keys=False))
+    monkeypatch.setattr(_flow_yaml, 'load', lambda *a, **k: load(fixture_flow))
+    monkeypatch.setattr(step_write_ledger, '_flow_yaml_path', lambda: fixture_flow)
+    monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    inputs = worker._declared_input_files(project, row['required_inputs'])
+    attempt = versions.begin_step(project, '5', inputs)
+    with versions.active_steps(project, [attempt]):
+        (project / raw).write_text('{"population":1,"scope":"SOURCE_CONTROL software producer"}\n')
+        formal = project / 'phase2/stage1/formal'
+        formal.mkdir(parents=True)
+        (formal / 'formal_authoring_request.json').write_text(
+            '{"fallback_skill":"formal-verify","scope":"SOURCE_CONTROL review request"}\n')
+        versions.publish_producer_outputs(project, attempt)
+        consumer = gates.evaluate(project, row)
+        pending = versions.finish_step(
+            project, attempt, verdict=consumer['status'], canonical_pass=False,
+            result={'runner': 'neutral_software_producer', 'invocation_status': 'PASS',
+                    'step_rows': [{'step_id': '5', 'status': 'PASS'}],
+                    'canonical_consumer': consumer})
+    assert pending['status'] == 'NOT_MEASURED'
+    assert consumer['step']['reason_class'] == 'awaiting_signed_judgement'
+    folder = project / 'steps' / pending['folder']
+    original = {p: p.read_bytes() for p in (folder / 'outputs.json', folder / 'written.json')}
+    return project, source, ready, folder, original
+
+
+def _sign_step5_checkpoint(project):
+    import ai_signed_judgement as ai
+    review = project / 'phase2/stage1/formal/formal_expert_review.json'
+    review.write_text('{"invocation_status":"INVOKED","fallback_skill":"formal-verify",'
+                      '"scope":"SOURCE_CONTROL independent review"}\n')
+    receipt = project / 'reports/audit/ai_judgements/5.json'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({
+        'schema': ai.SCHEMA, 'step_id': '5', 'verdict': 'PASS',
+        'signed_by': 'independent neutral fixture reviewer',
+        'judgement': 'Reviewed the exact neutral software checkpoint.',
+        'evidence_sha256': ai.evidence_sha256(project, '5')}))
+
+
+def test_signed_step5_revalidation_keeps_native_provenance_and_is_idempotent(
+        tmp_path, monkeypatch):
+    import step_output_collector as versions
+    project, _, _, old, before = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    _sign_step5_checkpoint(project)
+    accepted = V._revalidate_step5_checkpoint(project)
+    assert accepted['verdict'] == 'PASS'
+    current = versions.latest_pass(project, '5')
+    assert current['canonical_pass'] and current['current_inputs']
+    assert current['result']['checkpoint']['producer_started'] is False
+    assert current['result']['checkpoint']['prior_folder'] == str(old.relative_to(project / 'steps'))
+    new = project / 'steps' / accepted['folder']
+    assert (new / 'written.json').read_bytes() == before[old / 'written.json']
+    assert {p: p.read_bytes() for p in before} == before
+    assert V._revalidate_step5_checkpoint(project)['folder'] == accepted['folder']
+    assert versions.latest_pass(project, '5')['folder'] == accepted['folder']
+
+
+def test_signed_step5_cannot_override_a_real_complete_gate_failure(tmp_path, monkeypatch):
+    import step_output_collector as versions
+    project, _, ready, old, before = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    _sign_step5_checkpoint(project)
+    ready.write_text('{"ready":false,"scope":"SOURCE_CONTROL real mechanical refusal"}\n')
+    refused = V._revalidate_step5_checkpoint(project)
+    assert refused['verdict'] == 'FAIL'
+    assert versions.latest_pass(project, '5') is None
+    record = json.loads((project / 'steps' / refused['folder'] / 'outputs.json').read_text())
+    assert record['result']['canonical_consumer']['step']['status'] == 'FAIL'
+    assert {p: p.read_bytes() for p in before} == before
+    assert V._revalidate_step5_checkpoint(project)['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('changed', ['input', 'output', 'written', 'producer'])
+def test_step5_revalidation_refuses_changed_or_unmeasured_native_checkpoint(
+        tmp_path, monkeypatch, changed):
+    import step_output_collector as versions
+    project, source, _, old, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    _sign_step5_checkpoint(project)
+    if changed == 'input':
+        source.write_text(source.read_text() + '// changed original producer input\n')
+    elif changed == 'output':
+        raw = project / 'reports/step5_source_control.json'
+        raw.write_text(raw.read_text() + ' ')
+    elif changed == 'written':
+        (old / 'written.json').unlink()
+    else:
+        path = old / 'outputs.json'
+        record = json.loads(path.read_text())
+        record['result']['invocation_status'] = 'NOT_MEASURED'
+        path.write_text(json.dumps(record))
+    assert V._revalidate_step5_checkpoint(project)['verdict'] == 'NOT_MEASURED'
+    assert versions.latest_pass(project, '5') is None
+    assert next(r for r in versions._read_index(project)['steps'] if r['id'] == '5')['folder'] == str(old.relative_to(project / 'steps'))
+
+
+@pytest.mark.parametrize('signed', [False, True])
+def test_step5_revalidation_requires_a_current_review(tmp_path, monkeypatch, signed):
+    import step_output_collector as versions
+    project, _, _, old, before = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    if signed:
+        _sign_step5_checkpoint(project)
+        review = project / 'phase2/stage1/formal/formal_expert_review.json'
+        review.write_text(review.read_text() + ' ')
+    assert V._revalidate_step5_checkpoint(project)['verdict'] == 'NOT_MEASURED'
+    assert versions.latest_pass(project, '5') is None
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize('science_passes', [False, True])
+def test_step5_revalidation_keeps_measured_fail_before_changed_evidence(
+        tmp_path, monkeypatch, science_passes):
+    import execution_backend_gates as gates
+    import step_output_collector as versions
+    project, source, ready, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    _sign_step5_checkpoint(project)
+    if not science_passes:
+        ready.write_text('{"ready":false}\n')
+    evaluate = gates.evaluate
+    def consume_then_change(project, row):
+        result = evaluate(project, row)
+        source.write_text(source.read_text() + '// changed during consumer\n')
+        return result
+    monkeypatch.setattr(gates, 'evaluate', consume_then_change)
+    refused = V._revalidate_step5_checkpoint(project)
+    assert refused['verdict'] == ('NOT_MEASURED' if science_passes else 'FAIL')
+    assert versions.latest_pass(project, '5') is None
+    record = json.loads((project / 'steps' / refused['folder'] / 'outputs.json').read_text())
+    assert record['result']['observed_canonical_consumer']['status'] == ('PASS' if science_passes else 'FAIL')
+    assert record['canonical_pass'] is False
+
+
+@pytest.mark.parametrize('mechanical_ready', [False, True])
+def test_phase3_entry_revalidates_pending_step5_before_dispatch(
+        tmp_path, monkeypatch, mechanical_ready):
+    import step_output_collector as versions
+    project, _, ready, _, _ = _pending_step5_checkpoint(tmp_path, monkeypatch)
+    _sign_step5_checkpoint(project)
+    if not mechanical_ready:
+        ready.write_text('{"ready":false}\n')
+    called = []
+    class ReachedExistingBackend(Exception):
+        pass
+    def phase3_only(label, runner, args, env=None):
+        called.append(runner.name)
+        assert runner.name == 'phase3_one_shot_runner.py', 'Step4/5 producer must not restart'
+        if mechanical_ready:
+            assert versions.latest_pass(project, '5')['canonical_pass']
+        else:
+            assert versions.latest_pass(project, '5') is None
+        raise ReachedExistingBackend
+    monkeypatch.setattr(V, '_run_phase', phase3_only)
+    monkeypatch.setattr(sys, 'argv', ['vibe_ic_one_shot_runner', str(project),
+                        '--entry-step', '14', '--exit-step', '14', '--no-dashboard',
+                        '--skip-hardware', '--skip-analog'])
+    real_entry('IC', 'default', project)
+    if mechanical_ready:
+        with pytest.raises(ReachedExistingBackend):
+            V.main()
+        assert called == ['phase3_one_shot_runner.py']
+    else:
+        assert V.main() == 1
+        assert called == []
+        report = json.loads(_pl.report_path(project, 'vibe_ic_one_shot.json').read_text())
+        assert report['step5_checkpoint_review']['verdict'] == 'FAIL'
+        assert report['halted_at'] == 'phase2'
