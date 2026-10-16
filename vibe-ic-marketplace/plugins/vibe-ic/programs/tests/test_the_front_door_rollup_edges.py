@@ -242,7 +242,7 @@ def _recorded_d1_checkpoint(tmp_path, monkeypatch):
     plugin, project = _plugin(tmp_path), _project(tmp_path)
     stage_owner_route(project, 'ic')
     ready = _checkpoint_contract(project, monkeypatch, 'L1_DOC.json')
-    knobs = {'ic_name': '', 'pdk': 'auto', 'mode': 'docs'}
+    knobs = {'ic_name': 'UNNAMED_CHIP', 'pdk': 'auto', 'mode': 'docs'}
     monkeypatch.setattr(V, '_phase1_freshness', lambda p, k=None:
                         V._p1id.assess(p, plugin / 'programs', k))
     row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == 'D1')
