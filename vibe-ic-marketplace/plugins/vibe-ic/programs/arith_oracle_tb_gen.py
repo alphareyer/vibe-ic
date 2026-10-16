@@ -1705,7 +1705,7 @@ def emit_arithmetic_scenario_module(module_name: str, plan: dict, *,
                   ' clear_state(holds); compare_transaction(v,0,0);', 'end endtask',
                   'initial begin']
     else:
-            lines += ['task clear_state(input integer holds); begin',
+        lines += ['task clear_state(input integer holds); begin',
                   f" {rst}=1'b{on}; {sin}=0; {par}=0;",
                   ' for(h=0;h<holds;h=h+1) begin', f'  @(posedge {clk}); #{sample};',
                   f"  if ({sout} !== 1'b0 && {sout} !== 1'b1) errors=errors+1;",

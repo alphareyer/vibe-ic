@@ -2453,6 +2453,9 @@ def _postlayout_output_deadline(project: Path, plan: dict, declared: dict,
         clock = named[0]['name']
         unit_ns = Decimal(str(clocks['unit_s'])) / Decimal('1e-9')
         period = Decimal(str(clocks['clocks_s'][clock_port])) / Decimal('1e-9')
+        # The clock reader expresses seconds as binary floats. Compare its
+        # value at the emitter's existing 1 ps precision, not float repr bytes.
+        period = (period * 1000).to_integral_value() / 1000
         if period != Decimal(str(plan['observation']['clock_period_ns'])):
             raise ValueError('INPUT and current STA clock periods disagree')
         deadlines = {}
@@ -2464,13 +2467,13 @@ def _postlayout_output_deadline(project: Path, plan: dict, declared: dict,
                 endpoint = re.search(r'(?m)^Endpoint: (\S+) \(output port clocked by ([^)]+)\)', block)
                 if not endpoint or endpoint.group(1) != port:
                     continue
-                required = re.findall(r'(?m)^\s*([+-]?[\d.]+)\s+data required time\s*$', block)
+                required = set(re.findall(r'(?m)^\s*([+-]?[\d.]+)\s+data required time\s*$', block))
                 group = re.search(r'(?m)^Path Group: (\S+)\s*$', block)
                 kind = re.search(r'(?m)^Path Type: (\S+)\s*$', block)
                 if (endpoint.group(2) != clock or not group or group.group(1) != clock or
                         not kind or kind.group(1) != 'max' or len(required) != 1):
                     raise ValueError(f'{name}: selected output deadline is ambiguous')
-                values.append(Decimal(required[0]) * unit_ns)
+                values.append(Decimal(required.pop()) * unit_ns)
             if not values or any(not v.is_finite() or not 0 < v < period for v in values):
                 raise ValueError(f'{name}: selected output has no single-cycle deadline')
             deadlines[name] = str(min(values))
@@ -2480,7 +2483,7 @@ def _postlayout_output_deadline(project: Path, plan: dict, declared: dict,
             raise ValueError('no representable positive deadline at 1 ps resolution')
         return {'sample_offset_ns': float(sample), 'output': port, 'clock': clock,
                 'required_time_ns': deadlines, 'basis': signoff.tool_arm_basis(arm)}
-    except (OSError, KeyError, TypeError, ValueError, contract.Refusal) as exc:
+    except (OSError, KeyError, TypeError, ValueError, ArithmeticError, contract.Refusal) as exc:
         raise ValueError(f'POSTLAYOUT_OBSERVATION_UNMEASURED: {exc}') from exc
 
 

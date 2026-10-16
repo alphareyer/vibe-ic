@@ -1197,7 +1197,7 @@ def _current_output_deadline_fixture(project, root, deadline):
     for corner in CORNERS:
         process, temp, voltage = corner.split('_')[1:]
         lib = write(root / 'x/libs.ref/cells/lib' / _lib_of(corner),
-                    f'library(fixture) {{\n nom_process : 1;\n nom_voltage : {float(voltage[:-2].replace("v", "."))};\n'
+                    f'library(fixture) {{\n nom_process : 1;\n nom_voltage : {float(voltage.replace("v", "."))};\n'
                     f' nom_temperature : {(-float(temp[1:-1]) if temp.startswith("n") else float(temp[:-1]))};\n}}\n')
         libs[corner] = [str(lib)]
         spef = state['spef'][corner.split('_')[0] + '_*']
@@ -1330,7 +1330,7 @@ def test_default_gls_observes_the_current_output_deadline(
                                    Path(manifest['netlist']).read_text(), manifest['dut_binding'])
         drives = []
         for label, tb in [('model_only', old), ('deadline', source)]:
-            path = write(tmp_path / f'{label}.v', tb.replace('$sdf_annotate', '// disabled annotation in cadence-only monitor\n // $sdf_annotate') + monitor)
+            path = write(tmp_path / f'{label}.v', __import__('re').sub(r'\$sdf_annotate\([^;]+;', '', tb) + monitor)
             # Separate cadence observation: no change to the real GLS run above.
             binary = tmp_path / f'{label}.vvp'
             c = subprocess.run(['iverilog', '-g2012', '-gspecify', '-s', 'transaction_sequence', '-s', 'drive_monitor',
