@@ -1044,3 +1044,153 @@ def test_synthesis_cache_requires_original_executed_abc_witness(tmp_path, monkey
     if changed is not None:
         archived = list(folder.parent.glob('attempts/*/vibeic_receipt.json'))
         assert len(archived) == 1 and archived[0].read_bytes() == original
+
+
+def _physical_spec_checkpoint(tmp_path, monkeypatch):
+    """Real neutral native transport/handoff and retained producer snapshots.
+
+    The prior complete acceptances are software fixture preconditions; no IC
+    or EDA measurement qualification is claimed by this control.
+    """
+    import drv_run_identity as identity
+    import step_output_collector as versions
+    import _phase1_producer_identity as p1
+    from programs.tests._p1_identity_fixture import stamp_current
+
+    chain = ll.run_chain
+    def prepare(project, image, steps, **kwargs):
+        docs = project / identity.SPEC_DOCS
+        (docs / 'L8_TIMING_WAVEFORM.json').write_text(json.dumps({
+            'clock_domains': [{'role': 'primary', 'source_pin': 'clk', 'period_ns': 24}]}))
+        (docs / 'L19_CONSTRAINTS_PDK.json').write_text(json.dumps({
+            'fields': {'constraint_declarations': [
+                {'token': 'MAX_FANOUT_CONSTRAINT', 'value': '4'}]}}))
+        liberty = project / 'cells.lib'
+        liberty.write_text('library(neutral) { time_unit : "1ns"; }\n')
+        config = steps[0][1]
+        data = json.loads(config.read_text())
+        data.update(CLOCK_PERIOD=24, MAX_FANOUT_CONSTRAINT=4,
+                    LIB={'*': [str(liberty)]})
+        config.write_text(json.dumps(data))
+        return chain(project, image, steps, **kwargs)
+    monkeypatch.setattr(ll, 'run_chain', prepare)
+    project, native, netlist, sdc, config, _, calls = _cold_native_synthesis(tmp_path, monkeypatch)
+    monkeypatch.setattr(ll, 'run_chain', chain)
+    source = project / 'input/docs/spec.md'
+    source.parent.mkdir(parents=True)
+    source.write_text('Neutral source specification\n')
+    stamp_current(project)
+    docs = sorted((project / identity.SPEC_DOCS).glob('*.json'))
+    rtl = project / 'phase2/stage1/rtl/core.v'
+    ownership = {'D1': docs, '7': [sdc], '9': [netlist],
+                 '10': [sdc], '13': [netlist], '14': [netlist]}
+    def records(_project):
+        for sid, paths in ownership.items():
+            yield sid, 'neutral-' + sid, 'PASS', 'phase1' if sid == 'D1' else 'phase2', 'stage', [
+                {'rel': str(path.relative_to(project)), 'abs': str(path), 'exists': True}
+                for path in paths]
+    monkeypatch.setattr(versions, '_iter_step_records', records)
+    saved = {}
+    def complete(sid, status='PASS'):
+        inputs = {str(path.relative_to(project)): ll.digest(path) for path in
+                  ([source] if sid == 'D1' else [rtl, sdc])}
+        attempt = versions.begin_step(project, sid, inputs)
+        saved[sid] = versions.finish_step(project, attempt, verdict=status,
+            result={'runner': 'neutral-complete-predecessor-fixture',
+                    'canonical_consumer': {'status': status}},
+            canonical_pass=(status == 'PASS'))
+        return saved[sid]
+    for sid in ownership:
+        complete(sid)
+    old = identity.start(project)
+    # A normal completed mapping checkpoint exists before the new Floorplan.
+    receipts.synth_stage(project, netlist=netlist, top='core', liberties=[],
+        sdc=sdc, to_container=str, execute=_source_control_census)
+    assert next(row for row in plan._stages(project, True)[0]
+                if row['name'] == 'synth')['ran'] is True
+    l19 = project / identity.SPEC_DOCS / 'L19_CONSTRAINTS_PDK.json'
+    changed = json.loads(l19.read_text())
+    changed['_generator'] = {'emitter': 'neutral normal flow derivation'}
+    changed['fields']['constraint_declarations'].append(
+        {'token': 'PDN_VWIDTH', 'value': '4.2'})
+    l19.write_text(json.dumps(changed))
+    assert p1.record_derivation(project, l19.name, ll.digest(l19), 'neutral_normal_flow')
+    return project, native, old, saved, complete, calls
+
+
+def test_default_floorplan_rebuild_accepts_only_downstream_declared_spec_change(tmp_path, monkeypatch):
+    import drv_run_identity as identity
+    project, native, old, saved, _, calls = _physical_spec_checkpoint(tmp_path, monkeypatch)
+    abc = receipts.abc_script_path(project)
+    before = {path: path.read_bytes() for path in [abc, native / 'vibeic_receipt.json',
+        project / 'steps' / saved['D1']['folder'] / 'outputs.json',
+        project / 'steps' / saved['D1']['folder'] / 'L19_CONSTRAINTS_PDK.json']}
+    new = identity.start(project, continue_steps=['15', '15.5ic', '16', '17', '19'])
+    assert new['run_id'] == old['run_id']
+    assert new['initial_spec_version'] == old['spec_version']
+    assert new['spec_version'] == identity.spec_version(project) != old['spec_version']
+    assert new['initial_code_identity']['plugin_tree_sha256'] == old['plugin_tree_sha256']
+    assert {path: path.read_bytes() for path in before} == before
+    # A second normal physical decision must retain the same original D1
+    # basis and prove the preceding accepted spec through its derivation chain.
+    import _phase1_producer_identity as p1
+    l19 = project / identity.SPEC_DOCS / 'L19_CONSTRAINTS_PDK.json'
+    changed = json.loads(l19.read_text())
+    changed['fields']['constraint_declarations'][-1]['value'] = '4.8'
+    l19.write_text(json.dumps(changed))
+    assert p1.record_derivation(project, l19.name, ll.digest(l19), 'neutral_normal_flow')
+    again = identity.start(project, continue_steps=['15', '15.5ic', '16', '17', '19'])
+    assert again['run_id'] == old['run_id']
+    assert again['initial_spec_version'] == old['spec_version']
+    assert again['spec_version'] == identity.spec_version(project) != new['spec_version']
+    assert {path: path.read_bytes() for path in before} == before
+    assert len(calls) == 1, 'continuation must not rerun RTL or synthesis'
+
+
+@pytest.mark.parametrize('changed', [
+    'entry19', 'entry21', 'snapshot', 'other_doc', 'unknown_token', 'fanout',
+    'clock', 'rtl', 'sdc', 'native_config', 'liberty', 'measured_fail',
+    'unrecorded_edit', 'invalid_width'])
+def test_downstream_spec_rebuild_preserves_upstream_and_unknown_refusals(tmp_path, monkeypatch, changed):
+    import drv_run_identity as identity
+    import _phase1_producer_identity as p1
+    project, native, _, saved, complete, _ = _physical_spec_checkpoint(tmp_path, monkeypatch)
+    docs = project / identity.SPEC_DOCS
+    l19 = docs / 'L19_CONSTRAINTS_PDK.json'
+    value = json.loads(l19.read_text())
+    if changed == 'snapshot':
+        (project / 'steps' / saved['D1']['folder'] / l19.name).write_text('{}')
+    elif changed == 'other_doc':
+        (docs / 'L9_INTEGRATION_SPEC.json').write_text('{"top_module":"other"}')
+    elif changed == 'unknown_token':
+        value['fields']['constraint_declarations'][-1]['token'] = 'UNSUPPORTED_PHYSICAL_KNOB'
+    elif changed == 'fanout':
+        value['fields']['constraint_declarations'][0]['value'] = '8'
+    elif changed == 'clock':
+        path = docs / 'L8_TIMING_WAVEFORM.json'
+        path.write_text(path.read_text().replace('24', '12'))
+    elif changed == 'rtl':
+        path = project / 'phase2/stage1/rtl/core.v'
+        path.write_text(path.read_text() + '// changed RTL\n')
+    elif changed == 'sdc':
+        (project / 'constraint.sdc').write_text('create_clock -period 12 [get_ports clk]\n')
+    elif changed == 'native_config':
+        (native / 'config.json').write_text('{}')
+    elif changed == 'liberty':
+        (project / 'cells.lib').write_text('library(other) {}')
+    elif changed == 'measured_fail':
+        complete('13', 'FAIL')
+    elif changed == 'unrecorded_edit':
+        value['fields']['constraint_declarations'][-1]['value'] = '5.0'
+    elif changed == 'invalid_width':
+        value['fields']['constraint_declarations'][-1]['value'] = '-4'
+    if changed in ('unknown_token', 'fanout', 'unrecorded_edit', 'invalid_width'):
+        l19.write_text(json.dumps(value))
+        if changed != 'unrecorded_edit':
+            assert p1.record_derivation(project, l19.name, ll.digest(l19), 'neutral_normal_flow')
+    original = (project / identity.RECORD).read_bytes()
+    abc = receipts.abc_script_path(project).read_bytes()
+    with pytest.raises(ValueError, match='specification changed'):
+        identity.start(project, continue_steps=[changed[5:] if changed.startswith('entry') else '15'])
+    assert (project / identity.RECORD).read_bytes() == original
+    assert receipts.abc_script_path(project).read_bytes() == abc

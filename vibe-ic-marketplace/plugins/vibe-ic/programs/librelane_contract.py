@@ -1347,43 +1347,13 @@ def aux_tie_dont_touch(chip_top_record: dict[str, Any]) -> list[str]:
     return names
 
 
-def emit_config(project: Path, pdk: str, output: Path) -> dict:
-    """Emit only declared inputs; unavailable values stay absent, never guessed."""
-    root = project / 'phase1/generated_docs'
-    l8, l9, l19 = (_ldoc(root, name) for name in EMIT_CONFIG_LDOCS)
-    # The pad producer (step 15.5ic) runs after synthesis and pre-layout STA;
-    # before it has run the PAD_* keys are undeclared, so they stay absent.
-    pad_path = project / 'phase3/stage3/pnr/pad_assignment.json'
-    pads = _load(pad_path) if pad_path.is_file() else {}
+def _declared_flow_settings(l19: dict, pdk: str) -> tuple[dict, dict]:
+    """The existing L19 flow-setting parser, shared by emission and reuse.
+
+    Unsupported, inapplicable and unset declarations produce no setting.
+    """
     result: dict[str, Any] = {}
     sources: dict[str, str] = {}
-    clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'
-              and c.get('pdk_scoped_target') in (None, pdk)]
-    if len(clocks) != 1:
-        raise Refusal('LL_CLOCK_AMBIGUOUS', f'{len(clocks)} primary clocks for {pdk}')
-    c = clocks[0]
-    _set(result, sources, 'CLOCK_PERIOD', c.get('period_ns'), 'L8_TIMING_WAVEFORM.clock_domains[primary].period_ns')
-    _set(result, sources, 'CLOCK_PORT', c.get('source_pin'), 'L8_TIMING_WAVEFORM.clock_domains[primary].source_pin')
-    # The design's whole build closure (cmp3 D8): the read phase-3 synthesis
-    # and the Step-5 proof take (`_chip_synth_read.chip_rtl_files`), not the
-    # one file named after the top -- a multi-file core (subservient) lost
-    # every submodule, and Yosys.JsonHeader stopped on the first of them.
-    import _chip_synth_read as CSR
-    rtl = CSR.chip_rtl_files(project / 'phase2/stage1/rtl')
-    chip_top = project / 'phase3/stage3/pnr/chip_top_io.v'
-    if rtl and chip_top.is_file():
-        _set(result, sources, 'VERILOG_FILES',
-             ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
-             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
-             'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
-    sdc = project / 'phase3/stage3/pnr/constraint.sdc'
-    if sdc.is_file():
-        for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
-            _set(result, sources, key, 'dir::' + str(sdc.relative_to(project)),
-                 'phase3/stage3/pnr/constraint.sdc (L9-derived producer artefact)')
-    declared, declared_sources = declaration_config(project)
-    for key, value in declared.items():
-        _set(result, sources, key, value, declared_sources[key])
     declarations = l19.get('fields', {}).get('constraint_declarations', [])
     supported = {'MAX_FANOUT_CONSTRAINT', 'MAX_TRANSITION_CONSTRAINT',
                  'MAX_CAPACITANCE_CONSTRAINT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
@@ -1431,6 +1401,49 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
             raise Refusal('LL_CONSTRAINT_CONFLICT', key)
         _, value, source = applicable[0]
         _set(result, sources, key, value, source)
+    return result, sources
+
+
+def emit_config(project: Path, pdk: str, output: Path) -> dict:
+    """Emit only declared inputs; unavailable values stay absent, never guessed."""
+    root = project / 'phase1/generated_docs'
+    l8, l9, l19 = (_ldoc(root, name) for name in EMIT_CONFIG_LDOCS)
+    # The pad producer (step 15.5ic) runs after synthesis and pre-layout STA;
+    # before it has run the PAD_* keys are undeclared, so they stay absent.
+    pad_path = project / 'phase3/stage3/pnr/pad_assignment.json'
+    pads = _load(pad_path) if pad_path.is_file() else {}
+    result: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+    clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'
+              and c.get('pdk_scoped_target') in (None, pdk)]
+    if len(clocks) != 1:
+        raise Refusal('LL_CLOCK_AMBIGUOUS', f'{len(clocks)} primary clocks for {pdk}')
+    c = clocks[0]
+    _set(result, sources, 'CLOCK_PERIOD', c.get('period_ns'), 'L8_TIMING_WAVEFORM.clock_domains[primary].period_ns')
+    _set(result, sources, 'CLOCK_PORT', c.get('source_pin'), 'L8_TIMING_WAVEFORM.clock_domains[primary].source_pin')
+    # The design's whole build closure (cmp3 D8): the read phase-3 synthesis
+    # and the Step-5 proof take (`_chip_synth_read.chip_rtl_files`), not the
+    # one file named after the top -- a multi-file core (subservient) lost
+    # every submodule, and Yosys.JsonHeader stopped on the first of them.
+    import _chip_synth_read as CSR
+    rtl = CSR.chip_rtl_files(project / 'phase2/stage1/rtl')
+    chip_top = project / 'phase3/stage3/pnr/chip_top_io.v'
+    if rtl and chip_top.is_file():
+        _set(result, sources, 'VERILOG_FILES',
+             ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
+             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
+             'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
+    sdc = project / 'phase3/stage3/pnr/constraint.sdc'
+    if sdc.is_file():
+        for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
+            _set(result, sources, key, 'dir::' + str(sdc.relative_to(project)),
+                 'phase3/stage3/pnr/constraint.sdc (L9-derived producer artefact)')
+    declared, declared_sources = declaration_config(project)
+    for key, value in declared.items():
+        _set(result, sources, key, value, declared_sources[key])
+    settings, setting_sources = _declared_flow_settings(l19, pdk)
+    for key, value in settings.items():
+        _set(result, sources, key, value, setting_sources[key])
     # Step 19 (T98): CTS leaf clusters stay within the declared fanout cap.
     # `set_max_fanout` in the SDC does not constrain clock_tree_synthesis
     # (MEASURED on spm x ihp-sg13g2: a 16-sink leaf against a declared 8), so

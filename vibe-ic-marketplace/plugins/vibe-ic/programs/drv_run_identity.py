@@ -72,6 +72,116 @@ def record(project: Path, *, plugin_root: Path = PLUGIN_ROOT) -> dict:
     return doc
 
 
+def _physical_spec_continuation(project: Path, previous: dict, step_ids) -> bool:
+    """Rebuild from Floorplan after a downstream-only declared setting change.
+
+    The original D1 snapshots must prove the complete old specification. The
+    normal emitter and the measured Yosys config own the setting projection;
+    a self-consistent old receipt alone cannot prove current design intent.
+    """
+    if not step_ids or str(step_ids[0]) != "15":
+        return False
+    import librelane_contract as ll
+    import step_output_collector as versions
+    import synth_handoff_netlist_check as handoff
+    import _phase1_producer_identity as p1
+
+    try:
+        original = versions.latest_pass(project, "D1")
+        if (not original or not original.get("canonical_pass")
+                or not original.get("current_inputs") or original.get("capture_errors")):
+            return False
+        folder = project / "steps" / original["folder"]
+        entries = [r for r in original["outputs"]
+                   if Path(r["rel"]).parent == SPEC_DOCS]
+        current = {p.name: p for p in (project / SPEC_DOCS).glob("*.json") if p.is_file()}
+        if not entries or {Path(r["rel"]).name for r in entries} != set(current):
+            return False
+        old_docs = {}
+        digest = hashlib.sha256()
+        for row in sorted(entries, key=lambda r: Path(r["rel"]).name):
+            name = Path(row["rel"]).name
+            data = (folder / row["snapshot"]).read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            if sha != row["sha256"] or name in old_docs:
+                return False
+            digest.update(name.encode() + b"\0" + sha.encode() + b"\n")
+            old_docs[name] = data
+            if name != "L19_CONSTRAINTS_PDK.json" and current[name].read_bytes() != data:
+                return False
+        if "phase1-docs-sha256:" + digest.hexdigest() != previous.get(
+                "initial_spec_version", previous["spec_version"]):
+            return False
+        name = "L19_CONSTRAINTS_PDK.json"
+        before = json.loads(old_docs[name])
+        after = json.loads(current[name].read_bytes())
+        old_rows = before["fields"].get("constraint_declarations", [])
+        new_rows = after["fields"].get("constraint_declarations", [])
+        for doc in (before, after):
+            doc.pop("_generator", None)
+            doc["fields"].pop("constraint_declarations", None)
+        if before != after or not isinstance(old_rows, list) or not isinstance(new_rows, list):
+            return False
+        # A normal L-doc derivation preserves the old producer; it does not
+        # authorize an unrecorded edit to a generated document.
+        authority = p1._si.read_sidecar(p1.sidecar_dir(project), p1.KIND) or {}
+        old_sha = hashlib.sha256(old_docs[name]).hexdigest()
+        current_sha = ll.digest(current[name])
+        linked = old_sha
+        for change in authority.get("derivations", []):
+            if change.get("doc") == name and change.get("from") == linked:
+                linked = change.get("to")
+        if linked != current_sha or authority.get("outputs", {}).get(name) != current_sha:
+            return False
+        binding = json.loads((project / "phase2/stage2/synth/synth_inputs.json").read_text())["librelane_synthesis"]
+        native = project / binding["folder"]
+        receipt = ll.validate_step_receipt(native, "Yosys.Synthesis")
+        if (receipt["sha256"].get("config.json") != ll.digest(native / "config.json")
+                or handoff.bound_handoff(project).get("verdict") != "PASS"):
+            return False
+        config = json.loads((native / "config.json").read_text())
+        pdk, _ = ll.phase2_pdk(project)
+        if config.get("PDK") != pdk:
+            return False
+        old_settings, _ = ll._declared_flow_settings(
+            {"fields": {"constraint_declarations": old_rows}}, pdk)
+        settings, _ = ll._declared_flow_settings(
+            {"fields": {"constraint_declarations": new_rows}}, pdk)
+        for key in (set(old_settings) | set(settings)) & set(config):
+            if old_settings.get(key) != settings.get(key) or settings.get(key) != config[key]:
+                return False
+        changed = ([r for r in old_rows if r not in new_rows]
+                   + [r for r in new_rows if r not in old_rows])
+        if not changed:
+            return False
+        for row in changed:
+            owned, _ = ll._declared_flow_settings(
+                {"fields": {"constraint_declarations": [row]}}, pdk)
+            if not owned or set(owned) & set(config):
+                return False  # unknown/default/other-scope is not downstream proof
+        # The complete preceding acceptances retain the actual RTL, deck,
+        # selected PDK/corner and mapped outputs, not just a spec filename.
+        accepted = {str(r["id"]): r for r in versions.current_acceptance(project, 0)}
+        for sid in ("7", "9", "10", "13", "14"):
+            row = accepted.get(sid) or {}
+            if (row.get("status") != "PASS" or not row.get("canonical_pass")
+                    or row.get("capture_errors") or not row.get("inputs") or not row.get("outputs")):
+                return False
+            for rel, expected in row["inputs"].items():
+                sha = expected.get("sha256") if isinstance(expected, dict) else expected
+                if not sha or ll.digest(project / rel) != sha:
+                    return False
+            for output in row["outputs"]:
+                if not output.get("sha256") or ll.digest(project / output["rel"]) != output["sha256"]:
+                    return False
+        for kind in ("state_files", "config_files"):
+            if any(ll.digest(Path(path)) != sha for path, sha in receipt["input"].get(kind, {}).items()):
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ll.Refusal):
+        return False
+
+
 def start(project: Path, *, continue_steps=None) -> dict:
     """Start a fresh run, or continue one local Default run's checkpoints.
 
@@ -98,10 +208,12 @@ def start(project: Path, *, continue_steps=None) -> dict:
             if mapped or any(row.get("ran") for row in rows):
                 current_spec = spec_version(project)
                 if (previous.get("spec_version") is not None
-                        and previous["spec_version"] != current_spec):
+                        and previous["spec_version"] != current_spec
+                        and not _physical_spec_continuation(project, previous, continue_steps)):
                     raise ValueError("Default checkpoint specification changed; "
                                      "preceding stages cannot be reused")
                 doc = dict(previous)
+                doc.setdefault("initial_spec_version", previous.get("spec_version"))
                 doc.setdefault("initial_code_identity", {k: previous.get(k) for k in (
                     "plugin_source_commit", "plugin_tree_sha256", "recorded_at")})
                 doc.update(plugin_source_commit=_git_commit(PLUGIN_ROOT),
