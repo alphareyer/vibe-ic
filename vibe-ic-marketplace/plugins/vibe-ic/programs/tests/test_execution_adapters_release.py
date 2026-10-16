@@ -39,7 +39,10 @@ def _canonical_issued_transport(monkeypatch):
     monkeypatch.setattr(policy, '_ordinary_runtime', None)
     for name in (policy.ENV, policy._CAPABILITY_FD_ENV,
                  'VIBEIC_EXECUTION_AUTH_SOCKET'):
-        monkeypatch.delenv(name, raising=False)
+        # The issuer writes locators directly, including initially absent keys.
+        # Record the pre-state before teardown closes the issued descriptor.
+        monkeypatch.setenv(name, os.environ.get(name, ''))
+        monkeypatch.delenv(name)
     yield
     for proc, fd, channel in receipt_chain._launchers:
         try:
