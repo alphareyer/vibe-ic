@@ -223,6 +223,10 @@ def _hash(value: object) -> str:
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+# Bound pack mappings within the existing worker address-space limit. Git's
+# 64-bit default maps up to 1 GiB at once, regardless of the object's size.
+_PACKED_GIT_OPTIONS = ('-c', 'core.packedGitWindowSize=16m',
+                       '-c', 'core.packedGitLimit=64m')
 
 
 def _git_source_authority(source_sha: str) -> tuple[str, str]:
@@ -231,10 +235,10 @@ def _git_source_authority(source_sha: str) -> tuple[str, str]:
         raise Refusal('INVALID_SOURCE_SHA', str(source_sha))
     try:
         commit = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{commit}}'],
+            ['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{commit}}'],
             check=True, capture_output=True, text=True, timeout=5).stdout.strip()
         tree = subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{tree}}'],
+            ['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{tree}}'],
             check=True, capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', source_sha) from exc
@@ -254,7 +258,7 @@ def _git_blob_at_commit(source_sha: str, relative: str) -> str:
         raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', relative)
     try:
         return subprocess.run(
-            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify',
+            ['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'rev-parse', '--verify',
              f'{source_sha}:{relative}'],
             check=True, capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
@@ -337,7 +341,7 @@ def _git_source_blobs(commit: str, paths) -> dict[str, str]:
             raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', 'source population') from exc
     try:
         relative = [str(path.relative_to(_REPO_ROOT)) for path in paths]
-        result = subprocess.run(['git', '-C', str(_REPO_ROOT), 'ls-tree', '-r', '-z',
+        result = subprocess.run(['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'ls-tree', '-r', '-z',
                                  commit, '--', *relative], check=True,
                                 capture_output=True, timeout=10)
         blobs = {}

@@ -16,6 +16,11 @@ from pathlib import Path
 import subprocess
 
 
+# Keep object reads within worker RLIMIT_AS without changing Git configuration.
+_PACKED_GIT_OPTIONS = ('-c', 'core.packedGitWindowSize=16m',
+                       '-c', 'core.packedGitLimit=64m')
+
+
 @lru_cache(maxsize=2048)
 def python_import_syntax(content: str) -> tuple:
     """Share immutable import syntax by exact source bytes, never path state.
@@ -108,7 +113,7 @@ class SourceSnapshot:
 
     def _git_text(self, *args: str) -> str:
         self.stats["git_commands"] += 1
-        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+        return subprocess.run(["git", *_PACKED_GIT_OPTIONS, "-C", str(self.repo), *args], check=True,
                               capture_output=True, text=True, timeout=10).stdout.strip()
 
     def _resolve(self, path: Path) -> Path:
@@ -233,7 +238,7 @@ class SourceSnapshot:
     def _tree_blobs(self) -> dict[str, str]:
         if self._git_blobs is None:
             self.stats["git_commands"] += 1
-            raw = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "-z",
+            raw = subprocess.run(["git", *_PACKED_GIT_OPTIONS, "-C", str(self.repo), "ls-tree", "-r", "-z",
                                   self.commit], check=True, capture_output=True,
                                  timeout=20).stdout
             self.stats["git_tree_reads"] += 1
