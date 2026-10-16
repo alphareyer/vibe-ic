@@ -59438,7 +59438,13 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
                 notes.append(
                     f"clock_plan.json current subject is not reusable "
                     f"({refusal}) — re-derived")
-    if not (needs_refresh and primary_def.is_file()):
+    if not needs_refresh:
+        # The existing native subject passed the complete reuse validation
+        # above. Return the same owned path as a cold publication so callers
+        # can distinguish accepted reuse from a producer that could not run.
+        notes.append("clock_plan.json reused: current native subject validated")
+        return str(clock_plan)
+    if not primary_def.is_file():
         return None
 
     sdc_texts = []

@@ -198,3 +198,68 @@ def test_io_changed_after_publication_is_refused_by_consumer(setup):
     findings = json.loads(report.read_text())["findings"]
     assert any(f["rule"] == "CLOCK_PLAN_CURRENT_REFUSED"
                and "CURRENT_BYTES_CHANGED: pdk_lef_2" in f["message"] for f in findings)
+
+
+def test_validated_reuse_returns_the_owned_path_without_rerunning_native(setup):
+    project, floor, plan, _, pdk, calls = setup
+    assert runner.emit_clock_plan(project, plan, floor, floor.parent, [],
+                                  pdk=pdk) == str(plan)
+    before = plan.read_bytes()
+    notes = []
+    assert runner.emit_clock_plan(project, plan, floor, floor.parent, notes,
+                                  pdk=pdk) == str(plan), notes
+    assert len(calls) == 1
+    assert plan.read_bytes() == before
+    assert "current native subject validated" in notes[-1]
+    assert gate.main([str(project)]) == 0
+
+
+def test_default_clock_row_accepts_cold_and_validated_reused_native_plan(
+        setup, monkeypatch):
+    project, _, plan, _, pdk, calls = setup
+    # Step16 does not invoke this backend parameter transport. Its producer,
+    # native-subject validation, retained writer and complete consumer stay real.
+    monkeypatch.setattr(runner, "_backend_parameter_values", lambda *_: {})
+    first = runner._default_pnr_rows(project, "neutral", pdk, "", ["16"])
+    assert first.status == "PASS", first.detail
+    assert first.extras["canonical_gate_checks"]["16"]["status"] == "PASS"
+    before = plan.read_bytes()
+    second = runner._default_pnr_rows(project, "neutral", pdk, "", ["16"])
+    assert second.status == "PASS", second.detail
+    assert second.extras["canonical_gate_checks"]["16"]["status"] == "PASS"
+    assert len(calls) == 1
+    assert plan.read_bytes() == before
+    receipt = json.loads((project / "reports/phase3/default_steps/16/backend_result.json").read_text())
+    assert receipt["verdict"] == "PASS"
+    assert receipt["canonical_step_result"]["status"] == "PASS"
+    assert receipt["gate_ledger"][0]["rc"] == 0
+
+
+@pytest.mark.parametrize("changed", ["floorplan", "sdc", "log", "io"])
+def test_invalid_reuse_never_returns_success_when_native_refresh_fails(
+        setup, monkeypatch, changed):
+    project, floor, plan, io, pdk, calls = setup
+    assert runner.emit_clock_plan(project, plan, floor, floor.parent, [],
+                                  pdk=pdk) == str(plan)
+    before = plan.read_bytes()
+    doc = json.loads(before)
+    target = {"floorplan": floor,
+              "sdc": project / "phase2/stage2/constraints/current.sdc",
+              "log": project / doc["current"]["outputs"]["log"]["path"],
+              "io": io}[changed]
+    target.write_text(target.read_text() + "\n# changed original input or evidence\n")
+    native = current.run_native
+
+    def refused(*args):
+        _, execution = native(*args)
+        Path(args[-1]).write_text("native refresh failed\n")
+        return 1, {**execution, "rc": 1}
+
+    monkeypatch.setattr(current, "run_native", refused)
+    notes = []
+    assert runner.emit_clock_plan(project, plan, floor, floor.parent, notes,
+                                  pdk=pdk) is None
+    assert len(calls) == 2
+    assert plan.read_bytes() == before
+    assert any("NOT written" in note for note in notes)
+    assert gate.main([str(project)]) == 1
