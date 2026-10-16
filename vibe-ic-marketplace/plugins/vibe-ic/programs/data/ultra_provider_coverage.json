@@ -304,7 +304,8 @@
       "arm_id": "backend_19",
       "canonical_outputs": [
         "phase3/stage3/pnr/post_cts.def",
-        "phase3/stage3/cts/clock_tree.rpt"
+        "phase3/stage3/cts/clock_tree.rpt",
+        "reports/phase3/librelane_cts_handoff.json"
       ],
       "consumer_gates": [
         "cts_quality_check"
@@ -814,7 +815,7 @@
           "kind": "lesson"
         },
         {
-          "destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/\u2026)",
+          "destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/…)",
           "id": "25-H6",
           "kind": "feature"
         },
