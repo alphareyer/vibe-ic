@@ -922,6 +922,8 @@ def test_default_gls_manifest_uses_the_compilers_execution_namespace(
     for sdf in state['sdf'].values():
         write(Path(sdf), '(DELAYFILE\n (SDFVERSION "3.0") (DESIGN "chip_top")\n'
               ' (DIVIDER .) (TIMESCALE 1ns)\n'
+              ' (CELL (CELLTYPE "chip_top") (INSTANCE)\n'
+              '  (DELAY (ABSOLUTE (INTERCONNECT x u_pad_x.PAD (0.1:0.1:0.1)))))\n'
               ' (CELL (CELLTYPE "cells__in_c") (INSTANCE u_pad_x)\n'
               '  (DELAY (ABSOLUTE (IOPATH PAD Y (0.1:0.1:0.1) (0.1:0.1:0.1)))))\n)\n')
     if case == 'case_fail':
