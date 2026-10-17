@@ -1048,3 +1048,170 @@ def test_step30_model_publication_matches_the_selected_execution_namespace(tmp_p
     assert magic_calls[0]['argv'][4] == expected_root + '/neutral/libs.tech/magic/neutral.magicrc'
     assert arm['cells']['cell_view']['extracted'] == ['BUF']
     assert arm['cells']['cell_view']['missing_exports'] == []
+
+
+def test_default_step30_native_local_launcher_uses_the_admitted_provider(tmp_path, monkeypatch):
+    """Real Default producer/strict reader; native process outputs are neutral."""
+    import copy
+    import os
+    import re
+    import subprocess
+    import _watchdog as watchdog
+    import test_f22_spice_corr as reference
+
+    p, folder, lib = project(tmp_path)
+    root = p / 'fixture_pdk'
+    source = tmp_path / 'native-source'
+    write(source / 'librelane/__init__.py', '# SOURCE_FIXTURE_ONLY native source\n')
+    lib.write_text(reference._REFERENCE_LIB.replace('library(neutral_typ) {',
+        'library(neutral_typ) {\n voltage_map(VDD, 1.8);\n voltage_map(VSS, 0);'))
+    cells = '.subckt BUF A Z VDD VSS\nM0 Z A VSS VSS neutral W=1u L=1u\n.ends\n'
+    cell_file = write(root / 'neutral/cells.spice', cells)
+    gds = write(root / 'neutral/cells.gds', 'SOURCE_FIXTURE_ONLY cell geometry\n')
+    write(root / 'neutral/libs.tech/ngspice/model.sp',
+          '.lib typical\n.model neutral nmos level=1\n.endl typical\n')
+    write(root / 'neutral/libs.tech/magic/neutral.magicrc', '# SOURCE_FIXTURE_ONLY Magic technology\n')
+    write(root / 'neutral/libs.tech/librelane/config.tcl',
+          'set ::env(MAGICRC) "$::env(PDK_ROOT)/$::env(PDK)/libs.tech/magic/neutral.magicrc"\n')
+    netlist = p / 'phase3/stage3/pnr/neutral_pnr.v'
+    netlist.write_text(netlist.read_text().replace('BUF ', '\nBUF '))
+    config_path = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    config = json.loads(config_path.read_text())
+    config.update(VDD_PIN='VDD', GND_PIN='VSS', CELL_SPICE_MODELS=['/pdk/neutral/cells.spice'],
+                  CELL_GDS=['/pdk/neutral/cells.gds'])
+    put(config_path, config); put(folder / 'config.json', config)
+    put(p / 'phase3/librelane_switch.json', {
+        'mode': 'default', 'execution_route': 'LOCAL', 'local_network_mode': 'host',
+        'pdk_root_host': str(root), 'librelane_root_host': str(source)})
+    put(p / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',
+        {'fields': {'pdk_target': 'neutral'}})
+    image = LC.resolve_image(p)
+    assert isinstance(image, LC.LocalProviderIdentity) and image.network_mode == 'host'
+    LC.pdk_root_resolution(p, 'neutral', image=image)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(image=str(image), local_provider=image.as_record(), config=LC.digest(config_path),
+              config_files=LC.config_file_hashes(config, [(root / 'neutral', '/pdk/neutral')]),
+              liberty_files={'/pdk/neutral/neutral.lib': LC.digest(lib)})
+    fp['state_files'][str(netlist)] = LC.digest(netlist)
+    seal(folder, fp)
+    originals = {str(x): LC.digest(x) for x in
+                 [folder / 'vibeic_receipt.json', folder / 'input_fingerprint.json',
+                  netlist, lib, cell_file, gds]}
+    calls, points = [], {}
+    damage = {'tool': False}
+    original_leaf = watchdog.run_host_supervised
+
+    def native_leaf(argv, **kwargs):
+        # LC has already parsed the Docker-shaped request, admitted the typed
+        # provider, rewritten mounts and installed its address-space ceiling.
+        marker = 'import os,sys;os.execvp(sys.argv[1],sys.argv[1:])'
+        if marker not in argv:
+            return original_leaf(argv, **kwargs)
+        tool_argv = list(argv[argv.index(marker) + 1:])
+        cwd = Path(kwargs['cwd'])
+        assert kwargs['env']['VIBEIC_LOCAL_NETWORK_MODE'] == 'host'
+        calls.append({'argv': tool_argv, 'cwd': str(cwd),
+                      'network': kwargs['env']['VIBEIC_LOCAL_NETWORK_MODE'],
+                      'bound_executable': argv[0]})
+        tool = tool_argv[0]
+        if tool == 'magic':
+            script = Path(tool_argv[-1]).read_text()
+            assert 'gds read ' in script and 'ext2spice' in script
+            write(cwd / 'BUF.spice', '* SOURCE_FIXTURE_ONLY Magic output\n' + cells)
+            return watchdog.SupervisedResult(0, 'SOURCE_FIXTURE_ONLY Magic export\n', '', 'natural')
+        if tool == 'sta':
+            script = Path(tool_argv[-1]).read_text()
+            if 'set_pi_model u_ref/Z' in script:
+                slew = float(re.search(r'set_input_transition -fall (\S+)',
+                                      (cwd / 'reference.sdc').read_text())[1])
+                cap = float(re.search(r'set_pi_model u_ref/Z (\S+)', script)[1])
+                delay = .8 + .5 * slew + 5 * cap
+                points[cwd] = delay
+                write(cwd / 'reference.rpt', reference._reference_report(
+                    'BUF', 'u_ref', slew, cap, delay, external=True))
+                write(cwd / 'reference.sp_1.sp', '* SOURCE_FIXTURE_ONLY reference\n'
+                      '.include "reference.sp_1.subckt"\n.tran 1e-13 8e-9\n'
+                      '.print tran v(I) v(u_ref/A) v(u_ref/Z) v(Z)\n'
+                      'v1 u_ref/VDD 0 1.8\nv2 u_ref/VSS 0 0\n'
+                      'v3 I 0 pwl(0 1.8 1e-9 0)\n.end\n')
+                write(cwd / 'reference.sp_1.subckt', '.subckt ref I Z\nX0 Z I 0 0 neutral\n.ends\n')
+            else:
+                assert 'read_spef' in script and 'write_path_spice' in script
+                cap, wire = (.025, .2) if cwd.name == 'mutated' else (.02, .1)
+                delay = .8 + .5 * .2 + 5 * cap
+                points[cwd] = delay * .7 + wire
+                report = reference._reference_report('BUF', 'u0', .2, cap + .005, delay)
+                report = re.sub(r'^ 0\.2 0\.05 \S+ v capture/D',
+                                f' 0.2 0.05 {delay + wire:.9f} v capture/D', report, flags=re.M)
+                write(cwd / 'path_1.rpt', report)
+                write(cwd / 'reference_clocks.txt', '10\n')
+                write(cwd / 'path_1.sp_1.sp', '* SOURCE_FIXTURE_ONLY design path\n'
+                      '* Gate u0 A -> Z\nxu0 u0/A u0/Z u0/VDD u0/VSS BUF\n'
+                      '.include "path_1.sp_1.subckt"\nv1 u0/VDD 0 1.8\nv2 u0/VSS 0 0\n.ends\n'
+                      '.tran 1e-13 8e-9\n.print tran v(launch/Q) v(capture/D)\n.end\n')
+                write(cwd / 'path_1.sp_1.subckt', '.subckt design I Z\nX0 Z I 0 0 neutral\n.ends\n')
+                dcalc = write(cwd / 'dcalc.rpt', 'Library: neutral_typ\nCell: BUF\nA v -> Z v\n'
+                    f'------- input_net_transition = 0.200000000\n'
+                    f'| total_output_net_capacitance = {cap:.9f}\nDelay = {delay:.9f}\n')
+                write(cwd / 'dcalc_1_1.tsv', f'u0/A\tu0/Z\t{dcalc}\n')
+            return watchdog.SupervisedResult(0, 'VIBEIC_WPS_OK 1\nSOURCE_FIXTURE_ONLY STA\n', '', 'natural')
+        assert tool in ('ngspice', 'Xyce'), tool_argv
+        if damage['tool']:
+            return watchdog.SupervisedResult(127, '', 'SOURCE_FIXTURE_ONLY simulator unavailable\n', 'natural')
+        text = Path(tool_argv[-1]).read_text()
+        wave = Path(re.search(r'wrdata (\S+)', text)[1])
+        if 'refs' in cwd.parts:
+            delay = points[cwd] * .7
+            names, delays = ['I', 'u_ref/A', 'u_ref/Z', 'Z'], [0, 0, delay, delay]
+        else:
+            names, delays = ['launch/Q', 'capture/D'], [0, points[cwd]]
+        rows = ['time ' + ' '.join('v(' + n + ')' for n in names)]
+        for t in sorted({0, 8.0, *[1 + d + off for d in delays for off in (-.001, .001)]}):
+            rows.append(' '.join([str(t * 1e-9)] +
+                [str(1.8 if t <= 1 + d - .001 else 0) for d in delays]))
+        write(wave, '\n'.join(rows) + '\n')
+        return watchdog.SupervisedResult(0, 'SOURCE_FIXTURE_ONLY simulator\n', '', 'natural')
+
+    monkeypatch.setattr(watchdog, 'run_host_supervised', native_leaf)
+    result = _current_backend_step30(p, lib, monkeypatch)
+    gate = SC.run_audit(p, run_spice=False)
+    note = tmp_path / 'STEP30_LOCAL_LAUNCH_OBSERVATION.json'
+    observation = {'scope': 'SOURCE_FIXTURE_ONLY real Default30 producer/strict consumer',
+        'provider': image.as_record(), 'producer': result, 'gate': {'passed': gate.passed, 'summary': gate.summary},
+        'calls': calls, 'originals': originals}
+    write(note, json.dumps(observation, indent=2) + '\n')
+    assert result['verdict'] == 'PASS', result
+    assert gate.passed and gate.summary['current_binding'] == 'CURRENT'
+    assert gate.summary['measurement'] == 'MEASURED' and gate.summary['verdict'] == 'PASS'
+    assert {str(x): LC.digest(x) for x in map(Path, originals)} == originals
+    assert {'magic', 'sta', 'ngspice'} <= {x['argv'][0] for x in calls}
+    assert any('refs' in Path(x['cwd']).parts for x in calls)
+    assert all(x['bound_executable'] == image.executable for x in calls)
+    receipt = json.loads((p / 'reports/phase3/spice_correlation.current.json').read_text())
+    assert receipt['context']['image'] == str(image)
+    assert SC.main([str(p), '--no-spice', '--json', str(tmp_path / 'strict-consumer.json')]) == 0
+    # A plain Docker request keeps the exact original command shape. This
+    # transport-only control does not replace any LOCAL producer admission.
+    with monkeypatch.context() as remote:
+        captured = []
+        remote.setattr(LC, 'run_container', lambda argv, **kw:
+            captured.append((argv, kw)) or subprocess.CompletedProcess(argv, 0, '', ''))
+        PST._docker(BF.IMAGE, p, [(root / 'neutral', '/pdk/neutral')],
+                    ['ngspice', '-b', 'deck.sp'], p, env={'PDK_ROOT': '/pdk'})
+        expected = ['docker', 'run', '--rm', '--network', 'none',
+                    *PST._dmem.docker_memory_flags(), '-v', f'{p.resolve()}:{p.resolve()}',
+                    '-v', f'{(root / "neutral").resolve()}:/pdk/neutral:ro',
+                    '-e', 'PDK_ROOT=/pdk', '--workdir', str(p),
+                    '--entrypoint', 'ngspice', BF.IMAGE, '-b', 'deck.sp']
+        assert captured == [(expected, {'supervised': True})]
+    damage['tool'] = True
+    unavailable = _current_backend_step30(p, lib, monkeypatch)
+    observation['unavailable_tool'] = unavailable
+    assert unavailable['verdict'] == 'NOT_MEASURED', unavailable
+    damage['tool'] = False
+    model = root / 'neutral/libs.tech/ngspice/model.sp'
+    model.rename(model.with_suffix('.absent'))
+    missing = _current_backend_step30(p, lib, monkeypatch)
+    observation['missing_model'] = missing
+    write(note, json.dumps(observation, indent=2) + '\n')
+    assert missing['verdict'] == 'NOT_MEASURED', missing

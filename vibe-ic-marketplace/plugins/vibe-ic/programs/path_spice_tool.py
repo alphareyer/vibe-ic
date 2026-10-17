@@ -373,13 +373,14 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
         volumes += ['-v', f'{Path(host).resolve()}:{guest}:ro']
     for key, value in (env or {}).items():
         volumes += ['-e', f'{key}={value}']
-    command = [docker, 'run', '--rm', '--network', 'none',
+    import librelane_contract as ll
+    network, native_argv = ll.native_tool_command(image, argv)
+    command = [docker, 'run', '--rm', '--network', network,
                *_dmem.docker_memory_flags(), *volumes, '--workdir', str(cwd),
-               '--entrypoint', argv[0], image, *argv[1:]]
+               '--entrypoint', native_argv[0], image, *native_argv[1:]]
     # The producer is called inside execution_resource_lease.native_boundary.
     # Calling the source-owned runner lets that boundary bind the issued
     # share, watchdog, CID, cancellation and terminal command record.
-    import librelane_contract as ll
     started = time.monotonic_ns()
     result = ll.run_container(command, supervised=True)
     ended = time.monotonic_ns()
