@@ -522,3 +522,135 @@ def test_default_entry10_resumes_current_checkpoint(
             step14 = next(row for row in observed['rows'] if str(row['id']) == '14')
             assert step14['status'] == 'PASS' and step14['canonical_pass'], observed
             assert observed['p3_entry'] == '15' and observed['p3_sites'] == ['default_backend'], observed
+
+
+@pytest.mark.parametrize('case', ['current', 'forwarded', 'missing_L8',
+                                  'current_missing_PVT', 'invalid_sdc', 'missing_liberty'])
+def test_default_entry15_refreshes_step7_before_physical_handoff(
+        tmp_path, monkeypatch, cross_phase_transport, case):
+    """True front door/Step7 owner/full consumer; real P3 stops before physical tools."""
+    import json
+    import os
+    from types import SimpleNamespace
+    import _eda_pin
+    import _path_layout as layout
+    import phase3_one_shot_runner as phase3
+    import step_output_collector as versions
+    import vibe_ic_one_shot_runner as front
+    from _ppa import timing
+    from test_default_frontend_r2 import put
+    from test_execution_receipt_chain import real_entry
+
+    project, rtl, pdk = _entry10_retained_checkpoint(tmp_path, monkeypatch)
+    observed = {'case': case, 'phase_calls': [], 'native_resolution': [],
+                'native_prelayout': []}
+    _entry10_prelayout_transport(project, pdk, monkeypatch, 'current', observed)
+    # Construct the previous valid constraint/timing data before this resume.
+    # Only an unrelated source comment differs; the canonical emitter binds it.
+    old_source = tmp_path / 'prior_source/phase3_one_shot_runner.py'
+    old_source.parent.mkdir()
+    old_source.write_bytes(Path(phase3.__file__).read_bytes() + b'\n# prior unrelated source revision\n')
+    with monkeypatch.context() as previous:
+        previous.setattr(phase3, '__file__', str(old_source))
+        seed = phase3.step_prelayout_signoff(project, 'top', pdk, '')
+        assert seed.status == 'PASS', seed.detail
+    current, stale = timing.read_step7_asic_sdc(phase3, project, 'top', pdk)
+    assert current is None and '@code:phase3_one_shot_runner.py' in stale
+    before_sdc = next((project / 'phase2/stage2/constraints').glob('*.sdc')).read_bytes()
+    pvt = project / 'phase2/stage2/constraints/pvt_matrix.json'
+    stance = project / 'reports/phase3/single_corner_stance.json'
+    preserved = {p: p.read_bytes() for p in [rtl, pvt, stance,
+                 *[p for p in (project / 'phase1').rglob('*.json')],
+                 *[p for p in (project / 'steps').rglob('outputs.json')]]}
+    observed['native_resolution'].clear();observed['native_prelayout'].clear()
+    if case == 'missing_L8':
+        (project / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json').unlink()
+    elif case == 'current_missing_PVT':
+        timing.emit_step7_asic_sdc(phase3, project, 'top', pdk, '')
+        pvt.unlink()
+        observed['sdcreader_with_missing_pvt'] = timing.read_step7_asic_sdc(
+            phase3, project, 'top', pdk)[1]
+    elif case == 'invalid_sdc':
+        (project / 'input/constraints/clock.sdc').write_text('set_input_delay {unterminated\n')
+    elif case == 'missing_liberty':
+        Path(pdk.liberty).unlink()
+    stage_owner_route(project, 'ic')
+    authority = json.loads(Path(os.environ['VIBEIC_LIBRELANE_LOCAL_ATTESTATION']).read_text())
+    metadata = _eda_pin._docker
+    def image_metadata(*argv, **kwargs):
+        if argv[:3] == ('inspect', '--format', '{{.Image}}\t{{.Config.Image}}'):
+            item = authority['container_inspect']
+            return 0, item['Image'] + '\t' + item['Config']['Image'] + '\n', ''
+        return metadata(*argv, **kwargs)
+    monkeypatch.setattr(_eda_pin, '_docker', image_metadata)
+    original_phase = front._run_phase
+    def process(label, runner, argv, env=None, **kwargs):
+        observed['phase_calls'].append(runner.name)
+        if runner.name == 'phase1_one_shot_runner.py':
+            raise AssertionError('a physical continuation reran Phase1')
+        if runner.name == 'phase2_one_shot_runner.py':
+            assert case == 'forwarded'
+            assert argv[argv.index('--entry-step') + 1] == '11'
+            put(layout.report_path(project, 'phase2_one_shot.json'), {
+                'verdict': 'PASS', 'steps': [],
+                'declared_window': {'entry_step': '11', 'exit_step': '15'},
+                'scope': 'SOURCE_CONTROL unchanged phase process routing only; not DFT/LEC PASS'})
+            return 0
+        if runner.name == 'phase3_one_shot_runner.py':
+            entry = argv[argv.index('--entry-step') + 1]
+            exit_ = argv[argv.index('--exit-step') + 1]
+            path, why = phase3._prepnr_constraint_file(project, 'top', pdk)
+            observed.update(p3_entry=entry, p3_sdc_path=str(path), p3_sdc_reason=why)
+            args = SimpleNamespace(entry_step=entry, exit_step=exit_, container='',
+                die_um='auto', util=.4, spare_density=None, pdk=pdk.name)
+            with monkeypatch.context() as edge:
+                edge.setenv('VIBEIC_PHASE3_WINDOW_RUN_ID', env['VIBEIC_PHASE3_WINDOW_RUN_ID'])
+                return phase3._run_phase3_window(
+                    project, 'top', pdk, args, phase3._phase3_window_sites(entry, exit_))
+        return original_phase(label, runner, argv, env=env, **kwargs)
+    monkeypatch.setattr(front, '_run_phase', process)
+    real_entry('IC', 'default', project)
+    monkeypatch.setattr(sys, 'argv', [str(RUNNER), str(project), '--route', 'ic',
+        '--execution-mode', 'default', '--entry-step', '11' if case == 'forwarded' else '15', '--exit-step', '15',
+        '--top-name', 'top', '--ic-name', 'top', '--pdk', pdk.name, '--container', '',
+        '--no-dashboard', '--skip-hardware', '--skip-analog'])
+    try:
+        observed['frontdoor_rc'] = front.main()
+    finally:
+        observed['rows'] = [json.loads((project / 'steps' / r['folder'] / 'outputs.json').read_text())
+                            for r in versions._read_index(project)['steps'] if r.get('versioned')]
+        summary = layout.report_path(project, 'vibe_ic_one_shot.json')
+        observed['summary'] = json.loads(summary.read_text()) if summary.is_file() else None
+        put(project / 'ENTRY15_STEP7_OBSERVATION.json', observed)
+    if case not in ('current', 'forwarded'):
+        assert 'phase3_one_shot_runner.py' not in observed['phase_calls'], observed['summary']
+        assert observed['frontdoor_rc'] != 0, observed['summary']
+        assert observed['summary']['step7_sdc_refresh']['verdict'] != 'PASS'
+        assert not observed['native_prelayout']
+        for p, raw in preserved.items():
+            if (case == 'missing_L8' and p.name == 'L8_TIMING_WAVEFORM.json'
+                    or case == 'current_missing_PVT' and p == pvt):
+                continue
+            assert p.read_bytes() == raw, p
+        return
+    assert observed.get('p3_sdc_path') != 'None', observed.get('p3_sdc_reason', observed['summary'])
+    assert observed['p3_entry'] == '15'
+    current, error = timing.read_step7_asic_sdc(phase3, project, 'top', pdk)
+    assert current is not None, error
+    assert (project / current['path']).read_bytes() == before_sdc
+    accepted = versions.latest_pass(project, '7')
+    assert accepted['canonical_pass'] and accepted['current_inputs']
+    assert accepted['result']['canonical_consumer']['status'] == 'PASS'
+    assert not observed['native_prelayout'], 'entry15 must not rerun native Step10'
+    selected_folder = accepted['folder']
+    receipt_bytes = (project / 'phase2/stage2/constraints/asic_sdc.json').read_bytes()
+    reused = front._complete_step7_sdc(project, 'top', pdk.name, '')
+    assert reused['verdict'] == 'PASS' and reused['producer_reused'] is True
+    assert versions.latest_pass(project, '7')['folder'] == selected_folder
+    assert (project / 'phase2/stage2/constraints/asic_sdc.json').read_bytes() == receipt_bytes
+    if case == 'forwarded':
+        handoff = versions.latest_pass(project, '14')
+        assert handoff['canonical_pass'] and handoff['status'] == 'PASS'
+        assert handoff['result']['canonical_consumer']['status'] == 'PASS'
+    for p, raw in preserved.items():
+        assert p.read_bytes() == raw, p

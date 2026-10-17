@@ -831,6 +831,65 @@ def _revalidate_step5_checkpoint(project: Path) -> Optional[dict]:
             'producer_reused': True}
 
 
+def _complete_step7_sdc(project: Path, top: str, pdk_name: str,
+                        container: str) -> dict:
+    """Refresh stale Step7 SDC through its existing author and full consumer."""
+    import _flow_yaml
+    import design_one_shot_runner as design
+    import execution_backend_gates as gates
+    import phase3_one_shot_runner as phase3
+    import step_output_collector as versions
+    import step_preflight as preflight
+    from _ppa import timing
+
+    try:
+        pdk = design._phase2_pdk_config(project, pdk_name)
+        current, stale = timing.read_step7_asic_sdc(phase3, project, top, pdk)
+        if current is not None:
+            prior = versions.latest_pass(project, '7')
+            selected = next((row for row in versions._read_index(project)['steps']
+                             if str(row['id']) == '7'), None)
+            consumer = ((prior or {}).get('result') or {}).get('canonical_consumer') or {}
+            row7 = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '7')
+            try:
+                outputs = gates.contracts(project, row7)
+            except (OSError, ValueError, RuntimeError):
+                outputs = None
+            if (prior and selected and prior['folder'] == selected['folder']
+                    and prior.get('current_inputs') and prior.get('canonical_pass')
+                    and prior['status'] == 'PASS' and consumer.get('status') == 'PASS'
+                    and outputs and outputs == consumer.get('outputs')):
+                return {'verdict': 'PASS', 'producer_reused': True,
+                        'detail': 'current complete Step7 and input-bound SDC'}
+        admission = preflight.entry_admission(project, 'design_one_shot_runner', '7')
+        if not admission['admitted']:
+            return {'verdict': 'NOT_MEASURED', 'detail': admission['reason']}
+
+        def produce_sdc():
+            timing.emit_step7_asic_sdc(phase3, project, top, pdk, container)
+            current, error = timing.read_step7_asic_sdc(phase3, project, top, pdk)
+            return {'rc': 0 if current is not None else 2,
+                    'detail': error or 'Step7 SDC refreshed by its canonical author',
+                    'stale_input': stale}
+
+        began = time.time()
+        preflight.retained_call(project, '7', produce_sdc, canonical_acceptance=True)
+        current = next((row for row in versions.current_acceptance(project, began)
+                        if str(row['id']) == '7'), None)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    if current is None:
+        return {'verdict': 'NOT_MEASURED',
+                'detail': 'Step7 refresh published no complete consumer'}
+    consumer = (current.get('result') or {}).get('canonical_consumer') or {}
+    status = ('PASS' if current.get('canonical_pass') and current['status'] == 'PASS'
+              and consumer.get('status') == 'PASS' else
+              'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED')
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
+                      or str(current['result'].get('producer_return', {}))}
+
+
 def _complete_step14_handoff(project: Path) -> dict:
     """Run the existing synthesis audits and retain their complete consumer.
 
@@ -2563,6 +2622,23 @@ def _main() -> int:
                 'whole_flow_verdict': 'NOT_MEASURED'}, project)
             lock.release()
             return 1 if step5_acceptance['verdict'] == 'FAIL' else 2
+        step7_acceptance = (_complete_step7_sdc(
+            project, args.top_name, args.pdk, args.container)
+            if execution_policy_value['mode'] == 'default'
+            and str(args.entry_step) == '15' else None)
+        if step7_acceptance is not None and step7_acceptance['verdict'] != 'PASS':
+            status = step7_acceptance['verdict']
+            out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_runner_summary(out, {
+                'program': 'vibe_ic_one_shot_runner', 'bounded': False,
+                'verdict': status, 'halted_at': 'phase2',
+                'phases': [{'name': 'phase2', 'verdict': status,
+                            'rc': 1 if status == 'FAIL' else 2}],
+                'step7_sdc_refresh': step7_acceptance,
+                'whole_flow_verdict': 'NOT_MEASURED'}, project)
+            lock.release()
+            return 1 if status == 'FAIL' else 2
         # Only the signed Phase2 handoff adds Step14 here. Isolated backend
         # repairs without that checkpoint retain their existing entry scope.
         step14_acceptance = (_complete_step14_handoff(project)
@@ -3285,6 +3361,22 @@ def _main() -> int:
             # A bounded Phase2 omits the whole-flow producer sweep. Complete
             # its existing synthesis handoff before entering the physical
             # owner; its phase summary alone cannot authorize Step15.
+            step7_acceptance = _complete_step7_sdc(
+                project, phase3_top, args.pdk, args.container)
+            if step7_acceptance['verdict'] != 'PASS':
+                status = step7_acceptance['verdict']
+                out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+                out.parent.mkdir(parents=True, exist_ok=True)
+                _write_runner_summary(out, {
+                    'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                    **_delivery_route.report_label(project),
+                    'verdict': status, 'halted_at': 'phase2',
+                    'phases': [{'name': n, 'verdict': v, 'rc': code}
+                               for n, v, code in plan],
+                    'step7_sdc_refresh': step7_acceptance,
+                    'whole_flow_verdict': 'NOT_MEASURED'}, project)
+                lock.release()
+                return 1 if status == 'FAIL' else 2
             step14_acceptance = _complete_step14_handoff(project)
             if step14_acceptance['verdict'] != 'PASS':
                 status = step14_acceptance['verdict']
