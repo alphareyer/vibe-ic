@@ -449,7 +449,10 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
         assert kwargs['overlay']['DIE_AREA'][0] == LC._def_die_area(Path(stream['filled_def']))
         paths = {step: BF.put(p / native.CONFIG / (step + '.json'), {
             'meta': {'step': step}, 'DESIGN_NAME': 'cal_pg', 'PDK': 'neutral',
-            'TECH_LEFS': [str(material)]}) for step in steps}
+            'TECH_LEFS': [str(material)],
+            'KLAYOUT_TECH': str(root / 'neutral/stream.lyt'),
+            'KLAYOUT_PROPERTIES': str(root / 'neutral/stream.lyp'),
+            'KLAYOUT_DEF_LAYER_MAP': str(root / 'neutral/stream.lym')}) for step in steps}
         for step, path in paths.items():
             inputs = ['mag_gds', 'klayout_gds'] if step == native.STEPS[-1] else ['odb', 'def', 'nl', 'sdc']
             BF.put(LC.views_path(path), {'step': step, 'inputs': inputs, 'outputs': []})
