@@ -58021,7 +58021,7 @@ _PRESTREAM_GATES = (
     ("em_authority", "em_peak_current_authority_check.py",
      "reports/phase3/prestream/em_current_authority.json", ()),
     ("antenna", "antenna_report_check.py",
-     "reports/phase3/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
+     "reports/phase3/prestream/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
     ("si", "si_crosstalk_check.py",
      "reports/phase2/gates/si_crosstalk.json", ()),
     ("si_mcf", "si_mcf_sta_check.py",
@@ -58038,7 +58038,7 @@ _FINAL_LAYOUT_GATES = (
     ("em_authority_final", "em_peak_current_authority_check.py",
      "reports/phase3/final/em_current_authority.json", ()),
     ("antenna_final", "antenna_report_check.py",
-     "reports/phase3/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
+     "reports/phase3/final/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
     # A router report cannot attest to antenna geometry introduced by
     # finishing or fill. The GDS deck reads the delivered stream directly;
     # a missing deck is NOT_MEASURED, never release PASS. Keep this output

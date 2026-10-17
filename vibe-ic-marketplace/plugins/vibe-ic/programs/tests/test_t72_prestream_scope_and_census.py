@@ -118,13 +118,15 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
     supplies readable reports, segment currents, wire geometry and Jmax.
     """
     import test_em_peak_current_authority_check as current
+    import test_antenna_report_check as antenna
     specs = R._PRESTREAM_GATES if phase == 'prestream' else R._FINAL_LAYOUT_GATES
     programs = {'ir_drop_report_check.py', 'em_report_check.py',
-                'em_peak_current_authority_check.py'}
+                'em_peak_current_authority_check.py', 'antenna_report_check.py'}
     selected = [spec for spec in specs if spec[1] in programs]
     aliases = {'ir_drop_signoff.json': 'eda_report_audit:ir_drop',
                'em_signoff.json': 'eda_report_audit:em',
-               'em_current_authority.json': 'em_peak_current_authority_check'}
+               'em_current_authority.json': 'em_peak_current_authority_check',
+               'antenna_signoff.json': 'eda_report_audit:antenna'}
     for peak, expected in [('1.0e-06', 'PASS'), ('5.0', 'FAIL')]:
         project = current._project(tmp_path / expected, peak=peak,
                                    with_csv=True, with_jmax=True)
@@ -135,6 +137,7 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
             'worst voltage drop: 6.8 mV (0.2% Vdd) static IR\n'
             'worst dynamic IR: 9.1 mV (0.3% Vdd)\n'
             + '# synthetic report detail\n' * 100)
+        (reports / 'antenna.rpt').write_text(antenna.CLEAN)
         em_report = reports / 'em.rpt'
         em_report.write_text(em_report.read_text() + '# synthetic report detail\n' * 100)
         retained = {}
@@ -145,12 +148,12 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
             retained[path] = path.read_bytes()
         native_inputs = {path: path.read_bytes() for path in (
             reports / 'ir_drop.rpt', reports / 'em.rpt', reports / 'em.json',
-            reports / 'em_segments.csv', reports / 'em_jmax.json',
+            reports / 'em_segments.csv', reports / 'em_jmax.json', reports / 'antenna.rpt',
             project / 'phase3/stage3/pnr/routed.def')}
         rows = [R._run_declared_signoff_gate(project, *spec) for spec in selected]
         assert {path: path.read_bytes() for path in retained} == retained
         assert {path: path.read_bytes() for path in native_inputs} == native_inputs
-        assert len(rows) == (3 if phase == 'prestream' else 2)
+        assert len(rows) == (4 if phase == 'prestream' else 3)
         for spec, row in zip(selected, rows):
             report = project / spec[2]
             assert row.output_files == [str(report)]
