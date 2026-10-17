@@ -141,7 +141,8 @@ def _default_fill_pairs(project: Path) -> Tuple[set, Optional[dict]]:
     import _gds_geometry as geometry
     try:
         before = geometry.read_layout(Path(arm['filler']['gds_in']))
-        if not containers or containers.intersection(before.cells):
+        original_cells = set(before.cells)
+        if not containers or containers.intersection(original_cells):
             raise ValueError('XOR_FILLER_CONTAINER_NOT_NEW')
         del before
         deposited = geometry.read_layout(Path(arm['filler']['filled_gds']))
@@ -152,11 +153,13 @@ def _default_fill_pairs(project: Path) -> Tuple[set, Optional[dict]]:
         name = pending.pop()
         if name in visited:
             continue
+        if name in original_cells:
+            raise ValueError('XOR_FILLER_REFERENCES_EXISTING_DESIGN_CELL')
         visited.add(name)
         cell = deposited.cells[name]
         pairs.update((element.layer, element.datatype) for element in cell.own_area_elements())
         pending.extend(element.sname for element in cell.refs())
-    if not pairs or not pairs.issubset(set(declared.values())):
+    if not pairs.issubset(set(declared.values())):
         raise ValueError('XOR_FILLER_WRITE_SET_NOT_DECLARED')
     sources = {str(source): _sha256(source), arm['filler']['gds_in']: arm['filler']['gds_in_sha256'],
                arm['filler']['filled_gds']: arm['filler']['filled_sha256']}

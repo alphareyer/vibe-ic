@@ -288,7 +288,8 @@ def _native373_boundary_subject(tmp_path, monkeypatch):
     tech = root / 'neutral/stream.lef'
     tech.write_text('UNITS\n DATABASE MICRONS 2000 ;\nEND UNITS\nMANUFACTURINGGRID 0.005 ;\n')
     script = root / 'neutral/filler.rb'
-    script.write_text('Dummy = $ly.layer(34, 4)\n$fill_cell = $ly.create_cell("DECLARED_FILL")\n')
+    script.write_text('Dummy = $ly.layer(34, 4)\nDesign = $ly.layer(32, 0)\n'
+                      '$fill_cell = $ly.create_cell("DECLARED_FILL")\n')
     density = LF.run_density
 
     def native_density(*args, **kwargs):
