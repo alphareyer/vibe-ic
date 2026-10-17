@@ -230,7 +230,7 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
                 if path.is_file():
                     record = json.loads(path.read_text())
                     observed["saved_rows"].append({"id": record["id"],
-                        "status": record["status"], "canonical_pass": record["canonical_pass"],
+                        "status": record["status"], "canonical_pass": record.get("canonical_pass"),
                         "result": record.get("result")})
         (project / "cross_phase_observation.json").write_text(
             json.dumps(observed, indent=2) + "\n")
