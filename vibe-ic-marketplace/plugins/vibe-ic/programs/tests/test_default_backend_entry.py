@@ -140,6 +140,9 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
     def native_chain(*args, **kwargs):
         folders = chain(*args, **kwargs)
         folder = folders[1]
+        (folder / "COMMANDS").write_text(
+            "yosys -p 'synth -top top; dfflibmap; abc; setundef -zero; "
+            "hilomap; splitnets; clean; write_verilog top.nl.v'\n")
         for name in ("pre_synth_chk.rpt", "chk.rpt"):
             text = "Found and reported 0 problems.\n"
             if case == "phase2_failure" and name == "chk.rpt":
