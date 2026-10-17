@@ -1062,6 +1062,7 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
     None when step 34 did not run on the tool (no record, or a record with no
     measured GDS arm).  A record whose tool state no longer hashes to what it
     names is refused: a cross-reference to evidence that moved is not one."""
+    project = project.resolve()
     path = project / RECORD_REL
     if not path.is_file():
         return None

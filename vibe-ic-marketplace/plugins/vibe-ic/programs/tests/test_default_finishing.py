@@ -184,6 +184,46 @@ def test_current_finished_bytes_are_consumed_by_both_existing_rows(tmp_path):
     assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
 
 
+def test_relative_project_cli_consumes_the_current_default_density(tmp_path):
+    """Actual child CLI and validators; retained native processes are neutral."""
+    import subprocess
+    import sys
+    import os
+    p, record, _ = subject(tmp_path)
+    output = p / 'relative-step34.json'
+    # Carry only this fixture's declared transport and PDK data into the
+    # child; no producer/receipt/density validator is replaced.
+    bootstrap = '''import runpy, sys
+from pathlib import Path
+import _container_exec as transport
+import pdk_metal_density_windows as windows
+import librelane_fill_dfm as finishing
+transport.no_container_route = lambda: False
+windows._REGISTRY_PATH = Path(sys.argv.pop(1))
+try:
+    finishing.validate_default_stream(Path('.'))
+except ValueError as exc:
+    print('SOURCE_CONTROL_RELATIVE_VALIDATOR_EXCEPTION: ' + repr(exc), file=sys.stderr)
+script = sys.argv.pop(1)
+sys.argv[0] = script
+runpy.run_path(script, run_name='__main__')
+'''
+    result = subprocess.run([sys.executable, '-c', bootstrap, str(WINDOWS._REGISTRY_PATH),
+        str(Path(MFD.__file__).resolve()), '.', '--json', str(output)],
+        cwd=p, capture_output=True, text=True, check=False,
+        env=dict(os.environ,
+                 PYTHONPATH=str(Path(MFD.__file__).resolve().parent)))
+    (p / 'relative-step34.stdout').write_text(result.stdout)
+    (p / 'relative-step34.stderr').write_text(result.stderr)
+    report = json.loads(output.read_text())
+    assert result.returncode == 0, report
+    assert report['project_dir'] == '.' and report['summary']['pass'] is True
+    assert report['summary']['odb_fill_consumed'] is True
+    assert report['summary']['tool_density_errors'] == 0
+    assert report['summary']['filled_gds_density'] == 'PASS'
+    assert report['tool_per_layer_density']['subject_sha256'] == record['canonical_sha256']
+
+
 @pytest.mark.parametrize('mutation', ['stream_execution', 'filler_execution', 'filled_def',
     'stream_bytes', 'wrong_stage', 'wrong_design', 'wrong_tool', 'image', 'pdk',
     'canonical', 'pnr_copy', 'promotion_removed', 'consumer_record_removed',
