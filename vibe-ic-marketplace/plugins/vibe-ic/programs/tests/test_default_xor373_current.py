@@ -312,7 +312,8 @@ def test_default_stream_producer_and_reader_use_bound_filled_views(
     pnr = project / 'phase3/stage3/pnr'
     pnr.mkdir(parents=True)
     routed = pnr / 'routed.def'
-    routed.write_text('VERSION 5.8 ;\nDESIGN package_shell ;\nEND DESIGN\n')
+    routed.write_text('VERSION 5.8 ;\nDESIGN package_shell ;\n'
+                      'UNITS DISTANCE MICRONS 1000 ;\nDIEAREA ( 0 0 ) ( 10000 10000 ) ;\nEND DESIGN\n')
     old_nl = pnr / 'logical_source.v'
     old_nl.write_text('module package_shell(input a, output z); assign z=a; endmodule\n')
     old_sdc = pnr / 'constraint.sdc'
