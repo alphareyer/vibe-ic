@@ -115,7 +115,8 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
 
     project, rtl, pdk, native_calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
     stage_owner_route(project, "ic")
-    put(project / "phase1/generated_docs/L5_ADI_SPEC.json", {"no_analog": True})
+    if case != "handoff_missing_input":
+        put(project / "phase1/generated_docs/L5_ADI_SPEC.json", {"no_analog": True})
     # Admission reads image metadata, not the forbidden generic producer.
     # Replay only this exact read from the real enclosing launch observation.
     import _eda_pin
@@ -188,8 +189,6 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
                 canonical = project / "phase2/stage2/synth/netlist.v"
                 if case == "handoff_failure":
                     canonical.write_text(canonical.read_text() + "// changed handoff bytes\n")
-                elif case == "handoff_missing_input":
-                    canonical.unlink()
             return 0 if row.status == "PASS" else 1
         if runner.name == "phase3_one_shot_runner.py":
             entry = argv[argv.index("--entry-step") + 1]
