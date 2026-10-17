@@ -114,6 +114,17 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
 
     project, rtl, pdk, native_calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
     stage_owner_route(project, "ic")
+    # Admission reads image metadata, not the forbidden generic producer.
+    # Replay only this exact read from the real enclosing launch observation.
+    import _eda_pin
+    docker_metadata = _eda_pin._docker
+    authority = json.loads(Path(os.environ["VIBEIC_LIBRELANE_LOCAL_ATTESTATION"]).read_text())
+    def inspect_metadata(*argv, **kwargs):
+        if argv[:3] == ("inspect", "--format", "{{.Image}}\t{{.Config.Image}}"):
+            item = authority["container_inspect"]
+            return 0, item["Image"] + "\t" + item["Config"]["Image"] + "\n", ""
+        return docker_metadata(*argv, **kwargs)
+    monkeypatch.setattr(_eda_pin, "_docker", inspect_metadata)
     # Native resolved config and original report files, before the neutral
     # transport issues its first receipt. Do not restamp real field evidence.
     resolve, chain = contract.resolve_step_config, contract.run_chain
