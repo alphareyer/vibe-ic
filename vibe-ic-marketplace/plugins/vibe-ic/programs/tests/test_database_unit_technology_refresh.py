@@ -76,6 +76,7 @@ def test_default_373_publishes_real_units_before_the_public_xor_entry(
     import librelane_fill_dfm as LF
     import librelane_pv_signoff as PV
     import _klayout_launch as KL
+    import _default_backend_fixtures as BF
     from test_default_stream_epoch_order import _transport
     from test_default_finishing import refresh_receipt
 
@@ -93,7 +94,8 @@ def test_default_373_publishes_real_units_before_the_public_xor_entry(
     layout.write(str(cell_gds))
     pdk = SimpleNamespace(name='neutral', tech_lef=str(tech), cell_gds=str(cell_gds))
 
-    tool = json.loads((project / LF.RECORD_REL).read_text())['odb']['tool']
+    odb = json.loads((project / LF.RECORD_REL).read_text())['odb']
+    tool = odb['tool']
     state_path = Path(tool['state'])
     state = json.loads(state_path.read_text())
     for key, name, text in [('nl', 'cal_pg.nl.v', 'module cal_pg; endmodule\n'),
@@ -104,7 +106,9 @@ def test_default_373_publishes_real_units_before_the_public_xor_entry(
     state_path.write_text(json.dumps(state))
     refresh_receipt(state_path.parent)
     tool['state_sha256'] = LC.digest(state_path)
-    LF.update_record(project, 'odb', {'tool': tool})
+    tool['binding']['receipt_sha256'] = LC.digest(state_path.parent / 'vibeic_receipt.json')
+    BF.consume_fill(project, tool)
+    LF.update_record(project, 'odb', odb)
     stream = LF.default_stream(project, 'top', pdk, '')
     filled = Path(stream['filled_def']).resolve()
     declaration = project / TD.DECLARATION_REL
