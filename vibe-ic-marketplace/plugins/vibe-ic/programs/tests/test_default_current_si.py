@@ -768,3 +768,122 @@ def test_default_mcf_uses_current_physical_subject_and_owns_all_outputs(
         else:
             assert report['verdict'] == 'PASS'
             assert versions.latest_pass(p, '27')['current_inputs'] is True
+# The saved Step23 is neutral retained input, not a rerun of its native tool.
+# Step27's producer, current readers, MCF and full canonical consumer are real.
+def test_default_row27_reuses_the_typed_local_pdk_witness(tmp_path, monkeypatch):
+    import copy
+    import sys
+    import librelane_contract as LC
+    native_sta = LS.run_sta_script
+    p, cfg, observed = _default_step27_transport(tmp_path, monkeypatch)
+    put(p / 'reports/phase1/submission_template_fetch.json',
+        {'pdk': 'neutral', 'pdk_source': '--pdk'})
+    source = tmp_path / 'native-source'
+    write(source / 'librelane/__init__.py', '# SOURCE_FIXTURE_ONLY\n')
+    switch_path = p / 'phase3/librelane_switch.json'
+    switch = json.loads(switch_path.read_text())
+    switch.pop('pdk', None)  # The runtime is unnamed; the PDK role stays named.
+    switch.pop('image', None)  # The saved native receipt owns its source image.
+    switch.update(execution_route='LOCAL', local_network_mode='host',
+                  librelane_root_host=str(source), librelane_executable=sys.executable)
+    put(switch_path, switch)
+    import librelane_postroute as LP
+    import _watchdog
+    # Restore the real launcher; only its supervised process leaf is neutral.
+    record_path = p / LP.STEP23_RECORD
+    state_record = json.loads(record_path.read_text())
+    previous = Path(state_record['sta_state']).parent
+    state_in = json.loads((previous / 'state_in.json').read_text())
+    state_in['odb'] = str(write(p / 'phase3/stage3/pnr/neutral.odb', 'SOURCE_FIXTURE_ONLY\n'))
+    state_in['def'] = str(write(p / 'phase3/stage3/pnr/neutral.def',
+        'VERSION 5.8 ;\nDESIGN neutral ;\nEND DESIGN\n'))
+    state = put(p / 'phase3/librelane/typed-si-state.json', state_in)
+    config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
+    actual_gate_transport = _watchdog.run_host_supervised
+    calls = []
+    def native_leaf(command, **kwargs):
+        if '--id' in command:
+            folder = Path(command[command.index('-o') + 1])
+            before = json.loads(Path(command[command.index('-i') + 1]).read_text())
+            put(folder / 'state_in.json', before)
+            put(folder / 'state_out.json', before)
+            put(folder / 'config.json', json.loads(config.read_text()))
+            for name in ('sta.log', 'power.rpt'):
+                write(folder / 'nom_typ' / name, (previous / 'nom_typ' / name).read_text())
+            return _watchdog.SupervisedResult(rc=0, out='SOURCE_FIXTURE_ONLY\n', err='', outcome='natural')
+        if 'sta' in command:
+            calls.append({'argv': command, 'network': kwargs['env']['VIBEIC_LOCAL_NETWORK_MODE']})
+            data = {'pins': {pin: {'arr_rise_min': 1.0, 'arr_rise_max': 1.2,
+                'arr_fall_min': 1.0, 'arr_fall_max': 1.2, 'slew_rise_max': 0.1,
+                'slack_max': 4.0} for pin in ('u0:Z', 'u1:Z', 'u2:A', 'z')}}
+            put(p / 'phase3/stage3/extracted/neutral_si_timing.json', data)
+            marker = re.search(r'VIBEIC_CURRENT_DONE [a-f0-9]+', Path(command[-1]).read_text())[0]
+            text = 'SOURCE_FIXTURE_ONLY\nSI_TIMING_JSON_EMIT_DONE\n' + marker + '\n'
+            return _watchdog.SupervisedResult(rc=0, out=text, err='', outcome='natural')
+        return actual_gate_transport(command, **kwargs)
+    monkeypatch.setattr(_watchdog, 'run_host_supervised', native_leaf)
+    monkeypatch.setattr(LS, 'run_sta_script', native_sta)
+    monkeypatch.setattr(LC, 'image_capability', lambda *a, **k: {})
+    monkeypatch.setattr(LC, 'openroad_home', lambda *a, **k: None)
+    live_namespace = LC._local_network_namespace()
+    with monkeypatch.context() as old_context:
+        # Neutral old-context metadata goes through the actual LC producer.
+        old_context.setattr(LC, '_local_network_namespace', lambda: 'net:[retained-fixture]')
+        image = LC.resolve_image(p, record=False)
+        root_doc = LC.pdk_root_resolution(p, 'neutral', image=image)
+        folder = LC.run_chain(p, image, [('OpenROAD.STAPostPNR', config, state)],
+            lane='23-si-retained', pdk_root='/pdk',
+            mounts=[(p / 'fixture_pdk', '/pdk')])[0]
+    state_record.update(sta_state=str(folder / 'state_out.json'),
+                        sta_state_sha256=LC.digest(folder / 'state_out.json'))
+    put(record_path, state_record)
+    fresh = LC.resolve_image(p, record=False)
+    assert fresh != image and fresh.network_namespace == live_namespace
+    assert root_doc['provider']['pdk'] is None and root_doc['pdk'] == 'neutral'
+    assert root_doc['source'] == 'local_provider' and 'derivation' not in root_doc
+    retained = {name: LC.digest(folder / name) for name in
+                ('vibeic_receipt.json', 'input_fingerprint.json', 'pdk_root.json')}
+    LC._LOCAL_PROVIDER_IDENTITIES.pop(str(image), None)
+    root_path = p / 'phase3/librelane_pdk_root.provenance.json'
+
+    row = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+    record_path = p / 'reports/phase3/default_steps/27/backend_result.json'
+    record = json.loads(record_path.read_text())
+    observation = {'status': row.status, 'detail': row.detail,
+                   'record': record, 'provider': root_doc,
+                   'calls': copy.deepcopy(observed), 'native_calls': calls,
+                   'fresh_runtime': fresh.as_record(), 'retained': retained, 'refusals': {}}
+    put(tmp_path / 'LOCAL_SI_OBSERVATION.json', observation)
+    assert row.status == 'PASS', row.detail
+    assert record['producer_verdict'] == record['verdict'] == 'PASS'
+    assert record['canonical_step_result']['status'] == 'PASS'
+    assert SG.main([str(p)]) == 0
+    assert observed['sta_calls'] == ['nominal', 'mcf_setup', 'mcf_hold']
+    assert observed['si_checks'] == 1
+    assert calls and all(call['network'] == 'host' for call in calls)
+    assert {name: LC.digest(folder / name) for name in retained} == retained
+    import _opensta_current as current
+    subject, tool = current.tool_subject(p, 'neutral', coupling=True)
+    assert subject['tool_image'] == current.si_binding(p)['tool_image'] == image
+    assert isinstance(tool['image'], LC.LocalProviderIdentity) and tool['image'] == fresh
+    original_calls = copy.deepcopy(observed)
+
+    for damage in ('provider', 'missing_provider', 'pdk', 'root', 'material'):
+        bad = copy.deepcopy(root_doc)
+        if damage == 'provider':
+            bad['provider']['source_sha256'] = '0' * 64
+        elif damage == 'missing_provider':
+            bad.pop('provider')
+        elif damage == 'pdk':
+            bad['pdk'] = 'foreign'
+        elif damage == 'root':
+            bad['path'] = str(tmp_path)
+        else:
+            Path(cfg.liberty).write_text(Path(cfg.liberty).read_text() + '\n# changed\n')
+        put(root_path, bad)
+        rejected = R._default_pnr_rows(p, 'neutral', cfg, 'SOFTWARE_FIXTURE_ONLY', ['27'])
+        observation['refusals'][damage] = {'status': rejected.status, 'detail': rejected.detail}
+        put(tmp_path / 'LOCAL_SI_OBSERVATION.json', observation)
+        assert rejected.status == 'NOT_MEASURED', (damage, rejected.detail)
+        assert observed == original_calls, (damage, observed)
+        put(root_path, root_doc)

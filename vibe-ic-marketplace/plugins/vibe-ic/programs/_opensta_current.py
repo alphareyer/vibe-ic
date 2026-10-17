@@ -290,6 +290,10 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     if fp.get('image') != image:
         raise Refusal('CURRENT_STAPOSTPNR_IMAGE_CHANGED')
     mounts = evidence._pdk_mounts(project, switch, folder, image)
+    runtime = image
+    if str(image).startswith(lc.LOCAL_PROVIDER_IDENTITY_PREFIX):
+        evidence._retained_local_provider(project, fp.get('local_provider'), image)
+        runtime = lc.resolve_image(project, record=False)
     evidence._hashes(fp.get('state_files'))
     evidence._hashes(fp.get('config_files'), mounts)
     evidence._hashes(fp.get('liberty_files'), mounts)
@@ -347,7 +351,7 @@ def _tool_subject(project, top, *, corner=None, coupling=False):
     subject['tool_image'] = image
     subject['tool_corner'] = corner
     return subject, {'state': folder / 'state_out.json', 'corner': corner,
-                     'liberties': inputs['liberties'], 'image': image,
+                     'liberties': inputs['liberties'], 'image': runtime,
                      'mounts': [(Path(host), guest) for host, guest in mounts]}
 
 

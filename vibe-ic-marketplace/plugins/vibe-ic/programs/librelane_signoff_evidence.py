@@ -8,6 +8,7 @@ No producer/default policy is changed here; root composes those contracts.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -129,6 +130,26 @@ def _image(project: Path, switch: dict) -> str:
     return image
 
 
+def _retained_local_provider(project: Path, previous: dict, reference: str):
+    """Verify retained material independently of its old execution namespace."""
+    import librelane_contract as lc
+    _require(isinstance(previous, dict), 'LL_PDK_PROVIDER_UNBOUND')
+    current = lc.local_provider_identity(project, pdk=previous.get('pdk'))
+    fresh = current.as_record() if current is not None else {}
+    material = {k: v for k, v in previous.items() if k != 'reference'}
+    bound = lc.LOCAL_PROVIDER_IDENTITY_PREFIX + hashlib.sha256(json.dumps(
+        material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    execution = {'reference', 'network_namespace'}
+    _require(fresh and set(previous) == set(fresh)
+             and isinstance(previous.get('network_namespace'), str)
+             and previous['network_namespace']
+             and reference == previous.get('reference') == bound
+             and {k: v for k, v in previous.items() if k not in execution}
+             == {k: v for k, v in fresh.items() if k not in execution},
+             'LL_PDK_PROVIDER_CHANGED')
+    return current
+
+
 def _pdk_mounts(project: Path, switch: dict, folder: Path, image: str) -> list:
     """Use the actual root producer schema; never materialize/re-resolve it."""
     root_rec = _read(project / 'phase3/librelane_pdk_root.provenance.json')
@@ -142,7 +163,16 @@ def _pdk_mounts(project: Path, switch: dict, folder: Path, image: str) -> list:
                 or root_rec.get('path') or '')
     _require(root.is_absolute() and root.is_dir(), 'LL_PDK_MATERIAL_MISSING')
     _require(root.resolve() == Path(root_rec.get('path') or '').resolve(), 'LL_PDK_ROOT_CHANGED')
-    if root_rec.get('source') == 'resolved':
+    if root_rec.get('source') == 'local_provider':
+        # As at the retained RCX boundary, only the old execution's namespace
+        # and self-bound reference may differ; every material/policy is fresh.
+        provider = _retained_local_provider(
+            project, root_rec.get('provider'), root_rec.get('identity'))
+        _require(root_rec.get('pdk') == pdk
+                 and provider.pdk in (None, pdk)
+                 and Path(provider.pdk_root).resolve() == root.resolve(),
+                 'LL_PDK_IMAGE_OR_PROCESS_CHANGED')
+    elif root_rec.get('source') == 'resolved':
         _require(derivation.get('image') == image and derivation.get('pdk') == pdk,
                  'LL_PDK_IMAGE_OR_PROCESS_CHANGED')
         _require(Path(derivation.get('host_path') or '').resolve() == (root / pdk).resolve(),
