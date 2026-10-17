@@ -21,7 +21,8 @@ from test_librelane_contract import local_image  # noqa: E402,F401 — existing 
 
 
 @pytest.mark.parametrize('scenario', [
-    'current', 'wrong_gds', 'missing_native_proof', 'nonzero_native_inconsistency'])
+    'current', 'wrong_gds', 'missing_native_proof', 'nonzero_native_inconsistency',
+    'default_without_switch'])
 def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch, local_image, scenario):
     """Real chain/receipt and consumer; only the native process edge is neutral."""
     import librelane_contract as contract
@@ -83,9 +84,32 @@ def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch
     elif scenario == 'missing_native_proof':
         (folder / 'vibeic_receipt.json').unlink()
     report = tmp_path / 'reports/phase2/gates/gate_oxide_geom_deck.json'
-    rc = gate.main([str(tmp_path), '--json', str(report)])
+    if scenario == 'default_without_switch':
+        import flow_compliance_check as audit_gate
+        # Ordinary chip-class inputs select the existing Default owner without
+        # a legacy implementation switch. They are not native measurement proof.
+        (tmp_path / 'phase3/librelane_switch.json').unlink()
+        put(tmp_path / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',
+            {'fields': {'pdk_target': 'fixture_pdk'}})
+        route = tmp_path / 'input/submission_template/SELF_TAPEOUT.txt'
+        route.parent.mkdir(parents=True)
+        route.write_text('SELF_TAPEOUT\n')
+        monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', image)
+        put(report, {'verdict': 'DISCLOSED_SKIP', 'measurement': 'NOT_MEASURED',
+                     'reason': 'retained prior consumer report'})
+        original = report.read_bytes()
+        command = 'gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json'
+        outcome = audit_gate._check_program_exit_zero(tmp_path, command)
+        assert outcome.exit_code == 0, outcome
+        assert outcome.structured_verdict == 'PASS', outcome
+        assert report.read_bytes() == original
+        redirected = Path(audit_gate._RECEIPT_REDIRECTS[audit_gate._resolved_key(report)][0])
+        assert redirected != report and redirected.parent.parent == tmp_path / '.vibeic-state/audit_receipts'
+        report, rc = redirected, outcome.exit_code
+    else:
+        rc = gate.main([str(tmp_path), '--json', str(report)])
     result = json.loads(report.read_text())
-    if scenario == 'current':
+    if scenario in ('current', 'default_without_switch'):
         assert rc == 0, result
         assert result['verdict'] == 'PASS' and result['violations'] == 0
         assert result['evidence_basis'] == 'retained_KLayout.Antenna'

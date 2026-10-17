@@ -432,8 +432,9 @@ def _retained_native_result(project: Path, gds: Path, router: Optional[str],
                                    _kl.host_list_files, _kl.host_list_tree)
         if deck is None:
             raise ValueError(why)
-        mounts = native._pdk_mounts(project, native._read(
-            project / 'phase3/librelane_switch.json'), folder, row['image'])
+        switch_path = project / 'phase3/librelane_switch.json'
+        switch = native._read(switch_path) if switch_path.is_file() else {}
+        mounts = native._pdk_mounts(project, switch, folder, row['image'])
         from _container_exec import localise_mounted_paths
         def local(path):
             return Path(localise_mounted_paths(str(path), [(guest, str(host)) for host, guest in mounts])).resolve()
