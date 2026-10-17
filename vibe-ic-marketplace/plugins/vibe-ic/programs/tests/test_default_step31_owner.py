@@ -739,8 +739,15 @@ def test_public_default31_native_owner_closes_retained_subject(
         tmp_path, monkeypatch, local_image, case)
     before = {role: path.read_bytes() for role, path in selected.items()
               if role in ("def", "netlist", "sdc", "gds")}
+    closure_calls = (_observe_native31_closure_calls(monkeypatch)
+                     if case == "current" else None)
     rc, record, retained, row, post31_connectivity = _public_native31_window(
         project, pdk, monkeypatch, case=case, native_processes=calls)
+    if closure_calls is not None:
+        observation_path = project / "NATIVE_OWNER_OBSERVATION.json"
+        observation = json.loads(observation_path.read_text())
+        observation["same_call_closure_counts"] = closure_calls
+        observation_path.write_text(json.dumps(observation, indent=2))
     if case in ("drc_error", "netgen_mismatch", "legacy_feedback"):
         assert rc != 0 and record["result"]["producer_verdict"] == "FAIL", record
         assert not record["canonical_pass"] and retained is None
@@ -1185,3 +1192,36 @@ def _native31_synthesis_handoff(project, pdk, source_netlist):
     put(mapped.parent, "synth_inputs.json", json.dumps({"netlist": mapped.name}))
     handoff.publish_handoff(project, folder, mapped, "spm")
     assert handoff.bound_handoff(project)["verdict"] == "PASS"
+
+
+def _observe_native31_closure_calls(monkeypatch):
+    """Count real validator entries; no verdict, material or timing substitute."""
+    import _physical_current as current
+    import _native373_current as streams
+    import librelane_fill_dfm as fill
+    observed = {"totals": {"whole_stream": 0, "native_current": 0},
+                "resolver_calls": []}
+    original_fill = fill.validate_default_stream
+    original_native = streams.read_current
+    original_resolver = current.default_signoff_inputs
+
+    def whole_stream(*args, **kwargs):
+        observed["totals"]["whole_stream"] += 1
+        return original_fill(*args, **kwargs)
+
+    def native_current(*args, **kwargs):
+        observed["totals"]["native_current"] += 1
+        return original_native(*args, **kwargs)
+
+    def resolver(*args, **kwargs):
+        before = dict(observed["totals"])
+        try:
+            return original_resolver(*args, **kwargs)
+        finally:
+            observed["resolver_calls"].append({
+                key: observed["totals"][key] - before[key] for key in before})
+
+    monkeypatch.setattr(fill, "validate_default_stream", whole_stream)
+    monkeypatch.setattr(streams, "read_current", native_current)
+    monkeypatch.setattr(current, "default_signoff_inputs", resolver)
+    return observed

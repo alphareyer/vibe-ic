@@ -349,17 +349,22 @@ def default_signoff_inputs(project):
             or type(report.get("layers_compared")) is not int
             or report["layers_compared"] <= 0):
         raise ValueError("CURRENT_FINISHED_GEOMETRY_NOT_CLEAN")
-    refusal = xor.current_geometry_refusal(project, report)
+    # These results belong to this call only. Public XOR readers without the
+    # private arguments still obtain their own complete current proof.
+    stream = fill.validate_default_stream(project)
+    current = streams.read_current(project)
+    refusal = xor.current_geometry_refusal(project, report, _validated_stream=stream)
     if refusal:
         raise ValueError("CURRENT_FINISHED_STREAM_REFUSED: " + refusal)
-    current = streams.read_current(project)
     if current.get("count") != 0:
         raise ValueError("CURRENT_STREAM_CONNECTIVITY_NOT_CLEAN")
-    stream = fill.validate_default_stream(project)
-    connectivity = xor.gds_connectivity(project, digest(Path(stream["canonical"])), report)
+    connectivity = xor.gds_connectivity(project, digest(Path(stream["canonical"])), report,
+                                         _validated_native=current)
     if connectivity.get("verdict") != "PASS":
         raise ValueError("CURRENT_FINISHED_CONNECTIVITY_REFUSED: " + str(connectivity))
-    paths = streams._source_inputs(project, streams._source_def(project))
+    # read_current already derived and checked these exact fill-owned roles.
+    paths = {role: project / current["current"]["inputs"][role]["path"]
+             for role in ("def", "netlist", "sdc")}
     for role, path in paths.items():
         if entry(project, path) != current["current"]["inputs"][role]:
             raise ValueError("CURRENT_FILLED_VIEW_CHANGED: " + role)

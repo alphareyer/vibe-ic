@@ -102,14 +102,15 @@ def fill_datatypes(project: Path) -> Set[int]:
     return out
 
 
-def _default_fill_pairs(project: Path) -> Tuple[set, Optional[dict]]:
+def _default_fill_pairs(project: Path, *, _validated_stream=None) -> Tuple[set, Optional[dict]]:
     """Read the consumed native filler's literal write set, not layer guesses."""
     import librelane_fill_dfm as fill
     import librelane_signoff_evidence as native
     import die_level_deck_rule_attribution as attribution
     if not (project / fill.DEFAULT_STREAM_REL).is_file():
         return set(), None
-    promotion = fill.validate_default_stream(project)
+    promotion = (_validated_stream if _validated_stream is not None
+                 else fill.validate_default_stream(project))
     arm = _json(project / fill.RECORD_REL)['gds']['librelane']
     folder = Path(arm['filler']['state']).parent
     receipt = fill.validate_step_receipt(folder, 'KLayout.Filler')
@@ -182,7 +183,7 @@ def _default_fill_pairs(project: Path) -> Tuple[set, Optional[dict]]:
                    'granularity': 'layer/datatype', 'native_sources': sources}
 
 
-def declared_finishing_layers(project: Path) -> Tuple[Set[int], Set[Tuple[int, int]],
+def declared_finishing_layers(project: Path, *, _validated_stream=None) -> Tuple[Set[int], Set[Tuple[int, int]],
                                                       Dict[str, Any]]:
     """({fill layer numbers}, {seal (layer, datatype) pairs}, provenance).
 
@@ -242,7 +243,9 @@ def declared_finishing_layers(project: Path) -> Tuple[Set[int], Set[Tuple[int, i
         prov["seal_ring"] = {"source": FINISHING_REL,
                              "field": "seal_ring.ring_check.added_layers",
                              "pairs": [f"{l}/{d}" for l, d in sorted(seal_pairs)]}
-    native_pairs, native_provenance = _default_fill_pairs(project)
+    native_pairs, native_provenance = (
+        _default_fill_pairs(project) if _validated_stream is None else
+        _default_fill_pairs(project, _validated_stream=_validated_stream))
     if native_provenance is not None:
         fill_pairs.update(native_pairs)
         prov['fill'] = native_provenance
@@ -257,7 +260,7 @@ CANONICAL_GDS_GLOB = "phase3/stage4/gds/*.gds"
 CANONICAL_DEF_REL = "phase3/stage3/pnr/routed.def"
 
 
-def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
+def shipped_and_source(project: Path, *, _validated_stream=None) -> Tuple[Optional[Path], Optional[Path],
                                                Dict[str, Any]]:
     """(shipped GDS, the routed DEF it was streamed from, the run's attestation).
 
@@ -288,7 +291,8 @@ def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
     import librelane_fill_dfm as fill
     if (project / fill.DEFAULT_STREAM_REL).is_file():
         try:
-            stream = fill.validate_default_stream(project)
+            stream = (_validated_stream if _validated_stream is not None
+                      else fill.validate_default_stream(project))
             return Path(stream['canonical']), Path(stream['filled_def']), {
                 'source': fill.DEFAULT_STREAM_REL, 'binding': 'native-current-stream',
                 'gds': stream['canonical'],
@@ -562,7 +566,8 @@ def reference_is_faithful(stdout: str, *, boundary: bool = False) -> Tuple[bool,
     return True, "", stats
 
 
-def _default_stream_boundary(project: Path, dfile: Path, shipped: Path) -> Optional[Path]:
+def _default_stream_boundary(project: Path, dfile: Path, shipped: Path, *,
+                             _validated_stream=None) -> Optional[Path]:
     """The original native stream, before its validated seal/fill chain.
 
     Completeness compares streams of the same database boundary. A finishing
@@ -571,7 +576,8 @@ def _default_stream_boundary(project: Path, dfile: Path, shipped: Path) -> Optio
     import librelane_fill_dfm as fill
     if not (project / fill.DEFAULT_STREAM_REL).is_file():
         return None
-    record = fill.validate_default_stream(project)
+    record = (_validated_stream if _validated_stream is not None
+              else fill.validate_default_stream(project))
     if (Path(record['filled_def']).resolve() != dfile.resolve()
             or Path(record['canonical']).resolve() != shipped.resolve()):
         raise ValueError('XOR_DEFAULT_BOUNDARY_SUBJECT_CHANGED')
@@ -977,8 +983,31 @@ CONNECTIVITY_BASES = ("magic_vs_klayout_stream_xor",
 _CONNECTIVITY_UNMEASURED_CLASS = "FLOW_DOES_NOT_PERFORM"
 
 
+def _validated_native_connectivity(project, comparison, doc):
+    """Apply the native reader's role binding to its same-call validated result."""
+    import _native373_current as native
+    import _physical_current as pc
+    project = Path(project).resolve()
+    current = comparison["current"]
+    native._require(comparison.get("shipped_sha256_live") == current["inputs"]["shipped"]["sha256"],
+                    "NATIVE373_SHIPPED_IDENTITY_CHANGED")
+    native._require(current["inputs"].get("connectivity") == pc.entry(project, project / native.REL),
+                    "NATIVE373_DEPENDENCY_SWAPPED")
+    native._require(current["inputs"]["def"] == doc["current"]["inputs"]["def"], "NATIVE373_DEF_SWAPPED")
+    native._require(current["design"] == doc["current"]["design"]
+                    and current["pdk"] == doc["current"]["pdk"], "NATIVE373_CONTEXT_CHANGED")
+    native._require(current["inputs"]["reference"] in (doc["current"]["outputs"]["magic_gds"],
+                                                      doc["current"]["outputs"]["klayout_gds"]),
+                    "NATIVE373_REFERENCE_NOT_NATIVE")
+    return {"verdict": "PASS" if doc["count"] == 0 else "FAIL", "xor_difference_count": doc["count"],
+            "evidence": native.REL, "evidence_sha256": pc.digest(project / native.REL),
+            "reference_sha256": current["inputs"]["reference"]["sha256"],
+            "scope": doc["scope"]}
+
+
 def gds_connectivity(project: Path, live_sha256: str,
-                     comparison: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                     comparison: Optional[Dict[str, Any]] = None, *,
+                     _validated_native=None) -> Dict[str, Any]:
     """Is the SHIPPED GDS (these bytes) shown to carry the routed connectivity?
 
     WHAT DOES NOT COUNT, measured on the spm IC-path tail (cx_spmic2_run,
@@ -1004,7 +1033,9 @@ def gds_connectivity(project: Path, live_sha256: str,
     if comparison and (comparison.get("current") or {}).get("inputs", {}).get("connectivity"):
         import _native373_current as _bounded
         try:
-            measured = _bounded.connectivity(project, comparison)
+            measured = (_bounded.connectivity(project, comparison)
+                        if _validated_native is None else
+                        _validated_native_connectivity(project, comparison, _validated_native))
             measured["basis"] = CONNECTIVITY_BASES[0]
             found.append(measured)
         except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -1192,7 +1223,8 @@ def _stated_class(doc: Dict[str, Any],
     return stated or default
 
 
-def current_geometry_refusal(project: Path, doc: Dict[str, Any]) -> str:
+def current_geometry_refusal(project: Path, doc: Dict[str, Any], *,
+                             _validated_stream=None) -> str:
     """Re-read the existing geometric comparison without composing later LVS.
 
     Both Step37.3 and the downstream DEF-level LVS association use the same
@@ -1209,7 +1241,8 @@ def current_geometry_refusal(project: Path, doc: Dict[str, Any]) -> str:
                            required_inputs=("shipped", "reference", "def", "technology", "recipe"),
                            required_outputs=("log",), marker="XOR_DONE")
     if not refusal:
-        shipped, dfile, _att = shipped_and_source(project)
+        shipped, dfile, _att = (shipped_and_source(project) if _validated_stream is None else
+                              shipped_and_source(project, _validated_stream=_validated_stream))
         for role, path in (("shipped", shipped), ("def", dfile)):
             if path is None or _pc.entry(project, path) != current["inputs"][role]:
                 refusal = "XOR_CURRENT_SUBJECT_SWAPPED"
@@ -1218,7 +1251,10 @@ def current_geometry_refusal(project: Path, doc: Dict[str, Any]) -> str:
         text = (project / current["outputs"]["log"]["path"]).read_text()
         boundary = None
         try:
-            boundary = _default_stream_boundary(project, dfile, shipped)
+            boundary = (_default_stream_boundary(project, dfile, shipped)
+                        if _validated_stream is None else
+                        _default_stream_boundary(project, dfile, shipped,
+                                                 _validated_stream=_validated_stream))
             if boundary is not None:
                 if current['inputs'].get('boundary') != _pc.entry(project, boundary):
                     refusal = 'XOR_DEFAULT_BOUNDARY_CHANGED'
@@ -1234,7 +1270,9 @@ def current_geometry_refusal(project: Path, doc: Dict[str, Any]) -> str:
         if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
             refusal = "XOR_NATIVE_TOOL_MISSING"
         try:
-            fill, seal, provenance = declared_finishing_layers(project)
+            fill, seal, provenance = (
+                declared_finishing_layers(project) if _validated_stream is None else
+                declared_finishing_layers(project, _validated_stream=_validated_stream))
             if boundary is not None and doc.get('declared_finishing_layers') != provenance:
                 refusal = 'XOR_FINISHING_WRITE_SET_CHANGED'
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
