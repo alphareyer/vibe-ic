@@ -3621,7 +3621,8 @@ def test_capture_plan_reads_native_lib_environment(tmp_path, monkeypatch, schema
 _LOCAL_DRV_INSTALLED_IMAGE_DIGEST = drv._installed_image_digest
 
 
-def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypatch):
+def test_step32_local_provider_reaches_real_capture_and_judge(
+        tmp_path, monkeypatch, *, capture_step='32', named_pdk=True):
     """Actual Step32 owner and LOCAL schema; only native process leaves are neutral."""
     import os
     import shlex
@@ -3657,6 +3658,8 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
     switch = {'execution_route': 'LOCAL', 'pdk': 'synthetic',
               'pdk_root_host': str(root), 'librelane_root_host': str(source),
               'librelane_executable': sys.executable, 'local_network_mode': 'host'}
+    if not named_pdk:
+        switch.pop('pdk')
     _file(project, 'phase3/librelane_switch.json', json.dumps(switch))
     monkeypatch.setenv(ll.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
     monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(root))
@@ -3665,7 +3668,7 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
     monkeypatch.setattr(capture._ce, 'no_container_route', lambda: True)
     monkeypatch.setattr(drv, '_installed_image_digest', _LOCAL_DRV_INSTALLED_IMAGE_DIGEST)
     image = ll.resolve_image(project, record=False)
-    provenance = ll.pdk_root_resolution(project, 'synthetic', image=image)
+    provenance = ll.pdk_root_resolution(project, 'synthetic')
     assert provenance['source'] == 'local_provider' and 'derivation' not in provenance
     original_provenance = (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes()
     _file(state_path.parent, 'config.json', json.dumps({'DESIGN_NAME': 'physical_top'}))
@@ -3676,11 +3679,49 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
                    'config.json': drv._sha(state_path.parent / 'config.json')}}))
     spef = Path(state['spef']['nom_*'])
     spef.write_text('*SPEF neutral\n*D_NET n 0.1\n*CONN\n*I u:Y O\n*END\n')
+    rcx_provider = image
+    if capture_step == '23' and not named_pdk:
+        # Model the earlier process's namespace metadata through the real
+        # resolver; the current capture keeps its actual namespace/admission.
+        with monkeypatch.context() as prior_process:
+            prior_process.setattr(ll, '_local_network_namespace', lambda: 'net:[neutral-prior]')
+            rcx_provider = ll.resolve_image(project, record=False)
     _file(spef.parent.parent, 'COMMANDS', 'openroad -exit native-rcx.tcl\n')
     _file(spef.parent.parent, 'vibeic_receipt.json', json.dumps({
-        'input': {'step': 'OpenROAD.RCX', 'image': str(image),
+        'input': {'step': 'OpenROAD.RCX', 'image': str(rcx_provider),
+                  'local_provider': rcx_provider.as_record(),
                   'state_files': {state['def']: drv._sha(Path(state['def']))}},
         'sha256': {spef.relative_to(spef.parent.parent).as_posix(): drv._sha(spef)}}))
+    rcx_receipt_path = spef.parent.parent / 'vibeic_receipt.json'
+    original_rcx_receipt = rcx_receipt_path.read_bytes()
+    if capture_step == '23':
+        import shutil
+        folder = project / 'phase3/librelane/23/01-openroad-stapostpnr'
+        shutil.copytree(state_path.parent, folder)
+        state_path = folder / 'state_out.json'
+        state = json.loads(state_path.read_text())
+        alias = _file(project, 'phase3/stage3/extracted/spef_corners/top.nom.spef',
+                      spef.read_text())
+        state['spef'] = {'nom_*': alias['path']}
+        state_path.write_text(json.dumps(state))
+        _current_sta_ocv_receipts(state_path)
+        config_path = folder / 'config.json'
+        config = json.loads(config_path.read_text())
+        config['DESIGN_NAME'] = 'physical_top'
+        config_path.write_text(json.dumps(config))
+        receipt_path = folder / 'vibeic_receipt.json'
+        receipt = json.loads(receipt_path.read_text())
+        receipt['input'].update(image=str(image), state_files={
+            state[k]: drv._sha(Path(state[k])) for k in ('nl', 'def')})
+        receipt['sha256']['config.json'] = drv._sha(config_path)
+        receipt_path.write_text(json.dumps(receipt))
+        rcx_state = _file(spef.parent.parent, 'state_out.json', json.dumps({
+            'spef': {'nom_*': str(spef)}}))
+        _file(project, 'reports/phase3/librelane_rcx_handoff.json', json.dumps({
+            'state': rcx_state['path'], 'state_sha256': rcx_state['sha256'],
+            'views': {'spef:nom_*': {'source': str(spef), 'source_sha256': drv._sha(spef),
+                'dest': alias['path'], 'dest_sha256': alias['sha256']}}}))
+        (project / 'phase3/stage3/pnr/routed.def').write_bytes(Path(state['def']).read_bytes())
     drv_run_identity.record(project)
     _stage_receipts(project)
     # The Step32 owner rerecords these two stages from their native probe
@@ -3697,7 +3738,10 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
                   (evidence / filename).read_text())
     report = _step32_report(project, adopted)
     observed = {'scope': 'SOURCE_ONLY: neutral native reports, no physical signoff',
-                'provider': image.as_record(), 'provenance': provenance, 'calls': []}
+                'provider': image.as_record(), 'provenance': provenance,
+                'rcx_provider': rcx_provider.as_record(),
+                'prior_namespace_is_neutral_fixture_metadata': not named_pdk,
+                'calls': []}
     original_leaf = watchdog.run_host_supervised
 
     def native_leaf(argv, **kwargs):
@@ -3738,7 +3782,23 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
         return watchdog.SupervisedResult(0, 'OpenSTA 3.1 ' + 'a' * 40 + '\n', '', 'natural')
 
     monkeypatch.setattr(watchdog, 'run_host_supervised', native_leaf)
-    repair._step32_drv_signoff(project, report)
+    if capture_step == '32':
+        repair._step32_drv_signoff(project, report)
+    else:
+        selection = {'capture_step': '23', 'final': {
+            'sta_state': str(state_path), 'sta_state_sha256': drv._sha(state_path)}}
+        observed['selection'] = selection
+        try:
+            published = planner.capture_and_publish(project, final_state=selection)
+        except ValueError as exc:
+            observed.update(reader_outcome='REFUSED', reason=str(exc))
+        else:
+            result = drv.judge(json.loads(published.read_text()), project=project)
+            observed.update(reader_outcome='BOUND', full_judge=result)
+            report['drv_signoff_verdict'] = result['verdict']
+        (tmp_path / 'LOCAL_DRV_SOURCE_OBSERVATION.json').write_text(
+            json.dumps(observed, indent=2) + '\n')
+        assert observed['reader_outcome'] == 'BOUND', observed
     observed['report'] = report
     path = project / 'reports/phase3/sta/drv_signoff_bundle.json'
     if path.is_file():
@@ -3754,6 +3814,52 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
     assert bundle['identity']['tool_image'] != str(image)
     assert observed['calls'] and all(row['network'] == 'host' for row in observed['calls'])
     assert (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes() == original_provenance
+    if not named_pdk:
+        assert image.pdk is None
+        assert provenance['provider']['pdk'] == 'synthetic'
+        assert provenance['identity'] != str(image)
+        rcx_receipt = json.loads((spef.parent.parent / 'vibeic_receipt.json').read_text())
+        assert rcx_receipt['input']['image'] == rcx_receipt['input']['local_provider']['reference']
+        assert str(rcx_provider) != bundle['identity']['source_tool_image']
+        assert {k: v for k, v in rcx_provider.as_record().items()
+                if k not in ('reference', 'network_namespace')} == {
+                    k: v for k, v in image.as_record().items()
+                    if k not in ('reference', 'network_namespace')}
+        assert json.loads((state_path.parent / 'vibeic_receipt.json').read_text())['input']['image'] == str(image)
+        assert rcx_receipt_path.read_bytes() == original_rcx_receipt
+        plan = json.loads((project / 'reports/phase3/sta/drv_capture_plan.json').read_text())
+        namespace_refusals = []
+        # Change actual source/material bytes before resolving a fresh
+        # current provider; the retained RCX witness must not match that tool.
+        for fault, changed_path in [('source', source / 'librelane/__init__.py'),
+                                    ('material', lib)]:
+            old_bytes = changed_path.read_bytes()
+            changed_path.write_bytes(old_bytes + b'// actual changed input\n')
+            changed_provider = ll.resolve_image(project, record=False)
+            changed_plan = copy.deepcopy(plan)
+            changed_plan['identity'].update(source_tool_image=str(changed_provider),
+                source_tool_image_id=str(changed_provider),
+                source_tool_provider=changed_provider.as_record())
+            with pytest.raises(ValueError, match='RCX receipt image differs'):
+                capture._spef_extraction_receipt(changed_plan, changed_plan['scenes'][0],
+                                                  tmp_path / ('rejected_' + fault))
+            changed_path.write_bytes(old_bytes)
+            namespace_refusals.append(fault)
+        for fault in ('image_self_binding', 'missing_typed_witness'):
+            wrong_rcx = json.loads(original_rcx_receipt)
+            if fault == 'image_self_binding':
+                wrong_rcx['input']['image'] = ll.LOCAL_PROVIDER_IDENTITY_PREFIX + '0' * 64
+                wrong_rcx['input']['local_provider']['reference'] = wrong_rcx['input']['image']
+            else:
+                wrong_rcx['input'].pop('local_provider')
+            rcx_receipt_path.write_text(json.dumps(wrong_rcx))
+            with pytest.raises(ValueError, match='RCX receipt image differs'):
+                capture._spef_extraction_receipt(plan, plan['scenes'][0],
+                                                  tmp_path / ('rejected_' + fault))
+            rcx_receipt_path.write_bytes(original_rcx_receipt)
+            namespace_refusals.append(fault)
+        assert rcx_receipt_path.read_bytes() == original_rcx_receipt
+        observed['namespace_refusals'] = namespace_refusals
     # Same real full reader: a provider, image, material or measured-data
     # fault must not gain acceptance from the new schema adapter.
     wrong = copy.deepcopy(bundle)
@@ -3787,3 +3893,86 @@ def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypa
         'missing_provider': missing_provider, 'wrong_image': wrong_image, 'real_violation': violated,
         'missing_measurement': missing, 'changed_material': changed}
     (tmp_path / 'LOCAL_DRV_SOURCE_OBSERVATION.json').write_text(json.dumps(observed, indent=2) + '\n')
+
+
+def test_pdk_anchor_reconstructs_the_named_producer_with_real_local_resolver(tmp_path, monkeypatch):
+    """A nameless tool selection is not the PDK producer's named identity."""
+    import drv_signoff_anchor as anchor
+    import librelane_contract as ll
+    from test_librelane_contract import _host_provider
+
+    project, _ = _host_provider(tmp_path, monkeypatch)
+    switch_path = project / 'phase3/librelane_switch.json'
+    switch = json.loads(switch_path.read_text())
+    switch.pop('pdk')
+    switch['local_network_mode'] = 'host'
+    switch_path.write_text(json.dumps(switch))
+    material = Path(switch['pdk_root_host']) / 'neutral-pdk-source.txt'
+    material.write_text('neutral PDK source\n')
+    source = Path(switch['librelane_root_host']) / 'librelane/__init__.py'
+    unnamed = ll.resolve_image(project)
+    assert unnamed.pdk is None
+    # The normal producer resolves the same source/material with the actual
+    # selected PDK. Do not manufacture a provenance record or stub a reader.
+    provenance = ll.pdk_root_resolution(project, 'synthetic')
+    witness = (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes()
+    assert provenance['provider']['pdk'] == 'synthetic'
+    assert provenance['identity'] != str(unnamed)
+    observed = {'unnamed_tool_provider': unnamed.as_record(), 'producer_witness': provenance}
+    try:
+        result = anchor.pdk_source_identity(provenance, project=project)
+    except ValueError as exc:
+        observed.update(reader_outcome='REFUSED', reason=str(exc))
+    else:
+        observed.update(reader_outcome='BOUND', source_reader=result)
+    (tmp_path / 'NAMED_PDK_ANCHOR_OBSERVATION.json').write_text(json.dumps(observed, indent=2) + '\n')
+    assert observed['reader_outcome'] == 'BOUND', observed
+    assert result['pdk'] == 'synthetic'
+    assert result['image_id'] == str(unnamed)
+    assert result['provider'] == unnamed.as_record()
+    assert ll._provider_for_image(result['image']).as_record() == unnamed.as_record()
+    assert (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes() == witness
+    refused = []
+    for case in ('wrong_pdk', 'wrong_root', 'wrong_source', 'missing_witness'):
+        wrong = copy.deepcopy(provenance)
+        if case == 'wrong_pdk':
+            wrong['pdk'] = 'other_pdk'
+        elif case == 'wrong_root':
+            wrong['path'] = str(tmp_path / 'another-pdk-root')
+        elif case == 'wrong_source':
+            wrong['provider']['source_sha256'] = '0' * 64
+        else:
+            wrong.pop('provider')
+        with pytest.raises(ValueError, match='LOCAL provider differs'):
+            anchor.pdk_source_identity(wrong, project=project)
+        refused.append(case)
+    for case, path in (('changed_material', material), ('changed_source', source)):
+        before = path.read_bytes()
+        path.write_bytes(before + b'changed after original producer\n')
+        with pytest.raises(ValueError, match='LOCAL provider differs'):
+            anchor.pdk_source_identity(provenance, project=project)
+        path.write_bytes(before)
+        refused.append(case)
+    legacy = {'derivation': {'pdk': 'synthetic', 'image': 'synthetic:test',
+                             'image_id': 'sha256:' + 'a' * 64}}
+    assert anchor.pdk_source_identity(legacy, project=project) == legacy['derivation']
+    # Existing callers can pass the already-selected unnamed runtime to the
+    # PDK producer. Its full witness stays valid; its PDK name comes from caller.
+    generic_witness = ll.pdk_root_resolution(project, 'synthetic', image=unnamed)
+    assert generic_witness['provider']['pdk'] is None
+    assert generic_witness['pdk_from'] == 'caller'
+    generic_bytes = (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes()
+    generic_result = anchor.pdk_source_identity(generic_witness, project=project)
+    assert generic_result == result
+    assert (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes() == generic_bytes
+    (tmp_path / 'NAMED_PDK_ANCHOR_OBSERVATION.json').write_text(json.dumps({
+        'unnamed_tool_provider': unnamed.as_record(), 'producer_witness': provenance,
+        'source_reader': result, 'refused': refused, 'legacy': legacy,
+        'generic_producer_witness': generic_witness, 'generic_source_reader': generic_result,
+        'scope': 'Real LOCAL metadata producer/resolver/anchor; no native process or field run.'}, indent=2) + '\n')
+
+
+def test_current_step23_keeps_named_pdk_witness_and_unnamed_runtime_roles(tmp_path, monkeypatch):
+    """The real Step23 public capture and full judge retain both exact roles."""
+    test_step32_local_provider_reaches_real_capture_and_judge(
+        tmp_path, monkeypatch, capture_step='23', named_pdk=False)

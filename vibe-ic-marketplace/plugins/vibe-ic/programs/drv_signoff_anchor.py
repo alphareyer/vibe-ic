@@ -22,13 +22,20 @@ def pdk_source_identity(provenance: dict, *, project: Path) -> dict:
         derivation = provenance["derivation"]
         return {"pdk": derivation["pdk"], "image": derivation["image"],
                 "image_id": derivation["image_id"]}
-    image = _ll.resolve_image(project, record=False)
+    image = _ll.local_provider_identity(
+        project, pdk=(provenance.get("provider") or {}).get("pdk"))
     provider = _ll._provider_for_image(image)
     if (provider is None or provenance.get("identity") != str(provider) or
             provenance.get("provider") != provider.as_record() or
             Path(provenance["path"]).resolve() != Path(provider.pdk_root).resolve() or
             not provenance.get("pdk") or
             (provider.pdk and provider.pdk != provenance["pdk"])):
+        raise ValueError("installed PDK LOCAL provider differs from producer")
+    # The named PDK witness and the tool's selected runtime are separate roles.
+    # RCX and capture must retain the runtime identity they actually execute.
+    image = _ll.resolve_image(project, record=False)
+    provider = _ll._provider_for_image(image)
+    if provider is None:
         raise ValueError("installed PDK LOCAL provider differs from producer")
     return {"pdk": provenance["pdk"], "image": image,
             "image_id": str(provider), "provider": provider.as_record()}

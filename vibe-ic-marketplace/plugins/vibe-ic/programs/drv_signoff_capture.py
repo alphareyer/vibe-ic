@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import hashlib
 import json
 import re
 import shlex
@@ -306,7 +307,24 @@ def _spef_extraction_receipt(plan: dict, scene: dict, out: Path) -> dict:
         identity = plan.get("identity") or {}
         bound_image = identity.get("source_tool_image") or identity.get("tool_image")
         if recorded_image != bound_image:
-            raise ValueError("RCX receipt image differs from producer image")
+            # A retained LOCAL producer ran in its own admitted namespace.
+            # Keep its complete self-bound record; only that execution's
+            # namespace/reference may differ from the current admitted tool.
+            provider = _ll._provider_for_image(bound_image)
+            previous = recorded_input.get("local_provider")
+            current = provider.as_record() if provider is not None else {}
+            material = ({k: v for k, v in previous.items() if k != "reference"}
+                        if isinstance(previous, dict) else {})
+            reference = _ll.LOCAL_PROVIDER_IDENTITY_PREFIX + hashlib.sha256(
+                json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            execution_fields = {"reference", "network_namespace"}
+            if (not current or not material or set(previous) != set(current) or
+                    not isinstance(previous.get("network_namespace"), str) or
+                    not previous["network_namespace"] or
+                    recorded_image != previous.get("reference") or recorded_image != reference or
+                    {k: v for k, v in previous.items() if k not in execution_fields} !=
+                    {k: v for k, v in current.items() if k not in execution_fields}):
+                raise ValueError("RCX receipt image differs from producer image")
         rel_spef = spef.relative_to(rcx_dir).as_posix()
         spef_sha = _sha(spef)
         if recorded_sha.get(rel_spef) != spef_sha:
