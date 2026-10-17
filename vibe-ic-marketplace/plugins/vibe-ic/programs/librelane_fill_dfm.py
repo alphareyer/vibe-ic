@@ -51,6 +51,7 @@ from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
 import die_level_deck_rule_attribution as _dla
 import step_preflight as _spf
+import librelane_contract as _lc
 from librelane_contract import (PDK_GUEST_ROOT, PROBE_DEADLINE_S, Refusal, _load, digest,  # noqa: E402
                                 DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
@@ -390,6 +391,7 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
     extra_mounts = []
     pdk_dir = (pdk_root / pdk).resolve()
     project_dir = project.resolve()
+    local = _lc._provider_for_image(image) is not None or _lc._provider_route(project)
     for value in dict.fromkeys(str(x) for x in lefs):
         host = _host_pdk_path(value, pdk_root, pdk)
         if not host.is_absolute():
@@ -399,7 +401,7 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
                           f'physical LEF unreadable: {host}')
         host = host.resolve()
         guest = (str(Path('/pdk') / pdk / host.relative_to(pdk_dir))
-                 if host.is_relative_to(pdk_dir) else str(host))
+                 if not local and host.is_relative_to(pdk_dir) else str(host))
         guest_lefs.append(guest)
         if value in ring_role:
             guest_roles[guest] = ring_role[value]

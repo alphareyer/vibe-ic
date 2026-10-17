@@ -557,3 +557,81 @@ def test_native_die_density_emitter_reaches_the_existing_consumer(
         assert consumer['per_layer']['metal2']['status'] == 'PASS', values
         assert consumer.get('unchecked_layers', []) == [], values
         assert 'max=generic-default' in consumer['per_layer']['metal1']['window_source'], values
+
+
+@pytest.mark.parametrize('route', ['provider', 'project-local', 'docker'])
+def test_placed_keepout_tcl_uses_the_actual_execution_namespace(
+        tmp_path, monkeypatch, route):
+    """Real keepout caller and LOCAL mode guard; OpenDB process is neutral.
+
+    No EDA runs here. The process boundary refuses missing literal Tcl inputs,
+    reproducing the native LOCAL refusal without rewriting the generated Tcl.
+    Docker retains guest paths and is checked through its declared mounts.
+    """
+    import re
+    import librelane_contract as lc
+
+    project = tmp_path / 'project'
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed.parent.mkdir(parents=True)
+    routed.write_text('COMPONENTS 2 ; END COMPONENTS\n')
+    root, config = _pdk(tmp_path)
+    cfg = json.loads(config.read_text())
+    views = {}
+    for role, name in [('CELL_LEFS', 'cells'), ('PAD_LEFS', 'pads'),
+                       ('MACRO_LEFS', 'blocks')]:
+        path = root / 'processA/tech' / (name + '.lef')
+        path.write_text('MACRO ' + name + '\nEND ' + name + '\n')
+        cfg[role] = ['/pdk/processA/tech/' + path.name]
+        views[role] = path
+    extra = tmp_path / 'external.lef'
+    extra.write_text('MACRO extra\nEND extra\n')
+    cfg['EXTRA_LEFS'] = [str(extra)]
+    _put(project / 'phase3/librelane_switch.json', {
+        'execution_route': 'DOCKER' if route == 'docker' else 'LOCAL'})
+    monkeypatch.setattr(lc, '_provider_for_image',
+                        lambda image: object() if route == 'provider' else None)
+    monkeypatch.setattr(lc, '_provider_route_mismatch', lambda image: None)
+    monkeypatch.setattr(lc._ce, 'no_container_route', lambda: route != 'docker')
+    observed = []
+
+    def process(cmd, *, supervised, probe_deadline_s=None, **kwargs):
+        assert supervised is True and probe_deadline_s is None
+        script = Path(cmd[-1])
+        text = script.read_text()
+        paths = re.findall(r'^read_lef \{([^}]+)\}', text, re.M)
+        assert len(paths) == 5
+        observed.append(paths)
+        mounts = [cmd[i + 1].split(':')[:2] for i, a in enumerate(cmd) if a == '-v']
+        for path in paths:
+            executed = path
+            if route == 'docker':
+                executed = lc._ce.localise_mounted_paths(
+                    path, [(guest, host) for host, guest in mounts])
+            if not Path(executed).is_file():
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr=f'ORD-0001 {executed} does not exist')
+        assert ('read_def {' + str(routed.resolve()) + '}') in text
+        for role, kind in [('PAD_LEFS', 'PAD'), ('MACRO_LEFS', 'BLOCK')]:
+            executed = ('/pdk/processA/tech/' + views[role].name
+                        if route == 'docker' else str(views[role].resolve()))
+            assert ('read_lef {' + executed + '}') in text
+            assert f'getName] {kind}' in text
+        script.with_name('placed_keepouts.txt').write_text(
+            'DBU 2000\nTOTAL 2\nBOX PAD pads 0 0 2000 4000\n'
+            'BOX BLOCK blocks 4000 6000 8000 10000\nEND 2\n')
+        return SimpleNamespace(returncode=0, stdout='neutral OpenDB census', stderr='')
+
+    monkeypatch.setattr(lc, '_run_local', process)
+    monkeypatch.setattr(fill, 'run_container', process if route == 'docker'
+                        else lc.run_container)
+    placed = fill._placed_keepout_boxes(
+        project, 'neutral-image', root, 'processA', cfg,
+        project / 'phase3/librelane/37-keepout')
+    assert placed['dbu'] == 2000 and placed['total'] == 2
+    assert placed['boxes'] == [('PAD', 'pads', (0, 0, 2000, 4000)),
+                               ('BLOCK', 'blocks', (4000, 6000, 8000, 10000))]
+    assert len(observed) == 1
+    assert observed[0][-1] == str(extra.resolve())
+    assert observed[0][0] == ('/pdk/processA/tech/routing.tlef' if route == 'docker'
+                              else str((root / 'processA/tech/routing.tlef').resolve()))
