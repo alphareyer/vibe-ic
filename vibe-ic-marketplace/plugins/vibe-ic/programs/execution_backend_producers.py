@@ -2023,5 +2023,7 @@ def produce(project, params):
         'detail': result.get('detail', ''),
         'current_step_declared_producers': current,
     }]
+    if result.get('retained_drc_checkpoint'):
+        result['canonical_receipts'][0]['retained_drc_checkpoint'] = result['retained_drc_checkpoint']
     result.setdefault('native_receipts', [])
     return result

@@ -1309,7 +1309,9 @@ def test_public_default31_retains_valid_drc_across_failed_lvs(
     offset = len(calls)
     second_rc, second, retained, _, _ = _public_native31_window(
         project, pdk, monkeypatch, case=case, native_processes=calls)
-    adopted = second["result"].get("retained_drc_checkpoint")
+    adopted = next((receipt['retained_drc_checkpoint']
+                    for receipt in second['result']['canonical_receipts']
+                    if receipt.get('retained_drc_checkpoint')), None)
     observed = {"case": case, "first": first_observation,
         "second": json.loads((project / "NATIVE_OWNER_OBSERVATION.json").read_text()),
         "first_native_calls": native_counts(first_calls),
