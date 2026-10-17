@@ -234,6 +234,7 @@ def test_selected_synthesis_critical_checks(tmp_path, monkeypatch, critical):
     receipt_path = folder / 'vibeic_receipt.json'
     receipt = json.loads(receipt_path.read_text())
     receipt['input']['config'] = digest(resolved)
+    write_json(folder / 'input_fingerprint.json', receipt['input'])
     receipt['sha256'] = {str(path.relative_to(folder)): digest(path)
                          for path in folder.rglob('*')
                          if path.is_file() and path != receipt_path}

@@ -260,8 +260,9 @@ import pytest
 @pytest.mark.parametrize("damage", ["current", "changed_report", "missing_log",
                                     "swapped_log", "changed_gds"])
 def test_immutable_pair_retains_native_zero(tmp_path, monkeypatch, damage):
+    from dataclasses import asdict
     from _gdsii import write_gdsii
-    from test_signoff_drc_producer_is_a_signoff_deck import gate, klayout_rdb
+    from test_signoff_drc_producer_is_a_signoff_deck import klayout_rdb
 
     project = tmp_path / "project"
     raw_report, raw_log = project / SRC_RPT, project / SRC_LOG
@@ -303,9 +304,10 @@ def test_immutable_pair_retains_native_zero(tmp_path, monkeypatch, damage):
         (project / CANON_LOG).write_text("another invocation's transcript\n")
     elif damage == "changed_gds":
         write_gdsii(gds, cell="another_subject")
-    rc, report, _ = gate(project, "--signoff")
+    with A.scoped_discovery([project / CANON_RPT]):
+        report = asdict(A._check_drc(project))
     (project / "consumer_observation.json").write_text(json.dumps({
-        "damage": damage, "rc": rc, "report": report}, indent=2) + "\n")
-    assert (rc == 0) == (damage == "current"), report
+        "damage": damage, "report": report}, indent=2) + "\n")
     assert report["passed"] == (damage == "current"), report
+    assert report["summary"]["receipt_corroborated_files"] == int(damage == "current")
     assert (project / "provenance.jsonl").read_bytes() == ledger_before
