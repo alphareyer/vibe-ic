@@ -1548,6 +1548,19 @@ def produce_signoff(project, params):
         return _step37_streamout_result(project, route, row)
     elif sid == '37.3':
         import gds_xor_check as xor
+        if params.get('execution_mode') == 'default':
+            # Default stream publication returns before the legacy units
+            # publisher. Resume from the validated filled subject and retained
+            # PDK views without rewriting accepted declaration inputs.
+            physical_views = R._restore_recorded_physical_views(project, pdk, container)
+            if physical_views.get('refused'):
+                return {'verdict': 'NOT_MEASURED',
+                        'detail': 'Step37.3 recorded physical views refused: ' + physical_views['refused'],
+                        'physical_views': physical_views}
+            import _native373_current as native373
+            R.publish_database_unit_declaration(
+                project, pdk, container, native373._source_def(project),
+                publish_declaration=False)
         rc = xor.main([str(project), '--json', str(rpt / 'gds_xor.json'), '--container', container])
         return {'verdict': 'PASS' if rc == 0 else 'FAIL' if rc == 1 else 'NOT_MEASURED', 'detail': f'gds_xor producer rc={rc}'}
     elif sid == '31':

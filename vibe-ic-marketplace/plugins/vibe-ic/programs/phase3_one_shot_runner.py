@@ -49348,7 +49348,8 @@ def _pdk_stream_database_unit_um(pdk: "PdkConfig",
 
 def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
                                       container: str,
-                                      def_file: Path) -> Dict[str, Any]:
+                                      def_file: Path, *,
+                                      publish_declaration: bool = True) -> Dict[str, Any]:
     """Publish the technology's database unit into the record the tape-out
     precheck reads, or say in writing why it was not published.
 
@@ -49363,6 +49364,8 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
     the declaration's answer and its cited fact agree.  This preserves an
     explicit operator value and also refuses to paper over a self-conflicting
     declaration.
+    A resumed physical reader can publish the same measured report with
+    `publish_declaration=False`, preserving the already accepted declaration.
     """
     _tlef = _read_technology_text(pdk.tech_lef, container)
     rec = database_unit_verdict(
@@ -49373,13 +49376,14 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
         _pdk_stream_database_unit_um(pdk, container),
         lef_manufacturing_grid_um(_tlef))
     rec["program"] = "phase3_one_shot_runner.publish_database_unit_declaration"
+    rec["pdk"] = pdk.name
     rec["tech_lef"] = pdk.tech_lef
     rec["cell_gds"] = pdk.cell_gds
     rec["def"] = str(def_file)
     rec["published"] = False
     rec["published_to"] = None
 
-    if rec["verdict"] == "PASS":
+    if rec["verdict"] == "PASS" and publish_declaration:
         try:
             import _tapeout_declaration as _td
             decl_path = project / _td.DECLARATION_REL
