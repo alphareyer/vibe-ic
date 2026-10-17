@@ -129,3 +129,29 @@ def test_default15_still_requires_the_real_step7_input(tmp_path, source, missing
     else:
         (root / source).write_text('changed after issuance\n')
     assert source in resolve_input_contract(root, paths, manifest)
+
+
+def test_default15_accepts_the_step7_declared_design_staged_sdc(tmp_path):
+    """A normal Step7 design-staged deck has the producer's .sdc name."""
+    import hashlib
+    from execution_backend_worker import resolve_input_contract
+
+    root = _project(tmp_path)
+    original = root / 'phase2/stage2/constraints/spm.asic.sdc'
+    staged = root / 'phase2/stage2/constraints/spm.sdc'
+    staged.write_bytes(original.read_bytes())
+    original.unlink()
+    record_path = root / 'phase2/stage2/constraints/asic_sdc.json'
+    record = json.loads(record_path.read_text())
+    record.update(path=str(staged.relative_to(root)), design_staged=True,
+                  sha256=hashlib.sha256(staged.read_bytes()).hexdigest())
+    record_path.write_text(json.dumps(record))
+    paths = backend.backend_project_input_contract(root, '15', execution_mode='default')
+    assert record['path'] in paths
+    assert 'phase2/stage2/constraints/spm.asic.sdc' not in paths
+    assert 'phase2/stage2/constraints/asic_sdc.json' in paths
+    manifest = {'declarations': list(paths), 'missing': [], 'files': {
+        rel: hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        for rel in paths if (root / rel).is_file()}}
+    assert manifest['files'][record['path']] == record['sha256']
+    assert resolve_input_contract(root, paths, manifest) == []

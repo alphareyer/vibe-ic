@@ -779,7 +779,7 @@ def backend_project_input_contract(project: Path, step_id: str, *,
     if (root / "phase2/stage2/synth/netlist.v").is_file() and isinstance(issued_constraint, str):
         constraint_rel = Path(issued_constraint)
         if (constraint_rel.parent != Path("phase2/stage2/constraints")
-                or not constraint_rel.name.endswith(".asic.sdc")):
+                or not constraint_rel.name.endswith(".sdc")):
             raise ValueError(f"Step-7 constraint path is unsafe: {issued_constraint!r}")
         for raw in (
             # Default producers append this run's audit journal. It is not

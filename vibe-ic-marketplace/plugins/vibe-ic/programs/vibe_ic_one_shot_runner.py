@@ -860,6 +860,63 @@ def _complete_step14_handoff(project: Path) -> dict:
                       or str(record['result'].get('producer_return', {}))}
 
 
+def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
+                              container: str) -> dict:
+    """Resume the existing prelayout owner from a current synthesis handoff."""
+    import _flow_yaml
+    import design_one_shot_runner as design
+    import execution_backend_gates as gates
+    import phase3_one_shot_runner as phase3
+    import step_output_collector as versions
+    import synth_handoff_netlist_check as handoff
+
+    prior = versions.latest_pass(project, '9')
+    if (not prior or not prior.get('current_inputs')
+            or not prior.get('canonical_pass') or prior['status'] != 'PASS'):
+        return {'verdict': 'NOT_MEASURED', 'detail':
+                'Step10 requires a current complete canonical Step9 checkpoint'}
+    consumer = (prior.get('result') or {}).get('canonical_consumer') or {}
+    row9 = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '9')
+    try:
+        current_outputs = gates.contracts(project, row9)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    if (consumer.get('status') != 'PASS' or not consumer.get('outputs')
+            or current_outputs != consumer['outputs']):
+        return {'verdict': 'NOT_MEASURED', 'detail':
+                'Step9 declared outputs no longer match its complete consumer'}
+    bound = handoff.bound_handoff(project)
+    if not bound or bound['verdict'] != 'PASS':
+        return {'verdict': (bound or {}).get('verdict', 'NOT_MEASURED'),
+                'detail': '; '.join((bound or {}).get('findings', ()))
+                          or 'Step10 requires the current native synthesis handoff'}
+    if Path(bound['mapped']).name != f'{top}_synth.v':
+        return {'verdict': 'NOT_MEASURED', 'detail':
+                'Step10 top differs from the current native synthesis handoff'}
+
+    began = time.time()
+    try:
+        result = phase3.step_prelayout_signoff(
+            project, top, design._phase2_pdk_config(project, pdk_name), container)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    current = next((row for row in versions.current_acceptance(project, began)
+                    if str(row['id']) == '10'), None)
+    if current is None:
+        return {'verdict': 'FAIL' if result.status == 'FAIL' else 'NOT_MEASURED',
+                'detail': result.detail or 'Step10 published no complete consumer'}
+    status = ('PASS' if current.get('canonical_pass') and current['status'] == 'PASS'
+              else 'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED')
+    consumer = (current.get('result') or {}).get('canonical_consumer')
+    if not isinstance(consumer, dict):
+        return {'verdict': 'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED',
+                'folder': current['folder'],
+                'detail': 'Step10 has no complete canonical consumer'}
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
+                      or result.detail}
+
+
 def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
     """The no-L-docs half of `_phase1_decision`: which design input exists.
 
@@ -2442,6 +2499,8 @@ def _main() -> int:
     # silently ran the whole flow after being told to start at step 18 would be
     # doing something other than what it was asked.
     _entry_runner = None
+    _prelayout_entry = (str(getattr(args, 'entry_step', None)) == '10'
+                        and execution_policy_value['mode'] == 'default')
     if getattr(args, "entry_step", None):
         try:
             import step_preflight as _spf_o          # noqa: PLC0415
@@ -2450,6 +2509,10 @@ def _main() -> int:
                   file=sys.stderr)
             return 2
         _entry_runner = _spf_o.runner_for_step(str(args.entry_step))
+        if _prelayout_entry:
+            # The retained prelayout owner is independent of Step9. Its
+            # existing complete consumer runs before Phase2 resumes at11.
+            _entry_runner = 'design_one_shot_runner'
         if _entry_runner is None and execution_policy_value['mode'] == 'default':
             # Default's native backend rows have their own input contracts
             # and checkpoints. They no longer need the monolithic PnR head.
@@ -3070,6 +3133,32 @@ def _main() -> int:
     # ---------------- Phase 2 ----------------
     _phase2_pad_top_deferred = None
     if not halted_at:
+        if _prelayout_entry:
+            step10_acceptance = _complete_step10_prelayout(
+                project, flow_top, args.pdk, args.container)
+            reports['step10_prelayout'] = step10_acceptance
+            if (step10_acceptance['verdict'] != 'PASS'
+                    or str(args.exit_step) == '10'):
+                status = step10_acceptance['verdict']
+                rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
+                out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+                out.parent.mkdir(parents=True, exist_ok=True)
+                _write_runner_summary(out, {
+                    'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                    **_delivery_route.report_label(project),
+                    'verdict': status,
+                    'halted_at': None if status == 'PASS' else 'phase2',
+                    'declared_window': {'entry_step': '10',
+                                        'exit_step': str(args.exit_step)},
+                    'phases': [{'name': n, 'verdict': v, 'rc': code}
+                               for n, v, code in plan],
+                    'step10_prelayout': step10_acceptance,
+                    'whole_flow_verdict': 'NOT_MEASURED'}, project)
+                lock.release()
+                return rc
+        phase2_entry = ('11' if _prelayout_entry else
+                        str(args.entry_step)
+                        if _entry_runner == 'design_one_shot_runner' else None)
         runner = _phase_runner("phase2")
         # Forward --skip-phase3 so phase2's DFT/LEC chain (steps 11-13) gates the
         # heavy Fault ATPG OFF on a lightweight/RTL-only run (no silicon target),
@@ -3096,8 +3185,7 @@ def _main() -> int:
             lec_max_completed_rungs=args.lec_max_completed_rungs,
             skip_hardware=args.skip_hardware, skip_phase3=args.skip_phase3,
             skip_analog=False,
-            entry_step=(str(args.entry_step)
-                        if _entry_runner == "design_one_shot_runner" else None),
+            entry_step=phase2_entry,
             exit_step=(str(args.exit_step) if args.exit_step else None),
             area_receipt=args.area_receipt,
             area_run_manifest=args.area_run_manifest,
@@ -3114,7 +3202,8 @@ def _main() -> int:
             {"top_name": flow_top, "max_rtl_repair_retries": args.max_rtl_repair_retries,
              "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
              "skip_analog": "--skip-analog" in p2_args,
-             "entry_step": args.entry_step, "exit_step": args.exit_step,
+             "entry_step": (phase2_entry if _prelayout_entry else args.entry_step),
+             "exit_step": args.exit_step,
              "force_rtl_regen": False, "dry_run": False,
              "lec_max_completed_rungs": args.lec_max_completed_rungs})
         if not p2_admission.admitted:
@@ -3394,6 +3483,8 @@ def _main() -> int:
         }
         if step14_acceptance is not None:
             summary['step14_handoff'] = step14_acceptance
+        if 'step10_prelayout' in reports:
+            summary['step10_prelayout'] = reports['step10_prelayout']
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_runner_summary(out, summary, project)
