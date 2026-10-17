@@ -223,3 +223,45 @@ def test_actual_373_owner_only_reaches_transport_with_current_bound_filled_def(
             native.produce(p, pnr / 'routed.def' if damage == 'wrong_def' else filled)
         assert observed == []
     assert calls == ['primary', 'seal', 'filler-density']
+
+
+@pytest.mark.parametrize('boundary', ['recipe', 'inputs'])
+def test_default_stream_metadata_probes_reach_the_real_execution_contract(
+        tmp_path, monkeypatch, boundary):
+    """Real caller/guard/current reader; only the metadata process is controlled.
+
+    Both queries precede publication of the bound stream readset. The actual
+    stream/fill process seams retain the existing neutral fixture; no EDA runs.
+    """
+    p, pdk, calls, _ = _transport(tmp_path, monkeypatch)
+    metadata_process = LF.run_container
+    observed = []
+    guarded = []
+
+    def local_metadata(argv, *, probe_deadline_s, supervised, **kwargs):
+        assert probe_deadline_s == LC.PROBE_DEADLINE_S
+        assert supervised is False
+        guarded.append(boundary)
+        return metadata_process(argv)
+
+    def metadata_boundary(argv, **kwargs):
+        query = 'recipe' if 'get_script_dir' in argv[-1] else 'inputs'
+        observed.append(query)
+        if query == boundary:
+            return LC.run_container(argv, **kwargs)
+        return metadata_process(argv, **kwargs)
+
+    monkeypatch.setattr(LC, '_provider_for_image', lambda image: object())
+    monkeypatch.setattr(LC, '_provider_route_mismatch', lambda image: None)
+    monkeypatch.setattr(LC, '_run_local', local_metadata)
+    monkeypatch.setattr(LF, 'run_container', metadata_boundary)
+    record = LF.default_stream(p, 'top', pdk, '')
+    assert observed == ['recipe', 'inputs']
+    assert guarded == [boundary]
+    assert calls == ['primary', 'seal', 'filler-density']
+    assert LF.validate_default_stream(p) == json.loads(
+        (p / LF.DEFAULT_STREAM_REL).read_text())
+    assert LC.digest(Path(record['canonical'])) == record['canonical_sha256']
+    readset = json.loads((p / 'phase3/stage3/pnr/top.stream_inputs.json').read_text())
+    assert readset['native_cli']['inputs']
+    assert Path(record['canonical']).stat().st_size > 0

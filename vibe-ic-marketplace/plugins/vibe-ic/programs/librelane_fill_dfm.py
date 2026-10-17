@@ -51,7 +51,7 @@ from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
 import die_level_deck_rule_attribution as _dla
 import step_preflight as _spf
-from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, PROBE_DEADLINE_S, Refusal, _load, digest,  # noqa: E402
                                 DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
                                 state_from_direct, run_container, config_file_hashes,
@@ -1340,7 +1340,8 @@ def _default_stream_recipe(project: Path, image: str, root: Path) -> tuple[Path,
              'p=Path(get_script_dir())/"klayout/stream_out.py"; '
              'print(json.dumps({"path":str(p),"text":p.read_text()}))')
     cp = run_container(['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
-                        image, '--skip', 'python3', '-c', probe])
+                        image, '--skip', 'python3', '-c', probe],
+                       probe_deadline_s=PROBE_DEADLINE_S)
     if cp.returncode:
         raise Refusal('LL_STREAM_RECIPE_UNAVAILABLE', cp.stderr)
     source = json.loads(cp.stdout)
@@ -1387,7 +1388,8 @@ def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
     cp = run_container(['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
                         '-v', f'{project}:{project}:ro', '-v', f'{root}:/pdk:ro',
                         image, '--skip', 'python3', '-c', probe,
-                        json.dumps([native_script, *[p for _, p in paths]])])
+                        json.dumps([native_script, *[p for _, p in paths]])],
+                       probe_deadline_s=PROBE_DEADLINE_S)
     if cp.returncode:
         raise Refusal('LL_STREAM_INPUT_UNREADABLE', cp.stderr)
     hashes = json.loads(cp.stdout)
