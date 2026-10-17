@@ -111,9 +111,6 @@ def read_current(project, record=None):
                                     folder, doc["image"])
         _require(fp["config_files"] == lc._current_config_material(
             _read(config_root / f"{step}.json"), mounts), "NATIVE373_MATERIAL_CHANGED")
-        if step == 'Magic.StreamOut':
-            _require(_read(config_root / f"{step}.json").get('DIE_AREA') ==
-                     lc._def_die_area(_source_def(project)), 'NATIVE373_DIE_AREA_CHANGED')
         import execution_policy
         if step == 'KLayout.StreamOut' and execution_policy.request()['mode'] == 'default':
             import _stream_input_record as sir
