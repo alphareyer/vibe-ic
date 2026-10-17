@@ -280,6 +280,8 @@ def _retained_default_stream(tmp_path, monkeypatch):
     (project / 'input/submission_template/slots/neutral.yaml').unlink()
     _write(project, 'input/submission_template/tapeout_declaration.json',
            json.dumps({'answers': {'deliverable': 'HARDMACRO'}}))
+    _write(project, 'FINAL_REPORT.md', '# SOURCE_FIXTURE\nNo completion claims.\n')
+    _write(project, 'plugin_output/declaration.json', '{}\n')
     canonical = Path(first['canonical'])
     relative = str(canonical.relative_to(project))
     _write(project, 'provenance.jsonl', json.dumps({
@@ -299,6 +301,21 @@ def _retained_default_stream(tmp_path, monkeypatch):
     monkeypatch.setattr(R, '_layout_basis_paths', lambda *_: [])
     monkeypatch.setattr(R, '_chip_path_requests_pad_ring', lambda *_: False)
     monkeypatch.setattr(R, '_librelane_antenna_gds', lambda *_: None)
+    # Only the optional native antenna tool edge is neutral. The actual full
+    # consumer, size/substance/port/provenance programs and LF/LC readers run.
+    import flow_compliance_check as fcc
+    gate_process = fcc._watchdog.run_host_supervised
+
+    def native_gate_edge(argv, **kwargs):
+        if len(argv) > 1 and Path(argv[1]).name == 'gds_antenna_deck_check.py':
+            report = project / argv[argv.index('--json') + 1]
+            _write(project, str(report.relative_to(project)), json.dumps({
+                'verdict': 'PASS', 'evidence_kind': 'SOURCE_FIXTURE native process',
+                'gds_sha256': LC.digest(canonical)}))
+            return fcc._watchdog.SupervisedResult(
+                0, 'SOURCE_FIXTURE optional native antenna process\n', '', 'natural')
+        return gate_process(argv, **kwargs)
+    monkeypatch.setattr(fcc._watchdog, 'run_host_supervised', native_gate_edge)
     params = {'step_id': '37', 'top': 'top', 'pdk_name': pdk.name,
               'pdk_root': str(project / 'fixture_pdk'), 'image_id': first['image'],
               'execution_mode': 'default',
@@ -314,6 +331,7 @@ def test_default_step37_whole_reuse_reaches_current_consumer(
         tmp_path, monkeypatch, scenario):
     import librelane_fill_dfm as LF
     import phase3_one_shot_runner as R
+    import step_output_collector as versions
     project, params, first, calls = _retained_default_stream(tmp_path, monkeypatch)
     log = project / 'phase3/stage3/pnr/stream_out.log'
     before = log.read_bytes(), log.stat().st_mtime_ns
@@ -334,8 +352,11 @@ def test_default_step37_whole_reuse_reaches_current_consumer(
     monkeypatch.setattr(R, '_librelane_antenna_gds', after_stream)
     # Real produce_signoff -> real step_gds -> existing whole-reuse owner;
     # omitting finishing_receipt at that return site must break the positive.
+    attempt = versions.begin_step(project, '37', params['resolved_input_manifest']['files'])
     result = producers.produce(project, params)
     current = result['current_step_declared_producers']
+    if result['verdict'] == 'PASS':
+        versions.publish_producer_outputs(project, attempt)
     consumed = worker.execute_current_step(project, step_id='37', producer=result)
     assert calls == ['primary', 'seal', 'filler-density'], 'no second native epoch'
     if scenario != 'current_reuse':
