@@ -237,6 +237,24 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def test_named_container_keeps_original_runner_with_a_native_sidecar(tmp_path, monkeypatch):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs)
+    _use(monkeypatch, runner)
+    folder = project / 'phase3/librelane/26-gds/01-klayout-antenna'
+    folder.mkdir(parents=True)
+    (folder / 'pdk_root.json').write_text(json.dumps({'cli_pdk_root': '/pdk',
+        'stated_by': 'run_chain(pdk_root=...)'}))
+    (project / 'phase3/librelane_switch.json').write_text(json.dumps({'steps': {'26': 'librelane'}}))
+    record = project / 'reports/phase3/antenna_librelane.json'
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({'gds': {'state': str(folder / 'state_out.json')}}))
+    result = gate.run(project, None, None, None, None)
+    assert result['verdict'] == 'PASS', result
+    assert runner.argv is not None
+    assert result['pdk_parent'].startswith(GUEST + '/')
+
+
 @pytest.mark.parametrize("violations, verdict", [(0, "PASS"), (1, "FAIL")])
 def test_login_banner_no_longer_reads_as_a_deck_digest_mismatch(
         tmp_path, monkeypatch, violations, verdict):

@@ -412,6 +412,8 @@ def _retained_native_result(project: Path, gds: Path, router: Optional[str],
         model = native._member(native._read(record_path), 'gds')
         state = native._path(project, model.get('state'))
         folder = state.parent
+        if native._read(folder / 'pdk_root.json').get('execution_route') != 'LOCAL':
+            return None
         row = native.count_row(project, folder, 'KLayout.Antenna',
             'klayout__antenna_error__count', gds, project / 'phase3/librelane/26-config')
         result['native_evidence'] = row

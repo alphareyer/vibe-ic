@@ -17,22 +17,22 @@ import gds_antenna_deck_check as gate  # noqa: E402
 import eda_report_audit as audit  # noqa: E402
 import _watchdog as watchdog  # noqa: E402
 import _klayout_launch as launch  # noqa: E402
+from test_librelane_contract import local_image  # noqa: E402,F401 — existing neutral LOCAL launch fixture
 
 
 @pytest.mark.parametrize('scenario', [
     'current', 'wrong_gds', 'missing_native_proof', 'nonzero_native_inconsistency'])
-def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch, scenario):
+def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch, local_image, scenario):
     """Real chain/receipt and consumer; only the native process edge is neutral."""
     import librelane_contract as contract
-    from _native_signoff_fixture import put, IMAGE
-    from _stated_eda_image import mock_docker_route
-    mock_docker_route(monkeypatch)
+    from _native_signoff_fixture import put
+    image = local_image.image
     gds = _project(tmp_path)
     root = tmp_path / 'pdk_root'
     tree = root / 'fixture_pdk'
     parent = tree / 'libs.tech/klayout/tech/drc/main.drc'
     put(tmp_path / 'phase3/librelane_switch.json', {
-        'steps': {'26': 'librelane'}, 'image': IMAGE,
+        'steps': {'26': 'librelane'}, 'image': image,
         'pdk': 'fixture_pdk', 'pdk_root_host': str(root)})
     config = put(tmp_path / 'phase3/librelane/26-config/KLayout.Antenna.json', {
         'meta': {'step': 'KLayout.Antenna'}, 'PDK': 'fixture_pdk',
@@ -63,11 +63,13 @@ def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch
     monkeypatch.setattr(contract, 'image_capability', lambda *a, **k: {})
     monkeypatch.setattr(contract, 'openroad_home', lambda *a, **k: None)
     monkeypatch.setattr(contract, 'run_container', native_process)
-    folder = contract.run_chain(tmp_path, IMAGE, [('KLayout.Antenna', config, initial)],
-        mounts=[(tree, '/pdk/fixture_pdk')], lane='26-gds', pdk_root='/pdk')[0]
+    folder = contract.run_chain(tmp_path, image, [('KLayout.Antenna', config, initial)],
+        mounts=[(root, '/pdk')], lane='26-gds', pdk_root='/pdk')[0]
+    assert json.loads((folder / 'pdk_root.json').read_text())['execution_route'] == 'LOCAL'
     put(tmp_path / 'phase3/librelane_pdk_root.provenance.json', {
         'path': str(root), 'source': 'resolved', 'derivation': {
-            'pdk': 'fixture_pdk', 'image': IMAGE, 'image_id': 'sha256:' + '7d' * 32,
+            'pdk': 'fixture_pdk', 'image': image,
+            'image_id': contract.local_image_attestation(image)['image_id'],
             'guest_path': str(tree), 'host_path': str(tree)}})
     put(tmp_path / 'reports/phase3/antenna_librelane.json', {'gds': {
         'step': 'KLayout.Antenna', 'state': str(folder / 'state_out.json'),
