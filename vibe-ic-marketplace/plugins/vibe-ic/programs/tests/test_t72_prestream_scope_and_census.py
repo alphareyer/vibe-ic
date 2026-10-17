@@ -125,7 +125,7 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
     aliases = {'ir_drop_signoff.json': 'eda_report_audit:ir_drop',
                'em_signoff.json': 'eda_report_audit:em',
                'em_current_authority.json': 'em_peak_current_authority_check'}
-    for peak, expected in [('1.963e-04', 'PASS'), ('5.0', 'FAIL')]:
+    for peak, expected in [('1.0e-06', 'PASS'), ('5.0', 'FAIL')]:
         project = current._project(tmp_path / expected, peak=peak,
                                    with_csv=True, with_jmax=True)
         reports = project / 'reports/phase3'
@@ -135,6 +135,8 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
             'worst voltage drop: 6.8 mV (0.2% Vdd) static IR\n'
             'worst dynamic IR: 9.1 mV (0.3% Vdd)\n'
             + '# synthetic report detail\n' * 100)
+        em_report = reports / 'em.rpt'
+        em_report.write_text(em_report.read_text() + '# synthetic report detail\n' * 100)
         retained = {}
         for name, program in aliases.items():
             path = reports / name
@@ -154,7 +156,10 @@ def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
             assert row.output_files == [str(report)]
             assert report not in retained
             doc = json.loads(report.read_text())
-            assert doc['verdict'] in ('PASS', 'FAIL')
+            if spec[1] == 'em_peak_current_authority_check.py':
+                assert doc['verdict'] == expected
+            else:
+                assert doc['passed'] is (row.status == 'PASS')
         authority = next(row for spec, row in zip(selected, rows)
                          if spec[1] == 'em_peak_current_authority_check.py')
         assert authority.status == expected, authority.detail
