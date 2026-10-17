@@ -1496,7 +1496,9 @@ def produce_signoff(project, params):
             decision = R._repair_dec.decide(
                 None, timing == 'CLEAN', project=project,
                 single_corner_evidence=timing, producer_receipt=producer,
-                timing_basis='current Step-32 STAPostPNR per-corner census')
+                timing_basis='current Step-32 STAPostPNR per-corner census',
+                decision_scope='step32_native' if params.get('execution_mode') == 'default'
+                               else 'whole_signoff')
             if R._publish_step32_decision(
                     project, decision, source, source, out, producer, written, notes):
                 return {'verdict': 'NOT_MEASURED', 'detail': '; '.join(notes)}

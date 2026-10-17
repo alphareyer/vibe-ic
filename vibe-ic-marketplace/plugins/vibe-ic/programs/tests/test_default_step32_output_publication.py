@@ -26,7 +26,8 @@ def _write(root, raw, content):
 
 
 @pytest.mark.parametrize("case", ["clean", "adopted", "stale_canonical", "missing_raw", "missing_hash",
-                                  "changed_source", "missing_outcome", "policy_reject", "measured_fail"])
+                                  "changed_source", "missing_outcome", "policy_reject", "measured_fail",
+                                  "native_scope"])
 def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatch, case):
     project = _project(tmp_path)
     _write(project, "input/step_0_5ic_answers.json", "{}\n")
@@ -62,6 +63,11 @@ def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatc
                   "adopted": adopted, "corners": ["neutral_scene"], "baseline": baseline,
                   "final": final, "floors": {"setup": [0.0, "neutral fixture"], "hold": [0.0, "neutral fixture"]},
                   "candidates": [], "final_supply_ownership": {"verdict": "PASS"}}
+        # The neutral child supplies the complete native DRV result as well
+        # as its STA/antenna census; the actual row/policy/publisher read it.
+        report.update(drv_signoff_verdict="PASS", drv_signoff={
+            "verdict": "PASS", "counts": {"max_slew": 0, "max_capacitance": 0, "max_fanout": 0},
+            "failures": [], "not_measured": [], "waived": []})
         if adopted:
             baseline["drv_count"] = 1
             d = _write(root, "phase3/librelane/32-neutral/candidate.def", "DESIGN neutral ;\n# candidate\nEND DESIGN\n")
@@ -85,11 +91,34 @@ def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatc
         elif case == "policy_reject":
             import postroute_timing_repair_decision as policy
             _write(root, dict(policy._NON_TIMING_SIGNOFF_ARTEFACTS)["ir_drop"], '{"verdict":"FAIL"}\n')
+        elif case == "native_scope":
+            _write(root, "reports/phase3/ir_drop.json", '{"verdict":"FAIL"}\n')
+            _write(root, "reports/phase2/gates/erc_density.json", '{"summary":{"pass":false}}\n')
         if (root / RAW).is_file():
             native_raw.append((root / RAW).read_bytes())
         return report
 
     monkeypatch.setattr(repair, "run", controlled_native)
+    if case == "policy_reject":
+        # This existing IR-failure control belongs to the public whole-signoff
+        # policy, not Default's earlier timing/DRV repair row. Keep its refusal.
+        import postroute_timing_repair_decision as policy
+        import postroute_timing_repair_audit as audit
+        controlled_native(project)
+        producer = runner._step32_producer_receipt(project, project / REPAIR)
+        decision = policy.decide(None, True, project=project, producer_receipt=producer)
+        stance = _write(project, "reports/phase3/mcorner_ocv_stance.json", "{}\n")
+        assert runner._publish_step32_decision(
+            project, decision, stance, project / repair.REPORT_REL,
+            project / REPAIR, producer, [], []) == 0
+        canonical = json.loads((project / CANONICAL).read_text())
+        findings, stats = audit.audit(project)
+        assert audit.build_report(findings, stats, str(project))["summary"]["pass"] is False
+        assert canonical["repair_needed"] is True
+        assert canonical["timing_repair_needed"] is False
+        assert canonical["nontiming_failures"]
+        assert (project / RAW).read_bytes() == native_raw[0]
+        return
     result = runner._default_pnr_rows(project, "neutral", pdk, "SOURCE_CONTROL_ONLY", ["32"])
     receipt_path = project / "reports/phase3/default_steps/32/backend_result.json"
     receipt = json.loads(receipt_path.read_text())
@@ -100,7 +129,7 @@ def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatc
                    "source_control_only": True}
     _write(project, "API_OBSERVATION.json", json.dumps(observation, indent=2))
     assert native_calls == ["native_child_transport"]
-    expected = "PASS" if case in ("clean", "adopted", "stale_canonical") else "FAIL" if case in ("policy_reject", "measured_fail") else "NOT_MEASURED"
+    expected = "PASS" if case in ("clean", "adopted", "stale_canonical", "native_scope") else "FAIL" if case in ("policy_reject", "measured_fail") else "NOT_MEASURED"
     assert result.status == expected, result.detail
     if native_raw:
         assert (project / RAW).read_bytes() == native_raw[0], "canonical policy must retain producer bytes"
@@ -118,7 +147,66 @@ def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatc
         assert {RAW, CANONICAL} <= set(current["outputs"])
         assert receipt["canonical_step_result"]["status"] == "PASS"
         assert (project / REPAIR / ("repair_log.json" if case == "adopted" else "no_repair_needed.flag")).is_file()
-    elif case == "policy_reject":
-        assert canonical["repair_needed"] is True
-        assert canonical["timing_repair_needed"] is False
-        assert canonical["nontiming_failures"]
+    if case == "native_scope":
+        import copy
+        import postroute_timing_repair_decision as policy
+        import postroute_timing_repair_audit as audit
+        assert canonical["decision_scope"] == "step32_native"
+        assert not canonical["nontiming_failures"]
+        assert "reports/phase2/gates/erc_density.json" not in {row["path"] for row in canonical["inputs"]}
+        assert "reports/phase3/ir_drop.json" not in {row["path"] for row in canonical["inputs"]}
+        assert policy.verify_receipt(project, canonical) == canonical
+        routed = project / "phase3/stage3/pnr/routed.def"
+        route_bytes = routed.read_bytes()
+        routed.write_bytes(route_bytes + b"# changed current route\n")
+        with pytest.raises(ValueError, match="sha256 changed"):
+            policy.verify_receipt(project, canonical)
+        routed.unlink()
+        with pytest.raises(ValueError, match="routed DEF is absent"):
+            policy.decision_inputs(project, project / repair.REPORT_REL, project / repair.REPORT_REL)
+        routed.write_bytes(route_bytes)
+        # The generic owner still refuses these exact same IR/ERC artefacts.
+        assert policy.decide(None, True, project=project)["repair_needed"] is True
+        source = project / repair.REPORT_REL
+        original_report = json.loads(source.read_text())
+        refusals = []
+        for name in ("drv", "antenna", "timing", "missing_drv", "missing_timing", "missing_antenna"):
+            report = copy.deepcopy(original_report)
+            if name == "drv":
+                report["final"]["drv_count"] = 1
+                report["drv_signoff"]["counts"]["max_slew"] = 1
+                report["drv_signoff"]["verdict"] = report["drv_signoff_verdict"] = "FAIL"
+            elif name == "antenna":
+                report["final"]["antenna_pins"] = 1
+            elif name == "timing":
+                report["final"]["hold_ws_min"] = -0.1
+            elif name == "missing_drv":
+                report["drv_signoff"]["counts"].pop("max_fanout")
+            elif name == "missing_timing":
+                report["final"].pop("setup_ws_min")
+            else:
+                report["final"].pop("antenna_pins")
+            source.write_text(json.dumps(report))
+            repair._publish_declared_repair(project, report, source)
+            producer = runner._step32_producer_receipt(project, project / REPAIR)
+            try:
+                decision = policy.decide(None, True, project=project, producer_receipt=producer,
+                                         decision_scope="step32_native")
+            except ValueError as exc:
+                assert name.startswith("missing_"), str(exc)
+                refusals.append({"case": name, "refusal": str(exc)})
+            else:
+                assert decision["repair_needed"] is True, name
+                refusals.append({"case": name, "decision": decision})
+        source.write_text(json.dumps(original_report))
+        repair._publish_declared_repair(project, original_report, source)
+        raw = json.loads((project / RAW).read_text())
+        source.write_text(source.read_text() + "\n")
+        with pytest.raises(ValueError, match="sha256 changed"):
+            policy.decide(None, True, project=project, producer_receipt=raw,
+                          decision_scope="step32_native")
+        with pytest.raises(ValueError, match="sha256 changed"):
+            policy.decision_inputs(project, source, source)
+        _write(project, "NATIVE_SCOPE_OBSERVATION.json", json.dumps({
+            "canonical": canonical, "inline_refusals": refusals,
+            "scope": "real Default32 producer/publisher/full consumer; neutral native child reports"}, indent=2))

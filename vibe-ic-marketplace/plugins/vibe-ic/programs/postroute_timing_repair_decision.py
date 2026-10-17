@@ -390,6 +390,16 @@ def decision_inputs(project: Union["Path", str, None],
     producer report. Present files only; the record binds each by sha256."""
     root = Path(project) if project is not None else None
     paths: List[Path] = []
+    # The Default row supplies its one native report in both measurement
+    # roles. Generic OCV/STA callers keep their whole-signoff input contract.
+    if (root is not None and stance is not None and not isinstance(stance, dict)
+            and single_corner is not None
+            and Path(stance).resolve() == Path(single_corner).resolve()
+            == (root / STEP32_REPORT_REL).resolve()):
+        receipt = root / "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
+        record = json.loads(receipt.read_text())
+        _, inputs = _step32_native_inputs(root, record)
+        return [receipt, *inputs]
     if stance is not None and not isinstance(stance, dict):
         paths.append(Path(stance))
         named = (_load_stance(stance) or {}).get("report")
@@ -454,6 +464,88 @@ def verify_receipt(project: Union["Path", str], record: Any) -> Dict[str, Any]:
     return record
 
 
+def _step32_native_inputs(project: Path, record: Any):
+    """Re-read the producer's bound timing/DRV/antenna measurement, fail closed.
+
+    This is a repair scope, not whole-flow sign-off. Its material is the
+    current native report and the actual STA states it measured, never an
+    unrelated earlier ERC/PV report or a caller-supplied timing label.
+    """
+    import librelane_postroute_repair as repair
+
+    record = verify_receipt(project, record)
+    if (record.get("recorded_by") == CANONICAL_RECORDER
+            or record.get("source_report") != STEP32_REPORT_REL):
+        raise ValueError("Step-32 native scope needs its original producer receipt")
+    source = project / record["source_report"]
+    report = json.loads(source.read_text())
+    if (not isinstance(report, dict) or report.get("step") != "32"
+            or report.get("verdict") not in ("PASS", "FAIL")):
+        raise ValueError("Step-32 native measurement did not complete")
+    routed = project / "phase3/stage3/pnr/routed.def"
+    if not routed.is_file():
+        raise ValueError("Step-32 current routed DEF is absent")
+    inputs = [source, routed, *(project / row["path"] for row in record.get("inputs", []))]
+    for role in ("baseline", "final"):
+        measured = (report.get("input_baseline") or report.get("baseline")
+                    if role == "baseline" else report.get("final"))
+        if (not isinstance(measured, dict)
+                or repair.measured_repair_trigger(measured)["missing"]
+                or repair._antenna_counts(measured) is None
+                or not repair._has_sta_digest(measured)):
+            raise ValueError(f"Step-32 {role} timing/DRV/antenna census is incomplete")
+        state = Path(str(measured.get("sta_state") or ""))
+        state = state if state.is_absolute() else project / state
+        if (not state.resolve().is_relative_to(project.resolve()) or not state.is_file()
+                or _sha256(state) != measured["sta_state_sha256"]):
+            raise ValueError(f"Step-32 {role} STA state is absent or changed")
+        inputs.append(state)
+    drv = report.get("drv_signoff")
+    if not isinstance(drv, dict) or not isinstance(drv.get("counts"), dict):
+        raise ValueError("Step-32 full DRV judgement is absent")
+    counts = drv["counts"]
+    if (drv.get("verdict") not in ("PASS", "FAIL")
+            or drv.get("verdict") != report.get("drv_signoff_verdict")
+            or any(not isinstance(drv.get(k), list)
+                   for k in ("failures", "not_measured", "waived"))
+            or drv.get("not_measured") or drv.get("waived")
+            or any(type(counts.get(k)) is not int or counts[k] < 0
+                   for k in ("max_slew", "max_capacitance", "max_fanout"))):
+        raise ValueError("Step-32 full DRV judgement is incomplete")
+    return report, inputs
+
+
+def _step32_native_decision(project: Path, record: Any, timing_basis: Optional[str]):
+    import librelane_postroute_repair as repair
+
+    report, _ = _step32_native_inputs(project, record)
+    final = report["final"]
+    trigger = repair.measured_repair_trigger(final)
+    timing_failed = any(k in trigger["violated"] for k in ("setup_ws_min", "hold_ws_min"))
+    failures = []
+    drv = report["drv_signoff"]
+    if (final["drv_count"] or any(drv["counts"].values())
+            or drv["failures"] or drv["verdict"] == "FAIL"):
+        failures.append({"domain": "drv", "path": STEP32_REPORT_REL,
+                         "signal": "current native DRV judgement failed"})
+    if any(repair._antenna_counts(final)):
+        failures.append({"domain": "antenna", "path": STEP32_REPORT_REL,
+                         "signal": "current native antenna census has violations"})
+    if report["verdict"] == "FAIL" and not failures and not timing_failed:
+        failures.append({"domain": "step32", "path": STEP32_REPORT_REL,
+                         "signal": "current native producer failed"})
+    needed = bool(record["repair_needed"] or timing_failed or failures or report.get("adopted"))
+    return {"decision_scope": "step32_native", "basis": timing_basis or "Step-32 STAPostPNR",
+            "mc_ocv_available": False, "timing_basis_status": "VIOLATED" if timing_failed else "CLEAN",
+            "timing_repair_needed": timing_failed, "repair_needed": needed,
+            "violated_corners": [], "declared_hold_violations": [],
+            "setup_worst_slack_ns": final["setup_ws_min"], "hold_worst_slack_ns": final["hold_ws_min"],
+            "nontiming_failures": failures, "nontiming_not_determined": [],
+            "repair_applied": report.get("adopted"), "step32": step32_measured(project),
+            "reason": "current receipt-bound Step-32 timing/DRV/antenna repair scope: "
+                      + ("repair required or applied" if needed else "no repair needed")}
+
+
 def decide(stance: Union["Path", str, dict, None],
            single_corner_clean: bool,
            project: Union["Path", str, None] = None,
@@ -461,6 +553,7 @@ def decide(stance: Union["Path", str, dict, None],
            single_corner_evidence: Optional[str] = None,
            producer_receipt: Optional[Dict[str, Any]] = None,
            timing_basis: Optional[str] = None,
+           decision_scope: str = "whole_signoff",
            ) -> Dict[str, Any]:
     """Return the post-route timing-repair trigger decision.
 
@@ -484,6 +577,11 @@ def decide(stance: Union["Path", str, dict, None],
       timing_basis: OPTIONAL description of an explicitly supplied measured
         timing state. The legacy single-corner label remains the default;
         this label changes no timing or non-timing decision policy.
+      decision_scope: ``whole_signoff`` retains the generic cross-signoff
+        policy. Only the Default Step-32 caller selects ``step32_native``:
+        re-read its original bound producer receipt, complete current native
+        timing/DRV/antenna result and STA states. This earlier repair row
+        cannot decide later ERC/PV sign-off, which remains with its own rows.
       producer_receipt: OPTIONAL bound Step-32 PRODUCER receipt (a decision
         record that `verify_receipt` accepted and that the canonical recorder
         did not write). R-0929-STEP32-RECORD: its ``repair_needed=true`` is
@@ -522,6 +620,12 @@ def decide(stance: Union["Path", str, dict, None],
         sign-off domain. Step 32 may not certify "no post-route repair needed" over a failed
         IR-drop / EM / SI / PV sign-off (v1.7.64).
     """
+    if decision_scope == "step32_native":
+        if project is None:
+            raise ValueError("Step-32 native scope needs a project")
+        return _step32_native_decision(Path(project), producer_receipt, timing_basis)
+    if decision_scope != "whole_signoff":
+        raise ValueError("unknown postroute repair decision scope")
     out: Dict[str, Any] = {
         "basis": timing_basis or "single_corner_tt",
         "mc_ocv_available": False,
