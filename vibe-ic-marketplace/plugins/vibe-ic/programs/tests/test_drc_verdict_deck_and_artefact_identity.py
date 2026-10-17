@@ -28,8 +28,15 @@ unreadable re-measurement is never readable as "clean".
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import pytest
 
 _PROG = (Path(__file__).resolve().parent.parent / "phase3_one_shot_runner.py")
 _spec = importlib.util.spec_from_file_location("_p3_drc_ident", _PROG)
@@ -152,3 +159,76 @@ def test_zero_zero_zero_zero_still_detected():
     v = p3._detect_vacuous_magic("box values 0 0 0 0\n", drc_count=0)
     assert v["empty_bbox"] is True
     assert v["vacuous"] is True
+
+
+@pytest.mark.parametrize("spelling", ["top_cell", "topcell"])
+@pytest.mark.parametrize("selected", ["CLEAN_TOP", "DIRTY_TOP", "MISSING_TOP"])
+def test_native_deck_uses_explicit_top(tmp_path, spelling, selected):
+    """A real multi-top layout must obey either deck API spelling.
+
+    This runs the original launcher, native exec seam and RDB counter. The
+    synthetic rule forbids layer 2: CLEAN_TOP has none, DIRTY_TOP has one
+    polygon. A missing top must refuse instead of selecting another cell.
+    """
+    klayout = shutil.which("klayout")
+    if klayout is None:
+        pytest.skip("native KLayout is required for this integration case")
+    assert p3._local_exec_mode(), "run this case inside the EDA image"
+    gds = tmp_path / "multiple_tops.gds"
+    maker = tmp_path / "make_layout.rb"
+    maker.write_text(
+        "layout = RBA::Layout.new\n"
+        "layout.dbu = 0.001\n"
+        "allowed = layout.layer(1, 0)\n"
+        "forbidden = layout.layer(2, 0)\n"
+        "dirty = layout.create_cell('DIRTY_TOP')\n"
+        "dirty.shapes(allowed).insert(RBA::Box.new(0, 0, 2000, 2000))\n"
+        "dirty.shapes(forbidden).insert(RBA::Box.new(0, 0, 2000, 2000))\n"
+        "clean = layout.create_cell('CLEAN_TOP')\n"
+        "clean.shapes(allowed).insert(RBA::Box.new(0, 0, 2000, 2000))\n"
+        "layout.write($output)\n",
+        encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    made = subprocess.run(
+        [klayout, "-b", "-r", str(maker), "-rd", f"output={gds}"],
+        capture_output=True, text=True, env=env, timeout=30)
+    assert made.returncode == 0, made.stdout + made.stderr
+    assert gds.is_file() and gds.stat().st_size > 0
+    deck = tmp_path / "selected_top.drc"
+    layout_arg, report_arg = (("input", "report") if spelling == "top_cell"
+                              else ("in_gds", "report_file"))
+    deck.write_text(
+        f"selected = ${spelling}\n"
+        f"if selected\n  source(${layout_arg}, selected)\n"
+        f"else\n  source(${layout_arg})\nend\n"
+        f"report('Synthetic selected-top check', ${report_arg})\n"
+        "input(2, 0).output('FORBIDDEN_LAYER', 'Synthetic forbidden layer')\n",
+        encoding="utf-8")
+    class NativeDeck:
+        drc_deck = str(deck)
+    rpt = tmp_path / "selected_top.rdb"
+    assert not rpt.exists()
+    rc, stdout, stderr = p3._klayout_deck_exec(
+        gds, rpt, selected, NativeDeck(), "")
+    root = ET.parse(rpt).getroot() if rpt.is_file() else None
+    count = (p3._v1_6_597_count_klayout_xml_violations(rpt)
+             if root is not None else None)
+    observation = {
+        "spelling": spelling, "requested_top": selected, "rc": rc,
+        "stdout": stdout, "stderr": stderr,
+        "reported_top": root.findtext("top-cell") if root is not None else None,
+        "count": count, "report_exists": rpt.is_file(),
+    }
+    (tmp_path / "NATIVE_TOP_OBSERVATION.json").write_text(
+        json.dumps(observation, indent=2) + "\n", encoding="utf-8")
+    if selected == "MISSING_TOP":
+        assert rc != 0, observation
+        assert not rpt.exists(), observation
+        return
+    assert rc == 0, observation
+    assert root is not None and root.tag == "report-database", observation
+    assert root.findtext("top-cell") == selected, observation
+    if selected == "CLEAN_TOP":
+        assert count == (0, {}), observation
+    else:
+        assert count == (1, {"FORBIDDEN_LAYER": 1}), observation

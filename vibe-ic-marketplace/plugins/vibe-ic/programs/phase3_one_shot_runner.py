@@ -51916,6 +51916,8 @@ def _klayout_deck_exec(gds: Path, rpt: Path, top: str, pdk: PdkConfig,
     klayoutmatthias FreePDK45.lydrc reads $in_gds/$report_file. Define
     BOTH spellings — an extra -rd a deck never reads is inert, and the
     deck's own `source(...)`/`report(...)` picks whichever it declares.
+    Likewise pass both $top_cell and $topcell so the deck receives the
+    explicitly selected top rather than falling back to automatic selection.
     (First hit: nangate45 DRC died with "'source': No layout loaded".)
     chip-AGNOSTIC."""
     rpt.parent.mkdir(parents=True, exist_ok=True)
@@ -51926,7 +51928,7 @@ def _klayout_deck_exec(gds: Path, rpt: Path, top: str, pdk: PdkConfig,
         f"klayout -b -r {pdk.drc_deck} "
         f"-rd input={gds_c} -rd report={rpt_c} "
         f"-rd in_gds={gds_c} -rd report_file={rpt_c} "
-        f"-rd top_cell={top}"
+        f"-rd top_cell={top} -rd topcell={top}"
     )
     transcript = rpt.with_suffix(".log")
     return _docker_exec(container, cmd, marker=gds_c,
