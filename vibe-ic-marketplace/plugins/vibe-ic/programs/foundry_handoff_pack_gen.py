@@ -867,6 +867,9 @@ def main(argv=None) -> int:
         "--top", default=None,
         help="silicon top module name; #467 fallback used only when "
              "L1_DATASHEET[ic_name] is an empty / not-found sentinel.")
+    p.add_argument("--json", type=Path, default=None,
+                   help="also publish the mask specification here (relative "
+                        "to project); the canonical package is always retained")
     args = p.parse_args(argv)
 
     project = args.project.resolve()
@@ -1054,8 +1057,13 @@ def main(argv=None) -> int:
     if _layout["written"]:
         print(f"[handoff] layout member(s) (re)derived from the signed-off GDS: "
               f"{', '.join(_layout['written'])}")
-    _aa.write_text(handoff_dir / "mask_spec.json",
-        json.dumps(mask_spec, indent=2, ensure_ascii=False) + "\n")
+    mask_json = json.dumps(mask_spec, indent=2, ensure_ascii=False) + "\n"
+    mask_path = handoff_dir / "mask_spec.json"
+    _aa.write_text(mask_path, mask_json)
+    if args.json is not None:
+        output = project / args.json
+        if output.resolve() != mask_path.resolve():
+            _aa.write_text(output, mask_json)
 
     # Step 2: wat_plan.json — Wafer Acceptance Test plan.
     # #446: carries the design/PDK facts so two different designs can

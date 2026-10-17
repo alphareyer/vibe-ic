@@ -49,6 +49,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
@@ -351,3 +353,44 @@ def _project(tmp_path, with_chip_gds=False):
         basis.append(path)
     admission.admit_gds(p, stream, "a" * 64, basis)
     return p
+
+
+def test_declared_pack_producer_publishes_the_real_mask_spec(tmp_path):
+    """Exercise the ordinary caller's --json through the real public CLI."""
+    import phase3_one_shot_runner as runner
+    proj = _project(tmp_path, with_chip_gds=True)
+    _precheck(proj, verdict="PASS")
+    _S5.plant(proj)
+    spec = next(row for row in runner._PRE_AUDIT_PRODUCERS
+                if row[0] == "foundry_handoff")
+    result = runner._run_pre_audit_producer(proj, *spec, "")
+    assert result.status == "PASS", result.detail
+    mask = proj / spec[2]
+    assert str(mask) in result.output_files
+    data = json.loads(mask.read_text())
+    assert data["schema_version"] == "1.0"
+    assert data["design_top"] == "alpha" and data["layout_members"]
+    rc, rules = _gate(proj)
+    assert rc == 0, rules
+
+
+@pytest.mark.parametrize("destination", ["relative", "absolute"])
+def test_json_destination_is_the_mask_and_preserves_the_package(tmp_path, destination):
+    proj = _project(tmp_path, with_chip_gds=True)
+    _precheck(proj, verdict="PASS")
+    _S5.plant(proj)
+    target = (Path("reports/phase3/requested_mask.json") if destination == "relative"
+              else tmp_path / "explicit/mask.json")
+    cp = subprocess.run([sys.executable, str(PROGRAMS / "foundry_handoff_pack_gen.py"),
+                         str(proj), "--json", str(target)],
+                        capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    requested = proj / target
+    canonical = proj / "phase3/stage4/foundry_handoff/mask_spec.json"
+    assert requested.read_bytes() == canonical.read_bytes()
+    mask = json.loads(requested.read_text())
+    assert mask["schema_version"] == "1.0" and mask["layout_members"]
+    audit = json.loads((proj / "reports/phase3/foundry_handoff_audit.json").read_text())
+    assert audit["verdict"] == "SKELETON_EMITTED" and audit != mask
+    rc, rules = _gate(proj)
+    assert rc == 0, rules
