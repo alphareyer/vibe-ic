@@ -282,6 +282,8 @@ def _retained_default_stream(tmp_path, monkeypatch):
            json.dumps({'answers': {'deliverable': 'HARDMACRO'}}))
     _write(project, 'FINAL_REPORT.md', '# SOURCE_FIXTURE\nNo completion claims.\n')
     _write(project, 'plugin_output/declaration.json', '{}\n')
+    _write(project, 'reports/phase3/pad_ring_route_evidence.json', json.dumps({
+        'verdict': 'NOT_APPLICABLE', 'reason': 'SOURCE_FIXTURE core-only delivery'}))
     canonical = Path(first['canonical'])
     relative = str(canonical.relative_to(project))
     _write(project, 'provenance.jsonl', json.dumps({
