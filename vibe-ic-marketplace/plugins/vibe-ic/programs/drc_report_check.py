@@ -342,6 +342,32 @@ def _recorded_layout_evidence(project: Path, producers: list):
             report = path_for(rel)
         except (ValueError, OSError):
             return invalid("report path is outside the project")
+        sources = {report}
+        for transform in reversed(entries):
+            if (transform.get("record") != "declared_transform"
+                    or transform.get("producing_step") != "drc:signoff"):
+                continue
+            outputs = transform.get("outputs") or {}
+            try:
+                named = [value for name, value in outputs.items()
+                         if path_for(name) == report]
+                if not named:
+                    continue
+                inputs = transform.get("inputs") or {}
+                if (named != [digest(report)] or len(inputs) != 1
+                        or transform.get("exit_code") != 0):
+                    return invalid("canonical DRC copy binding is invalid")
+                name, expected = next(iter(inputs.items()))
+                source = path_for(name)
+                if (expected != digest(source) or expected != digest(report)
+                        or source.read_bytes() != report.read_bytes()):
+                    return invalid("canonical DRC copy differs from its native source")
+                sources = {source}
+                break
+            except (OSError, ValueError, TypeError) as exc:
+                return invalid(f"canonical DRC copy binding unreadable: {exc}")
+        native_copy = sources != {report}
+        found_before = len(found)
         for entry in reversed(entries):
             if entry.get("record") != "invocation":
                 continue
@@ -351,7 +377,7 @@ def _recorded_layout_evidence(project: Path, producers: list):
             bound = []
             for name, expected in outputs.items():
                 try:
-                    if path_for(name) == report:
+                    if path_for(name) in sources:
                         bound.append(expected)
                 except (ValueError, OSError, TypeError):
                     continue
@@ -390,6 +416,8 @@ def _recorded_layout_evidence(project: Path, producers: list):
                 break
             except (OSError, ValueError, TypeError) as exc:
                 return invalid(f"recorded layout binding unreadable: {exc}")
+        if native_copy and len(found) == found_before:
+            return invalid("canonical DRC copy has no bound native invocation")
     return found[0] if found else None
 
 

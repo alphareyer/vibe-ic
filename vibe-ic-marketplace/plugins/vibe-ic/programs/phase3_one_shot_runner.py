@@ -52806,7 +52806,13 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         return StepResult("drc", "FAIL", time.time() - t0,
                           "candidate DRC requires private SDR scratch")
     import drc_feedback_repair as _drc_feedback
-    if (not candidate and
+    import _physical_current as _current
+    try:
+        finished_inputs = None if candidate else _current.default_signoff_inputs(project)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return StepResult("drc", "NOT_MEASURED", time.time() - t0, str(exc),
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    if (not candidate and finished_inputs is None and
             _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None))):
         _bound, _why = _drc_feedback.check_binding(
             project, top, _pl.pnr_dir(project) / f"{top}.gds")
@@ -52816,6 +52822,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
     if _vac is not None:
         return _vac
     physical_top = _streamout_top(
+        finished_inputs["def"] if finished_inputs else
         _pl.pnr_dir(project) / f"{top}.def", top)[0]
     if not pdk.drc_deck:
         # No KLayout deck. If a Calibre deck is present, distinguish
@@ -52886,7 +52893,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         return StepResult("drc", "NOT_MEASURED", time.time() - t0,
                           f"PDK {pdk.name} ships no DRC deck — caller must "
                           "supply one or accept WAIVED-DEFERRED", reason_class=_V.ReasonClass.TOOL_ABSENT)
-    gds = _pl.pnr_dir(project) / f"{top}.gds"
+    gds = finished_inputs["gds"] if finished_inputs else _pl.pnr_dir(project) / f"{top}.gds"
     if not gds.is_file():
         return StepResult("drc", "NOT_MEASURED", time.time() - t0,
                           f"GDS missing: {gds}", reason_class=_V.ReasonClass.INPUT_ABSENT)
@@ -53393,6 +53400,9 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             _prod = _sdf.classify_file(rpt)
             if _prod.is_signoff_deck:
                 _canon.write_bytes(rpt.read_bytes())
+                _declare_immutable_transform(
+                    project, rpt, _canon, "drc:signoff", "phase3_one_shot_runner",
+                    "publish the unchanged native DRC report as canonical signoff")
                 extras["drc_signoff_report"] = str(_canon)
                 _native_log = rpt.with_suffix(".log")
                 if _native_log.is_file():
@@ -53935,7 +53945,14 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # KLayout-streamed GDS was either compact-layermapped (Magic-unreadable)
     # or a 70-byte abstract-view shell → portless extraction → all-top
     # disconnected. Prefer the routed DEF; fall back to any pnr DEF.
-    def_file = _pl.pnr_dir(project) / f"{top}.def"
+    import _physical_current as _current
+    try:
+        finished_inputs = _current.default_signoff_inputs(project)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return StepResult("lvs", "NOT_MEASURED", time.time() - t0, str(exc),
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    def_file = (finished_inputs["def"] if finished_inputs else
+                _pl.pnr_dir(project) / f"{top}.def")
     _def_fell_back = False
     if not def_file.is_file():
         # ORGANIC #571 (a) — when the named routed DEF is absent and we must
@@ -53955,7 +53972,11 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # whose cell population matches the routed layout (the pre-PnR synth
     # netlist has 0 spares → netgen mismatch). #512 lesson: the netlist
     # CHOICE was the runner's blind spot vs the field's manual run.
-    netlist, _nl_reason = _v0_3_15_select_lvs_netlist(project, top, def_file)
+    if finished_inputs:
+        netlist = finished_inputs["netlist"]
+        _nl_reason = "receipt-bound FillInsertion output paired with the current filled DEF"
+    else:
+        netlist, _nl_reason = _v0_3_15_select_lvs_netlist(project, top, def_file)
     if netlist is None:
         netlist = _pl.synth_dir(project) / f"{top}_synth.v"  # for the guard msg
     if not def_file.is_file() or not netlist.is_file():
@@ -54937,6 +54958,27 @@ def _lvs_power_pin_only_mismatch(blob: str) -> bool:
             and _lvt.mismatch_class(blob) == "POWER_PIN_ONLY")
 
 
+def _record_lvs_native_inputs(project: Path, *,
+                               power_aware: Optional[Dict[str, Any]] = None,
+                               **paths: Path) -> bool:
+    """Extend the existing LVS input record with the files the tools read."""
+    target = project / "reports/phase3/lvs_inputs.json"
+    if not target.is_file():
+        return False
+    import execution_policy
+    import librelane_fill_dfm as fill
+    if (execution_policy.request()["mode"] != "default"
+            or not (project / fill.DEFAULT_STREAM_REL).is_file()):
+        return False
+    doc = json.loads(target.read_text())
+    for role, path in paths.items():
+        path = Path(path).resolve()
+        doc[role] = {"path": str(path), "sha256": _sha256_file(path)}
+    doc["power_aware"] = power_aware
+    _aa.write_json(target, doc)
+    return True
+
+
 def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
                          container: str, spice_out: Path, sp_c: str,
                          lay_top: str, netlist: Path, netgen_setup: str,
@@ -55071,7 +55113,23 @@ def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
             # v1.3.47 — progress-stall watchdog (not a fixed 14400s kill); a
             # still-progressing netgen extraction/compare is never killed.
             # marker = the layout netlist path (in netgen's argv).
-            _rc, out, err = _docker_exec(container, cmd, marker=nl_c, outputs=[pa_rpt])
+            pa_log = pa_rpt.with_suffix(".log")
+            setup_host = (_container_path_to_host(netgen_setup, container, project)
+                          if (project / "reports/phase3/lvs_inputs.json").is_file()
+                          else Path(netgen_setup))
+            current_inputs = _record_lvs_native_inputs(project, extracted_spice=spice_out,
+                                      comparison_netlist=pa_nl,
+                                      netgen_setup=setup_host,
+                                      power_aware={"rails_as_ports": rails_as_ports,
+                                                   "tie_wells_to_rails": tie_wells},
+                                      **{f"power_lef_{i}": path for i, path in
+                                         enumerate(additional_lefs)})
+            if current_inputs:
+                _rc, out, err = _declared_session_exec(
+                    container, cmd, [pa_rpt, pa_log], marker=nl_c,
+                    inputs=[spice_out, pa_nl, setup_host], transcript_path=pa_log)
+            else:
+                _rc, out, err = _docker_exec(container, cmd, marker=nl_c, outputs=[pa_rpt])
         except Exception as exc:  # nosec — netgen crash on the pre-attempt is non-fatal
             attempt_log.append({**decision, "rejected_at": "netgen",
                                 "reason": f"{type(exc).__name__}: {exc}"})
@@ -55134,6 +55192,9 @@ def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
         "write the power-aware netgen result into lvs.rpt "
         "(phase3_one_shot_runner)", _write_pa,
         input_path=project / "reports" / "phase3" / "lvs_power_aware.rpt")
+    _declare_immutable_transform(
+        project, pa_rpt, lvs_rpt, "lvs:power_aware", "netgen",
+        "publish the unchanged power-aware native report as canonical lvs.rpt")
     verdict = _write_lvs_verdict(
         project, "PASS", "LVS_MATCH_POWER_VERIFIED",
         f"netgen LVS: circuits match uniquely with a POWER-AWARE gate netlist "
@@ -55947,9 +56008,16 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
     # writing ext2spice.log / burning CPU is never killed; only a hang dies.
     # marker = the tcl path (in magic's argv); log_path = the tee'd log.
     # The extraction declares the netlist LVS compares, its feedback and its log.
+    extraction_inputs = [extract_def, tcl, Path(pdk.tech_lef), Path(pdk.cell_lef),
+                         *map(Path, _ext_lefs)]
+    _record_lvs_native_inputs(project, extraction_def=extract_def,
+                              extraction_recipe=tcl,
+                              **{f"extraction_lef_{i}": path for i, path in
+                                 enumerate(extraction_inputs[2:])})
     rc, out, err = _declared_session_exec(
         container, cmd, [spice_out, feedback_out, ext_dir / "ext2spice.log"],
-        marker=_magic_tcl_c, log_path=ext_dir / "ext2spice.log")
+        marker=_magic_tcl_c, log_path=ext_dir / "ext2spice.log",
+        inputs=extraction_inputs)
     # v1.3.47 — a stall/ceiling kill must NOT be scored from a PARTIAL extracted
     # netlist (a half-written .spice would drive a false LVS verdict). Isolate
     # the partial output and FAIL as extraction-incomplete.
@@ -56073,7 +56141,10 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
         if _aliases:
             _patched = _v0_3_14_apply_top_port_aliases(
                 _sp_text, _aliases, top=top)
-            spice_out.write_text(_patched)
+            _declared_transform_exec(
+                project, spice_out, "lvs:top_port_aliases", "magic",
+                "restore the DEF's same-net top port aliases in extracted SPICE",
+                lambda: spice_out.write_text(_patched))
     except OSError:
         pass
     # ORGANIC-20260606 #477 — run-completion honesty check (c):
@@ -56280,7 +56351,16 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
     # v1.3.47 — progress-stall watchdog (not a fixed 14400s kill; see #443
     # note): a still-progressing netgen compare is never killed, only a hang.
     # marker = the layout netlist path (in netgen's argv).
-    rc, out, err = _docker_exec(container, cmd, marker=nl_c, outputs=[lvs_rpt])
+    lvs_log = lvs_rpt.with_suffix(".log")
+    setup_host = _container_path_to_host(netgen_setup, container, project)
+    current_inputs = _record_lvs_native_inputs(project, extracted_spice=spice_out,
+                              comparison_netlist=netlist, netgen_setup=setup_host)
+    if current_inputs:
+        rc, out, err = _declared_session_exec(
+            container, cmd, [lvs_rpt, lvs_log], marker=nl_c,
+            inputs=[spice_out, netlist, setup_host], transcript_path=lvs_log)
+    else:
+        rc, out, err = _docker_exec(container, cmd, marker=nl_c, outputs=[lvs_rpt])
     transcript = (out or "") + "\n" + (err or "")
     # ORGANIC v1462 — read the report with a bounded flush retry: netgen writes
     # its terminal `Final result:` verdict to lvs.rpt (its stdout carries only

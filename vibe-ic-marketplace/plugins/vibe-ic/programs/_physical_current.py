@@ -331,6 +331,123 @@ def clock_plan(project, plan, floorplan, sdcs, pdk):
     return str(plan)
 
 
+def default_signoff_inputs(project):
+    """The existing finished-stream and filled-view owners, when selected."""
+    import librelane_fill_dfm as fill
+    import execution_policy
+    project = Path(project).resolve()
+    if (execution_policy.request()["mode"] != "default"
+            or not (project / fill.DEFAULT_STREAM_REL).is_file()):
+        return None
+    import gds_xor_check as xor
+    import _native373_current as streams
+    report = json.loads((project / "reports/phase3/gds_xor.json").read_text())
+    if (report.get("gate") != xor.GATE or report.get("verdict") != "PASS"
+            or report.get("design_layer_differences") != []
+            or type(report.get("design__xor_difference__count")) is not int
+            or report["design__xor_difference__count"] != 0
+            or type(report.get("layers_compared")) is not int
+            or report["layers_compared"] <= 0):
+        raise ValueError("CURRENT_FINISHED_GEOMETRY_NOT_CLEAN")
+    refusal = xor.current_geometry_refusal(project, report)
+    if refusal:
+        raise ValueError("CURRENT_FINISHED_STREAM_REFUSED: " + refusal)
+    current = streams.read_current(project)
+    if current.get("count") != 0:
+        raise ValueError("CURRENT_STREAM_CONNECTIVITY_NOT_CLEAN")
+    stream = fill.validate_default_stream(project)
+    connectivity = xor.gds_connectivity(project, digest(Path(stream["canonical"])), report)
+    if connectivity.get("verdict") != "PASS":
+        raise ValueError("CURRENT_FINISHED_CONNECTIVITY_REFUSED: " + str(connectivity))
+    paths = streams._source_inputs(project, streams._source_def(project))
+    for role, path in paths.items():
+        if entry(project, path) != current["current"]["inputs"][role]:
+            raise ValueError("CURRENT_FILLED_VIEW_CHANGED: " + role)
+    return {**paths, "gds": Path(stream["canonical"]),
+            "stream_fidelity": project / "reports/phase3/gds_xor.json",
+            "native_streams": project / streams.REL}
+
+
+def _bound(row, files):
+    return files.get(row["path"]) in (row["sha256"], "sha256:" + row["sha256"])
+
+
+def _lvs_def_chain(project, inputs, native, entries):
+    """Re-derive the existing DEF extraction/compare and finished-stream link."""
+    import phase3_one_shot_runner as runner
+    import lvs_power_aware_netlist_emit as power
+    selected = default_signoff_inputs(project)
+    if selected is None or any(inputs[role] != entry(project, selected[role])
+                               for role in ("gds", "def", "netlist")):
+        raise ValueError("CURRENT_NATIVE_LAYOUT_UNBOUND")
+    path = project / "reports/phase3/lvs_inputs.json"
+    doc = json.loads(path.read_text())
+    for key, role in (("layout_def", "def"), ("schematic_netlist", "netlist")):
+        row = doc[key]
+        if (Path(row["path"]).resolve() != (project / inputs[role]["path"]).resolve()
+                or row["sha256"] != inputs[role]["sha256"]):
+            raise ValueError("CURRENT_LVS_SOURCE_CHANGED: " + role)
+    rows = {"lvs_inputs": entry(project, path)}
+    required = ("extracted_spice", "comparison_netlist", "netgen_setup",
+                "extraction_def", "extraction_recipe")
+    names = [*required, *sorted(k for k in doc if
+             re.fullmatch(r"(?:extraction|power)_lef_\d+", k))]
+    for name in names:
+        source = Path(doc[name]["path"])
+        external = bool(re.fullmatch(r"(?:extraction|power)_lef_\d+", name))
+        row = entry(project, source, external=external)
+        if row["sha256"] != doc[name]["sha256"]:
+            raise ValueError("CURRENT_LVS_INPUT_CHANGED: " + name)
+        rows[("pdk_" if external else "") + name] = row
+    for role in ("extracted_spice", "comparison_netlist", "netgen_setup"):
+        if not _bound(rows[role], native.get("inputs") or {}):
+            raise ValueError("CURRENT_NETGEN_INPUT_UNBOUND: " + role)
+    spice = rows["extracted_spice"]
+    extraction = [e for e in entries if e.get("record") == "invocation"
+                  and e.get("tool") == "magic" and spice["path"] in (e.get("outputs") or {})]
+    if not extraction:
+        raise ValueError("CURRENT_EXTRACTION_INVOCATION_MISSING")
+    extraction = extraction[-1]
+    if extraction.get("measured") is not True or extraction.get("exit_code") != 0:
+        raise ValueError("CURRENT_EXTRACTION_EXECUTION_MISSING")
+    for role in ("extraction_def", "extraction_recipe"):
+        if not _bound(rows[role], extraction.get("inputs") or {}):
+            raise ValueError("CURRENT_EXTRACTION_INPUT_UNBOUND: " + role)
+    original_def = (project / inputs["def"]["path"]).read_text(errors="replace")
+    extracted_def = (project / rows["extraction_def"]["path"]).read_text(errors="replace")
+    if extracted_def != original_def and extracted_def != runner._strip_nonlayer_blockages(original_def)[0]:
+        raise ValueError("CURRENT_EXTRACTION_DEF_CHANGED")
+    if not _bound(spice, extraction.get("outputs") or {}):
+        # The existing loss-free top-port restoration is an in-place transform.
+        old = (extraction.get("outputs") or {}).get(spice["path"], "").removeprefix("sha256:")
+        if not any(e.get("record") == "declared_transform"
+                   and e.get("producing_step") == "lvs:top_port_aliases"
+                   and (e.get("inputs") or {}).get(spice["path"]) in (old, "sha256:" + old)
+                   and _bound(spice, e.get("outputs") or {}) for e in entries):
+            raise ValueError("CURRENT_EXTRACTION_OUTPUT_UNBOUND")
+    log = entry(project, (project / rows["extraction_recipe"]["path"]).parent / "ext2spice.log")
+    if not _bound(log, extraction.get("outputs") or {}):
+        raise ValueError("CURRENT_EXTRACTION_LOG_UNBOUND")
+    compared = project / rows["comparison_netlist"]["path"]
+    original = project / inputs["netlist"]["path"]
+    if compared.resolve() != original.resolve():
+        options = doc["power_aware"]
+        if not isinstance(options, dict) or any(type(options.get(k)) is not bool
+                for k in ("rails_as_ports", "tie_wells_to_rails")):
+            raise ValueError("CURRENT_POWER_AWARE_MODEL_MISSING")
+        lef_roles = sorted((k for k in doc if re.fullmatch(r"power_lef_\d+", k)),
+                           key=lambda k: int(k.rsplit("_", 1)[1]))
+        lefs = [project / rows["pdk_" + k]["path"] for k in lef_roles]
+        expected, stats = power.emit_power_aware_netlist(
+            original.read_text(errors="replace"), pdk_of(project)[0],
+            top=design_of(project / inputs["def"]["path"]),
+            cell_lef=project / inputs["pdk_cell_lef"]["path"],
+            additional_lefs=lefs, **options)
+        if stats.get("modules_patched", 0) <= 0 or compared.read_text() != expected:
+            raise ValueError("CURRENT_POWER_AWARE_NETLIST_CHANGED")
+    return rows, log, extraction
+
+
 def direct_half(project, top, pdk, half, producer):
     """Bind the direct native DRC/LVS invocation, without masking its FAIL."""
     from _atomic_artefact import write_json
@@ -342,11 +459,11 @@ def direct_half(project, top, pdk, half, producer):
     inputs, refusal = {}, ""
     try:
         pnr = project / "phase3/stage3/pnr"
-        for role, source in (("gds", pnr / f"{top}.gds"),
-                             ("def", pnr / f"{top}.def"),
-                             ("netlist", pnr / f"{top}_pnr.v"),
-                             ("pdk_tech_lef", pdk.tech_lef),
-                             ("pdk_cell_lef", pdk.cell_lef)):
+        selected = default_signoff_inputs(project) or {
+            "gds": pnr / f"{top}.gds", "def": pnr / f"{top}.def",
+            "netlist": pnr / f"{top}_pnr.v"}
+        for role, source in {**selected, "pdk_tech_lef": pdk.tech_lef,
+                             "pdk_cell_lef": pdk.cell_lef}.items():
             inputs[role] = entry(project, source, external=role.startswith("pdk_"))
         deck = pdk.drc_deck if half == "drc" else getattr(pdk, "bridge_netgen_setup", None)
         if not deck and half == "lvs":
@@ -358,8 +475,8 @@ def direct_half(project, top, pdk, half, producer):
         if declared_pdk != pdk.name:
             raise ValueError("CURRENT_PDK_MISMATCH")
         inputs["technology"] = entry(project, technology)
-        design = design_of(pnr / f"{top}.def")
-    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        design = design_of(selected["def"])
+    except (OSError, ValueError, AttributeError, TypeError, RuntimeError) as exc:
         refusal = str(exc)
         design = top
     before = list(sdf._prov_entries(project))
@@ -369,9 +486,20 @@ def direct_half(project, top, pdk, half, producer):
             raise ValueError(refusal)
         report = project / f"reports/phase3/{'drc_signoff' if half == 'drc' else 'lvs'}.rpt"
         native_report = project / "phase3/reports/drc.rpt" if half == "drc" else report
-        invoked = [e for e in list(sdf._prov_entries(project))[len(before):]
+        new = list(sdf._prov_entries(project))[len(before):]
+        if half == "lvs":
+            raw = project / "reports/phase3/lvs_power_aware.rpt"
+            alias = entry(project, report)
+            if raw.is_file() and digest(raw) == alias["sha256"] and any(
+                    e.get("record") == "declared_transform"
+                    and e.get("producing_step") == "lvs:power_aware"
+                    and _bound(alias, e.get("outputs") or {})
+                    and _bound(entry(project, raw), e.get("inputs") or {}) for e in new):
+                native_report = raw
+        native_rel = str(native_report.relative_to(project))
+        invoked = [e for e in new
                    if e.get("record") == "invocation"
-                   and any(Path(k).name == native_report.name for k in (e.get("outputs") or {}))
+                   and native_rel in (e.get("outputs") or {})
                    and e.get("tool") in ("klayout", "magic", "netgen", "svrfdrc")]
         if not invoked:
             raise ValueError('CURRENT_NATIVE_INVOCATION_MISSING' + f": {native_report}: no new invocation in _signoff_drc_format._prov_entries({project}) names this report with tool klayout/magic/netgen/svrfdrc")
@@ -382,16 +510,25 @@ def direct_half(project, top, pdk, half, producer):
             if entry(project, project / expected["path"], external=role.startswith("pdk_")) != expected:
                 raise ValueError(f"CURRENT_INPUT_CHANGED_DURING_TOOL: {role}")
         log = native_report.with_suffix(".log")
+        native_execution = {"rc": execution["exit_code"],
+                            "argv": [execution.get("command") or execution.get("cmd") or execution["tool"]],
+                            "native_invocation": execution}
+        outputs = {"report": entry(project, report), "log": entry(project, log),
+                   "native_report": entry(project, native_report)}
+        if half == "lvs" and not _bound(inputs["gds"], execution.get("inputs") or {}):
+            rows, extraction_log, extraction = _lvs_def_chain(project, inputs, execution, new)
+            inputs.update(rows)
+            outputs["extraction_log"] = extraction_log
+            native_execution["extraction_invocation"] = extraction
         record = build(project, "31", "stage4", design, pdk.name, execution["tool"],
-                       inputs, {"report": entry(project, report), "log": entry(project, log),
-                                "native_report": entry(project, native_report)},
-                       {"rc": execution["exit_code"],
-                        "argv": [execution.get("command") or execution.get("cmd") or execution["tool"]],
-                        "native_invocation": execution})
+                       inputs, outputs, native_execution)
+        record["file_top"] = top
         write_json(path, record)
         row.extras["current_subject"] = str(path)
         row.extras["current_reader"] = read_direct_half(project, half)
-    except (OSError, ValueError, TypeError) as exc:
+        if row.extras["current_reader"]["verdict"] != "CURRENT":
+            raise ValueError(row.extras["current_reader"]["reason"])
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         refusal = str(exc)
         write_json(path, {"schema": SCHEMA, "step": "31", "stage": "stage4",
                           "verdict": "NOT_MEASURED", "reason": refusal})
@@ -422,26 +559,49 @@ def _direct_half_refusal(project, half):
     if (native.get("tool") != record["tool"] or native.get("measured") is not True
             or native.get("exit_code") != 0):
         return "CURRENT_NATIVE_INVOCATION_MISMATCH"
+    import _signoff_drc_format as sdf
+    entries = list(sdf._prov_entries(project))
+    if native not in entries:
+        return "CURRENT_NATIVE_INVOCATION_MISSING"
     for role in ("native_report", "log"):
         row = record["outputs"][role]
         if (native.get("outputs") or {}).get(row["path"]) != "sha256:" + row["sha256"]:
             return "CURRENT_NATIVE_OUTPUT_UNBOUND"
     pnr = project / "phase3/stage3/pnr"
-    for role, suffix in (("gds", ".gds"), ("def", ".def"), ("netlist", "_pnr.v")):
-        if record["inputs"][role] != entry(project, pnr / (record["design"] + suffix)):
+    selected = default_signoff_inputs(project)
+    file_top = record.get("file_top", record["design"])
+    expected = selected or {"gds": pnr / f"{file_top}.gds",
+                            "def": pnr / f"{file_top}.def",
+                            "netlist": pnr / f"{file_top}_pnr.v"}
+    for role, source in expected.items():
+        if record["inputs"].get(role) != entry(project, source):
             return "CURRENT_NATIVE_SUBJECT_SWAPPED"
     # The report's own invocation must bind the layout, not only its filename.
     want = record["inputs"]["gds"]
     bound = (native.get("inputs") or {}).get(want["path"])
-    if bound not in (want["sha256"], "sha256:" + want["sha256"]):
+    if half == "lvs" and bound not in (want["sha256"], "sha256:" + want["sha256"]):
+        rows, extraction_log, extraction = _lvs_def_chain(project, record["inputs"], native, entries)
+        if (any(record["inputs"].get(k) != v for k, v in rows.items())
+                or record["outputs"].get("extraction_log") != extraction_log
+                or record["execution"].get("extraction_invocation") != extraction):
+            return "CURRENT_EXTRACTION_CHAIN_CHANGED"
+    elif bound not in (want["sha256"], "sha256:" + want["sha256"]):
         return "CURRENT_NATIVE_LAYOUT_UNBOUND"
+    raw, canonical = record["outputs"]["native_report"], record["outputs"]["report"]
+    if half == "lvs" and raw["path"] != canonical["path"]:
+        if raw["sha256"] != canonical["sha256"] or not any(
+                e.get("record") == "declared_transform"
+                and e.get("producing_step") == "lvs:power_aware"
+                and _bound(raw, e.get("inputs") or {})
+                and _bound(canonical, e.get("outputs") or {}) for e in entries):
+            return "CURRENT_NATIVE_REPORT_TRANSFORM_UNBOUND"
     return ""
 
 
 def check_direct_half(project, half):
     try:
         return _direct_half_refusal(project, half)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         return f"CURRENT_NATIVE_REFUSED: {exc}"
 
 

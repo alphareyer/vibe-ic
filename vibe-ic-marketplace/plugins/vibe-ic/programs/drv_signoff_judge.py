@@ -675,8 +675,50 @@ def _record(ref: dict, missing: list[str], label: str) -> dict | None:
     return doc
 
 
+def _filled_lvs_association(identity: dict, inputs: dict) -> bool:
+    """Re-read the existing native fill bridge between STA and filled LVS."""
+    try:
+        import _physical_current as physical
+        import librelane_fill_dfm as fill
+        project = Path(identity["project"]).resolve()
+        selected = physical.default_signoff_inputs(project)
+        if (selected is None or physical.digest(selected["gds"]) !=
+                identity["derivation"]["gds"]["sha256"]):
+            return False
+        fill.validate_fill_consumption(project)
+        tool = json.loads((project / fill.RECORD_REL).read_text())["odb"]["tool"]
+        before = json.loads(Path(tool["binding"]["input_state"]).read_text())
+        after = json.loads(Path(tool["state"]).read_text())
+        if tool.get("refusals") != []:
+            return False
+        config = json.loads(Path(tool["binding"]["config"]).read_text())
+        census = fill.fill_census(Path(before["def"]).read_text(),
+                                  Path(after["def"]).read_text(),
+                                  fill.cell_patterns(config))
+        if (census != tool.get("census") or census["removed"]
+                or census["per_class"]["other"]):
+            return False
+        artifacts = identity["artifacts"]
+        before_def, before_nl = Path(before["def"]), Path(before["nl"])
+        if (physical.digest(before_def) != artifacts["def"]["sha256"]
+                or physical.digest(before_nl) != identity["sta_netlist"]):
+            return False
+        for name, role, state_role in (("layout_def", "def", "def"),
+                                       ("schematic_netlist", "netlist", "nl")):
+            row = inputs[name]
+            if (Path(row["path"]).resolve() != selected[role].resolve()
+                    or physical.digest(selected[role]) != row["sha256"]
+                    or physical.digest(Path(after[state_role])) != row["sha256"]):
+                return False
+        return (identity["lvs_netlist"] == physical.digest(selected["netlist"])
+                and identity["gds_netlist"] in
+                    (identity["sta_netlist"], identity["lvs_netlist"]))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
+        return False
+
+
 def _check_post_stream_derivation(identity: dict, fails: list[str],
-                                  missing: list[str]) -> None:
+                                  missing: list[str]) -> bool:
     """R-0929-DRV-IDENTITY: the final capture proves the streamed GDS and the
     LVS netlist derive from the judged DEF / netlist.  Every file is
     re-hashed and every record re-read here (review wave 58: the bundle's
@@ -688,7 +730,7 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
     judged_def = (artifacts.get("def") or {}).get("sha256")
     if not isinstance(derivation, dict):
         missing.append("post-stream derivation record absent")
-        return
+        return False
     gds = derivation.get("gds")
     if not isinstance(gds, dict):
         missing.append("post-stream GDS admission record absent")
@@ -707,12 +749,12 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
     lvs = derivation.get("lvs")
     if not isinstance(lvs, dict):
         missing.append("post-stream LVS record absent")
-        return
+        return False
     inputs_ref = lvs.get("inputs_record") or {}
     inputs = _record(inputs_ref, missing, "LVS inputs record")
     verdict = _record(lvs.get("verdict_record") or {}, missing, "LVS verdict record")
     if inputs is None or verdict is None:
-        return
+        return False
     # The verdict is the verdict OF these inputs only when step 31 wrote it
     # while this very record stood (a stale PASS of another layout is not).
     if (verdict.get("lvs_inputs") or {}).get("sha256") != inputs_ref.get("sha256"):
@@ -723,15 +765,17 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
     _evidence(schematic, missing, "LVS schematic netlist")
     if (lvs.get("schematic_netlist") or {}).get("sha256") != schematic.get("sha256"):
         missing.append("bundle LVS netlist differs from the LVS inputs record")
+    filled = _filled_lvs_association(identity, inputs)
     if not layout:
         missing.append("LVS names no layout DEF")
-    elif layout != judged_def:
+    elif layout != judged_def and not filled:
         fails.append("LVS compared a layout DEF other than the judged DEF")
-    if schematic.get("sha256") != identity.get("sta_netlist"):
+    if schematic.get("sha256") != identity.get("sta_netlist") and not filled:
         fails.append("LVS compared a netlist other than the judged STA netlist")
     if verdict.get("status") != "PASS" or verdict.get("compare_performed") is False:
         missing.append(f"LVS did not prove the layout matches the netlist "
                        f"(verdict {verdict.get('status')})")
+    return filled
 
 
 #: The DRV standard's listed (never gated, never dropped) row classes
@@ -831,12 +875,13 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         _evidence(item, missing, name)
         if name.endswith("netlist") and item.get("sha256") != identity.get(name):
             fails.append(f"{name}: recorded netlist sha256 disagrees with file")
+    filled_association = False
     if capture_point == "post_stream":
-        _check_post_stream_derivation(identity, fails, missing)
+        filled_association = _check_post_stream_derivation(identity, fails, missing)
     identified_netlists = [identity.get(name) for name in
                            ("sta_netlist", "lvs_netlist", "gds_netlist")
                            if identity.get(name)]
-    if len(set(identified_netlists)) > 1:
+    if len(set(identified_netlists)) > 1 and not filled_association:
         fails.append("STA/LVS/GDS netlist identity mismatch")
     for name in ("openroad_commit", "opensta_commit", "pdk_commit"):
         if not identity.get(name):

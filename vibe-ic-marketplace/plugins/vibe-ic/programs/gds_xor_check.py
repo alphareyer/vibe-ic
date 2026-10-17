@@ -1192,6 +1192,60 @@ def _stated_class(doc: Dict[str, Any],
     return stated or default
 
 
+def current_geometry_refusal(project: Path, doc: Dict[str, Any]) -> str:
+    """Re-read the existing geometric comparison without composing later LVS.
+
+    Both Step37.3 and the downstream DEF-level LVS association use the same
+    raw transcript, material/boundary and finishing-partition obligations.
+    """
+    diffs = doc.get("design_layer_differences")
+    count = doc.get("design__xor_difference__count")
+    layers = doc.get("layers_compared")
+    # A zero is credit only for the current, separately produced subjects.
+    import _physical_current as _pc
+    current = doc.get("current")
+    refusal = _pc.validate(project, current, step="37.3", stage="stage4",
+                           tools=("klayout",),
+                           required_inputs=("shipped", "reference", "def", "technology", "recipe"),
+                           required_outputs=("log",), marker="XOR_DONE")
+    if not refusal:
+        shipped, dfile, _att = shipped_and_source(project)
+        for role, path in (("shipped", shipped), ("def", dfile)):
+            if path is None or _pc.entry(project, path) != current["inputs"][role]:
+                refusal = "XOR_CURRENT_SUBJECT_SWAPPED"
+        if current["inputs"]["shipped"]["sha256"] == current["inputs"]["reference"]["sha256"]:
+            refusal = "XOR_IDENTICAL_INPUTS"
+        text = (project / current["outputs"]["log"]["path"]).read_text()
+        boundary = None
+        try:
+            boundary = _default_stream_boundary(project, dfile, shipped)
+            if boundary is not None:
+                if current['inputs'].get('boundary') != _pc.entry(project, boundary):
+                    refusal = 'XOR_DEFAULT_BOUNDARY_CHANGED'
+                faithful, why, _stats = reference_is_faithful(text, boundary=True)
+                if not faithful:
+                    refusal = 'XOR_REFERENCE_INCOMPLETE: ' + why
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            refusal = 'XOR_DEFAULT_BOUNDARY_REFUSED: ' + str(exc)
+        counts, done = parse_layers(text)
+        tops = re.findall(r"(?m)^XOR_TOP shipped=(\S+) reference=(\S+)$", text)
+        if not done or not counts or tops != [(current["design"], current["design"])]:
+            refusal = "XOR_NATIVE_SUBJECT_OR_EXECUTION_MISMATCH"
+        if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
+            refusal = "XOR_NATIVE_TOOL_MISSING"
+        try:
+            fill, seal, provenance = declared_finishing_layers(project)
+            if boundary is not None and doc.get('declared_finishing_layers') != provenance:
+                refusal = 'XOR_FINISHING_WRITE_SET_CHANGED'
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            return 'XOR_FINISHING_WRITE_SET_REFUSED: ' + str(exc)
+        native_design, native_finishing, total = partition(counts, fill, seal)
+        if (native_design != diffs or total != count or len(counts) != layers
+                or native_finishing != doc.get("finishing_layer_differences")):
+            refusal = "XOR_NATIVE_VALUES_CHANGED"
+    return refusal
+
+
 def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
     """Decide step 37.3 from the receipt the PRODUCER wrote. Returns (rc, line, doc).
 
@@ -1280,48 +1334,8 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
                 f"current connectivity unmeasured — {conn.get('reason') or 'no connectivity measurement recorded'}"), doc
         return 0, "PASS: current LibreLane finishing XOR and current connectivity", doc
 
-    # A zero is credit only for the current, separately produced subjects.
-    import _physical_current as _pc
     current = doc.get("current")
-    refusal = _pc.validate(project, current, step="37.3", stage="stage4",
-                           tools=("klayout",),
-                           required_inputs=("shipped", "reference", "def", "technology", "recipe"),
-                           required_outputs=("log",), marker="XOR_DONE")
-    if not refusal:
-        shipped, dfile, _att = shipped_and_source(project)
-        for role, path in (("shipped", shipped), ("def", dfile)):
-            if path is None or _pc.entry(project, path) != current["inputs"][role]:
-                refusal = "XOR_CURRENT_SUBJECT_SWAPPED"
-        if current["inputs"]["shipped"]["sha256"] == current["inputs"]["reference"]["sha256"]:
-            refusal = "XOR_IDENTICAL_INPUTS"
-        text = (project / current["outputs"]["log"]["path"]).read_text()
-        boundary = None
-        try:
-            boundary = _default_stream_boundary(project, dfile, shipped)
-            if boundary is not None:
-                if current['inputs'].get('boundary') != _pc.entry(project, boundary):
-                    refusal = 'XOR_DEFAULT_BOUNDARY_CHANGED'
-                faithful, why, _stats = reference_is_faithful(text, boundary=True)
-                if not faithful:
-                    refusal = 'XOR_REFERENCE_INCOMPLETE: ' + why
-        except (OSError, ValueError, KeyError, RuntimeError) as exc:
-            refusal = 'XOR_DEFAULT_BOUNDARY_REFUSED: ' + str(exc)
-        counts, done = parse_layers(text)
-        tops = re.findall(r"(?m)^XOR_TOP shipped=(\S+) reference=(\S+)$", text)
-        if not done or not counts or tops != [(current["design"], current["design"])]:
-            refusal = "XOR_NATIVE_SUBJECT_OR_EXECUTION_MISMATCH"
-        if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
-            refusal = "XOR_NATIVE_TOOL_MISSING"
-        try:
-            fill, seal, provenance = declared_finishing_layers(project)
-            if boundary is not None and doc.get('declared_finishing_layers') != provenance:
-                refusal = 'XOR_FINISHING_WRITE_SET_CHANGED'
-        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
-            return 2, 'NOT_MEASURED [EXECUTION_ERROR]: XOR_FINISHING_WRITE_SET_REFUSED: ' + str(exc), doc
-        native_design, native_finishing, total = partition(counts, fill, seal)
-        if (native_design != diffs or total != count or len(counts) != layers
-                or native_finishing != doc.get("finishing_layer_differences")):
-            refusal = "XOR_NATIVE_VALUES_CHANGED"
+    refusal = current_geometry_refusal(project, doc)
     if refusal:
         return 2, f"NOT_MEASURED [EXECUTION_ERROR]: {refusal}", doc
 
@@ -1357,7 +1371,10 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
     changed = (fresh_conn.get("verdict") != conn.get("verdict")
                or fresh_conn.get("basis") != conn.get("basis"))
     if current["inputs"].get("connectivity"):
-        changed = fresh_conn != conn
+        # Later DEF-level LVS can disclose a different reason it is not a
+        # GDS extraction. That diagnostic is not a changed native measurement.
+        changed = ({k: v for k, v in fresh_conn.items() if k != "not_measured_by"}
+                   != {k: v for k, v in conn.items() if k != "not_measured_by"})
     if changed:
         return 2, "NOT_MEASURED [EXECUTION_ERROR]: XOR_CONNECTIVITY_EVIDENCE_CHANGED", doc
     if conn["verdict"] == "FAIL":
