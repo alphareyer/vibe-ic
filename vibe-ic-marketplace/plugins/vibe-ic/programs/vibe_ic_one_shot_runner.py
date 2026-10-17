@@ -976,6 +976,66 @@ def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
                       or result.detail}
 
 
+def _complete_step8_postcheck(project: Path, top: str) -> dict:
+    """Accept the existing prelayout evidence without invoking its producers."""
+    import _flow_yaml
+    import design_one_shot_runner as design
+    import execution_backend_gates as gates
+    import librelane_contract as contract
+    import step_output_collector as versions
+    import synth_handoff_netlist_check as handoff
+
+    canonical = {str(row['id']): row for row in _flow_yaml.load()['steps']}
+    selected = {str(row['id']): row for row in versions._read_index(project)['steps']}
+    for sid in ('9', '10'):
+        prior = versions.latest_pass(project, sid)
+        latest = selected.get(sid) or {}
+        if (not prior or not prior.get('current_inputs')
+                or not prior.get('canonical_pass') or prior.get('status') != 'PASS'
+                or latest.get('folder') != prior.get('folder')):
+            return {'verdict': 'FAIL' if latest.get('status') == 'FAIL' else 'NOT_MEASURED',
+                    'detail': f'Step8 postcheck requires the current complete Step{sid} checkpoint'}
+        consumer = (prior.get('result') or {}).get('canonical_consumer') or {}
+        try:
+            outputs = gates.contracts(project, canonical[sid])
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+        if (consumer.get('status') != 'PASS' or not consumer.get('outputs')
+                or outputs != consumer['outputs']):
+            return {'verdict': 'NOT_MEASURED',
+                    'detail': f'Step{sid} outputs no longer match its complete consumer'}
+    bound = handoff.bound_handoff(project)
+    if not bound or bound.get('verdict') != 'PASS':
+        return {'verdict': (bound or {}).get('verdict', 'NOT_MEASURED'),
+                'detail': '; '.join((bound or {}).get('findings', ()))
+                          or 'Step8 requires the current native synthesis handoff'}
+    if Path(bound['mapped']).name != f'{top}_synth.v':
+        return {'verdict': 'NOT_MEASURED', 'detail': 'Step8 top differs from the synthesis handoff'}
+    try:
+        gate = json.loads((project / 'phase3/librelane/prelayout/gates/step8_sdc_opensta.json').read_text())
+        state = (project / gate['source']).resolve()
+        if not state.is_relative_to(project.resolve()):
+            raise ValueError('Step8 prelayout state is outside the project')
+        folder = state.parent
+        native = {'folder': str(folder),
+                  'receipt_sha256': contract.digest(folder / 'vibeic_receipt.json')}
+        began = time.time()
+        result = design.step_sdc_validation_post_prelayout(project, top, native_result=native)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    current = next((row for row in versions.current_acceptance(project, began)
+                    if str(row['id']) == '8'), None)
+    if current is None:
+        return {'verdict': 'FAIL' if result.status == 'FAIL' else 'NOT_MEASURED',
+                'detail': result.detail or 'Step8 published no complete consumer'}
+    consumer = (current.get('result') or {}).get('canonical_consumer') or {}
+    status = ('PASS' if current.get('canonical_pass') and current['status'] == 'PASS'
+              and consumer.get('status') == 'PASS' else
+              'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED')
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ())) or result.detail}
+
+
 def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
     """The no-L-docs half of `_phase1_decision`: which design input exists.
 
@@ -2560,6 +2620,8 @@ def _main() -> int:
     _entry_runner = None
     _prelayout_entry = (str(getattr(args, 'entry_step', None)) == '10'
                         and execution_policy_value['mode'] == 'default')
+    _sdc_postcheck_entry = (str(getattr(args, 'entry_step', None)) == '8'
+                            and execution_policy_value['mode'] == 'default')
     if getattr(args, "entry_step", None):
         try:
             import step_preflight as _spf_o          # noqa: PLC0415
@@ -2568,7 +2630,7 @@ def _main() -> int:
                   file=sys.stderr)
             return 2
         _entry_runner = _spf_o.runner_for_step(str(args.entry_step))
-        if _prelayout_entry:
+        if _prelayout_entry or _sdc_postcheck_entry:
             # The retained prelayout owner is independent of Step9. Its
             # existing complete consumer runs before Phase2 resumes at11.
             _entry_runner = 'design_one_shot_runner'
@@ -2599,6 +2661,10 @@ def _main() -> int:
                   f"1/2 step.", file=sys.stderr)
             return 2
         print(f"[entry] step {args.entry_step} -> {_entry_runner}")
+        if _sdc_postcheck_entry and str(args.exit_step) != '8':
+            print('REFUSED: Default Step8 postcheck needs --exit-step 8', file=sys.stderr)
+            lock.release()
+            return 2
 
     if _entry_runner == "phase3_one_shot_runner":
         # A Phase-3 entry is an isolated backend repair.  Do not run Phase 1,
@@ -3209,13 +3275,34 @@ def _main() -> int:
     # ---------------- Phase 2 ----------------
     _phase2_pad_top_deferred = None
     if not halted_at:
+        if _sdc_postcheck_entry:
+            step8_acceptance = _complete_step8_postcheck(project, flow_top)
+            status = step8_acceptance['verdict']
+            rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
+            out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_runner_summary(out, {
+                'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                **_delivery_route.report_label(project), 'verdict': status,
+                'halted_at': None if status == 'PASS' else 'phase2',
+                'declared_window': {'entry_step': '8', 'exit_step': '8'},
+                'phases': [{'name': n, 'verdict': v, 'rc': code} for n, v, code in plan],
+                'step8_postcheck': step8_acceptance,
+                'whole_flow_verdict': 'NOT_MEASURED'}, project)
+            lock.release()
+            return rc
         if _prelayout_entry:
             step10_acceptance = _complete_step10_prelayout(
                 project, flow_top, args.pdk, args.container)
             reports['step10_prelayout'] = step10_acceptance
-            if (step10_acceptance['verdict'] != 'PASS'
+            prelayout_status = step10_acceptance['verdict']
+            if prelayout_status == 'PASS':
+                step8_acceptance = _complete_step8_postcheck(project, flow_top)
+                reports['step8_postcheck'] = step8_acceptance
+                prelayout_status = step8_acceptance['verdict']
+            if (prelayout_status != 'PASS'
                     or str(args.exit_step) == '10'):
-                status = step10_acceptance['verdict']
+                status = prelayout_status
                 rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
                 out = _pl.report_path(project, 'vibe_ic_one_shot.json')
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -3229,6 +3316,7 @@ def _main() -> int:
                     'phases': [{'name': n, 'verdict': v, 'rc': code}
                                for n, v, code in plan],
                     'step10_prelayout': step10_acceptance,
+                    'step8_postcheck': reports.get('step8_postcheck'),
                     'whole_flow_verdict': 'NOT_MEASURED'}, project)
                 lock.release()
                 return rc

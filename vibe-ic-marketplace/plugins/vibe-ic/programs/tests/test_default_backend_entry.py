@@ -671,3 +671,112 @@ def test_default_entry15_refreshes_step7_before_physical_handoff(
         assert handoff['result']['canonical_consumer']['status'] == 'PASS'
     for p, raw in preserved.items():
         assert p.read_bytes() == raw, p
+
+
+@pytest.mark.parametrize('case', ['current', 'changed9', 'changed10',
+                                  'missing_gate', 'failed_gate', 'entry10'])
+def test_default_postcheck8_consumes_saved_prelayout_without_native_replay(
+        tmp_path, monkeypatch, cross_phase_transport, case):
+    """Real public entry, retained owners and consumers; native seed is neutral."""
+    import json
+    import os
+    import _eda_pin
+    import _path_layout as layout
+    from _ppa import timing
+    import design_one_shot_runner as design
+    import phase3_one_shot_runner as phase3
+    import step_output_collector as versions
+    import vibe_ic_one_shot_runner as front
+    from test_default_frontend_r2 import put
+
+    project, rtl, pdk = _entry10_retained_checkpoint(tmp_path, monkeypatch)
+    observed = {'case': case, 'native_resolution': [], 'native_prelayout': [],
+                'phases': [], 'scope': 'saved neutral native data; real postcheck/full consumer'}
+    _entry10_prelayout_transport(project, pdk, monkeypatch, 'current', observed)
+    stage_owner_route(project, 'ic')
+    if case != 'entry10':
+        seeded = front._complete_step10_prelayout(project, 'top', pdk.name, '')
+        assert seeded['verdict'] == 'PASS', seeded
+    saved = {sid: versions.latest_pass(project, sid)
+             for sid in (('9',) if case == 'entry10' else ('9', '10'))}
+    assert all(row and row['current_inputs'] and row['canonical_pass'] for row in saved.values())
+    preserved = {project / 'steps' / row['folder'] / 'outputs.json':
+                 (project / 'steps' / row['folder'] / 'outputs.json').read_bytes()
+                 for row in saved.values()}
+    for path in (project / 'phase1').rglob('*.json'):
+        preserved[path] = path.read_bytes()
+    preserved[rtl] = rtl.read_bytes()
+    staged_sdc = project / 'input/constraints/clock.sdc'
+    preserved[staged_sdc] = staged_sdc.read_bytes()
+    if case != 'entry10':
+        sdc = json.loads((project / 'phase2/stage2/constraints/asic_sdc.json').read_text())
+        for path in (project / sdc['path'],
+                     project / 'phase2/stage2/constraints/pvt_matrix.json'):
+            preserved[path] = path.read_bytes()
+    gate = project / 'phase3/librelane/prelayout/gates/step8_sdc_opensta.json'
+    if case == 'changed9':
+        put(project / 'phase2/stage2/synth/netlist.v', 'module changed; endmodule\n')
+    elif case == 'changed10':
+        path = project / 'reports/phase3/sta/pre_pnr_summary.json'
+        path.write_text(path.read_text() + '\n')
+    elif case == 'missing_gate':
+        gate.unlink()
+    elif case == 'failed_gate':
+        doc = json.loads(gate.read_text())
+        doc['verdict'] = 'FAIL'
+        doc['findings'] = ['neutral retained OpenSTA SDC failure']
+        put(gate, doc)
+    observed['native_resolution'].clear()
+    observed['native_prelayout'].clear()
+
+    def no_producer(*args, **kwargs):
+        raise AssertionError('postcheck-only entry reran an upstream producer')
+    monkeypatch.setattr(design, 'step_yosys_synth', no_producer)
+    if case != 'entry10':
+        monkeypatch.setattr(timing, 'emit_step7_asic_sdc', no_producer)
+        monkeypatch.setattr(phase3, 'step_prelayout_signoff', no_producer)
+    original_phase = front._run_phase
+    def phase(label, runner, argv, **kwargs):
+        observed['phases'].append(runner.name)
+        if runner.name in ('phase1_one_shot_runner.py', 'phase2_one_shot_runner.py',
+                           'phase3_one_shot_runner.py'):
+            raise AssertionError('postcheck-only bounded entry dispatched another phase')
+        return original_phase(label, runner, argv, **kwargs)
+    monkeypatch.setattr(front, '_run_phase', phase)
+    authority = json.loads(Path(os.environ['VIBEIC_LIBRELANE_LOCAL_ATTESTATION']).read_text())
+    metadata = _eda_pin._docker
+    def image_metadata(*argv, **kwargs):
+        if argv[:3] == ('inspect', '--format', '{{.Image}}\t{{.Config.Image}}'):
+            item = authority['container_inspect']
+            return 0, item['Image'] + '\t' + item['Config']['Image'] + '\n', ''
+        return metadata(*argv, **kwargs)
+    monkeypatch.setattr(_eda_pin, '_docker', image_metadata)
+    entry = '10' if case == 'entry10' else '8'
+    monkeypatch.setattr(sys, 'argv', [str(RUNNER), str(project), '--route', 'ic',
+        '--execution-mode', 'default', '--entry-step', entry, '--exit-step', entry,
+        '--top-name', 'top', '--ic-name', 'top', '--pdk', pdk.name, '--container', '',
+        '--no-dashboard', '--skip-hardware', '--skip-analog'])
+    try:
+        observed['rc'] = front.main()
+    finally:
+        summary = layout.report_path(project, 'vibe_ic_one_shot.json')
+        observed['summary'] = json.loads(summary.read_text()) if summary.is_file() else None
+        selected = next((r for r in versions._read_index(project)['steps'] if str(r['id']) == '8'), None)
+        observed['step8'] = (json.loads((project / 'steps' / selected['folder'] / 'outputs.json').read_text())
+                             if selected and selected.get('folder') else None)
+        put(project / 'POSTCHECK8_OBSERVATION.json', observed)
+    assert observed['rc'] == (0 if case in ('current', 'entry10') else
+                              1 if case == 'failed_gate' else 2), observed
+    assert not observed['phases'], observed
+    assert len(observed['native_prelayout']) == (1 if case == 'entry10' else 0), observed
+    if case in ('current', 'entry10'):
+        record = observed['step8']
+        assert record['status'] == 'PASS' and record['canonical_pass'], observed
+        assert record['result']['canonical_consumer']['status'] == 'PASS'
+        assert observed['summary']['step8_postcheck']['verdict'] == 'PASS'
+        assert observed['summary']['whole_flow_verdict'] == 'NOT_MEASURED'
+    else:
+        assert observed['summary']['step8_postcheck']['verdict'] != 'PASS', observed
+        assert not (observed['step8'] or {}).get('canonical_pass'), observed
+    for path, raw in preserved.items():
+        assert path.read_bytes() == raw, path
