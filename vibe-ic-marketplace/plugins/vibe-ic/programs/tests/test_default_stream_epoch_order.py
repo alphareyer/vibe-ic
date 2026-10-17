@@ -588,3 +588,142 @@ def test_shipped_xor_named_docker_retains_its_original_launch_envelope(tmp_path,
     assert '--rm' in argv and argv[argv.index('--network') + 1] == 'none'
     assert argv[argv.index(image) + 1:argv.index(image) + 5] == ['--skip', '/usr/bin/time', '-v', 'klayout']
     assert runner.execution['argv'] == [v for i, v in enumerate(argv) if i not in (2, 3)]
+
+
+def test_fresh_typed_local373_reaches_native_and_current_connectivity(tmp_path, monkeypatch):
+    """True typed LOCAL admission/three receipts/XOR runner; neutral EDA leaves."""
+    import execution_backend_producers as EBP
+    import _native373_current as native
+    import _watchdog as watchdog
+    import librelane_pv_signoff as pv
+    import gds_xor_check as xor
+    p, pdk, root, stream, calls = _native373_boundary_subject(tmp_path, monkeypatch)
+    source = tmp_path / 'provider'
+    (source / 'librelane').mkdir(parents=True)
+    (source / 'librelane/__init__.py').write_text('# neutral provider source\n')
+    BF.put(p / 'phase3/librelane_switch.json', {
+        'execution_route': 'LOCAL', 'pdk_root_host': str(root), 'pdk': 'neutral',
+        'librelane_root_host': str(source), 'librelane_executable': sys.executable,
+        'local_network_mode': 'host'})
+    monkeypatch.setenv(LC.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    monkeypatch.setattr(EBP, '_parameters', lambda *a: (R, LC, pdk, ''))
+    monkeypatch.setattr(LC, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(LC, 'openroad_home', lambda *a, **k: None)
+    monkeypatch.setattr(pv, 'tech_lef_overlay', lambda *a: {})
+    original_declaration = (p / 'input/submission_template/tapeout_declaration.json').read_bytes()
+    image = LC.resolve_image(p)
+    assert isinstance(image, LC.LocalProviderIdentity)
+    # Rebuild the existing neutral antecedent under the selected provider.
+    # Its prior OCI fill receipt cannot stand in for a typed LOCAL producer.
+    monkeypatch.setattr(BF, 'IMAGE', image)
+    previous = json.loads((p / LF.RECORD_REL).read_text())['odb']['tool']
+    before = json.loads(Path(previous['state']).read_text())
+    tool = BF.fill_record(p)
+    state_path = Path(tool['state'])
+    state = json.loads(state_path.read_text())
+    state.update({key: before[key] for key in ('nl', 'sdc')})
+    BF.put(state_path, state); refresh_receipt(state_path.parent)
+    tool['state_sha256'] = LC.digest(state_path)
+    tool['binding']['receipt_sha256'] = LC.digest(state_path.parent / 'vibeic_receipt.json')
+    BF.consume_fill(p, tool)
+    LF.update_record(p, 'odb', {'shipped': 'librelane', 'tool': tool,
+        'def_sha256': LC.digest(p / 'phase3/stage3/pnr/routed.def')})
+    calls.clear()
+    stream = LF.default_stream(p, 'top', pdk, '')
+
+    def configs(project, selected, name, steps, **kwargs):
+        assert steps == list(native.STEPS) and selected == image
+        assert kwargs['overlay']['DIE_AREA'][0] == LC._def_die_area(Path(stream['filled_def']))
+        cfg = json.loads((Path(stream['stream_state']).parent / 'config.json').read_text())
+        paths = {step: BF.put(p / native.CONFIG / (step + '.json'), {
+            **cfg, 'meta': {'step': step}}) for step in steps}
+        for step, path in paths.items():
+            inputs = ['mag_gds', 'klayout_gds'] if step == native.STEPS[-1] else ['odb', 'def', 'nl', 'sdc']
+            BF.put(LC.views_path(path), {'step': step, 'inputs': inputs, 'outputs': []})
+        return paths
+    monkeypatch.setattr(LC, 'resolve_step_configs', configs)
+
+    def neutral_conversion(project, selected, config, lines, folder, name, *args):
+        assert name == 'def_to_odb' and selected == image
+        for line in lines:
+            if line.startswith('write_db {'):
+                Path(line[len('write_db {'):-1]).write_text('SOURCE_CONTROL neutral database')
+        recipe = folder / (name + '.tcl'); recipe.write_text('\n'.join(lines))
+        return recipe
+    monkeypatch.setattr(LC, '_openroad_convert', neutral_conversion)
+    executed, commands, requests = [], [], []
+    original_container = LC.run_container
+    def observe_request(argv, **kwargs):
+        requests.append(list(argv))
+        return original_container(argv, **kwargs)
+    monkeypatch.setattr(LC, 'run_container', observe_request)
+    transcript = ('XOR_TOOL klayout\nXOR_TOP shipped=cal_pg reference=cal_pg\n'
+        'XOR_CENSUS shipped_cells=20 shipped_shapes=1000 reference_cells=10 reference_shapes=10\n'
+        'XOR_BOUNDARY_CENSUS cells=10 shapes=10\nXOR_LAYER 32/0 0\nXOR_LAYER 34/4 600\nXOR_DONE\n')
+    def neutral_process(argv, **kwargs):
+        commands.append(list(argv))
+        if '/usr/bin/time' in argv:
+            at = argv.index('/usr/bin/time')
+            assert argv[at + 1:at + 5] == ['-v', shutil.which('klayout'), '-b', '-r']
+            assert kwargs['env']['XOR_BOUNDARY'] == str(stream['stream'])
+            return watchdog.SupervisedResult(0, transcript, '', 'natural')
+        at = argv.index('-m')
+        assert argv[at:at + 3] == ['-m', 'librelane.steps', 'run']
+        argv = argv[at - 1:]  # retain the actual LC launcher in commands above
+        step = argv[argv.index('--id') + 1]
+        folder = Path(argv[argv.index('-o') + 1])
+        state = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        if step in native.STEPS[:2]:
+            role = 'mag_gds' if step == native.STEPS[0] else 'klayout_gds'
+            path = folder / (role + ('.oas' if role == 'mag_gds' else '.gds'))
+            _geometry(path); state[role] = str(path)
+        else:
+            state['metrics'] = {native.KEY: 0}
+            (folder / 'xor.xml').write_text('<report-database><top-cell>cal_pg</top-cell>'
+                f"<description>XOR {state['mag_gds']} vs. {state['klayout_gds']}</description>"
+                '<items></items></report-database>')
+        BF.put(folder / 'state_in.json', json.loads(Path(argv[argv.index('-i') + 1]).read_text()))
+        BF.put(folder / 'state_out.json', state)
+        BF.put(folder / 'config.json', json.loads(Path(argv[argv.index('-c') + 1]).read_text()))
+        executed.append(step)
+        return watchdog.SupervisedResult(0, 'SOURCE_CONTROL native ' + step, '', 'natural')
+    monkeypatch.setattr(watchdog, 'run_host_supervised', neutral_process)
+    result = EBP.produce_signoff(p, {'step_id': '37.3', 'execution_mode': 'default',
+        'top': 'cal_pg', 'pdk_root': str(root), 'image_id': str(image)})
+    emitted = json.loads((p / xor.REPORT_REL).read_text())
+    BF.put(tmp_path / 'TYPED_LOCAL373_PRODUCER_READBACK.json', {
+        'result': result, 'executed': executed, 'requests': requests,
+        'native_dependency_refusal': emitted.get('native_dependency_refusal'),
+        'connectivity': emitted.get('connectivity')})
+    assert executed == list(native.STEPS)
+    assert result['verdict'] == 'PASS', result
+    assert not emitted.get('native_dependency_refusal'), emitted.get('native_dependency_refusal')
+    dependency = native.read_current(p)
+    assert dependency['current']['execution']['local_provider'] == image.as_record()
+    assert 'local_image' not in dependency['current']['execution']
+    receipts = {rel: (p / rel / 'vibeic_receipt.json').read_bytes() for rel in dependency['folders']}
+    assert all(json.loads(data)['input']['local_provider'] == image.as_record() for data in receipts.values())
+    rc, line, report = xor.judge_receipt(p, xor.REPORT_REL)
+    assert rc == 0 and report['connectivity']['verdict'] == 'PASS', line
+    assert report['runner'] == {'kind': 'host', 'detail': shutil.which('klayout') + ' -b -r'}
+    assert report['current']['execution']['argv'] == commands[-1]
+    assert commands[-1][0] == image.executable and '/usr/bin/time' in commands[-1]
+    assert requests[-1][requests[-1].index('--network') + 1] == 'host'
+    assert '--cpus' not in requests[-1]
+    assert not (p / 'phase3/librelane/37.3-launches.jsonl').exists()
+    assert (p / 'input/submission_template/tapeout_declaration.json').read_bytes() == original_declaration
+    assert all((p / rel / 'vibeic_receipt.json').read_bytes() == data for rel, data in receipts.items())
+    assert calls == ['primary', 'seal', 'filler-density']
+    (root / 'neutral/stream.lef').write_text('changed native material\n')
+    with pytest.raises((LC.Refusal, ValueError)):
+        native.read_current(p)
+    assert xor.judge_receipt(p, xor.REPORT_REL)[0] == 2
+    assert executed == list(native.STEPS)
+    BF.put(tmp_path / 'TYPED_LOCAL373_OBSERVATION.json', {
+        'result': result['verdict'], 'current_consumer_rc': rc,
+        'executed': executed, 'requests': requests, 'actual_commands': commands,
+        'execution': dependency['current']['execution'],
+        'geometry_execution': report['current']['execution'],
+        'receipts_unchanged': True, 'changed_material_refused': True,
+        'scope': 'source/neutral native transport only; no physical or whole IC PASS'})

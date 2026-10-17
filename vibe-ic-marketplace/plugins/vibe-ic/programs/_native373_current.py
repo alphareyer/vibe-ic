@@ -87,6 +87,14 @@ def _local_execution(project, folder, step, image):
     receipt = lc.validate_step_receipt(folder, step)
     _require(_read(folder / "pdk_root.json").get("execution_route") == "LOCAL",
              "NATIVE373_LOCAL_ROUTE_CHANGED")
+    provider = receipt["input"].get("local_provider")
+    if provider is not None:
+        native._retained_local_provider(project, provider, image)
+        return {"kind": "retained_local_step_receipt", "rc": 0,
+                "argv": ["librelane_contract.run_chain", step,
+                         str((folder / "vibeic_receipt.json").relative_to(project))],
+                "receipt": pc.entry(project, folder / "vibeic_receipt.json"),
+                "local_provider": provider}
     original = receipt["input"].get("local_image")
     _require(isinstance(original, dict), "NATIVE373_LOCAL_IMAGE_MISSING")
     current = lc.local_image_attestation(image)
@@ -321,6 +329,10 @@ class ShippedXorRunner:
 
     def __init__(self, project, image):
         self.project = Path(project).resolve()
+        # read_current retains the producer's identity. Execute a new XOR in
+        # the current admitted provider, including after an ordinary resume.
+        if str(image).startswith(lc.LOCAL_PROVIDER_IDENTITY_PREFIX):
+            image = lc.resolve_image(self.project)
         self.image = image
         self.local = lc._provider_for_image(image) is not None or lc._ce.no_container_route()
         self.binary = "klayout"
@@ -335,12 +347,14 @@ class ShippedXorRunner:
         return Path(path).resolve().is_relative_to(self.project)
 
     def run(self, script, env, *, path_keys=(), timeout=1800):
+        network, command = lc.native_tool_command(
+            self.image, ["/usr/bin/time", "-v", self.binary, "-b", "-r", str(script)])
         argv = ["docker", "run", *_dmem.docker_memory_flags(), "--rm",
-                "--network", "none", *([] if self.local else ["--cpus", "2"]),
+                "--network", network, *([] if self.local else ["--cpus", "2"]),
                 "-v", f"{self.project}:{self.project}", "-e", "QT_QPA_PLATFORM=offscreen"]
         for key, value in env.items():
             argv += ["-e", f"{key}={value}"]
-        argv += [self.image, "--skip", "/usr/bin/time", "-v", self.binary, "-b", "-r", str(script)]
+        argv += [self.image, "--skip", *command]
         cp = lc.run_container(argv, supervised=True,
                               log=self.project / "reports/phase3/gds_xor_native.log")
         self.execution = {"rc": cp.returncode, "argv": list(cp.args) if self.local else argv}
