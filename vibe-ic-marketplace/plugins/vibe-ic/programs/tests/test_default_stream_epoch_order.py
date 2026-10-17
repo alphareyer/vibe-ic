@@ -447,10 +447,25 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
     def configs(project, image, name, steps, **kwargs):
         assert steps == list(native.STEPS)
         assert kwargs['overlay']['DIE_AREA'][0] == LC._def_die_area(Path(stream['filled_def']))
-        return {step: BF.put(p / native.CONFIG / (step + '.json'), {
+        paths = {step: BF.put(p / native.CONFIG / (step + '.json'), {
             'meta': {'step': step}, 'DESIGN_NAME': 'cal_pg', 'PDK': 'neutral',
             'TECH_LEFS': [str(material)]}) for step in steps}
+        for step, path in paths.items():
+            inputs = ['mag_gds', 'klayout_gds'] if step == native.STEPS[-1] else ['odb', 'def', 'nl', 'sdc']
+            BF.put(LC.views_path(path), {'step': step, 'inputs': inputs, 'outputs': []})
+        return paths
     monkeypatch.setattr(LC, 'resolve_step_configs', configs)
+
+    def neutral_db_conversion(project, image, config, lines, folder, name, *args):
+        assert name == 'def_to_odb'
+        # Only the EDA database conversion leaf is controlled. The original
+        # state_from_direct bridge still binds all real source views.
+        for line in lines:
+            if line.startswith('write_db {'):
+                Path(line[len('write_db {'):-1]).write_text('SOURCE_CONTROL neutral database')
+        recipe = folder / (name + '.tcl'); recipe.write_text('\n'.join(lines))
+        return recipe
+    monkeypatch.setattr(LC, '_openroad_convert', neutral_db_conversion)
     executed = []
 
     def neutral_process(argv, **kwargs):
