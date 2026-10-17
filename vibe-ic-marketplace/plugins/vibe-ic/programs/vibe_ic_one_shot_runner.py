@@ -3190,7 +3190,28 @@ def _main() -> int:
 
     # ---------------- Phase 3 ----------------
     phase3_top = flow_top
+    step14_acceptance = None
     if not halted_at and not args.skip_phase3 and not _p3_skip_by_exit:
+        if _p3_forward_window and execution_policy_value['mode'] == 'default':
+            # A bounded Phase2 omits the whole-flow producer sweep. Complete
+            # its existing synthesis handoff before entering the physical
+            # owner; its phase summary alone cannot authorize Step15.
+            step14_acceptance = _complete_step14_handoff(project)
+            if step14_acceptance['verdict'] != 'PASS':
+                status = step14_acceptance['verdict']
+                rc = 1 if status == 'FAIL' else 2
+                out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+                out.parent.mkdir(parents=True, exist_ok=True)
+                _write_runner_summary(out, {
+                    'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                    **_delivery_route.report_label(project),
+                    'verdict': status, 'halted_at': 'phase2',
+                    'phases': [{'name': n, 'verdict': v, 'rc': code}
+                               for n, v, code in plan],
+                    'step14_handoff': step14_acceptance,
+                    'whole_flow_verdict': 'NOT_MEASURED'}, project)
+                lock.release()
+                return rc
         runner = _phase_runner("phase3")
         # Reuse the flow-level resolved top. If phase 2 GENERATED the RTL (the
         # from-docs path, where no RTL existed at the flow-resolution point
@@ -3214,7 +3235,11 @@ def _main() -> int:
             p3_args += ["--area-receipt", args.area_receipt,
                         "--area-run-manifest", args.area_run_manifest]
         if _p3_forward_window:
-            p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]
+            # Phase2 already owns synthesis. Default continues through the
+            # existing native backend window at its declared physical head.
+            entry = (_physical_order[0] if execution_policy_value['mode'] == 'default'
+                     else '9')
+            p3_args += ["--entry-step", entry, "--exit-step", str(args.exit_step)]
         if getattr(args, "allow_oss_pdk_fallback", False):
             p3_args.append("--allow-oss-pdk-fallback")
         if getattr(args, "allow_pdk_target_mismatch", False):
@@ -3367,6 +3392,8 @@ def _main() -> int:
             "bounded_disclosures": p3_window.get("bounded_disclosures", []),
             "not_refreshed_here": ["reports/final_summary.md"],
         }
+        if step14_acceptance is not None:
+            summary['step14_handoff'] = step14_acceptance
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_runner_summary(out, summary, project)
