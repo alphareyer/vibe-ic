@@ -102,6 +102,83 @@ def fill_datatypes(project: Path) -> Set[int]:
     return out
 
 
+def _default_fill_pairs(project: Path) -> Tuple[set, Optional[dict]]:
+    """Read the consumed native filler's literal write set, not layer guesses."""
+    import librelane_fill_dfm as fill
+    import librelane_signoff_evidence as native
+    import die_level_deck_rule_attribution as attribution
+    if not (project / fill.DEFAULT_STREAM_REL).is_file():
+        return set(), None
+    promotion = fill.validate_default_stream(project)
+    arm = _json(project / fill.RECORD_REL)['gds']['librelane']
+    folder = Path(arm['filler']['state']).parent
+    receipt = fill.validate_step_receipt(folder, 'KLayout.Filler')
+    cfg = _json(folder / 'config.json')
+    script = cfg.get('KLAYOUT_FILLER_SCRIPT')
+    if not script:
+        return set(), None
+    switch = project / 'phase3/librelane_switch.json'
+    mounts = native._pdk_mounts(project, _json(switch) if switch.is_file() else {},
+                                folder, promotion['image'])
+    source = Path(script)
+    if not source.is_file():
+        for host, guest in mounts:
+            if source.is_relative_to(guest):
+                source = Path(host) / source.relative_to(guest)
+                break
+    if receipt['input']['config_files'].get(script) != _sha256(source):
+        raise ValueError('XOR_FILLER_SCRIPT_UNBOUND')
+    original = source.read_text()
+    text = attribution.deck_code_only(original)
+    declared = {name: (int(layer), int(datatype)) for name, layer, datatype in re.findall(
+        r'^\s*(\w+)\s*=\s*\$ly\.layer\(\s*(\d+)\s*,\s*(\d+)\s*\)', text, re.M)}
+    # The receipt binds the parent, not its require_relative children. Read the
+    # parent's explicitly created fill containers in its original bound output;
+    # current child source must never expand an old producer's write set.
+    containers = {match.group(1) for match in re.finditer(
+        r'^\s*\$fill_cell\w*\s*=\s*\$ly\.create_cell\(["\']([^"\']+)["\']\)',
+        original, re.M) if text[match.start():].lstrip().startswith('$fill_cell')}
+    import _gds_geometry as geometry
+    try:
+        before = geometry.read_layout(Path(arm['filler']['gds_in']))
+        if not containers or containers.intersection(before.cells):
+            raise ValueError('XOR_FILLER_CONTAINER_NOT_NEW')
+        del before
+        deposited = geometry.read_layout(Path(arm['filler']['filled_gds']))
+    except geometry.GdsError as exc:
+        raise ValueError('XOR_FILLER_OUTPUT_UNREADABLE: ' + str(exc)) from exc
+    pending, visited, pairs = list(containers), set(), set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        cell = deposited.cells[name]
+        pairs.update((element.layer, element.datatype) for element in cell.own_area_elements())
+        pending.extend(element.sname for element in cell.refs())
+    if not pairs or not pairs.issubset(set(declared.values())):
+        raise ValueError('XOR_FILLER_WRITE_SET_NOT_DECLARED')
+    sources = {str(source): _sha256(source), arm['filler']['gds_in']: arm['filler']['gds_in_sha256'],
+               arm['filler']['filled_gds']: arm['filler']['filled_sha256']}
+    topup = arm.get('density_topup')
+    if topup:
+        config = _json(Path(topup['config']))
+        report = _json(Path(topup['report']))
+        active = {row['name'] for row in report['layers'] if row.get('passes', 0) > 0}
+        for row in config['layers']:
+            if row['name'] not in active:
+                continue
+            layer, datatype = row['layer'][0], row.get('fill_datatype')
+            if type(layer) is not int or type(datatype) is not int:
+                raise ValueError('XOR_TOPUP_WRITE_SET_NOT_DECLARED')
+            pairs.add((layer, datatype))
+        sources.update({topup['config']: topup['config_sha256'],
+                        topup['report']: topup['report_sha256']})
+    return pairs, {'source': fill.RECORD_REL, 'field': 'gds.librelane.filler/density_topup',
+                   'pairs': [f'{l}/{d}' for l, d in sorted(pairs)],
+                   'granularity': 'layer/datatype', 'native_sources': sources}
+
+
 def declared_finishing_layers(project: Path) -> Tuple[Set[int], Set[Tuple[int, int]],
                                                       Dict[str, Any]]:
     """({fill layer numbers}, {seal (layer, datatype) pairs}, provenance).
@@ -162,6 +239,10 @@ def declared_finishing_layers(project: Path) -> Tuple[Set[int], Set[Tuple[int, i
         prov["seal_ring"] = {"source": FINISHING_REL,
                              "field": "seal_ring.ring_check.added_layers",
                              "pairs": [f"{l}/{d}" for l, d in sorted(seal_pairs)]}
+    native_pairs, native_provenance = _default_fill_pairs(project)
+    if native_provenance is not None:
+        fill_pairs.update(native_pairs)
+        prov['fill'] = native_provenance
     return fill_pairs, seal_pairs, prov
 
 
@@ -386,6 +467,12 @@ begin
   sc, ss = census(ship)
   rc2, rs = census(ref)
   puts "XOR_CENSUS shipped_cells=#{sc} shipped_shapes=#{ss} reference_cells=#{rc2} reference_shapes=#{rs}"
+  if ENV["XOR_BOUNDARY"]
+    boundary = RBA::Layout::new
+    boundary.read(ENV["XOR_BOUNDARY"])
+    bc, bs = census(boundary)
+    puts "XOR_BOUNDARY_CENSUS cells=#{bc} shapes=#{bs}"
+  end
   layers = {}
   ship.layer_indexes.each { |i| li = ship.get_info(i); layers[[li.layer, li.datatype]] = true }
   ref.layer_indexes.each  { |i| li = ref.get_info(i);  layers[[li.layer, li.datatype]] = true }
@@ -406,7 +493,7 @@ end
 
 
 def run_xor(runner, scratch: Path, shipped: Path, reference: Path,
-            timeout: int) -> Tuple[int, str, str]:
+            timeout: int, *, boundary: Optional[Path] = None) -> Tuple[int, str, str]:
     """Execute the XOR script, translating both paths for the runner.
 
     THE SCRIPT LIVES IN `scratch`, which is inside the project, because a
@@ -419,8 +506,10 @@ def run_xor(runner, scratch: Path, shipped: Path, reference: Path,
     """
     script = scratch / "xor.rb"
     script.write_text(_XOR_RB)
-    return runner.run(script, {"XOR_SHIPPED": shipped, "XOR_REFERENCE": reference},
-                      path_keys=("XOR_SHIPPED", "XOR_REFERENCE"), timeout=timeout)
+    env = {"XOR_SHIPPED": shipped, "XOR_REFERENCE": reference}
+    if boundary is not None:
+        env["XOR_BOUNDARY"] = boundary
+    return runner.run(script, env, path_keys=tuple(env), timeout=timeout)
 
 
 _CENSUS_RE = re.compile(
@@ -435,7 +524,7 @@ _CENSUS_RE = re.compile(
 _MIN_REFERENCE_SHAPE_FRACTION = 0.5
 
 
-def reference_is_faithful(stdout: str) -> Tuple[bool, str, Dict[str, int]]:
+def reference_is_faithful(stdout: str, *, boundary: bool = False) -> Tuple[bool, str, Dict[str, int]]:
     """(is it plausible, why not, the census).
 
     A reference missing a library is the failure mode this program must never
@@ -450,16 +539,40 @@ def reference_is_faithful(stdout: str) -> Tuple[bool, str, Dict[str, int]]:
              "reference_cells": int(m.group(3)), "reference_shapes": int(m.group(4))}
     if stats["shipped_shapes"] <= 0:
         return False, "the shipped layout reports zero shapes", stats
-    frac = stats["reference_shapes"] / stats["shipped_shapes"]
+    denominator = stats['shipped_shapes']
+    if boundary:
+        owned = re.search(r'^XOR_BOUNDARY_CENSUS cells=(\d+) shapes=(\d+)$', stdout, re.M)
+        if not owned or int(owned.group(2)) <= 0:
+            return False, 'the validated pre-finishing boundary printed no nonempty census', stats
+        stats.update(boundary_cells=int(owned.group(1)), boundary_shapes=int(owned.group(2)))
+        denominator = stats['boundary_shapes']
+    frac = stats["reference_shapes"] / denominator
     if frac < _MIN_REFERENCE_SHAPE_FRACTION:
         return False, (
             f"the reference carries {stats['reference_shapes']} shape(s) in "
-            f"{stats['reference_cells']} cell(s) against the shipped layout's "
-            f"{stats['shipped_shapes']} in {stats['shipped_cells']} "
+            f"{stats['reference_cells']} cell(s) against the "
+            f"{'validated pre-finishing boundary' if boundary else 'shipped layout'}'s "
+            f"{denominator} in {stats.get('boundary_cells', stats['shipped_cells'])} "
             f"({frac:.1%}) — a pre-finishing reference is smaller, but not by that "
             f"much, so a library did not resolve and any difference count here "
             f"would be about THIS PROGRAM and not about the design"), stats
     return True, "", stats
+
+
+def _default_stream_boundary(project: Path, dfile: Path, shipped: Path) -> Optional[Path]:
+    """The original native stream, before its validated seal/fill chain.
+
+    Completeness compares streams of the same database boundary. A finishing
+    deposit is not evidence that a pre-finishing reference lost a library.
+    """
+    import librelane_fill_dfm as fill
+    if not (project / fill.DEFAULT_STREAM_REL).is_file():
+        return None
+    record = fill.validate_default_stream(project)
+    if (Path(record['filled_def']).resolve() != dfile.resolve()
+            or Path(record['canonical']).resolve() != shipped.resolve()):
+        raise ValueError('XOR_DEFAULT_BOUNDARY_SUBJECT_CHANGED')
+    return Path(record['stream']).resolve()
 
 
 def parse_layers(stdout: str) -> Tuple[Dict[Tuple[int, int], int], bool]:
@@ -624,6 +737,16 @@ def resolve_reference(project: Path, top: str,
     calls it a fidelity finding -- which is why the receipt says WHICH reference it
     used and never lets the two be confused.
     """
+    import librelane_fill_dfm as fill
+    if (project / fill.DEFAULT_STREAM_REL).is_file():
+        stream = fill.validate_default_stream(project)
+        kept = Path(stream['stream'])
+        if dfile is None or Path(stream['filled_def']).resolve() != dfile.resolve():
+            raise ValueError('XOR_DEFAULT_BOUNDARY_DEF_CHANGED')
+        return kept, 'retained native klayout', {
+            'kind': 'retained', 'path': str(kept.relative_to(project)),
+            'sha256': stream['stream_sha256'], 'evidence': fill.DEFAULT_STREAM_REL,
+            'note': 'original receipt-bound native StreamOut before seal and fill'}
     # NAMED BY THE DEF'S OWN DESIGN, AND PROVEN TO BE THIS RUN'S. R-0915-148.
     #
     # My first cut resolved the exact `{top}` spelling and then GLOBBED
@@ -1169,13 +1292,29 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
         if current["inputs"]["shipped"]["sha256"] == current["inputs"]["reference"]["sha256"]:
             refusal = "XOR_IDENTICAL_INPUTS"
         text = (project / current["outputs"]["log"]["path"]).read_text()
+        boundary = None
+        try:
+            boundary = _default_stream_boundary(project, dfile, shipped)
+            if boundary is not None:
+                if current['inputs'].get('boundary') != _pc.entry(project, boundary):
+                    refusal = 'XOR_DEFAULT_BOUNDARY_CHANGED'
+                faithful, why, _stats = reference_is_faithful(text, boundary=True)
+                if not faithful:
+                    refusal = 'XOR_REFERENCE_INCOMPLETE: ' + why
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            refusal = 'XOR_DEFAULT_BOUNDARY_REFUSED: ' + str(exc)
         counts, done = parse_layers(text)
         tops = re.findall(r"(?m)^XOR_TOP shipped=(\S+) reference=(\S+)$", text)
         if not done or not counts or tops != [(current["design"], current["design"])]:
             refusal = "XOR_NATIVE_SUBJECT_OR_EXECUTION_MISMATCH"
         if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
             refusal = "XOR_NATIVE_TOOL_MISSING"
-        fill, seal, _ = declared_finishing_layers(project)
+        try:
+            fill, seal, provenance = declared_finishing_layers(project)
+            if boundary is not None and doc.get('declared_finishing_layers') != provenance:
+                refusal = 'XOR_FINISHING_WRITE_SET_CHANGED'
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            return 2, 'NOT_MEASURED [EXECUTION_ERROR]: XOR_FINISHING_WRITE_SET_REFUSED: ' + str(exc), doc
         native_design, native_finishing, total = partition(counts, fill, seal)
         if (native_design != diffs or total != count or len(counts) != layers
                 or native_finishing != doc.get("finishing_layer_differences")):
@@ -1301,7 +1440,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                               "verdict": "NOT_DETERMINED", "rc": 2}
     shipped, dfile, att = shipped_and_source(project)
     report["attestation"] = att
-    fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
+    finishing_error = None
+    try:
+        fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        fill_pairs, seal_pairs, prov = set(), set(), {}
+        finishing_error = str(exc)
     report["declared_finishing_layers"] = prov
 
     def finish(verdict: str, rc: int, reason: str) -> int:
@@ -1322,6 +1466,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  verdict: {verdict}  (rc={rc})")
         print(f"  {reason}")
         return rc
+
+    if finishing_error is not None:
+        return finish('NOT_DETERMINED', 2, 'XOR_FINISHING_WRITE_SET_REFUSED: ' + finishing_error)
 
     # NAME BOTH PLACES THAT WERE LOOKED IN. A refusal that cites only the
     # attestation sends a reader to a file that a design off the chip pad-ring
@@ -1382,6 +1529,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         bounded = _bounded.produce(project, dfile)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         report["native_dependency_refusal"] = str(exc)
+
+    try:
+        boundary = _default_stream_boundary(project, dfile, shipped)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return finish('NOT_DETERMINED', 2, 'XOR_DEFAULT_BOUNDARY_REFUSED: ' + str(exc))
 
     try:
         import _klayout_launch as _kl
@@ -1452,6 +1604,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "reference": _pc.entry(project, reference),
                       "def": _pc.entry(project, dfile),
                       "technology": _pc.entry(project, technology)}
+            if boundary is not None:
+                inputs['boundary'] = _pc.entry(project, boundary)
             if bounded is not None:
                 inputs["connectivity"] = _pc.entry(project, project / _bounded.REL)
             design_name = _pc.design_of(dfile)
@@ -1459,7 +1613,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return finish("NOT_DETERMINED", 2, f"XOR_CURRENT_INPUT_REFUSED: {exc}")
         report["reference"]["bytes"] = reference.stat().st_size
         rc, so, se = run_xor(runner, Path(scratch), shipped, reference,
-                             timeout)
+                             timeout, **({'boundary': boundary} if boundary is not None else {}))
         log_path = project / "reports/phase3/gds_xor_native.log"
         script_path = project / "reports/phase3/gds_xor_native.rb"
         log_path.write_text((so or "") + "\n" + (se or ""))
@@ -1472,7 +1626,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             {"rc": rc, "argv": ["klayout", "-b", "-r", str(script_path)],
              "runner": report["runner"]})
         counts, done = parse_layers(so)
-        ok, why, stats = reference_is_faithful(so)
+        ok, why, stats = reference_is_faithful(so, boundary=boundary is not None)
         report["census"] = stats
         if done and not ok:
             return finish("NOT_DETERMINED", 2, f"refusing to compare: {why}")

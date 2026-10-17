@@ -267,3 +267,145 @@ def test_default_stream_metadata_probes_reach_the_real_execution_contract(
     readset = json.loads((p / 'phase3/stage3/pnr/top.stream_inputs.json').read_text())
     assert readset['native_cli']['inputs']
     assert Path(record['canonical']).stat().st_size > 0
+
+
+def _native373_boundary_subject(tmp_path, monkeypatch):
+    """Neutral process fixture; real whole-stream, receipt and material readers."""
+    import klayout.db as db
+    original_geometry = _geometry
+
+    def geometry(path, number=0):
+        original_geometry(path, 1)
+        if number == 100:
+            layout = db.Layout(); layout.read(str(path))
+            fill = layout.create_cell('DECLARED_FILL')
+            fill.shapes(layout.layer(34, 4)).insert(db.Box(0, 0, 100, 100))
+            layout.top_cells()[0].insert(db.CellInstArray(fill.cell_index(), db.Trans()))
+            layout.write(str(path))
+    monkeypatch.setattr(sys.modules[__name__], '_geometry', geometry)
+    p, _, calls, _ = _transport(tmp_path, monkeypatch, finished_geometry=True)
+    root = p / 'fixture_pdk'
+    tech = root / 'neutral/stream.lef'
+    tech.write_text('UNITS\n DATABASE MICRONS 2000 ;\nEND UNITS\nMANUFACTURINGGRID 0.005 ;\n')
+    script = root / 'neutral/filler.rb'
+    script.write_text('Dummy = $ly.layer(34, 4)\n$fill_cell = $ly.create_cell("DECLARED_FILL")\n')
+    density = LF.run_density
+
+    def native_density(*args, **kwargs):
+        arm = density(*args, **kwargs)
+        folder = Path(arm['filler']['state']).parent
+        config = p / 'phase3/librelane/34-config/KLayout.Filler.json'
+        cfg = json.loads(config.read_text())
+        cfg['KLAYOUT_FILLER_SCRIPT'] = str(script)
+        BF.put(config, cfg); BF.put(folder / 'config.json', cfg)
+        fp = json.loads((folder / 'input_fingerprint.json').read_text())
+        fp.update(config=LC.digest(config), config_files=LC.config_file_hashes(cfg, [(root, '/pdk')]))
+        BF.put(folder / 'input_fingerprint.json', fp)
+        refresh_receipt(folder)
+        return arm
+    monkeypatch.setattr(LF, 'run_density', native_density)
+    odb = json.loads((p / LF.RECORD_REL).read_text())['odb']
+    tool = odb['tool']; state_path = Path(tool['state']); state = json.loads(state_path.read_text())
+    for role, name, text in [('nl', 'cal_pg.nl.v', 'module cal_pg; endmodule\n'),
+                              ('sdc', 'cal_pg.sdc', 'create_clock -period 10 [get_ports clk]\n')]:
+        path = state_path.parent / name; path.write_text(text); state[role] = str(path)
+    BF.put(state_path, state); refresh_receipt(state_path.parent)
+    tool['state_sha256'] = LC.digest(state_path)
+    tool['binding']['receipt_sha256'] = LC.digest(state_path.parent / 'vibeic_receipt.json')
+    BF.consume_fill(p, tool); LF.update_record(p, 'odb', odb)
+    cell_gds = root / 'neutral/cells.gds'; original_geometry(cell_gds)
+    pdk = SimpleNamespace(name='neutral', tech_lef=str(tech), cell_gds=str(cell_gds))
+    stream = LF.default_stream(p, 'top', pdk, '')
+    return p, pdk, root, stream, calls
+
+
+@pytest.mark.parametrize('condition', ['current', 'thin', 'design_difference',
+                                      'changed_material', 'missing_proof'])
+def test_normal373_uses_real_die_and_same_boundary_with_owned_fill_only(
+        tmp_path, monkeypatch, condition):
+    """Original normal producer/public XOR/current judge, neutral native leaves.
+
+    No physical XOR, independent stream or whole-IC PASS is claimed here.
+    """
+    import execution_backend_producers as EBP
+    import _native373_current as native
+    import librelane_pv_signoff as pv
+    import _klayout_launch as KL
+    import gds_xor_check as xor
+    p, pdk, root, stream, calls = _native373_boundary_subject(tmp_path, monkeypatch)
+    filled = Path(stream['filled_def'])
+    declaration = p / 'input/submission_template/tapeout_declaration.json'
+    original_declaration = declaration.read_bytes()
+    monkeypatch.setattr(EBP, '_parameters', lambda *a: (R, LC, pdk, ''))
+    monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(root)})
+    monkeypatch.setattr(pv, 'tech_lef_overlay', lambda *a: {})
+    reached = []
+
+    def configs(project, image, name, steps, **kwargs):
+        assert steps == list(native.STEPS), 'the independent Magic/KLayout chain must remain'
+        assert kwargs['overlay'].get('DIE_AREA') == (
+            LC._def_die_area(filled), f'{filled}: DIEAREA / UNITS DISTANCE MICRONS'), 'actual DEF/DBU DIE_AREA missing'
+        reached.append('independent_config')
+        return {step: p / 'phase3/librelane/34-config' / (step + '.json') for step in steps}
+    monkeypatch.setattr(LC, 'resolve_step_configs', configs)
+
+    def unavailable_native(*args, **kwargs):
+        # Preserve the actual native producer until its process boundary. The
+        # fallback's retained reference cannot manufacture connectivity credit.
+        raise LC.Refusal('SOURCE_CONTROL', 'independent native process not executed')
+    monkeypatch.setattr(LC, 'state_from_direct', unavailable_native)
+    runs = []
+
+    class NativeProcess:
+        kind, detail = 'source_control', 'neutral native XOR transcript; no geometry measurement'
+        def covers(self, path):
+            return True
+        def run(self, recipe, env, **kwargs):
+            assert env['XOR_BOUNDARY'] == Path(stream['stream'])
+            assert env['XOR_REFERENCE'] == Path(stream['stream'])
+            assert recipe.read_text() == xor._XOR_RB
+            runs.append(dict(env))
+            ref = 1 if condition == 'thin' else 10
+            design = 1 if condition == 'design_difference' else 0
+            return 0, (f'XOR_TOOL klayout\nXOR_TOP shipped=cal_pg reference=cal_pg\n'
+                f'XOR_CENSUS shipped_cells=20 shipped_shapes=1000 reference_cells=10 reference_shapes={ref}\n'
+                'XOR_BOUNDARY_CENSUS cells=10 shapes=10\n'
+                f'XOR_LAYER 32/0 {design}\nXOR_LAYER 34/4 600\nXOR_DONE\n'), ''
+    monkeypatch.setattr(KL, 'find_runner', lambda *a, **k: NativeProcess())
+    if condition == 'changed_material':
+        (root / 'neutral/stream.lef').write_text('changed retained material\n')
+    elif condition == 'missing_proof':
+        (Path(stream['stream_state']).parent / 'vibeic_receipt.json').unlink()
+    if condition in ('changed_material', 'missing_proof'):
+        with pytest.raises(LC.Refusal):
+            EBP.produce_signoff(p, {'step_id': '37.3', 'execution_mode': 'default',
+                'top': 'cal_pg', 'pdk_root': str(root), 'image_id': BF.IMAGE})
+        assert xor.main([str(p), '--json', str(p / xor.REPORT_REL)]) == 2
+        assert xor.judge_receipt(p, xor.REPORT_REL)[0] == 2
+        assert runs == reached == []
+        assert declaration.read_bytes() == original_declaration
+        return
+    result = EBP.produce_signoff(p, {'step_id': '37.3', 'execution_mode': 'default',
+        'top': 'cal_pg', 'pdk_root': str(root), 'image_id': BF.IMAGE})
+    path = p / xor.REPORT_REL
+    report = json.loads(path.read_text())
+    rc, line, judged = xor.judge_receipt(p, xor.REPORT_REL)
+    assert declaration.read_bytes() == original_declaration
+    assert calls == ['primary', 'seal', 'filler-density']
+    assert reached == ['independent_config'] and len(runs) == 1
+    assert report['current']['inputs']['boundary']['sha256'] == stream['stream_sha256']
+    assert judged['current'] == report['current']
+    if condition == 'thin':
+        assert report['rc'] == rc == 2 and result['verdict'] == 'NOT_MEASURED'
+        assert 'refusing to compare' in report['reason']
+    elif condition == 'design_difference':
+        assert result['verdict'] == 'FAIL' and report['rc'] == rc == 1
+        assert report['design_layer_differences'] == [{'layer': 32, 'datatype': 0, 'differences': 1}]
+    else:
+        assert result['verdict'] == report['verdict'] == 'PASS'
+        assert report['rc'] == 0 and report['design__xor_difference__count'] == 0
+        assert report['finishing_layer_differences'] == [
+            {'layer': 34, 'datatype': 4, 'differences': 600, 'declared_by': 'density_fill'}]
+        assert rc == 2 and report['connectivity']['verdict'] == 'NOT_DETERMINED', line
+        assert report['declared_finishing_layers']['fill']['pairs'] == ['34/4']
+        assert xor.reference_is_faithful((p / 'reports/phase3/gds_xor_native.log').read_text())[0] is False

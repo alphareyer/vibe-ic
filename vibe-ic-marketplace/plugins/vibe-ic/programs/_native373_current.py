@@ -106,10 +106,14 @@ def read_current(project, record=None):
                  "NATIVE373_PRODUCER_CHANGED")
         _require(fp["config"] == pc.digest(config_root / f"{step}.json"),
                  "NATIVE373_CONFIG_CHANGED")
-        mounts = native._pdk_mounts(project, _read(project / "phase3/librelane_switch.json"),
+        switch = project / "phase3/librelane_switch.json"
+        mounts = native._pdk_mounts(project, _read(switch) if switch.is_file() else {},
                                     folder, doc["image"])
         _require(fp["config_files"] == lc._current_config_material(
             _read(config_root / f"{step}.json"), mounts), "NATIVE373_MATERIAL_CHANGED")
+        if step == 'Magic.StreamOut':
+            _require(_read(config_root / f"{step}.json").get('DIE_AREA') ==
+                     lc._def_die_area(_source_def(project)), 'NATIVE373_DIE_AREA_CHANGED')
         import execution_policy
         if step == 'KLayout.StreamOut' and execution_policy.request()['mode'] == 'default':
             import _stream_input_record as sir
@@ -201,6 +205,9 @@ def produce(project, routed_def):
                                      "current routed netlist consumed by Step37.3")
         overlay["FALLBACK_SDC"] = (str(sources["sdc"]),
                                     "current routed constraints consumed by Step37.3")
+        die = lc._def_die_area(routed_def)
+        _require(die is not None, 'NATIVE373_DEF_DIE_AREA_NOT_MEASURED')
+        overlay['DIE_AREA'] = (die, f'{routed_def}: DIEAREA / UNITS DISTANCE MICRONS')
         configs = lc.resolve_step_configs(project, image, pdk, list(STEPS),
                                            pdk_root=pdk_root, docker=launcher,
                                            folder="37.3-config", overlay=overlay)
