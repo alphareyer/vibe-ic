@@ -329,3 +329,109 @@ def test_def_net_members_reads_port_nets_from_specialnets():
     assert members["clk"] == [("PIN", "clk"), ("u_pad_clk", "PAD")]
     assert members["VDD"] == [("PIN", "VDD")]
     assert ("u_pad_clk", "PD") in members["_aux_tie_0"]
+
+
+def _native_default_ring_project(tmp_path):
+    """Neutral retained native packets; no OpenROAD or geometry execution."""
+    import _default_backend_fixtures as fixtures
+    project = _ll_project(tmp_path)
+    pnr = p3._pl.pnr_dir(project)
+    for name in ('pnr.tcl', 'openroad.log'):
+        (pnr / name).unlink()
+    (pnr / 'floorplan.def').write_text(_def())
+    reports = project / 'reports/phase3'
+
+    def stage(step, previous, lane):
+        folder = project / 'phase3/librelane' / lane
+        folder.mkdir(parents=True, exist_ok=True)
+        output = folder / 'native.def'
+        output.write_text(_def())
+        before = json.loads(previous.read_text()) if previous is not None else {'metrics': {}}
+        folder, _ = fixtures.producer(project, step, before,
+            {'def': str(output), 'metrics': {}}, lane=lane)
+        if previous is not None:
+            fp = json.loads((folder / 'input_fingerprint.json').read_text())
+            fp['state'] = contract.digest(previous)
+            put(folder / 'input_fingerprint.json', fp)
+            receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+            receipt['input'] = fp
+            receipt['sha256']['input_fingerprint.json'] = contract.digest(
+                folder / 'input_fingerprint.json')
+            put(folder / 'vibeic_receipt.json', receipt)
+        return folder / 'state_out.json'
+
+    ring = stage('OpenROAD.PadRing', None, '15-floorplan/01-openroad-padring')
+    contract.handoff_to_direct(ring, {'def': pnr / 'padring.def'},
+                               reports / 'librelane_padring_handoff.json')
+    initial = put(project / 'phase3/librelane/placement-input.json',
+                  {'def': str(pnr / 'floorplan.def'), 'metrics': {}})
+    route = None
+    for sid, ids, handoff_name, target in (
+            ('17', ('OpenROAD.GlobalPlacement', 'OpenROAD.DetailedPlacement'),
+             'librelane_placement_handoff.json', 'placed.def'),
+            ('21', ('OpenROAD.GlobalRouting', 'OpenROAD.DetailedRouting'),
+             'execution-backend-execution-backend-21-handoff.json', 'routed.def')):
+        previous = initial
+        states = []
+        for index, step in enumerate(ids, 1):
+            previous = stage(step, previous, f'execution-backend-{sid}/{index:02d}-native')
+            states.append({'step': step, 'state': str(previous),
+                           'sha256': contract.digest(previous)})
+            if step == 'OpenROAD.DetailedRouting':
+                route = previous.parent
+        put(reports / f'execution-backend-{sid}.json', {
+            'ordered_steps': list(ids), 'initial_state': str(initial),
+            'initial_sha256': contract.digest(initial), 'states': states})
+        contract.handoff_to_direct(previous, {'def': pnr / target}, reports / handoff_name)
+        initial = previous
+    switch = json.loads((project / 'phase3/librelane_switch.json').read_text())
+    switch['steps'] = {'17': 'librelane', '21': 'librelane'}
+    put(project / 'phase3/librelane_switch.json', switch)
+    return project, route
+
+
+@pytest.mark.parametrize('change,code', [
+    ('current', None),
+    ('moved', 'PADRING_LL_RING_MOVED'),
+    ('pin-disconnected', 'PADRING_LL_RING_PIN_DISCONNECTED'),
+    ('port-lost', 'PADRING_LL_PORT_CONNECTION_LOST'),
+    ('receipt-changed', 'PADRING_LL_NATIVE_CONSUMER_UNBOUND'),
+    ('broken-chain', 'PADRING_LL_NATIVE_CONSUMER_UNBOUND'),
+])
+def test_default_ring_reader_uses_native_placement_and_route_consumers(tmp_path, change, code):
+    """True final caller/receipt/DEF proof, with neutral native process records."""
+    project, route = _native_default_ring_project(tmp_path)
+    result, doc = _run(project)
+    assert result.status == 'PASS', doc['findings']
+    assert doc['findings'] == []
+    assert doc['librelane_ring_evidence']['mode'] == 'librelane_native_chain'
+    assert len(doc['librelane_ring_evidence']['consumed_defs']) == 3
+    if change == 'current':
+        return
+    if change == 'receipt-changed':
+        (route / 'invocation.log').write_text('changed native execution record\n')
+    else:
+        receipt = json.loads((route / 'vibeic_receipt.json').read_text())
+        fp = receipt['input']
+        if change == 'broken-chain':
+            fp['state'] = '0' * 64
+        else:
+            before = json.loads((route / 'state_in.json').read_text())
+            definition = Path(before['def'])
+            text = (_def(pad_xy=(0, 60000)) if change == 'moved' else
+                    _def().replace('( u_pad_clk PD ) ', '') if change == 'pin-disconnected' else
+                    _def(pad_net='clk_buf', pad_driver='( ibuf Z )', extra_nets=(
+                        '- clk ( PIN clk ) ( ibuf I ) + USE SIGNAL ;',)))
+            definition.write_text(text)
+            producer = definition.parent
+            previous_receipt = json.loads((producer / 'vibeic_receipt.json').read_text())
+            previous_receipt['sha256'][definition.name] = contract.digest(definition)
+            put(producer / 'vibeic_receipt.json', previous_receipt)
+            fp['state_files'][str(definition)] = contract.digest(definition)
+        put(route / 'input_fingerprint.json', fp)
+        receipt['input'] = fp
+        receipt['sha256']['input_fingerprint.json'] = contract.digest(route / 'input_fingerprint.json')
+        put(route / 'vibeic_receipt.json', receipt)
+    result, doc = _run(project)
+    assert result.status == 'FAIL'
+    assert any(f.startswith(code) for f in doc['findings']), doc['findings']

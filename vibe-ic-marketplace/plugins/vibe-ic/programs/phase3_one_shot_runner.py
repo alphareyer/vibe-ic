@@ -48645,6 +48645,15 @@ def _librelane_placed_ring_evidence(project: Path, pnr_dir: Path,
             continue
         if not bound:
             findings.append(f"{code}:{target.name} is not the bytes {receipt_name} bound")
+    return _padring_def_consumption(pnr_dir, records, consumed, _pr,
+                                    findings, evidence)
+
+
+def _padring_def_consumption(pnr_dir: Path, records: List[Dict[str, Any]],
+                             consumed: Path, _pr: Any, findings: List[str],
+                             evidence: Dict[str, Any]
+                             ) -> Tuple[List[str], Dict[str, Any]]:
+    """Apply the existing ring position/pin/port proof to a consumed DEF."""
     try:
         ref_text = (pnr_dir / "padring.def").read_text(errors="replace")
         got_text = consumed.read_text(errors="replace")
@@ -48684,6 +48693,89 @@ def _librelane_placed_ring_evidence(project: Path, pnr_dir: Path,
         "ring_pins_connected_consumed": len(ref_pins) - len(lost),
         "ring_port_connections": sum(1 for v in ref_pins.values() if v),
         "ring_port_connections_lost": len(ports)})
+    return findings, evidence
+
+
+def _default_librelane_ring_evidence(project: Path, pnr_dir: Path,
+                                     records: List[Dict[str, Any]], _pr: Any
+                                     ) -> Tuple[List[str], Dict[str, Any]]:
+    """Read the Default placement/routing consumers' retained native packets."""
+    import librelane_contract as ll
+    import librelane_signoff_evidence as native
+    findings: List[str] = []
+    evidence: Dict[str, Any] = {"mode": "librelane_native_chain"}
+    reports = project / "reports/phase3"
+    try:
+        def handoff(name, target, expected=None):
+            doc = json.loads((reports / name).read_text())
+            state = Path(doc["state"])
+            if expected is not None and state.resolve() != expected.resolve():
+                raise ValueError(f"{name}: wrong native state")
+            if doc["state_sha256"] != ll.digest(state):
+                raise ValueError(f"{name}: native state changed")
+            row = doc["views"]["def"]
+            source = Path(json.loads(state.read_text())["def"])
+            if (Path(row["source"]).resolve() != source.resolve()
+                    or Path(row["dest"]).resolve() != target.resolve()
+                    or row["source_sha256"] != ll.digest(source)
+                    or row["dest_sha256"] != ll.digest(target)
+                    or row["source_sha256"] != row["dest_sha256"]):
+                raise ValueError(f"{name}: DEF handoff changed")
+            return state
+
+        ring_state = handoff("librelane_padring_handoff.json", pnr_dir / "padring.def")
+        ll.validate_step_receipt(ring_state.parent, "OpenROAD.PadRing")
+        consumers = []
+        stages = []
+        for sid, required, receipt_name, target in (
+                ("17", ("OpenROAD.GlobalPlacement", "OpenROAD.DetailedPlacement"),
+                 "librelane_placement_handoff.json", "placed.def"),
+                ("21", ("OpenROAD.GlobalRouting", "OpenROAD.DetailedRouting"),
+                 "execution-backend-execution-backend-21-handoff.json", "routed.def")):
+            chain_path = reports / f"execution-backend-{sid}.json"
+            chain = json.loads(chain_path.read_text())
+            rows = chain["states"]
+            ids = [row["step"] for row in rows]
+            if (ids != chain["ordered_steps"] or not ids
+                    or any(ids.count(step) != 1 for step in required)
+                    or ids.index(required[0]) >= ids.index(required[1])):
+                raise ValueError(f"{chain_path.name}: native consumer order missing")
+            previous = Path(chain["initial_state"])
+            if chain["initial_sha256"] != ll.digest(previous):
+                raise ValueError(f"{chain_path.name}: initial state changed")
+            for row in rows:
+                state = Path(row["state"])
+                if not state.resolve().is_relative_to(
+                        (project / f"phase3/librelane/execution-backend-{sid}").resolve()):
+                    raise ValueError(f"{row['step']}: wrong native chain")
+                receipt = ll.validate_step_receipt(state.parent, row["step"])
+                if (row["sha256"] != ll.digest(state)
+                        or receipt["input"]["state"] != ll.digest(previous)):
+                    raise ValueError(f"{row['step']}: native state chain changed")
+                native._hashes(receipt["input"]["state_files"])
+                if row["step"] == "OpenROAD.DetailedRouting":
+                    before = json.loads((state.parent / "state_in.json").read_text())
+                    consumed = Path(before["def"])
+                    if receipt["input"]["state_files"].get(str(consumed)) != ll.digest(consumed):
+                        raise ValueError("DetailedRouting: consumed DEF unbound")
+                    consumers.append(consumed)
+                stages.append({"step": row["step"], "state": str(state),
+                               "sha256": row["sha256"]})
+                previous = state
+            handoff(receipt_name, pnr_dir / target, previous)
+            if sid == "17":
+                consumers.append(pnr_dir / target)
+        consumers.append(pnr_dir / "routed.def")
+        evidence["native_stages"] = stages
+        evidence["consumed_defs"] = []
+        for consumed in consumers:
+            _, row = _padring_def_consumption(
+                pnr_dir, records, consumed, _pr, findings,
+                {"consumed_def": str(consumed.relative_to(project))})
+            evidence["consumed_defs"].append(row)
+        evidence["consumed_def"] = str(consumers[1].relative_to(project))
+    except (ll.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        findings.append(f"PADRING_LL_NATIVE_CONSUMER_UNBOUND:{exc}")
     return findings, evidence
 
 
@@ -48762,43 +48854,53 @@ def step_pad_ring_final_evidence(project: Path, top: str,
         except (OSError, ValueError) as exc:
             findings.append(f"PADRING_DEF_STAGE_UNREADABLE:{path.name}:{exc}")
 
-    route_tcl = pnr_dir / "pnr.tcl"
-    route_log = pnr_dir / "openroad.log"
-    live_marker = "PADRING_ROUTING_CONSUMED:"
-    routing_consumer = "read_def phase3/stage3/pnr/padring.def"
+    import librelane_contract as _ll
     ll_ring: Optional[Dict[str, Any]] = None
-    try:
-        tcl = route_tcl.read_text(errors="replace")
-    except OSError as exc:
-        tcl = None
-        findings.append(f"PADRING_CONSUMER_MISSING:{exc}")
-    if (tcl is not None and "PADRING_ROUTING_CONSUMED:" not in tcl
-            and _LL_PLACEMENT_CONSUMED_RE.search(tcl)):
-        # F23: steps 15..18 ran in LibreLane; the ring arrives inside the
-        # tool's placed DEF and is judged there.
-        ll_findings, ll_ring = _librelane_placed_ring_evidence(
-            project, pnr_dir, records, tcl, _pr)
+    native_chain = any((project / "reports/phase3" /
+                        f"execution-backend-{sid}.json").is_file()
+                       for sid in ("17", "21"))
+    if native_chain and _ll.selected_mode(project, "21") == "librelane":
+        ll_findings, ll_ring = _default_librelane_ring_evidence(
+            project, pnr_dir, records, _pr)
         findings.extend(ll_findings)
-        live_marker = "LIBRELANE_PLACEMENT_CONSUMED:"
-        routing_consumer = f"read_def {ll_ring.get('consumed_def')} (LibreLane 15..18)"
-    elif tcl is not None:
+        routing_consumer = "LibreLane native placement / DetailedRouting state chain"
+    else:
+        route_tcl = pnr_dir / "pnr.tcl"
+        route_log = pnr_dir / "openroad.log"
+        live_marker = "PADRING_ROUTING_CONSUMED:"
+        routing_consumer = "read_def phase3/stage3/pnr/padring.def"
         try:
-            ingest_i = tcl.index("PADRING_ROUTING_CONSUMED:")
-            place_m = _PNR_CMD_GLOBAL_PLACEMENT.search(tcl[ingest_i:])
-            route_m = _PNR_CMD_DETAILED_ROUTE.search(tcl[ingest_i:])
-            if place_m is None or route_m is None:
-                raise ValueError("live placement/route commands absent after ingest")
-            place_i = ingest_i + place_m.start()
-            route_i = ingest_i + route_m.start()
-            if not ingest_i < place_i < route_i:
-                findings.append("PADRING_CONSUMER_ORDER_INVALID")
-        except ValueError as exc:
+            tcl = route_tcl.read_text(errors="replace")
+        except OSError as exc:
+            tcl = None
             findings.append(f"PADRING_CONSUMER_MISSING:{exc}")
-    try:
-        if live_marker not in route_log.read_text(errors="replace"):
-            findings.append("PADRING_CONSUMER_NOT_OBSERVED_IN_LIVE_LOG")
-    except OSError as exc:
-        findings.append(f"PADRING_ROUTE_LOG_UNREADABLE:{exc}")
+        if (tcl is not None and "PADRING_ROUTING_CONSUMED:" not in tcl
+                and _LL_PLACEMENT_CONSUMED_RE.search(tcl)):
+            # F23: steps 15..18 ran in LibreLane; the ring arrives inside the
+            # tool's placed DEF and is judged there.
+            ll_findings, ll_ring = _librelane_placed_ring_evidence(
+                project, pnr_dir, records, tcl, _pr)
+            findings.extend(ll_findings)
+            live_marker = "LIBRELANE_PLACEMENT_CONSUMED:"
+            routing_consumer = f"read_def {ll_ring.get('consumed_def')} (LibreLane 15..18)"
+        elif tcl is not None:
+            try:
+                ingest_i = tcl.index("PADRING_ROUTING_CONSUMED:")
+                place_m = _PNR_CMD_GLOBAL_PLACEMENT.search(tcl[ingest_i:])
+                route_m = _PNR_CMD_DETAILED_ROUTE.search(tcl[ingest_i:])
+                if place_m is None or route_m is None:
+                    raise ValueError("live placement/route commands absent after ingest")
+                place_i = ingest_i + place_m.start()
+                route_i = ingest_i + route_m.start()
+                if not ingest_i < place_i < route_i:
+                    findings.append("PADRING_CONSUMER_ORDER_INVALID")
+            except ValueError as exc:
+                findings.append(f"PADRING_CONSUMER_MISSING:{exc}")
+        try:
+            if live_marker not in route_log.read_text(errors="replace"):
+                findings.append("PADRING_CONSUMER_NOT_OBSERVED_IN_LIVE_LOG")
+        except OSError as exc:
+            findings.append(f"PADRING_ROUTE_LOG_UNREADABLE:{exc}")
 
     gds = pnr_dir / f"{top}.gds"
     if gds_result.status != "PASS":
