@@ -310,12 +310,12 @@ def _worst_record(reports: List[Dict[str, Any]],
             eligible = matching
     else:
         bases = sorted({(e[1].get("scope") or {}).get("activity_basis")
-                        for e in eligible})
+                        for e in eligible}, key=lambda basis: (basis is not None, basis or ""))
         if len(bases) > 1:
             worst = max(eligible, key=lambda e: e[0])
             return worst[1], worst[2], (
                 f"the readable power reports state totals on more than one "
-                f"activity basis ({', '.join(bases)}) and the requirement "
+                f"activity basis ({', '.join(_pw.BASIS_UNSTATED if b is None else b for b in bases)}) and the requirement "
                 f"names none, so there is no one number for it to bound")
 
     worst = max(eligible, key=lambda e: e[0])

@@ -379,3 +379,59 @@ def test_the_selection_never_sorts_on_a_key_a_refusal_does_not_have(tmp_path):
     r = _run(proj)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 2, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("authority", [
+    "declared-budget", "missing-budget", "other-tech-baseline",
+])
+def test_mixed_unstated_and_known_basis_reaches_the_declared_disposition(
+        tmp_path, authority):
+    """An unknown basis stays visible beside a known one through the real CLI.
+
+    Neither a basis-free budget nor the absence of one makes the two reports
+    comparable. The existing foreign-technology disposition remains distinct
+    from both a comparison and an outstanding requirement.
+    """
+    if authority == "other-tech-baseline":
+        import test_issue2147_signoff_rows_are_consumed as signoff
+        proj = signoff._project(tmp_path, built_on=signoff.LIB_B)
+    else:
+        proj = _project(tmp_path, rpt=_rpt(),
+                        l19=1000.0 if authority == "declared-budget" else None)
+    retained = proj / "steps" / "33_retained_power"
+    retained.mkdir(parents=True)
+    (retained / "power.rpt").write_text(_rpt(None))
+    out = tmp_path / "power_budget.json"
+    r = _run(proj, "--json", str(out))
+    assert "Traceback" not in r.stderr, r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
+    doc = json.loads(out.read_text())
+    assert {row["activity_basis"] for row in doc["reports_read"]} == {
+        pw.BASIS_UNSTATED, pw.BASIS_VECTORLESS}
+    assert "UNSTATED, VECTORLESS" in doc["activity_basis_conflict"]
+    assert doc.get("comparison") is None
+    assert not doc["findings"]
+    if authority == "declared-budget":
+        assert _refused(r), r.stdout + r.stderr
+        assert doc["verdict"] == "INCOMPLETE"
+        assert doc["judgement"]["code"] == "ACTIVITY_BASIS_CONFLICT"
+        assert doc["power_budget_uw"] == 1.0e-3 / 1.0e-6
+    else:
+        assert doc["power_budget_uw"] is None
+        assert doc["requirement"] is None
+        assert doc["judgement"]["code"] == "NO_REQUIREMENT"
+        if authority == "missing-budget":
+            assert _refused(r), r.stdout + r.stderr
+            assert doc["verdict"] == "INCOMPLETE"
+        else:
+            import _flow_reason_taxonomy as taxonomy
+            import flow_compliance_check as fcc
+            assert doc["verdict"] == "NOT_APPLICABLE"
+            assert doc["reason_class"] == taxonomy.DESIGN_DECLARED_NA
+            assert doc["disposition"]["signoff_row_reason"] == (
+                "baseline_not_attributed_to_this_technology")
+            passed, detail = fcc._check_program_exit_zero(
+                proj, "power_total_vs_budget_check . --json "
+                      "reports/phase2/gates/power_budget.json")
+            assert passed is True, detail
+            assert "EXECUTION_ERROR" not in detail
