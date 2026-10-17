@@ -373,7 +373,7 @@ def test_default_step37_finishing_publishes_measured_provenance(
     # none declares the different final bytes or either delivery alias.
     ledger.write_text(''.join(json.dumps(entry) + '\n' for entry in native))
     assert provenance_check.main(argv) != 0
-    identities = {name: (Path(first[name]).read_bytes(), Path(first[name]).stat().st_mtime_ns)
+    identities = {name: (LC.digest(Path(first[name])), Path(first[name]).stat().st_mtime_ns)
                   for name in ('source', 'pnr_gds', 'canonical')}
     if scenario == 'changed_final_gds':
         canonical.write_bytes(canonical.read_bytes() + b'changed')
@@ -396,8 +396,12 @@ def test_default_step37_finishing_publishes_measured_provenance(
                for row in consumed['gate_ledger'])
     assert provenance_check.main(argv) == 0
     assert calls == ['primary', 'seal', 'filler-density'], 'retained publication runs no native epoch'
-    assert {name: (Path(first[name]).read_bytes(), Path(first[name]).stat().st_mtime_ns)
-            for name in identities} == identities
+    assert {name: LC.digest(Path(first[name])) for name in identities} == {
+        name: identity[0] for name, identity in identities.items()}
+    # The existing outer producer always copies the stage4 alias. The source
+    # and pnr stream remain untouched; publication itself is ledger-only.
+    assert {name: Path(first[name]).stat().st_mtime_ns for name in ('source', 'pnr_gds')} == {
+        name: identities[name][1] for name in ('source', 'pnr_gds')}
 
 
 @pytest.mark.parametrize('scenario', [
