@@ -111,9 +111,10 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
     if _ce.no_container_route():
         # The enclosing fresh EDA image already supplies the runtime. Use
         # the same attested LOCAL runner as the native LibreLane producers.
+        network, command = _ll.native_tool_command(
+            image, ["bash", "-c", f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"])
         local_argv = ["docker", "run", *_docker_memory.docker_memory_flags(),
-                      "--rm", "--network", "none", *mounts, image, "--skip",
-                      "bash", "-c", f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
+                      "--rm", "--network", network, *mounts, image, "--skip", *command]
         done = _ll.run_container(local_argv, supervised=True, log=raw)
         # run_container returns normal output; its log argument only salvages
         # interrupted runs. Persist the native transcript for this consumer.
@@ -362,8 +363,9 @@ def openroad_identity(image: str, *, run=None) -> dict:
     `commit` is the `-g<hash>` or CMake's full-SHA fallback every build reports; builds that
     disagree, a version with no commit, or no build at all leave it None with
     the reason, never a guess."""
-    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", "none",
-            image, "--skip", "bash", "-c", _OPENROAD_PROBE]
+    network, command = _ll.native_tool_command(image, ["bash", "-c", _OPENROAD_PROBE])
+    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", network,
+            image, "--skip", *command]
     try:
         if run is None and _ce.no_container_route():
             done = _ll.run_container(argv, probe_deadline_s=300)
@@ -401,10 +403,18 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     bundle = {k: plan[k] for k in ("identity", "frozen", "current", "stages",
                                   "pins")}
     bundle["identity"] = dict(bundle["identity"])
+    provider = _ll._provider_for_image(image)
+    if provider is not None and (
+            bundle["identity"].get("source_tool_provider") != provider.as_record() or
+            bundle["identity"].get("source_tool_image") != str(provider) or
+            bundle["identity"].get("source_tool_image_id") != str(provider)):
+        raise ValueError("capture LOCAL provider differs from source producer")
+    runtime_image = image
     image_info = None
     try:
         if _ce.no_container_route():
-            attestation = _ll.local_image_attestation(image)
+            attestation = _ll.local_image_attestation(None if provider is not None else image)
+            runtime_image = attestation["image"]
             inspected = json.loads(Path(attestation["attestation_path"]).read_text())
             image_doc = next(item for item in inspected["image_inspect"]
                              if item["Id"] == attestation["image_id"])
@@ -449,7 +459,7 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         for item in inputs:
             if _ref(Path(item.get("path") or ""))["sha256"] != item.get("sha256"):
                 raise ValueError(f"capture input bytes changed: {item.get('path')}")
-    bundle["identity"]["tool_image"] = image
+    bundle["identity"]["tool_image"] = runtime_image
     bundle["identity"]["tool_image_digest"] = digest
     bundle["identity"]["tool_image_oci_version"] = version
     openroad = openroad_identity(image)

@@ -16,6 +16,24 @@ import _docker_memory  # noqa: E402
 import librelane_contract as _ll  # noqa: E402
 
 
+def pdk_source_identity(provenance: dict, *, project: Path) -> dict:
+    """Read the existing PDK producer's Docker or typed LOCAL witness."""
+    if provenance.get("source") != "local_provider":
+        derivation = provenance["derivation"]
+        return {"pdk": derivation["pdk"], "image": derivation["image"],
+                "image_id": derivation["image_id"]}
+    image = _ll.resolve_image(project, record=False)
+    provider = _ll._provider_for_image(image)
+    if (provider is None or provenance.get("identity") != str(provider) or
+            provenance.get("provider") != provider.as_record() or
+            Path(provenance["path"]).resolve() != Path(provider.pdk_root).resolve() or
+            not provenance.get("pdk") or
+            (provider.pdk and provider.pdk != provenance["pdk"])):
+        raise ValueError("installed PDK LOCAL provider differs from producer")
+    return {"pdk": provenance["pdk"], "image": image,
+            "image_id": str(provider), "provider": provider.as_record()}
+
+
 _IMAGE_PROBE = r'''
 import hashlib, json, os, pathlib, sys
 pdk, library = sys.argv[1:]
@@ -40,9 +58,13 @@ def image_pdk_anchor(image: str, pdk: str, library: str) -> dict:
                for value in (pdk, library)):
         raise ValueError("PDK/library identity invalid")
     # The same memory ceiling as every other container this plugin creates.
+    network, command = _ll.native_tool_command(
+        image, ["python3", "-c", _IMAGE_PROBE, pdk, library])
+    provider = _ll._provider_for_image(image)
+    environment = ["-e", "PDK_ROOT=" + provider.pdk_root] if provider else []
     process = _ll.run_container(
-        ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", "none",
-         image, "--skip", "python3", "-c", _IMAGE_PROBE, pdk, library],
+        ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", "--network", network,
+         *environment, image, "--skip", *command],
         probe_deadline_s=90)
     if process.returncode:
         raise ValueError("installed PDK config probe failed: " + process.stderr[-300:])

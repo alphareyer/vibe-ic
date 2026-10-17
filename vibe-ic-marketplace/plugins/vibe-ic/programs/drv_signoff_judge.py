@@ -894,8 +894,20 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         missing.append("OpenSTA image digest not bound to installed image")
     if project is not None:
         try:
+            anchor_image = image
+            provenance_path = project / "phase3/librelane_pdk_root.provenance.json"
+            root_doc = json.loads(provenance_path.read_text()) if provenance_path.is_file() else {}
+            if root_doc.get("source") == "local_provider" or identity.get("source_tool_provider"):
+                from drv_signoff_anchor import pdk_source_identity
+                source = pdk_source_identity(root_doc, project=project)
+                if (source.get("provider") != identity.get("source_tool_provider") or
+                        source["pdk"] != identity.get("pdk") or
+                        str(source["image"]) != identity.get("source_tool_image") or
+                        source["image_id"] != identity.get("source_tool_image_id")):
+                    raise ValueError("LOCAL source provider differs from capture")
+                anchor_image = source["image"]
             anchor = image_pdk_anchor(
-                image, str(identity.get("pdk") or ""),
+                anchor_image, str(identity.get("pdk") or ""),
                 str(identity.get("library") or ""))
             if bundle.get("threshold_anchor") != anchor:
                 missing.append("frozen threshold anchor differs from installed image")
@@ -905,7 +917,8 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 fails.append("PDK threshold source differs from pinned image")
             if identity.get("pdk_commit") != anchor.get("pdk_commit"):
                 missing.append("PDK commit differs from pinned image version")
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError,
+                subprocess.TimeoutExpired) as exc:
             missing.append(f"installed PDK threshold anchor unavailable: {exc}")
     source_texts = {}
     for name in ("l7", "l9", "pdk_config", "signoff_sdc"):
@@ -930,7 +943,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 "pdk_config", {}).get("path") or "")).resolve()
             if not pdk_root.is_dir() or not pdk_source.is_relative_to(pdk_root):
                 missing.append("PDK config is not inside installed PDK root")
-            if ((root_doc.get("derivation") or {}).get("image_id") !=
+            source_id = (root_doc.get("identity") if root_doc.get("source") == "local_provider"
+                         else (root_doc.get("derivation") or {}).get("image_id"))
+            if (source_id !=
                     (identity.get("source_tool_image_id") or
                      identity.get("tool_image_digest"))):
                 missing.append("installed PDK root image identity differs from producer image")

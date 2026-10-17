@@ -3614,3 +3614,176 @@ def test_capture_plan_reads_native_lib_environment(tmp_path, monkeypatch, schema
         assert set(result['frozen']['liberties']) == {'std_typ'}
         assert result['scenes'][0]['liberty'] == 'std_typ'
         assert [row['name'] for row in result['scenes'][0]['linked_liberties']] == ['std_typ']
+
+
+# Keep the real installed-image reader available after this module's synthetic
+# image fixture; this LOCAL control uses the actual outer launch attestation.
+_LOCAL_DRV_INSTALLED_IMAGE_DIGEST = drv._installed_image_digest
+
+
+def test_step32_local_provider_reaches_real_capture_and_judge(tmp_path, monkeypatch):
+    """Actual Step32 owner and LOCAL schema; only native process leaves are neutral."""
+    import os
+    import shlex
+    import _watchdog as watchdog
+    import drv_capture_plan as planner
+    import drv_run_identity
+    import drv_signoff_capture as capture
+    import librelane_contract as ll
+    import librelane_postroute_repair as repair
+
+    # Reuse only the existing neutral material constructor, then restore its
+    # legacy image resolver before entering the real LOCAL producer/readers.
+    with monkeypatch.context() as material:
+        project, adopted = _librelane_final_sta(tmp_path, material)
+    monkeypatch.setattr(planner, '_SCENE_PROFILES', drv._SCENE_PROFILES)
+    root = tmp_path / 'pdks/versions/neutral-pdk-commit'
+    root.parent.mkdir(parents=True)
+    (tmp_path / 'installed').rename(root)
+    lib = root / 'synthetic/libs.ref/lib/lib/std_typ.lib'
+    lib.write_text('library (std) {\n time_unit : "1ns"; capacitive_load_unit (1,pf);\n nom_process : 1; nom_voltage : 5; nom_temperature : 25;\n default_max_transition : 3; default_max_capacitance : .2;\n cell (logic) { pin (Y) { direction : output;\n max_transition : 3; max_capacitance : .2; } }\n}\n')
+    (root / 'synthetic/libs.ref/lib/lef/std.lef').write_text(
+        'MACRO logic\n PIN Y\n DIRECTION OUTPUT ;\n USE SIGNAL ;\n END Y\nEND logic\n')
+    state_path = project / 'phase3/librelane/32-cand01/04-openroad-stapostpnr/state_out.json'
+    state = json.loads(state_path.read_text())
+    Path(state['nl']).write_text('module physical_top; endmodule\n')
+    Path(state['def']).write_text('VERSION 5.8 ;\nDESIGN physical_top ;\n'
+        'NETS 1 ;\n - n ( u Y ) ;\nEND NETS\nEND DESIGN\n')
+    Path(state['sdc']).write_text(Path(state['sdc']).read_text() +
+        'set_max_transition 3 [current_design]\nset_max_capacitance .2 [current_design]\n')
+    _file(project, 'phase1/generated_docs/L7.json', json.dumps({'verification': 'neutral'}))
+    source = tmp_path / 'native-source'
+    _file(source, 'librelane/__init__.py', '# neutral source identity\n')
+    switch = {'execution_route': 'LOCAL', 'pdk': 'synthetic',
+              'pdk_root_host': str(root), 'librelane_root_host': str(source),
+              'librelane_executable': sys.executable, 'local_network_mode': 'host'}
+    _file(project, 'phase3/librelane_switch.json', json.dumps(switch))
+    monkeypatch.setenv(ll.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(root))
+    monkeypatch.setenv('VIBEIC_LIBRELANE_ROOT', str(source))
+    monkeypatch.setenv('VIBEIC_LIBRELANE_LOCAL_NETWORK', 'host')
+    monkeypatch.setattr(capture._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(drv, '_installed_image_digest', _LOCAL_DRV_INSTALLED_IMAGE_DIGEST)
+    image = ll.resolve_image(project, record=False)
+    provenance = ll.pdk_root_resolution(project, 'synthetic', image=image)
+    assert provenance['source'] == 'local_provider' and 'derivation' not in provenance
+    original_provenance = (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes()
+    _file(state_path.parent, 'config.json', json.dumps({'DESIGN_NAME': 'physical_top'}))
+    _file(state_path.parent, 'vibeic_receipt.json', json.dumps({
+        'input': {'step': 'OpenROAD.STAPostPNR', 'image': str(image),
+                  'state_files': {state[k]: drv._sha(Path(state[k])) for k in ('nl', 'def')}},
+        'sha256': {'state_out.json': drv._sha(state_path),
+                   'config.json': drv._sha(state_path.parent / 'config.json')}}))
+    spef = Path(state['spef']['nom_*'])
+    spef.write_text('*SPEF neutral\n*D_NET n 0.1\n*CONN\n*I u:Y O\n*END\n')
+    _file(spef.parent.parent, 'COMMANDS', 'openroad -exit native-rcx.tcl\n')
+    _file(spef.parent.parent, 'vibeic_receipt.json', json.dumps({
+        'input': {'step': 'OpenROAD.RCX', 'image': str(image),
+                  'state_files': {state['def']: drv._sha(Path(state['def']))}},
+        'sha256': {spef.relative_to(spef.parent.parent).as_posix(): drv._sha(spef)}}))
+    drv_run_identity.record(project)
+    _stage_receipts(project)
+    # The Step32 owner rerecords these two stages from their native probe
+    # files; initialize those neutral process outputs before that call.
+    for folder, name, command in (
+            (state_path.parent, 'signoff_sta', 'report_check_types'),
+            (adopted.parent, 'postroute_repair', 'repair_design')):
+        evidence = project / 'phase3/stage_evidence' / name
+        for kind, filename in (('behavior.rpt', 'drv_behavior.rpt'),
+                               ('pre.sdc', 'pre_command.sdc'),
+                               ('fanout_limits.rpt', 'fanout_limits.rpt'),
+                               ('pin_cells', 'pin_cells')):
+            _file(folder / 'vibeic_drv_stage', f'{command}.all.1.{kind}',
+                  (evidence / filename).read_text())
+    report = _step32_report(project, adopted)
+    observed = {'scope': 'SOURCE_ONLY: neutral native reports, no physical signoff',
+                'provider': image.as_record(), 'provenance': provenance, 'calls': []}
+    original_leaf = watchdog.run_host_supervised
+
+    def native_leaf(argv, **kwargs):
+        # Consume the normal published inventory after the actual owner built
+        # it; the baseline must first reach that owner and its typed refusal.
+        plan_path = project / 'reports/phase3/sta/drv_capture_plan.json'
+        _install_test_freeze(json.loads(plan_path.read_text()), tmp_path, monkeypatch)
+        observed['calls'].append({'argv': list(argv),
+            'network': kwargs['env'].get('VIBEIC_LOCAL_NETWORK_MODE')})
+        if capture._OPENROAD_PROBE in argv:
+            return watchdog.SupervisedResult(0,
+                'OPENROAD_BINARY /neutral/openroad ' + 'b' * 64 + ' 1-g' + 'b' * 40 + '\n',
+                '', 'natural')
+        shell = next((part for part in argv if part.startswith('sta -no_init -exit ')), None)
+        if shell is None:
+            return original_leaf(argv, **kwargs)
+        script = Path(shlex.split(shell)[-1])
+        folder = script.parent
+        control = script.name == 'positive_control.tcl'
+        prefix = 'positive_control_' if control else ''
+        (folder / ('positive_control.rpt' if control else 'violators.rpt')).write_text(
+            _report(fanout=2, fanout_limit=1, cap_limit=1e-6, slew_limit=1e-6,
+                    violators=True) if control else _report(violators=True))
+        (folder / (prefix + 'all_limits.rpt')).write_text(
+            _report(fanout=2, fanout_limit=1, cap_limit=1e-6, slew_limit=1e-6)
+            if control else _report(fanout=2))
+        (folder / (prefix + 'counters.log')).write_text(''.join(
+            f'DRV_COUNTER {kind} {1 if control else 0}\n' for kind in drv.KINDS))
+        if not control:
+            (folder / 'pin_census.tsv').write_text(
+                'u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n')
+            (folder / 'net_census.rpt').write_text('Net n\n Total capacitance: 0.1\n'
+                ' Number of drivers: 1\n Number of loads: 0\n Number of pins: 1\n'
+                '\nDriver pins\n u/Y output (logic)\n\n')
+            (folder / 'disabled_edges.rpt').write_text('')
+            (folder / 'annotation.rpt').write_text('Found 0 unannotated drivers.\n')
+            (folder / 'clocks.rpt').write_text('propagated\n')
+        return watchdog.SupervisedResult(0, 'OpenSTA 3.1 ' + 'a' * 40 + '\n', '', 'natural')
+
+    monkeypatch.setattr(watchdog, 'run_host_supervised', native_leaf)
+    repair._step32_drv_signoff(project, report)
+    observed['report'] = report
+    path = project / 'reports/phase3/sta/drv_signoff_bundle.json'
+    if path.is_file():
+        observed['identity'] = json.loads(path.read_text())['identity']
+    (tmp_path / 'LOCAL_DRV_SOURCE_OBSERVATION.json').write_text(json.dumps(observed, indent=2) + '\n')
+    assert report['drv_signoff_verdict'] == 'PASS', observed
+    bundle = json.loads(path.read_text())
+    assert bundle['identity']['source_tool_image'] == str(image)
+    assert bundle['identity']['source_tool_provider'] == image.as_record()
+    outer = ll.local_image_attestation()
+    assert bundle['identity']['tool_image'] == outer['image']
+    assert bundle['identity']['tool_image_digest'] == outer['image_id']
+    assert bundle['identity']['tool_image'] != str(image)
+    assert observed['calls'] and all(row['network'] == 'host' for row in observed['calls'])
+    assert (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes() == original_provenance
+    # Same real full reader: a provider, image, material or measured-data
+    # fault must not gain acceptance from the new schema adapter.
+    wrong = copy.deepcopy(bundle)
+    wrong['identity']['source_tool_provider']['reference'] = 'local://wrong-provider'
+    wrong_provider = drv.judge(wrong, project=project)
+    assert wrong_provider['verdict'] == 'NOT_MEASURED', wrong_provider
+    assert any('LOCAL source provider' in r for r in wrong_provider['not_measured'])
+    wrong = copy.deepcopy(bundle)
+    wrong['identity'].pop('source_tool_provider')
+    missing_provider = drv.judge(wrong, project=project)
+    assert missing_provider['verdict'] == 'NOT_MEASURED', missing_provider
+    assert any('LOCAL source provider' in r for r in missing_provider['not_measured'])
+    wrong = copy.deepcopy(bundle)
+    wrong['identity']['tool_image_digest'] = 'sha256:' + '0' * 64
+    wrong_image = drv.judge(wrong, project=project)
+    assert wrong_image['verdict'] == 'NOT_MEASURED', wrong_image
+    assert 'OpenSTA image digest not bound to installed image' in wrong_image['not_measured']
+    wrong = copy.deepcopy(bundle)
+    _violate(wrong, tmp_path / 'measured_violation', 'max_fanout', value=5, limit=4)
+    violated = drv.judge(wrong, project=project)
+    assert violated['verdict'] == 'FAIL' and violated['findings'], violated
+    wrong = copy.deepcopy(bundle)
+    wrong['scenes'][0].pop('counter_report')
+    missing = drv.judge(wrong, project=project)
+    assert missing['verdict'] != 'PASS', missing
+    lib.write_text(lib.read_text() + '// changed after native capture\n')
+    changed = drv.judge(bundle, project=project)
+    assert changed['verdict'] == 'FAIL', changed
+    assert any('sha256' in r or 'digest' in r for r in changed['failures']), changed
+    observed['guard_results'] = {'wrong_provider': wrong_provider,
+        'missing_provider': missing_provider, 'wrong_image': wrong_image, 'real_violation': violated,
+        'missing_measurement': missing, 'changed_material': changed}
+    (tmp_path / 'LOCAL_DRV_SOURCE_OBSERVATION.json').write_text(json.dumps(observed, indent=2) + '\n')

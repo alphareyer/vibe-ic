@@ -788,8 +788,9 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         return _build_direct(project)
     state, state_path = _state(project, final_state)
     provenance = json.loads((project / "phase3/librelane_pdk_root.provenance.json").read_text())
-    pdk = provenance["derivation"]["pdk"]
-    image = provenance["derivation"]["image"]
+    from drv_signoff_anchor import pdk_source_identity
+    source = pdk_source_identity(provenance, project=project)
+    pdk, image = source["pdk"], source["image"]
     # A same-host checkpoint already names its PDK inputs. Reading them does
     # not require launching the older executable that produced the layout.
     # Only recreate the original image's PDK when that cache is unavailable.
@@ -797,7 +798,9 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     if not (root / pdk).is_dir():
         from librelane_contract import pdk_root_resolution
         resolution = pdk_root_resolution(None, pdk, image=image)
-        if resolution["derivation"]["image_id"] != provenance["derivation"]["image_id"]:
+        resolved_id = ((resolution.get("provider") or {}).get("reference")
+                       if source.get("provider") else resolution["derivation"]["image_id"])
+        if resolved_id != source["image_id"]:
             raise ValueError("final STA PDK image differs from run provenance")
         root = Path(resolution["path"])
     recorded_netlist = _run_path(project, state["nl"])
@@ -890,7 +893,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     if previous_path.is_file():
         previous = json.loads(previous_path.read_text())
         if ((previous.get("identity") or {}).get("source_tool_image_id") ==
-                provenance["derivation"]["image_id"]):
+                source["image_id"]):
             expected_pdk = ((previous.get("frozen") or {}).get("sources") or {}).get("pdk_config")
             if expected_pdk and expected_pdk != sources["pdk_config"]["sha256"]:
                 raise ValueError("retained checkpoint PDK config changed")
@@ -945,10 +948,12 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     identity = {"project": str(project), **_run_identity(project),
                 "pdk": pdk, "library": env["STD_CELL_LIBRARY"],
                 "source_tool_image": image,
-                "source_tool_image_id": provenance["derivation"]["image_id"],
+                "source_tool_image_id": source["image_id"],
                 "artifacts": artifacts,
                 **{key: artifacts[key].get("sha256") for key in
                    ("sta_netlist", "lvs_netlist", "gds_netlist")}}
+    if source.get("provider"):
+        identity["source_tool_provider"] = source["provider"]
     # The judge requires post-route repair constraints exactly when step 32
     # adopted a candidate; use the same adoption record.
     if current_step23:
