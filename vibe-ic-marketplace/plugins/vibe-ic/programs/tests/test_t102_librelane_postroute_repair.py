@@ -1969,3 +1969,64 @@ def test_native_postroute_callers_use_the_current_provider(tmp_path, monkeypatch
             assert launch[launch.index("--network") + 1] == "none"
         assert not any("os.execvp" in str(part) for part in launch)
         assert call["argv"][-len(native_command):] == native_command or owner == "fork_capability"
+
+
+def test_native_sta_consumes_normalized_lib_for_every_declared_scene(tmp_path, monkeypatch):
+    """The real measure builds every script; only OpenROAD file writes are neutral."""
+    odb = write(tmp_path / 'route.odb', 'neutral routed database')
+    sdc = write(tmp_path / 'route.sdc', 'create_clock -period 20 [get_ports clk]\n')
+    state = put(tmp_path / 'state.json', {'odb': str(odb), 'sdc': str(sdc)})
+    corners = [f'{rc}_{pvt}' for rc in ('nom', 'min', 'max')
+               for pvt in ('tt_025C_5v00', 'ss_125C_4v50', 'ff_n40C_5v50')]
+    libraries = {f'*_{pvt}': [str(write(tmp_path / f'{pvt}.lib', 'neutral liberty'))]
+                 for pvt in ('tt_025C_5v00', 'ss_125C_4v50', 'ff_n40C_5v50')}
+    pads = {pattern: [str(write(tmp_path / f'pad_{i}.lib', 'neutral pad liberty'))]
+            for i, pattern in enumerate(libraries)}
+    rules = {f'{rc}_*': str(write(tmp_path / f'{rc}.rcx', 'neutral extraction rules'))
+             for rc in ('nom', 'min', 'max')}
+    config = {'RCX_RULESETS': rules, 'LIB': libraries, 'PAD_LIBS': pads,
+              'STA_CORNERS': corners, 'DEFAULT_CORNER': corners[0]}
+    path = put(tmp_path / 'rcx.json', config)
+    ctx = {'project': str(tmp_path), 'image': 'neutral image', 'mounts': [],
+           'configs': {'OpenROAD.RCX': str(path)}, 'corners': corners,
+           'derate': [0.95, 1.05]}
+    scripts = {}
+
+    def tool_writes(_ctx, script, output):
+        scripts[script.name] = script.read_text()
+        output.write_text('*SPEF "IEEE 1481-1998"\n' if script.name.startswith('extract_')
+                          else 'OCV_BASIS flat_ocv\nworst slack max 1.250000\n'
+                               'worst slack min 0.125000\n')
+
+    monkeypatch.setattr(native, '_run', tool_writes)
+    result = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'normalized')
+    assert set(result['setup_ws']) == set(result['hold_ws']) == set(corners)
+    assert result['setup_ws_min'] == 1.25 and result['hold_ws_min'] == 0.125
+    assert len([name for name in scripts if name.startswith('extract_')]) == 3
+    default_lib = libraries['*_tt_025C_5v00'][0]
+    for name, text in scripts.items():
+        if name.startswith('extract_'):
+            assert f'read_liberty {{{default_lib}}}' in text
+        else:
+            corner = name[len('sta_'):-len('.tcl')]
+            group = next(pattern for pattern in libraries if native.fnmatch.fnmatch(corner, pattern))
+            assert [line for line in text.splitlines() if line.startswith('read_liberty ')] == [
+                f'read_liberty {{{lib}}}' for lib in [*libraries[group], *pads[group]]]
+            assert text.index('set_timing_derate -late') < text.index('report_worst_slack -max')
+    # An explicit modern declaration wins; legacy data cannot rescue empty/invalid LIB.
+    for invalid in ({}, None):
+        put(path, {**config, 'LIB': invalid, 'CELL_LIBS': libraries})
+        before = len(scripts)
+        with pytest.raises((ValueError, AttributeError, TypeError)):
+            REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'invalid')
+        assert len(scripts) == before
+    legacy = {key: value for key, value in config.items() if key != 'LIB'}
+    put(path, {**legacy, 'CELL_LIBS': libraries})
+    prior = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'legacy')
+    assert prior['setup_ws'] == result['setup_ws'] and prior['hold_ws'] == result['hold_ws']
+    (tmp_path / 'LIB_SCENE_OBSERVATION.json').write_text(json.dumps({
+        'modern_key': 'LIB', 'legacy_fallback': True, 'corners': corners,
+        'default_corner': config['DEFAULT_CORNER'], 'read_liberty_by_script': {
+            name: [line for line in text.splitlines() if line.startswith('read_liberty ')]
+            for name, text in scripts.items()}, 'setup': result['setup_ws'],
+        'hold': result['hold_ws'], 'neutral_process_leaf_only': True}, indent=2) + '\n')

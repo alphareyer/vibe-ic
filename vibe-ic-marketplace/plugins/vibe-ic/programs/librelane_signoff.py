@@ -699,7 +699,8 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
         libs = []
         roles = {}
         for field in ('CELL_LIBS', 'PAD_LIBS', 'EXTRA_LIBS'):
-            declared_libs = config.get(field) or {}
+            declared_libs = (config.get('LIB', config.get('CELL_LIBS'))
+                             if field == 'CELL_LIBS' else config.get(field)) or {}
             if isinstance(declared_libs, dict):
                 selected = [lib for p, group in declared_libs.items()
                             if fnmatch.fnmatch(name, p) for lib in group]

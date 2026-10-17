@@ -57,7 +57,7 @@ class IRDropChecker(Step):
     ]
 
     def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
-        libs = self.toolbox.filter_views(self.config, self.config["CELL_LIBS"])
+        libs = self.toolbox.filter_views(self.config, self.config.get("LIB", self.config.get("CELL_LIBS")))
         supply = self.toolbox.get_lib_voltage(str(libs[0])) if libs else None
         budget = self.config.get("VIBEIC_IR_BUDGET_PCT")
         doc = ir_findings(dict(state_in.metrics), self.config.get("VDD_NETS") or [],
@@ -115,7 +115,7 @@ class TransientIR(OpenROADStep):
         spefs = self.toolbox.filter_views(self.config, state_in[DesignFormat.SPEF])
         if len(spefs) != 1:
             raise StepError(f"expected one SPEF for the default corner, got {len(spefs)}")
-        libs = self.toolbox.filter_views(self.config, self.config["CELL_LIBS"])
+        libs = self.toolbox.filter_views(self.config, self.config.get("LIB", self.config.get("CELL_LIBS")))
         voltage = self.toolbox.get_lib_voltage(str(libs[0])) if libs else None
         if not voltage:
             raise StepError("no supply voltage from the library")

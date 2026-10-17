@@ -3589,3 +3589,28 @@ def test_recorded_abc_graph_survives_plan_to_complete_judge(
     else:
         assert result['verdict'] == 'FAIL', result
         assert any('synth:' in text or 'ABC' in text for text in result['failures']), result
+
+
+@pytest.mark.parametrize('schema', ['modern', 'legacy', 'precedence', 'empty'])
+def test_capture_plan_reads_native_lib_environment(tmp_path, monkeypatch, schema):
+    """Real capture-plan scene/material reader, using the original neutral run."""
+    import drv_capture_plan as plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    scene = project / 'phase3/librelane/32-cand01/04-openroad-stapostpnr/nom_typ/_env_sta.tcl'
+    old = scene.read_text()
+    if schema != 'legacy':
+        modern = old.replace('::env(CELL_LIBS)', '::env(LIB)')
+        if schema == 'empty':
+            modern = modern.replace('"/pdk/synthetic/libs.ref/lib/lib/std_typ.lib"', '""')
+            modern += 'set ::env(CELL_LIBS) "/pdk/synthetic/libs.ref/lib/lib/std_typ.lib"\n'
+        elif schema == 'precedence':
+            modern += 'set ::env(CELL_LIBS) "/pdk/unused/legacy_typ.lib"\n'
+        scene.write_text(modern)
+    if schema == 'empty':
+        with pytest.raises(ValueError, match='linked scene Liberty or LEF inventory absent'):
+            plan.build(project, final_state=_step32_report(project, adopted))
+    else:
+        result = plan.build(project, final_state=_step32_report(project, adopted))
+        assert set(result['frozen']['liberties']) == {'std_typ'}
+        assert result['scenes'][0]['liberty'] == 'std_typ'
+        assert [row['name'] for row in result['scenes'][0]['linked_liberties']] == ['std_typ']

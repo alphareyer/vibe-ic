@@ -3771,7 +3771,8 @@ def _sta_liberty_input_hashes(config: dict, project: Path,
     """
     libraries: set[str] = set()
     for field in ('CELL_LIBS', 'PAD_LIBS', 'EXTRA_LIBS'):
-        value = config.get(field) or {}
+        value = (config.get('LIB', config.get('CELL_LIBS'))
+                 if field == 'CELL_LIBS' else config.get(field)) or {}
         groups = value.values() if isinstance(value, dict) else [value]
         for group in groups:
             if isinstance(group, str):

@@ -464,3 +464,65 @@ def test_standalone_ir_openroad_and_capability_probe_use_shared_supervisor(
     assert la.sealring_spans_capable("img")
     assert calls[0][1] == {"supervised": True, "log": log}
     assert calls[1][1] == {"probe_deadline_s": ll.PROBE_DEADLINE_S}
+
+
+@pytest.mark.parametrize('owner', ['IRDropChecker', 'TransientIR'])
+def test_native_ir_plugins_consume_normalized_lib_without_legacy_override(tmp_path, monkeypatch, owner):
+    """Exercise each original plugin run and native Liberty reader; no IR solve."""
+    import importlib
+    from decimal import Decimal
+    from types import SimpleNamespace
+    monkeypatch.syspath_prepend(str(ll.PLUGIN_ROOT))
+    plugin = importlib.import_module('librelane_plugin_vibeic.ir_drop')
+    from librelane.common import Toolbox
+    from librelane.steps.openroad import OpenROADStep
+    library = tmp_path / 'neutral.lib'
+    library.write_text('library(neutral) { default_operating_conditions : typical; '
+                       'operating_conditions(typical) { voltage : 5.0; temperature : 25; } }\n')
+    sdc = tmp_path / 'neutral.sdc'
+    sdc.write_text('create_clock -period 24 [get_ports clk]\n')
+    spef = tmp_path / 'neutral.spef'
+    spef.write_text('*SPEF "IEEE 1481-1998"\n')
+    mapping = {'nom_*': [str(library)]}
+    cfg = {'LIB': mapping, 'DEFAULT_CORNER': 'nom_tt_025C_5v00',
+           'VDD_NETS': ['VDD'], 'GND_NETS': ['VSS'], 'VIBEIC_IR_BUDGET_PCT': Decimal('10'),
+           'PNR_SDC_FILE': str(sdc), 'VIBEIC_DECAP_CAP': None}
+    toolbox = Toolbox(str(tmp_path / 'toolbox'))
+    step = object.__new__(getattr(plugin, owner))
+    step.config = cfg
+    step.toolbox = toolbox
+    step.step_dir = str(tmp_path)
+    step.err = lambda *_args: None
+    step.extract_env = lambda kwargs: (kwargs, {})
+    state = plugin.State({plugin.DesignFormat.SPEF: {'nom_*': str(spef)},
+                          plugin.DesignFormat.SDC: str(sdc)}, metrics=MEASURED_METRICS)
+    process_calls = []
+
+    def neutral_openroad(_step, _state, **kwargs):
+        process_calls.append(kwargs['env'])
+        (tmp_path / 'transient_ir.rpt').write_bytes((_FIX / 'transient_quasi_static.rpt').read_bytes())
+        return {}, {}
+
+    monkeypatch.setattr(OpenROADStep, 'run', neutral_openroad)
+    _, measured = step.run(state)
+    if owner == 'IRDropChecker':
+        assert measured['vibeic__ir__analysed_net__count'] == 2
+        assert measured['vibeic__ir__drop__worst__pct'] > 0
+    else:
+        assert measured['vibeic__ir_dynamic__drop__worst'] > 0
+        assert process_calls[0]['LIB_VOLTAGE'] == '5.0'
+        assert process_calls[0]['CURRENT_SPEF_DEFAULT_CORNER'] == str(spef)
+    # LIB is authoritative even when the old spelling contains a usable view.
+    for invalid in ({}, None):
+        step.config = {**cfg, 'LIB': invalid, 'CELL_LIBS': mapping}
+        calls = len(process_calls)
+        with pytest.raises((plugin.StepError, TypeError, AttributeError)):
+            step.run(state)
+        assert len(process_calls) == calls
+    step.config = {key: value for key, value in cfg.items() if key != 'LIB'}
+    step.config['CELL_LIBS'] = mapping
+    assert step.run(state)[1] == measured
+    (tmp_path / 'IR_LIB_OBSERVATION.json').write_text(json.dumps({
+        'owner': owner, 'modern_key': 'LIB', 'legacy_fallback': True,
+        'empty_and_null_did_not_fallback': True, 'metrics': measured,
+        'neutral_native_solve_only': True}, default=str, indent=2) + '\n')

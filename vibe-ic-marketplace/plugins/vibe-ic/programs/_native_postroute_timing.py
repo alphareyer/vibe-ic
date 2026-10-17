@@ -132,7 +132,7 @@ def measure(ctx: dict[str, Any], repair_state: Path, out_dir: Path) -> dict[str,
     cfg = json.loads(Path(ctx["configs"]["OpenROAD.RCX"]).read_text())
     corners = ctx["corners"]
     rulesets = cfg["RCX_RULESETS"]
-    cell_libs = cfg["CELL_LIBS"]
+    cell_libs = cfg.get("LIB", cfg.get("CELL_LIBS"))
     pad_libs = cfg.get("PAD_LIBS") or {}
     out_dir.mkdir(parents=True, exist_ok=True)
     measured_sdc, early, late = _measurement_sdc(ctx, sdc, out_dir)

@@ -786,3 +786,42 @@ def test_standalone_sta_uses_shared_supervisor_and_preserves_log(tmp_path,
     assert cp.returncode == 0
     assert log.read_text() == "STA complete\n"
     assert calls[0][1] == {"supervised": True, "log": log}
+
+
+@pytest.mark.parametrize('schema', ['modern', 'legacy', 'precedence', 'empty', 'null'])
+def test_step23_tool_arm_reads_native_lib_schema(tmp_path, schema):
+    """The existing receipt-bound nine-corner reader chooses native LIB first."""
+    from test_f15_step23_gates_read_the_tool_arm import tool_project, rebind, STA
+    project = tool_project(tmp_path)
+    folder = project / STA
+    config_path = folder / 'config.json'
+    config = json.loads(config_path.read_text())
+    original = config['CELL_LIBS']
+    if schema != 'legacy':
+        config['LIB'] = {} if schema == 'empty' else None if schema == 'null' else original
+        if schema == 'modern':
+            config.pop('CELL_LIBS')
+        elif schema == 'precedence':
+            config['CELL_LIBS'] = {'*': ['/pdk/unused/legacy.lib']}
+    config_path.write_text(json.dumps(config))
+    # Unit native-output constructor: establish the recipe's initial config bytes
+    # before invoking the unchanged receipt/current consumer, never field evidence.
+    rebind(project)
+    arm = signoff.step23_tool_arm(project)
+    assert len(arm['corners']) == 9
+    if schema in ('empty', 'null'):
+        assert all(row['liberty'] is None and 'process' in row['scope_gaps']
+                   for row in arm['corners'].values())
+    else:
+        for name, row in arm['corners'].items():
+            assert row['process'] == name.split('_')[1]
+            assert row['liberty'] in [p for group in original.values() for p in group]
+            assert not row['scope_gaps'], row['scope_gaps']
+            assert all(v['role'] == 'CELL_LIBS' and v['run_sha256'] == v['sha256']
+                       for v in row['liberties'])
+        if schema == 'modern':
+            pdk = tmp_path / 'pdk_root'
+            library = next(pdk.rglob('*.lib'))
+            library.write_text(library.read_text() + '# changed after native STA\n')
+            changed = signoff.step23_tool_arm(project)
+            assert any('liberty_digest' in row['scope_gaps'] for row in changed['corners'].values())

@@ -1184,3 +1184,56 @@ def test_metadata_owner_uses_bound_provider_network(tmp_path, monkeypatch, owner
     else:
         assert observed['route'] == 'Docker'
         assert observed['args'][observed['args'].index('--network') + 1] == 'none'
+
+
+@pytest.mark.parametrize('schema', ['modern', 'legacy', 'precedence', 'empty', 'null'])
+def test_stapostpnr_receipt_binds_native_lib_schema(tmp_path, monkeypatch, schema):
+    """Actual run_chain receipt and drift guard; only tool file writes are neutral."""
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
+    project = tmp_path / 'design'
+    root = tmp_path / 'pdk'
+    paths = {}
+    for name in ('cell', 'pad', 'extra', 'legacy'):
+        path = root / (name + '.lib')
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('library (' + name + ') { nom_voltage : 5; }\n')
+        paths[name] = path
+    guests = {name: '/pdk/neutral/' + path.name for name, path in paths.items()}
+    views = {key: str(put(project / (key + '.json'), {})) for key in ('odb', 'def', 'nl', 'sdc')}
+    initial = put(project / 'initial.json', views)
+    config = {'meta': {'step': 'OpenROAD.STAPostPNR'}, 'STA_CORNERS': ['nom_typ'],
+              'PAD_LIBS': {'*': [guests['pad']]}, 'EXTRA_LIBS': [guests['extra']]}
+    if schema == 'legacy':
+        config['CELL_LIBS'] = {'*': [guests['cell']]}
+    else:
+        config['LIB'] = {} if schema == 'empty' else None if schema == 'null' else {'*': [guests['cell']]}
+        if schema in ('precedence', 'empty', 'null'):
+            config['CELL_LIBS'] = {'*': [guests['legacy']]}
+    config_path = put(project / 'config.json', config)
+
+    def native_leaf(argv, **kwargs):
+        folder = Path(argv[argv.index('-o') + 1])
+        put(folder / 'state_out.json', views)
+        log = folder / 'nom_typ/sta.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('NEUTRAL_NATIVE_STA_TRANSCRIPT\n')
+        return SimpleNamespace(returncode=0, stdout='neutral native process', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *_: None)
+    monkeypatch.setattr(contract, 'run_container', native_leaf)
+    invoke = lambda lane: contract.run_chain(project, 'candidate',
+        [('OpenROAD.STAPostPNR', config_path, initial)], mounts=[(root, '/pdk/neutral')],
+        pdk_root='/pdk/neutral', lane=lane)[0]
+    folder = invoke('first')
+    receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+    wanted = ['pad', 'extra'] + ([] if schema in ('empty', 'null') else ['cell'])
+    assert receipt['input']['liberty_files'] == {guests[name]: contract.digest(paths[name]) for name in wanted}
+    if schema == 'modern':
+        def drift(argv, **kwargs):
+            result = native_leaf(argv, **kwargs)
+            paths['cell'].write_text(paths['cell'].read_text() + '# changed during STA\n')
+            return result
+        monkeypatch.setattr(contract, 'run_container', drift)
+        with pytest.raises(contract.Refusal, match='LL_STA_LIBERTY_CHANGED_DURING_RUN'):
+            invoke('changed')

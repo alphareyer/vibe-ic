@@ -410,7 +410,9 @@ def _scene_files(env: dict, root: Path, pdk: str, pvt: str) -> tuple[list[dict],
     libs = []
     lefs = []
     for key in ("CELL_LIBS", "PAD_LIBS"):
-        paths = re.findall(r"/[^\s\"\\]+\.lib\b", env.get(key, ""))
+        declared = (env.get("LIB", env.get("CELL_LIBS"))
+                    if key == "CELL_LIBS" else env.get(key)) or ""
+        paths = re.findall(r"/[^\s\"\\]+\.lib\b", declared)
         selected = [_pdk_path(value, root, pdk) for value in paths if pvt in value]
         for path in selected:
             libs.append({"name": path.stem, **_ref(path)})
