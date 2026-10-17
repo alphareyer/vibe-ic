@@ -243,3 +243,105 @@ def test_inserted_pad_disagreement_is_not_exempt(tmp_path):
     result = S.audit(project)
     assert result['verdict'] == 'FAIL'
     assert any('future_alpha' in x['spares'] for x in result['artefact_agreement']['disagreements'])
+
+
+def _native_insertion_project(tmp_path, fault=None, *, handoff=True):
+    """Original native plan/receipt; no hand-written insertion classification."""
+    import json
+    import _default_backend_fixtures as native_fixture
+    import librelane_contract as native
+    project = _insertion_project(tmp_path, 'inserted_pad' if fault == 'removed_pad' else None)
+    pnr = project / 'phase3/stage3/pnr'
+    plan_path = pnr / 'spare_cells.json'
+    plan = json.loads(plan_path.read_text())
+    del plan['insertion_provenance']
+    native_fixture.put(plan_path, plan)
+    folder = project / 'phase3/librelane/execution-backend-18/01-vibeic-insertsparecells'
+    folder.mkdir(parents=True)
+    output = folder / 'unit.nl.v'
+    output.write_bytes((pnr / 'neutral_pnr.v').read_bytes())
+    placed = folder / 'unit.def'
+    placed.write_bytes((pnr / 'routed.def').read_bytes())
+    odb = folder / 'unit.odb'; odb.write_bytes(b'SOURCE_FIXTURE native database')
+    folder, _ = native_fixture.producer(project, 'Vibeic.InsertSpareCells',
+        {'nl': str(pnr / 'chip_top_io.v'), 'metrics': {}},
+        {'nl': str(output), 'def': str(placed), 'odb': str(odb), 'metrics': {}},
+        lane='execution-backend-18/01-vibeic-insertsparecells')
+    original = native_fixture.put(folder / 'spare_cells.json', plan)
+    receipt_path = folder / 'vibeic_receipt.json'
+    receipt = json.loads(receipt_path.read_text())
+    receipt['sha256']['spare_cells.json'] = native.digest(original)
+    native_fixture.put(receipt_path, receipt)
+    if handoff:
+        native.handoff_to_direct(folder / 'state_out.json',
+            {'def': pnr / 'post_spare.def', 'odb': pnr / 'post_spare.odb'},
+            project / 'reports/phase3/librelane_spare_handoff.json')
+    if fault == 'wrong_plan':
+        plan['spare_pads'].append({'name': 'another_reservation', 'kind': 'input'})
+        native_fixture.put(plan_path, plan)
+    elif fault == 'missing_receipt':
+        receipt_path.unlink()
+    elif fault == 'changed_input':
+        (pnr / 'chip_top_io.v').write_text('module neutral(); changed u0(); endmodule\n')
+    elif fault == 'missing_input':
+        (pnr / 'chip_top_io.v').unlink()
+    elif fault == 'removed_pad':
+        final = pnr / 'neutral_pnr.v'
+        final.write_text(final.read_text().replace('(* keep = 1 *) cell future_alpha ();\n', ''))
+        final = pnr / 'routed.def'
+        final.write_text(final.read_text().replace('- future_alpha cell + FIXED ( 0 0 ) N ;\n', ''))
+    return project, folder
+
+
+@pytest.mark.parametrize('fault', ['current', 'wrong_plan', 'missing_receipt',
+                                 'changed_input', 'missing_input', 'removed_pad'])
+def test_native_insertion_owner_reaches_the_public_preservation_cli(tmp_path, fault):
+    import json
+    import subprocess
+    project, folder = _native_insertion_project(tmp_path, None if fault == 'current' else fault)
+    plan = project / 'phase3/stage3/pnr/spare_cells.json'
+    original = plan.read_bytes()
+    report = project / 'preservation.json'
+    result = subprocess.run([sys.executable, str(PROGRAMS / 'spare_cell_preservation_check.py'),
+        '.', '--json', str(report)], cwd=project, capture_output=True, text=True, check=False)
+    (project / 'preservation.stdout').write_text(result.stdout)
+    (project / 'preservation.stderr').write_text(result.stderr)
+    doc = json.loads(report.read_text())
+    assert plan.read_bytes() == original
+    if fault == 'current':
+        assert result.returncode == 0, doc
+        assert doc['verdict'] == 'PASS' and doc['inserted'] == doc['survived'] == 6
+        assert doc['insertion_provenance']['planned_not_inserted'] == ['future_alpha', 'future_beta']
+        assert doc['insertion_provenance']['native_source']['plan'] == str(folder / 'spare_cells.json')
+        assert 'insertion_provenance' not in json.loads(original)
+    else:
+        assert result.returncode == 1 and doc['verdict'] == 'FAIL', doc
+        if fault == 'removed_pad':
+            assert any(row['name'] == 'future_alpha' for row in doc['removed']), doc
+        else:
+            assert doc['insertion_provenance']['status'] == 'UNVERIFIED', doc
+
+
+def test_native_step18_publishes_owner_metadata_without_rewriting_its_plan(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import execution_backend_producers as producer
+    import librelane_contract as native
+    import phase3_one_shot_runner as runner
+    project, folder = _native_insertion_project(tmp_path, handoff=False)
+    plan = folder / 'spare_cells.json'
+    receipt = folder / 'vibeic_receipt.json'
+    originals = (plan.read_bytes(), receipt.read_bytes())
+    monkeypatch.setattr(producer, '_parameters', lambda *a: (runner, native, SimpleNamespace(), ''))
+    monkeypatch.setattr(producer, '_predecessor_state', lambda *a: folder / 'state_in.json')
+    # Only the expensive native process/state preparation is substituted.
+    monkeypatch.setattr(producer, '_state_chain', lambda *a: (
+        native, {}, {'Vibeic.InsertSpareCells': folder}))
+    result = producer.produce_pnr(project, {'step_id': '18', 'top': 'neutral'})
+    assert result['verdict'] == 'PASS', result
+    handoff = json.loads((project / 'reports/phase3/librelane_spare_handoff.json').read_text())
+    assert handoff['insertion_provenance']['planned_not_inserted'] == ['future_alpha', 'future_beta']
+    assert handoff['insertion_provenance']['native_source']['plan_sha256'] == native.digest(plan)
+    assert (plan.read_bytes(), receipt.read_bytes()) == originals
+    assert (project / 'phase3/stage3/pnr/spare_cells.json').read_bytes() == plan.read_bytes()
+    assert 'insertion_provenance' not in json.loads(plan.read_text())

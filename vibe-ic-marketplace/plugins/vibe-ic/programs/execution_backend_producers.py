@@ -1212,6 +1212,12 @@ def produce_pnr(project, params):
         if len(reports) != 1:
             raise em.Refusal('BACKEND_SPARE_NATIVE_RECORD_ABSENT', str(reports))
         _copy(reports[0], project / PNR / 'spare_cells.json')
+        import spare_cell_preservation_check as spare_preservation
+        native_plan = json.loads(reports[0].read_text())
+        if native_plan.get('spare_pads'):
+            handoff['insertion_provenance'] = spare_preservation.native_insertion_provenance(
+                project, native_plan)
+            snap.dump(project / RPT / 'librelane_spare_handoff.json', handoff)
         R._emit_spare_cell_coverage(project, project / PNR / 'spare_cells.json')
     elif sid in ('19', '20'):
         return _cts_split(project, params, R, ll, pdk, overlay)

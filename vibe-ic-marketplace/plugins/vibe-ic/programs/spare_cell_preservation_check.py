@@ -443,6 +443,59 @@ def _spare_instance_names(plan: dict) -> List[str]:
     return [name for name, _typ in _spare_names_and_types(plan)]
 
 
+def native_insertion_provenance(project: Path, plan: dict) -> Optional[dict]:
+    """Re-derive insertion intent from the existing native Step18 owner.
+
+    The canonical plan remains the receipt's original bytes. Classification
+    uses insertion-time netlists, never absence from the final design.
+    """
+    if not plan.get("spare_pads"):
+        return None
+    import librelane_contract as native
+    import phase3_one_shot_runner as runner
+    project = project.resolve()
+    try:
+        handoff = _load_json(project / "reports/phase3/librelane_spare_handoff.json")
+        state = Path(handoff["state"]).resolve()
+        folder = state.parent
+        if (state.name != "state_out.json"
+                or not folder.is_relative_to(project / "phase3/librelane")
+                or native.digest(state) != handoff["state_sha256"]):
+            raise ValueError("native spare handoff state differs")
+        receipt = native.validate_step_receipt(folder, "Vibeic.InsertSpareCells")
+        plans = [name for name in receipt["sha256"]
+                 if Path(name).name == "spare_cells.json"]
+        if len(plans) != 1:
+            raise ValueError("native insertion plan is not uniquely bound")
+        original = folder / plans[0]
+        canonical = project / "phase3/stage3/pnr/spare_cells.json"
+        if (native.digest(canonical) != receipt["sha256"][plans[0]]
+                or _load_json(original) != plan):
+            raise ValueError("canonical plan differs from native insertion plan")
+        before = _load_json(folder / "state_in.json")
+        after = _load_json(state)
+        source = Path(before["nl"])
+        output = Path(after["nl"])
+        if (receipt["input"]["state_files"].get(str(source)) != native.digest(source)
+                or not output.is_relative_to(folder)
+                or receipt["sha256"].get(str(output.relative_to(folder))) != native.digest(output)):
+            raise ValueError("native insertion netlist source is not bound")
+        prior = runner._spare_insertion_provenance(plan, source)
+        observed = runner._spare_insertion_provenance(plan, output)
+        if prior["status"] != "OBSERVED" or observed["status"] != "OBSERVED":
+            raise ValueError("native insertion netlist source was not fully read")
+        if not set(prior["required_insertions"]) <= set(observed["required_insertions"]):
+            raise ValueError("native insertion removed a required optional instance")
+        return dict(observed, native_source={
+            "state": str(state), "state_sha256": native.digest(state),
+            "receipt": str(folder / "vibeic_receipt.json"),
+            "receipt_sha256": native.digest(folder / "vibeic_receipt.json"),
+            "plan": str(original), "plan_sha256": native.digest(original),
+            "input_netlist": str(source), "input_netlist_sha256": native.digest(source)})
+    except native.Refusal as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def _resolve_insertion_provenance(project: Path, plan: dict,
                                   final_texts: Dict[str, str]) -> Tuple[dict, dict]:
     """Separate named planning exclusions from insertion obligations.
@@ -466,6 +519,8 @@ def _resolve_insertion_provenance(project: Path, plan: dict,
                or not i["name"] for field in ("instances", "spare_pads")
                for i in plan.get(field, []) or []):
             raise ValueError("malformed insertion plan row")
+        if evidence is None and (project / "reports/phase3/librelane_spare_handoff.json").is_file():
+            evidence = native_insertion_provenance(project, plan)
         if not isinstance(evidence, dict) or evidence.get("version") != 1 \
                 or evidence.get("status") != "OBSERVED":
             raise ValueError("missing or unverified insertion provenance")
@@ -501,6 +556,8 @@ def _resolve_insertion_provenance(project: Path, plan: dict,
         report.update(status="VERIFIED", planned_not_inserted=excluded,
                       required_insertions=required, unknown=[],
                       source_path=str(path), source_sha256=source["sha256"])
+        if "native_source" in evidence:
+            report["native_source"] = evidence["native_source"]
         resolved = dict(plan)
         for field in ("instances", "spare_pads"):
             resolved[field] = [i for i in plan.get(field, []) or []
