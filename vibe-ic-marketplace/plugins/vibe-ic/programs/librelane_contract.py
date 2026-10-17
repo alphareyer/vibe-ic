@@ -3673,8 +3673,10 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker',
     script = ('import json,os,librelane;print(json.dumps({' + repr(_PDN_PAYLOAD_KEY) +
               ':open(os.path.join(os.path.dirname(librelane.__file__),'
               '"scripts","openroad","common","pdn_cfg.tcl")).read()}))')
+    provider = _provider_for_image(image)
+    network = provider.network_mode if provider is not None else 'none'
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
-                            'none', '--entrypoint', 'python3', image, '-c', script],
+                            network, '--entrypoint', 'python3', image, '-c', script],
                            probe_deadline_s=PROBE_DEADLINE_S)
     if result.returncode:
         raise Refusal('LL_PDN_CFG_UNREADABLE', (result.stderr or '')[-500:])
@@ -3702,8 +3704,10 @@ def flow_segment(image: str, first: str, last: str, *, flow: str = 'Chip',
     script = ('import json,sys;from librelane.flows import Flow;'
               'f=Flow.factory.get(sys.argv[1]);'
               'print(json.dumps([s.id for s in f.Steps]))')
+    provider = _provider_for_image(image)
+    network = provider.network_mode if provider is not None else 'none'
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
-                            'none', '--entrypoint', 'python3', image, '-c', script, flow],
+                            network, '--entrypoint', 'python3', image, '-c', script, flow],
                            probe_deadline_s=PROBE_DEADLINE_S)
     try:
         order = json.loads(result.stdout.strip().splitlines()[-1])

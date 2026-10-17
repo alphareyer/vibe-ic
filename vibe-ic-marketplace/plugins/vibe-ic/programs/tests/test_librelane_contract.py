@@ -1130,3 +1130,57 @@ def test_resolved_vertical_pdn_width_and_recipe_invalidate_native_cache(
     archives = list((folder.parent / 'attempts').glob(folder.name + '-*'))
     assert len(archives) == 1
     assert (archives[0] / 'vibeic_receipt.json').read_bytes() == old_receipt
+
+
+@pytest.mark.parametrize('owner', ['flow_segment', 'emit_pdn_cfg'])
+@pytest.mark.parametrize('profile', ['local_host', 'local_none', 'remote'])
+def test_metadata_owner_uses_bound_provider_network(tmp_path, monkeypatch, owner, profile):
+    """Real owner and launch guards; only the native/Docker process leaf is neutral."""
+    import _watchdog as watchdog
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    if profile.startswith('local_'):
+        network = profile.removeprefix('local_')
+        monkeypatch.setenv('VIBEIC_LIBRELANE_LOCAL_NETWORK', network)
+        _project, image = _host_provider(tmp_path, monkeypatch)
+        assert image.network_mode == network
+    else:
+        network = 'none'
+        monkeypatch.delenv(contract.LOCAL_PROVIDER_ROUTE_ENV, raising=False)
+        monkeypatch.setattr(container_exec, 'no_container_route', lambda: False)
+        image = 'registry.invalid/metadata@sha256:' + 'aa' * 32
+    calls = []
+    native = '# native PDN payload\nadd_pdn_connect -grid stdcell_grid -layers {lower upper}\n'
+    order = ['OpenROAD.Floorplan', 'OpenROAD.GeneratePDN', 'Odb.RemovePDNObstructions']
+
+    def payload(argv):
+        pdn_read = any(contract._PDN_PAYLOAD_KEY in str(part) for part in argv)
+        return json.dumps({contract._PDN_PAYLOAD_KEY: native}) + '\n' if pdn_read else json.dumps(order) + '\n'
+
+    def host_leaf(argv, **kwargs):
+        calls.append({'route': 'LOCAL', 'args': list(argv), 'env': kwargs['env']})
+        return watchdog.SupervisedResult(0, payload(argv), '', 'natural')
+
+    def remote_leaf(argv, **kwargs):
+        calls.append({'route': 'Docker', 'args': list(argv)})
+        return subprocess.CompletedProcess(argv, 0, payload(argv), '')
+
+    monkeypatch.setattr(watchdog, 'run_host_supervised', host_leaf)
+    monkeypatch.setattr(contract.subprocess, 'run', remote_leaf)
+    if owner == 'flow_segment':
+        assert contract.flow_segment(image, order[0], order[-1]) == order
+    else:
+        target = tmp_path / 'pdn_cfg.tcl'
+        result = contract.emit_pdn_cfg(image, 'neutral_process', target,
+            native_connects=[['lower', 'upper']])
+        assert result == target
+        assert target.read_text().startswith(native)
+    assert len(calls) == 1
+    observed = calls[0]
+    if profile.startswith('local_'):
+        assert observed['route'] == 'LOCAL'
+        assert observed['env']['VIBEIC_LOCAL_NETWORK_MODE'] == network
+        assert ('--unshare-net' in observed['args']) is (network == 'none')
+        assert observed['env']['PYTHONPATH'].split(os.pathsep)[0] == image.librelane_root
+    else:
+        assert observed['route'] == 'Docker'
+        assert observed['args'][observed['args'].index('--network') + 1] == 'none'
