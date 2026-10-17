@@ -514,7 +514,7 @@ def test_default_entry10_resumes_current_checkpoint(
             assert not observed['phase_calls'], observed
             assert observed['frontdoor_rc'] == (0 if case == 'exit10' else 1 if case == '10FAIL' else 2)
         elif case in ('14FAIL', '14NOT_MEASURED', 'phase2FAIL'):
-            assert observed['phase_calls'] == ['phase2_one_shot_runner.py'], observed
+            assert observed['phase_calls'] == ['phase2_one_shot_runner.py', 'flow_compliance_check.py'], observed
             assert summary['halted_at'] == 'phase2', observed
             if case != 'phase2FAIL':
                 assert summary['step14_handoff']['verdict'] == ('FAIL' if case == '14FAIL' else 'NOT_MEASURED'), observed
