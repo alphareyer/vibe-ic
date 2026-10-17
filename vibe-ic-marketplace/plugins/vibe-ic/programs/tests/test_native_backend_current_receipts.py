@@ -352,10 +352,12 @@ def test_default_step37_whole_reuse_reaches_current_consumer(
     monkeypatch.setattr(R, '_librelane_antenna_gds', after_stream)
     # Real produce_signoff -> real step_gds -> existing whole-reuse owner;
     # omitting finishing_receipt at that return site must break the positive.
-    attempt = versions.begin_step(project, '37', params['resolved_input_manifest']['files'])
     result = producers.produce(project, params)
     current = result['current_step_declared_producers']
     if result['verdict'] == 'PASS':
+        # The retained leaf has closed its invocation. Publish the ordinary
+        # current consumer's existing attribution, backed by its producer receipt.
+        attempt = versions.begin_step(project, '37', params['resolved_input_manifest']['files'])
         versions.publish_producer_outputs(project, attempt)
     consumed = worker.execute_current_step(project, step_id='37', producer=result)
     assert calls == ['primary', 'seal', 'filler-density'], 'no second native epoch'
