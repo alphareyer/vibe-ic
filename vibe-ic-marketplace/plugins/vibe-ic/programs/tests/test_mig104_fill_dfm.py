@@ -723,3 +723,117 @@ def test_an_unmeasured_yield_is_neither_preferred_nor_dropped():
     out = P.prefer_on_yield(cands, ["a", "b"], (_AREA,))
     assert sorted(out["preferred"]) == ["a", "b"]
     assert out["decisions"][0]["reason"] == "YIELD_NOT_COMPARABLE"
+
+
+def test_current_density_consumes_real_typed_local_receipt(tmp_path, monkeypatch):
+    """Real LC producer/current density reader; only the EDA process is neutral."""
+    import _watchdog as watchdog
+    import librelane_signoff_evidence as evidence
+    p = tmp_path / 'project'
+    (p / 'phase3/librelane').mkdir(parents=True)
+    root, source = tmp_path / 'pdk', tmp_path / 'provider'
+    (root / 'neutral').mkdir(parents=True)
+    (source / 'librelane').mkdir(parents=True)
+    deck = root / 'neutral/density.rb'; deck.write_text('# neutral density deck\n')
+    package = source / 'librelane/__init__.py'; package.write_text('# neutral source\n')
+    filler_script = root / 'neutral/filler.rb'; filler_script.write_text('# neutral filler\n')
+    switch_path = p / 'phase3/librelane_switch.json'
+    switch = {'execution_route': 'LOCAL', 'pdk': 'neutral',
+              'pdk_root_host': str(root), 'librelane_root_host': str(source),
+              'librelane_executable': sys.executable, 'local_network_mode': 'host'}
+    BF.put(switch_path, switch)
+    monkeypatch.setenv(LLC.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    monkeypatch.setattr(LLC, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(LLC, 'openroad_home', lambda *a, **kw: None)
+    image = LLC.resolve_image(p)
+    assert isinstance(image, LLC.LocalProviderIdentity)
+    assert 'image' not in switch and evidence._image(p, switch) != image
+    LLC.pdk_root_resolution(p, 'neutral', image=image)
+    gds = p / 'subject.gds'; gds.write_bytes(b'SOURCE_CONTROL neutral native subject')
+    step = 'KLayout.Density'
+    config = BF.put(p / 'phase3/librelane/34-config' / (step + '.json'), {
+        'meta': {'step': step}, 'DESIGN_NAME': 'neutral', 'PDK': 'neutral',
+        'PDK_ROOT': '/pdk', 'KLAYOUT_DENSITY_RUNSET': '/pdk/neutral/density.rb'})
+    BF.put(LLC.views_path(config), {'step': step, 'inputs': ['gds'], 'outputs': []})
+    fill_config = BF.put(config.with_name('KLayout.Filler.json'), {
+        'meta': {'step': 'KLayout.Filler'}, 'DESIGN_NAME': 'neutral', 'PDK': 'neutral',
+        'KLAYOUT_FILLER_SCRIPT': '/pdk/neutral/filler.rb'})
+    BF.put(LLC.views_path(fill_config), {'step': 'KLayout.Filler', 'inputs': ['gds'], 'outputs': []})
+    initial = BF.put(p / 'phase3/librelane/density-state.json',
+                     {'gds': str(gds), 'metrics': {}})
+    calls = []
+    def neutral_process(argv, **kwargs):
+        calls.append(list(argv))
+        at = argv.index('-m'); native = argv[at - 1:]
+        assert native[1:4] == ['-m', 'librelane.steps', 'run']
+        sid = native[native.index('--id') + 1]
+        assert sid in ('KLayout.Filler', step)
+        folder = Path(native[native.index('-o') + 1])
+        before = json.loads(Path(native[native.index('-i') + 1]).read_text())
+        BF.put(folder / 'state_in.json', before)
+        after = dict(before)
+        if sid == 'KLayout.Filler':
+            filled = folder / 'filled.gds'; filled.write_bytes(gds.read_bytes() + b' native fill')
+            after['gds'] = str(filled)
+        else:
+            after['metrics'] = {LF.DENSITY_METRIC: 0}
+        BF.put(folder / 'state_out.json', after)
+        BF.put(folder / 'config.json', json.loads(Path(native[native.index('-c') + 1]).read_text()))
+        return watchdog.SupervisedResult(0, 'SOURCE_CONTROL native density count 0', '', 'natural')
+    monkeypatch.setattr(watchdog, 'run_host_supervised', neutral_process)
+    folders = LLC.run_chain(p, image, [('KLayout.Filler', fill_config, initial),
+        (step, config, initial)], mounts=[(root, '/pdk')], pdk_root='/pdk', lane='34-fill')
+    folder = folders[-1]
+    state = folder / 'state_out.json'
+    filled = Path(json.loads(state.read_text())['gds'])
+    arm = {'state': str(state), 'state_sha256': LLC.digest(state),
+           'subject': str(filled), 'subject_sha256': LLC.digest(filled), LF.DENSITY_METRIC: 0,
+           'filler': {'script': str(filler_script), 'state': str(folders[0] / 'state_out.json')}}
+    receipt = folder / 'vibeic_receipt.json'
+    fp_path = folder / 'input_fingerprint.json'
+    saved = {path: path.read_bytes() for path in (receipt, fp_path)}
+    measured = LF.validate_density_result(p, arm, layout=filled)
+    BF.put(tmp_path / 'TYPED_DENSITY_OBSERVATION.json', {
+        'measured': measured, 'producer_image': str(image),
+        'legacy_image_candidate': evidence._image(p, switch), 'actual_commands': calls,
+        'receipt_sha256': LLC.digest(receipt)})
+    assert measured['value'] == 0, measured
+    assert measured['image'] == str(image)
+    assert len(calls) == 2 and all(cmd[0] == image.executable for cmd in calls)
+    published = p / 'phase3/stage3/pnr/neutral.gds'
+    published.parent.mkdir(parents=True, exist_ok=True); published.write_bytes(gds.read_bytes())
+    ctx = {'mode': 'librelane', 'image': image, 'root': root, 'pdk': 'neutral',
+           'tool': arm, 'doc': {'mode': 'librelane', 'prefill_sha256': LLC.digest(gds)}}
+    ok, note = R._step34_gds_ship(p, published, ctx, (False, 'direct arm not run'))
+    assert ok, note
+    assert published.read_bytes() == filled.read_bytes()
+    assert json.loads((p / LF.RECORD_REL).read_text())['gds']['shipped'] == 'librelane'
+    refused = {}
+    def refuse(label, mutate, restore):
+        mutate()
+        row = LF.validate_density_result(p, arm, layout=filled)
+        refused[label] = row
+        assert row['value'] == 'NOT_MEASURED', (label, row)
+        restore()
+        assert LF.validate_density_result(p, arm, layout=filled)['value'] == 0
+    refuse('source_changed', lambda: package.write_text('# changed source\n'),
+           lambda: package.write_text('# neutral source\n'))
+    refuse('pdk_changed', lambda: deck.write_text('# changed deck\n'),
+           lambda: deck.write_text('# neutral density deck\n'))
+    refuse('material_missing', lambda: deck.unlink(),
+           lambda: deck.write_text('# neutral density deck\n'))
+    refuse('network_policy_changed',
+           lambda: BF.put(switch_path, {**switch, 'local_network_mode': 'none'}),
+           lambda: BF.put(switch_path, switch))
+    def missing_witness():
+        doc = json.loads(saved[receipt]); fp = doc['input']; fp.pop('local_provider')
+        BF.put(fp_path, fp)
+        doc['sha256']['input_fingerprint.json'] = LLC.digest(fp_path)
+        BF.put(receipt, doc)
+    def restore_receipt():
+        for path, raw in saved.items(): path.write_bytes(raw)
+    refuse('missing_provider_witness', missing_witness, restore_receipt)
+    assert all(path.read_bytes() == raw for path, raw in saved.items())
+    assert len(calls) == 2, 'the current reader must not replay a native step'
+    BF.put(tmp_path / 'TYPED_DENSITY_REFUSALS.json', refused)

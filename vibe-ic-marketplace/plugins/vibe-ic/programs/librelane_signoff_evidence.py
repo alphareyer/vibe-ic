@@ -255,8 +255,12 @@ def count_row(project: Path, folder: Path, step: str, key: str,
                      and digest(path) == sha, f'LL_RECEIPT_CHANGED_OR_MISSING: {name}')
         switch_path = project / 'phase3/librelane_switch.json'
         switch = _read(switch_path) if switch_path.is_file() else {}
-        image = _image(project, switch)
-        _require(fp.get('image') == image, 'LL_IMAGE_CHANGED')
+        if 'local_provider' in fp:
+            image = fp.get('image')
+            _retained_local_provider(project, fp['local_provider'], image)
+        else:
+            image = _image(project, switch)
+            _require(fp.get('image') == image, 'LL_IMAGE_CHANGED')
         mounts = _pdk_mounts(project, switch, folder, image)
         config = config_root / f'{step}.json'
         _require(config.is_file() and digest(config) == fp.get('config'), 'LL_CONFIG_CHANGED_OR_MISSING')
