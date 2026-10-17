@@ -743,7 +743,7 @@ BACKEND_SITES = {
     "34": ("phase3_one_shot_runner.py:_emit_metal_fill", "phase3_one_shot_runner.py:_emit_metal_density_report", "librelane_fill_dfm.py:run_fill_insertion"),
     "37": ("phase3_one_shot_runner.py:step_gds", "librelane_step37.py:run"),
     "37.3": ("gds_xor_check.py:main",),
-    "31": ("phase3_one_shot_runner.py:step_drc", "phase3_one_shot_runner.py:step_lvs", "phase3_one_shot_runner.py:_emit_erc_report", "perc_corpus_sweep.py:main"),
+    "31": ("phase3_one_shot_runner.py:step_drc", "phase3_one_shot_runner.py:step_lvs", "_native_erc.py:emit", "phase3_one_shot_runner.py:_emit_erc_report", "perc_corpus_sweep.py:main"),
 }
 
 RELEASE_SITES = {

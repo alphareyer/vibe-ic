@@ -1584,7 +1584,11 @@ def produce_signoff(project, params):
         # Complementary axes ALL execute. No DRC winner can hide a failing LVS.
         drc = R.step_drc(project, top, pdk, container)
         lvs = R.step_lvs(project, top, pdk, container, upstream_pnr=None)
-        R._emit_erc_report(project, top, pdk, container, rpt / 'erc.rpt', notes)
+        if params.get('execution_mode') == 'default':
+            import _native_erc
+            _native_erc.emit(project, top, pdk, container, rpt / 'erc.rpt', notes)
+        else:
+            R._emit_erc_report(project, top, pdk, container, rpt / 'erc.rpt', notes)
         import perc_corpus_sweep as sweep
         sweep.main([str(project), '--report', str(rpt / 'perc_sweep.json')])
         statuses = [drc.status, lvs.status]
