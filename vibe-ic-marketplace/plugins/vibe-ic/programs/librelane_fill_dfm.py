@@ -950,29 +950,21 @@ def validate_fill_consumption(project: Path) -> None:
         raise Refusal('LL_FILL_NOT_CONSUMED', 'handoff does not bind current filled.def')
 
 
-def write_direct_schema_reports(project: Path, record: Dict[str, Any],
-                                subject: Dict[str, Any], subject_lines: str) -> None:
-    """`reports/density.{json,rpt}` and `metal_fill.done` for a filled.def the
-    TOOL wrote, in the direct producer's schema, so every consumer of those
-    files (`metal_fill_density_check` first) judges the tool's output
-    unchanged.  ``subject``/``subject_lines`` are the runner's own
-    `_measured_subject` stamp of the routed and filled DEFs."""
-    import _path_layout as _pl
-    from _atomic_artefact import write_text
+def direct_schema_reports(record: Dict[str, Any], subject: Dict[str, Any],
+                          subject_lines: str) -> tuple[str, dict, str]:
+    """The existing DEF-fill writer's documents, also used for current adoption."""
     census = record.get('census') or {}
     after = (record.get('occupancy') or {}).get('after') or {}
     placed = int(census.get('added') or 0)
     row_util = after.get('row_utilization_pct')
-    reports = project / 'reports'
-    reports.mkdir(parents=True, exist_ok=True)
     unit = '%' if row_util is not None else ''
-    write_text(reports / 'density.rpt', subject_lines +
+    report = (subject_lines +
                '# Metal-fill / density report — LibreLane OpenROAD.FillInsertion\n'
                f'# filler instances placed: {placed}\n'
                f"# per class: {json.dumps(census.get('per_class'))}\n"
                '# row-area utilization (post-fill): '
                f"{row_util if row_util is not None else 'unresolved'}{unit}\n")
-    write_json(reports / 'density.json', {
+    document = {
         'tool': 'librelane:OpenROAD.FillInsertion', 'filler_instances': placed,
         'row_utilization_pct': row_util, 'core_utilization_pct': None,
         'utilization_below_report_precision': False,
@@ -980,12 +972,26 @@ def write_direct_schema_reports(project: Path, record: Dict[str, Any],
                  "from the tool's DEF and the LEFs that define it; per-layer CMP "
                  'density is judged by the PDK density deck (KLayout.Density) at '
                  "step 34's GDS half"),
-        'measured_subject': subject})
-    write_text(_pl.pnr_dir(project) / 'metal_fill.done',
+        'measured_subject': subject}
+    marker = (
                'metal_fill_done\n'
                '# LibreLane OpenROAD.FillInsertion (step 34, mig104).\n'
                f'# fillers placed: {placed}\n'
                f"# state: {record.get('state')} sha256:{record.get('state_sha256')}\n")
+    return report, document, marker
+
+
+def write_direct_schema_reports(project: Path, record: Dict[str, Any],
+                                subject: Dict[str, Any], subject_lines: str) -> None:
+    """Publish the original fill report schema from the tool's current DEFs."""
+    import _path_layout as _pl
+    from _atomic_artefact import write_text
+    report, document, marker = direct_schema_reports(record, subject, subject_lines)
+    reports = project / 'reports'
+    reports.mkdir(parents=True, exist_ok=True)
+    write_text(reports / 'density.rpt', report)
+    write_json(reports / 'density.json', document)
+    write_text(_pl.pnr_dir(project) / 'metal_fill.done', marker)
 
 
 def cells_placed_record(record: Dict[str, Any]) -> Dict[str, Any]:

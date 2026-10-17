@@ -1509,6 +1509,8 @@ def produce_signoff(project, params):
             # This row owns their complete fill consumer, not a second writer.
             import librelane_fill_dfm as fill
             fill.validate_default_stream(project)
+            return {'verdict': 'PASS', 'detail': 'current finished fill retained',
+                    'finishing_receipt': str(project / fill.DEFAULT_STREAM_REL)}
         else:
             if not R._emit_metal_fill(project, top, pdk, container, pnr / 'filled.def', notes):
                 raise em.Refusal('BACKEND_FILL_NATIVE_UNMEASURED', sid)
@@ -1654,6 +1656,48 @@ def _step37_retained_output_sources(project, finishing_receipt):
     return bound
 
 
+def _step34_retained_output_sources(project, finishing_receipt):
+    """Bind retained DEF fill and re-derive its original report documents."""
+    import librelane_fill_dfm as fill
+    import phase3_one_shot_runner as runner
+    project = Path(project).resolve()
+    if (not isinstance(finishing_receipt, str)
+            or Path(finishing_receipt).resolve() !=
+            (project / fill.DEFAULT_STREAM_REL).resolve()):
+        raise ValueError('Step34 retained finishing receipt is not the owning promotion')
+    record = fill.validate_default_stream(project)
+    doc = fill._load(project / fill.RECORD_REL)
+    arm = doc['gds']['librelane']
+    if (arm.get(fill.DENSITY_METRIC) != 0
+            or fill.current_metal_density(project, arm, record).get('verdict') != 'PASS'):
+        raise ValueError('Step34 retained per-layer density did not pass')
+    # validate_default_stream already verifies the FillInsertion receipt,
+    # native state/output DEF and handoff into this canonical filled.def.
+    tool = doc['odb']['tool']
+    pnr = project / 'phase3/stage3/pnr'
+    filled = pnr / 'filled.def'
+    subject = runner._measured_subject(
+        project, record['file_top'], [Path(tool['subject']), filled],
+        tool_log=Path(tool['state']).parent / 'openroad-fillinsertion.log')
+    report, document, marker = fill.direct_schema_reports(
+        tool, subject, runner._measured_subject_lines(subject))
+    bound = {str(filled.relative_to(project)): tool['filled_def_sha256']}
+    expected = {pnr / 'metal_fill.done': marker}
+    for folder in (project / 'reports', project / 'reports/phase3'):
+        expected[folder / 'density.rpt'] = report
+        path = folder / 'density.json'
+        if path.exists():
+            if path.is_symlink() or fill._load(path) != document:
+                raise ValueError('Step34 retained density document changed: ' + str(path))
+            bound[str(path.relative_to(project))] = snap.sha(path)
+    for path, content in expected.items():
+        if path.exists():
+            if path.is_symlink() or path.read_text() != content:
+                raise ValueError('Step34 retained fill report changed: ' + str(path))
+            bound[str(path.relative_to(project))] = snap.sha(path)
+    return bound
+
+
 def _native_current_step_receipt(project, step_id, params, result,
                                  started_ns, prior_outputs=None):
     """Create the current receipt for a registry-backed native producer.
@@ -1737,12 +1781,13 @@ def _native_current_step_receipt(project, step_id, params, result,
             after = _native_output_identity(path)
             if before is not None and after == before:
                 try:
-                    if (sid != '37' or verdict != 'PASS'
+                    if (sid not in ('34', '37') or verdict != 'PASS'
                             or params.get('execution_mode') != 'default'):
                         raise ValueError('no retained Default stream producer')
                     if retained_sources is None:
-                        retained_sources = _step37_retained_output_sources(
-                            project, result.get('finishing_receipt'))
+                        owner = (_step34_retained_output_sources if sid == '34'
+                                 else _step37_retained_output_sources)
+                        retained_sources = owner(project, result.get('finishing_receipt'))
                     if retained_sources.get(raw) != digest:
                         raise ValueError('output is not bound by the retained stream')
                 except (OSError, ValueError, KeyError, TypeError, em.Refusal, LibrelaneRefusal) as exc:
@@ -1822,13 +1867,14 @@ def _current_step_producer_authority(record, project=None):
         adoption = record.get('retained_outputs')
         if adoption is not None:
             try:
-                if (sid != '37' or not isinstance(adoption, dict)
+                if (sid not in ('34', '37') or not isinstance(adoption, dict)
                         or adoption.get('execution_mode') != 'default'
                         or not isinstance(adoption.get('outputs'), dict)
                         or not adoption['outputs']):
                     raise ValueError('invalid retained stream adoption')
-                sources = _step37_retained_output_sources(
-                    project, adoption.get('finishing_receipt'))
+                owner = (_step34_retained_output_sources if sid == '34'
+                         else _step37_retained_output_sources)
+                sources = owner(project, adoption.get('finishing_receipt'))
                 for raw, digest in adoption['outputs'].items():
                     if (raw not in outputs or outputs[raw]['sha256'] != digest
                             or sources.get(raw) != digest):

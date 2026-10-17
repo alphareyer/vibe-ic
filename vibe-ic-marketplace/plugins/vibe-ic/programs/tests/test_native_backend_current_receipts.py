@@ -384,3 +384,74 @@ def test_default_step37_whole_reuse_reaches_current_consumer(
     refused = worker.execute_current_step(project, step_id='37', producer=result)
     assert refused['verdict'] == 'NOT_MEASURED'
     assert 'native retained stream refused' in refused['gate_ledger'][0]['reason']
+
+
+@pytest.mark.parametrize('scenario', [
+    'current_fill', 'changed_filled_def', 'changed_density_json',
+    'changed_density_rpt', 'changed_fill_marker', 'missing_native_proof'])
+def test_default_step34_retained_fill_reaches_current_consumer(
+        tmp_path, monkeypatch, scenario):
+    import librelane_contract as LC
+    import librelane_fill_dfm as LF
+    import phase3_one_shot_runner as R
+    import step_output_collector as versions
+    project, params, promotion, calls = _retained_default_stream(tmp_path, monkeypatch)
+    tool = LF._load(project / LF.RECORD_REL)['odb']['tool']
+    pnr = project / 'phase3/stage3/pnr'
+    subject = R._measured_subject(
+        project, promotion['file_top'], [Path(tool['subject']), pnr / 'filled.def'],
+        tool_log=Path(tool['state']).parent / 'openroad-fillinsertion.log')
+    LF.write_direct_schema_reports(project, tool, subject, R._measured_subject_lines(subject))
+    # Replace only the earlier neutral transport's minimal density placeholder
+    # with the original writer's document, keeping both declared aliases equal.
+    phase3_json = project / 'reports/phase3/density.json'
+    phase3_json.write_bytes((project / 'reports/density.json').read_bytes())
+    params['step_id'] = '34'
+    params['resolved_input_manifest'] = _manifest(project, 'phase3/stage4/gds/top.gds')
+    paths = [pnr / 'filled.def', pnr / 'metal_fill.done',
+             project / 'reports/density.json', phase3_json,
+             project / 'reports/density.rpt']
+    unchanged = {str(p.relative_to(project)): producers._native_output_identity(p) for p in paths}
+    targets = {'changed_filled_def': pnr / 'filled.def',
+               'changed_density_json': phase3_json,
+               'changed_density_rpt': project / 'reports/density.rpt',
+               'changed_fill_marker': pnr / 'metal_fill.done',
+               'missing_native_proof': Path(tool['state']).parent / 'vibeic_receipt.json'}
+    if scenario == 'missing_native_proof':
+        targets[scenario].unlink()
+    elif scenario in targets:
+        target = targets[scenario]
+        if scenario == 'changed_density_json':
+            doc = json.loads(target.read_text()); doc['filler_instances'] += 1
+            target.write_text(json.dumps(doc))
+        else:
+            target.write_bytes(target.read_bytes() + b'\nchanged\n')
+    if scenario in ('changed_filled_def', 'missing_native_proof'):
+        with pytest.raises(LC.Refusal, match='LL_FILL_(HANDOFF_UNBOUND|NOT_CONSUMED)'):
+            producers.produce(project, params)
+        return
+    result = producers.produce(project, params)
+    if result['verdict'] == 'PASS':
+        attempt = versions.begin_step(project, '34', params['resolved_input_manifest']['files'])
+        versions.publish_producer_outputs(project, attempt)
+    consumed = worker.execute_current_step(project, step_id='34', producer=result)
+    assert calls == ['primary', 'seal', 'filler-density'], 'no second fill or native epoch'
+    if scenario != 'current_fill':
+        assert result['verdict'] == 'NOT_MEASURED'
+        assert 'NATIVE_CURRENT_OUTPUT_UNCHANGED' in result['current_step_declared_producers']['reason']
+        assert consumed['verdict'] == 'NOT_MEASURED'
+        return
+    assert result['verdict'] == 'PASS', result
+    assert consumed['verdict'] == 'PASS', consumed
+    assert consumed['canonical_step_result']['status'] == 'PASS'
+    assert any(row.get('gate') == 'metal_fill_density_check' and row.get('rc') == 0
+               for row in consumed['gate_ledger'])
+    assert {str(p.relative_to(project)): producers._native_output_identity(p) for p in paths} == unchanged
+    current = result['current_step_declared_producers']
+    assert set(current['retained_outputs']['outputs']) == set(unchanged)
+    (project / 'STEP34_CURRENT_CONSUMER_OBSERVATION.json').write_text(json.dumps(consumed, indent=2))
+    # Intact alias hashes alone do not preserve authority after native proof loss.
+    (Path(tool['state']).parent / 'vibeic_receipt.json').unlink()
+    refused = worker.execute_current_step(project, step_id='34', producer=result)
+    assert refused['verdict'] == 'NOT_MEASURED'
+    assert 'native retained stream refused' in refused['gate_ledger'][0]['reason']
