@@ -1730,6 +1730,41 @@ def _measured_klayout_receipt_files(project_dir: Path,
         log_sha = digest(transcript)
         if not report_sha or not log_sha:
             continue
+        # The publisher copies the native RDB and transcript, but declares
+        # only the RDB's immutable transform.  Follow that single copy; the
+        # transcript must be the native sibling and remain byte-identical.
+        # Neither the transform nor equal bytes alone are a measurement.
+        source_rel = rel
+        for transform in reversed(records):
+            if (transform.get("record") != "declared_transform" or
+                    transform.get("producing_step") != "drc:signoff"):
+                continue
+            outputs = transform.get("outputs") or {}
+            try:
+                named = [value for name, value in outputs.items()
+                         if (project_dir / name).resolve() == report.resolve()]
+                if not named:
+                    continue
+                inputs = transform.get("inputs") or {}
+                if (named != [report_sha] or len(inputs) != 1 or
+                        transform.get("exit_code") != 0):
+                    source_rel = None
+                    break
+                name, expected = next(iter(inputs.items()))
+                source = (project_dir / name).resolve()
+                source_rel = source.relative_to(project_dir.resolve()).as_posix()
+                source_log = source.with_suffix(".log")
+                if (expected != digest(source) or expected != report_sha or
+                        source.read_bytes() != report.read_bytes() or
+                        digest(source_log) != log_sha or
+                        source_log.read_bytes() != transcript.read_bytes()):
+                    source_rel = None
+                break
+            except (OSError, ValueError, TypeError, AttributeError):
+                source_rel = None
+                break
+        if source_rel is None:
+            continue
         for row in reversed(records):
             outputs, inputs = row.get("outputs"), row.get("inputs")
             if (row.get("record") != "invocation" or
@@ -1738,9 +1773,9 @@ def _measured_klayout_receipt_files(project_dir: Path,
                     row.get("exit_code") != 0 or
                     not isinstance(outputs, dict) or not isinstance(inputs, dict)):
                 continue
-            if outputs.get(rel) != report_sha:
+            if outputs.get(source_rel) != report_sha:
                 continue
-            log_rel = str(Path(rel).with_suffix(".log"))
+            log_rel = str(Path(source_rel).with_suffix(".log"))
             if outputs.get(log_rel) != log_sha:
                 continue
             has_bound_gds = False

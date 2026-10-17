@@ -28,7 +28,7 @@ def put(path, data):
     return path
 
 
-def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None):
+def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None, critical='clean'):
     project = tmp_path / 'project'
     rtl = project / 'phase2/stage1/rtl/top.v'
     rtl.parent.mkdir(parents=True)
@@ -47,7 +47,8 @@ def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None):
 
     def config(project, pdk, output, *args, **kwargs):
         put(output.with_suffix('.provenance.json'), {})
-        return {'SYNTH_FSM_ENCFILE': False, 'SYNTH_TIEHI_CELL': 'TIE_H/Y', 'SYNTH_TIELO_CELL': 'TIE_L/Y'}
+        return {'SYNTH_FSM_ENCFILE': False, 'SYNTH_TIEHI_CELL': 'TIE_H/Y', 'SYNTH_TIELO_CELL': 'TIE_L/Y',
+                **_critical_reports(critical)[0]}
     monkeypatch.setattr(lc, 'emit_synthesis_config', config)
     monkeypatch.setattr(lc, 'resolve_step_config',
                         lambda project, image, raw, output, **kw: put(output, json.loads(raw.read_text())))
@@ -62,6 +63,16 @@ def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None):
         put(folder / 'state_out.json', {'nl': str(raw), 'metrics': {
             'design__instance__count': 1, 'design__instance__area': 1.0,
             'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
+        _, pre, final = _critical_reports(critical)
+        (folder / 'reports/pre_synth_chk.rpt').write_text(pre)
+        (folder / 'reports/chk.rpt').write_text(final)
+        put(folder / 'vibeic_receipt.json', {'sha256': {
+            str(path.relative_to(folder)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in folder.rglob('*') if path.is_file()}})
+        if critical == 'missing_final':
+            (folder / 'reports/chk.rpt').unlink()
+        elif critical == 'changed_final':
+            (folder / 'reports/chk.rpt').write_text(final + '# changed after receipt\n')
         if damage == 'missing_tool_netlist':
             raw.unlink()
         if damage == 'area_cli_error':
@@ -173,3 +184,81 @@ def test_unexplained_rc2_never_reuses_or_fabricates_area_evidence(tmp_path, monk
     assert result.status == 'FAIL', result.detail
     assert 'LL_SYNTH_AREA_REPORT_INVALID' in result.detail
     assert not published
+
+
+def _critical_reports(case):
+    config = {'TRISTATE_CELLS': ['SAFE_TBUF_*'],
+              'SYNTH_CHECKS_ALLOW_TRISTATE': True,
+              'SYNTH_ELABORATE_ONLY': case == 'elaborate'}
+    clean = 'Found and reported 0 problems.\n'
+    undriven = ('Warning: Wire core.\\unused [1] is used but has no driver.\n'
+                'Found and reported 1 problems.\n')
+    tristate = ('Warning: multiple conflicting drivers for core.\\bus:\n'
+                '    port Y[0] of cell u_buf (SAFE_TBUF_X1)\n'
+                'Found and reported 1 problems.\n')
+    return (config, undriven if case == 'pre_bad' else clean,
+            undriven if case in ('final_bad', 'elaborate') else
+            tristate if case == 'tristate' else clean)
+
+
+@pytest.mark.parametrize('critical', ['final_bad', 'pre_bad', 'clean', 'tristate',
+                                     'elaborate', 'missing_final', 'changed_final'])
+def test_selected_synthesis_critical_checks(tmp_path, monkeypatch, critical):
+    """The stale metric is zero while both real public consumers read CHECKs.
+
+    Native transport is neutral; receipt/config selection, report parsing,
+    Step9 publication and the retained Step14 writer/consumer remain real.
+    """
+    from test_step14_report_producer_authorship import (
+        project_fixture, actual_cli, digest, put as write_json, ga)
+
+    accepted = critical in ('clean', 'tristate', 'elaborate')
+    with monkeypatch.context() as patch:
+        result, _, published, folder = synth_case(
+            tmp_path / 'step9', patch, ceiling='10x10', critical=critical)
+    assert json.loads((folder / 'state_out.json').read_text())['metrics']['synthesis__check_error__count'] == 0
+
+    # Model an already selected receipt from an old image whose counter only
+    # read pre_synth_chk. These are original transport fixture bytes, not a
+    # newly fabricated measurement or an edit to any real project evidence.
+    project, _ = project_fixture(tmp_path / 'step14')
+    folder = project / 'phase3/librelane/02-yosys-synthesis'
+    cfg, pre, final = _critical_reports(critical)
+    native_config = json.loads((folder / 'config.json').read_text())
+    native_config.update(cfg)
+    write_json(folder / 'config.json', native_config)
+    resolved = project / 'phase3/librelane/synthesis_resolved.json'
+    write_json(resolved, native_config)
+    (folder / 'reports/pre_synth_chk.rpt').write_text(pre)
+    (folder / 'reports/chk.rpt').write_text(final)
+    receipt_path = folder / 'vibeic_receipt.json'
+    receipt = json.loads(receipt_path.read_text())
+    receipt['input']['config'] = digest(resolved)
+    receipt['sha256'] = {str(path.relative_to(folder)): digest(path)
+                         for path in folder.rglob('*')
+                         if path.is_file() and path != receipt_path}
+    write_json(receipt_path, receipt)
+    sidecar = project / 'phase2/stage2/synth/synth_inputs.json'
+    binding = json.loads(sidecar.read_text())
+    binding['librelane_synthesis']['receipt_sha256'] = digest(receipt_path)
+    write_json(sidecar, binding)
+    if critical == 'missing_final':
+        (folder / 'reports/chk.rpt').unlink()
+    elif critical == 'changed_final':
+        (folder / 'reports/chk.rpt').write_text(final + '# changed after receipt\n')
+    cp, report = actual_cli(project, 'yosys_script_template_check',
+                            project / 'retained_check.json', ga.ROLE_PRODUCER)
+    observation = {'case': critical, 'step9_status': result.status,
+                   'step9_detail': result.detail, 'step14_rc': cp.returncode,
+                   'step14_report': report}
+    (project / 'critical_check_observation.json').write_text(
+        json.dumps(observation, indent=2) + '\n')
+    assert (result.status == 'PASS') == accepted, observation
+    assert bool(published) == accepted
+    assert (cp.returncode == 0) == accepted, observation
+    assert (report['verdict'] == 'PASS') == accepted, observation
+    if critical in ('final_bad', 'pre_bad'):
+        assert 'critical CHECK errors' in result.detail
+        assert 'critical CHECK errors' in str(report), report
+    elif critical in ('missing_final', 'changed_final'):
+        assert 'chk.rpt' in result.detail and 'chk.rpt' in str(report)

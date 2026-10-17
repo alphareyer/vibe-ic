@@ -70,12 +70,16 @@ def project_fixture(tmp_path, mode="native", *, recipe=GOOD):
     prior = put(project / "phase3/librelane/01-yosys-jsonheader/core.h.json", {"module": "core"})
     cfg = {"meta": {"step": "Yosys.Synthesis"}, "PDK": "neutral",
            "DESIGN_NAME": "core", "VERILOG_FILES": [str(rtl)],
-           "SYNTH_TIEHI_CELL": "TIE_H/Y", "SYNTH_TIELO_CELL": "TIE_L/Y"}
+           "SYNTH_TIEHI_CELL": "TIE_H/Y", "SYNTH_TIELO_CELL": "TIE_L/Y",
+           "TRISTATE_CELLS": [], "SYNTH_CHECKS_ALLOW_TRISTATE": True,
+           "SYNTH_ELABORATE_ONLY": False}
     resolved = put(project / "phase3/librelane/synthesis_resolved.json", cfg)
     put(folder / "config.json", cfg)
     put(folder / "state_out.json", {"nl": str(raw), "metrics": {
         "design__instance_unmapped__count": 0, "synthesis__check_error__count": 0}})
     put(folder / "reports/stat.json", {"modules": {"\\core": {"num_submodules": 0}}})
+    for name in ("pre_synth_chk.rpt", "chk.rpt"):
+        (folder / "reports" / name).write_text("Found and reported 0 problems.\n")
     put(folder / "pdk_root.json", {"cli_pdk_root": "/pdk",
         "stated_by": "run_chain(pdk_root=...)", "mounts_under_it": []})
     inp = {"step": "Yosys.Synthesis", "config": digest(resolved),

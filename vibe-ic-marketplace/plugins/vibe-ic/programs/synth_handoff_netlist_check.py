@@ -25,6 +25,7 @@ Exit: 0 PASS, 1 FAIL, 2 NOT_MEASURED (unreadable input).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -85,6 +86,60 @@ def check(netlist: Path, resolved: dict) -> dict:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _yosys_check_errors(report, resolved: dict) -> int:
+    """Use the native warning-block rules, including configured exclusions.
+
+    Source: vibeic/librelane 50567b0576db59ebfe26e5a22bec56f2486f8292,
+    librelane/steps/pyosys.py::_parse_yosys_check (source SHA256
+    e125208701d12371f54879cb350f480cd7dd3acfcc077375700a93b3190dae73).
+    Only native debug/verbose logging is omitted; parsing needs no installed
+    LibreLane package or a container launch in a retained-evidence reader.
+    """
+    errors, current_warning = 0, None
+    for line in report:
+        if line.startswith("Warning:") or line.startswith("Found and reported"):
+            last_warning, current_warning = current_warning, line
+            if last_warning is None:
+                continue
+            cells = re.findall(r"cell\s+\S+\s+\((\S+)\)", last_warning)
+            if resolved["SYNTH_ELABORATE_ONLY"] and "but has no driver" in last_warning:
+                continue
+            if resolved["SYNTH_CHECKS_ALLOW_TRISTATE"] and (
+                    "tribuf" in last_warning or any(
+                        fnmatch.fnmatch(cell, pattern) for cell in cells
+                        for pattern in (resolved["TRISTATE_CELLS"] or []))):
+                continue
+            errors += 1
+        elif re.match(r"^\s+.+$", line) is not None and current_warning is not None:
+            current_warning += line
+    return errors
+
+
+def critical_synthesis_checks(folder: Path, resolved: dict) -> dict[str, int]:
+    """Judge both original CHECK reports at their receipt-bound bytes.
+
+    Older images counted only the pre-synthesis report in their state metric.
+    The critical final CHECK remains an obligation of that same producer.
+    """
+    receipt = json.loads((folder / "vibeic_receipt.json").read_text())
+    recorded = receipt["sha256"]
+    if recorded.get("config.json") != _sha(folder / "config.json"):
+        raise ValueError("native receipt mismatch: config.json")
+    if resolved != json.loads((folder / "config.json").read_text()):
+        raise ValueError("critical CHECK config differs from native producer")
+    counts = {}
+    for name in ("pre_synth_chk.rpt", "chk.rpt"):
+        rel = "reports/" + name
+        path = folder / rel
+        if recorded.get(rel) != _sha(path):
+            raise ValueError(f"native receipt mismatch: {rel}")
+        with path.open() as stream:
+            counts[name] = _yosys_check_errors(stream, resolved)
+    if any(counts.values()):
+        raise ValueError(f"native synthesis critical CHECK errors: {counts}")
+    return counts
 
 
 def _runtime_pdk_mount(root: Path, guest: Path, receipt: dict) -> Path | None:
@@ -373,6 +428,7 @@ def _native_synthesis(project: Path, folder: Path, top: str, *, path_resolver=No
     metrics = state.get('metrics', {})
     if metrics.get('design__instance_unmapped__count') != 0 or metrics.get('synthesis__check_error__count') != 0:
         raise ValueError('native synthesis checks did not measure zero errors')
+    critical_synthesis_checks(folder, cfg)
     report = check(raw, cfg)
     if report['verdict'] != 'PASS':
         raise ValueError('; '.join(report['findings']))

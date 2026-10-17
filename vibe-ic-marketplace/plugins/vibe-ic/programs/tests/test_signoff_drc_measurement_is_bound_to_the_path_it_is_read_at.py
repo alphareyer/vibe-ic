@@ -251,3 +251,61 @@ def test_no_ledger_and_no_report_are_both_quiet(tmp_path):
     _write(only_files, CANON_RPT, RPT_BYTES)          # no .log beside it
     _ledger(only_files, [_measured_row()])
     assert _rebind(only_files) is None
+
+
+# The current publisher records a copy, not a second native invocation.
+import pytest
+
+
+@pytest.mark.parametrize("damage", ["current", "changed_report", "missing_log",
+                                    "swapped_log", "changed_gds"])
+def test_immutable_pair_retains_native_zero(tmp_path, monkeypatch, damage):
+    from _gdsii import write_gdsii
+    from test_signoff_drc_producer_is_a_signoff_deck import gate, klayout_rdb
+
+    project = tmp_path / "project"
+    raw_report, raw_log = project / SRC_RPT, project / SRC_LOG
+    gds = project / SRC_GDS
+    gds.parent.mkdir(parents=True)
+    write_gdsii(gds, cell="fixture_core")
+    raw_report.parent.mkdir(parents=True)
+
+    def native_process(*args, **kwargs):
+        raw_report.write_text(klayout_rdb("fixture_core"))
+        return 0, "KLayout completed sign-off deck execution\n", ""
+
+    monkeypatch.setattr(R._dwd, "run_docker_supervised", native_process)
+    monkeypatch.setattr(R, "_PROV_SINK", str(project))
+    rc, _, _ = R._docker_exec(
+        "", f"klayout -b -r /pdk/deck.lydrc -rd input={gds}",
+        marker="/pdk/deck.lydrc", inputs=[gds],
+        outputs=[raw_report, raw_log], transcript_path=raw_log)
+    assert rc == 0
+    native_rows = _rows(project)
+    assert len(native_rows) == 1
+    assert native_rows[0]["record"] == "invocation"
+    assert native_rows[0]["measurement"]["measured"] is True
+    _write(project, CANON_RPT, raw_report.read_bytes())
+    _write(project, CANON_LOG, raw_log.read_bytes())
+    assert R._declare_immutable_transform(
+        project, raw_report, project / CANON_RPT, "drc:signoff",
+        "phase3_one_shot_runner", "publish byte-identical sign-off report")
+    # As on the real call path, no transform or invocation is minted for log.
+    assert len(_rows(project)) == 2
+    assert _rows(project)[-1]["record"] == "declared_transform"
+    ledger_before = (project / "provenance.jsonl").read_bytes()
+    if damage == "changed_report":
+        with (project / CANON_RPT).open("a") as stream:
+            stream.write("<!-- changed canonical bytes -->\n")
+    elif damage == "missing_log":
+        raw_log.unlink()
+    elif damage == "swapped_log":
+        (project / CANON_LOG).write_text("another invocation's transcript\n")
+    elif damage == "changed_gds":
+        write_gdsii(gds, cell="another_subject")
+    rc, report, _ = gate(project, "--signoff")
+    (project / "consumer_observation.json").write_text(json.dumps({
+        "damage": damage, "rc": rc, "report": report}, indent=2) + "\n")
+    assert (rc == 0) == (damage == "current"), report
+    assert report["passed"] == (damage == "current"), report
+    assert (project / "provenance.jsonl").read_bytes() == ledger_before

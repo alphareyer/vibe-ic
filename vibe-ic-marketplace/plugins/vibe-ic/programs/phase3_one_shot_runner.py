@@ -17385,6 +17385,9 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         if metrics.get("design__instance_unmapped__count") != 0 or \
                 metrics.get("synthesis__check_error__count") != 0:
             raise _ll.Refusal("LL_SYNTH_CHECK_FAILED", str(metrics))
+        import synth_handoff_netlist_check as _handoff
+        _handoff.critical_synthesis_checks(
+            folder, json.loads((folder / "config.json").read_text()))
         netlist = _pl.synth_dir(project) / f"{top}_synth.v"
         netlist.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, netlist)
