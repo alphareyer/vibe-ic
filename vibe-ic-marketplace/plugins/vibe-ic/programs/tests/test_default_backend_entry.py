@@ -111,9 +111,11 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
     import vibe_ic_one_shot_runner as front
     from test_default_frontend_r2 import _synthesis, put
     from test_execution_receipt_chain import real_entry
+    from test_step14_report_producer_authorship import GOOD
 
     project, rtl, pdk, native_calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
     stage_owner_route(project, "ic")
+    put(project / "phase1/generated_docs/L5_ADI_SPEC.json", {"no_analog": True})
     # Admission reads image metadata, not the forbidden generic producer.
     # Replay only this exact read from the real enclosing launch observation.
     import _eda_pin
@@ -140,9 +142,9 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
     def native_chain(*args, **kwargs):
         folders = chain(*args, **kwargs)
         folder = folders[1]
-        (folder / "COMMANDS").write_text(
-            "yosys -p 'synth -top top; dfflibmap; abc; setundef -zero; "
-            "hilomap; splitnets; clean; write_verilog top.nl.v'\n")
+        recipe = GOOD.replace("core", "top").replace("TIE_H Y", "lib__tieh Z").replace(
+            "TIE_L Y", "lib__tiel ZN")
+        (folder / "COMMANDS").write_text("yosys -p '" + "; ".join(recipe.splitlines()) + "'\n")
         for name in ("pre_synth_chk.rpt", "chk.rpt"):
             text = "Found and reported 0 problems.\n"
             if case == "phase2_failure" and name == "chk.rpt":
