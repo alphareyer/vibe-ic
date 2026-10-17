@@ -307,6 +307,7 @@ def test_default_stream_producer_and_reader_use_bound_filled_views(
     import _default_backend_fixtures as fixtures
     import _stream_input_record as stream_inputs
 
+    monkeypatch.setattr(fixtures, 'IMAGE', os.environ['VIBEIC_EDA_IMAGE'])
     project = tmp_path / 'component'
     pnr = project / 'phase3/stage3/pnr'
     pnr.mkdir(parents=True)
