@@ -396,6 +396,25 @@ def test_default_step34_retained_fill_reaches_current_consumer(
     import phase3_one_shot_runner as R
     import step_output_collector as versions
     project, params, promotion, calls = _retained_default_stream(tmp_path, monkeypatch)
+    # The neutral retained packets use the existing synthetic image route.
+    # Run this exact checker CLI in-process so that route fixture also applies
+    # to its real LF/LC readers; never replace the checker/validator verdict.
+    import contextlib
+    import io
+    import flow_compliance_check as fcc
+    import metal_fill_density_check as density_check
+    gate_process = fcc._watchdog.run_host_supervised
+
+    def density_consumer_transport(argv, **kwargs):
+        if len(argv) > 1 and Path(argv[1]).name == 'metal_fill_density_check.py':
+            report = project / argv[argv.index('--json') + 1]
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = density_check.main([str(project), '--json', str(report)])
+            return fcc._watchdog.SupervisedResult(
+                rc, stdout.getvalue(), stderr.getvalue(), 'natural')
+        return gate_process(argv, **kwargs)
+    monkeypatch.setattr(fcc._watchdog, 'run_host_supervised', density_consumer_transport)
     tool = LF._load(project / LF.RECORD_REL)['odb']['tool']
     pnr = project / 'phase3/stage3/pnr'
     subject = R._measured_subject(
