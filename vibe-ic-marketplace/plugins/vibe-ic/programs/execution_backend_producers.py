@@ -1594,8 +1594,11 @@ def produce_signoff(project, params):
             drv = R._run_declared_signoff_gate(project, *spec)
             statuses.append(drv.status)
             detail += '\nFinal DRV: ' + drv.detail
-        return {'verdict': 'FAIL' if 'FAIL' in statuses else 'PASS' if all(status == 'PASS' for status in statuses) else 'NOT_MEASURED',
-                'detail': detail}
+        result = {'verdict': 'FAIL' if 'FAIL' in statuses else 'PASS' if all(status == 'PASS' for status in statuses) else 'NOT_MEASURED',
+                  'detail': detail}
+        if drc.extras.get('retained_drc_checkpoint'):
+            result['retained_drc_checkpoint'] = drc.extras['retained_drc_checkpoint']
+        return result
     else:
         raise em.Refusal('BACKEND_UNKNOWN_SIGNOFF_STEP', sid)
     result = {'verdict': 'PASS', 'detail': '\n'.join(notes)}

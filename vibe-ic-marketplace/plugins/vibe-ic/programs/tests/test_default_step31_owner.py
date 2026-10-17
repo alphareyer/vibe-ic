@@ -1225,3 +1225,113 @@ def _observe_native31_closure_calls(monkeypatch):
     monkeypatch.setattr(streams, "read_current", native_current)
     monkeypatch.setattr(current, "default_signoff_inputs", resolver)
     return observed
+
+
+def _checkpoint31_fixture(tmp_path, monkeypatch, local_image):
+    """Supply a normal installed Magic path before the original fixture freezes."""
+    import shlex
+    import sys
+    from test_a_magic_receipt_binds_to_the_layout_it_read import _GOOD
+
+    original_stream = _native31_retained_stream
+
+    def installed_magic(*args, **kwargs):
+        subject = original_stream(*args, **kwargs)
+        _, pdk, root, _, _ = subject["subject"]
+        cell_gds = root / "neutral/libs.ref/neutral/gds/cells.gds"
+        cell_gds.parent.mkdir(parents=True, exist_ok=True)
+        cell_gds.write_bytes(Path(pdk.cell_gds).read_bytes())
+        pdk.cell_gds = str(cell_gds)
+        put(root, "neutral/libs.tech/magic/neutral.magicrc", "# neutral native input\n")
+        put(root, "neutral/libs.tech/magic/neutral.tech", "tech\n format 32\nend\n")
+        return subject
+
+    monkeypatch.setattr(sys.modules[__name__], "_native31_retained_stream", installed_magic)
+    project, pdk, selected, calls = _native31_runtime_fixture(
+        tmp_path, monkeypatch, local_image, "current")
+    attempt = {"first": True}
+
+    def leaf(container, command, marker, **kwargs):
+        process = _native31_process_leaf(project, selected,
+            "netgen_mismatch" if attempt["first"] else "current", calls)
+        result = process(container, command, marker, **kwargs)
+        argv = shlex.split(command)
+        if "magic" in argv and "SPICE_OUT=" not in command:
+            # The native recipe prints its actual design, layout and technology.
+            # This is a neutral process write, before the real logger hashes it.
+            report = project / R._MAGIC_SIGNOFF_DRC_REL
+            text = (_GOOD.replace("chip_top", selected["design"])
+                    .replace("ab" * 32, sha(selected["gds"]))
+                    .replace("/pdk/t.tech", str(Path(R._pdk_magicrc(pdk)).with_suffix(".tech")))
+                    .replace("/c/" + selected["design"] + ".gds", str(selected["gds"])))
+            report.write_text(text)
+            return result[0], text, result[2]
+        return result
+
+    monkeypatch.setattr(R._dwd, "run_docker_supervised", leaf)
+    return project, pdk, selected, calls, attempt
+
+
+@pytest.mark.parametrize("case", ["current", "changed_report", "missing_magic"])
+def test_public_default31_retains_valid_drc_across_failed_lvs(
+        tmp_path, monkeypatch, local_image, case):
+    """Two real public windows; only costly native process leaves are neutral."""
+    import shlex
+    import _physical_current as current
+
+    project, pdk, selected, calls, attempt = _checkpoint31_fixture(
+        tmp_path, monkeypatch, local_image)
+
+    def native_counts(items):
+        rows = [shlex.split(x["command"]) for x in items if isinstance(x, dict)]
+        return {"klayout": sum("klayout" in row for row in rows),
+                "magic_drc": sum("magic" in row and
+                    not any("SPICE_OUT=" in arg for arg in row) for row in rows)}
+
+    first_rc, first, _, _, _ = _public_native31_window(
+        project, pdk, monkeypatch, case="first_lvs_mismatch", native_processes=calls)
+    first_calls = list(calls)
+    checkpoint = project / "reports/phase3/direct_current_drc.json"
+    checkpoint_bytes = checkpoint.read_bytes()
+    first_observation = json.loads((project / "NATIVE_OWNER_OBSERVATION.json").read_text())
+    assert first_rc != 0 and first["result"]["producer_verdict"] == "FAIL", first
+    assert not first["canonical_pass"]
+    assert current.read_direct_half(project, "drc")["verdict"] == "CURRENT"
+    assert native_counts(first_calls) == {"klayout": 1, "magic_drc": 1}
+    magic = json.loads((project / R._MAGIC_SIGNOFF_DRC_JSON_REL).read_text())
+    assert magic["passed"] and magic["summary"]["layout_evidence_tier"] == "invocation"
+    if case == "changed_report":
+        path = project / "reports/phase3/drc_signoff.rpt"
+        path.write_text(path.read_text() + "\nchanged canonical report\n")
+    elif case == "missing_magic":
+        (project / R._MAGIC_SIGNOFF_DRC_REL).unlink()
+    attempt["first"] = False
+    offset = len(calls)
+    second_rc, second, retained, _, _ = _public_native31_window(
+        project, pdk, monkeypatch, case=case, native_processes=calls)
+    adopted = second["result"].get("retained_drc_checkpoint")
+    observed = {"case": case, "first": first_observation,
+        "second": json.loads((project / "NATIVE_OWNER_OBSERVATION.json").read_text()),
+        "first_native_calls": native_counts(first_calls),
+        "second_native_calls": native_counts(calls[offset:]),
+        "original_checkpoint_sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
+        "adopted": adopted,
+        "scope": "Source-only neutral native leaves, not physical DRC/LVS acceptance"}
+    put(project, "DRC_CHECKPOINT_OBSERVATION.json", json.dumps(observed, indent=2))
+    assert second_rc == 0 and second["canonical_pass"] is True, second
+    assert second["result"]["producer_verdict"] == "PASS"
+    assert second["result"]["canonical_step_result"]["status"] == "PASS"
+    assert retained and retained["current_inputs"]
+    assert current.read_direct_half(project, "drc")["verdict"] == "CURRENT"
+    if adopted:
+        assert case == "current"
+        assert checkpoint.read_bytes() == checkpoint_bytes
+        assert adopted["origin"]["sha256"] == observed["original_checkpoint_sha256"]
+        assert adopted["declared_engines"] == ["klayout", "magic"]
+        assert observed["second_native_calls"] == {"klayout": 0, "magic_drc": 0}
+        assert all(row["original_native_invocation"]["measured"] is True
+                   and row["original_native_invocation"]["exit_code"] == 0
+                   for row in adopted["evidence"])
+    else:
+        assert observed["second_native_calls"] == {"klayout": 1, "magic_drc": 1}
+    assert any("comparison" in x for x in calls[offset:] if isinstance(x, dict))

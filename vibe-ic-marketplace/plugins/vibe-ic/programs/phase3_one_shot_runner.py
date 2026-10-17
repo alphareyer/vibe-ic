@@ -52734,6 +52734,87 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                                     if status == "NOT_MEASURED" else ""))
 
 
+def _retained_default_drc(project: Path, pdk: PdkConfig) -> Optional[StepResult]:
+    """Adopt a clean current native checkpoint; never publish an invocation."""
+    import _physical_current as current
+    import drc_report_check as drc
+    import l24_signoff_evidence_backed_check as l24
+    import execution_policy
+
+    if execution_policy.request()['mode'] != 'default' or not _local_exec_mode():
+        return None
+    started = time.time()
+    try:
+        checked = current.read_direct_half(project, 'drc')
+        if checked['verdict'] != 'CURRENT' or checked['tool'] != 'klayout':
+            return None
+        if current.default_signoff_inputs(project) is None:
+            return None
+        if checked['pdk'] != pdk.name:
+            return None
+        for role, path in (('pdk_tech_lef', pdk.tech_lef),
+                           ('pdk_cell_lef', pdk.cell_lef),
+                           ('pdk_deck', pdk.drc_deck)):
+            if checked['inputs'][role] != current.entry(project, path, external=True):
+                return None
+        checkpoint_path = project / checked['subject']['path']
+        checkpoint = json.loads(checkpoint_path.read_text())
+        engines = set(_declared_drc_engines(project)) | {'klayout'}
+        if engines - {'klayout', 'magic'}:
+            return None
+        evidence = []
+        for engine in sorted(engines):
+            if engine == 'magic':
+                audit = _audit_magic_signoff_drc(project)
+                if audit.get('rc') != 0:
+                    return None
+                rel_json, rel_report = _MAGIC_SIGNOFF_DRC_JSON_REL, _MAGIC_SIGNOFF_DRC_REL
+            else:
+                job = next(job for job in _DRC_ATTRIBUTION_JOBS_BASE
+                           if job[1] == 'reports/phase3/drc_signoff.json')
+                name, rel_json, rel_report, args = job
+                audit = _run_declared_signoff_gate(
+                    project, name, name + '.py', rel_json, args)
+                if audit.status != 'PASS':
+                    return None
+            payload = json.loads((project / rel_json).read_text())
+            ok, _, _, total = drc.denominator_of(payload)
+            summary = payload.get('summary') or {}
+            if (payload.get('passed') is not True or not ok or total != 0
+                    or l24._report_engine(rel_json, payload, project) != engine
+                    or summary.get('layout_evidence_tier') != _sdf.TIER_INVOCATION
+                    or summary.get('layout_topcell_match') is not True):
+                return None
+            report = current.entry(project, project / rel_report)
+            native = next((entry for entry in reversed(list(_sdf._prov_entries(project)))
+                           if entry.get('record') == 'invocation'
+                           and entry.get('tool') == engine
+                           and entry.get('measured') is True and entry.get('exit_code') == 0
+                           and current._bound(report, entry.get('outputs') or {})
+                           and current._bound(checked['inputs']['gds'], entry.get('inputs') or {})),
+                          None) if engine == 'magic' else checkpoint['execution']['native_invocation']
+            if native is None:
+                return None
+            evidence.append({'engine': engine, 'report': report,
+                             'audit': current.entry(project, project / rel_json),
+                             'original_native_invocation': native})
+        # Readers must not replace the checkpoint or change the selected subject.
+        if current.read_direct_half(project, 'drc') != checked:
+            return None
+        return StepResult('drc', 'PASS', time.time() - started,
+                          'Adopted the original clean current DRC checkpoint; '
+                          'no native KLayout/Magic execution in this adoption.',
+                          [str(project / row['report']['path']) for row in evidence],
+                          extras={'current_subject': str(checkpoint_path),
+                                  'current_reader': checked,
+                                  'retained_drc_checkpoint': {
+                                      'origin': checked['subject'],
+                                      'declared_engines': sorted(engines),
+                                      'evidence': evidence}})
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, AttributeError):
+        return None
+
+
 def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
                      direct: Callable[[], StepResult], *,
                      current_direct: Optional[Callable[[], StepResult]] = None
@@ -52756,6 +52837,10 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
         import _physical_current as _pc
+        if half == 'drc':
+            retained = _retained_default_drc(project, pdk)
+            if retained is not None:
+                return retained
         row = _pc.direct_half(project, top, pdk, half, current_direct or direct)
         if current_direct is not None and half == "drc" and "magic_signoff_drc" in row.extras:
             # The existing audit consumes this invocation's current subject.
