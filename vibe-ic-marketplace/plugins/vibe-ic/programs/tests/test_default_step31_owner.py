@@ -416,3 +416,71 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
 def test_ultra_keeps_its_existing_step31_sites(monkeypatch):
     monkeypatch.setattr(P, "request", lambda: {"mode": "ultra"})
     assert R._phase3_window_sites("31", "31") == ["drc", "lvs"]
+
+
+@pytest.mark.parametrize("case", ["current", "changed_pdk", "changed_gds", "refused_restore"])
+def test_resumed_default31_uses_fresh_admission_basis_before_physical_views(
+        tmp_path, monkeypatch, case):
+    """Real admission/restore/producer/full consumer; native leaves are neutral."""
+    import copy
+
+    project, pdk, calls, observed, row = fixture(tmp_path, monkeypatch, "current")
+    pnr = R._pl.pnr_dir(project)
+    macro = put(project, "input/pdk/recorded_macro.lef",
+                "MACRO recorded_macro\n CLASS BLOCK ;\n SIZE 1 BY 1 ;\nEND recorded_macro\n")
+    put(project, R.PHYSICAL_VIEW_INVENTORY_REL, json.dumps({
+        "read_lef_paths": [pdk.tech_lef, pdk.cell_lef, str(macro)]}))
+    fresh_basis, error = R._layout_basis(project, "chip_top", pdk, "SOURCE_CONTROL_ONLY")
+    assert not error
+    assert R._ga.admitted_gds(project, pnr / "chip_top.gds", fresh_basis)
+    restored_pdk = copy.deepcopy(pdk)
+    restored = R._restore_recorded_physical_views(project, restored_pdk, "SOURCE_CONTROL_ONLY")
+    assert restored["macro_lefs"] == [str(macro)]
+    restored_basis, error = R._layout_basis(
+        project, "chip_top", restored_pdk, "SOURCE_CONTROL_ONLY")
+    assert not error and restored_basis != fresh_basis
+    assert not R._ga.admitted_gds(project, pnr / "chip_top.gds", restored_basis)
+    before = {str(path.relative_to(project)): path.read_bytes() for path in
+              [*R._layout_basis_paths(project, "chip_top"), pnr / "chip_top.gds",
+               R._ga.admission_path(project), project / R.PHYSICAL_VIEW_INVENTORY_REL]}
+    if case == "changed_pdk":
+        path = Path(pdk.liberty)
+        path.write_text(path.read_text() + "\n/* changed source material */\n")
+    elif case == "changed_gds":
+        _write_gds(pnr / "chip_top.gds", n_shapes=13, cell="chip_top")
+    elif case == "refused_restore":
+        put(project, "reports/pdk_via_patch_legalization.json", json.dumps({
+            "status": "APPLIED", "derived_tech_lef": "input/pdk/missing_recorded.lef",
+            "derived_sha256": "0" * 64}))
+    # Model the bounded entry's fresh process, rather than retaining hashes
+    # memoized while the neutral fixture published its original admission.
+    monkeypatch.setattr(R, "_STEP_PDK_HASH_CACHE", {})
+    calls.clear()
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="SOURCE_CONTROL_ONLY",
+                           die_um=None, util=None, spare_density=None)
+    rc = R._run_phase3_window(project, "chip_top", pdk, args,
+                              R._phase3_window_sites("31", "31"))
+    receipt = json.loads((project / "reports/phase3/default_steps/31/backend_result.json").read_text())
+    current = V.latest_pass(project, "31")
+    put(project, "BASIS_ORDER_OBSERVATION.json", json.dumps({
+        "case": case, "fresh_basis": fresh_basis, "restored_basis": restored_basis,
+        "restored_macro_lefs": pdk.macro_lefs, "rc": rc, "calls": calls,
+        "observed": observed, "receipt": receipt, "current": current,
+        "scope": "real bounded Default31 admission and consumer; neutral native leaves"}, indent=2))
+    if case != "current":
+        assert rc != 0 and receipt["producer_verdict"] == "NOT_MEASURED", receipt
+        assert calls == [] and observed == [], "refusal must precede all native instruments"
+        assert current is None
+        if case == "refused_restore":
+            assert "via-legalized tech LEF" in receipt["detail"]
+        else:
+            assert "unadmitted routed GDS" in receipt["detail"]
+        return
+    assert rc == 0 and receipt["producer_verdict"] == "PASS", receipt
+    assert [x[:2] for x in observed] == [("declared", "31"), ("consumer", "31")]
+    assert calls.count("erc") == calls.count("extraction") == calls.count("netgen") == 1
+    assert str(macro) in pdk.macro_lefs, "instruments still require restored physical views"
+    assert current and current["canonical_pass"] and current["current_inputs"]
+    assert len(row["required_outputs"]) == 13
+    for name, payload in before.items():
+        assert (project / name).read_bytes() == payload

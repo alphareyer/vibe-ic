@@ -1564,6 +1564,9 @@ def produce_signoff(project, params):
         rc = xor.main([str(project), '--json', str(rpt / 'gds_xor.json'), '--container', container])
         return {'verdict': 'PASS' if rc == 0 else 'FAIL' if rc == 1 else 'NOT_MEASURED', 'detail': f'gds_xor producer rc={rc}'}
     elif sid == '31':
+        # Admission uses the same fresh routed basis as stream publication.
+        # Instrument-only restoration below mutates this PDK object in memory.
+        basis, error = R._layout_basis(project, top, pdk, container)
         # A resumed backend producer detects its own PDK object. Restore the
         # recorded views on that object before either physical instrument reads
         # it, just as the individual post-route window already does.
@@ -1572,7 +1575,6 @@ def produce_signoff(project, params):
             return {'verdict': 'NOT_MEASURED',
                     'detail': 'Step31 recorded physical views refused: ' + physical_views['refused'],
                     'physical_views': physical_views}
-        basis, error = R._layout_basis(project, top, pdk, container)
         if error or not R._ga.admitted_gds(project, pnr / (top + '.gds'), basis):
             return {'verdict': 'NOT_MEASURED',
                     'detail': 'Step31 refused unadmitted routed GDS: ' + str(error or basis),
