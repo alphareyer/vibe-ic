@@ -166,6 +166,7 @@ def test_pad_ring_stays_outside_declared_core_during_top_up(tmp_path, monkeypatc
 def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
+    _put(project / 'phase3/librelane_switch.json', {'execution_route': 'DOCKER'})
     gds = project / 'pdk_filled.gds'
     gds.write_bytes(b'PDK filler GDS')
     root, config = _pdk(tmp_path)
