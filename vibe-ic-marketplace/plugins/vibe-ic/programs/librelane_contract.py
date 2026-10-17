@@ -267,6 +267,16 @@ def _provider_for_image(image: Any) -> LocalProviderIdentity | None:
     return _LOCAL_PROVIDER_IDENTITIES.get(str(image))
 
 
+def native_tool_command(image: Any, command: list[str]) -> tuple[str, list[str]]:
+    """Enter a native tool through the current provider's admitted executable."""
+    provider = _provider_for_image(image)
+    if provider is None:
+        return 'none', command
+    return provider.network_mode, [
+        provider.executable, '-c',
+        'import os,sys;os.execvp(sys.argv[1],sys.argv[1:])', *command]
+
+
 def _provider_route_mismatch(image: Any, project: Path | None = None, *,
                              native_handoff: bool = False) -> Refusal | None:
     provider = _provider_for_image(image)
@@ -1922,9 +1932,10 @@ def _openroad_convert(project: Path, image: str, config: dict, tcl_body: list[st
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
+    network, command = native_tool_command(image, ['openroad', '-exit', str(tcl)])
     completed = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm',
-                               '--network', 'none', *volumes,
-                               image, '--skip', 'openroad', '-exit', str(tcl)],
+                               '--network', network, *volumes,
+                               image, '--skip', *command],
                               supervised=True, log=folder / f'{name}.log')
     (folder / f'{name}.log').write_text(completed.stdout + '\n' + completed.stderr)
     if completed.returncode:

@@ -115,3 +115,118 @@ def test_density_caller_refuses_when_the_selected_pdk_is_missing(tmp_path, monke
         fill.run_density(project, "fixture-image", pdk_root, "pdkFixture",
                          gds=gds, lane="missing-selected-pdk",
                          steps=("KLayout.Density",))
+
+
+@pytest.mark.parametrize("owner", ["ir_openroad", "sealring_capability", "fill_keepout", "si_sta"])
+@pytest.mark.parametrize("profile", ["local_host", "local_none", "remote"])
+def test_native_finishing_callers_use_the_current_provider(tmp_path, monkeypatch, owner, profile):
+    """Real caller, typed provider and LOCAL parser; neutral native process leaves."""
+    import os
+    import subprocess
+    import _watchdog as watchdog
+    import _container_exec as container_exec
+    import librelane_ir_antenna as ir
+    import librelane_signoff as signoff
+    from test_librelane_contract import _host_provider
+    from test_die_density_finish import _pdk
+
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "4g")
+    if profile.startswith("local_"):
+        network = profile.removeprefix("local_")
+        monkeypatch.setenv("VIBEIC_LIBRELANE_LOCAL_NETWORK", network)
+        project, image = _host_provider(tmp_path, monkeypatch)
+        assert image.network_mode == network
+    else:
+        network = "none"
+        monkeypatch.delenv(ll.LOCAL_PROVIDER_ROUTE_ENV, raising=False)
+        monkeypatch.setattr(container_exec, "no_container_route", lambda: False)
+        image = "registry.invalid/native@sha256:" + "aa" * 32
+        project = tmp_path / "project"
+        project.mkdir()
+    folder = project / "neutral-native"
+    folder.mkdir()
+    script = folder / "native.tcl"
+    script.write_text("# neutral native process input\n")
+    log = folder / "native.log"
+    root, config = _pdk(tmp_path)
+    routed = project / "phase3/stage3/pnr/routed.def"
+    routed.parent.mkdir(parents=True, exist_ok=True)
+    routed.write_text("COMPONENTS 0 ; END COMPONENTS\n")
+    observed = {"owner": owner, "profile": profile, "launches": [], "calls": [],
+                "provider": image.as_record() if profile.startswith("local_") else None}
+    original_run_container = ll.run_container
+
+    def record_launch(argv, **kwargs):
+        observed["launches"].append(list(argv))
+        return original_run_container(argv, **kwargs)
+
+    def payload():
+        if owner == "sealring_capability":
+            return "True\n"
+        if owner == "fill_keepout":
+            (folder / "placed_keepouts.txt").write_text("DBU 1000\nTOTAL 0\nEND 0\n")
+        return "NEUTRAL_NATIVE_STDOUT\n"
+
+    def host_leaf(argv, **kwargs):
+        row = {"route": "Docker" if argv[0] == "docker" else "LOCAL", "argv": list(argv)}
+        if row["route"] == "LOCAL":
+            row.update(network=kwargs["env"]["VIBEIC_LOCAL_NETWORK_MODE"],
+                       pythonpath=kwargs["env"]["PYTHONPATH"])
+        observed["calls"].append(row)
+        return watchdog.SupervisedResult(0, payload(), "", "natural")
+
+    def docker_leaf(argv, **kwargs):
+        observed["calls"].append({"route": "Docker", "argv": list(argv)})
+        return subprocess.CompletedProcess(argv, 0, payload(), "")
+
+    for module in (ir, fill, signoff):
+        monkeypatch.setattr(module, "run_container", record_launch)
+    monkeypatch.setattr(watchdog, "run_host_supervised", host_leaf)
+    monkeypatch.setattr(ll.subprocess, "run", docker_leaf)
+    try:
+        if owner == "ir_openroad":
+            metrics = folder / "metrics.json"
+            assert ir._run_openroad(project, image, script, log, [], metrics=metrics) == 0
+            native_command = ["bash", "-c",
+                "LD_LIBRARY_PATH=/opt/or-tools/lib /foss/tools/openroad/bin/openroad "
+                f"-no_init -no_splash -metrics {metrics} -exit {script}"]
+        elif owner == "sealring_capability":
+            assert ir.sealring_spans_capable(image) is True
+            native_command = ["python3", "-c", ir._SEALRING_SPANS_PROBE]
+        elif owner == "fill_keepout":
+            result = fill._placed_keepout_boxes(project, image, root, "processA",
+                                                json.loads(config.read_text()), folder)
+            assert result == {"dbu": 1000, "total": 0, "boxes": [], "source": str(routed)}
+            native_command = ["openroad", "-exit", str(folder / "placed_keepouts.tcl")]
+        else:
+            result = signoff.run_sta_script(project, image, [], script, log)
+            assert result.returncode == 0 and log.read_text() == "NEUTRAL_NATIVE_STDOUT\n\n"
+            native_command = ["sta", "-no_init", "-no_splash", "-exit", str(script)]
+        observed["completed"] = True
+    except ll.Refusal as exc:
+        observed["refusal"] = {"code": exc.code, "detail": str(exc)}
+        raise
+    finally:
+        (tmp_path / "NATIVE_FINISHING_PROVIDER_OBSERVATION.json").write_text(
+            json.dumps(observed, indent=2) + "\n")
+    assert len(observed["calls"]) == len(observed["launches"]) == 1
+    call, launch = observed["calls"][0], observed["launches"][0]
+    assert launch[launch.index("--network") + 1] == network
+    assert launch[launch.index("--memory") + 1] == "4g"
+    assert launch[launch.index("--memory-swap") + 1] == "4g" and "--rm" in launch
+    if profile.startswith("local_"):
+        assert call["route"] == "LOCAL" and call["network"] == network
+        assert ("--unshare-net" in call["argv"]) is (network == "none")
+        assert call["pythonpath"].split(os.pathsep)[0] == image.librelane_root
+        launcher = "import os,sys;os.execvp(sys.argv[1],sys.argv[1:])"
+        index = call["argv"].index(launcher)
+        assert call["argv"][index - 2:index] == [image.executable, "-c"]
+        assert call["argv"][index + 1:] == native_command
+    else:
+        assert call["route"] == "Docker"
+        assert not any("os.execvp" in str(part) for part in launch)
+        if owner in ("ir_openroad", "sealring_capability"):
+            at = launch.index("--entrypoint")
+            assert launch[at:] == ["--entrypoint", native_command[0], image, *native_command[1:]]
+        else:
+            assert launch[launch.index(image) + 1:] == ["--skip", *native_command]

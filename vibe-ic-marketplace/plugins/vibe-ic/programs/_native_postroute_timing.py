@@ -50,8 +50,12 @@ def _run(ctx: dict[str, Any], script: Path, output: Path) -> None:
     volumes = ["-v", f"{project}:{project}"]
     for host, guest in ctx["mounts"]:
         volumes.extend(["-v", f"{Path(host).resolve()}:{guest}:ro"])
-    argv = ["docker", "run", *_dmem.docker_memory_flags(), "--rm", *volumes,
-            "--entrypoint", "openroad", ctx["image"], "-no_init", "-exit", str(script)]
+    network, command = ll.native_tool_command(
+        ctx["image"], ["openroad", "-no_init", "-exit", str(script)])
+    network_args = (["--network", network]
+                    if ll._provider_for_image(ctx["image"]) is not None else [])
+    argv = ["docker", "run", *_dmem.docker_memory_flags(), "--rm", *network_args, *volumes,
+            "--entrypoint", command[0], ctx["image"], *command[1:]]
     output.unlink(missing_ok=True)
     result = ll.run_container(argv, supervised=True, log=script.with_suffix(".log"))
     script.with_suffix(".log").write_text((result.stdout or "") + "\n" + (result.stderr or ""))

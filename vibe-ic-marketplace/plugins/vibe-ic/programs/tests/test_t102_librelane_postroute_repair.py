@@ -1870,3 +1870,102 @@ def test_a_repair_not_found_in_the_chain_says_so_and_why(tmp_path, monkeypatch, 
     put(project / 'reports/phase3/librelane_route_handoff.json', {'postroute_repair': None})
     report, why = runner._postroute_repair_in_chain(project)
     assert report is None and 'names no step-32 report' in why
+
+
+
+@pytest.mark.parametrize("owner", ["fork_capability", "openroad_convert", "native_sta"])
+@pytest.mark.parametrize("profile", ["local_host", "local_none", "remote"])
+def test_native_postroute_callers_use_the_current_provider(tmp_path, monkeypatch, owner, profile):
+    """Real owners and LOCAL guards; only expensive process leaves are neutral."""
+    import _watchdog as watchdog
+    import _container_exec as container_exec
+    from test_librelane_contract import _host_provider
+
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "4g")
+    if profile.startswith("local_"):
+        network = profile.removeprefix("local_")
+        monkeypatch.setenv("VIBEIC_LIBRELANE_LOCAL_NETWORK", network)
+        project, image = _host_provider(tmp_path, monkeypatch)
+        assert image.network_mode == network
+    else:
+        network = "none"
+        monkeypatch.delenv(contract.LOCAL_PROVIDER_ROUTE_ENV, raising=False)
+        monkeypatch.setattr(container_exec, "no_container_route", lambda: False)
+        image = "registry.invalid/capability@sha256:" + "aa" * 32
+        project = tmp_path / "project"
+        project.mkdir()
+    folder = project / "neutral-tool"
+    folder.mkdir()
+    output = folder / "native.rpt"
+    script = folder / "native.tcl"
+    script.write_text("# neutral native process input\n")
+    observed = {"owner": owner, "profile": profile, "calls": [], "launches": [],
+                "provider": image.as_record() if profile.startswith("local_") else None}
+    original_run_container = contract.run_container
+
+    def record_launch(argv, **kwargs):
+        observed["launches"].append(list(argv))
+        return original_run_container(argv, **kwargs)
+
+    def payload():
+        if owner == "fork_capability":
+            return FORK_TRANSCRIPT
+        output.write_text("NEUTRAL_NATIVE_REPORT\n")
+        return "NEUTRAL_NATIVE_STDOUT\n"
+
+    def host_leaf(argv, **kwargs):
+        call = {"route": "Docker" if argv[0] == "docker" else "LOCAL", "argv": list(argv)}
+        if call["route"] == "LOCAL":
+            call.update(network=kwargs["env"]["VIBEIC_LOCAL_NETWORK_MODE"],
+                        pythonpath=kwargs["env"]["PYTHONPATH"])
+        observed["calls"].append(call)
+        return watchdog.SupervisedResult(0, payload(), "", "natural")
+
+    def docker_leaf(argv, **kwargs):
+        observed["calls"].append({"route": "Docker", "argv": list(argv)})
+        return subprocess.CompletedProcess(argv, 0, payload(), "")
+
+    monkeypatch.setattr(contract, "run_container", record_launch)
+    monkeypatch.setattr(watchdog, "run_host_supervised", host_leaf)
+    monkeypatch.setattr(contract.subprocess, "run", docker_leaf)
+    try:
+        if owner == "fork_capability":
+            result = prr.fork_capability(image)
+            assert result["capable"] is True
+            native_command = ["bash", "-c"]
+        elif owner == "openroad_convert":
+            tech = tmp_path / "neutral.tech.lef"
+            tech.write_text("# neutral process material\n")
+            result = contract._openroad_convert(project, image,
+                {"TECH_LEFS": {"nom_*": str(tech)}}, ["exit"], folder, "convert", [], "docker")
+            assert result.is_file() and "read_lef" in result.read_text()
+            native_command = ["openroad", "-exit", str(result)]
+        else:
+            native._run({"project": str(project), "image": image, "mounts": []}, script, output)
+            assert output.read_text() == "NEUTRAL_NATIVE_REPORT\n"
+            native_command = ["openroad", "-no_init", "-exit", str(script)]
+        observed["completed"] = True
+    except contract.Refusal as exc:
+        observed["refusal"] = {"code": exc.code, "detail": str(exc)}
+        raise
+    finally:
+        (tmp_path / "STEP32_PROVIDER_OBSERVATION.json").write_text(
+            json.dumps(observed, indent=2) + "\n")
+    assert len(observed["calls"]) == len(observed["launches"]) == 1
+    call, launch = observed["calls"][0], observed["launches"][0]
+    if profile.startswith("local_"):
+        assert call["route"] == "LOCAL" and call["network"] == network
+        assert ("--unshare-net" in call["argv"]) is (network == "none")
+        assert call["pythonpath"].split(os.pathsep)[0] == image.librelane_root
+        launcher = "import os,sys;os.execvp(sys.argv[1],sys.argv[1:])"
+        index = call["argv"].index(launcher)
+        assert call["argv"][index - 2:index] == [image.executable, "-c"]
+        assert call["argv"][index + 1:index + 1 + len(native_command)] == native_command
+        assert launch[launch.index("--network") + 1] == network
+    else:
+        assert call["route"] == "Docker"
+        assert ("--network" in launch) is (owner != "native_sta")
+        if "--network" in launch:
+            assert launch[launch.index("--network") + 1] == "none"
+        assert not any("os.execvp" in str(part) for part in launch)
+        assert call["argv"][-len(native_command):] == native_command or owner == "fork_capability"

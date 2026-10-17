@@ -78,7 +78,7 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 import _psm_source_model as _psm_sm  # noqa: E402
 from librelane_contract import (PDK_GUEST_ROOT, PLUGIN_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, state_from_direct,
-                                run_container, PROBE_DEADLINE_S)
+                                run_container, PROBE_DEADLINE_S, native_tool_command)
 
 
 def _plugin_module(name: str):
@@ -124,11 +124,12 @@ def _run_openroad(project: Path, image: str, tcl: Path, log: Path,
         volumes += ['-v', f'{Path(host).resolve()}:{guest}:ro']
     extra = f'-metrics {metrics} ' if metrics else ''
     log.parent.mkdir(parents=True, exist_ok=True)
+    network, command = native_tool_command(image, ['bash', '-c',
+        'LD_LIBRARY_PATH=/opt/or-tools/lib /foss/tools/openroad/bin/openroad '
+        f'-no_init -no_splash {extra}-exit {tcl}'])
     completed = run_container(
-        ['docker', 'run', '--rm', '--network', 'none', *_dmem.docker_memory_flags(),
-         *volumes, '--entrypoint', 'bash', image, '-c',
-         'LD_LIBRARY_PATH=/opt/or-tools/lib /foss/tools/openroad/bin/openroad '
-         f'-no_init -no_splash {extra}-exit {tcl}'],
+        ['docker', 'run', '--rm', '--network', network, *_dmem.docker_memory_flags(),
+         *volumes, '--entrypoint', command[0], image, *command[1:]],
         supervised=True, log=log)
     log.write_text(completed.stdout + '\n' + completed.stderr)
     return completed.returncode
@@ -812,10 +813,11 @@ _SEALRING_SPANS_PROBE = ('from librelane.steps.klayout import SealRing;'
 def sealring_spans_capable(image: str) -> bool:
     """Does this image's KLayout.SealRing size the ring from x1-x0/y1-y0?
     (vibeic/librelane #3; the released 0.3.79 passes x1/y1.)"""
+    network, command = native_tool_command(image, ['python3', '-c', _SEALRING_SPANS_PROBE])
     completed = run_container(
-        ['docker', 'run', '--rm', '--network', 'none',
-         *_dmem.docker_memory_flags(), '--entrypoint', 'python3',
-         image, '-c', _SEALRING_SPANS_PROBE],
+        ['docker', 'run', '--rm', '--network', network,
+         *_dmem.docker_memory_flags(), '--entrypoint', command[0],
+         image, *command[1:]],
         probe_deadline_s=PROBE_DEADLINE_S)
     return completed.returncode == 0 and completed.stdout.strip() == 'True'
 

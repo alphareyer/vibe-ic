@@ -56,7 +56,7 @@ from librelane_contract import (PDK_GUEST_ROOT, PROBE_DEADLINE_S, Refusal, _load
                                 DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
                                 state_from_direct, run_container, config_file_hashes,
-                                settled_floorplan_geometry,
+                                settled_floorplan_geometry, native_tool_command,
                                 validate_step_receipt, _def_design_name, resolve_image)
 
 ODB_FILL_STEP = 'OpenROAD.FillInsertion'
@@ -455,11 +455,12 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         'close $_out',
         f'file rename -force {word(partial.resolve())} {word(output.resolve())}',
     ]) + '\n')
-    cmd = ['docker', 'run', '--rm', '--network', 'none',
+    network, command = native_tool_command(image, ['openroad', '-exit', str(script)])
+    cmd = ['docker', 'run', '--rm', '--network', network,
            *_dmem.docker_memory_flags(),
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro',
-           *extra_mounts, image, '--skip', 'openroad', '-exit', str(script)]
+           *extra_mounts, image, '--skip', *command]
     result = _run_logged(cmd, folder / 'placed_keepouts.log')
     if result.returncode != 0 or not output.is_file():
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',

@@ -327,10 +327,13 @@ if "librelane.steps" in argv:
     state = json.load(open(argv[argv.index("-i") + 1]))
     state["metrics"] = {"x": 1}
     json.dump(state, open(os.path.join(out, "state_out.json"), "w"))
+    print("neutral native step completed")
 '''
 
 
 def _fake_docker(tmp_path, monkeypatch):
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
     docker = tmp_path / "bin" / "docker"
     docker.parent.mkdir()
     docker.write_text(_FAKE_DOCKER)

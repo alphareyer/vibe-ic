@@ -54,7 +54,7 @@ from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest, handoff_to_direct,  # noqa: E402
                                 resolve_step_configs, run_chain, run_container,
-                                state_from_direct, validate_rcx_receipt)
+                                state_from_direct, validate_rcx_receipt, native_tool_command)
 
 STEPS = ('OpenROAD.RCX', 'OpenROAD.STAPostPNR')
 #: Where the extra corner Tcl lives in the project, and its provenance.
@@ -1027,10 +1027,11 @@ def run_sta_script(project: Path, image: str, mounts: list[tuple[Path, str]],
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    completed = run_container([docker, 'run', '--rm', '--network', 'none',
+    network, command = native_tool_command(
+        image, ['sta', '-no_init', '-no_splash', '-exit', str(script)])
+    completed = run_container([docker, 'run', '--rm', '--network', network,
                                *_dmem.docker_memory_flags(), *volumes,
-                               image, '--skip', 'sta', '-no_init', '-no_splash',
-                               '-exit', str(script)], supervised=True, log=log)
+                               image, '--skip', *command], supervised=True, log=log)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(completed.stdout + '\n' + completed.stderr)
     return completed

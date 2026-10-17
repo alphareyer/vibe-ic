@@ -18,7 +18,7 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
-from _stated_eda_image import stated_image, state_the_image  # noqa: E402
+from _stated_eda_image import stated_image, state_the_image, mock_docker_route  # noqa: E402
 import _eda_pin  # noqa: E402
 signoff = importlib.import_module('librelane_signoff')
 
@@ -40,6 +40,7 @@ def write(path, text):
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
+    mock_docker_route(monkeypatch)
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)

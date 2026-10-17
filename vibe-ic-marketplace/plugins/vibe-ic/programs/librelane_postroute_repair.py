@@ -172,13 +172,14 @@ def fork_capability(image: str, docker: str = "docker") -> Dict[str, Any]:
            f"{{ puts \"{_PROBE_REAL} $e\" }} else {{ puts \"{_PROBE_REAL} <accepted>\" }}\n"
            f"if {{[catch {{estimate_parasitics {_CTRL_FLAG}}} e]}} "
            f"{{ puts \"{_PROBE_CTRL} $e\" }} else {{ puts \"{_PROBE_CTRL} <accepted>\" }}\n")
-    cmd = [docker, "run", "--rm", "--network", "none", *_dmem.docker_memory_flags(),
-           image, "--skip", "bash", "-c",
-           "set -o pipefail; printf '%s' \"$1\" | openroad -no_init "
-           "-no_splash -exit /dev/stdin 2>&1", "vibeic-probe", tcl]
+    import librelane_contract as _ll
+    network, command = _ll.native_tool_command(image, [
+        "bash", "-c", "set -o pipefail; printf '%s' \"$1\" | openroad -no_init "
+        "-no_splash -exit /dev/stdin 2>&1", "vibeic-probe", tcl])
+    cmd = [docker, "run", "--rm", "--network", network, *_dmem.docker_memory_flags(),
+           image, "--skip", *command]
     try:
         from librelane_contract import PROBE_DEADLINE_S
-        import librelane_contract as _ll
         done = _ll.run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S)
         transcript = (done.stdout or "") + "\n" + (done.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
