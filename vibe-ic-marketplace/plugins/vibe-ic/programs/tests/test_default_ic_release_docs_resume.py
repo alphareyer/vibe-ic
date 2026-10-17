@@ -252,3 +252,62 @@ def test_ultra_retains_its_existing_enclosing_route(monkeypatch):
     import execution_policy
     monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
     assert runner._phase3_window_sites("37.5ic", "37.5ic") == ["enclosing_phase3"]
+
+
+@pytest.mark.parametrize("change", ["current", "changed_pdk", "changed_gds", "refused_restore"])
+def test_default_ic_release_admission_precedes_instrument_view_restoration(
+        tmp_path, monkeypatch, change):
+    """Real release entry/admission/restore; stop before document/PV consumers."""
+    import copy
+
+    project, pdk = _project(tmp_path)
+    gds = project / f"phase3/stage3/pnr/{DESIGN}.gds"
+    macro = _write(project, "input/recorded_macro.lef",
+                   "MACRO recorded_macro\n CLASS BLOCK ;\n SIZE 1 BY 1 ;\nEND recorded_macro\n")
+    _write(project, runner.PHYSICAL_VIEW_INVENTORY_REL, {
+        "read_lef_paths": [pdk.tech_lef, pdk.cell_lef, str(macro)]})
+    basis, error = runner._layout_basis(project, DESIGN, pdk, "")
+    assert not error and admission.admitted_gds(project, gds, basis)
+    restored_pdk = copy.deepcopy(pdk)
+    restored = runner._restore_recorded_physical_views(project, restored_pdk, "")
+    restored_basis, error = runner._layout_basis(project, DESIGN, restored_pdk, "")
+    assert not error and restored["macro_lefs"] == [str(macro)]
+    assert restored_basis != basis
+    assert not admission.admitted_gds(project, gds, restored_basis)
+    preserved = {str(path.relative_to(project)): path.read_bytes() for path in
+                 [*runner._layout_basis_paths(project, DESIGN), gds,
+                  admission.admission_path(project), macro]}
+    if change == "changed_pdk":
+        Path(pdk.liberty).write_text("library(changed_source_material) {}\n")
+    elif change == "changed_gds":
+        gds.write_bytes(gds.read_bytes() + b"changed after admission")
+    elif change == "refused_restore":
+        _write(project, "reports/pdk_via_patch_legalization.json", {
+            "status": "APPLIED", "derived_tech_lef": "input/absent_recorded.lef",
+            "derived_sha256": "0" * 64})
+    monkeypatch.setattr(runner, "_STEP_PDK_HASH_CACHE", {})
+    reached = []
+
+    def metrics_frontier(*args, **kwargs):
+        assert str(macro) in pdk.macro_lefs
+        reached.append(args[1])
+        return runner.StepResult("signoff_metrics_aggregate", "NOT_MEASURED", 0.0,
+                                 "SOURCE_CONTROL_METRICS_FRONTIER; no physical sign-off",
+                                 reason_class="not_executed")
+
+    monkeypatch.setattr(runner, "_run_declared_signoff_gate", metrics_frontier)
+    result = runner._default_ic_release_docs(project, DESIGN, pdk, "")
+    _write(project, "IC_RELEASE_BASIS_OBSERVATION.json", {
+        "change": change, "fresh_basis": basis, "restored_basis": restored_basis,
+        "result": result, "calls": reached, "macro_lefs": pdk.macro_lefs,
+        "scope": "real admission/restore source frontier only; not document or physical PASS"})
+    if change == "current":
+        assert reached == ["signoff_metrics_aggregate"], result
+        assert result["verdict"] == "NOT_MEASURED"
+        assert result["detail"].startswith("SOURCE_CONTROL_METRICS_FRONTIER")
+        for relative, payload in preserved.items():
+            assert (project / relative).read_bytes() == payload
+    else:
+        assert reached == [] and result["verdict"] == "NOT_MEASURED", result
+        assert ("via-legalized tech LEF" if change == "refused_restore" else
+                "unadmitted current layout") in result["detail"]

@@ -992,7 +992,8 @@ def repair_dont_use(config: Path, pdk_root: Path, pdk: str,
     every corner's file is read; a step that declares no CELL_LIBS at all is
     an undeclared population and refuses (CR4), never an empty policy."""
     import librelane_contract as _ll
-    libs = _load(config).get("CELL_LIBS") or {}
+    doc = _load(config)
+    libs = doc.get("LIB", doc.get("CELL_LIBS")) or {}
     paths = sorted({str(p) for v in (libs.values() if isinstance(libs, dict) else [libs])
                     for p in (v if isinstance(v, list) else [v])})
     if not paths:

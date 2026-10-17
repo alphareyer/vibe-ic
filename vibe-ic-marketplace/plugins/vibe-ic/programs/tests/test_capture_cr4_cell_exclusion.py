@@ -134,3 +134,64 @@ def test_reverse_mutation_removing_policy_exposes_the_bad_master(tmp_path):
     assert _audit(config, state)["verdict"] == "FAIL"
     config.write_text(json.dumps({"EXTRA_EXCLUDED_CELLS": []}))
     assert _audit(config, state)["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("lib_kind", ["native", "empty", "null", "invalid_member"])
+def test_resolved_cell_policy_native_lib_contract(tmp_path, lib_kind):
+    """Use the resolved native LIB; an explicit invalid LIB cannot borrow CELL_LIBS."""
+    root, configs = _corner_configs(tmp_path)
+    source = configs["OpenROAD.Floorplan"]
+    doc = json.loads(source.read_text())
+    libs = doc["CELL_LIBS"]
+    doc["DEFAULT_CORNER"] = "tt"
+    doc["STA_CORNERS"] = ["tt", "ss"]
+    if lib_kind == "native":
+        doc["LIB"] = doc.pop("CELL_LIBS")
+    else:
+        doc["LIB"] = {"empty": {}, "null": None,
+                      "invalid_member": {"tt": [None]}}[lib_kind]
+    config = tmp_path / "Yosys.JsonHeader.json"
+    config.write_text(json.dumps(doc))
+    before = config.read_bytes()
+    if lib_kind != "native":
+        with pytest.raises(L.Refusal, match="LL_CELL_POLICY_LIBERTY_UNDECLARED"):
+            R._resolved_cell_policy({"Yosys.JsonHeader": config}, root, "famxD",
+                                    required=("Yosys.JsonHeader",))
+        assert config.read_bytes() == before
+        return
+    updated, covered = R._resolved_cell_policy(
+        {"Yosys.JsonHeader": config}, root, "famxD", required=("Yosys.JsonHeader",))
+    result = json.loads(updated["Yosys.JsonHeader"].read_text())
+    assert result["EXTRA_EXCLUDED_CELLS"] == [
+        "famx__dly_1", "famx__dly_2", "famx__probe_1"]
+    assert result["LIB"] == libs
+    assert result["DEFAULT_CORNER"] == doc["DEFAULT_CORNER"]
+    assert result["STA_CORNERS"] == doc["STA_CORNERS"]
+    assert covered == ["Yosys.JsonHeader"]
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("lib_kind", ["native", "empty", "null", "invalid_member"])
+def test_postroute_policy_native_lib_contract(tmp_path, lib_kind):
+    """The repair owner uses its native LIB and never falls back from an explicit value."""
+    root, configs = _corner_configs(tmp_path)
+    doc = json.loads(configs["OpenROAD.Floorplan"].read_text())
+    if lib_kind == "native":
+        doc["LIB"] = doc.pop("CELL_LIBS")
+    else:
+        doc["LIB"] = {"empty": {}, "null": None,
+                      "invalid_member": {"tt": [None]}}[lib_kind]
+    config = tmp_path / "OpenROAD.RepairDesignPostGRT.json"
+    config.write_text(json.dumps(doc))
+    before = config.read_bytes()
+    rule = lambda text: R._dont_use_family_cells(R._V1_6_596_RE_CELL_DECL.findall(text))
+    if lib_kind != "native":
+        code = ("LL_PRR_LIBERTY_UNREADABLE" if lib_kind == "invalid_member"
+                else "LL_PRR_LIBERTY_UNDECLARED")
+        with pytest.raises(L.Refusal, match=code):
+            P.repair_dont_use(config, root, "famxD", rule)
+        assert config.read_bytes() == before
+        return
+    assert P.repair_dont_use(config, root, "famxD", rule) == [
+        "famx__dly_1", "famx__dly_2"]
+    assert config.read_bytes() == before

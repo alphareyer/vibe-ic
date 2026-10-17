@@ -24308,7 +24308,7 @@ def _resolved_cell_policy(configs: Dict[str, Path], pdk_root: Path,
         if not isinstance(inherited, list) or any(
                 not isinstance(name, str) for name in inherited):
             raise _ll.Refusal("LL_CELL_POLICY_INVALID", f"{step}: {config}")
-        libs = doc.get("CELL_LIBS")
+        libs = doc.get("LIB", doc.get("CELL_LIBS"))
         groups = libs.values() if isinstance(libs, dict) else [libs]
         paths: set[str] = set()
         for group in groups:
@@ -79106,10 +79106,12 @@ def _default_ic_release_docs(project: Path, top: str, pdk: PdkConfig,
     """
     import step_output_collector as versions
     started = time.time()
+    # Admission uses the publication's fresh PDK identity; instrument views
+    # restored below still belong to the document owners' physical inputs.
+    basis, error = _layout_basis(project, top, pdk, container)
     restored = _restore_recorded_physical_views(project, pdk, container)
     if restored.get('refused'):
         return {'verdict': 'NOT_MEASURED', 'detail': str(restored['refused'])}
-    basis, error = _layout_basis(project, top, pdk, container)
     if error or not _ga.admitted_gds(project, _pl.pnr_dir(project) / f'{top}.gds', basis):
         return {'verdict': 'NOT_MEASURED',
                 'detail': f'IC release refused unadmitted current layout: {error or basis}'}
