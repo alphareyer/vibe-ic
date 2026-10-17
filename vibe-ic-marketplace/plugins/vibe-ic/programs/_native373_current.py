@@ -76,16 +76,49 @@ def _source_inputs(project, definition):
     return paths
 
 
+def _local_execution(project, folder, step, image):
+    """Describe existing successful LOCAL receipt evidence, not a new launch.
+
+    run_chain publishes this receipt only after rc0 and state_out. Its LOCAL
+    runner validates the enclosing image attestation before and after the tool.
+    Reuse follows the same scientific-input identity as run_chain; COMMANDS is
+    not receipt-bound and is deliberately not treated as an execution journal.
+    """
+    receipt = lc.validate_step_receipt(folder, step)
+    _require(_read(folder / "pdk_root.json").get("execution_route") == "LOCAL",
+             "NATIVE373_LOCAL_ROUTE_CHANGED")
+    original = receipt["input"].get("local_image")
+    _require(isinstance(original, dict), "NATIVE373_LOCAL_IMAGE_MISSING")
+    current = lc.local_image_attestation(image)
+    _require(lc._step_input_identity({"local_image": original}) ==
+             lc._step_input_identity({"local_image": current}),
+             "NATIVE373_LOCAL_IMAGE_CHANGED")
+    return {"kind": "retained_local_step_receipt", "rc": 0,
+            # This argv names the proof owner, not a reconstructed tool argv.
+            "argv": ["librelane_contract.run_chain", step,
+                     str((folder / "vibeic_receipt.json").relative_to(project))],
+            "receipt": pc.entry(project, folder / "vibeic_receipt.json"),
+            "local_image": original}
+
+
+def _local_chain(project, folders):
+    return len(folders) == len(STEPS) and all(
+        _read(project / folder / "pdk_root.json").get("execution_route") == "LOCAL"
+        for folder in folders)
+
+
 def read_current(project, record=None):
     """Validate retained native producers, inputs, material and typed count."""
     project = Path(project).resolve()
     doc = record if record is not None else _read(project / REL)
     current = doc["current"]
+    local = _local_chain(project, doc["folders"])
     refusal = pc.validate(project, current, step="37.3", stage="stage4",
                           tools=("librelane",),
                           required_inputs=("def", "netlist", "sdc", "technology"),
-                          required_outputs=("magic_gds", "klayout_gds", "xor_report", "log", "launches"),
-                          marker="Exit status: 0")
+                          required_outputs=("magic_gds", "klayout_gds", "xor_report", "log") +
+                                           (() if local else ("launches",)),
+                          marker=None if local else "Exit status: 0")
     _require(not refusal, refusal)
     design = pc.design_of(_path(project, current["inputs"]["def"]))
     for role, path in _source_inputs(project, _source_def(project)).items():
@@ -93,7 +126,8 @@ def read_current(project, record=None):
                  "NATIVE373_CURRENT_SOURCE_CHANGED: " + role)
     _require(doc.get("steps") == list(STEPS), "NATIVE373_WRONG_CHAIN")
     config_root = project / CONFIG
-    launches = [json.loads(line) for line in _path(project, current["outputs"]["launches"]).read_text().splitlines()]
+    launches = [] if local else [json.loads(line) for line in
+        _path(project, current["outputs"]["launches"]).read_text().splitlines()]
     folders = []
     for step, rel in zip(STEPS, doc["folders"]):
         folder = (project / rel).resolve(strict=True)
@@ -133,21 +167,27 @@ def read_current(project, record=None):
             path = (folder / name).resolve(strict=True)
             _require(path.is_relative_to(folder) and pc.digest(path) == sha,
                      "NATIVE373_RECEIPT_CHANGED: " + name)
-        matches = [run for run in launches if "--id" in run["argv"]
-                   and run["argv"][run["argv"].index("--id") + 1] == step
-                   and run["argv"][run["argv"].index("-o") + 1] == str(folder)]
-        _require(matches, "NATIVE373_EXECUTION_MISSING: " + step)
-        run = matches[-1]
-        argv = run["argv"]
-        if step == STEPS[-1]:
-            _require(current["execution"] == run, "NATIVE373_RECORDED_EXECUTION_CHANGED")
-        _require(run["rc"] == 0 and argv[argv.index(doc["image"]) + 1] == "--skip"
-                 and argv[argv.index("-c") + 1] == str(config_root / f"{step}.json")
-                 and argv[argv.index("--pdk-root") + 1] == "/pdk",
-                 "NATIVE373_EXECUTION_CHANGED: " + step)
-        text = (folder / "invocation.log").read_text()
-        _require(f"--id {step} " in text and "Exit status: 0" in text,
-                 "NATIVE373_NATIVE_LOG_MISSING: " + step)
+        if local:
+            execution = _local_execution(project, folder, step, doc["image"])
+            if step == STEPS[-1]:
+                _require(current["execution"] == execution,
+                         "NATIVE373_RECORDED_EXECUTION_CHANGED")
+        else:
+            matches = [run for run in launches if "--id" in run["argv"]
+                       and run["argv"][run["argv"].index("--id") + 1] == step
+                       and run["argv"][run["argv"].index("-o") + 1] == str(folder)]
+            _require(matches, "NATIVE373_EXECUTION_MISSING: " + step)
+            run = matches[-1]
+            argv = run["argv"]
+            if step == STEPS[-1]:
+                _require(current["execution"] == run, "NATIVE373_RECORDED_EXECUTION_CHANGED")
+            _require(run["rc"] == 0 and argv[argv.index(doc["image"]) + 1] == "--skip"
+                     and argv[argv.index("-c") + 1] == str(config_root / f"{step}.json")
+                     and argv[argv.index("--pdk-root") + 1] == "/pdk",
+                     "NATIVE373_EXECUTION_CHANGED: " + step)
+            text = (folder / "invocation.log").read_text()
+            _require(f"--id {step} " in text and "Exit status: 0" in text,
+                     "NATIVE373_NATIVE_LOG_MISSING: " + step)
     _require(len(folders) == 3, "NATIVE373_CHAIN_INCOMPLETE")
     try:
         report = lc.check_xor_report(folders[-1], _read(folders[-1] / "vibeic_receipt.json"))
@@ -228,8 +268,10 @@ def produce(project, routed_def):
     outputs = {"magic_gds": pc.entry(project, final["mag_gds"]),
                "klayout_gds": pc.entry(project, final["klayout_gds"]),
                "xor_report": pc.entry(project, folders[-1] / "xor.xml"),
-               "log": pc.entry(project, folders[-1] / "invocation.log"),
-               "launches": pc.entry(project, journal)}
+               "log": pc.entry(project, folders[-1] / "invocation.log")}
+    local = _local_chain(project, folders)
+    if not local:
+        outputs["launches"] = pc.entry(project, journal)
     for index, folder in enumerate(folders):
         inputs[f"config_{index}"] = pc.entry(project, configs[STEPS[index]])
         fp = _read(folder / "input_fingerprint.json")
@@ -237,9 +279,12 @@ def produce(project, routed_def):
             inputs[f"pdk_material_{index}_{len(inputs)}"] = pc.entry(project, material, external=True)
         for name in ("invocation.log", "state_in.json", "state_out.json", "vibeic_receipt.json", "pdk_root.json"):
             outputs[f"producer_{index}_{name}"] = pc.entry(project, folder / name)
-    launches = [json.loads(line) for line in journal.read_text().splitlines()]
-    execution = [run for run in launches if "--id" in run["argv"]
-                 and run["argv"][run["argv"].index("--id") + 1] == STEPS[-1]][-1]
+    if local:
+        execution = _local_execution(project, folders[-1], STEPS[-1], image)
+    else:
+        launches = [json.loads(line) for line in journal.read_text().splitlines()]
+        execution = [run for run in launches if "--id" in run["argv"]
+                     and run["argv"][run["argv"].index("--id") + 1] == STEPS[-1]][-1]
     doc = {"steps": list(STEPS), "folders": [str(folder.relative_to(project)) for folder in folders],
            "image": image, "count": final["metrics"].get(KEY),
            "scope": "native two-stream geometric fidelity; LVS and full signoff NOT_MEASURED",

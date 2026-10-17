@@ -410,3 +410,108 @@ def test_normal373_uses_real_die_and_same_boundary_with_owned_fill_only(
         assert rc == 2 and report['connectivity']['verdict'] == 'NOT_DETERMINED', line
         assert report['declared_finishing_layers']['fill']['pairs'] == ['34/4']
         assert xor.reference_is_faithful((p / 'reports/phase3/gds_xor_native.log').read_text())[0] is False
+
+
+from test_librelane_contract import local_image  # existing real attestation reader fixture
+
+
+@pytest.mark.parametrize('condition', ['current', 'missing_receipt', 'changed_material', 'nonzero'])
+def test_normal373_local_receipts_reach_original_connectivity_consumer(
+        tmp_path, monkeypatch, local_image, condition):
+    """Real normal producer/LOCAL runner/receipts/consumer; neutral EDA leaves.
+
+    The controlled stream and XOR results qualify evidence plumbing only, not
+    physical XOR, independent tool measurements or canonical IC PASS.
+    """
+    import execution_backend_producers as EBP
+    import _native373_current as native
+    import _physical_current as pc
+    import _watchdog as watchdog
+    import librelane_pv_signoff as pv
+    import gds_xor_check as xor
+    monkeypatch.setattr(BF, 'IMAGE', local_image.image)
+    p, pdk, root, stream, calls = _native373_boundary_subject(tmp_path, monkeypatch)
+    # The finishing fixture has a named-Docker process edge. This antecedent
+    # explicitly chooses the actual attested LOCAL route for the three streams.
+    monkeypatch.setattr(LC._ce, 'no_container_route', lambda: True)
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    monkeypatch.setattr(EBP, '_parameters', lambda *a: (R, LC, pdk, ''))
+    monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(root)})
+    monkeypatch.setattr(LC, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(LC, 'openroad_home', lambda *a, **k: None)
+    monkeypatch.setattr(pv, 'tech_lef_overlay', lambda *a: {})
+    declaration = p / 'input/submission_template/tapeout_declaration.json'
+    original_declaration = declaration.read_bytes()
+    material = root / 'neutral/stream.lef'
+
+    def configs(project, image, name, steps, **kwargs):
+        assert steps == list(native.STEPS)
+        assert kwargs['overlay']['DIE_AREA'][0] == LC._def_die_area(Path(stream['filled_def']))
+        return {step: BF.put(p / native.CONFIG / (step + '.json'), {
+            'meta': {'step': step}, 'DESIGN_NAME': 'cal_pg', 'PDK': 'neutral',
+            'TECH_LEFS': [str(material)]}) for step in steps}
+    monkeypatch.setattr(LC, 'resolve_step_configs', configs)
+    executed = []
+
+    def neutral_process(argv, **kwargs):
+        assert argv[:4] == ['python3', '-m', 'librelane.steps', 'run']
+        step = argv[argv.index('--id') + 1]
+        folder = Path(argv[argv.index('-o') + 1])
+        state = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        if step in native.STEPS[:2]:
+            role = 'mag_gds' if step == native.STEPS[0] else 'klayout_gds'
+            gds = folder / (role + '.gds')
+            _geometry(gds, 1 if role == 'mag_gds' else 2)
+            state[role] = str(gds)
+        else:
+            count = 1 if condition == 'nonzero' else 0
+            state['metrics'] = {native.KEY: count}
+            (folder / 'xor.xml').write_text(
+                '<report-database><top-cell>cal_pg</top-cell><description>'
+                f"XOR {state['mag_gds']} vs. {state['klayout_gds']}"
+                '</description><items>' + '<item/>' * count + '</items></report-database>')
+        BF.put(folder / 'state_in.json', json.loads(Path(argv[argv.index('-i') + 1]).read_text()))
+        BF.put(folder / 'state_out.json', state)
+        BF.put(folder / 'config.json', json.loads(Path(argv[argv.index('-c') + 1]).read_text()))
+        executed.append(step)
+        # Match the real LOCAL log shape: neither Docker launch journal nor
+        # the Docker /usr/bin/time 'Exit status: 0' wrapper exists.
+        return watchdog.SupervisedResult(0, 'SOURCE_CONTROL neutral native ' + step, '', 'natural')
+    monkeypatch.setattr(watchdog, 'run_host_supervised', neutral_process)
+
+    def geometry_process(self, recipe, env, **kwargs):
+        assert env['XOR_BOUNDARY'] == Path(stream['stream'])
+        self.execution = {'rc': 0, 'argv': ['SOURCE_CONTROL', 'shipped_geometry']}
+        return 0, ('XOR_TOOL klayout\nXOR_TOP shipped=cal_pg reference=cal_pg\n'
+            'XOR_CENSUS shipped_cells=20 shipped_shapes=1000 reference_cells=10 reference_shapes=10\n'
+            'XOR_BOUNDARY_CENSUS cells=10 shapes=10\n'
+            'XOR_LAYER 32/0 0\nXOR_LAYER 34/4 600\nXOR_DONE\n'), ''
+    monkeypatch.setattr(native.ShippedXorRunner, 'run', geometry_process)
+    result = EBP.produce_signoff(p, {'step_id': '37.3', 'execution_mode': 'default',
+        'top': 'cal_pg', 'pdk_root': str(root), 'image_id': local_image.image})
+    assert executed == list(native.STEPS)
+    assert result['verdict'] == 'PASS', result
+    assert not (p / 'phase3/librelane/37.3-launches.jsonl').exists()
+    dependency = native.read_current(p)
+    assert dependency['count'] == (1 if condition == 'nonzero' else 0)
+    assert 'launches' not in dependency['current']['outputs']
+    assert dependency['current']['execution']['kind'] == 'retained_local_step_receipt'
+    receipts = {}
+    for rel in dependency['folders']:
+        folder = p / rel
+        receipts[str(folder)] = (folder / 'vibeic_receipt.json').read_bytes()
+        assert json.loads((folder / 'pdk_root.json').read_text())['execution_route'] == 'LOCAL'
+        assert 'Exit status: 0' not in (folder / 'invocation.log').read_text()
+    if condition == 'missing_receipt':
+        (p / dependency['folders'][0] / 'vibeic_receipt.json').unlink()
+    elif condition == 'changed_material':
+        material.write_text('changed original native material\n')
+    expected = 2 if condition in ('missing_receipt', 'changed_material') else 1 if condition == 'nonzero' else 0
+    rc, line, report = xor.judge_receipt(p, xor.REPORT_REL)
+    assert rc == expected, line
+    assert report['verdict'] == 'PASS'  # original geometry is a separate answer
+    assert report['connectivity']['verdict'] == ('FAIL' if condition == 'nonzero' else 'PASS')
+    assert declaration.read_bytes() == original_declaration
+    assert executed == list(native.STEPS), 'read-only consumer must not rerun any native step'
+    assert all((Path(folder) / 'vibeic_receipt.json').read_bytes() == data
+               for folder, data in receipts.items() if (Path(folder) / 'vibeic_receipt.json').exists())
