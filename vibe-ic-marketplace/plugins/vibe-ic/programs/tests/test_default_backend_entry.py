@@ -110,11 +110,20 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
     import step_output_collector as versions
     import vibe_ic_one_shot_runner as front
     from test_default_frontend_r2 import _synthesis, put
-    from test_execution_receipt_chain import real_entry
     from test_step14_report_producer_authorship import GOOD
 
     project, rtl, pdk, native_calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    # This partial Phase2 transport retains the normal Step7 corner inputs
+    # before the real front door checks the physical handoff dependencies.
+    for process_corner in ("ss", "tt", "ff"):
+        put(project / f"input/pdk/liberty/neutral__{process_corner}.lib",
+            Path(pdk.liberty).read_text())
+    design._emit_step7_pvt_matrix(project, pdk, "")
+    # This transport executes synthesis, not native prelayout STA. The
+    # existing direct SDC consumer still checks the actual emitted deck.
+    put(project / "phase3/librelane_switch.json", {"steps": {"8": "direct"}})
     stage_owner_route(project, "ic")
+    # The real front door constructs the ordinary PROGRAM_DEFAULT runtime.
     if case != "handoff_missing_input":
         put(project / "phase1/generated_docs/L5_ADI_SPEC.json", {"no_analog": True})
     # Admission reads image metadata, not the forbidden generic producer.
@@ -210,7 +219,6 @@ def test_default_cross_phase_keeps_synthesis_in_phase2(
         return original_phase(label, runner, argv, env=env, **kwargs)
 
     monkeypatch.setattr(front, "_run_phase", process)
-    real_entry("IC", "default", project)
     entry, exit_ = ("31", "31") if case == "step31" else ("9", "38")
     monkeypatch.setattr(sys, "argv", [str(RUNNER), str(project), "--route", "ic",
         "--execution-mode", "default", "--entry-step", entry, "--exit-step", exit_,
@@ -416,12 +424,23 @@ def test_default_entry10_resumes_current_checkpoint(
     import step_output_collector as versions
     import vibe_ic_one_shot_runner as front
     from test_default_frontend_r2 import put
-    from test_execution_receipt_chain import real_entry
 
     project, rtl, pdk = _entry10_retained_checkpoint(tmp_path, monkeypatch)
     observed = {'case': case, 'phase_calls': [], 'native_resolution': [],
                 'native_prelayout': [], 'phase2_scope': 'ROUTING_ONLY_NOT_DFT_LEC_QUALIFICATION'}
     _entry10_prelayout_transport(project, pdk, monkeypatch, case, observed)
+    # Preserve the actual nested audit process result if its report cannot
+    # be published. This observes the real transport without replacing it.
+    import _watchdog
+    native_host_run = _watchdog.run_host_supervised
+    def observed_host_run(argv, **kwargs):
+        result = native_host_run(argv, **kwargs)
+        if any(Path(str(arg)).name == 'stage1_compliance.py' for arg in argv):
+            observed.setdefault('stage1_native_process', []).append({
+                'argv': list(argv), 'rc': result.rc,
+                'stdout': result.out, 'stderr': result.err})
+        return result
+    monkeypatch.setattr(_watchdog, 'run_host_supervised', observed_host_run)
     stage_owner_route(project, 'ic')
     history = put(project / 'steps/history/retained_entry10/outputs.json',
                   {'scope': 'neutral retained input history; no current PASS claim'})
@@ -474,7 +493,6 @@ def test_default_entry10_resumes_current_checkpoint(
             raise AssertionError('Step10 resume dispatched Phase1')
         return original_phase(label, runner, argv, env=env, **kwargs)
     monkeypatch.setattr(front, '_run_phase', process)
-    real_entry('IC', 'default', project)
     exit_ = '10' if case == 'exit10' else '38'
     monkeypatch.setattr(sys, 'argv', [str(RUNNER), str(project), '--route', 'ic',
         '--execution-mode', 'default', '--entry-step', '10', '--exit-step', exit_,
@@ -539,12 +557,21 @@ def test_default_entry15_refreshes_step7_before_physical_handoff(
     import vibe_ic_one_shot_runner as front
     from _ppa import timing
     from test_default_frontend_r2 import put
-    from test_execution_receipt_chain import real_entry
 
     project, rtl, pdk = _entry10_retained_checkpoint(tmp_path, monkeypatch)
     observed = {'case': case, 'phase_calls': [], 'native_resolution': [],
                 'native_prelayout': []}
     _entry10_prelayout_transport(project, pdk, monkeypatch, 'current', observed)
+    stage_owner_route(project, 'ic')
+    authority = json.loads(Path(os.environ['VIBEIC_LIBRELANE_LOCAL_ATTESTATION']).read_text())
+    metadata = _eda_pin._docker
+    def image_metadata(*argv, **kwargs):
+        if argv[:3] == ('inspect', '--format', '{{.Image}}\t{{.Config.Image}}'):
+            item = authority['container_inspect']
+            return 0, item['Image'] + '\t' + item['Config']['Image'] + '\n', ''
+        return metadata(*argv, **kwargs)
+    monkeypatch.setattr(_eda_pin, '_docker', image_metadata)
+    front._capture_container_image(project, '', None)
     # Construct the previous valid constraint/timing data before this resume.
     # Only an unrelated source comment differs; the canonical emitter binds it.
     old_source = tmp_path / 'prior_source/phase3_one_shot_runner.py'
@@ -574,15 +601,6 @@ def test_default_entry15_refreshes_step7_before_physical_handoff(
         (project / 'input/constraints/clock.sdc').write_text('set_input_delay {unterminated\n')
     elif case == 'missing_liberty':
         Path(pdk.liberty).unlink()
-    stage_owner_route(project, 'ic')
-    authority = json.loads(Path(os.environ['VIBEIC_LIBRELANE_LOCAL_ATTESTATION']).read_text())
-    metadata = _eda_pin._docker
-    def image_metadata(*argv, **kwargs):
-        if argv[:3] == ('inspect', '--format', '{{.Image}}\t{{.Config.Image}}'):
-            item = authority['container_inspect']
-            return 0, item['Image'] + '\t' + item['Config']['Image'] + '\n', ''
-        return metadata(*argv, **kwargs)
-    monkeypatch.setattr(_eda_pin, '_docker', image_metadata)
     original_phase = front._run_phase
     def process(label, runner, argv, env=None, **kwargs):
         observed['phase_calls'].append(runner.name)
@@ -609,7 +627,6 @@ def test_default_entry15_refreshes_step7_before_physical_handoff(
                     project, 'top', pdk, args, phase3._phase3_window_sites(entry, exit_))
         return original_phase(label, runner, argv, env=env, **kwargs)
     monkeypatch.setattr(front, '_run_phase', process)
-    real_entry('IC', 'default', project)
     monkeypatch.setattr(sys, 'argv', [str(RUNNER), str(project), '--route', 'ic',
         '--execution-mode', 'default', '--entry-step', '11' if case == 'forwarded' else '15', '--exit-step', '15',
         '--top-name', 'top', '--ic-name', 'top', '--pdk', pdk.name, '--container', '',
