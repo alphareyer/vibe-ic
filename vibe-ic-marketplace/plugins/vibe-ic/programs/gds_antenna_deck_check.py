@@ -65,6 +65,7 @@ import importlib.util
 import json
 import posixpath
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -357,6 +358,12 @@ def _bound_native_count(gds: Path, rdb: Path, transcript: Path, gds_sha: str,
     log = transcript.read_text(errors="replace")
     if not log.startswith(_BIND_PREFIX + gds_sha + "\n"):
         return None, "native transcript is bound to another GDS SHA-256", {}
+    return _native_result_count(rdb, transcript, deck)
+
+
+def _native_result_count(rdb: Path, transcript: Path, deck: Optional[dict]):
+    """The same raw deck obligations for fresh and receipt-bound native runs."""
+    log = transcript.read_text(errors="replace")
     if not re.search(r"Executing rule\s+ANT\.", log):
         return None, "native transcript names no executed ANT rule", {}
     if deck is None:
@@ -387,6 +394,92 @@ def _bound_native_count(gds: Path, rdb: Path, transcript: Path, gds_sha: str,
     return count, "", {"rdb_sha256": _sha(rdb),
                        "transcript_sha256": _sha(transcript),
                        "transcript_tally": tallied}
+
+
+def _retained_native_result(project: Path, gds: Path, router: Optional[str],
+                            cell: Optional[str], receipt: dict) -> Optional[dict]:
+    """Read the selected native producer, never substitute its summary label."""
+    import librelane_signoff_evidence as native
+    record_path = project / 'reports/phase3/antenna_librelane.json'
+    if not record_path.is_file() or not native.tool_selected(project, '26'):
+        return None
+    result = {'check': 'gds_geometry_antenna_deck', 'method': 'pdk_native_klayout',
+              'evidence_basis': 'retained_KLayout.Antenna',
+              'gds': str(gds), 'gds_sha256': _sha(gds),
+              'pdk_receipt': str(receipt['receipt']), 'record': str(record_path)}
+    rdb = None
+    try:
+        model = native._member(native._read(record_path), 'gds')
+        state = native._path(project, model.get('state'))
+        folder = state.parent
+        row = native.count_row(project, folder, 'KLayout.Antenna',
+            'klayout__antenna_error__count', gds, project / 'phase3/librelane/26-config')
+        result['native_evidence'] = row
+        if type(row['value']) is not int:
+            raise ValueError(row.get('reason') or 'native antenna has no current reading')
+        result['violations'] = row['value']
+        config = native._read(folder / 'config.json')
+        if (model.get('step') != 'KLayout.Antenna'
+                or model.get('state_sha256') != row['sha256']
+                or model.get('subject_sha256') != result['gds_sha256']
+                or type(native._member(model, 'counts').get('klayout__antenna_error__count')) is not int
+                or native._member(model, 'counts').get('klayout__antenna_error__count') != row['value']
+                or config.get('PDK') != receipt['pdk']):
+            raise ValueError('retained antenna model differs from its native producer')
+        deck, why = _discover_deck(receipt['host_tree'], _kl.host_read_bytes,
+                                   _kl.host_list_files, _kl.host_list_tree)
+        if deck is None:
+            raise ValueError(why)
+        mounts = native._pdk_mounts(project, native._read(
+            project / 'phase3/librelane_switch.json'), folder, row['image'])
+        from _container_exec import localise_mounted_paths
+        def local(path):
+            return Path(localise_mounted_paths(str(path), [(guest, str(host)) for host, guest in mounts])).resolve()
+        if local(config.get('KLAYOUT_ANTENNA_RUNSET')) != Path(deck['parent']).resolve():
+            raise ValueError('retained native antenna runset differs from the selected PDK deck')
+        commands = [shlex.split(line) for line in (folder / 'COMMANDS').read_text().splitlines() if line.strip()]
+        selected = [argv for argv in commands if '-r' in argv
+                    and local(argv[argv.index('-r') + 1]) == Path(deck['parent']).resolve()]
+        if len(selected) != 1:
+            raise ValueError('retained antenna commands name no unique native runset')
+        argv = selected[0]
+        options = dict(argv[i + 1].split('=', 1) for i, arg in enumerate(argv) if arg == '-rd')
+        design = config.get('DESIGN_NAME')
+        if (not design or options.get('decks') != 'antenna'
+                or any(options.get(key) != str(value) for key, value in
+                       config.get('KLAYOUT_ANTENNA_OPTIONS', {}).items())
+                or options.get('topcell') != design or (cell is not None and cell != design)
+                or _sha(local(options['input'])) != result['gds_sha256']):
+            raise ValueError('retained antenna commands do not consume the selected GDS/top/deck')
+        rdb = local(options['report'])
+        if not rdb.is_relative_to(folder.resolve()):
+            raise ValueError('retained native antenna report is outside its producer')
+        transcript = folder / 'invocation.log'
+        count, why, hashes = _native_result_count(rdb, transcript, deck)
+        if why:
+            raise ValueError(why)
+        report = folder / 'reports/antenna.klayout.json'
+        raw = native._read(report)
+        bound = native._read(folder / 'vibeic_receipt.json')['sha256']
+        if (bound.get(str(report.relative_to(folder))) != _sha(report)
+                or type(raw.get('total')) is not int or raw['total'] != count
+                or count != row['value']
+                or not re.search(r'<top-cell>\s*' + re.escape(design) + r'\s*</top-cell>', rdb.read_text())):
+            raise ValueError('native antenna RDB, raw report, top and producer count disagree')
+        result.update(hashes, rdb=str(rdb), transcript=str(transcript),
+                      pdk_rule=deck['rule'], pdk_rule_sha256=deck['rule_sha256'],
+                      pdk_parent=deck['parent'], pdk_parent_sha256=deck['parent_sha256'],
+                      verdict='FAIL' if count else 'PASS', measurement='MEASURED',
+                      reason=f'{count} PDK-native antenna violation(s)' if count else '')
+        raw_out = project / 'reports/phase3' / _RAW_REPORT_NAME
+        _atomic_write_bytes(raw_out, json.dumps({'verdict': result['verdict'], 'violations': count}).encode())
+        return _native_router_cross_check(project, router, raw_out, result, count)
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        red = result.get('violations') or (_rdb_red_count(rdb) if rdb is not None else None)
+        result.update(verdict='FAIL' if red else 'DISCLOSED_SKIP',
+                      measurement='FAIL' if red else 'NOT_MEASURED',
+                      failure_class='BINDING', reason=str(exc))
+        return result
 
 
 def _rdb_red_count(rdb: Path) -> Optional[int]:
@@ -433,6 +526,9 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
         gds_path = project / gds_path
     if gds_path is None or not gds_path.is_file():
         return skip("no streamed GDS for the selected native PDK deck")
+    retained = _retained_native_result(project, gds_path, router, cell, receipt)
+    if retained is not None:
+        return retained
     # An image-bound tree exists only inside that image: a host KLayout could
     # read nothing but the unverified host copy, so it is never asked.
     runner = (_kl.find_container_runner(project=project) if image_bound
@@ -548,6 +644,11 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
     res = {**base, "verdict": "PASS" if count == 0 else "FAIL",
            "violations": count, "worst_ratio": None,
            "reason": f"{count} PDK-native antenna violation(s)" if count else ""}
+    return _native_router_cross_check(project, router, raw, res, count)
+
+
+def _native_router_cross_check(project: Path, router: Optional[str], raw: Path,
+                                res: dict, count: int) -> dict:
     # Native router reports may be KLayout RDBs.  The plugin's calibrated
     # cross-check reader understands that dialect; an image copy can lag it.
     xtool = Path(__file__).resolve().parent / "gds_antenna" / "xcheck_router.py"

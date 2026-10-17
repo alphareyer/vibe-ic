@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +17,86 @@ import gds_antenna_deck_check as gate  # noqa: E402
 import eda_report_audit as audit  # noqa: E402
 import _watchdog as watchdog  # noqa: E402
 import _klayout_launch as launch  # noqa: E402
+
+
+@pytest.mark.parametrize('scenario', [
+    'current', 'wrong_gds', 'missing_native_proof', 'nonzero_native_inconsistency'])
+def test_retained_native_antenna_reaches_original_consumer(tmp_path, monkeypatch, scenario):
+    """Real chain/receipt and consumer; only the native process edge is neutral."""
+    import librelane_contract as contract
+    from _native_signoff_fixture import put, IMAGE
+    from _stated_eda_image import mock_docker_route
+    mock_docker_route(monkeypatch)
+    gds = _project(tmp_path)
+    root = tmp_path / 'pdk_root'
+    tree = root / 'fixture_pdk'
+    parent = tree / 'libs.tech/klayout/tech/drc/main.drc'
+    put(tmp_path / 'phase3/librelane_switch.json', {
+        'steps': {'26': 'librelane'}, 'image': IMAGE,
+        'pdk': 'fixture_pdk', 'pdk_root_host': str(root)})
+    config = put(tmp_path / 'phase3/librelane/26-config/KLayout.Antenna.json', {
+        'meta': {'step': 'KLayout.Antenna'}, 'PDK': 'fixture_pdk',
+        'DESIGN_NAME': 'neutral_core', 'KLAYOUT_ANTENNA_RUNSET': str(parent),
+        'KLAYOUT_ANTENNA_OPTIONS': {'decks': 'antenna'}})
+    initial = put(tmp_path / 'phase3/librelane/native-input-state.json',
+                  {'gds': str(gds), 'metrics': {}})
+    count = 1 if scenario == 'nonzero_native_inconsistency' else 0
+    calls = []
+
+    def native_process(argv, **kwargs):
+        calls.append(argv[argv.index('--id') + 1])
+        folder = Path(argv[argv.index('-o') + 1])
+        cfg = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+        state = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        put(folder / 'config.json', cfg); put(folder / 'state_in.json', state)
+        put(folder / 'state_out.json', dict(state, metrics={'klayout__antenna_error__count': count}))
+        report = folder / 'reports/antenna.klayout.lyrdb'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(_rdb(count, str(parent)).replace(
+            '</generator>', '</generator><top-cell>neutral_core</top-cell>'))
+        put(folder / 'reports/antenna.klayout.json', {'ANT.1': 0, 'total': 0})
+        command = ['klayout', '-b', '-r', str(parent), '-rd', 'input=' + str(gds),
+                   '-rd', 'topcell=neutral_core', '-rd', 'report=' + str(report), '-rd', 'decks=antenna']
+        (folder / 'COMMANDS').write_text(shlex.join(command) + '\n')
+        return subprocess.CompletedProcess(argv, 0, _transcript(command, count), '')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a, **k: {})
+    monkeypatch.setattr(contract, 'openroad_home', lambda *a, **k: None)
+    monkeypatch.setattr(contract, 'run_container', native_process)
+    folder = contract.run_chain(tmp_path, IMAGE, [('KLayout.Antenna', config, initial)],
+        mounts=[(tree, '/pdk/fixture_pdk')], lane='26-gds', pdk_root='/pdk')[0]
+    put(tmp_path / 'phase3/librelane_pdk_root.provenance.json', {
+        'path': str(root), 'source': 'resolved', 'derivation': {
+            'pdk': 'fixture_pdk', 'image': IMAGE, 'image_id': 'sha256:' + '7d' * 32,
+            'guest_path': str(tree), 'host_path': str(tree)}})
+    put(tmp_path / 'reports/phase3/antenna_librelane.json', {'gds': {
+        'step': 'KLayout.Antenna', 'state': str(folder / 'state_out.json'),
+        'state_sha256': contract.digest(folder / 'state_out.json'),
+        'subject': str(gds), 'subject_sha256': contract.digest(gds),
+        'counts': {'klayout__antenna_error__count': count}}})
+    monkeypatch.setattr(gate._kl, 'find_container_runner', lambda **k: None)
+    monkeypatch.setattr(gate._kl, 'find_runner', lambda **k: None)
+    if scenario == 'wrong_gds':
+        gds.write_bytes(gds.read_bytes() + b'changed delivered geometry')
+    elif scenario == 'missing_native_proof':
+        (folder / 'vibeic_receipt.json').unlink()
+    report = tmp_path / 'reports/phase2/gates/gate_oxide_geom_deck.json'
+    rc = gate.main([str(tmp_path), '--json', str(report)])
+    result = json.loads(report.read_text())
+    if scenario == 'current':
+        assert rc == 0, result
+        assert result['verdict'] == 'PASS' and result['violations'] == 0
+        assert result['evidence_basis'] == 'retained_KLayout.Antenna'
+        assert result['native_evidence']['receipt'] == str(folder / 'vibeic_receipt.json')
+        assert result['gds_sha256'] == contract.digest(gds)
+        assert result['rdb_sha256'] == gate._sha(folder / 'reports/antenna.klayout.lyrdb')
+    elif scenario == 'nonzero_native_inconsistency':
+        assert rc == 1 and result['verdict'] == 'FAIL', result
+        assert result['violations'] == 1
+        assert 'disagree' in result['reason']
+    else:
+        assert rc == 2 and result['measurement'] == 'NOT_MEASURED', result
+    assert calls == ['KLayout.Antenna'], 'the current consumer must not rerun a native producer'
 
 
 def test_real_native_rdb_calibration_pair():
