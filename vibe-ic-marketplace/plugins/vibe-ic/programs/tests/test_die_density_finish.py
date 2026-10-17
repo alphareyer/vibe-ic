@@ -587,12 +587,14 @@ def test_placed_keepout_tcl_uses_the_actual_execution_namespace(
     extra = tmp_path / 'external.lef'
     extra.write_text('MACRO extra\nEND extra\n')
     cfg['EXTRA_LEFS'] = [str(extra)]
-    _put(project / 'phase3/librelane_switch.json', {
-        'execution_route': 'DOCKER' if route == 'docker' else 'LOCAL'})
+    monkeypatch.delenv(lc.LOCAL_PROVIDER_ROUTE_ENV, raising=False)
+    if route != 'provider':
+        _put(project / 'phase3/librelane_switch.json', {
+            'execution_route': 'DOCKER' if route == 'docker' else 'LOCAL'})
     monkeypatch.setattr(lc, '_provider_for_image',
                         lambda image: object() if route == 'provider' else None)
     monkeypatch.setattr(lc, '_provider_route_mismatch', lambda image: None)
-    monkeypatch.setattr(lc._ce, 'no_container_route', lambda: route != 'docker')
+    monkeypatch.setattr(lc._ce, 'no_container_route', lambda: route == 'project-local')
     observed = []
 
     def process(cmd, *, supervised, probe_deadline_s=None, **kwargs):
