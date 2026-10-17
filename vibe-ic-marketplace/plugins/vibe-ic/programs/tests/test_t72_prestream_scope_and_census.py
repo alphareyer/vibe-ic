@@ -104,3 +104,61 @@ def test_prestream_route_row_uses_new_census_instead_of_old_log(tmp_path, monkey
     route = next(r for r in rows if r["name"] == "route_connectivity")
     assert route["status"] == "PASS", route
     assert route["output_files"] == [str(tmp_path / "reports/phase3/prestream_route_census.json")]
+
+
+import pytest
+
+
+@pytest.mark.parametrize('phase', ['prestream', 'final'])
+def test_later_signoff_readers_preserve_completed_ir_em_owner_reports(
+        tmp_path, phase):
+    """Real report checkers write their own scope and retain measured failure.
+
+    Native tools are not invoked: the existing neutral current/limit fixture
+    supplies readable reports, segment currents, wire geometry and Jmax.
+    """
+    import test_em_peak_current_authority_check as current
+    specs = R._PRESTREAM_GATES if phase == 'prestream' else R._FINAL_LAYOUT_GATES
+    programs = {'ir_drop_report_check.py', 'em_report_check.py',
+                'em_peak_current_authority_check.py'}
+    selected = [spec for spec in specs if spec[1] in programs]
+    aliases = {'ir_drop_signoff.json': 'eda_report_audit:ir_drop',
+               'em_signoff.json': 'eda_report_audit:em',
+               'em_current_authority.json': 'em_peak_current_authority_check'}
+    for peak, expected in [('1.963e-04', 'PASS'), ('5.0', 'FAIL')]:
+        project = current._project(tmp_path / expected, peak=peak,
+                                   with_csv=True, with_jmax=True)
+        reports = project / 'reports/phase3'
+        (reports / 'ir_drop.rpt').write_text(
+            'OpenROAD PSM IR drop analysis\n'
+            'power grid mesh nodes: 12458\n'
+            'worst voltage drop: 6.8 mV (0.2% Vdd) static IR\n'
+            'worst dynamic IR: 9.1 mV (0.3% Vdd)\n'
+            + '# synthetic report detail\n' * 100)
+        retained = {}
+        for name, program in aliases.items():
+            path = reports / name
+            path.write_text(json.dumps({'program': program, 'verdict': 'PASS',
+                                        'retained_owner': name}) + '\n')
+            retained[path] = path.read_bytes()
+        native_inputs = {path: path.read_bytes() for path in (
+            reports / 'ir_drop.rpt', reports / 'em.rpt', reports / 'em.json',
+            reports / 'em_segments.csv', reports / 'em_jmax.json',
+            project / 'phase3/stage3/pnr/routed.def')}
+        rows = [R._run_declared_signoff_gate(project, *spec) for spec in selected]
+        assert {path: path.read_bytes() for path in retained} == retained
+        assert {path: path.read_bytes() for path in native_inputs} == native_inputs
+        assert len(rows) == (3 if phase == 'prestream' else 2)
+        for spec, row in zip(selected, rows):
+            report = project / spec[2]
+            assert row.output_files == [str(report)]
+            assert report not in retained
+            doc = json.loads(report.read_text())
+            assert doc['verdict'] in ('PASS', 'FAIL')
+        authority = next(row for spec, row in zip(selected, rows)
+                         if spec[1] == 'em_peak_current_authority_check.py')
+        assert authority.status == expected, authority.detail
+        if expected == 'PASS':
+            assert all(row.status == 'PASS' for row in rows), rows
+        else:
+            assert any(row.status == 'FAIL' for row in rows), rows
