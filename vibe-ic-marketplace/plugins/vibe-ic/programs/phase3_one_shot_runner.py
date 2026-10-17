@@ -1387,7 +1387,8 @@ def _log_surviving_artefact(outputs, *, produced_by: str,
                             marker: str | None = None,
                             tool: str | None = None,
                             exit_code: int | None = None,
-                            survived: Dict[str, Any] | None = None) -> None:
+                            survived: Dict[str, Any] | None = None,
+                            project: Path | None = None) -> None:
     """Record artefacts AFTER the verdict that decides whether they survive.
 
     vibe-ic#1330. `_docker_exec(..., outputs=[...])` hashes the declared paths
@@ -1413,7 +1414,7 @@ def _log_surviving_artefact(outputs, *, produced_by: str,
     that do not exist, so an unlinked report simply produces no row. That is the
     honest outcome and it needs no special case.
     """
-    sink = _PROV_SINK
+    sink = project if project is not None else _PROV_SINK
     if sink is None:
         return
     _outs = _hash_declared_outputs(sink, outputs)
@@ -57392,7 +57393,8 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
     return None
 
 
-def _step37_declare_streamout_gds_provenance(project: Path, top: str) -> None:
+def _step37_declare_streamout_gds_provenance(
+        project: Path, top: str, *, default_finishing: bool = False) -> None:
     """Declare BOTH GDS deliverables of Step 37 with their real current hashes.
 
     WHY THIS EXISTS, measured on the completed spm x ihp-sg13g2 run:
@@ -57427,6 +57429,38 @@ def _step37_declare_streamout_gds_provenance(project: Path, top: str) -> None:
     canon_rel = f"phase3/stage4/gds/{top}.gds"
     pnr_gds = project / pnr_rel
     canon_gds = project / canon_rel
+    if default_finishing:
+        import librelane_fill_dfm as fill
+        record = fill.validate_default_stream(project)
+        arm = fill._load(project / fill.RECORD_REL)['gds']['librelane']
+        judged = fill.current_metal_density(project, arm, record)
+        source = Path(record['source'])
+        if (record['file_top'] != top
+                or Path(record['pnr_gds']).resolve() != pnr_gds.resolve()
+                or Path(record['canonical']).resolve() != canon_gds.resolve()
+                or record['source_sha256'] != record['pnr_gds_sha256']
+                or record['source_sha256'] != record['canonical_sha256']
+                or arm.get(fill.DENSITY_METRIC) != 0
+                or judged.get('verdict') != 'PASS'):
+            raise fill.Refusal('LL_FINISHING_PROVENANCE_UNBOUND', str(record))
+        # The validated whole chain includes the raw StreamOut, seal, filler
+        # and optional topup. Its final source can differ from the raw stream.
+        # Reconstruct an artefact declaration, never a second tool invocation.
+        source_sha = _file_sha256(source)
+        if _newest_declared_sha(project, _project_rel(project, source) or '') != source_sha:
+            _log_surviving_artefact(
+                [str(source)], project=project, tool='klayout', exit_code=0,
+                produced_by='librelane_default_finishing',
+                marker='retained native finishing closure: ' + fill.DEFAULT_STREAM_REL)
+        for output in (pnr_gds, canon_gds):
+            if output.resolve() == source.resolve():
+                continue
+            if _newest_declared_sha(project, _project_rel(project, output) or '') == source_sha:
+                continue
+            _declare_immutable_transform(
+                project, source, output, 'step37_default_finishing_publication',
+                'klayout', 'publish byte-identical validated finished GDS')
+        return
     promotion = project / "phase3/librelane/37-promotion.json"
     ll_selected = False
     if promotion.is_file():

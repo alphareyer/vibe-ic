@@ -253,7 +253,7 @@ def test_worker_does_not_promote_entire_tree_to_producer_inputs(tmp_path, monkey
     assert seen['files'] == {}
 
 
-def _retained_default_stream(tmp_path, monkeypatch):
+def _retained_default_stream(tmp_path, monkeypatch, *, native_only_provenance=False):
     """Original owner/validators; only native process edges are neutral data."""
     import klayout.db as db
     import librelane_contract as LC
@@ -273,7 +273,23 @@ def _retained_default_stream(tmp_path, monkeypatch):
                 db.Box(index * 2, 10, index * 2 + 1, 11))
         layout.write(str(path))
     monkeypatch.setattr(transport, '_geometry', substantive_geometry)
-    project, pdk, calls, _ = transport._transport(tmp_path, monkeypatch)
+    project, pdk, calls, _ = transport._transport(
+        tmp_path, monkeypatch, finished_geometry=native_only_provenance)
+    if native_only_provenance:
+        stream_process = LF.run_chain
+
+        def declared_native_stream(*args, **kwargs):
+            folders = stream_process(*args, **kwargs)
+            state = json.loads((folders[0] / 'state_out.json').read_text())
+            relative = str(Path(state['klayout_gds']).relative_to(project))
+            entry = {'record': 'invocation', 'tool': 'klayout', 'exit_code': 0,
+                     'scope': 'SOURCE_FIXTURE controlled native process',
+                     'outputs': {relative: 'sha256:' + LC.digest(project / relative)},
+                     'measurement': _runner_measurement.derive(project, relative, 'klayout')}
+            with (project / 'provenance.jsonl').open('a') as stream:
+                stream.write(json.dumps(entry) + '\n')
+            return folders
+        monkeypatch.setattr(LF, 'run_chain', declared_native_stream)
     first = LF.default_stream(project, 'top', pdk, '')
     assert calls == ['primary', 'seal', 'filler-density']
     # A core-only delivery does not owe the independent pad-ring report.
@@ -286,12 +302,13 @@ def _retained_default_stream(tmp_path, monkeypatch):
         'verdict': 'NOT_APPLICABLE', 'reason': 'SOURCE_FIXTURE core-only delivery'}))
     canonical = Path(first['canonical'])
     relative = str(canonical.relative_to(project))
-    _write(project, 'provenance.jsonl', json.dumps({
-        'record': 'invocation', 'tool': 'klayout', 'exit_code': 0,
-        'scope': 'SOURCE_FIXTURE controlled native process',
-        'outputs': {relative: 'sha256:' + LC.digest(canonical)},
-        'measurement': _runner_measurement.derive(project, relative, 'klayout'),
-    }) + '\n')
+    if not native_only_provenance:
+        _write(project, 'provenance.jsonl', json.dumps({
+            'record': 'invocation', 'tool': 'klayout', 'exit_code': 0,
+            'scope': 'SOURCE_FIXTURE controlled native process',
+            'outputs': {relative: 'sha256:' + LC.digest(canonical)},
+            'measurement': _runner_measurement.derive(project, relative, 'klayout'),
+        }) + '\n')
     monkeypatch.setattr(producers, '_parameters', lambda *_: (R, LC, pdk, ''))
     monkeypatch.setattr(R, 'step_prestream_gate', lambda *_: R.StepResult(
         'prestream', 'PASS', 0.0, 'SOURCE_FIXTURE upstream admission',
@@ -324,6 +341,63 @@ def _retained_default_stream(tmp_path, monkeypatch):
               'resolved_input_manifest': _manifest(
                   project, 'phase3/stage3/pnr/routed.def')}
     return project, params, first, calls
+
+
+@pytest.mark.parametrize('scenario', ['current', 'changed_final_gds', 'missing_native_proof'])
+def test_default_step37_finishing_publishes_measured_provenance(
+        tmp_path, monkeypatch, scenario):
+    import librelane_fill_dfm as LF
+    import librelane_contract as LC
+    import phase3_one_shot_runner as R
+    import provenance_check
+    import step_output_collector as versions
+    project, params, first, calls = _retained_default_stream(
+        tmp_path, monkeypatch, native_only_provenance=True)
+    canonical = Path(first['canonical'])
+    ledger = project / 'provenance.jsonl'
+    entries = [json.loads(line) for line in ledger.read_text().splitlines()]
+    native = [entry for entry in entries if entry.get('record') == 'invocation']
+    assert len(native) == 1
+    assert set(native[0]['outputs']) == {str(Path(first['stream']).relative_to(project))}
+    assert first['stream_sha256'] != first['source_sha256'], 'finishing changed real neutral geometry'
+    argv = [str(project), '--output=phase3/stage4/gds/*.gds',
+            '--tool=klayout,magic,openroad', '--require-measured']
+    assert provenance_check.main(argv) == 0, 'fresh normal LF publication must declare final material'
+    artefacts = [entry for entry in entries if entry.get('record') == 'artefact']
+    assert any(entry.get('produced_by') == 'librelane_default_finishing'
+               and entry['outputs'] == {str(Path(first['source']).relative_to(project)):
+                                        'sha256:' + first['source_sha256']}
+               and entry.get('measurement') for entry in artefacts)
+    assert all(entry.get('duration_ms') is None for entry in entries if entry not in native)
+    # Resume the actual historical case: only native-path provenance survived;
+    # none declares the different final bytes or either delivery alias.
+    ledger.write_text(''.join(json.dumps(entry) + '\n' for entry in native))
+    assert provenance_check.main(argv) != 0
+    identities = {name: (Path(first[name]).read_bytes(), Path(first[name]).stat().st_mtime_ns)
+                  for name in ('source', 'pnr_gds', 'canonical')}
+    if scenario == 'changed_final_gds':
+        canonical.write_bytes(canonical.read_bytes() + b'changed')
+    elif scenario == 'missing_native_proof':
+        (Path(first['stream_state']).parent / 'vibeic_receipt.json').unlink()
+    if scenario != 'current':
+        with pytest.raises((LF.Refusal, ValueError, KeyError)):
+            R._step37_declare_streamout_gds_provenance(project, 'top', default_finishing=True)
+        assert ledger.read_text() == ''.join(json.dumps(entry) + '\n' for entry in native)
+        assert provenance_check.main(argv) != 0
+        return
+    result = producers.produce(project, params)
+    assert result['verdict'] == 'PASS', result
+    attempt = versions.begin_step(project, '37', params['resolved_input_manifest']['files'])
+    versions.publish_producer_outputs(project, attempt)
+    consumed = worker.execute_current_step(project, step_id='37', producer=result)
+    assert consumed['verdict'] == 'PASS', consumed
+    assert consumed['canonical_step_result']['status'] == 'PASS'
+    assert any(row.get('gate') == 'provenance_check' and row.get('rc') == 0
+               for row in consumed['gate_ledger'])
+    assert provenance_check.main(argv) == 0
+    assert calls == ['primary', 'seal', 'filler-density'], 'retained publication runs no native epoch'
+    assert {name: (Path(first[name]).read_bytes(), Path(first[name]).stat().st_mtime_ns)
+            for name in identities} == identities
 
 
 @pytest.mark.parametrize('scenario', [

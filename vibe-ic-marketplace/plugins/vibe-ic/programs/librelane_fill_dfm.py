@@ -1437,6 +1437,8 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
             arm = _load(project / RECORD_REL)['gds']['librelane']
             judged = current_metal_density(project, arm, record)
             if arm.get(DENSITY_METRIC) == 0 and judged.get('verdict') == 'PASS':
+                runner._step37_declare_streamout_gds_provenance(
+                    project, top, default_finishing=True)
                 return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
             reuse_refusal = 'retained density consumer did not pass: ' + str(judged)
         except (Refusal, OSError, ValueError, KeyError, TypeError) as exc:
@@ -1563,6 +1565,8 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
         raise Refusal('LL_METAL_DENSITY_CONSUMER_FAILED', str(per_layer))
     # Keep the engine-neutral transcript on the canonical caller boundary.
     shutil.copyfile(folder / 'invocation.log', pnr / 'stream_out.log')
+    runner._step37_declare_streamout_gds_provenance(
+        project, top, default_finishing=True)
     return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
 
 

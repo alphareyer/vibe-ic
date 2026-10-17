@@ -30,7 +30,7 @@ def _geometry(path, number=0):
     layout.write(str(path))
 
 
-def _transport(tmp_path, monkeypatch):
+def _transport(tmp_path, monkeypatch, *, finished_geometry=False):
     neutral_declared_windows.__wrapped__(tmp_path, monkeypatch)
     monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(policy, '_ordinary_runtime', None)
@@ -120,6 +120,8 @@ def _transport(tmp_path, monkeypatch):
         target = p / 'phase3/librelane/34-fill/01-klayout-filler/top.gds'
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(gds, target)
+        if finished_geometry:
+            _geometry(target, 100)
         folder, _ = BF.producer(p, 'KLayout.Filler', {'gds': str(gds), 'metrics': {}},
             {'gds': str(target), 'metrics': {}}, lane='34-fill/01-klayout-filler')
         arm = BF.density_record(p, target, 0)
