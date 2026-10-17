@@ -3976,3 +3976,253 @@ def test_current_step23_keeps_named_pdk_witness_and_unnamed_runtime_roles(tmp_pa
     """The real Step23 public capture and full judge retain both exact roles."""
     test_step32_local_provider_reaches_real_capture_and_judge(
         tmp_path, monkeypatch, capture_step='23', named_pdk=False)
+
+
+def _cold_local_post_stream_capture(tmp_path, monkeypatch):
+    """Reuse the qualified neutral LOCAL materials, with the real post-stream owner."""
+    named_pdk, capture_step = False, '32'
+    import os
+    import shlex
+    import _watchdog as watchdog
+    import drv_capture_plan as planner
+    import drv_run_identity
+    import drv_signoff_capture as capture
+    import librelane_contract as ll
+    import librelane_postroute_repair as repair
+
+    # Reuse only the existing neutral material constructor, then restore its
+    # legacy image resolver before entering the real LOCAL producer/readers.
+    with monkeypatch.context() as material:
+        project, adopted = _librelane_final_sta(tmp_path, material)
+    monkeypatch.setattr(planner, '_SCENE_PROFILES', drv._SCENE_PROFILES)
+    root = tmp_path / 'pdks/versions/neutral-pdk-commit'
+    root.parent.mkdir(parents=True)
+    (tmp_path / 'installed').rename(root)
+    lib = root / 'synthetic/libs.ref/lib/lib/std_typ.lib'
+    lib.write_text('library (std) {\n time_unit : "1ns"; capacitive_load_unit (1,pf);\n nom_process : 1; nom_voltage : 5; nom_temperature : 25;\n default_max_transition : 3; default_max_capacitance : .2;\n cell (logic) { pin (Y) { direction : output;\n max_transition : 3; max_capacitance : .2; } }\n}\n')
+    (root / 'synthetic/libs.ref/lib/lef/std.lef').write_text(
+        'MACRO logic\n PIN Y\n DIRECTION OUTPUT ;\n USE SIGNAL ;\n END Y\nEND logic\n')
+    state_path = project / 'phase3/librelane/32-cand01/04-openroad-stapostpnr/state_out.json'
+    state = json.loads(state_path.read_text())
+    Path(state['nl']).write_text('module physical_top; endmodule\n')
+    Path(state['def']).write_text('VERSION 5.8 ;\nDESIGN physical_top ;\n'
+        'NETS 1 ;\n - n ( u Y ) ;\nEND NETS\nEND DESIGN\n')
+    Path(state['sdc']).write_text(Path(state['sdc']).read_text() +
+        'set_max_transition 3 [current_design]\nset_max_capacitance .2 [current_design]\n')
+    _file(project, 'phase1/generated_docs/L7.json', json.dumps({'verification': 'neutral'}))
+    source = tmp_path / 'native-source'
+    _file(source, 'librelane/__init__.py', '# neutral source identity\n')
+    switch = {'execution_route': 'LOCAL', 'pdk': 'synthetic',
+              'pdk_root_host': str(root), 'librelane_root_host': str(source),
+              'librelane_executable': sys.executable, 'local_network_mode': 'host'}
+    if not named_pdk:
+        switch.pop('pdk')
+    _file(project, 'phase3/librelane_switch.json', json.dumps(switch))
+    monkeypatch.setenv(ll.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
+    monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(root))
+    monkeypatch.setenv('VIBEIC_LIBRELANE_ROOT', str(source))
+    monkeypatch.setenv('VIBEIC_LIBRELANE_LOCAL_NETWORK', 'host')
+    monkeypatch.setattr(capture._ce, 'no_container_route', lambda: True)
+    monkeypatch.setattr(drv, '_installed_image_digest', _LOCAL_DRV_INSTALLED_IMAGE_DIGEST)
+    image = ll.resolve_image(project, record=False)
+    provenance = ll.pdk_root_resolution(project, 'synthetic', image=image)
+    assert provenance['source'] == 'local_provider' and 'derivation' not in provenance
+    original_provenance = (project / ll.PDK_ROOT_PROVENANCE_REL).read_bytes()
+    _file(state_path.parent, 'config.json', json.dumps({'DESIGN_NAME': 'physical_top'}))
+    _file(state_path.parent, 'vibeic_receipt.json', json.dumps({
+        'input': {'step': 'OpenROAD.STAPostPNR', 'image': str(image),
+                  'state_files': {state[k]: drv._sha(Path(state[k])) for k in ('nl', 'def')}},
+        'sha256': {'state_out.json': drv._sha(state_path),
+                   'config.json': drv._sha(state_path.parent / 'config.json')}}))
+    spef = Path(state['spef']['nom_*'])
+    spef.write_text('*SPEF neutral\n*D_NET n 0.1\n*CONN\n*I u:Y O\n*END\n')
+    rcx_provider = image
+    if capture_step == '23' and not named_pdk:
+        # Model the earlier process's namespace metadata through the real
+        # resolver; the current capture keeps its actual namespace/admission.
+        with monkeypatch.context() as prior_process:
+            prior_process.setattr(ll, '_local_network_namespace', lambda: 'net:[neutral-prior]')
+            rcx_provider = ll.resolve_image(project, record=False)
+    _file(spef.parent.parent, 'COMMANDS', 'openroad -exit native-rcx.tcl\n')
+    _file(spef.parent.parent, 'vibeic_receipt.json', json.dumps({
+        'input': {'step': 'OpenROAD.RCX', 'image': str(rcx_provider),
+                  'local_provider': rcx_provider.as_record(),
+                  'state_files': {state['def']: drv._sha(Path(state['def']))}},
+        'sha256': {spef.relative_to(spef.parent.parent).as_posix(): drv._sha(spef)}}))
+    rcx_receipt_path = spef.parent.parent / 'vibeic_receipt.json'
+    original_rcx_receipt = rcx_receipt_path.read_bytes()
+    if capture_step == '23':
+        import shutil
+        folder = project / 'phase3/librelane/23/01-openroad-stapostpnr'
+        shutil.copytree(state_path.parent, folder)
+        state_path = folder / 'state_out.json'
+        state = json.loads(state_path.read_text())
+        alias = _file(project, 'phase3/stage3/extracted/spef_corners/top.nom.spef',
+                      spef.read_text())
+        state['spef'] = {'nom_*': alias['path']}
+        state_path.write_text(json.dumps(state))
+        _current_sta_ocv_receipts(state_path)
+        config_path = folder / 'config.json'
+        config = json.loads(config_path.read_text())
+        config['DESIGN_NAME'] = 'physical_top'
+        config_path.write_text(json.dumps(config))
+        receipt_path = folder / 'vibeic_receipt.json'
+        receipt = json.loads(receipt_path.read_text())
+        receipt['input'].update(image=str(image), state_files={
+            state[k]: drv._sha(Path(state[k])) for k in ('nl', 'def')})
+        receipt['sha256']['config.json'] = drv._sha(config_path)
+        receipt_path.write_text(json.dumps(receipt))
+        rcx_state = _file(spef.parent.parent, 'state_out.json', json.dumps({
+            'spef': {'nom_*': str(spef)}}))
+        _file(project, 'reports/phase3/librelane_rcx_handoff.json', json.dumps({
+            'state': rcx_state['path'], 'state_sha256': rcx_state['sha256'],
+            'views': {'spef:nom_*': {'source': str(spef), 'source_sha256': drv._sha(spef),
+                'dest': alias['path'], 'dest_sha256': alias['sha256']}}}))
+        (project / 'phase3/stage3/pnr/routed.def').write_bytes(Path(state['def']).read_bytes())
+    (project / 'phase3/stage3/pnr/routed.def').write_bytes(Path(state['def']).read_bytes())
+    gds = _file(project, 'phase3/stage4/gds/top.gds', 'SOURCE_FIXTURE_ONLY final stream\n')
+    layout = {'path': state['def'], 'sha256': drv._sha(Path(state['def']))}
+    netlist = {'path': state['nl'], 'sha256': drv._sha(Path(state['nl']))}
+    _file(project, 'reports/phase3/gds_admission.json', json.dumps({
+        'gds_relpath': 'phase3/stage4/gds/top.gds', 'gds_sha256': gds['sha256'],
+        'basis_inputs': {'phase3/stage3/pnr/routed.def': layout['sha256']}}))
+    lvs_inputs = _file(project, 'reports/phase3/lvs_inputs.json', json.dumps({
+        'layout_def': layout, 'schematic_netlist': netlist}))
+    _file(project, 'reports/phase3/lvs_verdict.json', json.dumps({
+        'status': 'PASS', 'compare_performed': True, 'lvs_inputs': lvs_inputs}))
+    drv_run_identity.record(project)
+    _stage_receipts(project)
+    # The Step32 owner rerecords these two stages from their native probe
+    # files; initialize those neutral process outputs before that call.
+    for folder, name, command in (
+            (state_path.parent, 'signoff_sta', 'report_check_types'),
+            (adopted.parent, 'postroute_repair', 'repair_design')):
+        evidence = project / 'phase3/stage_evidence' / name
+        for kind, filename in (('behavior.rpt', 'drv_behavior.rpt'),
+                               ('pre.sdc', 'pre_command.sdc'),
+                               ('fanout_limits.rpt', 'fanout_limits.rpt'),
+                               ('pin_cells', 'pin_cells')):
+            _file(folder / 'vibeic_drv_stage', f'{command}.all.1.{kind}',
+                  (evidence / filename).read_text())
+    report = _step32_report(project, adopted)
+    observed = {'scope': 'SOURCE_ONLY: neutral native reports, no physical signoff',
+                'provider': image.as_record(), 'provenance': provenance,
+                'rcx_provider': rcx_provider.as_record(),
+                'prior_namespace_is_neutral_fixture_metadata': not named_pdk,
+                'calls': []}
+    original_leaf = watchdog.run_host_supervised
+
+    def native_leaf(argv, **kwargs):
+        # Consume the normal published inventory after the actual owner built
+        # it; the baseline must first reach that owner and its typed refusal.
+        plan_path = project / 'reports/phase3/sta/drv_capture_plan.json'
+        _install_test_freeze(json.loads(plan_path.read_text()), tmp_path, monkeypatch)
+        observed['calls'].append({'argv': list(argv),
+            'network': kwargs['env'].get('VIBEIC_LOCAL_NETWORK_MODE')})
+        if capture._OPENROAD_PROBE in argv:
+            return watchdog.SupervisedResult(0,
+                'OPENROAD_BINARY /neutral/openroad ' + 'b' * 64 + ' 1-g' + 'b' * 40 + '\n',
+                '', 'natural')
+        shell = next((part for part in argv if part.startswith('sta -no_init -exit ')), None)
+        if shell is None:
+            return original_leaf(argv, **kwargs)
+        script = Path(shlex.split(shell)[-1])
+        folder = script.parent
+        control = script.name == 'positive_control.tcl'
+        prefix = 'positive_control_' if control else ''
+        (folder / ('positive_control.rpt' if control else 'violators.rpt')).write_text(
+            _report(fanout=2, fanout_limit=1, cap_limit=1e-6, slew_limit=1e-6,
+                    violators=True) if control else _report(violators=True))
+        (folder / (prefix + 'all_limits.rpt')).write_text(
+            _report(fanout=2, fanout_limit=1, cap_limit=1e-6, slew_limit=1e-6)
+            if control else _report(fanout=2))
+        (folder / (prefix + 'counters.log')).write_text(''.join(
+            f'DRV_COUNTER {kind} {1 if control else 0}\n' for kind in drv.KINDS))
+        if not control:
+            (folder / 'pin_census.tsv').write_text(
+                'u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n')
+            (folder / 'net_census.rpt').write_text('Net n\n Total capacitance: 0.1\n'
+                ' Number of drivers: 1\n Number of loads: 0\n Number of pins: 1\n'
+                '\nDriver pins\n u/Y output (logic)\n\n')
+            (folder / 'disabled_edges.rpt').write_text('')
+            (folder / 'annotation.rpt').write_text('Found 0 unannotated drivers.\n')
+            (folder / 'clocks.rpt').write_text('propagated\n')
+        return watchdog.SupervisedResult(0, 'OpenSTA 3.1 ' + 'a' * 40 + '\n', '', 'natural')
+
+    monkeypatch.setattr(watchdog, 'run_host_supervised', native_leaf)
+    published = planner.capture_and_publish(project, final_state=report,
+                                             capture_point='post_stream')
+    observed['retained_provider'] = image.as_record()
+    return project, published, observed, root, lib, source
+
+
+def test_cold_post_stream_gate_retains_source_and_admits_current_runtime(tmp_path, monkeypatch):
+    """Real capture/main post-stream reader; only expensive process leaves neutral."""
+    import librelane_contract as ll
+    old_namespace = 'net:[neutral-retained-capture]'
+    with monkeypatch.context() as old_context:
+        old_context.setattr(ll, '_local_network_namespace', lambda: old_namespace)
+        project, published, observed, root, lib, source = _cold_local_post_stream_capture(
+            tmp_path, monkeypatch)
+    bundle = json.loads(published.read_text())
+    captured = bundle['identity']['source_tool_provider']
+    old_ref = captured['reference']
+    current = ll.resolve_image(project, record=False)
+    assert current.network_namespace != old_namespace and str(current) != old_ref
+    ignored = {'network_namespace', 'reference'}
+    assert {k: v for k, v in captured.items() if k not in ignored} == {
+        k: v for k, v in current.as_record().items() if k not in ignored}
+    ll._LOCAL_PROVIDER_IDENTITIES.pop(old_ref, None)
+    ll._LOCAL_PROVIDER_IDENTITIES.pop(observed['provenance']['identity'], None)
+    paths = [published, project / 'reports/phase3/sta/drv_capture_plan.json',
+             project / ll.PDK_ROOT_PROVENANCE_REL,
+             *project.glob('phase3/librelane/**/vibeic_receipt.json'),
+             *project.glob('phase3/librelane/**/COMMANDS')]
+    originals = {str(path): drv._sha(path) for path in paths}
+    calls_before = len(observed['calls'])
+    output = tmp_path / 'cold-post-stream-gate.json'
+    rc = drv.main([str(project), '--capture-point', 'post_stream', '--json', str(output)])
+    result = json.loads(output.read_text())
+    observation = {'scope': 'SOURCE_FIXTURE_ONLY retained capture/cold full reader',
+        'rc': rc, 'result': result, 'source_provider': captured,
+        'fresh_runtime': current.as_record(), 'originals': originals,
+        'probe_calls_before': calls_before, 'probe_calls_after': len(observed['calls']),
+        'calls': observed['calls'], 'refusals': {}}
+    note = tmp_path / 'COLD_POST_STREAM_OBSERVATION.json'
+    note.write_text(json.dumps(observation, indent=2) + '\n')
+    assert rc == 0 and result['verdict'] == 'PASS', result
+    assert result['capture_point'] == 'post_stream' and result['final_signoff_capture'] is True
+    assert len(observed['calls']) > calls_before
+    assert {str(path): drv._sha(path) for path in paths} == originals
+    for damage in ('provider_reference', 'missing_provider', 'image_id', 'policy'):
+        wrong = copy.deepcopy(bundle)
+        if damage == 'provider_reference':
+            wrong['identity']['source_tool_provider']['reference'] = 'local://wrong'
+        elif damage == 'missing_provider':
+            wrong['identity'].pop('source_tool_provider')
+        elif damage == 'image_id':
+            wrong['identity']['source_tool_image_id'] = ll.LOCAL_PROVIDER_IDENTITY_PREFIX + '0' * 64
+        else:
+            provider = wrong['identity']['source_tool_provider']
+            provider['network_mode'] = 'none'
+            material = {k: v for k, v in provider.items() if k != 'reference'}
+            provider['reference'] = ll.LOCAL_PROVIDER_IDENTITY_PREFIX + hashlib.sha256(
+                json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            wrong['identity'].update(source_tool_image=provider['reference'],
+                                     source_tool_image_id=provider['reference'])
+        rejected = drv.judge(wrong, project=project)
+        observation['refusals'][damage] = rejected
+        note.write_text(json.dumps(observation, indent=2) + '\n')
+        assert rejected['verdict'] == 'NOT_MEASURED', (damage, rejected)
+    wrong = copy.deepcopy(bundle)
+    _violate(wrong, tmp_path / 'cold-measured-violation', 'max_fanout', value=5, limit=4)
+    measured = drv.judge(wrong, project=project)
+    assert measured['verdict'] == 'FAIL', measured
+    observation['refusals']['measured_violation'] = measured
+    old_gds = Path(bundle['identity']['derivation']['gds']['path'])
+    old_gds.write_text(old_gds.read_text() + 'changed final subject\n')
+    changed = drv.judge(bundle, project=project)
+    observation['refusals']['changed_final_gds'] = changed
+    note.write_text(json.dumps(observation, indent=2) + '\n')
+    assert changed['verdict'] == 'NOT_MEASURED', changed
+    assert any('GDS' in reason and 'sha256' in reason for reason in changed['not_measured']), changed

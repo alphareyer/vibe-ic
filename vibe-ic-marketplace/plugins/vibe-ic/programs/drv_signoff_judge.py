@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import sys
+from librelane_contract import Refusal as LocalProviderRefusal
 from pathlib import Path
 from typing import Any
 
@@ -899,11 +900,17 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             root_doc = json.loads(provenance_path.read_text()) if provenance_path.is_file() else {}
             if root_doc.get("source") == "local_provider" or identity.get("source_tool_provider"):
                 from drv_signoff_anchor import pdk_source_identity
+                from librelane_signoff_evidence import _retained_local_provider
                 source = pdk_source_identity(root_doc, project=project)
-                if (source.get("provider") != identity.get("source_tool_provider") or
+                try:
+                    captured = _retained_local_provider(
+                        project, identity.get("source_tool_provider"),
+                        identity.get("source_tool_image"))
+                except (ValueError, LocalProviderRefusal):
+                    raise ValueError("LOCAL source provider differs from capture") from None
+                if (source.get("provider") != captured.as_record() or
                         source["pdk"] != identity.get("pdk") or
-                        str(source["image"]) != identity.get("source_tool_image") or
-                        source["image_id"] != identity.get("source_tool_image_id")):
+                        identity.get("source_tool_image") != identity.get("source_tool_image_id")):
                     raise ValueError("LOCAL source provider differs from capture")
                 anchor_image = source["image"]
             anchor = image_pdk_anchor(
@@ -917,7 +924,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 fails.append("PDK threshold source differs from pinned image")
             if identity.get("pdk_commit") != anchor.get("pdk_commit"):
                 missing.append("PDK commit differs from pinned image version")
-        except (OSError, ValueError, TypeError, KeyError, AttributeError,
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, LocalProviderRefusal,
                 subprocess.TimeoutExpired) as exc:
             missing.append(f"installed PDK threshold anchor unavailable: {exc}")
     source_texts = {}
@@ -945,14 +952,21 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 missing.append("PDK config is not inside installed PDK root")
             if root_doc.get("source") == "local_provider":
                 from drv_signoff_anchor import pdk_source_identity
+                from librelane_signoff_evidence import _retained_local_provider
                 source_id = pdk_source_identity(root_doc, project=project)["image_id"]
+                captured = _retained_local_provider(
+                    project, identity.get("source_tool_provider"),
+                    identity.get("source_tool_image"))
+                if identity.get("source_tool_image") != identity.get("source_tool_image_id"):
+                    raise ValueError("LOCAL capture image identity is not self-bound")
+                expected_source_id = str(captured)
             else:
                 source_id = (root_doc.get("derivation") or {}).get("image_id")
-            if (source_id !=
-                    (identity.get("source_tool_image_id") or
-                     identity.get("tool_image_digest"))):
+                expected_source_id = (identity.get("source_tool_image_id") or
+                                      identity.get("tool_image_digest"))
+            if source_id != expected_source_id:
                 missing.append("installed PDK root image identity differs from producer image")
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, LocalProviderRefusal):
             missing.append("installed PDK root provenance unavailable")
     sdc = (current.get("sources") or {}).get("signoff_sdc") or {}
     sdc_text = _evidence(sdc, fails, "signoff_sdc")

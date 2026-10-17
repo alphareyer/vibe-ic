@@ -22,12 +22,13 @@ def pdk_source_identity(provenance: dict, *, project: Path) -> dict:
         derivation = provenance["derivation"]
         return {"pdk": derivation["pdk"], "image": derivation["image"],
                 "image_id": derivation["image_id"]}
-    image = _ll.local_provider_identity(
-        project, pdk=(provenance.get("provider") or {}).get("pdk"))
-    provider = _ll._provider_for_image(image)
-    if (provider is None or provenance.get("identity") != str(provider) or
-            provenance.get("provider") != provider.as_record() or
-            Path(provenance["path"]).resolve() != Path(provider.pdk_root).resolve() or
+    from librelane_signoff_evidence import _retained_local_provider
+    try:
+        provider = _retained_local_provider(
+            project, provenance.get("provider"), provenance.get("identity"))
+    except (ValueError, _ll.Refusal):
+        raise ValueError("installed PDK LOCAL provider differs from producer") from None
+    if (Path(provenance["path"]).resolve() != Path(provider.pdk_root).resolve() or
             not provenance.get("pdk") or
             (provider.pdk and provider.pdk != provenance["pdk"])):
         raise ValueError("installed PDK LOCAL provider differs from producer")
