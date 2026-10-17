@@ -415,7 +415,8 @@ def test_normal373_uses_real_die_and_same_boundary_with_owned_fill_only(
 from test_librelane_contract import local_image  # existing real attestation reader fixture
 
 
-@pytest.mark.parametrize('condition', ['current', 'missing_receipt', 'changed_material', 'nonzero'])
+@pytest.mark.parametrize('condition', ['current', 'missing_receipt', 'changed_material', 'nonzero',
+                                      'local_runner', 'local_runner_nonzero'])
 def test_normal373_local_receipts_reach_original_connectivity_consumer(
         tmp_path, monkeypatch, local_image, condition):
     """Real normal producer/LOCAL runner/receipts/consumer; neutral EDA leaves.
@@ -435,6 +436,12 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
     # explicitly chooses the actual attested LOCAL route for the three streams.
     monkeypatch.setattr(LC._ce, 'no_container_route', lambda: True)
     monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    if condition.startswith('local_runner'):
+        launch = json.loads(local_image.receipt.read_text())
+        launch['container_inspect']['HostConfig'].update(
+            NanoCpus=8_000_000_000, Memory=32 * 1024**3, MemorySwap=32 * 1024**3)
+        BF.put(local_image.receipt, launch)
+        monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '32g')
     monkeypatch.setattr(EBP, '_parameters', lambda *a: (R, LC, pdk, ''))
     monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(root)})
     monkeypatch.setattr(LC, 'image_capability', lambda *a: None)
@@ -468,9 +475,23 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
         recipe = folder / (name + '.tcl'); recipe.write_text('\n'.join(lines))
         return recipe
     monkeypatch.setattr(LC, '_openroad_convert', neutral_db_conversion)
-    executed = []
+    executed, geometry_commands, requests = [], [], []
+    geometry_text = ('XOR_TOOL klayout\nXOR_TOP shipped=cal_pg reference=cal_pg\n'
+        'XOR_CENSUS shipped_cells=20 shipped_shapes=1000 reference_cells=10 reference_shapes=10\n'
+        'XOR_BOUNDARY_CENSUS cells=10 shapes=10\n'
+        'XOR_LAYER 32/0 0\nXOR_LAYER 34/4 600\nXOR_DONE\n')
+    original_container = LC.run_container
+    def observe_request(argv, **kwargs):
+        requests.append(list(argv))
+        return original_container(argv, **kwargs)
+    monkeypatch.setattr(LC, 'run_container', observe_request)
 
     def neutral_process(argv, **kwargs):
+        if argv[:2] == ['/usr/bin/time', '-v']:
+            assert argv[2] == shutil.which('klayout')
+            assert kwargs['env']['XOR_BOUNDARY'] == str(stream['stream'])
+            geometry_commands.append(list(argv))
+            return watchdog.SupervisedResult(0, geometry_text, '', 'natural')
         assert argv[:4] == ['python3', '-m', 'librelane.steps', 'run']
         step = argv[argv.index('--id') + 1]
         folder = Path(argv[argv.index('-o') + 1])
@@ -482,7 +503,7 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
             _geometry(gds)
             state[role] = str(gds)
         else:
-            count = 1 if condition == 'nonzero' else 0
+            count = 1 if condition in ('nonzero', 'local_runner_nonzero') else 0
             state['metrics'] = {native.KEY: count}
             (folder / 'xor.xml').write_text(
                 '<report-database><top-cell>cal_pg</top-cell><description>'
@@ -500,18 +521,16 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
     def geometry_process(self, recipe, env, **kwargs):
         assert env['XOR_BOUNDARY'] == Path(stream['stream'])
         self.execution = {'rc': 0, 'argv': ['SOURCE_CONTROL', 'shipped_geometry']}
-        return 0, ('XOR_TOOL klayout\nXOR_TOP shipped=cal_pg reference=cal_pg\n'
-            'XOR_CENSUS shipped_cells=20 shipped_shapes=1000 reference_cells=10 reference_shapes=10\n'
-            'XOR_BOUNDARY_CENSUS cells=10 shapes=10\n'
-            'XOR_LAYER 32/0 0\nXOR_LAYER 34/4 600\nXOR_DONE\n'), ''
-    monkeypatch.setattr(native.ShippedXorRunner, 'run', geometry_process)
+        return 0, geometry_text, ''
+    if not condition.startswith('local_runner'):
+        monkeypatch.setattr(native.ShippedXorRunner, 'run', geometry_process)
     result = EBP.produce_signoff(p, {'step_id': '37.3', 'execution_mode': 'default',
         'top': 'cal_pg', 'pdk_root': str(root), 'image_id': local_image.image})
     assert executed == list(native.STEPS)
     assert result['verdict'] == 'PASS', result
     assert not (p / 'phase3/librelane/37.3-launches.jsonl').exists()
     dependency = native.read_current(p)
-    assert dependency['count'] == (1 if condition == 'nonzero' else 0)
+    assert dependency['count'] == (1 if condition in ('nonzero', 'local_runner_nonzero') else 0)
     assert 'launches' not in dependency['current']['outputs']
     assert dependency['current']['execution']['kind'] == 'retained_local_step_receipt'
     receipts = {}
@@ -524,12 +543,48 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
         (p / dependency['folders'][0] / 'vibeic_receipt.json').unlink()
     elif condition == 'changed_material':
         material.write_text('changed original native material\n')
-    expected = 2 if condition in ('missing_receipt', 'changed_material') else 1 if condition == 'nonzero' else 0
+    expected = 2 if condition in ('missing_receipt', 'changed_material') else 1 if condition in ('nonzero', 'local_runner_nonzero') else 0
     rc, line, report = xor.judge_receipt(p, xor.REPORT_REL)
     assert rc == expected, line
     assert report['verdict'] == 'PASS'  # original geometry is a separate answer
-    assert report['connectivity']['verdict'] == ('FAIL' if condition == 'nonzero' else 'PASS')
+    assert report['connectivity']['verdict'] == ('FAIL' if condition in ('nonzero', 'local_runner_nonzero') else 'PASS')
+    if condition.startswith('local_runner'):
+        assert len(geometry_commands) == 1
+        assert report['runner'] == {'kind': 'host', 'detail': shutil.which('klayout') + ' -b -r'}
+        assert report['current']['execution']['argv'] == geometry_commands[0]
+        assert report['current']['execution']['argv'][0] == '/usr/bin/time'
+        request = requests[-1]
+        assert '--cpus' not in request
+        assert request[request.index('--memory') + 1] == request[request.index('--memory-swap') + 1] == '32g'
+        assert '--rm' in request and request[request.index('--network') + 1] == 'none'
+        assert request[request.index(local_image.image) + 1] == '--skip'
     assert declaration.read_bytes() == original_declaration
     assert executed == list(native.STEPS), 'read-only consumer must not rerun any native step'
     assert all((Path(folder) / 'vibeic_receipt.json').read_bytes() == data
                for folder, data in receipts.items() if (Path(folder) / 'vibeic_receipt.json').exists())
+
+
+def test_shipped_xor_named_docker_retains_its_original_launch_envelope(tmp_path, monkeypatch):
+    """The real Docker parser retains its old resource flags; neutral exec leaf."""
+    import _native373_current as native
+    import _watchdog as watchdog
+    from _stated_eda_image import mock_docker_route, stated_image
+    mock_docker_route(monkeypatch)
+    monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
+    image = stated_image()
+    commands = []
+    def neutral_process(argv, **kwargs):
+        commands.append(list(argv))
+        return watchdog.SupervisedResult(0, 'SOURCE_CONTROL Docker exec leaf', '', 'natural')
+    monkeypatch.setattr(watchdog, 'run_host_supervised', neutral_process)
+    runner = native.ShippedXorRunner(tmp_path, image)
+    assert runner.kind == 'docker_run' and runner.detail == image + ':klayout'
+    rc, _, _ = runner.run(tmp_path / 'xor.rb', {})
+    assert rc == 0 and len(commands) == 1
+    argv = commands[0]
+    assert argv[:2] == ['docker', 'run'] and '--name' in argv
+    assert argv[argv.index('--cpus') + 1] == '2'
+    assert argv[argv.index('--memory') + 1] == argv[argv.index('--memory-swap') + 1] == '4g'
+    assert '--rm' in argv and argv[argv.index('--network') + 1] == 'none'
+    assert argv[argv.index(image) + 1:argv.index(image) + 5] == ['--skip', '/usr/bin/time', '-v', 'klayout']
+    assert runner.execution['argv'] == [v for i, v in enumerate(argv) if i not in (2, 3)]

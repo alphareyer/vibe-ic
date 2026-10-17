@@ -316,13 +316,19 @@ def connectivity(project, comparison):
 
 
 class ShippedXorRunner:
-    """The existing geometric script through a fresh standard container run."""
+    """The geometric script through the existing attested LOCAL or Docker route."""
     kind = "docker_run"
 
     def __init__(self, project, image):
         self.project = Path(project).resolve()
         self.image = image
-        self.detail = image + ":klayout"
+        self.local = lc._provider_for_image(image) is not None or lc._ce.no_container_route()
+        self.binary = "klayout"
+        if self.local:
+            import shutil
+            self.binary = shutil.which("klayout") or "klayout"
+            self.kind = "host"
+        self.detail = self.binary + " -b -r" if self.local else image + ":klayout"
         self.execution = None
 
     def covers(self, path):
@@ -330,12 +336,12 @@ class ShippedXorRunner:
 
     def run(self, script, env, *, path_keys=(), timeout=1800):
         argv = ["docker", "run", *_dmem.docker_memory_flags(), "--rm",
-                "--network", "none", "--cpus", "2",
+                "--network", "none", *([] if self.local else ["--cpus", "2"]),
                 "-v", f"{self.project}:{self.project}", "-e", "QT_QPA_PLATFORM=offscreen"]
         for key, value in env.items():
             argv += ["-e", f"{key}={value}"]
-        argv += [self.image, "--skip", "/usr/bin/time", "-v", "klayout", "-b", "-r", str(script)]
+        argv += [self.image, "--skip", "/usr/bin/time", "-v", self.binary, "-b", "-r", str(script)]
         cp = lc.run_container(argv, supervised=True,
                               log=self.project / "reports/phase3/gds_xor_native.log")
-        self.execution = {"rc": cp.returncode, "argv": argv}
+        self.execution = {"rc": cp.returncode, "argv": list(cp.args) if self.local else argv}
         return cp.returncode, cp.stdout, cp.stderr
