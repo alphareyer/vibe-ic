@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
@@ -249,3 +251,111 @@ def test_worker_does_not_promote_entire_tree_to_producer_inputs(tmp_path, monkey
                        json.dumps({'required_gates': []}))
     worker.execute(inputs.parent, outputs, step_id='32', params={})
     assert seen['files'] == {}
+
+
+def _retained_default_stream(tmp_path, monkeypatch):
+    """Original owner/validators; only native process edges are neutral data."""
+    import klayout.db as db
+    import librelane_contract as LC
+    import librelane_fill_dfm as LF
+    import phase3_one_shot_runner as R
+    import _runner_measurement
+    import test_default_stream_epoch_order as transport
+    geometry = transport._geometry
+
+    def substantive_geometry(path, number=0):
+        geometry(path, number)
+        layout = db.Layout(); layout.read(str(path))
+        top = layout.cell('cal_pg')
+        # Real neutral geometry, not padding or a relaxed size threshold.
+        for index in range(2000):
+            top.shapes(layout.layer(1, 0)).insert(
+                db.Box(index * 2, 10, index * 2 + 1, 11))
+        layout.write(str(path))
+    monkeypatch.setattr(transport, '_geometry', substantive_geometry)
+    project, pdk, calls, _ = transport._transport(tmp_path, monkeypatch)
+    first = LF.default_stream(project, 'top', pdk, '')
+    assert calls == ['primary', 'seal', 'filler-density']
+    # A core-only delivery does not owe the independent pad-ring report.
+    (project / 'input/submission_template/slots/neutral.yaml').unlink()
+    _write(project, 'input/submission_template/tapeout_declaration.json',
+           json.dumps({'answers': {'deliverable': 'HARDMACRO'}}))
+    canonical = Path(first['canonical'])
+    relative = str(canonical.relative_to(project))
+    _write(project, 'provenance.jsonl', json.dumps({
+        'record': 'invocation', 'tool': 'klayout', 'exit_code': 0,
+        'scope': 'SOURCE_FIXTURE controlled native process',
+        'outputs': {relative: 'sha256:' + LC.digest(canonical)},
+        'measurement': _runner_measurement.derive(project, relative, 'klayout'),
+    }) + '\n')
+    monkeypatch.setattr(producers, '_parameters', lambda *_: (R, LC, pdk, ''))
+    monkeypatch.setattr(R, 'step_prestream_gate', lambda *_: R.StepResult(
+        'prestream', 'PASS', 0.0, 'SOURCE_FIXTURE upstream admission',
+        extras={'layout_digest': LC.digest(project / 'phase3/stage3/pnr/routed.def')}))
+    monkeypatch.setattr(R, '_layout_basis', lambda *_: ('fixture-layout', None))
+    monkeypatch.setattr(R, '_vacuous_on_unrouted', lambda *_: None)
+    monkeypatch.setattr(R._ga, 'stream_refusal', lambda *_: None)
+    monkeypatch.setattr(R._ga, 'admit_gds', lambda *_: None)
+    monkeypatch.setattr(R, '_layout_basis_paths', lambda *_: [])
+    monkeypatch.setattr(R, '_chip_path_requests_pad_ring', lambda *_: False)
+    monkeypatch.setattr(R, '_librelane_antenna_gds', lambda *_: None)
+    params = {'step_id': '37', 'top': 'top', 'pdk_name': pdk.name,
+              'pdk_root': str(project / 'fixture_pdk'), 'image_id': first['image'],
+              'execution_mode': 'default',
+              'resolved_input_manifest': _manifest(
+                  project, 'phase3/stage3/pnr/routed.def')}
+    return project, params, first, calls
+
+
+@pytest.mark.parametrize('scenario', [
+    'current_reuse', 'changed_log', 'changed_gds', 'changed_readset',
+    'changed_recipe', 'missing_native_proof', 'density_not_current'])
+def test_default_step37_whole_reuse_reaches_current_consumer(
+        tmp_path, monkeypatch, scenario):
+    import librelane_fill_dfm as LF
+    import phase3_one_shot_runner as R
+    project, params, first, calls = _retained_default_stream(tmp_path, monkeypatch)
+    log = project / 'phase3/stage3/pnr/stream_out.log'
+    before = log.read_bytes(), log.stat().st_mtime_ns
+
+    def after_stream(*_):
+        # Mutate one actual retained artefact after the normal owner returned,
+        # before the native-current collector. Do not stub its validators.
+        targets = {
+            'changed_log': log, 'changed_gds': Path(first['canonical']),
+            'changed_readset': project / 'phase3/stage3/pnr/top.stream_inputs.json',
+            'changed_recipe': project / 'phase3/stage3/pnr/stream_out.py',
+            'missing_native_proof': Path(first['stream_state']).parent / 'vibeic_receipt.json',
+            'density_not_current': project / 'reports/phase3/metal_density.json'}
+        if scenario == 'missing_native_proof':
+            targets[scenario].unlink()
+        elif scenario in targets:
+            targets[scenario].write_bytes(targets[scenario].read_bytes() + b'\nchanged\n')
+    monkeypatch.setattr(R, '_librelane_antenna_gds', after_stream)
+    # Real produce_signoff -> real step_gds -> existing whole-reuse owner;
+    # omitting finishing_receipt at that return site must break the positive.
+    result = producers.produce(project, params)
+    current = result['current_step_declared_producers']
+    consumed = worker.execute_current_step(project, step_id='37', producer=result)
+    assert calls == ['primary', 'seal', 'filler-density'], 'no second native epoch'
+    if scenario != 'current_reuse':
+        assert result['verdict'] == 'NOT_MEASURED'
+        assert 'NATIVE_CURRENT_OUTPUT_UNCHANGED' in current['reason']
+        assert consumed['verdict'] == 'NOT_MEASURED'
+        return
+    assert result['verdict'] == 'PASS', result
+    assert result['finishing_receipt'] == str(project / LF.DEFAULT_STREAM_REL)
+    assert (log.read_bytes(), log.stat().st_mtime_ns) == before
+    adopted = current['retained_outputs']['outputs']
+    assert str(log.relative_to(project)) in adopted
+    assert set(adopted) <= set(current['outputs'])
+    assert consumed['verdict'] == 'PASS', consumed
+    assert consumed['canonical_step_result']['status'] == 'PASS'
+    assert any(row.get('gate') == 'gds_substance_check'
+               and row.get('rc') == 0 for row in consumed['gate_ledger'])
+    # Consumer re-derives promotion/density proof, not just the output hashes.
+    promotion = project / LF.DEFAULT_STREAM_REL
+    promotion.unlink()
+    refused = worker.execute_current_step(project, step_id='37', producer=result)
+    assert refused['verdict'] == 'NOT_MEASURED'
+    assert 'native retained stream refused' in refused['gate_ledger'][0]['reason']

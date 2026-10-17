@@ -20,6 +20,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 import execution_backend_snapshot as snap
 import execution_modes as em
+from librelane_contract import Refusal as LibrelaneRefusal
 
 PNR = 'phase3/stage3/pnr/'
 RPT = 'reports/phase3/'
@@ -1534,7 +1535,8 @@ def produce_signoff(project, params):
                         return {'verdict': pad.status, 'detail': pad.detail}
         if params.get('execution_mode') == 'default':
             return {'verdict': row.status, 'detail': row.detail,
-                    'streamout_engine': row.extras.get('streamout_engine')}
+                    'streamout_engine': row.extras.get('streamout_engine'),
+                    'finishing_receipt': row.extras.get('finishing_receipt')}
         return _step37_streamout_result(project, route, row)
     elif sid == '37.3':
         import gds_xor_check as xor
@@ -1607,6 +1609,51 @@ def _run_current_step_declared_producers(project, step_id):
         }
 
 
+def _step37_retained_output_sources(project, finishing_receipt):
+    """Recheck the existing whole-stream owner, then bind its publications.
+
+    The canonical transcript is copied from the native invocation at normal
+    publication. Its equality is not part of validate_default_stream, so it
+    must also match the original StreamOut receipt before it can be adopted.
+    """
+    import librelane_fill_dfm as fill
+    import _stream_input_record as sir
+    project = Path(project).resolve()
+    if (not isinstance(finishing_receipt, str)
+            or Path(finishing_receipt).resolve() !=
+            (project / fill.DEFAULT_STREAM_REL).resolve()):
+        raise ValueError('Step37 retained finishing receipt is not the owning promotion')
+    record = fill.validate_default_stream(project)
+    arm = fill._load(project / fill.RECORD_REL)['gds']['librelane']
+    judged = fill.current_metal_density(project, arm, record)
+    if arm.get(fill.DENSITY_METRIC) != 0 or judged.get('verdict') != 'PASS':
+        raise ValueError('Step37 retained per-layer density did not pass')
+    pnr = project / 'phase3/stage3/pnr'
+    inputs = sir.record_path(pnr / (record['file_top'] + '.gds'))
+    readset, why = sir.read(inputs)
+    if readset is None:
+        raise ValueError('Step37 retained readset is unavailable: ' + str(why))
+    native = Path(record['stream_state']).parent
+    receipt = fill.validate_step_receipt(native, 'KLayout.StreamOut')
+    log_sha = receipt['sha256'].get('invocation.log')
+    if not log_sha or snap.sha(native / 'invocation.log') != log_sha:
+        raise ValueError('Step37 retained native invocation log is unbound')
+    sources = {record[key]: record[key + '_sha256']
+               for key in ('canonical', 'pnr_gds')}
+    sources.update({str(inputs): record['stream_inputs_sha256'],
+                    str(project / readset['recipe']['project_rel']):
+                        readset['recipe']['sha256'],
+                    str(pnr / 'stream_out.log'): log_sha})
+    bound = {}
+    for raw, expected in sources.items():
+        path = Path(raw)
+        relative = str(path.relative_to(project))
+        if path.is_symlink() or not path.is_file() or snap.sha(path) != expected:
+            raise ValueError('Step37 retained publication changed: ' + relative)
+        bound[relative] = expected
+    return bound
+
+
 def _native_current_step_receipt(project, step_id, params, result,
                                  started_ns, prior_outputs=None):
     """Create the current receipt for a registry-backed native producer.
@@ -1671,6 +1718,7 @@ def _native_current_step_receipt(project, step_id, params, result,
         receipt['verdict'] = 'NOT_MEASURED'
         receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_CONTRACT_UNAVAILABLE: {exc}'
         return receipt
+    retained_sources = None
     for spec, paths in contract.items():
         receipt['output_specs'].append(spec)
         for raw, digest in sorted(paths.items()):
@@ -1688,9 +1736,23 @@ def _native_current_step_receipt(project, step_id, params, result,
             before = prior_outputs.get(raw)
             after = _native_output_identity(path)
             if before is not None and after == before:
-                receipt['verdict'] = 'NOT_MEASURED'
-                receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_UNCHANGED: {raw}'
-                return receipt
+                try:
+                    if (sid != '37' or verdict != 'PASS'
+                            or params.get('execution_mode') != 'default'):
+                        raise ValueError('no retained Default stream producer')
+                    if retained_sources is None:
+                        retained_sources = _step37_retained_output_sources(
+                            project, result.get('finishing_receipt'))
+                    if retained_sources.get(raw) != digest:
+                        raise ValueError('output is not bound by the retained stream')
+                except (OSError, ValueError, KeyError, TypeError, em.Refusal, LibrelaneRefusal) as exc:
+                    receipt['verdict'] = 'NOT_MEASURED'
+                    receipt['reason'] = f'NATIVE_CURRENT_OUTPUT_UNCHANGED: {raw}; {exc}'
+                    return receipt
+                adoption = receipt.setdefault('retained_outputs', {
+                    'execution_mode': 'default',
+                    'finishing_receipt': result['finishing_receipt'], 'outputs': {}})
+                adoption['outputs'][raw] = digest
             actual = snap.sha(path)
             if actual != digest:
                 receipt['verdict'] = 'NOT_MEASURED'
@@ -1757,6 +1819,22 @@ def _current_step_producer_authority(record, project=None):
                     return False, f"native current producer output changed: {raw}", "NOT_MEASURED"
             except OSError:
                 return False, f"native current producer output absent: {raw}", "NOT_MEASURED"
+        adoption = record.get('retained_outputs')
+        if adoption is not None:
+            try:
+                if (sid != '37' or not isinstance(adoption, dict)
+                        or adoption.get('execution_mode') != 'default'
+                        or not isinstance(adoption.get('outputs'), dict)
+                        or not adoption['outputs']):
+                    raise ValueError('invalid retained stream adoption')
+                sources = _step37_retained_output_sources(
+                    project, adoption.get('finishing_receipt'))
+                for raw, digest in adoption['outputs'].items():
+                    if (raw not in outputs or outputs[raw]['sha256'] != digest
+                            or sources.get(raw) != digest):
+                        raise ValueError('retained output is not bound: ' + str(raw))
+            except (OSError, ValueError, KeyError, TypeError, em.Refusal, LibrelaneRefusal) as exc:
+                return False, f"native retained stream refused: {exc}", "NOT_MEASURED"
         return True, "", "PASS"
     results = record.get("results")
     if not isinstance(results, list):
