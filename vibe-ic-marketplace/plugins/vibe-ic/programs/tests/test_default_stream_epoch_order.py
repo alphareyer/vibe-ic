@@ -447,12 +447,11 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
     def configs(project, image, name, steps, **kwargs):
         assert steps == list(native.STEPS)
         assert kwargs['overlay']['DIE_AREA'][0] == LC._def_die_area(Path(stream['filled_def']))
+        # Reuse the fixture's original canonical stream config/readset rather
+        # than declaring a second list of its four native materials.
+        source_config = json.loads((Path(stream['stream_state']).parent / 'config.json').read_text())
         paths = {step: BF.put(p / native.CONFIG / (step + '.json'), {
-            'meta': {'step': step}, 'DESIGN_NAME': 'cal_pg', 'PDK': 'neutral',
-            'TECH_LEFS': [str(material)],
-            'KLAYOUT_TECH': str(root / 'neutral/stream.lyt'),
-            'KLAYOUT_PROPERTIES': str(root / 'neutral/stream.lyp'),
-            'KLAYOUT_DEF_LAYER_MAP': str(root / 'neutral/stream.lym')}) for step in steps}
+            **source_config, 'meta': {'step': step}}) for step in steps}
         for step, path in paths.items():
             inputs = ['mag_gds', 'klayout_gds'] if step == native.STEPS[-1] else ['odb', 'def', 'nl', 'sdc']
             BF.put(LC.views_path(path), {'step': step, 'inputs': inputs, 'outputs': []})
@@ -478,8 +477,9 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
         state = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
         if step in native.STEPS[:2]:
             role = 'mag_gds' if step == native.STEPS[0] else 'klayout_gds'
-            gds = folder / (role + '.gds')
-            _geometry(gds, 1 if role == 'mag_gds' else 2)
+            # Two file encodings retain neutral equal geometry but distinct bytes.
+            gds = folder / (role + ('.oas' if role == 'mag_gds' else '.gds'))
+            _geometry(gds)
             state[role] = str(gds)
         else:
             count = 1 if condition == 'nonzero' else 0
