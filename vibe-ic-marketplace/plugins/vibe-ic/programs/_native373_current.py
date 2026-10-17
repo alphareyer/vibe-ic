@@ -53,6 +53,29 @@ def _source_def(project):
     return project / 'phase3/stage3/pnr/routed.def'
 
 
+def _source_inputs(project, definition):
+    """Use the consumed fill producer's explicit views on the Default route."""
+    import execution_policy
+    pnr = project / 'phase3/stage3/pnr'
+    design = pc.design_of(definition)
+    paths = {'def': definition, 'netlist': pnr / f'{design}_pnr.v',
+             'sdc': pnr / 'constraint.sdc'}
+    if execution_policy.request()['mode'] == 'default':
+        import librelane_fill_dfm as fill
+        fill.validate_fill_consumption(project)
+        tool = _read(project / fill.RECORD_REL)['odb']['tool']
+        state_path = Path(tool['state']).resolve(strict=True)
+        receipt = lc.validate_step_receipt(state_path.parent, fill.ODB_FILL_STEP)
+        state = _read(state_path)
+        for role, key in (('netlist', 'nl'), ('sdc', 'sdc')):
+            path = Path(state[key]).resolve(strict=True)
+            _require(path.is_relative_to(state_path.parent)
+                     and receipt['sha256'].get(str(path.relative_to(state_path.parent)))
+                     == pc.digest(path), 'NATIVE373_FILL_VIEW_UNBOUND: ' + role)
+            paths[role] = path
+    return paths
+
+
 def read_current(project, record=None):
     """Validate retained native producers, inputs, material and typed count."""
     project = Path(project).resolve()
@@ -64,11 +87,8 @@ def read_current(project, record=None):
                           required_outputs=("magic_gds", "klayout_gds", "xor_report", "log", "launches"),
                           marker="Exit status: 0")
     _require(not refusal, refusal)
-    pnr = project / "phase3/stage3/pnr"
     design = pc.design_of(_path(project, current["inputs"]["def"]))
-    for role, path in (("def", _source_def(project)),
-                       ("netlist", pnr / f"{design}_pnr.v"),
-                       ("sdc", pnr / "constraint.sdc")):
+    for role, path in _source_inputs(project, _source_def(project)).items():
         _require(pc.entry(project, path) == current["inputs"][role],
                  "NATIVE373_CURRENT_SOURCE_CHANGED: " + role)
     _require(doc.get("steps") == list(STEPS), "NATIVE373_WRONG_CHAIN")
@@ -168,9 +188,7 @@ def produce(project, routed_def):
     pdk, technology = pc.pdk_of(project)
     image = lc.resolve_image(project)
     pdk_root = Path(lc.pdk_root_resolution(project, pdk, image=image)["path"])
-    pnr = project / "phase3/stage3/pnr"
-    sources = {"def": routed_def, "netlist": pnr / f"{design}_pnr.v",
-               "sdc": pnr / "constraint.sdc", "technology": technology}
+    sources = {**_source_inputs(project, routed_def), "technology": technology}
     inputs = {role: pc.entry(project, source) for role, source in sources.items()}
     launcher = str(Path(__file__).with_name("_native373_docker.py"))
     journal = project / "phase3/librelane/37.3-launches.jsonl"
