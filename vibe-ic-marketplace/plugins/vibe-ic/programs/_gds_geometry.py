@@ -280,7 +280,7 @@ def read_layout(path: Path) -> Layout:
                 continue                       # a property of no open element
             elif name == "LAYER" and len(payload) >= 2:
                 element.layer = struct.unpack_from(">h", payload, 0)[0]
-            elif name in ("DATATYPE", "BOXTYPE") and len(payload) >= 2:
+            elif name in ("DATATYPE", "BOXTYPE", "TEXTTYPE") and len(payload) >= 2:
                 element.datatype = struct.unpack_from(">h", payload, 0)[0]
             elif name == "XY":
                 count = len(payload) // 4

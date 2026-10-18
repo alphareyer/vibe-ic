@@ -987,13 +987,115 @@ def _step_zero_area(ev: StepEvidence, geom: Optional[Dict[str, Any]]) -> None:
                        f"{geom['zero_area_polygons'][0]}")
 
 
+def _native_library_text_pairs(project: Path, layout: Path, layout_sha: str):
+    """TEXT purposes in the selected stream's receipt-bound PDK libraries.
+
+    The native COMMANDS readset owns the file roles, not CELL_GDS projections,
+    the candidate's contents or library/cell names. No native tool is invoked.
+    """
+    import shlex
+    import librelane_contract as lc
+    import librelane_fill_dfm as lf
+    import librelane_signoff_evidence as native
+    import _stream_input_record as sir
+    try:
+        record = lc._load(project / lf.DEFAULT_STREAM_REL)
+        if (lc._load(project / lf.RECORD_REL).get('default_stream') != record
+                or Path(record['canonical']).resolve() != layout.resolve()
+                or record['canonical_sha256'] != layout_sha
+                or record['source_sha256'] != layout_sha):
+            raise ValueError('selected StreamOut promotion differs from the candidate')
+        state = Path(record['stream_state']).resolve()
+        folder = state.parent
+        if (state.name != 'state_out.json'
+                or not folder.is_relative_to((project / 'phase3/librelane').resolve())
+                or 'attempts' in folder.relative_to(project.resolve()).parts
+                or lc.digest(state) != record['stream_state_sha256']):
+            raise ValueError('selected StreamOut state is unbound')
+        receipt = lc.validate_step_receipt(folder, 'KLayout.StreamOut')
+        fp = receipt['input']
+        switch_path = project / 'phase3/librelane_switch.json'
+        switch = lc._load(switch_path) if switch_path.is_file() else {}
+        if 'local_provider' in fp:
+            image = fp.get('image')
+            native._retained_local_provider(project, fp['local_provider'], image)
+        else:
+            image = native._image(project, switch)
+        mounts = native._pdk_mounts(project, switch, folder, image)
+        config_path = project / 'phase3/librelane' / lf.CONFIG_FOLDER / 'KLayout.StreamOut.json'
+        config = lc._load(config_path)
+        if (fp.get('image') != image or record.get('image') != image
+                or fp.get('config') != lc.digest(config_path)
+                or config.get('meta', {}).get('step') != 'KLayout.StreamOut'
+                or fp.get('config_files') != lc.config_file_hashes(config, mounts)
+                or config.get('DESIGN_NAME') != record['design_name']
+                or lc._load(state).get('klayout_gds') != record['stream']):
+            raise ValueError('current StreamOut configuration differs from the producer')
+        inputs_path = sir.record_path(Path(record['pnr_gds']))
+        readset, why = sir.read(inputs_path)
+        if (readset is None or lc.digest(inputs_path) != record['stream_inputs_sha256']
+                or readset.get('engine') != 'klayout'
+                or readset.get('top') != record['file_top']):
+            raise ValueError(why or 'selected StreamOut readset changed')
+        cli = readset.get('native_cli') or {}
+        commands, argv = Path(cli.get('commands') or ''), cli.get('argv') or []
+        if (commands.resolve() != (folder / 'COMMANDS').resolve()
+                or lc.digest(commands) != cli.get('commands_sha256')
+                or argv not in [shlex.split(line) for line in commands.read_text().splitlines()
+                                if line.strip()]):
+            raise ValueError('native StreamOut COMMANDS are unbound')
+        entries = {e['argv_index']: e for e in cli.get('inputs', [])}
+        indices = [i + 1 for i in range(3, len(argv), 2)
+                   if argv[i] == '--with-gds-file']
+        if not indices:
+            raise ValueError('native StreamOut names no PDK GDS libraries')
+        from tapeout_precheck import resolve_pdk
+        declared_pdk, _ = resolve_pdk(project)
+        pdk = declared_pdk or switch.get('pdk')
+        if not pdk or config.get('PDK') != pdk:
+            raise ValueError('StreamOut library process differs from the selected PDK')
+        root = Path(lc._load(project / 'phase3/librelane_pdk_root.provenance.json')['path'])
+        volume = (root / pdk).resolve()
+        pairs, sources = set(), []
+        for index in indices:
+            entry = entries[index]
+            guest = Path(argv[index])
+            source = guest
+            for host, mount in sorted(mounts, key=lambda m: len(str(m[1])), reverse=True):
+                if guest.is_relative_to(mount):
+                    source = Path(host) / guest.relative_to(mount)
+                    break
+            source = source.resolve()
+            expected = entry.get('sha256')
+            if (entry.get('path') != str(guest) or not expected
+                    or (fp.get('config_files') or {}).get(str(guest)) != expected
+                    or not source.is_relative_to(volume) or source == layout.resolve()
+                    or lc.digest(source) != expected):
+                raise ValueError('native PDK library material is missing, foreign or changed')
+            library = _geom.read_layout(source)
+            text = {(el.layer, el.datatype) for cell in library.cells.values()
+                    for el in cell.elements if el.kind == 'TEXT'
+                    and el.layer is not None and el.datatype is not None}
+            pairs.update(text)
+            sources.append({'path': str(source), 'native_path': str(guest),
+                            'sha256': expected,
+                            'text_pairs': sorted(f'{l}/{d}' for l, d in text)})
+        return pairs, sources, ''
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
+            lc.Refusal, _geom.GdsError) as exc:
+        return set(), [], str(exc)
+
+
 def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
                            forbidden: Any,
                            allowed: Optional[set] = None,
                            authority: Optional[str] = None,
                            authority_tried: Optional[List[str]] = None,
                            authority_why: str = "",
-                           flow_markers: Optional[Tuple] = None) -> None:
+                           flow_markers: Optional[Tuple] = None,
+                           text_pairs: Optional[set] = None,
+                           physical_pairs: Optional[set] = None,
+                           annotation_authority: Optional[Tuple] = None) -> None:
     """FORBIDDEN IS THE COMPLEMENT OF THE PROCESS, NOT A LIST SOMEBODY TYPED.
 
     Owner ruling, 2026-09-06 (vibe-ic#2058): this rung is DERIVED, never
@@ -1072,12 +1174,21 @@ def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
     _flow_exact, _flow_base, _flow_why, _flow_tried = flow_markers or (
         set(), None, "the flow's marker declaration was not consulted", [])
     _outside = [(l, d) for (l, d) in layers if (l, d) not in allowed]
+    _annotation, _annotation_sources, _annotation_why = annotation_authority or (set(), [], '')
+    _library_text = {pair for pair in _outside if pair in (text_pairs or set())
+                     and pair not in (physical_pairs or set()) and pair in _annotation
+                     and not _pdkauth.is_flow_marker(pair[0], pair[1], _flow_exact, _flow_base)}
+    if annotation_authority is not None:
+        ev.measured['annotation_authority'] = _annotation_sources
+        ev.measured['annotation_authority_refusal'] = _annotation_why
+        ev.measured['library_text_layers'] = sorted(f'{l}/{d}' for l, d in _library_text)
     _mine = sorted((f"{l}/{d}" for (l, d) in _outside
                     if _pdkauth.is_flow_marker(l, d, _flow_exact, _flow_base)),
                    key=_key)
     unmapped = sorted((f"{l}/{d}" for (l, d) in _outside
                        if not _pdkauth.is_flow_marker(l, d, _flow_exact,
-                                                      _flow_base)),
+                                                      _flow_base)
+                       and (l, d) not in _library_text),
                       key=_key)
     ev.measured["unmapped_layers"] = unmapped
     ev.measured["flow_marker_layers"] = _mine
@@ -1099,12 +1210,15 @@ def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
         ev.verdict = PASS
         ev.evidence = (f"every one of the {len(used)} layer/datatype pair(s) "
                        f"in this layout is accounted for: "
-                       f"{len(used) - len(_mine)} by the technology's own "
+                       f"{len(used) - len(_mine) - len(_library_text)} by the technology's own "
                        f"layer table ({authority}, {len(allowed)} pair(s))"
                        + (f" and {len(_mine)} by this flow's own marker "
                           f"declaration ({', '.join(_mine)}), which "
                           f"General.FlowMarkerLayers reports in full"
                           if _mine else "")
+                       + (f" and {len(_library_text)} TEXT purpose(s) by the selected "
+                          "native PDK library views (sources and digests disclosed)"
+                          if _library_text else "")
                        + (f". None of the {len(declared)} additionally "
                           f"declared forbidden layer(s) is in use"
                           if declared else ""))
@@ -1608,6 +1722,7 @@ def evaluate(project: Path,
 
     geom: Optional[Dict[str, Any]] = None
     layers: Optional[Dict[Any, int]] = None
+    text_pairs, physical_pairs = set(), set()
     read_error: Optional[str] = None
     try:
         lay = _geom.read_layout(chosen)
@@ -1616,6 +1731,12 @@ def evaluate(project: Path,
                and declared_top in lay.cells else None)
         geom = _geom.summarise(lay, top)
         layers = _geom.layers_used(lay)
+        for cell in lay.cells.values():
+            for el in cell.elements:
+                if el.layer is not None:
+                    pair = (el.layer, el.datatype if el.datatype is not None else 0)
+                    (text_pairs if el.kind == 'TEXT' and el.datatype is not None
+                     else physical_pairs).add(pair)
         rep.geometry = geom
     except _geom.GdsError as exc:
         read_error = str(exc)
@@ -1647,6 +1768,10 @@ def evaluate(project: Path,
     # What THIS FLOW declares it writes into a stream. Derived from the writer's
     # own constants, asked once, consumed by two rungs.
     flow_markers = _pdkauth.flow_marker_layers()
+    annotation_authority = None
+    if allowed is not None and any(pair not in allowed and not _pdkauth.is_flow_marker(
+            pair[0], pair[1], flow_markers[0], flow_markers[1]) for pair in text_pairs):
+        annotation_authority = _native_library_text_pairs(project, chosen, rep.layout_sha256)
     rep.flow_marker_declaration = {
         "basis": flow_markers[2],
         "exact_pairs": sorted(f"{l}/{d}" for l, d in flow_markers[0]),
@@ -1689,7 +1814,9 @@ def evaluate(project: Path,
                 ev, layers, _decl.answer(doc, _decl.FORBIDDEN_LAYERS_KEY),
                 allowed=allowed, authority=layer_authority,
                 authority_tried=(layer_tried or _volume_tried),
-                authority_why=volume_why, flow_markers=flow_markers)
+                authority_why=volume_why, flow_markers=flow_markers,
+                text_pairs=text_pairs, physical_pairs=physical_pairs,
+                annotation_authority=annotation_authority)
         elif step.step_id == "General.FlowMarkerLayers":
             _step_flow_marker_layers(ev, layers, flow_markers)
         elif step.delegate is not None:
