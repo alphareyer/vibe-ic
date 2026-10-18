@@ -1388,7 +1388,8 @@ def _log_surviving_artefact(outputs, *, produced_by: str,
                             tool: str | None = None,
                             exit_code: int | None = None,
                             survived: Dict[str, Any] | None = None,
-                            project: Path | None = None) -> None:
+                            project: Path | None = None,
+                            reconstructed: bool = False) -> None:
     """Record artefacts AFTER the verdict that decides whether they survive.
 
     vibe-ic#1330. `_docker_exec(..., outputs=[...])` hashes the declared paths
@@ -1433,6 +1434,8 @@ def _log_surviving_artefact(outputs, *, produced_by: str,
     }
     if marker:
         entry["marker"] = marker
+    if reconstructed:
+        entry.update(reconstructed=True, duration_ms=None)
     # A SHIPPED product of a session that exited non-zero (review we8o6v9hg):
     # the tool that wrote the bytes, the exit code the runner APPLIED when it
     # judged the crash survivable, and the crash itself -- raw rc, signal,
@@ -57621,18 +57624,26 @@ def _step37_declare_streamout_gds_provenance(
         # and optional topup. Its final source can differ from the raw stream.
         # Reconstruct an artefact declaration, never a second tool invocation.
         source_sha = _file_sha256(source)
-        if _newest_declared_sha(project, _project_rel(project, source) or '') != source_sha:
-            _log_surviving_artefact(
-                [str(source)], project=project, tool='klayout', exit_code=0,
-                produced_by='librelane_default_finishing',
-                marker='retained native finishing closure: ' + fill.DEFAULT_STREAM_REL)
-        for output in (pnr_gds, canon_gds):
-            if output.resolve() == source.resolve():
-                continue
-            if _newest_declared_sha(project, _project_rel(project, output) or '') == source_sha:
-                continue
+        outputs = [output for output in (pnr_gds, canon_gds)
+                   if output.resolve() != source.resolve() and
+                   _newest_declared_sha(project, _project_rel(project, output) or '') != source_sha]
+        if not outputs:
+            return
+        # Native lanes are reusable working locations. Retain their validated
+        # bytes independently, as the direct stream/finishing chain does.
+        retained = pnr_gds.parent / 'streamout' / f'{top}.finished.{time.time_ns()}.gds'
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, retained)
+        if _file_sha256(retained) != source_sha:
+            raise ValueError('native finishing source changed while being retained')
+        _log_surviving_artefact(
+            [str(retained)], project=project, tool='klayout', exit_code=0,
+            produced_by='librelane_default_finishing_retention', reconstructed=True,
+            marker=f'byte-identical retained copy of {source}; '
+                   f'validated native finishing closure: {fill.DEFAULT_STREAM_REL}; no tool invocation')
+        for output in outputs:
             _declare_immutable_transform(
-                project, source, output, 'step37_default_finishing_publication',
+                project, retained, output, 'step37_default_finishing_publication',
                 'klayout', 'publish byte-identical validated finished GDS')
         return
     promotion = project / "phase3/librelane/37-promotion.json"

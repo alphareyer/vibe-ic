@@ -747,8 +747,32 @@ def _transform_input_findings(project: Path, entries: List[dict],
                             except OSError:
                                 actual = None
                             if actual is None or actual.lower() != claimed.lower():
-                                reason = (f"input '{rel}' retained bytes are {actual or 'unreadable'}, "
-                                          f"not {claimed}")
+                                retained = None
+                                # A historical edge may name a working alias
+                                # whose original bytes the collector retained.
+                                # Its earlier successful producer was checked
+                                # above; only the exact managed version counts.
+                                import step_output_collector as versions
+                                for version in versions.retained_before_versions(
+                                        project, rel, claimed[7:].lower()):
+                                    try:
+                                        path = version['path']
+                                        if (_is_inside_project(project, path) and
+                                                shipped(str(path.relative_to(project.resolve()))) and
+                                                path.stat().st_size == version['size'] and
+                                                _file_sha256(path).lower() == claimed[7:].lower()):
+                                            retained = version
+                                            break
+                                    except OSError:
+                                        continue
+                                if retained is None:
+                                    reason = (f"input '{rel}' retained bytes are {actual or 'unreadable'}, "
+                                              f"not {claimed}")
+                                else:
+                                    findings.append(ProvenanceFinding(
+                                        i, tool, "PROVENANCE_TRANSFORM_INPUT_RETAINED",
+                                        f"input '{rel}' {claimed} verified at {retained['path']} "
+                                        f"from {retained['metadata']}", severity="DISCLOSED"))
                     if reason:
                         findings.append(ProvenanceFinding(
                             i, tool, "PROVENANCE_TRANSFORM_INPUT_INVALID", reason))

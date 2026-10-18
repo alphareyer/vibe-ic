@@ -273,3 +273,133 @@ def test_reextracted_spef_retains_openrcx_bytes_and_declares_augmentation(tmp_pa
     assert C.audit(project)[0] == "PASS"
     output.write_bytes(b"unlogged rewrite")
     assert "PROVENANCE_HASH_MISMATCH" in {f.rule for f in C.audit(project)[1]}
+
+
+def test_historical_transform_reads_exact_managed_before_version(tmp_path):
+    import step_output_collector as versions
+
+    project, source, _middle, head = _immutable_chain(tmp_path)
+    attempt = versions.begin_step(project, '37')
+    with versions.active_steps(project, [attempt]):
+        versions.retain_before(project, '37', [source])
+    versions.finish_step(project, attempt, verdict='FAIL')
+    epoch = project / attempt['storage_root'] / attempt['folder']
+    metadata = epoch / 'before/outputs.json'
+    before = json.loads(metadata.read_text())
+    source_rel = source.relative_to(project).as_posix()
+    row = next(row for row in before['outputs'] if row['rel'] == source_rel)
+    snapshot = metadata.parent / row['snapshot']
+    saved_metadata, saved_snapshot = metadata.read_bytes(), snapshot.read_bytes()
+    rows = _rows(project)
+    source.write_bytes(b'new producer version')
+    rows.append({'tool': 'layout', 'exit_code': 0,
+                 'outputs': {source_rel: _sha(source.read_bytes())}})
+    ledger = project / 'provenance.jsonl'
+    ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    saved_ledger = ledger.read_bytes()
+    report = tmp_path / 'history-check.json'
+    rc = C.main([str(project), '--json', str(report)])
+    assert rc == 0, 'the exact managed before-version did not retain the historical input'
+    payload = json.loads(report.read_text())
+    disclosures = [f for f in payload['findings']
+                   if f['rule'] == 'PROVENANCE_TRANSFORM_INPUT_RETAINED']
+    assert len(disclosures) == 1 and str(snapshot) in disclosures[0]['detail']
+    assert disclosures[0]['severity'] == 'DISCLOSED'
+    assert ledger.read_bytes() == saved_ledger
+    head_bytes = head.read_bytes()
+    for damage in ('wrong_rel', 'wrong_hash', 'changed_snapshot', 'missing_snapshot',
+                   'missing_before', 'failed_prior', 'missing_prior',
+                   'latest_output_changed', 'missing_current_input', 'wrong_owner'):
+        metadata.write_bytes(saved_metadata)
+        snapshot.write_bytes(saved_snapshot)
+        ledger.write_bytes(saved_ledger)
+        head.write_bytes(head_bytes)
+        source.write_bytes(b'new producer version')
+        original_owner = (epoch / 'outputs.json').read_bytes()
+        if damage in ('wrong_rel', 'wrong_hash'):
+            broken = json.loads(saved_metadata)
+            target = next(r for r in broken['outputs'] if r['rel'] == source_rel)
+            target['rel' if damage == 'wrong_rel' else 'sha256'] = (
+                'unrelated/file.gds' if damage == 'wrong_rel' else '0' * 64)
+            metadata.write_text(json.dumps(broken))
+        elif damage == 'changed_snapshot':
+            snapshot.write_bytes(b'changed retained material')
+        elif damage == 'missing_snapshot':
+            snapshot.unlink()
+        elif damage == 'missing_before':
+            metadata.unlink()
+        elif damage in ('failed_prior', 'missing_prior'):
+            broken = json.loads('[' + ','.join(saved_ledger.decode().splitlines()) + ']')
+            if damage == 'failed_prior':
+                broken[0]['exit_code'] = 1
+            else:
+                broken.pop(0)
+            ledger.write_text(''.join(json.dumps(r) + '\n' for r in broken))
+        elif damage == 'latest_output_changed':
+            head.write_bytes(b'unlogged latest output edit')
+        elif damage == 'missing_current_input':
+            source.unlink()
+        else:
+            broken = json.loads(original_owner)
+            broken['folder'] = 'another/owner/folder'
+            (epoch / 'outputs.json').write_text(json.dumps(broken))
+        assert C.main([str(project), '--json', str(report)]) == 1, damage
+        assert json.loads(report.read_text())['errors_count'] > 0, damage
+        print('HISTORICAL_INPUT_REFUSED', damage)
+        (epoch / 'outputs.json').write_bytes(original_owner)
+    metadata.write_bytes(saved_metadata)
+    snapshot.write_bytes(saved_snapshot)
+    source.write_bytes(b'new producer version')
+    head.write_bytes(head_bytes)
+    ledger.write_bytes(saved_ledger)
+    assert C.main([str(project), '--json', str(report)]) == 0
+    assert ledger.read_bytes() == saved_ledger
+
+
+def test_default_publication_retains_independent_versions(tmp_path, monkeypatch):
+    import librelane_fill_dfm as fill
+
+    project = _project(tmp_path)
+    source = project / 'phase3/librelane/reusable/finished.gds'
+    source.parent.mkdir(parents=True)
+    pnr = project / 'phase3/stage3/pnr/unit.gds'
+    canonical = project / 'phase3/stage4/gds/unit.gds'
+    canonical.parent.mkdir(parents=True)
+    record = {}
+    # Only the already-qualified native/material leaf is substituted. Real
+    # publication, copying, declaration, collector and checker are exercised.
+    monkeypatch.setattr(fill, 'validate_default_stream', lambda _p: record)
+    monkeypatch.setattr(fill, 'current_metal_density', lambda *_a: {'verdict': 'PASS'})
+    monkeypatch.setattr(fill, '_load', lambda _p: {'gds': {'librelane': {fill.DENSITY_METRIC: 0}}})
+    report = tmp_path / 'publication-check.json'
+    retained = []
+    try:
+        for data in (b'first qualified source fixture', b'second qualified source fixture'):
+            for path in (source, pnr, canonical):
+                path.write_bytes(data)
+            digest = _sha(data)[7:]
+            record.update(file_top='unit', pnr_gds=str(pnr), canonical=str(canonical),
+                          source=str(source), source_sha256=digest,
+                          pnr_gds_sha256=digest, canonical_sha256=digest)
+            R._step37_declare_streamout_gds_provenance(project, 'unit', default_finishing=True)
+            transforms = [r for r in _rows(project) if r.get('record') == 'declared_transform']
+            version = project / next(iter(transforms[-1]['inputs']))
+            assert version != source, 'native publication still points a transform at its mutable source'
+            assert version.read_bytes() == data
+            retained.append((version, data))
+            assert all(path.read_bytes() == old for path, old in retained)
+            assert C.main([str(project), '--json', str(report)]) == 0
+        assert retained[0][0] != retained[1][0]
+        artefacts = [r for r in _rows(project) if r.get('record') == 'artefact']
+        assert len(artefacts) == 2
+        assert all(r['reconstructed'] is True and r['duration_ms'] is None and
+                   'no tool invocation' in r['marker'] for r in artefacts)
+        ledger = (project / 'provenance.jsonl').read_bytes()
+        R._step37_declare_streamout_gds_provenance(project, 'unit', default_finishing=True)
+        assert (project / 'provenance.jsonl').read_bytes() == ledger
+        assert len(list(pnr.parent.glob('streamout/*.gds'))) == 2
+        retained[0][0].write_bytes(b'changed immutable source')
+        assert C.main([str(project), '--json', str(report)]) == 1
+        print('IMMUTABLE_PUBLICATION_REFUSED', 'changed_retained_source')
+    finally:
+        R.set_invocation_provenance_sink(None)

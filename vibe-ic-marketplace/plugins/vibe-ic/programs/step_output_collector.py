@@ -287,6 +287,45 @@ def retain_before(project: Path, step_id: str, paths) -> None:
             raise OSError('producer history could not be retained: ' + '; '.join(errors))
 
 
+
+def retained_before_versions(project: Path, rel: str, sha256: str):
+    """Locate existing managed pre-producer copies of one exact file version.
+
+    An unsuccessful attempt can still retain its predecessor's bytes. These
+    copies establish location, never producer success or a current verdict;
+    the consumer must verify their recorded size and actual digest.
+    """
+    project = Path(project).resolve()
+    root = _versions_root(project)
+    for metadata in sorted(root.glob('*/*/*/before/outputs.json')):
+        epoch = metadata.parent.parent
+        owner_path = epoch / 'outputs.json'
+        if not owner_path.is_file():
+            owner_path = epoch / 'attempt.json'
+        try:
+            owner = json.loads(owner_path.read_text())
+            before = json.loads(metadata.read_text())
+            folder = Path(owner['folder'])
+            if (owner.get('storage_root') != str(root.relative_to(project)) or
+                    len(folder.parts) != 3 or
+                    folder.parts[:2] != (owner.get('phase'), owner.get('stage')) or
+                    root / folder != epoch):
+                continue
+            for row in before.get('outputs', []):
+                if (row.get('rel') != rel or row.get('sha256') != sha256 or
+                        not isinstance(row.get('snapshot'), str) or
+                        Path(row['snapshot']).name != row['snapshot'] or
+                        type(row.get('size')) is not int or row['size'] < 0):
+                    continue
+                path = metadata.parent / row['snapshot']
+                if (path.is_symlink() or not path.is_file() or
+                        path.resolve().parent != metadata.parent.resolve()):
+                    continue
+                yield {'path': path, 'metadata': metadata, 'size': row['size']}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
 def _read_index(project: Path) -> dict:
     try:
         return json.loads((_versions_root(project) / 'index.json').read_text())
