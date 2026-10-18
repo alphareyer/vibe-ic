@@ -425,3 +425,85 @@ def test_a_sweep_of_a_DIFFERENT_root_is_refused_not_answered():
         f"a sweep over '{other}' answered rc={r.returncode} against a baseline "
         f"recorded over '{pop}'\n{r.stdout}{r.stderr}")
     assert "NOT CHECKED" in r.stdout, r.stdout
+
+
+# The Default consumer publishes this summary only AFTER its gates return.
+# Re-reading the previous summary as a tool leaf locks the same owner in FAIL.
+def _default_consumer_rollup(project, relative='reports/phase3/default_steps/36/backend_result.json'):
+    path = project / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        'step_id': '36', 'verdict': 'FAIL',
+        'detail': 'current final-layout identity and compliance',
+        'outputs': {}, 'missing_outputs': [],
+        'gate_ledger': [{'gate': 'step_internal_fail_bubble_up_check',
+                         'cmd': 'step_internal_fail_bubble_up_check .',
+                         'rc': 1, 'verdict': 'FAIL'}],
+        'canonical_step_result': {
+            'id': 36, 'status': 'FAIL',
+            'reasons': ['program failed: step_internal_fail_bubble_up_check .']}}
+    path.write_text(json.dumps(document))
+    return path, document
+
+
+def _normal_project_audit(project, label):
+    report = project.parent / (label + '.json')
+    result = _pr.run([sys.executable, str(PROG), str(project), '--json', str(report)],
+                     capture_output=True, text=True)
+    document = json.loads(report.read_text())
+    (project.parent / (label + '.raw.json')).write_text(json.dumps({
+        'argv': result.args, 'returncode': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr, 'report': document}, indent=2) + '\n')
+    return result.returncode, document
+
+
+def test_default_consumer_rollup_does_not_lock_its_own_recovery(tmp_path):
+    project = _proj(tmp_path)
+    rollup, _ = _default_consumer_rollup(project)
+    original = rollup.read_bytes()
+    leaf = _write_report(project, 'native_check', 'FAIL', 'phase3/default_steps/31')
+    rc, report = _normal_project_audit(project, 'initial-native-fail')
+    assert rc == 1 and report['verdict'] == 'FAIL'
+    leaf.write_text(json.dumps({'verdict': 'PASS', 'tool': 'test'}))
+    for label in ('recovery-first', 'recovery-repeat'):
+        rc, report = _normal_project_audit(project, label)
+        assert rc == 0, 'a corrected tool leaf must not depend on its previous consumer summary'
+        assert report['verdict'] == 'PASS' and report['reports_examined'] == 1
+        assert rollup.read_bytes() == original
+    leaf.write_text(json.dumps({'verdict': 'FAIL', 'tool': 'test'}))
+    rc, report = _normal_project_audit(project, 'native-fail-again')
+    assert rc == 1 and report['verdict'] == 'FAIL'
+    assert [f['report_file'] for f in report['findings']] == [str(leaf.relative_to(project))]
+    assert rollup.read_bytes() == original
+
+
+def test_a_consumer_rollup_alone_is_not_examined_or_a_pass(tmp_path):
+    project = _proj(tmp_path)
+    _default_consumer_rollup(project)
+    rc, report = _normal_project_audit(project, 'consumer-only')
+    assert rc == 2, 'a derived consumer summary alone is not a measured tool population'
+    assert report['verdict'] == 'NOT_EXAMINED' and report['reports_examined'] == 0
+    assert report['findings'] == []
+
+
+def test_other_backend_named_failures_are_still_real_leaf_failures(tmp_path):
+    for damage in ('wrong_path', 'wrong_sid', 'missing_canonical', 'missing_SELF',
+                   'same_basename', 'malformed_shape'):
+        project = _proj(tmp_path / damage)
+        relative = ('reports/phase2/default_steps/36/backend_result.json' if damage == 'wrong_path'
+                    else 'reports/phase3/native_leaf/backend_result.json' if damage == 'same_basename'
+                    else 'reports/phase3/default_steps/36/backend_result.json')
+        path, document = _default_consumer_rollup(project, relative)
+        if damage == 'wrong_sid':
+            document['canonical_step_result']['id'] = 37
+        elif damage == 'missing_canonical':
+            del document['canonical_step_result']
+        elif damage == 'missing_SELF':
+            document['gate_ledger'] = [{'gate': 'native_leaf_check', 'rc': 1, 'verdict': 'FAIL'}]
+        elif damage == 'malformed_shape':
+            document['outputs'] = []
+        path.write_text(json.dumps(document))
+        rc, report = _normal_project_audit(project, damage)
+        assert rc == 1 and report['verdict'] == 'FAIL', damage
+        assert report['reports_examined'] == 1
+        assert [f['report_file'] for f in report['findings']] == [str(path.relative_to(project))]

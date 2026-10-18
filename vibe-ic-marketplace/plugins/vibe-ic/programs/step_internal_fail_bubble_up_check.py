@@ -544,6 +544,28 @@ def _iter_report_files(project: Path) -> List[Path]:
     return out
 
 
+def _is_default_consumer_rollup(report: Path, project: Path, data: dict) -> bool:
+    """The consumer's own result is derived from this gate, not a tool leaf."""
+    try:
+        parts = report.relative_to(project).parts
+    except ValueError:
+        return False
+    if (len(parts) != 5 or parts[:3] != ('reports', 'phase3', 'default_steps')
+            or parts[4] != 'backend_result.json'):
+        return False
+    canonical = data.get('canonical_step_result')
+    ledger = data.get('gate_ledger')
+    return (isinstance(canonical, dict)
+            and str(data.get('step_id')) == parts[3] == str(canonical.get('id'))
+            and isinstance(data.get('verdict'), str)
+            and data['verdict'] == canonical.get('status')
+            and isinstance(data.get('outputs'), dict)
+            and isinstance(data.get('missing_outputs'), list)
+            and isinstance(ledger, list)
+            and all(isinstance(row, dict) for row in ledger)
+            and any(_is_self_record(row) for row in ledger))
+
+
 def audit(project: Path) -> Tuple[str, List[BubbleFinding], int]:
     """Returns (verdict, findings, examined) — `examined` is the DENOMINATOR:
     how many report files actually carried a readable verdict.
@@ -570,6 +592,8 @@ def audit(project: Path) -> Tuple[str, List[BubbleFinding], int]:
     for rp in _iter_report_files(project):
         d = _read_json(rp)
         if not isinstance(d, dict):
+            continue
+        if _is_default_consumer_rollup(rp, project, d):
             continue
         verdict_raw = d.get("verdict")
         if not isinstance(verdict_raw, str):
