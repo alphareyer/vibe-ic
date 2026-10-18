@@ -83,7 +83,10 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                       "phase3/analog/*/spec.json",
                       "phase1/generated_docs/L5*.json")
     if sid == "36":
-        return _files(project, "reports/audit/tapeout_checklist.json",
+        # Physical exception review; Step38 owns the final package checklist.
+        return _files(project, "reports/phase3/layout_receipts.json",
+                      "phase3/final/metrics.json",
+                      "reports/phase3/signoff_metrics_aggregate.json",
                       "waivers.json", "reports/phase3/perc_equivalent.json")
     return []
 
@@ -120,16 +123,10 @@ def _requested(project: Path, sid: str) -> bool:
                             "phase3/mixed_signal/cosim/*_cosim_results.json",
                             "phase3/mixed_signal/cosim/mixed_signal_results.json"))
     if sid == "36":
-        checklist = _json(project / "reports/audit/tapeout_checklist.json")
         perc = _json(project / "reports/phase3/perc_equivalent.json")
         return (bool(_json(project / "waivers.json"))
-                or bool(checklist.get("pending_foundry_items"))
-                or bool(checklist.get("reviewer_todo"))
                 or any(isinstance(row, dict) and row.get("status") == "MANUAL_REVIEW"
-                       for row in (perc.get("categories") or []))
-                or any(str(x).upper() in ("PASS_WITH_WAIVERS", "PENDING",
-                                           "MANUAL_REVIEW", "PASS_WITH_OPEN_ITEMS")
-                       for x in (checklist.get("verdict"),)))
+                       for row in (perc.get("categories") or [])))
     return False
 
 
@@ -172,7 +169,7 @@ def check(project: Path, step_id: str, *, expected_verdict: str = "PASS") -> Tup
                "phase2/analog/*/topology.md"),
         "A9": ("phase3/mixed_signal/cosim/*_cosim_results.json",
                "phase3/mixed_signal/cosim/mixed_signal_results.json"),
-        "36": ("reports/audit/tapeout_checklist.json",),
+        "36": ("reports/phase3/layout_receipts.json",),
     }.get(sid)
     if required_ai_output and not _files(project, *required_ai_output):
         return False, (f"awaiting_signed_judgement: Step {sid} has no AI "

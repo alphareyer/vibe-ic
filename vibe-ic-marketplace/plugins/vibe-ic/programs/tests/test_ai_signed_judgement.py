@@ -27,7 +27,7 @@ FILES = {
     "A2": {"phase3/analog/block/topology_gap.json": "{}",
            "phase3/analog/block/topology.md": "a topology"},
     "A9": {"phase3/mixed_signal/cosim/mixed_signal_results.json": "{}"},
-    "36": {"reports/audit/tapeout_checklist.json": "{}",
+    "36": {"reports/phase3/layout_receipts.json": "{}",
            "waivers.json": '{"waived_steps":[{"id":36}]}'},
 }
 
@@ -134,11 +134,11 @@ def test_completion_audit_exits_nonzero_while_signature_is_pending(tmp_path):
 
 
 def test_step36_perc_manual_review_also_needs_judgement(tmp_path):
-    checklist = tmp_path / "reports/audit/tapeout_checklist.json"
+    checklist = tmp_path / "reports/phase3/layout_receipts.json"
     perc = tmp_path / "reports/phase3/perc_equivalent.json"
     for path in (checklist, perc):
         path.parent.mkdir(parents=True, exist_ok=True)
-    checklist.write_text('{"verdict":"READY_FOR_TAPEOUT"}')
+    checklist.write_text('{"release_scope":"RELEASE_CANDIDATE"}')
     perc.write_text('{"categories":[{"status":"MANUAL_REVIEW"}]}')
     row = _judge(tmp_path, "36", checklist.relative_to(tmp_path).as_posix())
     assert row.status == "NOT_MEASURED"
@@ -167,13 +167,106 @@ def test_env_unavailable_waiver_stays_disclosed_without_ai_credit(
 
 
 def test_other_waiver_does_not_sign_expert_review(tmp_path):
-    checklist = tmp_path / "reports/audit/tapeout_checklist.json"
+    checklist = tmp_path / "reports/phase3/layout_receipts.json"
     checklist.parent.mkdir(parents=True)
-    checklist.write_text('{"verdict":"PENDING"}')
+    checklist.write_text('{"release_scope":"RELEASE_CANDIDATE"}')
+    (tmp_path / "waivers.json").write_text('{"waived_steps":[{"id":36}]}')
     step = {"id": "36", "name": "36", "stage": "test",
-            "required_outputs": ["reports/audit/tapeout_checklist.json"],
-            "gate": {"files_exist": ["reports/audit/tapeout_checklist.json"]}}
+            "required_outputs": ["reports/phase3/layout_receipts.json"],
+            "gate": {"files_exist": ["reports/phase3/layout_receipts.json"]}}
     row = audit.check_step(tmp_path, step, {
         "36": {"reason": "manual waiver", "approver": "reviewer"}})
     assert row.status == "NOT_MEASURED"
     assert row.reason_class == "awaiting_signed_judgement"
+
+
+# Step36 reviews existing physical exceptions; Step38 owns package publication.
+_PHYSICAL_REVIEW_FILES = (
+    'reports/phase3/layout_receipts.json', 'phase3/final/metrics.json',
+    'reports/phase3/signoff_metrics_aggregate.json', 'waivers.json',
+    'reports/phase3/perc_equivalent.json')
+
+
+def _physical_review_project(root, *, requested=True):
+    documents = [
+        {'release_scope': 'RELEASE_CANDIDATE', 'gds_sha256': 'a' * 64},
+        {'route__drc_errors': 0, '__provenance__': {'route__drc_errors': {'sha256': 'b' * 64}}},
+        {'schema': 'vibeic.signoff-metrics.v1', 'keys': 1, 'measured': 1, 'rows': []},
+        {'waived_steps': [{'id': 36, 'reason': 'review physical exception'}]} if requested else {},
+        {'categories': [{'status': 'MANUAL_REVIEW' if requested else 'PASS'}]}]
+    for rel, doc in zip(_PHYSICAL_REVIEW_FILES, documents):
+        path = root / rel; path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
+    return root
+
+
+def _physical_review_receipt(root, verdict='PASS'):
+    path = root / 'reports/audit/ai_judgements/36.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        'schema': 'vibeic.ai-judgement.v1', 'step_id': '36',
+        'evidence_sha256': _digest(root, _PHYSICAL_REVIEW_FILES), 'verdict': verdict,
+        'signed_by': 'synthetic-physical-reviewer',
+        'judgement': 'Reviewed the synthetic physical exception, metrics and PERC evidence.'}))
+    return path
+
+
+def test_step36_physical_review_survives_later_package_publication(tmp_path):
+    import ai_signed_judgement as judgement
+    root = _physical_review_project(tmp_path)
+    first = _PHYSICAL_REVIEW_FILES[0]
+    assert _judge(root, '36', first).status == 'NOT_MEASURED'
+    _physical_review_receipt(root)
+    assert _judge(root, '36', first).status == 'PASS', 'physical review must not require a future Step38 checklist'
+    original = judgement.evidence_sha256(root, '36')
+    later = root / 'reports/audit/tapeout_checklist.json'
+    later.parent.mkdir(parents=True, exist_ok=True)
+    observations = []
+    for todo in ('future package not assembled', 'future package inventory refreshed'):
+        later.write_text(json.dumps({'verdict': 'PENDING', 'reviewer_todo': [todo]}))
+        volatile = root / 'reports/phase3/gates/stage3_compliance.json'
+        volatile.parent.mkdir(parents=True, exist_ok=True)
+        volatile.write_text(json.dumps({'generated_at': todo}))
+        row = _judge(root, '36', first)
+        observations.append({'status': row.status, 'digest': judgement.evidence_sha256(root, '36')})
+        assert row.status == 'PASS'
+        assert judgement.evidence_sha256(root, '36') == original
+    (root / 'PHYSICAL_REVIEW_OBSERVATIONS.json').write_text(json.dumps(observations))
+
+
+def test_later_package_work_does_not_create_a_step36_review_request(tmp_path):
+    root = _physical_review_project(tmp_path, requested=False)
+    checklist = root / 'reports/audit/tapeout_checklist.json'
+    checklist.parent.mkdir(parents=True, exist_ok=True)
+    for verdict in ('PENDING', 'PASS_WITH_OPEN_ITEMS'):
+        checklist.write_text(json.dumps({'verdict': verdict, 'pending_foundry_items': ['future38'],
+                                        'reviewer_todo': ['final-package review']}))
+        assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'PASS', 'Step38 package work must not trigger a new Step36 review'
+    (root / 'waivers.json').write_text('{"waived_steps":[{"id":36}]}')
+    assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'NOT_MEASURED'
+    (root / 'waivers.json').write_text('{}')
+    (root / 'reports/phase3/perc_equivalent.json').write_text('{"categories":[{"status":"MANUAL_REVIEW"}]}')
+    assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'NOT_MEASURED'
+
+
+def test_step36_material_mutations_missing_layout_and_rejected_review_stay_uncredited(tmp_path):
+    import ai_signed_judgement as judgement
+    for i, rel in enumerate(_PHYSICAL_REVIEW_FILES):
+        root = _physical_review_project(tmp_path / str(i))
+        _physical_review_receipt(root)
+        assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'PASS', 'current physical evidence must accept its genuine review'
+        path = root / rel
+        path.write_bytes(path.read_bytes() + b'\n ')
+        assert not judgement.check(root, '36')[0], rel
+        assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'NOT_MEASURED'
+    root = _physical_review_project(tmp_path / 'missing-layout')
+    _physical_review_receipt(root)
+    (root / _PHYSICAL_REVIEW_FILES[0]).unlink()
+    assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'FAIL'
+    credit, detail = judgement.check(root, '36')
+    assert not credit and 'no AI review output to sign' in detail
+    root = _physical_review_project(tmp_path / 'rejected')
+    _physical_review_receipt(root, 'FAIL')
+    assert judgement.check(root, '36', expected_verdict='FAIL')[0]
+    assert not judgement.check(root, '36')[0]
+    assert _judge(root, '36', _PHYSICAL_REVIEW_FILES[0]).status == 'NOT_MEASURED'
