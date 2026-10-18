@@ -776,6 +776,17 @@ def _transition_pair(mod: dict, reset_bit: int,
                         "control_bits": control, "branch_roles": "native vector truth / unchanged data"})
                 else:
                     answer = combine_roles(op, a, b)
+            elif kind == "$reduce_xor":
+                # Fold source roles, never data values: parity is forced only
+                # when every operand has a force role in the same domain.
+                answer = ("1", "0", "0")
+                for source in conn.get("A") or []:
+                    a, b = answer, d_roles(source, arm, q, seen, cofactor)
+                    answer = (either(both(a[0], b[0]), both(a[1], b[1])),
+                              either(both(a[0], b[1]), both(a[1], b[0])),
+                              either(both(a[2], b[0]), both(b[2], a[0])))
+                role_provenance.append({"output_bit": bit, "kind": kind,
+                    "branch_roles": "parity composition of original operand force/retain roles"})
             elif kind in {"$reduce_and", "$reduce_or", "$reduce_bool", "$logic_not"}:
                 answer = reduced_roles("$and" if kind == "$reduce_and" else "$or",
                                        conn.get("A") or [], arm, q, seen, cofactor)

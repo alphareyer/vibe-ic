@@ -423,3 +423,73 @@ def test_correlated_role_candidates_preserve_data_and_undef_refusals(tmp_path):
         assert rec["verdict"] == fsc.NOT_DISCHARGED, rec
         mapping = rec["claims"][0]["reset_control_mapping"]
         assert len(mapping["raw_identities"]) == 2 and mapping["unresolved"], mapping
+
+
+@pytest.mark.parametrize("payload", ["d", "{q,d[1:0]}"], ids=["free-data", "current-q"])
+def test_masked_parity_reduction_normal_cli_matches_factored_reset_roles(tmp_path, payload):
+    _yosys()
+    observations = []
+    for name, expression in [
+        ("masked", f"^({payload} & {{W{{!(rst&clear)}}}})"),
+        ("factored", f"(^{payload}) & !(rst&clear)"),
+    ]:
+        work = tmp_path / name
+        work.mkdir()
+        rtl, output = work / "m.v", work / "mapping.json"
+        rtl.write_text("module m #(parameter W=3)(input clk,rst,clear,input[W-1:0] d,output reg q);\n"
+                       f"always @(posedge clk) q <= {expression};\nendmodule\n")
+        rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+            "reset_polarity:rst:active_high", "--work-dir", str(work), "--json", str(output)])
+        rec = json.loads(output.read_text())
+        observations.append((name, rc, rec["verdict"]))
+    assert observations == [("masked", 0, fsc.PASS), ("factored", 0, fsc.PASS)]
+    for name, _, _ in observations:
+        work = tmp_path / name
+        mapping = json.loads((work / "mapping.json").read_text())["claims"][0]["reset_control_mapping"]
+        assert mapping["complete"] and not mapping["unresolved"], mapping
+        assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+        assert len(mapping["raw_identities"]) == len(mapping["rows"]) == 1, mapping
+        assert mapping["native_exit_code"] == mapping["payload_analysis"]["native_exit_code"] == 0, mapping
+        progress = mapping["query_progress"]
+        assert progress["completed"] == progress["planned"] and not progress["unknown"], mapping
+        row = mapping["rows"][0]
+        assert row["classification"] == "RESET_FORCE" and row["polarity"] == "active_high", row
+        assert row["total_force"] is False, row
+        assert any(role["reset_value"] == 1 and role["role"] == "FORCE_ZERO" and
+                   role["reachable"] and role["implication_query"] == "PROVED"
+                   for role in row["conditional_roles"]), row
+        assert all(row["native_queries"][f"roles_{proof}{arm}"] == "PROVED"
+                   for arm in (0, 1) for proof in ("cover", "disjoint")), row
+        assert row["native_queries"]["undef0"] == row["native_queries"]["undef1"] == "NO_UNDEF", row
+        if name == "masked":
+            assert any(p["kind"] == "$reduce_xor" for p in row["role_provenance"]), row
+        wrong = fsc.check([work / "m.v"], "m", [
+            {"rule": "reset_polarity", "signal": "rst", "value": "active_low"}], work / "wrong-sense")
+        assert wrong["verdict"] == fsc.REFUTED, wrong
+        print("PARITY_RESET_OBSERVATION " + json.dumps({"form": name, "payload": payload,
+            "verdict": "PASS", "wrong_sense": wrong["verdict"], "mapping": mapping}, sort_keys=True))
+
+
+def test_parity_reduction_preserves_ordinary_data_current_q_and_undef_refusals(tmp_path):
+    _yosys()
+    for name, expression in [
+        ("ordinary-data", "^(d ^ {W{rst&clear}})"),
+        ("current-q-data", "^({q,d[0],rst&clear})"),
+        ("literal-x", "^({d[1:0],1'bx} & {W{!(rst&clear)}})"),
+    ]:
+        work = tmp_path / name
+        work.mkdir()
+        rtl, output = work / "m.v", work / "mapping.json"
+        rtl.write_text("module m #(parameter W=3)(input clk,rst,clear,input[W-1:0] d,output reg q);\n"
+                       f"always @(posedge clk) q <= {expression};\nendmodule\n")
+        rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+            "reset_polarity:rst:active_high", "--work-dir", str(work), "--json", str(output)])
+        rec = json.loads(output.read_text())
+        assert rc == 1 and rec["verdict"] == fsc.NOT_DISCHARGED, rec
+        mapping = rec["claims"][0]["reset_control_mapping"]
+        assert len(mapping["raw_identities"]) == 1 and mapping["unresolved"] and not mapping["complete"], mapping
+        assert mapping["native_exit_code"] == 0, mapping
+        assert not any(role["reachable"] and role["role"] in {"FORCE_ZERO", "FORCE_ONE"}
+                       for row in mapping["rows"] for role in row["conditional_roles"]), mapping
+        print("PARITY_REFUSAL_OBSERVATION " + json.dumps({"case": name, "rc": rc,
+            "verdict": rec["verdict"], "mapping": mapping}, sort_keys=True))

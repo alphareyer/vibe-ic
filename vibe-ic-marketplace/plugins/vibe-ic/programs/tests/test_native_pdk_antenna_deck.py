@@ -389,3 +389,170 @@ def test_host_native_runner_enforces_memory_and_keeps_progressing():
     assert result.rc == 0, result
     assert result.elapsed_s > 0.3
     assert result.out.strip() == str(256 * 1024 * 1024)
+
+
+# Typed LOCAL PDK records and nullable native options use the original consumer.
+def _current_native_antenna_fixture(tmp_path, monkeypatch, *, typed, options, count=0):
+    import librelane_contract as contract
+    from _native_signoff_fixture import put
+    gds = _project(tmp_path)
+    root = tmp_path / 'pdk_root'
+    source = tmp_path / 'native-source'
+    (source / 'librelane').mkdir(parents=True)
+    (source / 'librelane/__init__.py').write_text('VERSION = "neutral"\n')
+    switch = {'execution_route': 'LOCAL', 'local_network_mode': 'host',
+              'steps': {'26': 'librelane'}, 'pdk_root_host': str(root),
+              'librelane_root_host': str(source), 'librelane_executable': sys.executable}
+    put(tmp_path / 'phase3/librelane_switch.json', switch)
+    put(tmp_path / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',
+        {'fields': {'pdk_target': 'fixture_pdk'}})
+    image = contract.resolve_image(tmp_path)
+    # The producer's generic runtime has pdk=None; the caller supplies the PDK.
+    provenance = contract.pdk_root_resolution(tmp_path, 'fixture_pdk', image=image)
+    assert provenance['source'] == 'local_provider'
+    assert provenance['provider']['pdk'] is None
+    parent = root / 'fixture_pdk/libs.tech/klayout/tech/drc/main.drc'
+    config = put(tmp_path / 'phase3/librelane/26-config/KLayout.Antenna.json', {
+        'meta': {'step': 'KLayout.Antenna'}, 'PDK': 'fixture_pdk',
+        'DESIGN_NAME': 'neutral_core', 'KLAYOUT_ANTENNA_RUNSET': str(parent),
+        'KLAYOUT_ANTENNA_OPTIONS': options})
+    initial = put(tmp_path / 'phase3/librelane/native-input-state.json',
+                  {'gds': str(gds), 'metrics': {}})
+    calls = []
+    def native_process(argv, **kwargs):
+        calls.append(argv[argv.index('--id') + 1])
+        folder = Path(argv[argv.index('-o') + 1])
+        cfg = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+        state = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        put(folder / 'config.json', cfg)
+        put(folder / 'state_in.json', state)
+        put(folder / 'state_out.json', dict(state, metrics={'klayout__antenna_error__count': count}))
+        report = folder / 'reports/antenna.klayout.lyrdb'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(_rdb(count, str(parent)).replace(
+            '</generator>', '</generator><top-cell>neutral_core</top-cell>'))
+        put(folder / 'reports/antenna.klayout.json', {'ANT.1': count, 'total': count})
+        command = ['klayout', '-b', '-r', str(parent), '-rd', 'input=' + str(gds),
+                   '-rd', 'topcell=neutral_core', '-rd', 'report=' + str(report), '-rd', 'decks=antenna']
+        if isinstance(options, dict):
+            command.extend(item for key, value in options.items() if key != 'decks'
+                           for item in ('-rd', str(key) + '=' + str(value)))
+        (folder / 'COMMANDS').write_text(shlex.join(command) + '\n')
+        return subprocess.CompletedProcess(argv, 0, _transcript(command, count), '')
+    # These are only native file/process transport leaves; all chain receipts,
+    # PDK resolution, discovery, native counts and the final gate remain real.
+    monkeypatch.setattr(contract, 'image_capability', lambda *a, **k: {})
+    monkeypatch.setattr(contract, 'openroad_home', lambda *a, **k: None)
+    monkeypatch.setattr(contract, 'run_container', native_process)
+    folder = contract.run_chain(tmp_path, image, [('KLayout.Antenna', config, initial)],
+        mounts=[(root, '/pdk')], lane='26-gds', pdk_root='/pdk')[0]
+    put(tmp_path / 'reports/phase3/antenna_librelane.json', {'gds': {
+        'step': 'KLayout.Antenna', 'state': str(folder / 'state_out.json'),
+        'state_sha256': contract.digest(folder / 'state_out.json'),
+        'subject': str(gds), 'subject_sha256': contract.digest(gds),
+        'counts': {'klayout__antenna_error__count': count}}})
+    if not typed:
+        # The existing declared-host shape isolates the nullable-options seam.
+        put(tmp_path / gate._PDK_ROOT_RECEIPT,
+            {'path': str(root), 'source': 'declared', 'pdk': 'fixture_pdk'})
+    def no_second_native(**kwargs):
+        raise AssertionError('a retained consumer must not launch another native tool')
+    monkeypatch.setattr(gate._kl, 'find_runner', no_second_native)
+    monkeypatch.setattr(gate._kl, 'find_container_runner', no_second_native)
+    report = tmp_path / 'reports/phase2/gates/gate_oxide_geom_deck.json'
+    return provenance, folder, calls, report
+
+
+def test_typed_local_pdk_producer_reaches_retained_native_antenna(tmp_path, monkeypatch):
+    provenance, folder, calls, report = _current_native_antenna_fixture(
+        tmp_path, monkeypatch, typed=True, options=None)
+    rc = gate.main([str(tmp_path), '--json', str(report)])
+    result = json.loads(report.read_text())
+    print('LOCAL_PDK_ANTENNA_OBSERVATION', json.dumps({'rc': rc, 'result': result}, sort_keys=True))
+    assert rc == 0, result
+    assert result['verdict'] == 'PASS' and result['violations'] == 0
+    assert result['evidence_basis'] == 'retained_KLayout.Antenna'
+    assert result['native_evidence']['receipt'] == str(folder / 'vibeic_receipt.json')
+    receipt = tmp_path / gate._PDK_ROOT_RECEIPT
+    # Missing/changed PDK, root, typed self-binding and source material do not
+    # become a host-tree fallback. Each re-read consumes the same real producer.
+    mutations = [dict(provenance, pdk=None), dict(provenance, pdk='other_pdk'),
+                 dict(provenance, path=str(tmp_path / 'other-root')),
+                 dict(provenance, provider=None), dict(provenance, identity='local://unbound')]
+    for bad in mutations:
+        receipt.write_text(json.dumps(bad))
+        assert gate.main([str(tmp_path), '--json', str(report)]) == 2
+        refused = json.loads(report.read_text())
+        assert refused['verdict'] == 'DISCLOSED_SKIP'
+    receipt.write_text(json.dumps(provenance))
+    (tmp_path / 'native-source/librelane/__init__.py').write_text('VERSION = "changed"\n')
+    assert gate.main([str(tmp_path), '--json', str(report)]) == 2
+    assert calls == ['KLayout.Antenna']
+
+
+def test_retained_native_antenna_nullable_options_preserve_binding_and_red(tmp_path, monkeypatch):
+    observed = []
+    for name, options, count, expected in [
+            ('null', None, 0, 0), ('nonempty', {'decks': 'antenna', 'custom': 'kept'}, 0, 0),
+            ('bad_list', [], 0, 2), ('bad_false', False, 0, 2),
+            ('bad_string', '', 0, 2), ('measured_red', [], 1, 1)]:
+        project = tmp_path / name
+        _, folder, calls, report = _current_native_antenna_fixture(
+            project, monkeypatch, typed=False, options=options, count=count)
+        rc = gate.main([str(project), '--json', str(report)])
+        result = json.loads(report.read_text())
+        observed.append({'name': name, 'rc': rc, 'verdict': result['verdict'],
+                         'reason': result.get('reason')})
+        assert rc == expected, result
+        assert result['verdict'] == ('PASS' if expected == 0 else 'FAIL' if expected == 1 else 'DISCLOSED_SKIP')
+        assert calls == ['KLayout.Antenna']
+        if expected == 0:
+            assert result['evidence_basis'] == 'retained_KLayout.Antenna'
+            assert result['violations'] == 0
+            if name == 'nonempty':
+                commands = folder / 'COMMANDS'
+                commands.write_text(commands.read_text().replace('custom=kept', 'custom=changed'))
+                assert gate.main([str(project), '--json', str(report)]) == 2
+        elif expected == 1:
+            assert result['violations'] == 1 and result['measurement'] == 'FAIL'
+        else:
+            assert 'not a mapping' in result['reason']
+    print('NULLABLE_ANTENNA_OPTIONS_OBSERVATION', json.dumps(observed, sort_keys=True))
+
+
+
+def test_bound_native_transcript_preserves_wrapped_deck_event(tmp_path):
+    import textwrap
+    # Rich may wrap both the event header and the middle of a long path token.
+    tree = '/neutral/' + 'long_process_tree_' * 7
+    rule = tree + '/libs.tech/klayout/tech/drc/rule_decks/antenna.rb'
+    parent = tree + '/libs.tech/klayout/tech/drc/main.drc'
+    pieces = textwrap.wrap(rule, width=76, break_long_words=True, break_on_hyphens=False)
+    assert len(pieces) >= 2
+    header = '2026-01-01 00:00:00 +0000: Memory Usage (100K) : Executing deck\nantenna_poly2 from\n'
+    wrapped = '\n'.join(piece.ljust(80) for piece in pieces)
+    following = '\n2026-01-01 00:00:01 +0000: Executing rule ANT.1\nDRC RESULT: SUCCESS (0 violations)\n'
+    rdb, transcript = tmp_path / 'native.lyrdb', tmp_path / 'invocation.log'
+    rdb.write_text(_rdb(0, parent))
+    transcript.write_text(header + wrapped + following)
+    deck = {'rule': rule, 'parent': parent}
+    count, why, hashes = gate._native_result_count(rdb, transcript, deck)
+    assert count == 0 and why == '', (count, why)
+    assert hashes['transcript_sha256'] == gate._sha(transcript)
+    # Do not remove arbitrary whitespace or cross a new log event to recover
+    # a matching token; a different or unfinished rule is still refused.
+    continuation = '\n'.join(pieces[1:])
+    negatives = {
+        'unfinished': header + pieces[0] + following,
+        'blank_boundary': header + pieces[0] + '\n\n' + continuation + following,
+        'new_event': header + pieces[0] + '\n2026-01-01 00:00:01: INFO: another event\n' + continuation + following,
+        'mixed_message': header + pieces[0] + '\nINFO: unrelated message\n' + continuation + following,
+        'space_in_fragment': header + pieces[0] + '\n' + pieces[1] + ' another-token\n' + '\n'.join(pieces[2:]) + following,
+        'different_deck': header + wrapped + '\n2026-01-01: Executing deck other from /other/rule_decks/antenna.rb' + following,
+        'changed_wrapped_path': header + wrapped.replace('long_process_tree_', 'different_tree___', 1) + following,
+    }
+    for name, text in negatives.items():
+        transcript.write_text(text)
+        count, why, _ = gate._native_result_count(rdb, transcript, deck)
+        assert count is None and 'executed decks from' in why, (name, count, why)
+    print('WRAPPED_NATIVE_DECK_OBSERVATION', json.dumps({'positive_count': 0, 'negative_cases': list(negatives)}, sort_keys=True))

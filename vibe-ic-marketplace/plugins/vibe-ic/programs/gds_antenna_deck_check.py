@@ -194,6 +194,21 @@ def _pdk_receipt(project: Path):
         # DECLARED ({path, source, declared_by, pdk}), whose root is a host
         # tree the declaration names and which carries no derivation.
         derivation = doc.get("derivation")
+        if doc.get("source") == "local_provider":
+            from librelane_contract import Refusal
+            from librelane_signoff_evidence import _retained_local_provider
+            from tapeout_precheck import resolve_pdk
+            try:
+                provider = _retained_local_provider(
+                    project, doc.get("provider"), doc.get("identity"))
+            except Refusal as exc:
+                raise ValueError(str(exc)) from exc
+            selected, _ = resolve_pdk(project)
+            if (root.resolve() != Path(provider.pdk_root).resolve()
+                    or (provider.pdk and provider.pdk != doc.get("pdk"))
+                    or (selected and selected != doc.get("pdk"))):
+                raise ValueError("LOCAL PDK root or selected PDK differs from its producer")
+            derivation = {"pdk": doc.get("pdk")}
         if doc.get("source") == "declared" and derivation is None:
             if "pdk" not in doc:
                 raise ValueError(
@@ -361,6 +376,25 @@ def _bound_native_count(gds: Path, rdb: Path, transcript: Path, gds_sha: str,
     return _native_result_count(rdb, transcript, deck)
 
 
+def _executed_native_decks(log: str) -> set[str]:
+    """Read each deck event, including Rich's single-token path continuations.
+
+    Keep event boundaries: a blank, timestamp/level prefix or other message
+    cannot be removed to manufacture a path. The reconstructed token still
+    has to equal the complete hashed rule in the caller.
+    """
+    executed = set()
+    for match in _DECK_FROM_RE.finditer(log):
+        path = match.group(1)
+        for line in log[match.end(1):].splitlines()[1:]:
+            fragment = line.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_./+@%=~-]+", fragment):
+                break
+            path += fragment
+        executed.add(path)
+    return executed
+
+
 def _native_result_count(rdb: Path, transcript: Path, deck: Optional[dict]):
     """The same raw deck obligations for fresh and receipt-bound native runs."""
     log = transcript.read_text(errors="replace")
@@ -368,7 +402,7 @@ def _native_result_count(rdb: Path, transcript: Path, deck: Optional[dict]):
         return None, "native transcript names no executed ANT rule", {}
     if deck is None:
         return None, "no native deck identity to bind the transcript to", {}
-    executed = set(_DECK_FROM_RE.findall(log))
+    executed = _executed_native_decks(log)
     if executed != {deck["rule"]}:
         return None, (f"native transcript executed decks from "
                       f"{sorted(executed) or 'no named rule file'}, not the "
@@ -448,9 +482,14 @@ def _retained_native_result(project: Path, gds: Path, router: Optional[str],
         argv = selected[0]
         options = dict(argv[i + 1].split('=', 1) for i, arg in enumerate(argv) if arg == '-rd')
         design = config.get('DESIGN_NAME')
+        configured_options = config.get('KLAYOUT_ANTENNA_OPTIONS')
+        if configured_options is None:
+            configured_options = {}
+        if not isinstance(configured_options, dict):
+            raise ValueError('retained native antenna options are not a mapping')
         if (not design or options.get('decks') != 'antenna'
                 or any(options.get(key) != str(value) for key, value in
-                       config.get('KLAYOUT_ANTENNA_OPTIONS', {}).items())
+                       configured_options.items())
                 or options.get('topcell') != design or (cell is not None and cell != design)
                 or _sha(local(options['input'])) != result['gds_sha256']):
             raise ValueError('retained antenna commands do not consume the selected GDS/top/deck')
