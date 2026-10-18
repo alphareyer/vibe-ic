@@ -471,8 +471,10 @@ def test_nested_p0_main_preserves_the_existing_owner_and_its_verdict(
     monkeypatch.setattr(fcc, 'check_step', lambda project, row, *_a, **_k:
         fcc.StepResult(id=row['id'], name=row['name'], stage=row['stage'],
                        status='PASS', reasons=[], evidence=[]))
-    for stage, parent_scope in ((1, 'ALL:stage2'), (2, 'ALL')):
-        project = tmp_path / f'stage{stage}'
+    for label, parent_scope in (('direct_child', 'ALL'),
+                                ('stage2_child', 'ALL:stage2')):
+        stage = 1
+        project = tmp_path / label
         relative = 'phase2/stage1/rtl/top.v'
         rtl = write(project, relative,
                     b'module top(input a, output b); assign b=a; endmodule\n')
