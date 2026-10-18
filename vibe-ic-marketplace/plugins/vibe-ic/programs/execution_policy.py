@@ -1159,6 +1159,8 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
                  dict(runtime['parameters'], **dict(parameters or {}))) if frontend else dict(applicable[0].objective)
     if frontend:
         objective.setdefault('metric', 'source_boundary')
+        if objective['metric'] == 'source_boundary':
+            objective.setdefault('direction', 'max')
     from execution_backend_gates import canonical_family_row, required_programs
     canonical = canonical_family_row(step_id, adapters=adapters)
     required = (required_programs(canonical) if canonical is not None

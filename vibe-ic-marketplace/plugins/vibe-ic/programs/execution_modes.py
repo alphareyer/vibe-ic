@@ -59,15 +59,17 @@ from execution_source_snapshot import SourceSnapshot, active as _active_source_s
 
 
 def required_gate_satisfied(step_id, gate, verdict):
-    """Honor the template checker's documented exit-zero applicability case.
+    """Honor only the source-validated template and Step4 applicability cases.
 
-    NOT_APPLICABLE remains visible in evidence. No physical gate or other
-    step can use it to satisfy an obligation. Execution and input authority
+    NOT_APPLICABLE remains visible in evidence. The two Step4 declarations
+    are re-read by its validator; no other gate gains an exception. Execution and input authority
     are still verified separately before eligibility and adoption.
     """
-    return verdict == 'PASS' or (
-        step_id == '0.5ic' and gate == 'submission_template_check' and
-        verdict == 'NOT_APPLICABLE')
+    return verdict == 'PASS' or (verdict == 'NOT_APPLICABLE' and (
+        (step_id == '0.5ic' and gate == 'submission_template_check') or
+        (step_id == '4' and gate in (
+            'functional_state_transition_coverage_check',
+            'behavioral_evidence_per_spec_item_check'))))
 
 
 # The issuer is owned by this live controller process, never a caller-supplied

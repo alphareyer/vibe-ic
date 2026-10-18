@@ -9,6 +9,7 @@ import time
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import execution_modes as em
 import execution_policy as policy
 from programs.tests import test_execution_modes as H
@@ -324,3 +325,209 @@ def test_allocated_choice_poll_is_finite_and_bound(tmp_path,monkeypatch,state):
         got=policy._wait_for_choice(context,tmp_path,{},tmp_path/'choice.json',None,1)
         assert got==(None if state=='absent' else request)
     assert len(attempts)==(6 if state=='absent' else 2)
+
+
+def _validate_frontend_boundary(outputs, binding):
+    # A finite neutral transform's current successful validation proves the
+    # binary source boundary. Its independent cost metric remains available.
+    evidence = H.validate_text(outputs, binding)
+    return replace(evidence, metrics=dict(evidence.metrics, source_boundary=1.0))
+
+
+@pytest.fixture(scope='module')
+def objective_frontend_arms():
+    arms = []
+    for name, cost in [('a', 8), ('b', 3)]:
+        arm = H.adapter(name, cost=cost)
+        source = dict(arm.source_files)
+        here = Path(__file__).resolve()
+        source[str(here)] = em.digest(here)
+        source.update({str(p): em.digest(p) for p in em._source_closure(source)})
+        # This is the frontend protocol over the existing neutral text tools,
+        # not a simulator/tool qualification or native IC execution.
+        arms.append(replace(arm, tool_id='frontend-worker', source_files=source,
+                            objective={'parameters_from': 'issued_manifest'},
+                            validate=_validate_frontend_boundary))
+    return tuple(arms)
+
+
+@pytest.mark.parametrize('parameters,selected,refusal', [
+    pytest.param({}, 'a', None, id='default-boundary-max'),
+    pytest.param({'metric': 'cost', 'direction': 'min'}, 'b', None,
+                 id='custom-metric-min'),
+    pytest.param({'metric': 'source_boundary', 'direction': 'min'}, 'a', None,
+                 id='explicit-boundary-min'),
+    pytest.param({'metric': 'source_boundary', 'direction': None}, 'a',
+                 'OBJECTIVE_INVALID: None', id='explicit-none-refused'),
+    pytest.param({'metric': 'source_boundary', 'direction': 'sideways'}, 'a',
+                 'OBJECTIVE_INVALID: sideways', id='invalid-direction-refused'),
+    pytest.param({'metric': 'cost'}, 'a', 'OBJECTIVE_INVALID: None',
+                 id='custom-metric-missing-direction-refused'),
+])
+def test_frontend_objective_reaches_core_choice_consumer(
+        tmp_path, monkeypatch, objective_frontend_arms, parameters, selected, refusal):
+    project, controller, _, runtime = _runtime(
+        tmp_path, monkeypatch, arms=objective_frontend_arms, wait_s=0)
+    pending = policy.dispatch_fixed_step(project, '1', parameters=parameters)
+    assert pending['status'] == 'AWAITING_AI_SELECTION'
+    context = runtime['contexts']['1']
+    run = runtime['runs']['1'][0]
+    comparison = json.loads((run / 'comparison.json').read_text())
+    assert len(comparison['eligible_arms']) == 2
+    decision = H.choice(context, run, selected)
+    observation = {'parameters': parameters, 'objective': dict(context.objective),
+                   'eligible': comparison['eligible_arms'], 'selected': selected}
+    (tmp_path / 'OBJECTIVE_OBSERVATION.json').write_text(json.dumps(observation, indent=2))
+    if refusal:
+        with pytest.raises(em.Refusal, match=refusal):
+            policy.dispatch_fixed_step(project, '1', parameters=parameters, choice=decision)
+        assert json.loads((run / 'adoption.json').read_text())['status'] == 'REFUSED'
+        assert not (project / 'value.txt').exists()
+    else:
+        adopted = policy.dispatch_fixed_step(project, '1', parameters=parameters, choice=decision)
+        assert adopted['status'] == 'ADOPTED'
+        assert controller.verify_adoption(context, run)['selected'] == selected
+        assert (project / 'value.txt').read_text() == 'ONE INPUT\n'
+        assert context.objective['metric'] == parameters.get('metric', 'source_boundary')
+        assert context.objective['direction'] == parameters.get('direction', 'max')
+
+
+_RETAINED_STEP4_MEASUREMENTS = (
+    'phase2/stage1/sim_professional/l10_unit_tb/results.xml',
+    'phase2/stage1/sim_professional/neutral_logic/cocotb_run.log',
+    'phase2/stage1/sim_professional/neutral_logic/results.xml',
+)
+
+
+def _retained_step4_project(root):
+    root.mkdir(parents=True)
+    sources = {
+        'text.txt': 'one input\n',
+        'phase2/stage1/rtl/neutral_logic.v': 'module neutral_logic; endmodule\n',
+        'phase1/generated_docs/L10_TEST_CASES.json': '{}\n',
+        'phase1/generated_docs/L12_BEHAVIORAL_SEQUENCES.json': '{}\n',
+        'phase2/stage1/sim_professional/neutral_logic/Makefile': '# source configuration\n',
+        'phase2/stage1/sim_professional/neutral_logic/tb_neutral.py': '# testbench source\n',
+        'phase2/stage1/sim_professional/neutral_logic/helper.py': '# helper source\n',
+        'phase2/stage1/sim_professional/neutral_logic/support.json': '{"operand": 2}\n',
+        'phase2/stage1/sim/tb/scenario.v': 'module scenario; endmodule\n',
+    }
+    for rel, text in sources.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    plan = root / 'phase2/stage1/sim_professional/neutral_logic/verification_plan.json'
+    plan.write_text(json.dumps({'random_goal_plan': {'binding': {
+        rel: em.digest(root / rel) for rel in ('text.txt',
+            'phase2/stage1/sim_professional/neutral_logic/support.json')}}}))
+    for rel in _RETAINED_STEP4_MEASUREMENTS:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('retained earlier measurement\n')
+    return root
+
+
+@pytest.fixture(scope='module')
+def retained_step4_input_contract(tmp_path_factory):
+    # Consume the actual source owner's registration, including its shared
+    # professional-plan resolver. No native simulator component is executed.
+    import execution_frontend_providers as frontend
+    from execution_source_snapshot import SourceSnapshot, using
+    project = _retained_step4_project(tmp_path_factory.mktemp('input-contract') / 'project')
+    snapshot = SourceSnapshot(em._REPO_ROOT, H.BASE)
+    with using(snapshot):
+        registry = em.Registry(snapshot=snapshot)
+        frontend.register_factories(registry, step_ids=('4',), project=project,
+            parameters={'top': 'neutral_logic'}, execution_mode='ultra')
+        registry.finalize()
+    return tuple(registry.adapters('4')[0].input_contract)
+
+
+def _validate_retained_step4_measurements(outputs, binding):
+    evidence = H.validate_text(outputs, binding)
+    expected = (outputs / 'value.txt').read_bytes()
+    artifacts = dict(evidence.outputs)
+    for rel in _RETAINED_STEP4_MEASUREMENTS:
+        assert (outputs / rel).read_bytes() == expected
+        artifacts[rel] = em.digest(outputs / rel)
+    return replace(evidence, outputs=artifacts,
+                   metrics=dict(evidence.metrics, source_boundary=1.0))
+
+
+@pytest.mark.parametrize('change_source', [False, True], ids=['retained-output-import', 'source-drift-refused'])
+def test_step4_retained_measurements_are_outputs_not_frozen_sources(
+        tmp_path, monkeypatch, retained_step4_input_contract, change_source):
+    """Real neutral subprocesses, dispatch/adopt/Journal/verify; no EDA or IC."""
+    fixed_inputs = policy._fixed_inputs
+    project, _, _, runtime = _runtime(tmp_path, monkeypatch, wait_s=0)
+    # _runtime creates the neutral input. Populate this same canonical project.
+    project.rename(tmp_path / 'empty-runtime-project')
+    _retained_step4_project(project)
+    monkeypatch.setattr(policy, '_fixed_inputs', fixed_inputs)
+    arm = H.adapter('a')
+    source = dict(arm.source_files)
+    here = str(Path(__file__).resolve())
+    source[here] = em.digest(Path(here))
+    source.update({str(path): em.digest(path) for path in em._source_closure(source)})
+    from execution_provider_catalog import implementation_closure
+    execution_cwd = (project / 'reports/execution' /
+        runtime['policy']['request_receipt']['invocation_id'] / '4' / arm.arm_id / 'outputs')
+    source.update({str(path): em.digest(path)
+                   for path in implementation_closure(Path(here), cwd=execution_cwd)})
+    components = arm.components + (em.Component('measurement-artifacts',
+        (str(Path(sys.executable).resolve()), here,
+         '--neutral-retained-measurements', '{outputs}')),)
+    required = ('value.txt', 'measurement.json', *_RETAINED_STEP4_MEASUREMENTS)
+    arm = replace(arm, step_id='4', tool_id='frontend-worker', source_files=source,
+        objective={'parameters_from': 'issued_manifest'},
+        components=components, validate=_validate_retained_step4_measurements,
+        input_contract=retained_step4_input_contract,
+        required_outputs=required, output_contract={rel: (rel,) for rel in required})
+    registry = em.Registry(); registry.register(arm)
+    controller = em.Controller(registry, em.Budget(1, 512), {
+        'meta': {'test_only': True}, 'steps': [{'id': '4',
+        'mandatory_gate_programs': ['transform'], 'required_output_contract': list(required)}]})
+    runtime.update(registry=registry, controller=controller)
+    pending = policy.dispatch_fixed_step(project, '4', parameters={'top': 'neutral_logic'})
+    assert pending['status'] == 'AWAITING_AI_SELECTION'
+    context = runtime['contexts']['4']; run = runtime['runs']['4'][0]
+    choice = H.choice(context, run, 'a')
+    before = {rel: em.digest(project / rel) for rel in _RETAINED_STEP4_MEASUREMENTS}
+    adopted = policy.dispatch_fixed_step(project, '4', parameters={'top': 'neutral_logic'}, choice=choice)
+    assert adopted['status'] == 'ADOPTED'
+    assert controller.verify_adoption(context, run)['selected'] == 'a'
+    assert not set(_RETAINED_STEP4_MEASUREMENTS).intersection(context.inputs)
+    sources = {
+        'phase2/stage1/sim_professional/neutral_logic/Makefile',
+        'phase2/stage1/sim_professional/neutral_logic/tb_neutral.py',
+        'phase2/stage1/sim_professional/neutral_logic/helper.py',
+        'phase2/stage1/sim_professional/neutral_logic/support.json',
+        'phase2/stage1/sim/tb/scenario.v',
+        'phase2/stage1/rtl/neutral_logic.v',
+    }
+    assert sources.issubset(context.inputs)
+    for rel in _RETAINED_STEP4_MEASUREMENTS:
+        assert (project / rel).read_text() == 'ONE INPUT\n'
+        assert em.digest(project / rel) != before[rel]
+    if change_source:
+        (project / 'phase2/stage1/sim_professional/neutral_logic/helper.py').write_text('# changed source\n')
+        with pytest.raises(em.Refusal, match='CURRENT_INPUT_CHANGED'):
+            controller.verify_adoption(context, run)
+    (tmp_path / 'STEP4_INPUT_OWNER_OBSERVATION.json').write_text(json.dumps({
+        'issued_inputs': sorted(context.inputs), 'retained_before': before,
+        'current_after': {rel: em.digest(project / rel) for rel in before},
+        'adoption_status': adopted['status'], 'source_drift_refused': change_source,
+        'scope': 'neutral process input/output ownership; no simulator qualification'}, indent=2))
+
+
+if __name__ == '__main__':
+    # Source-bound finite file producer for the ownership regression above.
+    # No pytest, simulator or IC runner is invoked by this CLI.
+    if len(sys.argv) != 3 or sys.argv[1] != '--neutral-retained-measurements':
+        raise SystemExit(2)
+    root = Path(sys.argv[2])
+    content = (root / 'value.txt').read_bytes()
+    for rel in _RETAINED_STEP4_MEASUREMENTS:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)

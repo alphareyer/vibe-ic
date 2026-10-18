@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -36,10 +37,66 @@ def _dump(path, data):
     atomic.write_text(path, json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
+def professional_source_dependencies(project, top=None):
+    """Resolve the retained professional plan's actual source bindings.
+
+    Issuance and arm staging use this same list. A missing or changed
+    antecedent cannot be repaired by borrowing an earlier measurement.
+    """
+    project = Path(project)
+    root = project / 'phase2/stage1/sim_professional'
+    plans = ([root / top / 'verification_plan.json'] if top else
+             sorted(root.glob('*/verification_plan.json')))
+    # This bundle is also a producer output directory.  Freeze its source
+    # population, not retained JUnit/transcripts/builds that this arm replaces.
+    # Non-code support files remain inputs when the plan explicitly binds them.
+    dependencies = {
+        str(path.relative_to(project)): path
+        for path in root.rglob('*')
+        if path.is_file() and not any(part.startswith('sim_build') for part in path.relative_to(root).parts)
+        and (path.suffix in ('.py', '.sva', '.v', '.sv', '.vh', '.svh')
+             or path.name in ('Makefile', 'verification_plan.json'))
+    }
+    for path in (project / 'phase2/stage1/sim/tb').glob('*'):
+        if path.is_file() and path.suffix in ('.v', '.sv'):
+            dependencies[str(path.relative_to(project))] = path
+    missing, changed = [], []
+    for path in plans:
+        if not path.is_file():
+            continue
+        plan = json.loads(path.read_text())
+        random_plan = plan.get('random_goal_plan')
+        if random_plan is None:
+            continue
+        binding = random_plan.get('binding') if isinstance(random_plan, dict) else None
+        if not isinstance(binding, dict) or not binding:
+            raise ValueError('STEP4_PROFESSIONAL_BINDING_INVALID: ' + str(path))
+        for rel, expected in binding.items():
+            if (not isinstance(rel, str) or Path(rel).is_absolute()
+                    or '..' in Path(rel).parts):
+                raise ValueError('STEP4_PROFESSIONAL_INPUT_INVALID: ' + str(rel))
+            source = project / rel
+            dependencies[rel] = source
+            if not source.is_file():
+                missing.append(rel)
+            elif coverage_hash(source) != expected:
+                changed.append(rel)
+    if missing or changed:
+        raise ValueError('STEP4_PROFESSIONAL_INPUT_UNBOUND: ' +
+                         json.dumps(dict(missing=sorted(set(missing)),
+                                         changed=sorted(set(changed)))))
+    return dependencies
+
+
 def stage(project, output):
     """Copy issued source inputs, never prior simulator measurements/builds."""
     from execution_frontend_worker import _verify_manifest
     manifest = _verify_manifest(project, '4')
+    dependencies = professional_source_dependencies(
+        project, manifest['parameters'].get('top'))
+    omitted = sorted(set(dependencies) - set(manifest['files']))
+    if omitted:
+        raise ValueError('STEP4_PROFESSIONAL_INPUT_NOT_ISSUED: ' + ', '.join(omitted))
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     for rel, expected in manifest['files'].items():
@@ -53,7 +110,9 @@ def stage(project, output):
             raise ValueError('4: frozen source changed: ' + rel)
         # The manifest may include an existing bundle directory. Admit its
         # sources/configuration, but not a previous measurement or binary.
-        if not (rel.startswith(('input/', 'phase1/', 'phase2/stage1/rtl/')) or
+        if not (rel in dependencies or
+                rel.startswith(('input/', 'phase1/', 'phase2/stage1/rtl/')) or
+                (rel.startswith('phase2/stage1/sim/tb/') and path.suffix in ('.v', '.sv')) or
                 ('/sim_professional/' in rel and
                  (path.suffix in ('.py', '.json', '.sva') or path.name == 'Makefile') and
                  not any(part.startswith('sim_build') for part in path.parts))):
@@ -107,8 +166,28 @@ def measure_bundle(project, bundle, rtl, *, jobs=4):
     """Use the canonical parser and RTL scope on fresh native coverage bytes."""
     destination = project / 'reports/phase2' / coverage.COVERAGE_MEASUREMENT_REL
     destination.unlink(missing_ok=True)
-    run = _simulate(bundle, 'verilator', instrument=True, jobs=jobs, rtl=rtl)
-    dat = bundle / 'coverage.dat'
+    if (bundle / 'verification_plan.json').is_file():
+        # Reuse the ordinary coverage producer, including its fresh native
+        # JUnit/input-activity receipt. Raw coverage totals alone do not qualify.
+        captured = {}
+        def execute(argv, cwd):
+            cp = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                                timeout=1200)
+            captured.update(argv=argv, rc=cp.returncode)
+            return cp.returncode, cp.stdout, cp.stderr
+        dat = Path(coverage.verilate_professional_tb_and_run(
+            rtl, bundle / ('tb_' + bundle.name + '.py'),
+            bundle / 'coverage_build', bundle / 'coverage_runs',
+            exec_fn=execute, build_jobs=jobs))
+        junit = dat.parent / 'coverage_results.xml'
+        run = dict(captured, junit=str(junit),
+                   log=str(dat.parent / 'coverage_cocotb.log'),
+                   summary=results.parse_junit(junit), verdict='PASS')
+    else:
+        # Preserve the existing missing-plan component diagnostic. Its raw
+        # measurement still fails the unchanged canonical coverage consumer.
+        run = _simulate(bundle, 'verilator', instrument=True, jobs=jobs, rtl=rtl)
+        dat = bundle / 'coverage.dat'
     if run['verdict'] != 'PASS' or not dat.is_file() or not dat.stat().st_size:
         return dict(verdict='FAIL', reason='STEP4_COVERAGE_RUN_FAILED', run=run)
     parsed = coverage.parse_coverage_dat(str(dat))
@@ -166,7 +245,22 @@ def produce(project, output, simulator, **parameters):
         if generated.get('status') != 'PASS':
             raise ValueError('4: professional bundle unavailable')
     rtl = staged_rtl(project)
+    import testbench_gen
+    scenario_report = {}
+    if (project / 'phase1/generated_docs/L10_TEST_CASES.json').is_file():
+        testbench_gen.emit_unit_tbs(project, top,
+            kind=testbench_gen.DEFAULT_SCAFFOLD_KIND, report=scenario_report)
+        testbench_gen.run_unit_tbs(project, None, scenario_report)
     functional = _simulate(bundle, simulator, rtl=rtl)
+    plan_path = bundle / 'verification_plan.json'
+    if plan_path.is_file():
+        plan = json.loads(plan_path.read_text())
+        if plan.get('random_goal_plan'):
+            import professional_tb_gen
+            import _eda_pin
+            professional_tb_gen.finalize_random_pair_execution(
+                bundle, plan['random_goal_plan'], argv=functional['argv'],
+                returncode=functional['rc'], image=_eda_pin.configured_reference())
     # Publish the same arm's actual JUnit bytes at the normal consumer seam.
     # A view is not a second measurement; the source transcript remains bound.
     primary_junit = Path(functional['junit'])
@@ -190,6 +284,8 @@ def produce(project, output, simulator, **parameters):
                simulator=simulator, tests=summary.get('tests', 0)))
     _dump(project / 'step4_execution.json', dict(schema='execution_step4/1',
           simulator=simulator, functional=functional, coverage=measured,
+          scenario_execution=scenario_report,
+          complementary_engines=dict(scenarios='verilator', coverage='verilator'),
           shared_checker='cocotb + verilator code coverage',
           qualification='CANONICAL_CONSUMER_REQUIRED'))
     from execution_frontend_providers import _concrete_outputs, CANONICAL_ROWS
@@ -206,6 +302,27 @@ def produce(project, output, simulator, **parameters):
     return project / 'step4_execution.json'
 
 
+DESIGN_NA_GATES = frozenset((
+    'functional_state_transition_coverage_check',
+    'behavioral_evidence_per_spec_item_check',
+))
+GATE_BRIDGES = DESIGN_NA_GATES | {'vacuous_testbench_check'}
+
+
+def _clear_design_na_receipt(root, gate, argv):
+    """These gate-owned receipts must be written by this invocation."""
+    if gate not in DESIGN_NA_GATES:
+        return None
+    try:
+        report = Path(argv[argv.index('--json') + 1])
+    except (ValueError, IndexError, TypeError):
+        return None
+    if not report.is_absolute():
+        report = Path(root) / report
+    report.unlink(missing_ok=True)
+    return report
+
+
 def main(simulator):
     parser = argparse.ArgumentParser()
     parser.add_argument('--gate')
@@ -214,7 +331,7 @@ def main(simulator):
     parser.add_argument('gate_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.gate:
-        if args.gate != 'vacuous_testbench_check':
+        if args.gate not in GATE_BRIDGES:
             raise SystemExit('unsupported Step 4 gate bridge')
         raise SystemExit(run_gate(args.gate, args.gate_args))
     if not args.inputs or not args.outputs:
@@ -226,11 +343,12 @@ def run_gate(gate, argv):
     """Run a declared Step 4 gate, translating only typed N/A rc2.
 
     The Controller treats a component's nonzero rc as PROCESS_ERROR, while
-    ``vacuous_testbench_check`` uses rc2 for its explicit, report-backed
-    ``NOT_APPLICABLE`` tier. Keep that tier visible in the report and make the
+    The existing vacuous bridge and the two design-declared checks use rc2
+    for explicit, report-backed non-applicability. Keep that tier visible in the report and make the
     process seam agree with the canonical consumer. A crash/IO_ERROR or a
     measured FAIL keeps its original nonzero status.
     """
+    fresh_report = _clear_design_na_receipt(Path.cwd(), gate, argv)
     script = Path(__file__).with_name(gate + '.py')
     cp = subprocess.run([sys.executable, str(script), *argv],
                         cwd=Path.cwd(), capture_output=True, text=True)
@@ -238,6 +356,23 @@ def run_gate(gate, argv):
         print(cp.stdout, end='')
     if cp.stderr:
         print(cp.stderr, end='', file=sys.stderr)
+    if gate in DESIGN_NA_GATES:
+        print(f'STEP4_GATE_EXIT: program={gate} actual_exit_code={cp.returncode}')
+        if cp.returncode != 2 or fresh_report is None:
+            return cp.returncode
+        try:
+            document = json.loads(fresh_report.read_text())
+        except (OSError, ValueError, TypeError):
+            return cp.returncode
+        import flow_compliance_check as flow
+        command = shlex.join([gate, *argv])
+        if (document.get('verdict') != 'FAIL' and
+                flow._report_proves_executed_design_na(
+                    Path.cwd(), document, command)):
+            print(f'STEP4_GATE_APPLICABILITY: program={gate} '
+                  'verdict=NOT_APPLICABLE reason_class=DESIGN_DECLARED_NA')
+            return 0
+        return cp.returncode
     if cp.returncode != 2 or gate != 'vacuous_testbench_check':
         return cp.returncode
     try:
@@ -285,9 +420,15 @@ def validate(project, facts, gate_names):
         if command is None:
             gates[name] = 'NOT_MEASURED'
             continue
+        _clear_design_na_receipt(root, name, shlex.split(command)[1:])
         outcome = flow.__check_program_exit_zero(root, command)
-        structured = flow._report_verdict(flow._command_json_report(root, command))
-        if structured in ('NOT_APPLICABLE', 'NOT_MEASURED', 'SKIP', 'SKIPPED'):
+        report = flow._command_json_report(root, command)
+        structured = flow._report_verdict(report)
+        if (name in DESIGN_NA_GATES and outcome.exit_code == 2 and
+                structured != 'FAIL' and
+                flow._report_proves_executed_design_na(root, report, command)):
+            gates[name] = 'NOT_APPLICABLE'
+        elif structured in ('NOT_APPLICABLE', 'NOT_MEASURED', 'SKIP', 'SKIPPED'):
             gates[name] = 'NOT_MEASURED'
         elif outcome.passed and outcome.exit_code == 0:
             gates[name] = 'PASS'
@@ -308,7 +449,9 @@ def validate(project, facts, gate_names):
                       for alt in str(spec).split(' OR ')) for spec in required)
     if canonical.status == 'FAIL' or 'FAIL' in gates.values():
         verdict = 'FAIL'
-    elif canonical.status == 'PASS' and complete and gates and all(v == 'PASS' for v in gates.values()):
+    elif canonical.status == 'PASS' and complete and gates and all(
+            em.required_gate_satisfied('4', gate, value)
+            for gate, value in gates.items()):
         verdict = 'PASS'
     else:
         verdict = 'NOT_MEASURED'

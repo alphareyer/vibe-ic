@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROG = (Path(__file__).resolve().parent.parent / "tapeout_checklist_gen.py")
 
 
@@ -129,3 +131,49 @@ def test_an_empty_project_is_not_ready_for_tapeout(tmp_path):
     rep = json.loads(Path(head["out"]).read_text())
     assert rep["verdict"] == head["verdict"]
     assert rep["summary"]["blockers_total"] == head["blockers_total"]
+
+
+@pytest.mark.parametrize("reports", ["canonical", "legacy", "both", "absent"])
+def test_sta_inventory_follows_canonical_output_and_retains_legacy(tmp_path, reports):
+    """Inventory the declared report; presence does not replace STA signoff."""
+    import yaml
+    from programs.tests._hostpaths import require_repo
+
+    flow = yaml.safe_load(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "flow",
+        "phase1_phase2_phase3.yaml").read_text())
+    step = next(row for row in flow["steps"] if str(row["id"]) == "23")
+    canonical = "phase3/stage3/sta/post_route_timing.rpt"
+    assert canonical in step["required_outputs"]
+    legacy = {
+        "sta_report": "phase3/stage3/pnr/sta.rpt",
+        "sta_rigor": "phase3/stage3/pnr/post_route_timing.rpt",
+    }
+    if reports in ("canonical", "both"):
+        report = tmp_path / canonical
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("slack (VIOLATED) -0.2\n")
+    if reports in ("legacy", "both"):
+        for path in legacy.values():
+            report = tmp_path / path
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("legacy timing inventory\n")
+
+    result = _run(tmp_path)
+    assert result.returncode == 0
+    payload = json.loads((tmp_path / "reports/audit/tapeout_checklist.json").read_text())
+    items = {item["name"]: item for item in payload["items"]}
+    for name, old_path in legacy.items():
+        item = items[name]
+        expected = (canonical if reports in ("canonical", "both")
+                    else old_path if reports == "legacy" else None)
+        assert item["path"] == expected
+        assert item["present"] is (reports != "absent")
+        if expected:
+            assert item["pattern"] == expected
+            assert item["size_bytes"] == (tmp_path / expected).stat().st_size
+    assert items["sta_report"]["severity"] == "blocker"
+    assert items["sta_rigor"]["gate"] == "sta_signoff_rigor_check"
+    assert items["sta_rigor"]["presence_is_pass"] is False
+    assert payload["gate_references"]["sta_rigor"] == "sta_signoff_rigor_check"
+    assert payload["verdict"] == "BLOCKER_MISSING"

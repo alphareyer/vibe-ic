@@ -40,9 +40,9 @@ _CHECKLIST_ITEMS = [
     ("gds",                "phase3/stage4/gds/*.gds",                  "blocker",  None),
     ("netlist",            "phase2/stage2/synth/*.v",                 "blocker",  None),
     ("post_route_def",     "phase3/stage3/pnr/*.def",                  "blocker",  None),
-    ("sta_report",         "phase3/stage3/pnr/sta.rpt",                "blocker",  None),
+    ("sta_report",         "phase3/stage3/sta/post_route_timing.rpt",  "blocker",  None),
     ("sta_per_corner",     "phase3/stage3/sta/per_corner/sta_*.rpt",   "advisory", None),
-    ("sta_rigor",          "phase3/stage3/pnr/post_route_timing.rpt",  "advisory", "sta_signoff_rigor_check"),
+    ("sta_rigor",          "phase3/stage3/sta/post_route_timing.rpt",  "advisory", "sta_signoff_rigor_check"),
     ("drc_report",         "reports/phase3/drc_signoff.rpt",           "blocker",  None),
     # LVS is genuine-match-required, NOT presence-only: a POWER_PIN_ONLY netgen
     # waiver does NOT count as a tapeout LVS pass (lvs_tapeout_signoff_check).
@@ -104,6 +104,13 @@ _CHECKLIST_ITEMS = [
     ("shuttle_readiness",  "reports/audit/tapeout_readiness.json",     "advisory", "tapeout_readiness_check"),
     ("layout_xor",         "reports/**/xor_report.json",               "advisory", "xor_layout_check"),
 ]
+
+# The canonical Step 23 report takes precedence. Retained direct-run reports
+# remain inventory inputs when that report is absent; no STA gate is bypassed.
+_LEGACY_STA_REPORTS = {
+    "sta_report": "phase3/stage3/pnr/sta.rpt",
+    "sta_rigor": "phase3/stage3/pnr/post_route_timing.rpt",
+}
 
 #: Where `tapeout_readiness_check` writes its verdict. Read — never written —
 #: here: this generator does not run EDA tools and does not run that gate. The
@@ -293,6 +300,11 @@ def main(argv=None) -> int:
     blockers_total = 0
     for name, pattern, severity, gate in _CHECKLIST_ITEMS:
         f = _glob_first(project, pattern)
+        if f is None and name in _LEGACY_STA_REPORTS:
+            legacy_pattern = _LEGACY_STA_REPORTS[name]
+            f = _glob_first(project, legacy_pattern)
+            if f is not None:
+                pattern = legacy_pattern
         present = f is not None
         size = _file_size(f) if f else 0
         if severity == "blocker":

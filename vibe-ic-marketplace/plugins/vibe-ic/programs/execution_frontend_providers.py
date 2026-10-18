@@ -598,7 +598,10 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             # Ultra exposes two fixed simulator entry points. They share the
             # declared Step 4 consumers, but each arm owns its simulator and
             # runs the complete source-bound producer independently.
-            from execution_step4 import gate_commands
+            from execution_step4 import (GATE_BRIDGES, gate_commands,
+                                         professional_source_dependencies)
+            dependencies = (professional_source_dependencies(project,
+                (parameters or {}).get('top')) if project is not None else {})
             declared = gate_commands(contract)
             gate_components = []
             for gate in portfolio_gates:
@@ -609,7 +612,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                 # Controller runs every component in the arm output root. All
                 # relative command paths therefore resolve there; the explicit
                 # '.' project operand becomes the issued {outputs} path.
-                if gate == 'vacuous_testbench_check':
+                if gate in GATE_BRIDGES:
                     # Its rc2 is a typed NOT_APPLICABLE result. The Controller
                     # requires component rc0, so the Step4 bridge preserves
                     # the report and translates only that disclosed tier.
@@ -628,7 +631,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                         '--inputs', '{inputs}', '--outputs', '{outputs}'), timeout_s=300),
                         *gate_components),
                     input_contract=INPUT_CONTRACTS[row] + ('phase2/stage1/rtl',
-                        'phase1/generated_docs', 'phase2/stage1/sim_professional'),
+                        'phase1/generated_docs') + tuple(dependencies),
                     cpus=4, ram_mb=12288, qualified=False,
                     qualification_evidence='source-bound simulator; native canonical qualification pending'))
         else:
