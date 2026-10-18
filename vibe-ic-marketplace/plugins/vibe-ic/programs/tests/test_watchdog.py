@@ -58,7 +58,8 @@ def test_meter_cpu_counts_only_strict_increase_and_carries_forward():
     seq = iter([0.0, 100.0, 100.0, 90.0, 150.0])
     m = W.ProgressMeter(size_fn=lambda: 0, cpu_fn=lambda: next(seq))
     s = [m.sample() for _ in range(5)]
-    assert s == [0.0, 100.0, 100.0, 100.0, 150.0], s
+    # The drop adds nothing; the next valid increase contributes 150 - 90.
+    assert s == [0.0, 100.0, 100.0, 100.0, 160.0], s
 
 
 def test_meter_none_flap_is_never_progress():
@@ -576,3 +577,84 @@ def test_launch_error_is_returned_in_the_callers_alphabet():
         assert isinstance(r.out, want), (as_text, type(r.out))
         needle = "COMMAND_NOT_FOUND" if as_text else b"COMMAND_NOT_FOUND"
         assert needle in r.err
+
+
+
+def test_tree_counter_growth_after_child_exit_keeps_the_job_alive(tmp_path):
+    """The current-live tree total may fall when a child exits, then advance."""
+    import json
+
+    clk = _FakeClock()
+    proc = _RunningProc()
+    state = {'counter': 100.0}
+    samples = []
+    meter = W.ProgressMeter(size_fn=lambda: 0, cpu_fn=lambda: state['counter'])
+    killer = _KillCounter(proc)
+
+    def probe():
+        score = meter.sample()
+        samples.append({'time': clk.t, 'counter': state['counter'], 'score': score})
+        return score
+
+    def wait_fn(p, t):
+        clk.advance(t)
+        p.polls += 1
+        state['counter'] = 5.0 if p.polls == 1 else state['counter'] + 1.0
+        return 0 if p.polls == 8 else None
+
+    observations = {}
+    outcome, rc = W.supervise(
+        proc, probe, killer, poll_s=10, stall_grace_s=25,
+        hard_ceiling_s=1000, wait_fn=wait_fn, clock=clk,
+        observations=observations)
+    record = {'outcome': outcome, 'rc': rc, 'kills': killer.calls,
+              'samples': samples, 'observations': observations,
+              'scope': 'Real ProgressMeter and supervise; controlled clock and '
+                       'current-live aggregate values, no real IC or EDA run.'}
+    (tmp_path / 'TREE_COUNTER_OBSERVATION.json').write_text(json.dumps(record))
+    print('TREE_COUNTER_OBSERVATION ' + json.dumps(record, sort_keys=True))
+    assert outcome == 'natural', f'recovered tree progress was {outcome}'
+    assert rc == 0 and killer.calls == [] and not proc.killed
+    assert clk.t == 80
+    assert samples[1]['score'] == samples[0]['score']
+    assert samples[2]['counter'] < samples[0]['counter']
+    assert samples[2]['score'] > samples[1]['score']
+    assert observations['since_last_progress_s'] == 10
+
+
+def test_tree_counter_decreases_without_growth_still_stall(tmp_path):
+    """Losing child counters alone is not progress and cannot refresh grace."""
+    import json
+
+    clk = _FakeClock()
+    proc = _RunningProc()
+    state = {'counter': 100.0}
+    samples = []
+    meter = W.ProgressMeter(size_fn=lambda: 0, cpu_fn=lambda: state['counter'])
+    killer = _KillCounter(proc)
+
+    def probe():
+        score = meter.sample()
+        samples.append(score)
+        return score
+
+    def wait_fn(p, t):
+        clk.advance(t)
+        p.polls += 1
+        state['counter'] -= 10.0
+        return None
+
+    observations = {}
+    outcome, rc = W.supervise(
+        proc, probe, killer, poll_s=10, stall_grace_s=25,
+        hard_ceiling_s=1000, wait_fn=wait_fn, clock=clk,
+        observations=observations)
+    record = {'outcome': outcome, 'rc': rc, 'kills': killer.calls,
+              'scores': samples, 'elapsed_s': clk.t,
+              'observations': observations}
+    (tmp_path / 'DECLINING_COUNTER_OBSERVATION.json').write_text(json.dumps(record))
+    print('DECLINING_COUNTER_OBSERVATION ' + json.dumps(record, sort_keys=True))
+    assert outcome == 'stalled' and rc is None
+    assert killer.calls == ['stalled'] and proc.killed
+    assert samples == [100.0, 100.0, 100.0, 100.0]
+    assert clk.t == observations['since_last_progress_s'] == 30

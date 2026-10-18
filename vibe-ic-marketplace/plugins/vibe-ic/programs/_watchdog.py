@@ -307,10 +307,11 @@ class ProgressMeter:
     """Fuse forward-progress signals into a MONOTONIC non-decreasing score so
     the supervisor sees "progress" iff a signal genuinely ADVANCED.
 
-    Sources, all individually non-decreasing:
+    Sources fused into the activity score:
       • captured-output bytes  (a temp file the child appends to — only grows),
       • external tee'd-log advances  (size or mtime change → +1 event),
-      • CPU seconds  (carried forward; counted only on a strict increase).
+      • CPU/IO counter increments since the previous valid reading; a live
+        process-tree total may decrease when a child exits.
     A signal that is momentarily UNAVAILABLE (probe returned None) CARRIES
     FORWARD its last value — a signal *disappearing* is never mistaken for
     progress. This closes the None-flap where an intermittently-failing CPU
@@ -327,6 +328,7 @@ class ProgressMeter:
         self._log_events = 0.0
         self._last_log = None
         self._last_cpu = 0.0
+        self._cpu_progress = 0.0
         # WHAT WAS ACTUALLY READ, not what was wired (vibe-ic#2113 O3). Counted
         # per signal across every look, plus whether the LAST look got a
         # reading, because those answer two different questions a reader has:
@@ -401,9 +403,8 @@ class ProgressMeter:
     def sample(self) -> float:
         # Every branch below already knew whether it got a reading; it simply
         # threw the answer away. Recording it is what lets `watched()` name
-        # what was READ instead of what was wired (vibe-ic#2113 O3). The score
-        # arithmetic is UNTOUCHED -- a change to the fusion would be a change
-        # to when jobs are reaped, which this is not.
+        # what was READ instead of what was wired (vibe-ic#2113 O3). CPU/IO
+        # activity below compares consecutive valid samples, not a tree peak.
         self._looks += 1
         score = 0.0
         if self._size_fn is not None:
@@ -431,12 +432,14 @@ class ProgressMeter:
                 cpu = self._cpu_fn()
             except Exception:  # nosec
                 cpu = None
-            if cpu is not None and cpu > self._last_cpu:
+            if cpu is not None:
+                if cpu > self._last_cpu:
+                    self._cpu_progress += cpu - self._last_cpu
                 self._last_cpu = cpu
             self._read_last["cpu"] = cpu is not None
             if cpu is None:
                 self._blind["cpu"] += 1
-        score += self._last_cpu
+        score += self._cpu_progress
         return score
 
 
@@ -1133,8 +1136,10 @@ def _pid_io_bytes(pid: int):
 def host_tree_progress(pid: int):
     """Forward-progress reading for the host process TREE rooted at `pid`.
 
-    Returns CPU-seconds + I/O-megabytes summed tree-wide (one comparable float
-    that only grows while the job works), or None when nothing in the tree is
+    Returns current-live CPU-seconds + I/O-megabytes summed tree-wide. The
+    total can decrease when a child exits; ProgressMeter counts later positive
+    increments without treating the decrease itself as activity. Returns None
+    when nothing in the tree is
     readable — i.e. the job is gone. Returning None rather than 0.0 on a dead
     tree matters: `ProgressMeter` CARRIES FORWARD an unavailable signal, so a
     process exiting can never look like a progress RESET, and an unreadable
@@ -1168,7 +1173,7 @@ def host_cpu_probe(proc):
     """`cpu_probe` injection for `run_supervised` over a HOST subprocess.
 
     Signature matches what `run_supervised` calls: it is handed the live proc
-    object and returns a monotonic progress reading (or None)."""
+    object and returns a current-live tree reading (or None)."""
     pid = getattr(proc, "pid", None)
     if pid is None:
         return None
