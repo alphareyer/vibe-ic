@@ -453,3 +453,75 @@ def test_scoped_analog_audit_is_not_a_synthesis_invocation(tmp_path, monkeypatch
     assert len(history) == 1
     assert (history[0]/'before.json').read_bytes() == b'previous scoped analog audit'
     assert (history[0]/'after.json').read_bytes() == report.read_bytes()
+
+
+@pytest.mark.parametrize('verdict', ['PASS', 'FAIL'])
+def test_nested_p0_main_preserves_the_existing_owner_and_its_verdict(
+        tmp_path, monkeypatch, verdict):
+    """Real main/collector ownership; the neutral structural leaf is isolated.
+
+    Both observed field contexts still execute their own P0 consumer. They
+    must not recover a live sibling's retained version or credit its result.
+    Existing standalone P0 controls above cover canonical capture separately.
+    """
+    import hashlib
+
+    monkeypatch.setattr(fcc, '_STRUCTURAL_RTL_GATES', ('retention_fixture_check',))
+    monkeypatch.setattr(fcc, '_run_yosys_gates', lambda project: (True, []))
+    monkeypatch.setattr(fcc, 'check_step', lambda project, row, *_a, **_k:
+        fcc.StepResult(id=row['id'], name=row['name'], stage=row['stage'],
+                       status='PASS', reasons=[], evidence=[]))
+    for stage, parent_scope in ((1, 'ALL:stage2'), (2, 'ALL')):
+        project = tmp_path / f'stage{stage}'
+        relative = 'phase2/stage1/rtl/top.v'
+        rtl = write(project, relative,
+                    b'module top(input a, output b); assign b=a; endmodule\n')
+        inputs = {relative: {'sha256': hashlib.sha256(rtl.read_bytes()).hexdigest()}}
+        owner = versions.begin_step(project, 'P0', inputs=inputs)
+        folder = project / owner['storage_root'] / owner['folder']
+        original_attempt = (folder / 'attempt.json').read_bytes()
+        records = [fcc._p0_gate_record(
+            'retention_fixture_check', verdict, 'neutral structural leaf result',
+            {'exit_code': 0 if verdict == 'PASS' else 1})]
+        calls = []
+
+        def structural(actual_project, **kwargs):
+            calls.append(actual_project)
+            kwargs['records_out'].extend(records)
+            return verdict == 'PASS', [], [], []
+
+        monkeypatch.setattr(fcc, '_run_structural_rtl_gates', structural)
+        monkeypatch.setenv('VIBEIC_FCC_ACTIVE_SCOPES', parent_scope)
+        report_path = project / 'nested.json'
+        rc = fcc.main([str(project), '--stage', str(stage), '--phase', '2',
+                       '--strict-structural', '--json', str(report_path)])
+        report = json.loads(report_path.read_text())
+        p0 = next(row for row in report['steps'] if str(row['id']) == 'P0')
+        owner_metadata = folder / ('outputs.json' if (folder / 'outputs.json').is_file()
+                                   else 'attempt.json')
+        observed_owner = json.loads(owner_metadata.read_text())['status']
+        observation = {'stage': stage, 'parent_scope': parent_scope,
+                       'structural_calls': len(calls), 'rc': rc,
+                       'nested_overall': report['overall'],
+                       'nested_p0_status': p0['status'],
+                       'nested_gate_records': p0['gate_records'],
+                       'observed_owner_status': observed_owner,
+                       'scope': 'Real FCC main/collector; neutral structural leaf '
+                                'and unrelated YAML row consumers are isolated.'}
+        (project / 'P0_OWNER_OBSERVATION.json').write_text(json.dumps(observation))
+        print('P0_OWNER_OBSERVATION ' + json.dumps(observation, sort_keys=True))
+        assert observed_owner == 'RUNNING', (
+            f'existing P0 owner changed to {observed_owner}')
+        assert (folder / 'attempt.json').read_bytes() == original_attempt
+        assert (folder / 'inputs' / relative).read_bytes() == rtl.read_bytes()
+        assert calls == [project]
+        assert p0['gate_records'] == records
+        assert p0['status'] == verdict
+        assert report['overall'] == verdict
+        assert rc == (0 if verdict == 'PASS' else 1)
+        finished = versions.finish_step(project, owner, verdict=verdict,
+                                        result={'neutral_consumer': p0},
+                                        canonical_pass=verdict == 'PASS')
+        assert finished['status'] == verdict and not finished['capture_errors']
+        assert finished['canonical_pass'] is (verdict == 'PASS')
+        assert (folder / 'inputs' / relative).read_bytes() == rtl.read_bytes()

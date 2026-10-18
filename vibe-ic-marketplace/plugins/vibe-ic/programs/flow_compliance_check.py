@@ -20857,7 +20857,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             and target_stage not in _NO_RTL_UMBRELLA_SCOPES):
         structural_gate_records = []
         import execution_policy as _p0_policy
-        if _p0_policy.request()['mode'] == 'default':
+        # Nested compliance still evaluates P0; only the outer invocation owns
+        # its retained version. A nested begin can recover a live sibling.
+        if _p0_policy.request()['mode'] == 'default' and not _active:
             import step_preflight as _p0_preflight
             p0_attempt = _p0_preflight._begin_retained_rows(project,
                 _p0_preflight.Decision(runner='flow_compliance_check',
