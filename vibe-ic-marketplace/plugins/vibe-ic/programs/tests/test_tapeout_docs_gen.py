@@ -360,3 +360,84 @@ def test_the_flows_own_evaluator_fails_the_gate_on_a_run_that_is_not_clean(tmp_p
     assert ok_clean, (
         f"a clean run must still PASS, or this gate is red for everyone: "
         f"{out_clean[:200]!r}")
+
+
+def test_canonical_gate_preserves_producer_citations_across_clock_change(tmp_path, monkeypatch):
+    import datetime
+    import shlex
+    import _cited_artefacts as citations
+    import flow_compliance_check as fcc
+    import phase3_one_shot_runner as runner
+
+    spec = importlib.util.spec_from_file_location('tdg_readonly_source_control', PROG)
+    tdg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tdg)
+    clock = [datetime.datetime(2026, 1, 2, 3, 4, tzinfo=datetime.timezone.utc)]
+
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz)
+
+    monkeypatch.setattr(tdg, 'datetime', Clock)
+
+    def invoke(argv):
+        monkeypatch.setattr(sys, 'argv', [str(PROG), *argv])
+        try:
+            tdg.main()
+        except SystemExit as exc:
+            return exc.code if type(exc.code) is int else 1
+        return 0
+
+    project = _project(tmp_path / 'run', CLEAN)
+    out = project / 'reports/phase3/docs'
+    producer = ['--project', str(project), '--out-dir', str(out)]
+    assert invoke(producer) == 0
+    paths = sorted(out.glob('*.html'))
+    assert len(paths) == 2
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+    runner._publish_in_progress_steps(project, [runner.StepResult(
+        'tapeout_docs_gen', 'PASS', 0.0, 'source fixture: actual document producer rc0',
+        [str(p) for p in paths])])
+    record_path = project / citations.REPORT_REL
+    record = json.loads(record_path.read_text())
+    record_before = record_path.read_bytes()
+    assert citations.check(project, record)[0] == 'PASS'
+    clock[0] += datetime.timedelta(hours=1)
+    monkeypatch.chdir(project)
+    gate_argv = shlex.split(_declared_clause())[1:]
+    rc = invoke(gate_argv)
+    assert rc == 0
+    citation_status = citations.check(project, record)[0]
+    assert citation_status == 'PASS', 'canonical release gate changed producer-owned HTML bytes'
+    assert '--check-only' in gate_argv
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths} == before
+    assert record_path.read_bytes() == record_before
+    metrics = project / 'phase3/final/metrics.json'
+    for damage in ('negative_setup', 'missing_tns', 'draft_flag'):
+        broken = dict(CLEAN)
+        if damage in ('negative_setup', 'draft_flag'):
+            broken['timing__setup__ws'] = -1.53
+        else:
+            broken.pop('timing__hold__tns')
+        metrics.write_text(json.dumps(broken))
+        rc = invoke(gate_argv + (['--allow-incomplete'] if damage == 'draft_flag' else []))
+        assert rc == 1, damage
+        assert {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths} == before
+        print('READONLY_RELEASE_REFUSED', damage)
+    metrics.write_text(json.dumps(CLEAN))
+    signoff = next(p for p in paths if p.name.startswith('SIGNOFF_'))
+    signoff.write_bytes(before[signoff.name][0] + b'edited document')
+    status, rows = citations.check(project, record)
+    assert status == 'NOT_MEASURED'
+    assert any(r['reason'] == 'STALE_CITATION' for r in rows)
+    print('READONLY_RELEASE_REFUSED', 'html_tamper_by_original_citation_check')
+    signoff.unlink()
+    assert invoke(gate_argv) == 0
+    assert citations.check(project, record)[0] == 'NOT_MEASURED'
+    satisfied, *_ = fcc._resolve_required_output(
+        project, '37.5ic', 'reports/phase3/docs/SIGNOFF_*.html', {})
+    assert satisfied is False
+    assert not signoff.exists()
+    assert record_path.read_bytes() == record_before
+    print('READONLY_RELEASE_REFUSED', 'missing_html_by_original_required_output')

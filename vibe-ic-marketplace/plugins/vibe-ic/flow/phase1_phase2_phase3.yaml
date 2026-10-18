@@ -9185,7 +9185,7 @@ steps:
         # one and nobody fetched it" (NOT_DETERMINED), and nothing that sees
         # only one arm can report a disagreement between them.
         - program_exit_zero: "tapeout_precheck . --json reports/phase3/tapeout_precheck.json"
-        - program_exit_zero: "tapeout_docs_gen --project . --out-dir reports/phase3/docs"
+        - program_exit_zero: "tapeout_docs_gen --project . --out-dir reports/phase3/docs --check-only"
         # THE PRODUCT DOCUMENTS ARE JUDGED ON THEIR OWN EVIDENCE, not on the
         # producer's exit code. Nothing here trusts `ic_release_docs_gen`: this
         # gate RE-DERIVES every quantity the documents state, from a DIFFERENT

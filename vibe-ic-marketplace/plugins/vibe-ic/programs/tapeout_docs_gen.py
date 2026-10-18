@@ -31,9 +31,10 @@ WHY THE PRODUCER ROW AND BLOCKING CLAUSE BOTH EXIST
 ===================================================
 ``step_tapeout_docs_gen`` is the producer dispatch: it runs after artefact
 canonicalisation so the HTML inputs already exist. It does not replace the
-canonical gate clause. Step 37.5ic re-runs the same program through
-``program_exit_zero`` and checks the required document globs; that is where the
-release verdict blocks the flow. Keeping both paths prevents the compliance
+canonical gate clause. Step 37.5ic re-runs its release checks through
+``program_exit_zero`` with ``--check-only`` and checks the required document
+globs; that is where the release verdict blocks the flow. The consumer leaves
+producer-owned HTML bytes unchanged so their original citations remain valid. Keeping both paths prevents the compliance
 auditor from becoming the first producer of the artefacts it is judging while
 still consuming rc 1 as a refusal.
 
@@ -517,6 +518,8 @@ def main():
     ap.add_argument("--allow-incomplete", action="store_true",
                     help="write a DRAFT for a run that is not clean; every "
                          "document is stamped DRAFT and says why")
+    ap.add_argument("--check-only", action="store_true",
+                    help="check the run's release conditions without writing documents")
     a = ap.parse_args()
 
     if a.project and not a.metrics:
@@ -602,7 +605,7 @@ def main():
             raise SystemExit(0)
 
     blockers = release_blockers(m)
-    if blockers and not a.allow_incomplete:
+    if blockers and (a.check_only or not a.allow_incomplete):
         print("NOT RELEASABLE — no documents written. "
               f"{len(blockers)} propert(ies) are not clean:", file=sys.stderr)
         for b in blockers:
@@ -619,6 +622,10 @@ def main():
         # `_check_program_exit_zero`, tagged `__VACUOUS_HINT__`. A run that is
         # NOT RELEASABLE is a content-earned FAIL and must be scored as one.
         raise SystemExit(1)
+
+    if a.check_only:
+        print("RELEASABLE — release conditions checked; no documents written")
+        return
 
     a.out_dir.mkdir(parents=True, exist_ok=True)
     so = a.out_dir / f"SIGNOFF_{a.design}_{a.pdk}.html"
