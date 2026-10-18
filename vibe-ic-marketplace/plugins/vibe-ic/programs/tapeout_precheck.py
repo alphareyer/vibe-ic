@@ -798,7 +798,8 @@ def evaluate(project: Path,
              runner: Optional[Runner] = None,
              programs_dir: Optional[Path] = None,
              timeout: Optional[float] = 7200.0,
-             pdk_container: str = "") -> MergedReport:
+             pdk_container: str = "",
+             report_dir: Optional[Path] = None) -> MergedReport:
     """Run both arms — or say, in writing, why one of them did not run.
 
     `pdk_container` is forwarded to OUR arm only: `general_precheck` reads the
@@ -865,7 +866,8 @@ def evaluate(project: Path,
 
     # ---------------- ARM 1 — OURS. No condition. Every design. -------------
     our_authority = f"{OURS}/{_ours.ATTRIBUTION}"
-    our_out = project / OUR_ARM_ARTEFACT
+    our_out = (report_dir / Path(OUR_ARM_ARTEFACT).name if report_dir is not None
+               else project / OUR_ARM_ARTEFACT)
     cmd = [sys.executable, str(pdir / "general_precheck.py"), str(project),
            "--json", str(our_out)]
     # THE PDK REACHES OUR OWN ARM. `general_precheck --pdk` exists so its
@@ -929,7 +931,8 @@ def evaluate(project: Path,
                f"{TEMPLATE_SLOTS_GLOB}, or name it in "
                f"{_decl.DECLARATION_REL}.")
     slot = resolved_slot or ""
-    their_out = project / THEIR_ARM_ARTEFACT
+    their_out = (report_dir / Path(THEIR_ARM_ARTEFACT).name if report_dir is not None
+                 else project / THEIR_ARM_ARTEFACT)
     their_authority = (_authority_of(shuttle) if shuttle is not None
                        else f"{OURS}/{ATTRIBUTION}")
     their_doc: Optional[Dict[str, Any]] = None
@@ -1156,17 +1159,22 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    out_json = args.out_json or (args.project / MERGED_ARTEFACT)
+    # The auditor already isolated this invocation's result. Its child reports
+    # belong beside that receipt, never over the producer's canonical evidence.
+    report_args = ({"report_dir": out_json.parent}
+                   if _ga.caller_role() == _ga.ROLE_AUDIT else {})
     rep = evaluate(project=args.project, pdk=args.pdk, layout=args.layout,
                    declaration_path=args.declaration, slot=args.slot,
                    cob=args.cob, top=args.top, die_id=args.die_id,
                    image=args.image, allow_pull=args.pull,
-                   timeout=args.timeout, pdk_container=args.pdk_container)
+                   timeout=args.timeout, pdk_container=args.pdk_container,
+                   **report_args)
     payload = rep.as_dict()
     # R-0915-152 -- the document states WHO INVOKED this writer, beside the
     # verdict it already composes. Unstated role == producer, so the run's
     # own path is unchanged.
     _ga.stamp(payload)
-    out_json = args.out_json or (args.project / MERGED_ARTEFACT)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out_json, json.dumps(payload, indent=2) + "\n",
                       encoding="utf-8")

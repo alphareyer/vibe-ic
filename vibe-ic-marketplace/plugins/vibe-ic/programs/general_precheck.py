@@ -201,6 +201,7 @@ import _pdk_layer_authority as _pdkauth                         # noqa: E402
 import _tapeout_declaration as _decl                            # noqa: E402
 import _submission_template as _template                       # noqa: E402
 import submission_template_check as _template_check            # noqa: E402
+import _gate_authorship as _ga
 import plugin_manifest_discovery as _pmd                        # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text    # noqa: E402
 
@@ -1404,7 +1405,8 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    volume_why: str = "",
                    layout: Optional[Path] = None,
                    seal_deliverable: Any = _decl.NOT_DETERMINED,
-                   seal_route: str = _decl.NOT_DETERMINED) -> None:
+                   seal_route: str = _decl.NOT_DETERMINED,
+                   report_dir: Optional[Path] = None) -> None:
     import librelane_signoff_evidence as native
     physical = {'Checker.MagicDRC': ('drc', 'magic__drc_error__count'),
                 'Checker.KLayoutDRC': ('drc', 'klayout__drc_error__count'),
@@ -1521,7 +1523,8 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
         return
     positional = (str(project) if d.positional == "project"
                   else str(project / "reports" / "phase3"))
-    out = project / d.report_rel
+    out = (report_dir / Path(d.report_rel).name if report_dir is not None
+           else project / d.report_rel)
     out.parent.mkdir(parents=True, exist_ok=True)
     # `--pdk` IS NOT COSMETIC FOR THIS DELEGATE. MEASURED: with no PDK named,
     # `metal_layer_density_check` has no per-layer windows, every metal layer
@@ -1622,7 +1625,8 @@ def evaluate(project: Path,
              programs_dir: Optional[Path] = None,
              timeout: Optional[float] = 3600.0,
              pdk: Optional[str] = None,
-             pdk_container: Optional[str] = None) -> PrecheckReport:
+             pdk_container: Optional[str] = None,
+             report_dir: Optional[Path] = None) -> PrecheckReport:
     """Run the general ladder and report what came back — including nothing.
 
     `pdk` is forwarded to the delegates in `_PDK_AWARE_DELEGATES`, which judge
@@ -1844,7 +1848,8 @@ def evaluate(project: Path,
                            seal_facility_path=seal_path,
                            seal_facility_tried=seal_tried,
                            volume_why=volume_why, layout=chosen,
-                           seal_deliverable=deliverable, seal_route=seal_route)
+                           seal_deliverable=deliverable, seal_route=seal_route,
+                           report_dir=report_dir)
             if seal_expected_source:
                 ev.measured = dict(ev.measured or {},
                     seal_ring_required_declared=declared_seal,
@@ -1941,11 +1946,14 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    out_json = args.out_json or (args.project / PRECHECK_ARTEFACT)
+    # Keep this audit's delegates in its existing receipt tree as well.
+    report_args = ({"report_dir": out_json.parent / Path(DELEGATE_REPORT_DIR).name}
+                   if _ga.caller_role() == _ga.ROLE_AUDIT else {})
     rep = evaluate(project=args.project, layout=args.layout, pdk=args.pdk,
                    declaration_path=args.declaration, timeout=args.timeout,
-                   pdk_container=args.pdk_container)
+                   pdk_container=args.pdk_container, **report_args)
     payload = rep.as_dict()
-    out_json = args.out_json or (args.project / PRECHECK_ARTEFACT)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out_json, json.dumps(payload, indent=2) + "\n",
                       encoding="utf-8")
