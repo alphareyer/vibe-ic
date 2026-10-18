@@ -511,6 +511,7 @@ def _transition_pair(mod: dict, reset_bit: int,
                     if p.get("direction") == "input" for b in p["bits"]
                     if isinstance(b, int) and b != reset_bit}
     nxt, maps, shared, cells, ports = 2, [{}, {}], {}, {}, {}
+    role_inputs = {}
 
     def allocate():
         nonlocal nxt
@@ -546,6 +547,7 @@ def _transition_pair(mod: dict, reset_bit: int,
         cells[f"transition_{y}"] = {"type": kind, "parameters": params,
             "port_directions": {p: "output" if p == "Y" else "input" for p in conn},
             "connections": conn}
+        role_inputs[y] = [v for pin, values in conn.items() if pin != "Y" for v in values]
         return y
 
     def mux(a, b, s):
@@ -560,6 +562,12 @@ def _transition_pair(mod: dict, reset_bit: int,
                 copied["connections"] = {p: [remap(b, arm) for b in bits]
                                           for p, bits in cell["connections"].items()}
                 cells[f"comb_{arm}_{i}"] = copied
+                inputs = [v for pin, values in copied["connections"].items()
+                          if copied["port_directions"].get(pin) == "input" for v in values]
+                for pin, values in copied["connections"].items():
+                    if copied["port_directions"].get(pin) == "output":
+                        for value in values:
+                            role_inputs[value] = inputs
 
     def both(a, b):
         return gate("$and", a, b)
@@ -571,6 +579,24 @@ def _transition_pair(mod: dict, reset_bit: int,
         return gate("$not", a)
 
     role_cache, role_provenance = {}, []
+
+    def payload_free_guard(bit, q):
+        """A new force guard cannot select a convenient shared data/Q value."""
+        forbidden = {shared[v] for v in (payload_by_q or {}).get(q, set()) | qbits
+                     if v in shared}
+        pending, seen = [bit], set()
+        while pending:
+            value = pending.pop()
+            if value in ("0", "1") or value in seen:
+                continue
+            if not isinstance(value, int) or value in forbidden:
+                return False
+            seen.add(value)
+            if value in role_inputs:
+                pending.extend(role_inputs[value])
+            elif value not in shared.values():
+                return False
+        return True
 
     def input_bit(cell, pin, index):
         values = cell["connections"].get(pin) or []
@@ -635,20 +661,20 @@ def _transition_pair(mod: dict, reset_bit: int,
             "connections": {"A": [remap(value, arm) for value in values], "Y": [y]}}
         return y
 
-    def reduced_roles(kind, values, arm, q, seen):
+    def reduced_roles(kind, values, arm, q, seen, cofactor=None):
         control = [v for v in values if isinstance(v, int) and v in cone]
         data = [v for v in values if not (isinstance(v, int) and v in cone)]
         if control and data and all(mask_control(v, q) for v in control):
             role_provenance.append({"kind": "native vector reduction",
                 "control_bits": control, "branch_roles": "dominating Boolean mask / unchanged vector data"})
-            return masked_roles(kind, reduced_roles(kind, data, arm, q, seen),
+            return masked_roles(kind, reduced_roles(kind, data, arm, q, seen, cofactor),
                                 native_reduce(kind, control, arm))
         result = ("0", "1", "0") if kind == "$and" else ("1", "0", "0")
         for value in values:
-            result = combine_roles(kind, result, d_roles(value, arm, q, seen))
+            result = combine_roles(kind, result, d_roles(value, arm, q, seen, cofactor))
         return result
 
-    def d_roles(bit, arm, q, seen=frozenset()):
+    def d_roles(bit, arm, q, seen=frozenset(), cofactor=None):
         """Conditional source roles, without solving for convenient data values.
 
         The three predicates mean force-zero, force-one, and retain-Q. A mux
@@ -660,7 +686,9 @@ def _transition_pair(mod: dict, reset_bit: int,
         a new control. Every resulting force/hold implication is checked by
         native SAT against the original next-state value below.
         """
-        key = (bit, arm, q)
+        if cofactor is not None and bit == cofactor[0]:
+            return ("1", "0", "0") if cofactor[1] == "0" else ("0", "1", "0")
+        key = (bit, arm, q, cofactor)
         if key in role_cache:
             return role_cache[key]
         empty = ("0", "0", "0")
@@ -676,18 +704,18 @@ def _transition_pair(mod: dict, reset_bit: int,
             i = conn["Y"].index(bit)
             seen = seen | {bit}
             if kind in {"$pos", "$not"}:
-                zero, one, held = d_roles(input_bit(cell, "A", i), arm, q, seen)
+                zero, one, held = d_roles(input_bit(cell, "A", i), arm, q, seen, cofactor)
                 answer = (one, zero, "0") if kind == "$not" else (zero, one, held)
             elif kind in {"$mux", "$bwmux"}:
                 select = conn["S"][i if kind == "$bwmux" else 0]
-                a = d_roles(input_bit(cell, "A", i), arm, q, seen)
-                b = d_roles(input_bit(cell, "B", i), arm, q, seen)
+                a = d_roles(input_bit(cell, "A", i), arm, q, seen, cofactor)
+                b = d_roles(input_bit(cell, "B", i), arm, q, seen, cofactor)
                 answer = tuple(mux(x, y, remap(select, arm)) for x, y in zip(a, b))
                 role_provenance.append({"output_bit": bit, "kind": kind,
                     "control_bits": [select], "branch_roles": "original A/B selection"})
             elif kind in {"$and", "$or", "$xor", "$xnor"}:
                 left, right = input_bit(cell, "A", i), input_bit(cell, "B", i)
-                a, b = d_roles(left, arm, q, seen), d_roles(right, arm, q, seen)
+                a, b = d_roles(left, arm, q, seen, cofactor), d_roles(right, arm, q, seen, cofactor)
                 controls = [v for v in (left, right) if isinstance(v, int) and v in cone]
                 if len(controls) == 1 and kind in {"$and", "$or"} and mask_control(controls[0], q):
                     control = controls[0]
@@ -707,15 +735,36 @@ def _transition_pair(mod: dict, reset_bit: int,
                 elif kind == "$or":
                     answer = combine_roles(kind, a, b)
                 else:
-                    zero = either(both(a[0], b[0]), both(a[1], b[1]))
-                    one = either(both(a[0], b[1]), both(a[1], b[0]))
-                    held = either(both(a[2], b[0]), both(b[2], a[0]))
-                    answer = ((one, zero, "0") if kind == "$xnor" else (zero, one, held))
+                    def xor_roles(x, y):
+                        zero = either(both(x[0], y[0]), both(x[1], y[1]))
+                        one = either(both(x[0], y[1]), both(x[1], y[0]))
+                        held = either(both(x[2], y[0]), both(y[2], x[0]))
+                        return (one, zero, "0") if kind == "$xnor" else (zero, one, held)
+
+                    answer = xor_roles(a, b)
+                    if cofactor is None:
+                        # Keep correlations with an original shared payload atom.
+                        # BOTH values must force the same result, so this is not
+                        # a SAT witness choosing lucky data. The original value
+                        # model and all native role/undef/priority proofs remain.
+                        for atom in {left, right} & free & (payload_by_q or {}).get(q, set()):
+                            halves = [xor_roles(
+                                d_roles(left, arm, q, seen, (atom, value)),
+                                d_roles(right, arm, q, seen, (atom, value)))
+                                for value in ("0", "1")]
+                            guards = [both(halves[0][j], halves[1][j]) for j in (0, 1)]
+                            independent = [payload_free_guard(guard, q) for guard in guards]
+                            answer = tuple(either(answer[j], guards[j]) if independent[j] else answer[j]
+                                           for j in (0, 1)) + (answer[2],)
+                            if any(independent):
+                                role_provenance.append({"output_bit": bit, "kind": kind,
+                                    "cofactored_shared_payload_bit": atom,
+                                    "branch_roles": "both payload values; payload-independent force guard"})
             elif kind in {"$logic_and", "$logic_or"}:
                 # Logical operands use vector truth (nonzero), not bit zero.
                 left, right = conn.get("A") or [], conn.get("B") or []
-                a = reduced_roles("$or", left, arm, q, seen)
-                b = reduced_roles("$or", right, arm, q, seen)
+                a = reduced_roles("$or", left, arm, q, seen, cofactor)
+                b = reduced_roles("$or", right, arm, q, seen, cofactor)
                 dependent = [values for values in (left, right) if any(
                     isinstance(v, int) and v in cone for v in values)]
                 op = "$and" if kind == "$logic_and" else "$or"
@@ -729,7 +778,7 @@ def _transition_pair(mod: dict, reset_bit: int,
                     answer = combine_roles(op, a, b)
             elif kind in {"$reduce_and", "$reduce_or", "$reduce_bool", "$logic_not"}:
                 answer = reduced_roles("$and" if kind == "$reduce_and" else "$or",
-                                       conn.get("A") or [], arm, q, seen)
+                                       conn.get("A") or [], arm, q, seen, cofactor)
                 if kind == "$logic_not":
                     answer = (answer[1], answer[0], "0")
             elif kind in {"$slice", "$concat"}:
@@ -740,7 +789,7 @@ def _transition_pair(mod: dict, reset_bit: int,
                 else:
                     width = len(conn.get("A") or [])
                     source = input_bit(cell, "A", i) if i < width else input_bit(cell, "B", i - width)
-                answer = d_roles(source, arm, q, seen)
+                answer = d_roles(source, arm, q, seen, cofactor)
             else:
                 answer = empty
         except (IndexError, KeyError, ValueError):

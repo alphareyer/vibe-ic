@@ -364,3 +364,62 @@ def test_lowered_data_mux_cannot_select_shared_payload_for_force_guard(tmp_path)
     native = json.loads((tmp_path / "formal_structural_netlist.json").read_text())["modules"]["m"]
     assert native["ports"]["d"]["bits"][0] in row["payload_support"]["shared_payload_bits"], row
     assert mapping["payload_analysis"]["native_exit_code"] == 0, mapping
+
+
+@pytest.mark.parametrize("case,body,width,forced_bits,force_role", [
+    ("xor", "q <= d ^ (d & {W{rst & clear}});", 2, 2, "FORCE_ZERO"),
+    ("xnor", "q <= ~(d ^ (d & {W{rst & clear}}));", 3, 3, "FORCE_ONE"),
+    ("current-q", "q <= q ^ (q & {W{rst & clear}});", 2, 2, "FORCE_ZERO"),
+    ("unsigned-mask", "q <= d ^ (d & (rst & clear));", 2, 1, "FORCE_ZERO"),
+], ids=["xor", "xnor", "current-q", "unsigned-mask"])
+def test_shared_payload_correlations_are_classified_without_selecting_data_values(
+        tmp_path, case, body, width, forced_bits, force_role):
+    _yosys()
+    rtl = tmp_path / "m.v"
+    rtl.write_text(_control_rtl(body, width))
+    output = tmp_path / "mapping.json"
+    rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+        "reset_polarity:rst:active_high", "--work-dir", str(tmp_path), "--json", str(output)])
+    rec = json.loads(output.read_text())
+    actual_verdict = rec["verdict"]
+    assert actual_verdict == fsc.PASS
+    assert rc == 0
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert mapping["complete"] and not mapping["unresolved"], mapping
+    assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+    assert len(mapping["raw_identities"]) == len(mapping["rows"]) == width, mapping
+    forced = [row for row in mapping["rows"] if row["classification"] == "RESET_FORCE"]
+    assert len(forced) == forced_bits, mapping
+    assert all(row["polarity"] == "active_high" and not row["total_force"] for row in forced), mapping
+    for row in forced:
+        assert any(role["reset_value"] == 1 and role["role"] == force_role and
+                   role["reachable"] and role["implication_query"] == "PROVED"
+                   for role in row["conditional_roles"]), row
+        assert row["native_queries"]["undef0"] == row["native_queries"]["undef1"] == "NO_UNDEF", row
+        assert any("cofactored_shared_payload_bit" in p for p in row["role_provenance"]), row
+    if case == "current-q":
+        assert all(any(role["reset_value"] == 0 and role["role"] == "RETAIN" and
+                       role["reachable"] and role["implication_query"] == "PROVED"
+                       for role in row["conditional_roles"]) for row in forced), mapping
+    if case == "unsigned-mask":
+        assert sum(row["classification"] == "NO_DEPENDENCE" for row in mapping["rows"]) == 1, mapping
+    wrong = fsc.check([rtl], "m", [{"rule": "reset_polarity", "signal": "rst", "value": "active_low"}],
+                      tmp_path / "wrong-sense")
+    assert wrong["verdict"] == fsc.REFUTED, wrong
+
+
+def test_correlated_role_candidates_preserve_data_and_undef_refusals(tmp_path):
+    _yosys()
+    for name, body in [
+        ("data-switch", "q <= rst ? d : ~d;"),
+        ("opposite-forced-values", "q <= d ^ ((rst ? d : ~d) & {W{clear}});"),
+        ("literal-x", "q <= d ^ ((d ^ {W{1'bx}}) & {W{rst & clear}});"),
+    ]:
+        work = tmp_path / name
+        work.mkdir()
+        rtl = work / "m.v"
+        rtl.write_text(_control_rtl(body))
+        rec = fsc.check([rtl], "m", [{"rule": "reset_polarity", "signal": "rst", "value": "active_high"}], work)
+        assert rec["verdict"] == fsc.NOT_DISCHARGED, rec
+        mapping = rec["claims"][0]["reset_control_mapping"]
+        assert len(mapping["raw_identities"]) == 2 and mapping["unresolved"], mapping
