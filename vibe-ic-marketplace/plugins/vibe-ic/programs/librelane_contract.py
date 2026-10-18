@@ -1146,6 +1146,7 @@ def settled_floorplan_geometry(project: Path) -> tuple[list[float | int],
     ``OpenROAD.Floorplan`` receipt; a rectangle copied from a stale report or
     guessed from DIE_AREA alone is refused.
     """
+    project = Path(project).resolve()
     import _declared_die as DD
 
     record_path = Path(project) / DD.FLOORPLAN_RECTANGLES_REL

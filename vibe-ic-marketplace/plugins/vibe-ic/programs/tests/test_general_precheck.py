@@ -97,6 +97,33 @@ def _chosen_plan_cli(project,layout):
     return rc,{row['step_id']:row for row in report['steps']}
 
 
+def test_same_bound_plan_survives_absolute_producer_then_cwd_gate(tmp_path,monkeypatch):
+    p,gds,_cfg,plan,_finish=_chosen_plan_project(tmp_path,monkeypatch)
+    relevant=('KLayout.CheckTopLevel','KLayout.CheckSize','General.SealRing')
+    absolute_rc,absolute_rows=_chosen_plan_cli(p,gds)
+    assert absolute_rc==0
+    assert all(absolute_rows[sid]['verdict']==GP.PASS for sid in relevant)
+    monkeypatch.chdir(p)
+    relative_rc,relative_rows=_chosen_plan_cli(Path('.'),gds)
+    assert relative_rc==0, 'same bound Floorplan intent was lost by the canonical cwd project representation'
+    assert all(relative_rows[sid]['verdict']==GP.PASS for sid in relevant)
+    for sid in relevant:
+        assert relative_rows[sid]['measured']['expected_source']==absolute_rows[sid]['measured']['expected_source']
+    receipt=p/'phase3/librelane/15-floorplan/02-openroad-floorplan/vibeic_receipt.json'
+    for fault,path in [('receipt',receipt),('geometry',plan)]:
+        before=path.read_bytes()
+        data=json.loads(before)
+        if fault=='receipt':data['sha256']['config.json']='0'*64
+        else:data['die_rect_um'][2]+=1
+        path.write_text(json.dumps(data))
+        try:
+            rc,rows=_chosen_plan_cli(Path('.'),gds)
+            assert rc==1 and all(rows[sid]['verdict']==GP.NOT_DETERMINED for sid in relevant),fault
+            print('RELATIVE_PLAN_MUTATION_REFUSED',fault)
+        finally:
+            path.write_bytes(before)
+
+
 def test_chosen_pre_gds_plan_answers_only_unanswered_physical_expectations(tmp_path,monkeypatch):
     p,gds,_cfg,_plan,_finish=_chosen_plan_project(tmp_path,monkeypatch)
     rc,rows=_chosen_plan_cli(p,gds)
