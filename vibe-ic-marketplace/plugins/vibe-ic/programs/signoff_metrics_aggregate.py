@@ -80,6 +80,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -495,6 +496,30 @@ def _tns(project: Path, want: str) -> Cell:
             f"{rec_rel}: names no readable STA report on this tree "
             f"({cited or 'no report field'}), so no total-negative-slack table "
             f"can be attributed to the sign-off corner")
+    import librelane_signoff as native
+    if rel == native.SIGNOFF_RECORD:
+        # The native producer's record is JSON, not an OpenSTA text report.
+        # Its existing reader binds every declared scene to current timed
+        # inputs and the original receipt; no raw JSON/WNS fallback is valid.
+        try:
+            arm = native.step23_tool_arm(project, artefacts=())
+            if not arm or not arm.get('corners'):
+                raise ValueError('the selected native STA arm is absent')
+            values = {}
+            for corner, row in arm['corners'].items():
+                value = row.get('metrics', {}).get(f'{want}_tns')
+                if (row.get('scope_gaps') or type(value) not in (int, float)
+                        or not math.isfinite(value)):
+                    raise ValueError(f'{corner}: missing, unbound or non-finite {want} TNS')
+                values[corner] = value
+            # LibreLane aggregates both TNS metrics by their minimum, never
+            # by adding repeated endpoint populations across PVT scenes.
+            source = str((Path(arm['folder']) / 'state_out.json').relative_to(project.resolve()))
+            return Cell(min(values.values()), source,
+                        basis=f"native {want} TNS minimum across {len(values)} declared scenes; "
+                              f"{rel} sha256={arm['record_sha256']}; per_scene={values}")
+        except Exception as exc:
+            return unmeasured(f'{rel}: native {want} TNS unavailable: {exc}', rel)
     value = _tns_from(_text(project, rel) or "", want)
     if value is None:
         return unmeasured(

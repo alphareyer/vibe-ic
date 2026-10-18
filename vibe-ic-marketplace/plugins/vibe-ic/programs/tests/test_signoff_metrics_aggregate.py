@@ -9,6 +9,7 @@ somewhere else, or a rule that takes a whole tree down with it, fails here.
 import json
 import hashlib
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,114 @@ from _direct_density_fixture import stage_direct_density
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import signoff_metrics_aggregate as AGG           # noqa: E402
 import tapeout_docs_gen as TDG                    # noqa: E402
+
+
+def _native_tns_project(root):
+    """Existing synthetic retained-native fixture; real strict reader, no EDA."""
+    from test_f15_step23_gates_read_the_tool_arm import tool_project, rebind, CORNERS, STA
+    project = tool_project(root)
+    state_path = project / STA / 'state_out.json'
+    state = json.loads(state_path.read_text())
+    for corner in CORNERS:
+        for role in ('setup', 'hold'):
+            state['metrics'][f'timing__{role}__tns__corner:{corner}'] = 0
+    _write(state_path, state)
+    rebind(project)
+    _write(project / 'reports/phase3/sta/post_route_signoff_corner.json', {
+        'setup_worst_slack_ns': 1.0, 'hold_worst_slack_ns': 0.4,
+        'report': 'reports/phase3/sta_postpnr_signoff.json'})
+    return project, state_path, rebind, CORNERS
+
+
+def test_native_json_tns_uses_real_scene_metrics_and_keeps_negative_totals(tmp_path):
+    project, state_path, rebind, corners = _native_tns_project(tmp_path)
+    setup = AGG._tns(project, 'setup')
+    hold = AGG._tns(project, 'hold')
+    setup_value, hold_value = setup.value, hold.value
+    assert setup_value == hold_value == 0, 'receipt-bound native TNS was lost by the JSON/text handoff'
+    assert setup.source.endswith('/state_out.json')
+    state = json.loads(state_path.read_text())
+    # Different scenes, distinct totals and unchanged positive WNS: neither
+    # the first scene nor the WNS winner supplies the TNS aggregate.
+    state['metrics'][f'timing__setup__tns__corner:{corners[3]}'] = -2.5
+    state['metrics'][f'timing__setup__tns__corner:{corners[6]}'] = -1.0
+    state['metrics'][f'timing__hold__tns__corner:{corners[4]}'] = -0.75
+    _write(state_path, state)
+    rebind(project)
+    assert AGG.main([str(project)]) == 0
+    metrics = json.loads((project / 'phase3/final/metrics.json').read_text())
+    assert metrics['timing__setup__tns'] == -2.5
+    assert metrics['timing__hold__tns'] == -0.75
+    clean = {key: 0 for _label, key, _pred in TDG.MANUFACTURABILITY + TDG.ELECTRICAL}
+    for role in ('setup', 'hold'):
+        clean[f'timing__{role}__tns'] = metrics[f'timing__{role}__tns']
+    path = project / 'synthetic-doc-metrics.json'
+    _write(path, clean)
+    destination = project / 'refused-documents'
+    cp = subprocess.run([sys.executable, TDG.__file__, '--metrics', str(path),
+                         '--design', 'synthetic', '--pdk', 'neutral',
+                         '--out-dir', str(destination)], capture_output=True, text=True)
+    assert cp.returncode == 1 and 'NOT RELEASABLE' in cp.stderr
+    assert '-2.5' in cp.stderr and '-0.75' in cp.stderr
+    assert not destination.exists() or not list(destination.iterdir())
+    print('NATIVE_TNS_NEGATIVE_TOTALS', metrics['timing__setup__tns'], metrics['timing__hold__tns'], 'DOCS_RC', cp.returncode)
+
+
+def test_native_tns_never_defaults_partial_bad_or_unbound_measurements(tmp_path):
+    for fault in ('missing-record', 'missing-native-record', 'missing-receipt',
+                  'stale-state', 'stale-config', 'changed-input',
+                  'partial', 'string', 'bool', 'nan', 'inf', 'wrong-report', 'scope-gap'):
+        project, state_path, rebind, corners = _native_tns_project(tmp_path / fault)
+        folder = state_path.parent
+        if fault == 'missing-record':
+            (project / 'reports/phase3/sta/post_route_signoff_corner.json').unlink()
+        elif fault == 'missing-native-record':
+            (project / 'reports/phase3/sta_postpnr_signoff.json').unlink()
+        elif fault == 'missing-receipt':
+            (folder / 'vibeic_receipt.json').unlink()
+        elif fault in ('stale-state', 'stale-config'):
+            path = state_path if fault == 'stale-state' else folder / 'config.json'
+            path.write_text(path.read_text() + ' ')
+        elif fault == 'changed-input':
+            state = json.loads(state_path.read_text())
+            path = Path(state['nl'])
+            path.write_text(path.read_text() + '// actual timed input changed\n')
+        elif fault == 'wrong-report':
+            _write(project / 'reports/phase3/unselected.json', {'setup_tns': 0})
+            _write(project / 'reports/phase3/sta/post_route_signoff_corner.json',
+                   {'report': 'reports/phase3/unselected.json'})
+        elif fault == 'scope-gap':
+            library = tmp_path / fault / 'pdk_root/p/libs.ref/cells/lib/cells__ss_125C_4v50.lib'
+            library.write_text(library.read_text() + '// changed Liberty bytes\n')
+        else:
+            state = json.loads(state_path.read_text())
+            key = f'timing__setup__tns__corner:{corners[-1]}'
+            if fault == 'partial':
+                state['metrics'].pop(key)
+            else:
+                state['metrics'][key] = {'string': '0', 'bool': False,
+                                         'nan': float('nan'), 'inf': float('inf')}[fault]
+            _write(state_path, state)
+            rebind(project)
+        row = AGG._tns(project, 'setup')
+        assert row.value == AGG.NOT_MEASURED and row.reason, fault
+        print('NATIVE_TNS_REFUSAL', fault, row.value)
+
+
+def test_native_tns_repeated_consumers_are_stable_and_report_bytes_still_bind(tmp_path):
+    project, _state, _rebind, _corners = _native_tns_project(tmp_path)
+    before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in project.rglob('*') if p.is_file()}
+    assert AGG._tns(project, 'setup').value == AGG._tns(project, 'setup').value
+    assert before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in project.rglob('*') if p.is_file()}
+    assert AGG.main([str(project)]) == 0
+    assert AGG.main([str(project), '--check']) == 0
+    assert AGG.main([str(project), '--check']) == 0
+    report = project / 'reports/phase3/sta_postpnr_signoff.json'
+    report.write_text(report.read_text() + ' ')
+    assert AGG.main([str(project), '--check']) == 1
+    print('NATIVE_TNS_REPORT_BYTE_MUTATION_REFUSED')
 
 
 def _write(p: Path, obj):
