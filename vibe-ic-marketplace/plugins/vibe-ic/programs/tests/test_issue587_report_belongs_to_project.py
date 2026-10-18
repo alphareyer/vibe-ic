@@ -32,15 +32,18 @@ the prior question: is this report about this project at all?
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import pathlib
 import sys
+from unittest.mock import patch
 
 from _published_corpus import corpus_root, needs_corpus
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import step_output_collector as collector  # noqa: E402
 
 _PROGRAMS = pathlib.Path(__file__).resolve().parents[1]
 PROG = _PROGRAMS / "report_belongs_to_project_check.py"
@@ -174,6 +177,107 @@ def test_a_report_outside_a_reports_directory_is_undecidable(tmp_path):
     findings, stats = M.audit(proj)
     assert findings == []
     assert stats["undecidable"] == 1, stats
+
+
+class _CaptureClock(collector.datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 18, 2, 0, 0, tzinfo=tz)
+
+
+def _captured_report(project, claims, snapshot_kind="files", running_rc=None):
+    # Keep epoch names stable across the same base/fixed/reversed control.
+    project.mkdir()
+    rel = "reports/orchestrator/phase2_one_shot.json"
+    with patch.object(collector.datetime, "datetime", _CaptureClock):
+        inputs = None
+        if snapshot_kind == "inputs":
+            report = _report(project, claims, rel=rel)
+            inputs = {rel: hashlib.sha256(report.read_bytes()).hexdigest()}
+        attempt = collector.begin_step(project, "8", inputs=inputs)
+        if snapshot_kind == "files":
+            report = _report(project, claims, rel=rel)
+        if running_rc is not None:
+            running = _run(project)
+            print("running input:\n" + running.stdout + running.stderr)
+            assert running.returncode == running_rc, running.stdout + running.stderr
+        record = collector.finish_step(project, attempt, verdict="NOT_MEASURED")
+    assert record["capture_errors"] == []
+    assert record["canonical_pass"] is False
+    saved = next(row for row in record["written_files" if snapshot_kind == "files" else "input_files"]
+                 if row["rel"] == str(report.relative_to(project)))
+    snapshot = project / record["storage_root"] / record["folder"] / saved["snapshot"]
+    assert snapshot.read_bytes() == report.read_bytes()
+    return report, snapshot
+
+
+def test_a_collector_snapshot_keeps_the_logical_report_owner(tmp_path):
+    project = tmp_path / "mine"
+    report, snapshot = _captured_report(project, str(project))
+    result = _run(project)
+    print(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout + result.stderr
+    findings, stats = M.audit(project)
+    assert findings == [] and stats["reports"] == stats["attributed"] == 2
+    assert report.is_file() and snapshot.is_file()
+
+
+def test_a_collector_input_snapshot_keeps_the_logical_report_owner(tmp_path):
+    project = tmp_path / "mine"
+    project.mkdir()
+    rel = "reports/orchestrator/phase2_one_shot.json"
+    report = _report(project, str(project), rel=rel)
+    with patch.object(collector.datetime, "datetime", _CaptureClock):
+        attempt = collector.begin_step(
+            project, "8", inputs={rel: hashlib.sha256(report.read_bytes()).hexdigest()})
+        epoch = project / attempt["storage_root"] / attempt["folder"]
+        assert (epoch / "attempt.json").is_file() and not (epoch / "outputs.json").exists()
+        running = _run(project)
+        print("running input:\n" + running.stdout + running.stderr)
+        assert running.returncode == 0, running.stdout + running.stderr
+        record = collector.finish_step(project, attempt, verdict="NOT_MEASURED")
+    assert record["capture_errors"] == [] and record["canonical_pass"] is False
+    snapshot = epoch / record["input_files"][0]["snapshot"]
+    assert snapshot.read_bytes() == report.read_bytes()
+    result = _run(project)
+    print(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout + result.stderr
+    findings, stats = M.audit(project)
+    assert findings == [] and stats["reports"] == stats["attributed"] == 2
+    assert report.is_file() and snapshot.is_file()
+
+
+def test_foreign_current_or_snapshot_mixtures_are_not_relocations(tmp_path):
+    foreign = tmp_path / "theirs"
+    for foreign_location in ("current", "snapshot", "input"):
+        project = tmp_path / foreign_location
+        report, snapshot = _captured_report(
+            project, str(project if foreign_location == "current" else foreign),
+            "inputs" if foreign_location == "input" else "files",
+            running_rc=1 if foreign_location == "input" else None)
+        _report(project, str(foreign if foreign_location == "current" else project),
+                rel="reports/orchestrator/phase2_one_shot.json")
+        true_foreign = report if foreign_location == "current" else snapshot
+        findings, stats = M.audit(project, relocated_from=foreign)
+        assert str(true_foreign) in [row["report"] for row in findings], findings
+        assert stats["foreign"] > 0 and stats["relocated"] == 0, stats
+        result = _pr.run([sys.executable, str(PROG), str(project),
+                          "--relocated-from", str(foreign)],
+                         capture_output=True, text=True)
+        print(foreign_location + ":\n" + result.stdout + result.stderr)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert str(true_foreign) in result.stdout
+
+
+def test_an_unmanaged_nested_reports_directory_keeps_its_own_owner(tmp_path):
+    project = tmp_path / "mine"
+    nested = project / "steps" / "phase2" / "stage2" / "unmanaged" / "files"
+    _report(nested, str(nested))
+    assert _run(project).returncode == 0
+    _report(nested, str(project))
+    findings, stats = M.audit(project)
+    assert stats["foreign"] == 1 and findings[0]["sits_in"] == str(nested)
+    assert _run(project).returncode == 1
 
 
 # ── the corpus, so a parser regression is visible ────────────────────────────

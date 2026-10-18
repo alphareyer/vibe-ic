@@ -115,6 +115,8 @@ REPORT_GLOB = "**/*_one_shot.json"
 def _project_root_of(report: Path) -> Optional[Path]:
     """The project a report SITS IN — the directory above its `reports/`.
 
+    Collector snapshots retain that logical location through written_files or
+    input_files; their epoch's storage directory is not a new project.
     Returns None when the report is not under a `reports/` directory, which
     means this program cannot say where it belongs; that is reported as
     undecidable rather than guessed.
@@ -122,7 +124,38 @@ def _project_root_of(report: Path) -> Optional[Path]:
     parts = report.parts
     if "reports" not in parts:
         return None
-    return Path(*parts[:parts.index("reports")])
+    owner = Path(*parts[:parts.index("reports")])
+    for files in (owner, *owner.parents):
+        if files.name not in ("files", "inputs"):
+            continue
+        epoch = files.parent
+        record_path = epoch / "outputs.json"
+        if files.name == "inputs" and not record_path.exists():
+            record_path = epoch / "attempt.json"
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get("storage_root") != "steps":
+            continue
+        folder = record.get("folder")
+        if not isinstance(folder, str):
+            continue
+        folder = Path(folder)
+        if (len(folder.parts) != 3 or len(epoch.parents) < 4 or
+                folder.parts[:2] != (record.get("phase"), record.get("stage"))):
+            continue
+        project = epoch.parents[3]
+        if project / "steps" / folder != epoch:
+            continue
+        rel = report.relative_to(files)
+        written = record.get("written_files" if files.name == "files" else "input_files")
+        if isinstance(written, list) and any(
+                isinstance(row, dict) and row.get("rel") == str(rel) and
+                row.get("snapshot") == str(Path(files.name) / rel)
+                for row in written):
+            return _project_root_of(project / rel)
+    return owner
 
 
 def audit(project: Path,
