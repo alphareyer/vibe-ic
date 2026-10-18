@@ -274,3 +274,104 @@ def test_the_verdict_report_is_published_under_reports_phase2_gates(
     assert out.is_file(), sorted(str(x) for x in p.rglob("*.json"))
     assert res.output_files == [str(out)]
     assert json.loads(out.read_text())["program"] == _GATE
+
+
+def _native_log_project(tmp_path, monkeypatch, text=_REAL_STAT_LOG, *, critical_error=False):
+    """Real run_chain receipt and handoff; neutral synthesis process output only."""
+    import subprocess
+    import librelane_contract as lc
+    import synth_handoff_netlist_check as handoff
+    from _stated_eda_image import mock_docker_route
+    from test_step14_report_producer_authorship import project_fixture, put
+    project, _ = project_fixture(tmp_path)
+    put(project / 'phase3/librelane_switch.json', {'steps': {'9': 'librelane'}})
+    mock_docker_route(monkeypatch)
+    folder = project / 'phase3/librelane/02-yosys-synthesis'
+    cfg = project / 'phase3/librelane/synthesis_resolved.json'
+    saved = {path.relative_to(folder): path.read_bytes() for path in folder.rglob('*')
+             if path.is_file() and path.name not in ('vibeic_receipt.json', 'input_fingerprint.json', 'pdk_root.json')}
+    if critical_error:
+        saved[Path('reports/chk.rpt')] = (
+            b'Warning: Wire core.\\bad is used but has no driver.\n'
+            b'Found and reported 1 problems.\n')
+    header_config = put(project / 'phase3/librelane/header.json', {'meta': {'step': 'Yosys.JsonHeader'}})
+    initial = put(project / 'phase3/librelane/initial.state.json', {})
+    monkeypatch.setattr(lc, 'image_capability', lambda *a, **k: {})
+    monkeypatch.setattr(lc, 'openroad_home', lambda *a, **k: None)
+    calls = []
+
+    def process_edge(argv, **kwargs):
+        step = argv[argv.index('--id') + 1]
+        target = Path(argv[argv.index('-o') + 1])
+        put(target / 'config.json', json.loads(Path(argv[argv.index('-c') + 1]).read_text()))
+        put(target / 'state_in.json', json.loads(Path(argv[argv.index('-i') + 1]).read_text()))
+        if step == 'Yosys.JsonHeader':
+            header = put(target / 'core.h.json', {'module': 'core'})
+            put(target / 'state_out.json', {'json_h': str(header)})
+        else:
+            for rel, data in saved.items():
+                path = target / rel; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+        calls.append(step)
+        return subprocess.CompletedProcess(argv, 0, text if step == 'Yosys.Synthesis' else 'neutral header output', '')
+
+    monkeypatch.setattr(lc, 'run_container', process_edge)
+    lc.run_chain(project, 'registry.invalid/source-control@sha256:' + 'a' * 64,
+                 [('Yosys.JsonHeader', header_config, initial), ('Yosys.Synthesis', cfg, initial)],
+                 pdk_root='/pdk')
+    if not critical_error:
+        handoff.publish_handoff(project, folder, project / 'phase2/stage2/synth/core_synth.v', 'core')
+    (project / 'reports').mkdir(exist_ok=True)
+    assert calls == ['Yosys.JsonHeader', 'Yosys.Synthesis']
+    assert not (project / _SYNTH_LOG_REL).exists()
+    return project, folder
+
+
+def test_native_log_audit_and_lint_cite_the_current_receipt_bound_log(tmp_path, monkeypatch):
+    project, folder = _native_log_project(tmp_path, monkeypatch)
+    row = _row(DOSR.step_synth_log_audit(project, _synth('PASS')))
+    DOSR.step_emit_phase2_manifests(project, [])
+    hygiene = json.loads((project / 'reports/phase2/lint/rtl_hygiene.json').read_text())
+    observed = {'audit': row['verdict'], 'audit_log': row['log_file'],
+                'lint': hygiene['verdict'], 'lint_evidence': hygiene.get('evidence')}
+    (tmp_path / 'NATIVE_LOG_READBACK.json').write_text(json.dumps(observed, indent=2) + '\n')
+    assert (row['verdict'], hygiene['verdict']) == ('PASS', 'PASS'), observed
+    assert Path(row['log_file']) == folder / 'invocation.log'
+    assert hygiene['evidence'] == str((folder / 'invocation.log').relative_to(project))
+    receipt = json.loads((project / 'reports/phase2/gates/eda_log_check_receipt.json').read_text())
+    assert receipt['verdict'] == 'PASS' and receipt['examined'] > 0
+    assert receipt['subject']['items'][0]['path'] == str(folder / 'invocation.log')
+    assert not (project / _SYNTH_LOG_REL).exists()
+
+
+def test_native_log_refusals_never_fall_back_to_an_unrelated_legacy_log(tmp_path, monkeypatch):
+    for damage in ('missing', 'changed', 'missing_binding', 'malformed_binding', 'changed_binding', 'rtl', 'critical_check'):
+        with monkeypatch.context() as patch:
+            project, folder = _native_log_project(tmp_path / damage, patch, critical_error=damage == 'critical_check')
+            legacy = project / _SYNTH_LOG_REL
+            legacy.write_text(_REAL_STAT_LOG)
+            if damage == 'missing':
+                (folder / 'invocation.log').unlink()
+            elif damage == 'changed':
+                (folder / 'invocation.log').write_text(_REAL_STAT_LOG + '\nERROR: changed native execution bytes\n')
+            elif damage in ('missing_binding', 'malformed_binding', 'changed_binding'):
+                path = project / 'phase2/stage2/synth/synth_inputs.json'
+                doc = json.loads(path.read_text())
+                if damage == 'missing_binding': del doc['librelane_synthesis']
+                elif damage == 'malformed_binding': doc['librelane_synthesis'] = 'malformed'
+                else: doc['librelane_synthesis']['receipt_sha256'] = '0' * 64
+                path.write_text(json.dumps(doc))
+            elif damage == 'rtl':
+                (project / 'phase2/stage1/rtl/core.v').write_text('module changed; endmodule\n')
+            with pytest.raises((ValueError, OSError, RuntimeError)):
+                DOSR.step_synth_log_audit(project, _synth('PASS'))
+            with pytest.raises((ValueError, OSError, RuntimeError)):
+                DOSR.step_emit_phase2_manifests(project, [])
+
+
+def test_a_bound_native_log_without_accounting_keeps_a_real_fail_receipt(tmp_path, monkeypatch):
+    project, _ = _native_log_project(tmp_path, monkeypatch, 'neutral producer stopped before stat\n')
+    row = _row(DOSR.step_synth_log_audit(project, _synth('PASS')))
+    assert row['verdict'] == 'FINDING' and row['categories'] == ['EXPECTED_NOT_FOUND'], row
+    receipt = json.loads((project / 'reports/phase2/gates/eda_log_check_receipt.json').read_text())
+    assert receipt['verdict'] == 'FAIL' and receipt['examined'] > 0

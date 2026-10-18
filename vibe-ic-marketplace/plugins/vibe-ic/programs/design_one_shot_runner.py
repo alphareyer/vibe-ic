@@ -19635,6 +19635,23 @@ _SYNTH_NOT_ATTEMPTED = frozenset({
 })
 
 
+def _synthesis_log_path(project: Path) -> Path:
+    """Read the selected producer's bound transcript without creating aliases."""
+    project = Path(project)
+    import synth_handoff_netlist_check as handoff
+    import librelane_contract as contract
+    current = handoff.bound_handoff(project.resolve())
+    if current is None:
+        return project / _SYNTH_LOG_REL
+    if not isinstance(current, dict) or current.get('verdict') != 'PASS':
+        raise ValueError(f'SYNTH_LOG_HANDOFF_UNBOUND: {current}')
+    sidecar = _pl.synth_dir(project) / 'synth_inputs.json'
+    doc = json.loads(sidecar.read_text())
+    folder = project / doc['librelane_synthesis']['folder']
+    contract.validate_step_receipt(folder, 'Yosys.Synthesis')
+    return folder / 'invocation.log'
+
+
 def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
     """RUN `eda_log_check` over the log `step_yosys_synth` just wrote, and put
     its verdict in the ledger. vibe-ic#2080.
@@ -19705,6 +19722,8 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
             "synth_log_audit", "PASS", time.time() - t0,
             f"synth log audit NOT_APPLICABLE — yosys_synth {synth.status}",
             extras={"synth_log_audit": row}, disclosures=[_V.Disclosure.ADVISORY])
+    log = _synthesis_log_path(project)
+    row['log_file'] = str(log)
     out = _pl.report_path(project, "gates/synth_log_audit.json")
     buf_out, buf_err = io.StringIO(), io.StringIO()
     try:
@@ -19737,7 +19756,7 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
     if rc == 0:
         row["verdict"] = "PASS"
         detail = (f"synth log audit PASS — {row['line_count']} line(s) in "
-                  f"{_SYNTH_LOG_REL}, carrying yosys's own stat accounting")
+                  f"{log.relative_to(project)}, carrying yosys's own stat accounting")
     else:
         row["verdict"] = "FINDING"
         row["reason"] = "; ".join(
@@ -24230,8 +24249,9 @@ def step_emit_phase2_manifests(project: Path,
             _rtl_dir_rel = rtl_dir.relative_to(project).as_posix()
         except ValueError:                      # pragma: no cover
             _rtl_dir_rel = str(rtl_dir)
-        _synth_log_present = (project / _SYNTH_LOG_REL).is_file() and \
-            (project / _SYNTH_LOG_REL).stat().st_size > 0
+        _synth_log = _synthesis_log_path(project) if _lint_rtl else project / _SYNTH_LOG_REL
+        _synth_log_rel = _synth_log.relative_to(project).as_posix()
+        _synth_log_present = _synth_log.is_file() and _synth_log.stat().st_size > 0
         if not _lint_rtl:
             _hyg = {
                 "verdict": "INCOMPLETE",
@@ -24252,11 +24272,11 @@ def step_emit_phase2_manifests(project: Path,
                 "reason": (
                     f"{len(_lint_rtl)} RTL file(s) staged, but the synth "
                     f"transcript this verdict rests on is absent or empty at "
-                    f"{_SYNTH_LOG_REL} — the errors-as-fail reading has no "
+                    f"{_synth_log_rel} — the errors-as-fail reading has no "
                     f"input, so there is nothing to substantiate a PASS"),
                 "source": "yosys_synth (errors-as-fail)",
                 "rtl_files": _lint_rtl,
-                "evidence": _SYNTH_LOG_REL,
+                "evidence": _synth_log_rel,
                 "rule_set": "yosys-elaborate-noncrit-warn",
             }
         else:
@@ -24264,7 +24284,7 @@ def step_emit_phase2_manifests(project: Path,
                 "verdict": "PASS",
                 "source": "yosys_synth (errors-as-fail)",
                 "rtl_files": _lint_rtl,
-                "evidence": _SYNTH_LOG_REL,
+                "evidence": _synth_log_rel,
                 "rule_set": "yosys-elaborate-noncrit-warn",
             }
         w("reports/phase2/lint/rtl_hygiene.json", _hyg)
