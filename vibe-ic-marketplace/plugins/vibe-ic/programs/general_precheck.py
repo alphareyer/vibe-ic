@@ -1173,6 +1173,36 @@ def _bound_drc_scope(project: Path, layout: Optional[Path],
     records a binding, missing/stale artifacts cannot silently revert to an
     unrelated historical PASS. Publication aliases must be byte-identical.
     """
+    current_path = project / "reports/phase3/direct_current_drc.json"
+    if engine != "magic" and (current_path.exists() or current_path.is_symlink()):
+        # The Default owner retains the native invocation separately from its
+        # later immutable canonical publication. Consume that existing strict
+        # subject instead of mistaking the publication for a new native run.
+        # Magic has its own independent report/invocation below.
+        import _physical_current as current
+        failure = "the measured DRC input/output binding is stale or incomplete"
+        try:
+            receipt = current.read_direct_half(project, "drc")
+            if receipt.get("verdict") != "CURRENT":
+                return [], failure + ": " + receipt.get("reason", "CURRENT_NATIVE_REFUSED")
+            if (receipt["tool"] != "klayout" or layout is None
+                    or not layout.is_file()
+                    or _sha256(layout) != receipt["inputs"]["gds"]["sha256"]
+                    or layout.stat().st_size != receipt["inputs"]["gds"]["bytes"]):
+                return [], failure
+            outputs = receipt["outputs"]
+            report_rel = "reports/phase3/drc_signoff.rpt"
+            log_rel = "reports/phase3/drc_signoff.log"
+            canonical_log = current.entry(project, project / log_rel)
+            if (outputs["report"] != current.entry(project, project / report_rel)
+                    or outputs["report"]["sha256"] != outputs["native_report"]["sha256"]
+                    or outputs["report"]["bytes"] != outputs["native_report"]["bytes"]
+                    or any(canonical_log[key] != outputs["log"][key]
+                           for key in ("sha256", "bytes"))):
+                return [], failure
+            return [report_rel, log_rel], ""
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            return [], failure + ": " + str(exc)
     ledger = project / "provenance.jsonl"
     if not ledger.is_file():
         return [], ""
