@@ -4005,6 +4005,10 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     _exact_rc = _actual_rc if _actual_rc is not None else rc
     _ledger_row["exit_code"] = _exact_rc
     _ledger_row["structured_verdict"] = _structured_verdict
+    if verdict in {"CRASHED", "STALLED", "INVOCATION_ERROR", "NOT_FOUND"}:
+        # Keep the invocation's own error after its temporary streams close.
+        # This is evidence only; the verdict and both exit-code fields stay put.
+        _ledger_row["diagnostic"] = out[:4000]
     if isinstance(_inner, _ProgramCheckOutcome):
         _ledger_row["executed_argv"] = _inner.executed_argv
         if _inner.written_receipts:
@@ -12677,7 +12681,7 @@ def _advisory_execution_record(cmd: str, ledger_start: int,
     else:
         # No program-authored nonblocking verdict bought this non-zero exit.
         enforcement = "BLOCKING"
-    return {
+    record = {
         "gate": _gate_name(cmd),
         "command": cmd,
         "exit_code": actual_rc,
@@ -12686,6 +12690,9 @@ def _advisory_execution_record(cmd: str, ledger_start: int,
         "reason_class": reason_class,
         "enforcement": enforcement,
     }
+    if row.get("diagnostic"):
+        record["diagnostic"] = row["diagnostic"]
+    return record
 
 
 # Gate predicate keys that are NOT program invocations. A step whose gate is

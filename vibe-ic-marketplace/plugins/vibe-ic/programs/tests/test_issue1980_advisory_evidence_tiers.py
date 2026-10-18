@@ -306,3 +306,55 @@ def test_shipped_step31_keeps_perc_and_via_findings_out_of_gate_coverage(
                for record in outputs.values())
     newly_run = _flow._GATE_LEDGER[before:]
     assert not any(record["gate"] in producers for record in newly_run)
+
+
+def test_crashed_advisory_retains_its_exception_after_classification(
+        tmp_path, monkeypatch):
+    """A real crash stays incomplete even beside a stale PASS receipt."""
+    import json
+
+    programs = tmp_path / "programs"
+    report = tmp_path / "reports" / "previous.json"
+    report.parent.mkdir()
+    report.write_text(json.dumps({"verdict": "PASS", "examined": 1}))
+    _write_program(
+        programs,
+        "crashing_advisory",
+        "import sys\n"
+        "print('earlier output ' * 1000)\n"
+        "sys.stderr.write('earlier diagnostic ' * 1000 + '\\n')\n"
+        "def crash_here():\n"
+        "    raise RuntimeError('invocation diagnostic must survive')\n"
+        "crash_here()\n",
+    )
+    monkeypatch.setattr(_flow, "PROGRAMS_DIR", programs)
+    command = "crashing_advisory --json reports/previous.json"
+    before = len(_flow._GATE_LEDGER)
+    result = _flow.check_step(
+        tmp_path, _step({"advisory_program_exit_zero": command}), {},
+    )
+    ledger = _flow._GATE_LEDGER[before:]
+    record = result.advisory_gate_records[0]
+    assert len(ledger) == 1
+    assert ledger[0]["verdict"] == "CRASHED"
+    assert ledger[0]["rc"] is None
+    assert ledger[0]["exit_code"] == 1
+    assert ledger[0]["structured_verdict"] == "PASS"
+    assert result.status == "NOT_MEASURED", result.reasons
+    assert record["exit_code"] == 1
+    assert record["structured_verdict"] == "PASS"
+    assert record["reason_class"] == "EXECUTION_ERROR"
+    assert record["enforcement"] == "DISCLOSED_INCOMPLETE"
+    expected = "RuntimeError: invocation diagnostic must survive"
+    (tmp_path / "CRASH_DIAGNOSTIC_OBSERVATION.json").write_text(json.dumps({
+        "ledger": ledger,
+        "step": asdict(result),
+        "scope": "Real neutral executable through resolver, supervised process, "
+                 "classification, ledger and advisory step report; no native EDA.",
+    }, indent=2))
+    for durable_record in (ledger[0], asdict(result)):
+        serialized = json.dumps(durable_record)
+        observed = expected if expected in serialized else "LOST_AFTER_CLASSIFICATION"
+        assert observed == expected, serialized
+    assert len(ledger[0]["diagnostic"]) <= 4000
+    assert record["diagnostic"] == ledger[0]["diagnostic"]
