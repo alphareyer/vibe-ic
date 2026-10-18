@@ -468,3 +468,145 @@ def test_zero_errors_cannot_replace_the_current_per_layer_consumer(
         assert stats['density_errors'] == 0
         assert ref['measurement_verdict'] == 'FAIL'
         assert ref['per_layer_consumer']['per_layer']['metal2']['status'] == 'FAIL'
+
+
+def _typed_local_finishing(tmp_path, monkeypatch):
+    """Actual run_chain receipts; only the external EDA process writes are neutral."""
+    import subprocess
+    p, record, arm = subject(tmp_path)
+    root = p / 'fixture_pdk'
+    source = tmp_path / 'local-librelane'
+    (source / 'librelane').mkdir(parents=True)
+    (source / 'librelane/__init__.py').write_text('# neutral provider source\n')
+    executable = tmp_path / 'local-python'
+    executable.write_text('#!/bin/sh\nexit 0\n')
+    executable.chmod(0o755)
+    switch = p / 'phase3/librelane_switch.json'
+    cfg = json.loads(switch.read_text())
+    cfg.update(execution_route='LOCAL', local_network_mode='host',
+               librelane_root_host=str(source), librelane_executable=str(executable))
+    BF.put(switch, cfg)
+    namespace = ['net:[1001]']
+    monkeypatch.setattr(LC, '_local_network_namespace', lambda: namespace[0])
+    image = LC.resolve_image(p)
+    LC.pdk_root_resolution(p, 'neutral', image=image)
+    doc = json.loads((p / LF.RECORD_REL).read_text())
+    tool = doc['odb']['tool']
+    stages = [(LF.ODB_FILL_STEP, Path(tool['state'])),
+              ('KLayout.StreamOut', Path(record['stream_state'])),
+              ('KLayout.Filler', Path(arm['filler']['state'])),
+              ('KLayout.Density', Path(arm['state']))]
+    payloads, initial, configs = {}, {}, {}
+    common = {}
+    for view in ('odb', 'nl', 'sdc'):
+        path = p / 'phase3/librelane/neutral-inputs' / ('input.' + view)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('neutral ' + view + ' input\n')
+        common[view] = str(path)
+    for step, state in stages:
+        folder = state.parent
+        after = json.loads(state.read_text())
+        outputs = {path: path.read_bytes() for path in LC._walk_paths(after)
+                   if path.is_relative_to(folder)}
+        commands = folder / 'COMMANDS'
+        payloads[step] = (after, outputs, commands.read_bytes() if commands.exists() else None,
+                          (folder / 'invocation.log').read_text())
+        before = json.loads((folder / 'state_in.json').read_text())
+        if step in (LF.ODB_FILL_STEP, 'KLayout.StreamOut'):
+            before.update(common)
+        initial[step] = BF.put(p / 'phase3/librelane/neutral-inputs' / (step + '.state.json'), before)
+        configs[step] = p / 'phase3/librelane/34-config' / (step + '.json')
+    calls = []
+
+    def process_edge(argv, **kwargs):
+        step = argv[argv.index('--id') + 1]
+        folder = Path(argv[argv.index('-o') + 1])
+        after, outputs, commands, log = payloads[step]
+        BF.put(folder / 'state_in.json', json.loads(Path(argv[argv.index('-i') + 1]).read_text()))
+        BF.put(folder / 'config.json', json.loads(Path(argv[argv.index('-c') + 1]).read_text()))
+        for path, data in outputs.items():
+            path.write_bytes(data)
+        BF.put(folder / 'state_out.json', after)
+        if commands is not None:
+            (folder / 'COMMANDS').write_bytes(commands)
+        calls.append(step)
+        return subprocess.CompletedProcess(argv, 0, log, '')
+
+    monkeypatch.setattr(LC, 'run_container', process_edge)
+    mounts = [(root, '/pdk')]
+    for lane, steps in [('34', [LF.ODB_FILL_STEP]),
+                        ('37-default-stream', ['KLayout.StreamOut']),
+                        ('34-fill', ['KLayout.Filler', 'KLayout.Density'])]:
+        LC.run_chain(p, image, [(step, configs[step], initial[step]) for step in steps],
+                     lane=lane, mounts=mounts, pdk_root='/pdk')
+    tool['binding'].update(image=str(image), mounts=[[str(root), '/pdk']],
+        input_state=str(initial[LF.ODB_FILL_STEP]),
+        receipt_sha256=LC.digest(Path(tool['state']).parent / 'vibeic_receipt.json'))
+    record['image'] = str(image)
+    doc.update(default_stream=record)
+    BF.put(p / LF.RECORD_REL, doc)
+    BF.put(p / LF.DEFAULT_STREAM_REL, record)
+    assert LF.validate_default_stream(p) == record
+    receipts = {str(path.parent / name): (path.parent / name).read_bytes()
+                for _, path in stages for name in ('vibeic_receipt.json', 'input_fingerprint.json')}
+    assert len(calls) == 4
+    return p, record, namespace, receipts, source, executable, calls
+
+
+def test_retained_local_finishing_accepts_a_new_namespace_without_rewriting_receipts(
+        tmp_path, monkeypatch):
+    p, record, namespace, receipts, _, _, calls = _typed_local_finishing(tmp_path, monkeypatch)
+    namespace[0] = 'net:[1002]'
+    current = LC.resolve_image(p).as_record()
+    previous = json.loads(next(data for path, data in receipts.items()
+                               if path.endswith('vibeic_receipt.json')))['input']['local_provider']
+    assert {key for key in previous if previous[key] != current[key]} == {'reference', 'network_namespace'}
+    observation = {'previous': previous, 'current': current, 'calls': calls}
+    try:
+        assert LF.validate_default_stream(p) == record
+        assert LF.validate_default_stream(p) == record
+        assert all(Path(path).read_bytes() == data for path, data in receipts.items())
+        assert len(calls) == 4
+        observation['accepted'] = True
+    except Exception as exc:
+        observation['refusal'] = str(exc)
+        raise
+    finally:
+        BF.put(tmp_path / 'LOCAL_FINISHING_OBSERVATION.json', observation)
+
+
+def test_retained_local_finishing_still_refuses_true_material_and_input_changes(
+        tmp_path, monkeypatch):
+    observations = []
+    for changed in ('source', 'pdk', 'executable', 'policy', 'config', 'state', 'input', 'promotion'):
+        with monkeypatch.context() as patch:
+            p, record, namespace, _, source, executable, calls = _typed_local_finishing(tmp_path / changed, patch)
+            namespace[0] = 'net:[1002]'
+            tool = json.loads((p / LF.RECORD_REL).read_text())['odb']['tool']
+            if changed == 'source':
+                (source / 'librelane/__init__.py').write_text('# changed real source bytes\n')
+            elif changed == 'pdk':
+                (p / 'fixture_pdk/neutral/stream.lef').write_text('changed real PDK bytes\n')
+            elif changed == 'executable':
+                executable.write_text('#!/bin/sh\nexit 1\n')
+            elif changed == 'policy':
+                path = p / 'phase3/librelane_switch.json'
+                cfg = json.loads(path.read_text()); cfg['local_network_mode'] = 'none'
+                BF.put(path, cfg)
+            elif changed == 'config':
+                Path(tool['binding']['config']).write_text('{}')
+            elif changed == 'state':
+                Path(tool['binding']['input_state']).write_text('{}')
+            elif changed == 'input':
+                subject = Path(tool['subject'])
+                subject.write_text(subject.read_text() + '\n# changed real input bytes\n')
+            else:
+                record['image'] = 'local://librelane@sha256:' + '0' * 64
+                BF.put(p / LF.DEFAULT_STREAM_REL, record)
+                LF.update_record(p, 'default_stream', record)
+            with pytest.raises(LC.Refusal) as refused:
+                LF.validate_default_stream(p)
+            assert len(calls) == 4
+            observations.append({'changed': changed, 'refusal': str(refused.value)})
+    BF.put(tmp_path / 'LOCAL_FINISHING_NEGATIVES.json', observations)
+    print(json.dumps(observations, indent=2))

@@ -879,6 +879,16 @@ def _walk_input_views(state: dict):
     return _walk_paths({k: v for k, v in state.items() if k != 'metrics'})
 
 
+def _record_provider_binding(project: Path, fingerprint: dict) -> str:
+    """Keep the producer identity while revalidating current LOCAL material."""
+    if 'local_provider' in fingerprint:
+        import librelane_signoff_evidence as native
+        image = fingerprint.get('image')
+        native._retained_local_provider(project, fingerprint['local_provider'], image)
+        return image
+    return resolve_image(project)
+
+
 def validate_fill_handoff(project: Path, record: dict, *, routed_def: Path) -> dict:
     """Revalidate the actual fill producer and current inputs before consumption."""
     try:
@@ -896,7 +906,8 @@ def validate_fill_handoff(project: Path, record: dict, *, routed_def: Path) -> d
         import librelane_signoff_evidence as native
         switch_path = project / 'phase3/librelane_switch.json'
         switch = _load(switch_path) if switch_path.is_file() else {}
-        mounts = native._pdk_mounts(project, switch, folder, resolve_image(project))
+        image = _record_provider_binding(project, fp)
+        mounts = native._pdk_mounts(project, switch, folder, image)
         if [[str(Path(host).resolve()), str(guest)] for host, guest in mounts] != \
                 [[str(Path(host).resolve()), str(guest)] for host, guest in binding['mounts']]:
             raise ValueError('current PDK mount differs from producer')
@@ -904,7 +915,7 @@ def validate_fill_handoff(project: Path, record: dict, *, routed_def: Path) -> d
         if not all(p.resolve().is_relative_to(project.resolve()) for p in (config_path, initial)):
             raise ValueError('foreign config or input state')
         config, before, after = _load(config_path), _load(initial), _load(state_path)
-        if (fp.get('image') != binding['image'] or binding['image'] != resolve_image(project)
+        if (fp.get('image') != binding['image'] or binding['image'] != image
                 or fp.get('config') != digest(config_path)
                 or fp.get('state') != digest(initial)
                 or fp.get('state_files') != {str(p): digest(p) for p in _walk_input_views(before)}
@@ -1204,7 +1215,7 @@ def _current_stage(project: Path, state: Path, step: str) -> tuple[dict, dict]:
         raise Refusal('LL_FINISHING_WRONG_STAGE', str(state))
     receipt = validate_step_receipt(folder, step)
     fp = receipt['input']
-    image = resolve_image(project)
+    image = _record_provider_binding(project, fp)
     switch_path = project / 'phase3/librelane_switch.json'
     switch = _load(switch_path) if switch_path.is_file() else {}
     mounts = native._pdk_mounts(project, switch, folder, image)
@@ -1234,7 +1245,10 @@ def validate_default_stream(project: Path) -> dict:
     record = doc['default_stream']
     if _load(project / DEFAULT_STREAM_REL) != record:
         raise Refusal('LL_FINISHING_PROMOTION_CHANGED', DEFAULT_STREAM_REL)
-    if record.get('image') != resolve_image(project):
+    stream_fp = validate_step_receipt(
+        Path(record['stream_state']).parent, 'KLayout.StreamOut')['input']
+    if (record.get('image') != stream_fp.get('image')
+            or record.get('image') != _record_provider_binding(project, stream_fp)):
         raise Refusal('LL_FINISHING_IMAGE_CHANGED', str(record.get('image')))
     gates = record['gates']
     if set(gates) != {'substance', 'port_labels'} or any(
