@@ -753,7 +753,7 @@ def _transform_input_findings(project: Path, entries: List[dict],
                                 # Its earlier successful producer was checked
                                 # above; only the exact managed version counts.
                                 import step_output_collector as versions
-                                for version in versions.retained_before_versions(
+                                for version in versions.retained_versions(
                                         project, rel, claimed[7:].lower()):
                                     try:
                                         path = version['path']
@@ -772,7 +772,7 @@ def _transform_input_findings(project: Path, entries: List[dict],
                                     findings.append(ProvenanceFinding(
                                         i, tool, "PROVENANCE_TRANSFORM_INPUT_RETAINED",
                                         f"input '{rel}' {claimed} verified at {retained['path']} "
-                                        f"from {retained['metadata']}", severity="DISCLOSED"))
+                                        f"from {retained['metadata']} ({retained['role']})", severity="DISCLOSED"))
                     if reason:
                         findings.append(ProvenanceFinding(
                             i, tool, "PROVENANCE_TRANSFORM_INPUT_INVALID", reason))

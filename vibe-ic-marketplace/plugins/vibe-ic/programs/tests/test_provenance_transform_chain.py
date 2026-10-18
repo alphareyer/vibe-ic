@@ -403,3 +403,112 @@ def test_default_publication_retains_independent_versions(tmp_path, monkeypatch)
         print('IMMUTABLE_PUBLICATION_REFUSED', 'changed_retained_source')
     finally:
         R.set_invocation_provenance_sink(None)
+
+
+@pytest.mark.parametrize('population', ['outputs', 'written_files', 'input_files'])
+def test_historical_transform_reads_exact_managed_report_version(tmp_path, population):
+    import step_output_collector as versions
+
+    project = _project(tmp_path)
+    reports = project / 'reports/phase3'
+    reports.mkdir(parents=True)
+    source = reports / ('lvs.rpt' if population == 'outputs' else 'lvs_power_aware.rpt')
+    head = reports / 'published.rpt'
+    old, new = b'first measured report\n', b'next measured report\n'
+    rel = source.relative_to(project).as_posix()
+    if population == 'input_files':
+        source.write_bytes(old)
+        attempt = versions.begin_step(project, '36', inputs={rel: _sha(old)[7:]})
+    else:
+        attempt = versions.begin_step(project, '31')
+        source.write_bytes(old)
+    ledger = project / 'provenance.jsonl'
+    ledger.write_text(json.dumps({'tool': 'netgen', 'exit_code': 0,
+                                 'outputs': {rel: _sha(old)}}) + '\n')
+    head.write_bytes(old)
+    assert R._declare_immutable_transform(project, source, head, 'publish', 'netgen',
+                                         'publish unchanged measured report')
+    epoch = project / attempt['storage_root'] / attempt['folder']
+    report = tmp_path / 'report-version-check.json'
+
+    def next_version():
+        source.write_bytes(new)
+        rows = _rows(project)
+        rows.append({'tool': 'netgen', 'exit_code': 0, 'outputs': {rel: _sha(new)}})
+        ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+
+    if population == 'input_files':
+        next_version()
+        rc = C.main([str(project), '--json', str(report)])
+        assert rc == 0, (
+            'running managed input copy did not retain the historical report')
+    versions.finish_step(project, attempt, verdict='FAIL')
+    metadata = epoch / 'outputs.json'
+    owner = json.loads(metadata.read_text())
+    row = next(row for row in owner[population] if row['rel'] == rel)
+    snapshot = epoch / row['snapshot']
+    assert snapshot.read_bytes() == old
+    assert not any(row['rel'] == rel for row in
+                   json.loads((epoch / 'before/outputs.json').read_text())['outputs'])
+    if population != 'input_files':
+        next_version()
+    saved_ledger, saved_owner, saved_snapshot = (
+        ledger.read_bytes(), metadata.read_bytes(), snapshot.read_bytes())
+    rc = C.main([str(project), '--json', str(report)])
+    assert rc == 0, (
+        'managed report copy did not retain the historical transform input')
+    findings = json.loads(report.read_text())['findings']
+    assert any(f['rule'] == 'PROVENANCE_TRANSFORM_INPUT_RETAINED' and
+               str(snapshot) in f['detail'] and f['severity'] == 'DISCLOSED'
+               for f in findings)
+    for damage in ('wrong_rel', 'wrong_hash', 'wrong_size', 'wrong_role',
+                   'changed_snapshot', 'missing_snapshot', 'wrong_owner',
+                   'failed_prior', 'latest_output_changed'):
+        metadata.write_bytes(saved_owner)
+        snapshot.write_bytes(saved_snapshot)
+        ledger.write_bytes(saved_ledger)
+        head.write_bytes(old)
+        broken = json.loads(saved_owner)
+        target = next(row for row in broken[population] if row['rel'] == rel)
+        # finish_step may save the same bytes in outputs and written_files.
+        # Isolate this negative's role; another valid copy must remain usable.
+        for other in ('outputs', 'written_files', 'input_files'):
+            if other != population:
+                broken[other] = [r for r in broken.get(other, [])
+                                 if not (r['rel'] == rel and r['sha256'] == _sha(old)[7:])]
+        metadata.write_text(json.dumps(broken))
+        if damage in ('wrong_rel', 'wrong_hash', 'wrong_size', 'wrong_role'):
+            field, value = {
+                'wrong_rel': ('rel', 'reports/phase3/unrelated.rpt'),
+                'wrong_hash': ('sha256', '0' * 64),
+                'wrong_size': ('size', len(old) + 1),
+                'wrong_role': ('snapshot', 'other/' + snapshot.name),
+            }[damage]
+            target[field] = value
+            if damage == 'wrong_role':
+                other = epoch / value
+                other.parent.mkdir(exist_ok=True)
+                other.write_bytes(old)
+            metadata.write_text(json.dumps(broken))
+        elif damage == 'changed_snapshot':
+            snapshot.write_bytes(b'changed retained report')
+        elif damage == 'missing_snapshot':
+            snapshot.unlink()
+        elif damage == 'wrong_owner':
+            broken['folder'] = 'another/owner/folder'
+            metadata.write_text(json.dumps(broken))
+        elif damage == 'failed_prior':
+            rows = _rows(project)
+            rows[0]['exit_code'] = 1
+            ledger.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        else:
+            head.write_bytes(b'unlogged newest output')
+        assert C.main([str(project), '--json', str(report)]) == 1, damage
+        assert json.loads(report.read_text())['errors_count'] > 0, damage
+        print('MANAGED_REPORT_VERSION_REFUSED', population, damage)
+    metadata.write_bytes(saved_owner)
+    snapshot.write_bytes(saved_snapshot)
+    head.write_bytes(old)
+    ledger.write_bytes(saved_ledger)
+    assert C.main([str(project), '--json', str(report)]) == 0
+    assert ledger.read_bytes() == saved_ledger

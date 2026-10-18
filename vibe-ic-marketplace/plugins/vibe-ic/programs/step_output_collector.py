@@ -326,6 +326,47 @@ def retained_before_versions(project: Path, rel: str, sha256: str):
             continue
 
 
+def retained_versions(project: Path, rel: str, sha256: str):
+    """Locate saved bytes, never producer success, in existing managed roles."""
+    for version in retained_before_versions(project, rel, sha256):
+        yield {**version, 'role': 'before.outputs'}
+    project = Path(project).resolve()
+    root = _versions_root(project)
+    epochs = {p.parent for pattern in ('*/*/*/outputs.json', '*/*/*/attempt.json')
+              for p in root.glob(pattern)}
+    for epoch in sorted(epochs):
+        metadata = epoch / 'outputs.json'
+        if not metadata.is_file():
+            metadata = epoch / 'attempt.json'
+        try:
+            owner = json.loads(metadata.read_text())
+            folder = Path(owner['folder'])
+            if (owner.get('storage_root') != str(root.relative_to(project)) or
+                    len(folder.parts) != 3 or
+                    folder.parts[:2] != (owner.get('phase'), owner.get('stage')) or
+                    root / folder != epoch):
+                continue
+            for population, prefix in (('outputs', None), ('written_files', 'files'),
+                                       ('input_files', 'inputs')):
+                for row in owner.get(population, []):
+                    snapshot = row.get('snapshot')
+                    if (row.get('rel') != rel or row.get('sha256') != sha256 or
+                            not isinstance(snapshot, str) or
+                            type(row.get('size')) is not int or row['size'] < 0):
+                        continue
+                    if ((prefix is None and Path(snapshot).name != snapshot) or
+                            (prefix is not None and snapshot != str(Path(prefix) / rel))):
+                        continue
+                    path = epoch / snapshot
+                    if (path.is_symlink() or not path.is_file() or
+                            not path.resolve().is_relative_to(epoch.resolve())):
+                        continue
+                    yield {'path': path, 'metadata': metadata, 'size': row['size'],
+                           'role': population}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
 def _read_index(project: Path) -> dict:
     try:
         return json.loads((_versions_root(project) / 'index.json').read_text())
