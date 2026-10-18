@@ -1065,7 +1065,8 @@ def main(argv=None) -> int:
                     help=f"where the full record goes (default: {REPORT_REL})")
     args = ap.parse_args(argv)
 
-    project = Path(args.project_dir)
+    # Producer and canonical cwd checks must name the same evidence paths.
+    project = Path(args.project_dir).resolve()
     if not project.is_dir():
         print(f"[CANNOT CHECK] signoff_metrics_aggregate — {project} is not a "
               f"directory; there is no run to summarise")

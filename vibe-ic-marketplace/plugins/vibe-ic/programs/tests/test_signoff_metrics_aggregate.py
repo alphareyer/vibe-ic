@@ -7,6 +7,7 @@ the file still written and the exit code still 0. A rule that answers from
 somewhere else, or a rule that takes a whole tree down with it, fails here.
 """
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -297,3 +298,83 @@ def test_check_fails_when_the_record_no_longer_states_what_the_run_states(
 
 def test_a_missing_project_is_cannot_check_not_a_pass(tmp_path):
     assert AGG.main([str(tmp_path / "nope")]) == 2
+
+
+def test_check_same_project_spelling_preserves_native_provenance(
+        tmp_path, monkeypatch, capsys):
+    """The producer's ABS path and canonical cwd '.' name the same run.
+
+    Actual run_chain/judge own the neutral fixture's receipts. Only the
+    external process edge supplies protocol State, not physical signoff.
+    """
+    from _native_signoff_fixture import finished_producer
+    project = tmp_path / "project"
+    finished_producer(project, monkeypatch)
+    steps = []
+    def call(args):
+        rc = AGG.main(args)
+        output = capsys.readouterr()
+        steps.append({"args": args, "rc": rc, "stdout": output.out,
+                      "stderr": output.err})
+        return rc
+    assert call([str(project)]) == 0
+    assert call([str(project), "--check"]) == 0
+    metrics = project / "phase3/final/metrics.json"
+    report = project / AGG.REPORT_REL
+    frozen = {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in (metrics, report)}
+    recorded = json.loads(metrics.read_text())
+    assert recorded["__provenance__"]["klayout__density_error__count"]["measured"]
+    monkeypatch.chdir(project)
+    current, current_report = AGG.aggregate(Path("."))
+    rc = call([".", "--check"])
+    (tmp_path / "PROJECT_SPELLING_OBSERVATION.json").write_text(json.dumps({
+        "steps": steps, "stored_density_provenance": recorded["__provenance__"]["klayout__density_error__count"],
+        "relative_density_provenance": current["__provenance__"]["klayout__density_error__count"],
+        "stored_report_project": json.loads(report.read_text())["project"],
+        "relative_report_project": current_report["project"],
+        "metric_values_equal": {k: v for k, v in recorded.items() if k != "__provenance__"}
+                               == {k: v for k, v in current.items() if k != "__provenance__"},
+    }, indent=2) + "\n")
+    assert rc == 0, steps[-1]
+    assert call([".", "--check"]) == 0
+    assert call([str(project), "--check"]) == 0
+    assert frozen == {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in (metrics, report)}
+
+
+@pytest.mark.parametrize("mutation", ["same_value_new_bytes", "measurement"])
+def test_check_still_refuses_changed_measurement_report(project, mutation, capsys):
+    assert AGG.main([str(project)]) == 0
+    assert AGG.main([str(project), "--check"]) == 0
+    source = project / "reports/phase3/antenna.json"
+    if mutation == "same_value_new_bytes":
+        source.write_text(source.read_text() + "\n")
+    else:
+        payload = json.loads(source.read_text())
+        payload["net_violations"] += 1
+        _write(source, payload)
+    capsys.readouterr()
+    rc = AGG.main([str(project), "--check"])
+    output = capsys.readouterr()
+    (project.parent / "MEASUREMENT_MUTATION_OBSERVATION.json").write_text(
+        json.dumps({"mutation": mutation, "rc": rc, "stdout": output.out,
+                    "stderr": output.err}, indent=2) + "\n")
+    assert rc == 1
+    assert "__provenance__" in output.out
+
+
+def test_check_still_refuses_changed_native_input(tmp_path, monkeypatch, capsys):
+    from _native_signoff_fixture import finished_producer
+    project = tmp_path / "project"
+    info = finished_producer(project, monkeypatch)
+    assert AGG.main([str(project)]) == 0
+    assert AGG.main([str(project), "--check"]) == 0
+    info["deck"].write_text(info["deck"].read_text() + "changed true source\n")
+    capsys.readouterr()
+    rc = AGG.main([str(project), "--check"])
+    output = capsys.readouterr()
+    (tmp_path / "NATIVE_INPUT_MUTATION_OBSERVATION.json").write_text(
+        json.dumps({"rc": rc, "stdout": output.out, "stderr": output.err}, indent=2) + "\n")
+    assert rc == 1
+    assert "__provenance__" in output.out
