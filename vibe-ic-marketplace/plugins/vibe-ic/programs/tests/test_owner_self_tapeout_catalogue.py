@@ -88,3 +88,72 @@ def test_changed_catalogue_cannot_exempt_operator_arm(tmp_path):
     (t/'neutral.json').write_text('{}')
     assert TP.operator_arm_applicability(p,'gf180mcu')[0]!=TP.NOT_APPLICABLE
     assert CHK.evaluate(p,json.loads((p/ST.REPORT_REL).read_text()),None)['verdict']==ST.VERDICT_FAIL
+
+
+def _normal_absence(tmp_path, omitted):
+    """The actual 0.5ic CLI emits the absence proof; no native tool runs."""
+    p=tmp_path/'design';p.mkdir(parents=True)
+    reason='Owner independently selects DIE self-tapeout; no operator purchase or slot applies.'
+    raw={'answers':{'deliverable':'DIE'},'answer_provenance':{
+        'deliverable':{'answered_by':'owner','citation':'Neutral explicit owner DIE route'}},
+        'operator_template':{'path':None,'slot':None,'absent_reason':reason}}
+    for key in omitted:raw['operator_template'].pop(key)
+    own=p/ST.DESIGN_ANSWERS_REL;own.parent.mkdir(parents=True);own.write_text(json.dumps(raw))
+    assert ING.main([str(p),'--template',str(tmp_path/'not-an-operator-template'),
+                     '--no-template-reason',reason])==0
+    GEN.write_artefacts(p,GEN.build(p,own))
+    switch=p/'phase3/librelane_switch.json';switch.parent.mkdir(parents=True)
+    switch.write_text(json.dumps({'steps':{s:'direct' for s in ['26','31','34','37']}}))
+    return p,own
+
+
+def _absence_cli(p, monkeypatch):
+    # Only the unrelated physical-arm subprocess is synthetic. The real CLI
+    # reads the actual ingest/declaration and decides operator applicability.
+    def run(cmd, timeout):
+        assert 'general_precheck.py' in cmd[1], 'an operator subprocess must not run without its template'
+        target=__import__('pathlib').Path(cmd[cmd.index('--json')+1])
+        target.write_text(json.dumps({'verdict':'PASS','steps':[
+            {'step_id':'Synthetic.UnrelatedPhysicalArm','verdict':'PASS',
+             'evidence':'Synthetic transport only; no physical measurement claimed'}]}))
+        return 0,'synthetic unrelated physical arm',''
+    monkeypatch.setattr(TP,'default_runner',run)
+    return TP.main([str(p),'--pdk','gf180mcu','--json',str(p/'merged.json')])
+
+
+@pytest.mark.parametrize('omitted',[('path',),('slot',),('path','slot')])
+def test_normal_absent_ingest_optional_keys_reach_the_cli(tmp_path,monkeypatch,omitted):
+    p,_=_normal_absence(tmp_path,omitted)
+    original=(p/TD.DECLARATION_REL).read_bytes()
+    rc=_absence_cli(p,monkeypatch)
+    assert rc==0, 'typed explicit no-operator selection acquired a phantom operator obligation'
+    report=json.loads((p/'merged.json').read_text())
+    assert report['arms'][1]['state']==TP.NOT_APPLICABLE
+    assert report['arms_ran']==report['arms_expected']==1
+    assert (p/TD.DECLARATION_REL).read_bytes()==original
+
+
+def test_optional_key_absence_still_requires_the_actual_owner_and_ingest(tmp_path,monkeypatch):
+    faults=['selected-path','selected-slot','no-owner','no-citation','no-reason',
+            'PRESENT','ERROR','NOT_ATTEMPTED','not-attempted','template-present',
+            'declared-slot','undeclared-router','different-reason','missing-proof']
+    for fault in faults:
+        p,own=_normal_absence(tmp_path/fault,('path','slot'))
+        raw=json.loads(own.read_text());record=json.loads((p/ST.REPORT_REL).read_text())
+        if fault=='selected-path':raw['operator_template']['path']='operator-template'
+        elif fault=='selected-slot':raw['operator_template']['slot']='purchased'
+        elif fault=='no-owner':raw['answer_provenance']['deliverable']['answered_by']='agent'
+        elif fault=='no-citation':raw['answer_provenance']['deliverable']['citation']=''
+        elif fault=='no-reason':raw['operator_template']['absent_reason']=''
+        elif fault in {'PRESENT','ERROR','NOT_ATTEMPTED'}:record['ingest']['status']=fault
+        elif fault=='not-attempted':record['ingest']['lookup']['attempted']=False
+        elif fault=='template-present':record['ingest']['lookup']['template_present']=True
+        elif fault=='declared-slot':record['ingest']['declared_slot']='purchased'
+        elif fault=='undeclared-router':record['ingest']['path_selector']['declared']=False
+        elif fault=='different-reason':record['ingest']['no_template_reason']='A different owner decision, not the current input.'
+        own.write_text(json.dumps(raw));(p/ST.REPORT_REL).write_text(json.dumps(record))
+        if fault=='missing-proof':(p/ST.REPORT_REL).unlink()
+        assert _absence_cli(p,monkeypatch)==1, fault
+        result=json.loads((p/'merged.json').read_text())
+        assert result['arms'][1]['state']!=TP.NOT_APPLICABLE, fault
+        print('OPTIONAL_ABSENCE_NEGATIVE',fault,result['arms'][1]['state'])

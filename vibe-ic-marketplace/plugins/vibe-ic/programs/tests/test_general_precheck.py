@@ -49,6 +49,121 @@ import tapeout_declaration_check as TDC   # noqa: E402
 import tapeout_declaration_gen as TDG     # noqa: E402
 
 
+def _chosen_plan_project(tmp_path, monkeypatch, answers=None):
+    """Independent miniature pre-GDS Floorplan inputs; no EDA invocation."""
+    import test_floorplan_core_binding_for_density as FP
+    project,pdks,_cfg,_gds,config=FP._fixture(tmp_path)
+    volume=pdks/'processA'
+    script=volume/'libs.tech/klayout/tech/scripts/sealring.py'
+    script.parent.mkdir(parents=True);script.write_text('# synthetic technology facility\n')
+    lyp=volume/'libs.tech/klayout/tech/process.lyp'
+    lyp.write_text('<layer-properties><properties><source>61/0@1</source></properties></layer-properties>')
+    record=project/'reports/phase3/floorplan_rectangles.json'
+    plan=json.loads(record.read_text())
+    plan['seal_ring_margin']={'applies':True,'deliverable':'DIE','seal_ring_required':True,
+        'seal_ring_basis':'the technology ships a die seal-ring generator at '+str(script),
+        'pdk_dir':str(volume)}
+    record.write_text(json.dumps(plan))
+    # The measured layout is encoded only AFTER the independent plan/receipt.
+    layout=write_gds(project/'phase3/stage4/gds/generic_top.gds',{
+        'generic_top':{'boundaries':[(61,0,_rect(0,0,120000,100000))]}})
+    doc,_=TD.merge_answers(TD.blank_declaration(),dict(
+        {'deliverable':'DIE','database_unit_um':0.001},**(answers or {})))
+    _OD.attest(doc)
+    declaration=project/TD.DECLARATION_REL;declaration.write_text(json.dumps(doc))
+    (project/'phase3/librelane_switch.json').write_text(json.dumps({
+        'steps':{s:'direct' for s in ['26','31','34','37']}}))
+    finishing=project/'reports/phase3/die_finishing.json'
+    finishing.write_text(json.dumps({'producer':'die_finishing_gen',
+        'seal_ring':{'state':'PASS'},'die_id':{'state':'NOT_APPLICABLE','reason':'synthetic non-CoB route'}}))
+    (project/'phase3/stage3/pnr/die_finished.def').write_text('synthetic finished DEF fixture\n')
+    monkeypatch.setattr(GP._pdkauth,'resolve_volume',lambda *a,**k:(volume,'synthetic selected technology',[]))
+    def run(cmd,timeout):
+        if Path(cmd[1]).name=='die_finishing_check.py':
+            import subprocess
+            cp=subprocess.run(cmd,capture_output=True,text=True)
+            return cp.returncode,cp.stdout,cp.stderr
+        return 0,'synthetic unrelated delegate transport; no physical measurement',''
+    monkeypatch.setattr(GP,'default_runner',run)
+    return project,layout,config,record,finishing
+
+
+def _chosen_plan_cli(project,layout):
+    out=project/'chosen-plan-precheck.json'
+    before=(project/TD.DECLARATION_REL).read_bytes()
+    rc=GP.main([str(project),'--gds',str(layout),'--pdk','processA','--json',str(out)])
+    report=json.loads(out.read_text())
+    assert (project/TD.DECLARATION_REL).read_bytes()==before
+    return rc,{row['step_id']:row for row in report['steps']}
+
+
+def test_chosen_pre_gds_plan_answers_only_unanswered_physical_expectations(tmp_path,monkeypatch):
+    p,gds,_cfg,_plan,_finish=_chosen_plan_project(tmp_path,monkeypatch)
+    rc,rows=_chosen_plan_cli(p,gds)
+    assert rc==0, 'bound pre-GDS producer intent was not consumed by the normal general-precheck CLI'
+    for sid in ['KLayout.CheckTopLevel','KLayout.CheckSize','General.SealRing']:
+        assert rows[sid]['verdict']==GP.PASS,sid
+        assert 'floorplan' in rows[sid]['measured']['expected_source'].lower()
+    assert rows['KLayout.CheckTopLevel']['measured']['declared_top_cell']==TD.NOT_DETERMINED
+    assert rows['KLayout.CheckSize']['measured']['declared_origin_um']==TD.NOT_DETERMINED
+    assert rows['General.SealRing']['measured']['seal_ring_required_declared']==TD.NOT_DETERMINED
+
+
+def test_chosen_plan_never_corrects_explicit_or_measured_geometry_conflicts(tmp_path,monkeypatch):
+    for fault in ['top','origin','size','explicit-top','explicit-origin','explicit-size']:
+        answers={'top_cell':'wrong_top'} if fault=='explicit-top' else (
+            {'die_origin_um':[5,7]} if fault=='explicit-origin' else (
+            {'die_area_um':[0,0,90,80]} if fault=='explicit-size' else {}))
+        p,gds,_cfg,_plan,_finish=_chosen_plan_project(tmp_path/fault,monkeypatch,answers)
+        if fault in ['top','origin','size']:
+            name='wrong_top' if fault=='top' else 'generic_top'
+            box=_rect(3000,4000,123000,104000) if fault=='origin' else (
+                _rect(0,0,90000,80000) if fault=='size' else _rect(0,0,120000,100000))
+            write_gds(gds,{name:{'boundaries':[(61,0,box)]}})
+        rc,rows=_chosen_plan_cli(p,gds)
+        sid='KLayout.CheckTopLevel' if 'top' in fault else 'KLayout.CheckSize'
+        assert rc==1 and rows[sid]['verdict']==GP.FAIL, 'independent expected geometry failed to refuse '+fault
+        print('CHOSEN_PLAN_CONFLICT',fault,rows[sid]['verdict'])
+
+
+def test_unbound_or_malformed_plan_cannot_answer_the_declaration(tmp_path,monkeypatch):
+    for fault in ['missing-receipt','changed-receipt','stale-config','wrong-top-config',
+                  'missing-plan','wrong-program','malformed-declaration','no-seal-intent']:
+        p,gds,cfg,plan,_finish=_chosen_plan_project(tmp_path/fault,monkeypatch)
+        receipt=p/'phase3/librelane/15-floorplan/02-openroad-floorplan/vibeic_receipt.json'
+        if fault=='missing-receipt':receipt.unlink()
+        elif fault=='changed-receipt':
+            d=json.loads(receipt.read_text());d['sha256']['config.json']='0'*64;receipt.write_text(json.dumps(d))
+        elif fault in ['stale-config','wrong-top-config']:
+            d=json.loads(cfg.read_text());d['DIE_AREA']=[0,0,90,80] if fault=='stale-config' else d['DIE_AREA']
+            if fault=='wrong-top-config':d['DESIGN_NAME']='different'
+            cfg.write_text(json.dumps(d))
+        elif fault=='missing-plan':plan.unlink()
+        elif fault=='wrong-program':
+            d=json.loads(plan.read_text());d['program']='unrelated';plan.write_text(json.dumps(d))
+        elif fault=='no-seal-intent':
+            d=json.loads(plan.read_text());d['seal_ring_margin']['seal_ring_required']=False;plan.write_text(json.dumps(d))
+        else:
+            d=json.loads((p/TD.DECLARATION_REL).read_text());d['answers'].pop('die_origin_um')
+            (p/TD.DECLARATION_REL).write_text(json.dumps(d))
+        rc,rows=_chosen_plan_cli(p,gds)
+        sid='General.SealRing' if fault=='no-seal-intent' else 'KLayout.CheckTopLevel'
+        assert rc==1 and rows[sid]['verdict']==GP.NOT_DETERMINED,fault
+        print('CHOSEN_PLAN_UNBOUND',fault,rows[sid]['verdict'])
+
+
+def test_chosen_seal_requirement_still_reads_and_refuses_the_real_finishing_report(tmp_path,monkeypatch):
+    for fault in ['missing-report','missing-finished-def','seal-fail']:
+        p,gds,_cfg,_plan,finish=_chosen_plan_project(tmp_path/fault,monkeypatch)
+        if fault=='missing-report':finish.unlink()
+        elif fault=='missing-finished-def':(p/'phase3/stage3/pnr/die_finished.def').unlink()
+        else:
+            d=json.loads(finish.read_text());d['seal_ring']['state']='FAIL';finish.write_text(json.dumps(d))
+        rc,rows=_chosen_plan_cli(p,gds)
+        assert rc==1 and rows['General.SealRing']['verdict']!=GP.PASS,fault
+        print('CHOSEN_PLAN_SEAL_NEGATIVE',fault,rows['General.SealRing']['verdict'])
+
+
 # --------------------------------------------------------------------------- #
 # A minimal GDSII WRITER, so every fixture is a real stream.
 #

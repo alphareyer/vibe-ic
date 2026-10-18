@@ -751,7 +751,7 @@ def owner_self_tapeout(project: Path, doc: Dict[str, Any]) -> bool:
     if type(ring) is bool and answer(doc, "seal_ring_required") is not ring:
         return False
     op = raw.get("operator_template")
-    if not isinstance(op, dict) or any(k not in op or op[k] is not None
+    if not isinstance(op, dict) or any(op.get(k) is not None
                                        for k in ("path", "slot")):
         return False
     if not isinstance(op.get("absent_reason"), str) or not op["absent_reason"].strip():
@@ -762,8 +762,27 @@ def owner_self_tapeout(project: Path, doc: Dict[str, Any]) -> bool:
         rec, err = load(report_path)
         if err or not isinstance(rec, dict) or not isinstance(rec.get("ingest"), dict):
             return False
-        if rec["ingest"].get("declared_slot") is not None:
+        ingest = rec["ingest"]
+        if ingest.get("declared_slot") is not None:
             return False
+        if any(k not in op for k in ("path", "slot")):
+            # Optional caller keys need the actual ingest's typed absence,
+            # not a narrative that could describe an unavailable operator.
+            lookup = ingest.get("lookup") or {}
+            selector = ingest.get("path_selector") or {}
+            if not isinstance(lookup, dict) or not isinstance(selector, dict):
+                return False
+            if (not ST.declares_no_template(ingest.get("status"),
+                                             ingest.get("no_template_reason"))
+                    or ingest.get("no_template_reason") != op["absent_reason"].strip()
+                    or lookup.get("attempted") is not True
+                    or lookup.get("template_present") is not False
+                    or "declared_slot" not in ingest
+                    or selector.get("declared") is not True
+                    or selector.get("file") != ST.NO_TEMPLATE_REL):
+                return False
+    elif any(k not in op for k in ("path", "slot")):
+        return False
     return True
 
 

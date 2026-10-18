@@ -767,15 +767,40 @@ def _recorded_physical_top(project: Any) -> Optional[Dict[str, str]]:
             "record": DERIVED_CHIP_TOP_REL}
 
 
+def _chosen_floorplan_expectations(project: Path) -> Tuple[Dict[str, Any], str]:
+    """Existing pre-GDS Floorplan identity, never the layout being judged."""
+    import librelane_contract as contract
+    try:
+        die, _core, source = contract.settled_floorplan_geometry(project)
+        config = contract._load(project / 'phase3/librelane/15-config/OpenROAD.Floorplan.json')
+        record = contract._load(project / 'reports/phase3/floorplan_rectangles.json')
+        if record.get('program') != 'phase3_one_shot_runner.step_pnr':
+            raise ValueError('floorplan record names no existing PnR producer')
+        return {'top_cell': config['DESIGN_NAME'], 'die_origin_um': die[:2],
+                'die_area_um': die, 'source': source,
+                'seal_ring_margin': record.get('seal_ring_margin') or {}}, ''
+    except (contract.Refusal, OSError, ValueError, TypeError, KeyError) as exc:
+        return {}, f'current chosen Floorplan expectation unavailable: {exc}'
+
+
 def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
                     declared_top: Any,
-                    physical_top: Optional[Dict[str, str]] = None) -> None:
+                    physical_top: Optional[Dict[str, str]] = None,
+                    *, chosen_top: Optional[str] = None,
+                    expected_source: str = '') -> None:
     if geom is None:
         ev.evidence = "the layout was not read, so its top cell is unknown"
         return
     tops = geom["top_cells"]
     ev.measured = {"top_cells": tops, "top_cell_count": len(tops),
                    "declared_top_cell": declared_top}
+    compared_top = declared_top
+    authority = 'declared'
+    if declared_top == _decl.NOT_DETERMINED and chosen_top:
+        compared_top = chosen_top
+        authority = 'producer-chosen'
+        ev.measured.update(expected_top_cell=chosen_top,
+                           expected_source=expected_source)
     if physical_top:
         ev.measured["physical_top"] = dict(physical_top)
     if len(tops) != 1:
@@ -784,15 +809,15 @@ def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
             f"the stream carries {len(tops)} top-level cell(s) {tops}; a "
             "submission carries exactly one")
         return
-    if declared_top == _decl.NOT_DETERMINED:
+    if compared_top == _decl.NOT_DETERMINED:
         ev.evidence = (f"the top cell is {tops[0]!r} and `top_cell` was not "
                        "declared, so there is nothing to compare it against")
         return
-    if tops[0] == declared_top:
+    if tops[0] == compared_top:
         ev.verdict = PASS
-        ev.evidence = f"the single top-level cell is {tops[0]!r}, as declared"
+        ev.evidence = f"the single top-level cell is {tops[0]!r}, as {authority}"
     elif (physical_top and tops[0] == physical_top["chip_top"]
-            and physical_top["core"] == declared_top):
+            and physical_top["core"] == compared_top):
         # THE RING IS PART OF THIS DESIGN. The declared `top_cell` names the
         # core; this run's own step-15.5ic record says it wrapped that core in
         # `chip_top` to carry the pads, and the stream's top cell is exactly
@@ -807,14 +832,17 @@ def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
             f"{physical_top['record']}")
     else:
         ev.verdict = FAIL
-        ev.evidence = (f"the top-level cell is {tops[0]!r}; the declaration "
-                       f"names {declared_top!r}. This layout is not this "
+        owner = 'the declaration' if authority == 'declared' else 'the floorplan producer'
+        ev.evidence = (f"the top-level cell is {tops[0]!r}; {owner} "
+                       f"names {compared_top!r}. This layout is not this "
                        "design")
 
 
 def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
                deliverable: Any, origin: Any, die_area: Any,
-               macro_origin: Any = None, macro_area: Any = None) -> None:
+               macro_origin: Any = None, macro_area: Any = None,
+               *, chosen_origin=None, chosen_area=None,
+               expected_source: str = '') -> None:
     """THE ORIGIN CHECK, and the declared-size check beside it.
 
     TWO NAMES FOR THE SIZE, AND WHICH ONE APPLIES IS THE DELIVERABLE'S TO SAY
@@ -830,19 +858,29 @@ def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
         _origin_key, _area_key = "macro_origin_um", "macro_area_um"
     else:
         _origin_key, _area_key = "die_origin_um", "die_area_um"
+    declared_origin, declared_area = origin, die_area
+    origin_authority = area_authority = 'declared'
+    if deliverable == _decl.DELIVERABLE_DIE:
+        if origin == _decl.NOT_DETERMINED and chosen_origin is not None:
+            origin, origin_authority = chosen_origin, 'producer-chosen'
+        if die_area == _decl.NOT_DETERMINED and chosen_area is not None:
+            die_area, area_authority = chosen_area, 'producer-chosen'
     if geom is None:
         ev.evidence = "the layout was not read, so its extent is unknown"
         return
     bbox = geom.get("bbox_um")
     dbu = geom.get("dbu_um")
-    ev.measured = {"bbox_um": bbox, "declared_origin_um": origin,
-                   "declared_area_um": die_area,
+    ev.measured = {"bbox_um": bbox, "declared_origin_um": declared_origin,
+                   "declared_area_um": declared_area,
                    "declared_origin_key": _origin_key,
                    "declared_area_key": _area_key,
                    "deliverable": deliverable,
                    "bbox_complete": geom.get("bbox_complete"),
                    "bbox_cycles": geom.get("bbox_cycles"),
                    "bbox_missing_cells": geom.get("bbox_missing_cells")}
+    if 'producer-chosen' in (origin_authority, area_authority):
+        ev.measured.update(expected_origin_um=origin, expected_area_um=die_area,
+                           expected_source=expected_source)
     if bbox is None:
         ev.evidence = ("no bounding box could be computed: the examined top "
                        "cell holds no geometry, or the database unit is "
@@ -875,11 +913,12 @@ def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
             return
         if _close(bbox[0], origin[0], dbu) and _close(bbox[1], origin[1], dbu):
             checked.append(
-                f"lower-left ({bbox[0]}, {bbox[1]}) um is the declared origin")
+                f"lower-left ({bbox[0]}, {bbox[1]}) um is the {origin_authority} origin")
         else:
             problems.append(
                 f"the layout's lower-left is ({bbox[0]}, {bbox[1]}) um; the "
-                f"declaration requires ({origin[0]}, {origin[1]}) um. A die is "
+                f"{'declaration' if origin_authority == 'declared' else 'floorplan producer'} "
+                f"requires ({origin[0]}, {origin[1]}) um. A die is "
                 "fabricated at the coordinates it is drawn at")
     else:
         checked.append(
@@ -911,10 +950,11 @@ def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
         want_h = die_area[3] - die_area[1]
         got_w, got_h = geom["width_um"], geom["height_um"]
         if _close(got_w, want_w, dbu) and _close(got_h, want_h, dbu):
-            checked.append(f"the extent is {got_w} x {got_h} um, as declared")
+            checked.append(f"the extent is {got_w} x {got_h} um, as {area_authority}")
         else:
             problems.append(
-                f"the layout measures {got_w} x {got_h} um; the declaration "
+                f"the layout measures {got_w} x {got_h} um; "
+                f"{'the declaration' if area_authority == 'declared' else 'the floorplan producer'} "
                 f"pins {want_w} x {want_h} um")
 
     if problems:
@@ -1462,6 +1502,7 @@ def evaluate(project: Path,
 
     decl_path = declaration_path or (project / _decl.DECLARATION_REL)
     doc, decl_error = _decl.load(decl_path) if decl_path.is_file() else (None, None)
+    readable_declaration = doc is not None and not decl_error
     refusals: List[Dict[str, Any]] = []
     if doc is None:
         # No declaration is NOT a refusal of the layout. It is the reason
@@ -1483,6 +1524,11 @@ def evaluate(project: Path,
     ans = doc.get("answers") or {}
     audit = _decl.audit(doc)
     deliverable = _decl.answer(doc, "deliverable")
+    expected: Dict[str, Any] = {}
+    if readable_declaration and not refusals and deliverable == _decl.DELIVERABLE_DIE:
+        if any(_decl.answer(doc, key) == _decl.NOT_DETERMINED for key in
+               ('top_cell', 'die_origin_um', 'die_area_um', 'seal_ring_required')):
+            expected, _expectation_problem = _chosen_floorplan_expectations(project)
     slots_dir = project / _template.SLOTS_DIR_REL
     has_slots = bool(list(slots_dir.glob("*.yaml"))
                      + list(slots_dir.glob("*.yml")))
@@ -1594,13 +1640,18 @@ def evaluate(project: Path,
             _step_database_unit(ev, geom, _decl.answer(doc, "database_unit_um"))
         elif step.step_id == "KLayout.CheckTopLevel":
             _step_top_level(ev, geom, _decl.answer(doc, "top_cell"),
-                            _recorded_physical_top(project))
+                            _recorded_physical_top(project),
+                            chosen_top=expected.get('top_cell'),
+                            expected_source=expected.get('source', ''))
         elif step.step_id == "KLayout.CheckSize":
             _step_size(ev, geom, deliverable,
                        _decl.answer(doc, "die_origin_um"),
                        _decl.answer(doc, "die_area_um"),
                        _decl.answer(doc, "macro_origin_um"),
-                       _decl.answer(doc, "macro_area_um"))
+                       _decl.answer(doc, "macro_area_um"),
+                       chosen_origin=expected.get('die_origin_um'),
+                       chosen_area=expected.get('die_area_um'),
+                       expected_source=expected.get('source', ''))
         elif step.step_id == "Checker.KLayoutZeroAreaPolygons":
             _step_zero_area(ev, geom)
         elif step.step_id == "General.ForbiddenLayers":
@@ -1613,6 +1664,22 @@ def evaluate(project: Path,
             _step_flow_marker_layers(ev, layers, flow_markers)
         elif step.delegate is not None:
             seal = ans.get("seal_ring_required")
+            declared_seal = seal
+            seal_expected_source = ''
+            policy = expected.get('seal_ring_margin')
+            if (step.step_id == 'General.SealRing' and not _decl.is_answered(seal)
+                    and isinstance(policy, dict) and policy.get('applies') is True
+                    and policy.get('deliverable') == _decl.DELIVERABLE_DIE
+                    and policy.get('seal_ring_required') is True
+                    and isinstance(policy.get('seal_ring_basis'), str)
+                    and policy['seal_ring_basis'].strip()
+                    and isinstance(policy.get('pdk_dir'), str) and policy['pdk_dir']
+                    and volume is not None and seal_facility is True
+                    and Path(policy['pdk_dir']).resolve() == volume.resolve()):
+                seal = True
+                seal_expected_source = (expected['source']
+                    + '; reports/phase3/floorplan_rectangles.json.seal_ring_margin: '
+                    + policy['seal_ring_basis'])
             _step_delegate(ev, step, project, run, pdir, timeout,
                            seal_required=(seal if _decl.is_answered(seal)
                                           else _decl.NOT_DETERMINED),
@@ -1621,6 +1688,12 @@ def evaluate(project: Path,
                            seal_facility_tried=seal_tried,
                            volume_why=volume_why, layout=chosen,
                            seal_deliverable=deliverable, seal_route=seal_route)
+            if seal_expected_source:
+                ev.measured = dict(ev.measured or {},
+                    seal_ring_required_declared=declared_seal,
+                    seal_ring_required_expected=True,
+                    expected_source=seal_expected_source)
+                ev.evidence += '; independent chosen expectation: ' + seal_expected_source
 
     with_evidence = sum(1 for s in steps if s.verdict != NOT_DETERMINED)
     failed = [s.step_id for s in steps if s.verdict == FAIL]
