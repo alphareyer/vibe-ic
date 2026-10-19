@@ -458,6 +458,10 @@ def test_normal_phase2_report_survives_absent_advisory_handoff(tmp_path, monkeyp
     import execution_policy
     import flow_declared_producer_run
     monkeypatch.setattr(flow_declared_producer_run, 'run_for_step', lambda *a, **kw: None)
+    monkeypatch.setattr(DOSR, '_audit_after_declared_producers', lambda *a, **kw:
+        DOSR.StepResult('final_audit', 'NOT_MEASURED', 0.0,
+                        'unrelated whole-flow audit outside this reporting fixture',
+                        reason_class=DOSR._V.ReasonClass.NOT_EXECUTED))
     monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
     monkeypatch.setattr(sys, 'argv', ['design', str(project), '--skip-hardware',
                                     '--skip-phase3', '--skip-analog',
