@@ -46540,9 +46540,16 @@ def _doc_module_name_label_or_inline(extracted: Dict[str, str]) -> Optional[str]
                 inline_counts[nm] = inline_counts.get(nm, 0) + 1
     # A formal label is stronger than a stated top, which is stronger than a
     # passing inline module reference.
-    for counts in (label_counts, stated_counts, inline_counts):
+    for counts in (label_counts, stated_counts):
         if counts:
             return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    # An interface subject outranks a passing helper reference, while an
+    # explicit design-top declaration above still owns the wrapper target.
+    subjects = _doc_comportable_module_subjects(extracted)
+    if subjects:
+        return next(iter(subjects)) if len(subjects) == 1 else None
+    if inline_counts:
+        return sorted(inline_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
     return None
 
 
@@ -47024,13 +47031,6 @@ def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
     if _real:
         return _normalize_top_module_case(_real, extracted)
 
-    # The documented interface subject is stronger than a passing module
-    # reference. Preserve the declared spelling; conflicting subjects have no
-    # unique design target and cannot be resolved by frequency or doc order.
-    _comportable = _doc_comportable_module_subjects(extracted)
-    if _comportable:
-        return next(iter(_comportable)) if len(_comportable) == 1 else None
-
     # A subject-first declaration names the design, rather than merely
     # mentioning a top module. Anchor the entire affirmative clause so
     # historical, negative, hypothetical and example prose cannot qualify.
@@ -47072,8 +47072,12 @@ def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
     # over the low-confidence heading / intro-phrase heuristics below, which
     # otherwise left prompt-only specs on the `chip_top` sentinel.
     _named = _doc_module_name_label_or_inline(extracted)
+    _comportable = _doc_comportable_module_subjects(extracted)
     if _named:
-        return _normalize_top_module_case(_named, extracted)
+        return (_named if _named in _comportable
+                else _normalize_top_module_case(_named, extracted))
+    if _comportable:
+        return None  # Conflicting subjects cannot fall back to a heading.
 
     def _walk(pattern: "re.Pattern[str]") -> Optional[str]:
         counts: Dict[str, int] = {}
