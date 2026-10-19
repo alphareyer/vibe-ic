@@ -430,6 +430,7 @@ def verilate_professional_tb_and_run(
     execution = {
         "testbench": str(tb), "top": plan["top"],
         "reference_model_tier": plan["reference_model_tier"],
+        "python_source_sha256": audit["python_source_sha256"],
         "instrumented_junit": str(junit), "test_denominator": summary,
         "functional_stimulus": audit, "coverage_dat": str(dat),
         "instrumentation_flags": list(COVERAGE_INSTRUMENTATION_FLAGS),
@@ -490,13 +491,14 @@ def _check_professional_execution(tb: Path, dat: Path) -> Optional[str]:
         plan = _professional_bundle(tb)
         record = json.loads((dat.parent / "coverage_cocotb_execution.json").read_text())
         summary = _srb.parse_junit(dat.parent / "coverage_results.xml")
+        audit = functional_stimulus_audit(tb)
         if (record.get("testbench") != str(tb)
                 or record.get("testbench_sha256") != hashlib.sha256(tb.read_bytes()).hexdigest()
+                or record.get("python_source_sha256") != audit.get("python_source_sha256")
                 or not summary or summary["tests"] <= 0 or summary["passed"] <= 0
                 or summary["failures"] or summary["errors"] or summary["skipped"]
                 or summary != record.get("test_denominator")):
             return "instrumented Python source/JUnit is missing, changed, failed, skipped or zero-test"
-        audit = functional_stimulus_audit(tb)
         activity = _professional_input_activity(dat, plan["top"], audit["driven"])
         if not activity or activity != record.get("observed_functional_input_toggles"):
             return "tool data recorded no matching top-level functional-input movement"
@@ -2006,6 +2008,287 @@ def _professional_local_helper_reads(tree: ast.Module, port_names: set[str]) -> 
     return reads
 
 
+def _professional_sibling_asserted_reads(
+        tb: Path, tree: ast.Module, port_names: set[str]) -> tuple[set[str], set[Path]]:
+    """Resolve one deliberately small same-bundle Python helper subset.
+
+    Credit is dataflow, not naming: a unique direct sibling class import must
+    receive the cocotb DUT in its constructor, a reachable local helper must
+    await a method on that instance, and the value returned from a real
+    ``self.<dut>.<port>.value`` read must reach an assertion.  Relative,
+    package, missing, symlinked, rebound, decorated and otherwise ambiguous
+    sources receive no credit.
+    """
+    top_binding_count: Dict[str, int] = {}
+    for node in tree.body:
+        for name in _python_bound_names([node]):
+            top_binding_count[name] = top_binding_count.get(name, 0) + 1
+    if any(isinstance(node, ast.ImportFrom)
+           and any(alias.name == '*' for alias in node.names)
+           for node in tree.body):
+        return set(), set()
+    global_mutations = {name for node in ast.walk(tree)
+                        if isinstance(node, ast.Global) for name in node.names}
+
+    imported_classes: Dict[str, List[Dict[str, Any]]] = {}
+    bundle = tb.parent.resolve()
+    for node in tree.body:
+        if (not isinstance(node, ast.ImportFrom) or node.level != 0
+                or not node.module or not node.module.isidentifier()):
+            continue
+        source = tb.parent / f"{node.module}.py"
+        try:
+            if (source.is_symlink() or not source.is_file()
+                    or source.resolve(strict=True).parent != bundle):
+                continue
+            helper_tree = ast.parse(source.read_text())
+        except (OSError, SyntaxError):
+            continue
+        helper_binding_count: Dict[str, int] = {}
+        for helper_node in helper_tree.body:
+            for name in _python_bound_names([helper_node]):
+                helper_binding_count[name] = helper_binding_count.get(name, 0) + 1
+        for alias in node.names:
+            if alias.name == '*' or not alias.name.isidentifier():
+                continue
+            local = alias.asname or alias.name
+            classes = [item for item in helper_tree.body
+                       if isinstance(item, ast.ClassDef)
+                       and item.name == alias.name and not item.decorator_list]
+            if len(classes) == 1:
+                imported_classes.setdefault(local, []).append({
+                    'class': classes[0], 'source': source,
+                    'module_bound': set(helper_binding_count),
+                    'class_binding_count': helper_binding_count.get(alias.name),
+                })
+    imported_classes = {
+        name: rows for name, rows in imported_classes.items()
+        if (len(rows) == 1 and top_binding_count.get(name) == 1
+            and rows[0]['class_binding_count'] == 1
+            and name not in global_mutations)
+    }
+
+    local_functions: Dict[str, ast.AST] = {}
+    for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not node.decorator_list
+                and top_binding_count.get(node.name) == 1
+                and node.name not in global_mutations):
+            local_functions[node.name] = node
+
+    def constructor_object(call: ast.Call, dut: str, blocked: set[str]):
+        if (not isinstance(call.func, ast.Name) or call.func.id in blocked
+                or call.func.id not in imported_classes or call.keywords
+                or len(call.args) != 1 or not isinstance(call.args[0], ast.Name)
+                or call.args[0].id != dut):
+            return None
+        row = imported_classes[call.func.id][0]
+        cls = row['class']
+        initialisers = [item for item in cls.body
+                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and item.name == '__init__' and not item.decorator_list]
+        init_binding_count = sum('__init__' in _python_bound_names([item])
+                                 for item in cls.body)
+        if len(initialisers) != 1 or init_binding_count != 1:
+            return None
+        init = initialisers[0]
+        positional = [*init.args.posonlyargs, *init.args.args]
+        if (len(positional) != 2 or init.args.vararg or init.args.kwarg
+                or init.args.kwonlyargs or init.args.defaults
+                or not isinstance(init, ast.FunctionDef)):
+            return None
+        self_name, dut_name = (arg.arg for arg in positional)
+        if dut_name in _python_bound_names(_python_scope_nodes(init.body)):
+            return None
+        if len(init.body) != 1 or not isinstance(init.body[0], ast.Assign):
+            return None
+        assign = init.body[0]
+        if (len(assign.targets) != 1
+                or not isinstance(assign.targets[0], ast.Attribute)
+                or not isinstance(assign.targets[0].value, ast.Name)
+                or assign.targets[0].value.id != self_name
+                or not isinstance(assign.value, ast.Name)
+                or assign.value.id != dut_name):
+            return None
+        return {'class': cls, 'source': row['source'],
+                'module_bound': row['module_bound'],
+                'self': self_name, 'dut_attr': assign.targets[0].attr}
+
+    def merge(parts):
+        reads: set[str] = set()
+        sources: set[Path] = set()
+        for item_reads, item_sources in parts:
+            reads.update(item_reads)
+            sources.update(item_sources)
+        return reads, sources
+
+    def function_result(function, values, objects, blocked, active, depth):
+        if depth > 16 or id(function) in active or function.decorator_list:
+            return set(), set()
+        positional = [*function.args.posonlyargs, *function.args.args]
+        if (function.args.vararg or function.args.kwarg
+                or function.args.kwonlyargs or function.args.defaults
+                or any(arg.arg in _python_bound_names(
+                    _python_scope_nodes(function.body)) for arg in positional)):
+            return set(), set()
+        active = active | {id(function)}
+        local_values = dict(values)
+        local_objects = dict(objects)
+        for statement in function.body:
+            if isinstance(statement, ast.Expr):
+                continue
+            if (isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and isinstance(statement.target if isinstance(
+                        statement, ast.AnnAssign) else
+                        statement.targets[0] if len(statement.targets) == 1 else None,
+                        ast.Name)):
+                target = (statement.target if isinstance(statement, ast.AnnAssign)
+                          else statement.targets[0])
+                local_objects.pop(target.id, None)
+                local_values[target.id] = expression_result(
+                    statement.value, local_values, local_objects,
+                    blocked, active, depth + 1)
+                continue
+            if isinstance(statement, ast.Return) and statement.value is not None:
+                return expression_result(statement.value, local_values,
+                                         local_objects, blocked, active, depth + 1)
+            return set(), set()
+        return set(), set()
+
+    def call_function(call, function, values, objects, blocked, active, depth):
+        positional = [*function.args.posonlyargs, *function.args.args]
+        if (call.keywords or len(call.args) != len(positional)
+                or function.args.vararg or function.args.kwarg
+                or function.args.kwonlyargs or function.args.defaults):
+            return set(), set()
+        parameter_values = {}
+        parameter_objects = {}
+        for formal, actual in zip(positional, call.args):
+            parameter_values[formal.arg] = expression_result(
+                actual, values, objects, blocked, active, depth + 1)
+            if isinstance(actual, ast.Name) and actual.id in objects:
+                parameter_objects[formal.arg] = objects[actual.id]
+        return function_result(function, parameter_values, parameter_objects,
+                               blocked, active, depth + 1)
+
+    def method_result(call, obj, values, objects, blocked, active, depth):
+        if call.args or call.keywords or not isinstance(call.func, ast.Attribute):
+            return set(), set()
+        methods = [item for item in obj['class'].body
+                   if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and item.name == call.func.attr and not item.decorator_list]
+        member_binding_count = sum(
+            call.func.attr in _python_bound_names([item])
+            for item in obj['class'].body)
+        if len(methods) != 1 or member_binding_count != 1:
+            return set(), set()
+        method = methods[0]
+        positional = [*method.args.posonlyargs, *method.args.args]
+        if len(positional) != 1 or positional[0].arg != obj['self']:
+            return set(), set()
+        return function_result(method, {}, {obj['self']: obj},
+                               blocked | obj['module_bound'],
+                               active, depth + 1)
+
+    def expression_result(expr, values, objects, blocked, active, depth):
+        if expr is None or depth > 16:
+            return set(), set()
+        if isinstance(expr, ast.Await):
+            return expression_result(expr.value, values, objects,
+                                     blocked, active, depth + 1)
+        if isinstance(expr, ast.Name):
+            return values.get(expr.id, (set(), set()))
+        if (isinstance(expr, ast.Attribute) and expr.attr == 'value'
+                and isinstance(expr.ctx, ast.Load)
+                and isinstance(expr.value, ast.Attribute)
+                and expr.value.attr in port_names
+                and isinstance(expr.value.value, ast.Attribute)
+                and isinstance(expr.value.value.value, ast.Name)):
+            root = expr.value.value.value.id
+            obj = objects.get(root)
+            if obj and expr.value.value.attr == obj['dut_attr']:
+                return {expr.value.attr}, {obj['source']}
+        if isinstance(expr, ast.Call):
+            if (isinstance(expr.func, ast.Name)
+                    and expr.func.id in {'int', 'bool'}
+                    and expr.func.id not in blocked and len(expr.args) == 1
+                    and not expr.keywords):
+                return expression_result(expr.args[0], values, objects,
+                                         blocked, active, depth + 1)
+            if (isinstance(expr.func, ast.Name) and expr.func.id not in blocked
+                    and expr.func.id in local_functions):
+                return call_function(expr, local_functions[expr.func.id], values,
+                                     objects, blocked, active, depth + 1)
+            if (isinstance(expr.func, ast.Attribute)
+                    and isinstance(expr.func.value, ast.Name)
+                    and expr.func.value.id in objects):
+                return method_result(expr, objects[expr.func.value.id], values,
+                                     objects, blocked, active, depth + 1)
+            return set(), set()
+        if isinstance(expr, (ast.Compare, ast.BinOp, ast.UnaryOp)):
+            return merge(expression_result(child, values, objects, blocked,
+                                           active, depth + 1)
+                         for child in ast.iter_child_nodes(expr))
+        return set(), set()
+
+    reads: set[str] = set()
+    sources: set[Path] = set()
+    for test in tree.body:
+        if (not isinstance(test, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or not test.args.args
+                or not any(ast.unparse(item).startswith('cocotb.test')
+                           for item in test.decorator_list)):
+            continue
+        dut = test.args.args[0].arg
+        lexical = list(_python_scope_nodes(test.body))
+        blocked = _python_bound_names(lexical)
+        store_count: Dict[str, int] = {}
+        for node in lexical:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                store_count[node.id] = store_count.get(node.id, 0) + 1
+        if (dut in blocked or any(isinstance(node, ast.Nonlocal) and dut in node.names
+                                  for node in ast.walk(test))):
+            continue
+        values: Dict[str, tuple[set[str], set[Path]]] = {}
+        objects: Dict[str, Dict[str, Any]] = {}
+
+        def statements(body):
+            for statement in body:
+                if (isinstance(statement, ast.Assign)
+                        and len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name)):
+                    target = statement.targets[0].id
+                    obj = (constructor_object(statement.value, dut, blocked)
+                           if (isinstance(statement.value, ast.Call)
+                               and store_count.get(target) == 1) else None)
+                    if obj is not None:
+                        objects[target] = obj
+                        values.pop(target, None)
+                    else:
+                        objects.pop(target, None)
+                        values[target] = expression_result(
+                            statement.value, values, objects, blocked, set(), 0)
+                elif isinstance(statement, ast.AnnAssign) and isinstance(
+                        statement.target, ast.Name):
+                    objects.pop(statement.target.id, None)
+                    values[statement.target.id] = expression_result(
+                        statement.value, values, objects, blocked, set(), 0)
+                elif isinstance(statement, ast.Assert):
+                    found, adopted = expression_result(
+                        statement.test, values, objects, blocked, set(), 0)
+                    reads.update(found)
+                    sources.update(adopted)
+                elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                    statements(statement.body)
+                elif isinstance(statement, ast.If) and isinstance(
+                        statement.test, ast.Constant):
+                    statements(statement.body if statement.test.value
+                               else statement.orelse)
+
+        statements(test.body)
+    return reads, sources
+
+
 def _professional_python_audit(tb: Path) -> Dict[str, Any]:
     """Python stimulus uses the design's L9 input contract, not pin guesses.
 
@@ -2015,11 +2298,15 @@ def _professional_python_audit(tb: Path) -> Dict[str, Any]:
     """
     out = {"testbench": str(tb), "decidable": False, "reason": "",
            "driven": [], "inert": [], "clock_reset": [],
+           "adopted_helper_sources": [], "python_source_sha256": {},
            "self_declared_connectivity_only": False,
            "stimulus_language": "cocotb-python"}
     try:
         plan = _professional_bundle(tb)
         tree = ast.parse(tb.read_text())
+        import hashlib  # noqa: PLC0415
+        out["python_source_sha256"] = {
+            str(tb): hashlib.sha256(tb.read_bytes()).hexdigest()}
         project = _cov_project_root({"rtl_sources": [str(tb)]})
         if project is None:
             raise ValueError("Python testbench is outside a canonical project bundle")
@@ -2086,7 +2373,15 @@ def _professional_python_audit(tb: Path) -> Dict[str, Any]:
                 values[name].add(repr(value))
             except (ValueError, TypeError):
                 dynamic.add(name)
-    reads.update(_professional_local_helper_reads(tree, {p['name'] for p in ports}))
+    port_names = {p['name'] for p in ports}
+    reads.update(_professional_local_helper_reads(tree, port_names))
+    sibling_reads, helper_sources = _professional_sibling_asserted_reads(
+        tb, tree, port_names)
+    reads.update(sibling_reads)
+    out["adopted_helper_sources"] = sorted(str(path) for path in helper_sources)
+    for path in sorted(helper_sources):
+        out["python_source_sha256"][str(path)] = hashlib.sha256(
+            path.read_bytes()).hexdigest()
     if not reads or not any(isinstance(n, ast.Assert) for n in ast.walk(tree)):
         out["reason"] = "no observed DUT read and self-check assertion in the Python source"
         return out
