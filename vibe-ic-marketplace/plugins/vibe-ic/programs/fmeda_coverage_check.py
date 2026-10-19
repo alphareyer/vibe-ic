@@ -67,9 +67,17 @@ import fmeda_fault_injection_coverage as fi  # noqa: E402
 def check(report: dict, asil_override: Optional[str],
           min_dc: Optional[float]) -> dict:
     """Recompute the verdict from raw counts. Pure — the authoritative gate."""
-    if report.get("mechanism_binding") == "UNBOUND":
-        # The producer discovered only a port-shaped candidate. Even a
-        # contradictory applicable=false flag cannot turn it into N/A.
+    mechanism = report.get("mechanism")
+    legacy_auto = (isinstance(mechanism, dict)
+                   and mechanism.get("source") == "auto-detected")
+    if report.get("mechanism_binding") == "UNBOUND" or legacy_auto:
+        # Current producer marks candidates UNBOUND. Earlier reports carried
+        # only mechanism.source=auto-detected and may even contain fault
+        # counts. Those counts came from a shape-inferred pair, without a
+        # source-bound encoder/checker relationship, and cannot become PASS by
+        # replaying an old report. A contradictory applicable=false flag also
+        # cannot turn the same candidate into N/A. Explicit measured reports
+        # still reach the raw-count and ASIL-floor recomputation below.
         return {"gate": "fmeda_coverage_check", "verdict": "NOT_MEASURED",
                 "passed": False, "recomputed_dc_pct": None,
                 "reason": "mechanism candidate is unbound; no fault injection "

@@ -1,4 +1,5 @@
 """#3246: port shapes can discover candidates, but cannot bind safety semantics."""
+import copy
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,31 @@ def test_rst_ni_is_never_selected_as_protected_encoder_data():
     assert producer._is_clk_rst("rst_ni") is True
     assert producer._is_clk_rst("reset_n") is True
     assert producer._is_clk_rst("data_in") is False
+
+
+def test_old_auto_report_cannot_borrow_real_hamming_counts_for_pass():
+    # Exact native positive counts: 112 injected, 112 detected, valid baseline,
+    # 100% DC versus 99% ASIL-D floor. The only changed fact is the OLD
+    # producer's source marker. Its shape-only selection has no binding proof.
+    bound = {
+        "applicable": True, "measured": True, "asil": "D",
+        "injected_faults": 112, "detected_faults": 112,
+        "baseline_valid": True, "diagnostic_coverage_pct": 100.0,
+        "dc_floor_pct": 99.0, "verdict": "PASS",
+        "mechanism": {"source": "explicit"},
+    }
+    explicit = consumer.check(bound, None, None)
+    assert explicit["passed"] is True and explicit["verdict"] == "PASS"
+    legacy = copy.deepcopy(bound)
+    legacy["mechanism"]["source"] = "auto-detected"
+    before_counts = (legacy["injected_faults"], legacy["detected_faults"],
+                     legacy["baseline_valid"], legacy["dc_floor_pct"])
+    refused = consumer.check(legacy, None, None)
+    assert (legacy["injected_faults"], legacy["detected_faults"],
+            legacy["baseline_valid"], legacy["dc_floor_pct"]) == before_counts
+    assert refused["verdict"] == "NOT_MEASURED"
+    assert refused["passed"] is False
+    assert refused["recomputed_dc_pct"] is None
 
 
 def _run(project):
