@@ -2569,7 +2569,12 @@ def rule_continuous_function_hidden_globals(src: str, path: str) -> List[Finding
                         scoped = re.sub(r'^\s*:\s*[A-Za-z_]\w*', ' ',
                                         surface[scope[0]:scope[1]])
                         for stmt, _ in _module_ports._collect_statements(scoped):
-                            shadowed.update(_dependency_decl_names(stmt) or set())
+                            # Nested constants can shadow a mutable module name
+                            # just like a nested net; they are not module state.
+                            constant = re.match(r'\s*(?:localparam|parameter)\b', stmt)
+                            declaration = stmt[constant.end():] if constant else stmt
+                            shadowed.update(_dependency_decl_names(
+                                declaration, bare=constant is not None) or set())
                         cursor = scope[0] - len('begin')
                     if reads & actual_ids & shadowed:
                         reasons.add('actual argument may bind a nested declaration')
