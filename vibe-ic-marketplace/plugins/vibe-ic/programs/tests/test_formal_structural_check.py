@@ -716,6 +716,7 @@ def test_native_cofactor_keeps_named_container_on_the_existing_local_route(tmp_p
     observation = {'scope': 'Real native cofactor normalization with a container label on the existing local route',
                    'native': info, 'payloads': {str(k): sorted(v) for k, v in payloads.items()}}
     (tmp_path / 'LOCAL_ROUTE_OBSERVATION.json').write_text(json.dumps(observation, indent=2))
-    assert info['native_exit_code'] == 0 and info['status'] == 'NATIVE_NORMALIZED_COFACTOR_SUPPORT', observation
+    observed = (info['native_exit_code'], info['status'])
+    assert observed == (0, 'NATIVE_NORMALIZED_COFACTOR_SUPPORT'), observed
     assert payloads == {9: {7}}, observation
     assert info['native_run']['supervision'] == 'host_process_and_progress', observation
