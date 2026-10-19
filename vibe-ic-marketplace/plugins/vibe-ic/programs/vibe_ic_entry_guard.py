@@ -254,7 +254,8 @@ def _expected_front_door_verdict(data: dict, phases: list) -> str:
                 rows,
                 data.get("completion_audit_verdicts") or [],
                 demoted=data.get("demoted_phases") or {},
-                audit_axis=axis if isinstance(axis, dict) else None)[0]
+                audit_axis=axis if isinstance(axis, dict) else None,
+                halted_at=data.get("halted_at"))[0]
     if not rows:
         return 'FAIL'
     # LEGACY SHAPE — a report published before the conjunction rule existed.

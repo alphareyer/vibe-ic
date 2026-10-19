@@ -1313,7 +1313,8 @@ def _rollup_phase_rows(plan, execution_mode=None):
 def _roll_up(rows: List[Tuple[str, str, int]],
              completion_audit_verdicts: Optional[List[str]] = None,
              demoted: Optional[Dict[str, Dict[str, Any]]] = None,
-             audit_axis: Optional[Dict[str, Any]] = None
+             audit_axis: Optional[Dict[str, Any]] = None,
+             halted_at: Optional[str] = None
              ) -> Tuple[str, List[str]]:
     """Roll the phases up into ONE verdict, and say why it is that verdict.
 
@@ -1431,6 +1432,12 @@ def _roll_up(rows: List[Tuple[str, str, int]],
             f"the phase2/3 completion audit is not a pass ({_axis_state})"
             + (f" — {_axis_why}" if _axis_why else ""))
 
+    # A retained checkpoint can be a passing tier without satisfying the
+    # stricter downstream handoff. Keep its row intact, but a halted whole
+    # invocation has not completed merely because later rows were skipped.
+    # Scoped phase/window callers omit this whole-invocation context.
+    if halted_at:
+        unmeasured.append(f"invocation halted at {halted_at}; downstream dispatch did not complete")
     if fails:
         return "FAIL", fails + unmeasured + disclosed
     if unmeasured:
@@ -3886,7 +3893,8 @@ def _main() -> int:
     if digital_rows:
         overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts,
                                         demoted=_demoted,
-                                        audit_axis=_audit_axis)
+                                        audit_axis=_audit_axis,
+                                        halted_at=halted_at)
     else:
         overall, _rollup_why = "FAIL", ["no digital phase ran"]
     import ai_signed_judgement as _ai_judgement
