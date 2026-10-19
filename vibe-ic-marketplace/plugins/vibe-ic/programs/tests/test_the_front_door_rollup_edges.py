@@ -2143,3 +2143,50 @@ def test_step14_remains_unsupported_as_a_runner_entry(tmp_path, monkeypatch, cap
     assert V.main() == 2
     assert "no runner can be entered at step '14'" in capsys.readouterr().err
     assert dispatched == []
+# The checkpoint consumer is a software boundary here, not an IC producer.
+# Its real retained inputs, signed review, identity and output recorder still
+# run; the leaf supplies the existing pass-with-note tier and its exact reason.
+def test_unbounded_refused_checkpoint_cannot_succeed(tmp_path, monkeypatch):
+    import execution_backend_gates as gates
+
+    project, _, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    consume = gates.evaluate
+    reason = "neutral software checkpoint requires strict PASS before downstream admission"
+    observed = []
+
+    def noted_consumer(project, row):
+        result = consume(project, row)
+        assert result["status"] == "PASS", result
+        observed.append(result["status"])
+        return {**result, "status": "PASS_WITH_WAIVERS",
+                "step": {**result["step"], "status": "PASS_WITH_WAIVERS",
+                         "reasons": [reason]}}
+
+    monkeypatch.setattr(gates, "evaluate", noted_consumer)
+    called = []
+    rc, doc = _drive_main(
+        project, monkeypatch, phase1=("FAIL", 1, None), phase2=("PASS", 0),
+        phase3=({"verdict": "PASS"}, 0), reuse_phase1=True,
+        after_phase=called.append)
+    observation = {"scope": "Normal main/report/replay software control only; no IC or native EDA",
+                   "rc": rc, "report": doc, "phase_calls": called,
+                   "native_consumer_before_note": observed}
+    (tmp_path / "HALTED_CHECKPOINT_OBSERVATION.json").write_text(
+        json.dumps(observation, indent=2) + "\n")
+    assert observed and called == [], observation
+    assert doc["halted_at"] == "phase1", observation
+    assert doc["phases"][0] == {"name": "phase1", "verdict": "PASS_WITH_WAIVERS", "rc": 0}
+    assert doc["phase1_checkpoint_review"]["canonical_acceptance"]["verdict"] == "PASS_WITH_WAIVERS"
+    assert doc["phase1_checkpoint_review"]["detail"] == reason
+    assert doc["completion_audit_axis"]["state"] == "NOT_APPLICABLE"
+    assert all(row["verdict"] == "SKIPPED" for row in doc["phases"][1:])
+    assert {path: path.read_bytes() for path in before} == before
+    assert (rc, doc["verdict"]) == (1, "NOT_MEASURED"), observation
+    assert GUARD._expected_front_door_verdict(doc, doc["phases"]) == "NOT_MEASURED"
+    assert GUARD._is_orchestrator_report(
+        _pl.report_path(project, "vibe_ic_one_shot.json"), project)
+    forged = dict(doc, verdict="PASS_WITH_WAIVERS")
+    forged_path = tmp_path / "forged-success.json"
+    forged_path.write_text(json.dumps(forged) + "\n")
+    assert not GUARD._is_orchestrator_report(forged_path, project)
