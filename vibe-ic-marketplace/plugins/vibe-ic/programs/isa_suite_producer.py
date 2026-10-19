@@ -320,6 +320,7 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
 #: words whose read data is valid N clocks after the read strobe.
 _SDP_RE = re.compile(r"^sdp(?P<width>\d+)_(?P<roles>[a-z_]+?)_sync(?P<lat>\d+)r$")
 _SDP_ROLES = ("waddr", "wdata", "wen", "raddr", "rdata", "ren")
+SINGLE_PORT_PROTOCOL = "single_port_8bit_async_read_posedge_write"
 _RESET_CONST_NAMES = ("reset_pc", "reset_vector", "boot_addr", "boot_address")
 _HEX_RE = re.compile(r"0x([0-9a-fA-F_]+)")
 
@@ -413,6 +414,10 @@ def reset_vector(project: Path, decl: Dict[str, Any]) -> Tuple[Optional[int], st
 
 def parse_sram_protocol(token: str) -> Tuple[Optional[Dict[str, Any]], str]:
     from reset_invariant_oracle_tb_gen import RETENTION_PROTOCOL
+    if token == SINGLE_PORT_PROTOCOL:
+        return {"kind": "sp", "width": 8, "read_latency": 0,
+                "stated_roles": ["addr", "rdata", "wdata", "we"],
+                "explicit_roles_required": True}, "declared single-port byte SRAM protocol parsed"
     if token == RETENTION_PROTOCOL:
         return {"kind": "sdp", "width": 8, "read_latency": 0,
                 "stated_roles": ["raddr", "rdata", "waddr", "wdata", "we"],
@@ -450,8 +455,10 @@ def bind_sram_ports(ports: List[Tuple[str, str, str]], *,
     if protocol is not None and project is not None:
         roles = {"we" if role == "wen" else role for role in protocol["stated_roles"]}
         selected = _declaration(project)
+        expected_roles = ({"addr", "wdata", "we", "rdata"} if protocol.get("kind") == "sp" else
+                          {"waddr", "wdata", "we", "raddr", "rdata"})
         if (protocol["read_latency"] == 0
-                and roles == {"waddr", "wdata", "we", "raddr", "rdata"}
+                and roles == expected_roles
                 and ("sram_interface" in selected or protocol.get("explicit_roles_required"))):
             import reset_invariant_oracle_tb_gen as retention
             memory, why = retention.declared_retention_memory(
@@ -463,6 +470,8 @@ def bind_sram_ports(ports: List[Tuple[str, str, str]], *,
             return {role: memory[key] for role, key in
                     (("waddr", "waddr"), ("wdata", "wdata"), ("wen", "we"),
                      ("raddr", "raddr"), ("rdata", "rdata"))}, why
+    if protocol is not None and protocol.get("kind") == "sp":
+        return None, "single-port SRAM requires its explicit selected address/data/write-enable mapping"
     def _prefix(name: str, suffix: str) -> str:
         stem = name[:-(len(suffix) + 1)] if name != suffix else ""
         return re.sub(r"^(?:i|o)_", "", stem)
@@ -755,6 +764,7 @@ def gen_tb(facts: Dict[str, Any]) -> str:
     `+init=<hex byte>`, loads `+hex=`, releases reset and watches the SRAM
     WRITE PORT for the store to `tohost`; then dumps the signature."""
     p = facts["sram_ports"]
+    single_port = facts["sram"].get("kind") == "sp"
     lat = int(facts["sram"]["read_latency"])
     rst_on = "1'b1" if facts["reset_active_high"] else "1'b0"
     rst_off = "1'b0" if facts["reset_active_high"] else "1'b1"
@@ -775,6 +785,8 @@ def gen_tb(facts: Dict[str, Any]) -> str:
                      "  always @* rdata = mem[raddr % MEMSIZE];")
     ren_setup = "" if "ren" in p else "  assign ren = 1'b1;\n"
     ren_connection = f",\n    .{p['ren']}(ren));" if "ren" in p else ");"
+    write_address_connection = "" if single_port else f".{p['waddr']}(waddr),\n    "
+    shared_address = "  assign waddr = raddr;\n" if single_port else ""
     return f"""// Flow-authored ISA-suite testbench (isa_suite_producer). No harness copied.
 `timescale 1ns/1ps
 module isa_tb;
@@ -784,7 +796,7 @@ module isa_tb;
   reg rst = {rst_on};
   always #5 clk = ~clk;
   wire [31:0] waddr, raddr;
-  wire [7:0] wdata;
+{shared_address}  wire [7:0] wdata;
   wire wen, ren;
 {ren_setup}  reg [7:0] rdata;
   reg [7:0] mem [0:MEMSIZE-1];
@@ -793,8 +805,7 @@ module isa_tb;
   {facts['top']} #(.{facts['memsize_param']}(MEMSIZE)) dut (
     .{facts['clock']}(clk),
     .{facts['reset']}(rst),
-{ties}    .{p['waddr']}(waddr),
-    .{p['wdata']}(wdata),
+{ties}    {write_address_connection}.{p['wdata']}(wdata),
     .{p['wen']}(wen),
     .{p['raddr']}(raddr),
     .{p['rdata']}(rdata){ren_connection}

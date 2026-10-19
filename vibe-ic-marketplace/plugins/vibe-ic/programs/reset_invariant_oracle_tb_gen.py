@@ -430,7 +430,12 @@ def retention_stimulus_request(project: Path, case: dict, dut: str, inputs, outp
 def declared_retention_memory(project: Path, dut: str,
                               inputs: List[Tuple[str, str]],
                               outputs: List[Tuple[str, str]]) -> Tuple[Optional[dict], str]:
-    """Bind the selected SRAM protocol and explicit role map; never infer timing."""
+    """Bind the selected SRAM protocol and explicit role map; never infer timing.
+
+    single_port_8bit_async_read_posedge_write uses one ``address`` field plus
+    write_data/read_data/write_enable. Internal read/write address roles share
+    that physical port; dual-port protocols still require five distinct ports.
+    """
     path = Path(project) / "plugin_output/declaration.json"
     try:
         raw = path.read_bytes()
@@ -441,20 +446,27 @@ def declared_retention_memory(project: Path, dut: str,
         decl = decl["fields"]
     from isa_suite_producer import parse_sram_protocol
     protocol, _ = parse_sram_protocol(decl.get("sram_interface_protocol")) if isinstance(decl, dict) else (None, "")
+    single_port = protocol is not None and protocol["kind"] == "sp"
+    expected_roles = ({"addr", "rdata", "wdata", "we"} if single_port else
+                      {"raddr", "rdata", "waddr", "wdata", "we"})
     if (protocol is None or protocol["width"] != 8 or protocol["read_latency"] != 0
             or {"we" if role == "wen" else role for role in protocol["stated_roles"]}
-            != {"raddr", "rdata", "waddr", "wdata", "we"}):
+            != expected_roles):
         return None, "NOT_MEASURED: unsupported or unstated external memory commit protocol"
     roles = decl.get("sram_interface")
     if (not isinstance(roles, dict) or type(roles.get("read_latency_cycles", 0)) is not int
             or roles.get("read_latency_cycles", 0) != 0 or "read_enable" in roles):
         return None, "NOT_MEASURED: selected protocol needs explicit SRAM roles and asynchronous read"
+    if single_port and any(key in roles for key in ("read_address", "write_address")):
+        return None, "NOT_MEASURED: single-port SRAM needs one address role, not separate read/write addresses"
     memory = {role: roles.get(key) for role, key in (
         ("raddr", "read_address"), ("waddr", "write_address"),
         ("wdata", "write_data"), ("rdata", "read_data"), ("we", "write_enable"))}
+    if single_port:
+        memory["raddr"] = memory["waddr"] = roles.get("address")
     ins, outs = dict(inputs), dict(outputs)
     if (any(not isinstance(n, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", n)
-            for n in memory.values()) or len(set(memory.values())) != 5
+            for n in memory.values()) or len(set(memory.values())) != (4 if single_port else 5)
             or memory["rdata"] not in ins
             or any(memory[k] not in outs for k in ("raddr", "waddr", "wdata", "we"))):
         return None, "NOT_MEASURED: selected memory roles do not bind to the actual DUT ports"
