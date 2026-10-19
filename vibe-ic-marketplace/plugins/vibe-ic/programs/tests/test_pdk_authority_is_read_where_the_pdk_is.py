@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 
@@ -119,6 +121,23 @@ def test_unreachable_remote_glob_is_unknown_not_process_absence():
         assert state == "UNKNOWN", (reader.name, tried)
         assert path is None
         assert any("127" in item for item in tried)
+
+
+@pytest.mark.parametrize("reader_type", [A.ContainerReader, A.ImageReader])
+@pytest.mark.parametrize("method", ["is_dir", "is_file", "read_text"])
+@pytest.mark.parametrize("transport_rc", [2, 127])
+def test_remote_reader_distinguishes_transport_failure_from_absence(
+        reader_type, method, transport_rc):
+    reader = reader_type("unreachable", runner=lambda *_: (transport_rc, ""))
+    try:
+        value = getattr(reader, method)("/foss/pdks/neutral/missing")
+        state = "ABSENT" if value in (False, None) else "PRESENT"
+    except OSError as exc:
+        state = "UNKNOWN"
+        assert str(transport_rc) in str(exc)
+    assert state == "UNKNOWN"
+    absent = reader_type("reachable", runner=lambda *_: (1, ""))
+    assert getattr(absent, method)("/foss/pdks/neutral/missing") in (False, None)
 
 
 def test_the_same_pdk_is_unreadable_from_the_host_filesystem(tmp_path):

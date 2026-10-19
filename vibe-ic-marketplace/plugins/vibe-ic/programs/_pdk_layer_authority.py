@@ -205,11 +205,29 @@ class LocalReader:
             return None
 
 
+def _remote_present(rc: int, reader_name: str, path: str) -> bool:
+    """POSIX `test`: rc1 is absent; every other nonzero is an unreadable probe."""
+    if rc == 0:
+        return True
+    if rc == 1:
+        return False
+    raise OSError(f"PDK probe in {reader_name}: rc={rc}: {path}")
+
+
+def _remote_text(rc: int, out: str, reader_name: str,
+                 path: str) -> Optional[str]:
+    if rc == 0:
+        return out
+    if rc == 1:
+        return None
+    raise OSError(f"PDK read in {reader_name}: rc={rc}: {path}")
+
+
 class ContainerReader:
     """A running container's filesystem, read with `docker exec`.
 
-    Every answer is the container's own filesystem query; an unreadable path
-    is None or False, never a default. The container name is the caller's --
+    Every answer is the container's own filesystem query; an unreadable probe
+    raises OSError. The container name is the caller's --
     this module never discovers or starts one."""
 
     def __init__(self, container: str, runner=None) -> None:
@@ -228,10 +246,12 @@ class ContainerReader:
         return cp.returncode, cp.stdout
 
     def is_dir(self, path: str) -> bool:
-        return self._run(self.container, ["test", "-d", path])[0] == 0
+        rc, _ = self._run(self.container, ["test", "-d", path])
+        return _remote_present(rc, self.name, path)
 
     def is_file(self, path: str) -> bool:
-        return self._run(self.container, ["test", "-f", path])[0] == 0
+        rc, _ = self._run(self.container, ["test", "-f", path])
+        return _remote_present(rc, self.name, path)
 
     def glob(self, root: str, pattern: str) -> List[str]:
         rc, out = self._run(self.container, _remote_glob_argv(root, pattern))
@@ -255,7 +275,7 @@ class ContainerReader:
 
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._run(self.container, ["cat", path])
-        return out if rc == 0 else None
+        return _remote_text(rc, out, self.name, path)
 
 
 class ImageReader:
@@ -274,8 +294,8 @@ class ImageReader:
     background and nothing has to be torn down: `--rm` and no `-d` mean each
     answer's container is gone before the answer is returned.
 
-    An unreachable image is None or False, never a default -- the caller must
-    be able to tell "the PDK does not ship this" from "nothing was read".
+    An unreachable image raises OSError -- the caller must be able to tell
+    "the PDK does not ship this" from "nothing was read".
     """
 
     def __init__(self, image: str, runner=None) -> None:
@@ -309,10 +329,12 @@ class ImageReader:
         return self._seen[key]
 
     def is_dir(self, path: str) -> bool:
-        return self._ask("is_dir", "test", "-d", path)[0] == 0
+        rc, _ = self._ask("is_dir", "test", "-d", path)
+        return _remote_present(rc, self.name, path)
 
     def is_file(self, path: str) -> bool:
-        return self._ask("is_file", "test", "-f", path)[0] == 0
+        rc, _ = self._ask("is_file", "test", "-f", path)
+        return _remote_present(rc, self.name, path)
 
     def glob(self, root: str, pattern: str) -> List[str]:
         rc, out = self._ask("glob", *_remote_glob_argv(root, pattern))
@@ -335,7 +357,7 @@ class ImageReader:
 
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._ask("read", "cat", path)
-        return out if rc == 0 else None
+        return _remote_text(rc, out, self.name, path)
 
 
 #: The run's OWN receipt of where its tools ran: the container it used, the image
