@@ -71,6 +71,13 @@ class TestParseCellPins:
         assert mod.parse_cell_pins("* just a comment\nM0 a b c d nmos\n") == {}
 
 
+def test_compact_named_port_binding_does_not_become_an_instance_name():
+    text = ("module unit(a,y); input a; output y; "
+            "test_buffer u0(.A(a),.Y(y)); endmodule")
+    _, _, instances = mod.parse_verilog(text)
+    assert instances == [("test_buffer", "u0", {"A": "a", "Y": "y"})]
+
+
 class TestNorm:
     def test_const_zero(self):
         assert mod.norm("1'b0") == "VSS"

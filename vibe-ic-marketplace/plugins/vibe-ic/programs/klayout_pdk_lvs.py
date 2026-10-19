@@ -777,12 +777,22 @@ def read_current_verdict(project, report_path, layout):
             path = project / path
         if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
             raise ValueError("NATIVE_LVS_SOURCE_MISMATCH:" + key)
-    for source in record.get("runset_sources", []) + record.get("cell_libraries", []):
+    for source in (record.get("runset_sources", []) + record.get("cell_libraries", [])
+                   + record.get("producer_sources", [])):
         path = Path(source.get("path", ""))
         if not path.is_absolute():
             path = project / path
         if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
             raise ValueError("NATIVE_LVS_DEPENDENCY_MISMATCH")
+    basis = record.get("extraction_basis")
+    if basis:
+        for key in ("report", "native_result", "inputs_manifest"):
+            source = basis.get(key, {})
+            path = Path(source.get("path", ""))
+            if not path.is_absolute():
+                path = project / path
+            if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
+                raise ValueError("NATIVE_LVS_EXTRACTION_BASIS_CHANGED:" + key)
     result = record.get("native_result", {})
     expected = _native_status(result, record.get("execution", {}).get("rc"))
     if (not record.get("compare_performed") or expected == "NOT_MEASURED"
@@ -917,13 +927,131 @@ def cmd_native(args, pya):
     return 0 if status == "PASS" else 1
 
 
+def _recompare_database(input_db, output_db, policy, pya):
+    """Reuse extracted connectivity; run the native comparer on both netlists."""
+    database = pya.LayoutVsSchematic()
+    database.read(str(input_db))
+    database.reference.case_sensitive = policy["reference_case_sensitive"]
+    before, after = [], []
+    for netlist in (database.netlist(), database.reference):
+        before.append(sum(len(list(c.each_device())) for c in netlist.each_circuit()))
+        netlist.combine_devices()
+        after.append(sum(len(list(c.each_device())) for c in netlist.each_circuit()))
+    comparer = pya.NetlistComparer()
+    comparer.max_resistance = policy["max_resistance"]
+    comparer.min_capacitance = policy["min_capacitance"]
+    matched = database.compare(comparer)
+    database.write(str(output_db))
+    print(json.dumps({"operation": "native_combine_and_compare", "matched": matched,
+                      "before_device_counts": before, "after_device_counts": after,
+                      "policy": policy}), flush=True)
+
+
+def cmd_native_recompare(args, pya):
+    """Resume a bound extraction using explicit comparison policy from its PDK.
+
+    The original extraction options, sources and verdict remain unchanged.
+    This entry point combines equivalent parallel/serial devices through the
+    native API; it never changes geometry or silently chooses a tolerance.
+    """
+    if not (args.source and args.out and args.work_dir):
+        raise ValueError("native-recompare requires source report, work-dir and out")
+    prior_path = Path(args.source).resolve()
+    layout = Path(args.gds).resolve()
+    prior = read_current_verdict(prior_path.parent, prior_path, layout)
+    if prior["execution"]["rc"] != 0:
+        raise ValueError("NATIVE_LVS_EXTRACTION_DID_NOT_COMPLETE")
+    supplied = dict(item.split("=", 1) for item in args.parameter)
+    required = {"combine", "reference_case_sensitive", "max_resistance", "min_capacitance"}
+    if (set(supplied) != required or supplied["combine"] != "true"
+            or supplied["reference_case_sensitive"] not in ("true", "false")):
+        raise ValueError("NATIVE_LVS_EXPLICIT_COMPARISON_POLICY_REQUIRED")
+    policy = {"combine": True,
+              "reference_case_sensitive": supplied["reference_case_sensitive"] == "true",
+              "max_resistance": float(supplied["max_resistance"]),
+              "min_capacitance": float(supplied["min_capacitance"])}
+    top = prior["native_result"]["top"]
+    if args.top and args.top != top:
+        raise ValueError("NATIVE_LVS_RECOMPARE_TOP_CHANGED")
+    work = Path(args.work_dir).resolve()
+    work.mkdir(parents=True, exist_ok=False)
+    basis = {"report": _file_record(prior_path), "native_result": prior["native_result"],
+             "inputs_manifest": prior["inputs_manifest"],
+             "log": prior["log"], "driver_source": prior["driver_source"],
+             "layout_source": prior["layout_source"], "reference_source": prior["reference_source"],
+             "deck": prior["deck"], "options": prior["options"],
+             "tool": prior["tool"], "tool_version": prior["tool_version"]}
+    records = [prior[key] for key in ("layout_source", "reference_source", "deck",
+               "native_result", "cell_library_bundle", "source_netlist", "driver_source",
+               "log", "inputs_manifest")]
+    records += prior.get("runset_sources", []) + prior.get("cell_libraries", [])
+    records += [basis["report"]]
+    manifest = [_file_record(row["path"]) for row in records]
+    (work / "inputs.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    tools = work / "tools"
+    tools.mkdir()
+    for name in ("klayout_pdk_lvs.py", "_atomic_artefact.py"):
+        shutil.copyfile(Path(__file__).with_name(name), tools / name)
+    db, log, driver = work / "result.lvsdb", work / "native.log", work / "recompare.py"
+    driver.write_text("import sys, pya\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parent / 'tools'))\n"
+        "from klayout_pdk_lvs import _recompare_database\n"
+        + f"_recompare_database({basis['native_result']['path']!r}, {str(db)!r}, {policy!r}, pya)\n")
+    argv = ["klayout", "-b", "-r", str(driver)]
+    started = time.monotonic()
+    with log.open("w") as stream:
+        cp = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT,
+                              cwd=work, start_new_session=True)
+        try:
+            rc = cp.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(cp.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                cp.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(cp.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                cp.wait(timeout=5)
+            rc = 124
+    try:
+        result = (_native_database_result(db, top, pya) if db.is_file()
+                  else {"compare_performed": False, "circuits": [], "top": top})
+    except (RuntimeError, ValueError, TypeError) as exc:
+        result = {"compare_performed": False, "circuits": [], "top": top,
+                  "read_error": str(exc)}
+    unchanged = all(_file_record(row["path"])["sha256"] == row["sha256"] for row in manifest)
+    status = _native_status(result, rc) if unchanged else "NOT_MEASURED"
+    version = subprocess.run(["klayout", "-b", "-v"], capture_output=True,
+                             text=True, timeout=30)
+    payload = dict(prior)
+    payload.update(status=status, finding="NATIVE_FINAL_GDS_LVS_" + status,
+        tool_version=version.stdout.strip(),
+        options={**prior["options"], "combine": "true", "report": str(db)},
+        comparison_policy=policy, extraction_basis=basis,
+        compare_performed=result["compare_performed"],
+        native_result=({**_file_record(db), **result} if db.is_file() else result),
+        driver_source=_file_record(driver), producer_sources=[_file_record(path) for path in sorted(tools.glob("*.py"))],
+        log=_file_record(log), inputs_manifest=_file_record(work / "inputs.json"),
+        execution={"rc": rc, "argv": argv, "elapsed_s": time.monotonic() - started,
+                   "inputs_unchanged": unchanged, "scope": "reuse_bound_native_extraction"})
+    with atomic_writing(args.out) as stream:
+        json.dump(payload, stream, indent=2)
+    print(json.dumps(payload))
+    return 0 if status == "PASS" else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Net-correct KLayout transistor LVS extraction + compare")
-    ap.add_argument("cmd", choices=["extract", "lib", "cell", "compare", "native"])
+    ap.add_argument("cmd", choices=["extract", "lib", "cell", "compare", "native", "native-recompare"])
     ap.add_argument("gds", help="GDS (extract/lib/cell) or LAYOUT SPICE netlist (compare)")
     ap.add_argument("--cell")
     ap.add_argument("--out")
-    ap.add_argument("--source", help="compare: gate-level SOURCE SPICE netlist (reference)")
+    ap.add_argument("--source", help="compare: reference SPICE; native-recompare: bound native report")
     ap.add_argument("--top", help="compare: top circuit name (default spm)")
     ap.add_argument("--power", help="compare: power net name (default VDD)")
     ap.add_argument("--ground", help="compare: ground net name (default VSS)")
@@ -948,7 +1076,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     pya = _require_pya()
     return {"extract": cmd_extract, "lib": cmd_lib, "cell": cmd_cell,
-            "compare": cmd_compare, "native": cmd_native}[args.cmd](args, pya)
+            "compare": cmd_compare, "native": cmd_native,
+            "native-recompare": cmd_native_recompare}[args.cmd](args, pya)
 
 
 if __name__ == "__main__":

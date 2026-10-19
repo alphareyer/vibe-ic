@@ -118,8 +118,8 @@ def parse_verilog(vtext, preserve_supply_ports=False):
         ports = [p for p in ports if not _is_supply_port(p)]
 
     insts = []
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s+(\S+)\s*\(([^;]*?)\)\s*;", body, re.S):
-        cell, inst, conns = m.group(1), m.group(2), m.group(3)
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s+(\\[^\s]+\s+|[^\s(]+)\s*\(([^;]*?)\)\s*;", body, re.S):
+        cell, inst, conns = m.group(1), m.group(2).strip(), m.group(3)
         pinmap = {}
         for pm in re.finditer(r"\.(\w+)\s*\(\s*([^)]*?)\s*\)", conns):
             pinmap[pm.group(1)] = resolve(norm(pm.group(2))) if pm.group(2).strip() else None

@@ -117,8 +117,10 @@ def native_project_verdict(project: Path):
         return None
     try:
         record = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"LVS_VERDICT_UNREADABLE: {path}: {exc}") from exc
+    if not isinstance(record, dict):
+        raise ValueError(f"LVS_VERDICT_NOT_AN_OBJECT: {path}")
     if record.get("schema") != "vibeic.native_gds_lvs/1":
         return None
     import _physical_current as current
