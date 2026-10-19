@@ -974,6 +974,19 @@ def test_issue3241_same_bundle_constructor_awaited_helper_is_observed(tmp_path):
     assert audit['adopted_helper_sources'] == [str(tb.parent / 'wire_bfm.py')], audit
 
 
+def test_issue3241_unawaited_coroutine_assertion_receives_no_observation_credit(
+        tmp_path):
+    source = _ISSUE3241_EXPERT_TB.replace(
+        'actual = await block_value(env)', 'actual = block_value(env)').replace(
+        'assert actual == expected', 'assert actual')
+    _project, _bundle, tb = _issue3241_project(tmp_path, expert_source=source)
+    audit = V.functional_stimulus_audit(tb)
+    assert audit['reason'] == (
+        'no observed DUT read and self-check assertion in the Python source'), audit
+    assert not audit['decidable'] and audit['driven'] == [], audit
+    assert audit.get('adopted_helper_sources', []) == [], audit
+
+
 @pytest.mark.parametrize('control,expert_source,helper_source', [
     ('constant-helper', _ISSUE3241_EXPERT_TB,
      _ISSUE3241_WIRE_BFM.replace(
