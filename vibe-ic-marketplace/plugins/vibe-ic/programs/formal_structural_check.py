@@ -605,6 +605,27 @@ def _transition_pair(mod: dict, reset_bit: int,
         signed = _param_bit(cell.get("parameters", {}).get(pin + "_SIGNED"))
         return values[-1] if signed and values else "0"
 
+    def payload_expression_support(bit, q, seen=frozenset()):
+        """A shared payload expression may use only the existing payload roots."""
+        if bit in ("0", "1"):
+            return set()
+        if not isinstance(bit, int) or bit in seen:
+            return None
+        if bit in free:
+            return {bit} if bit in (payload_by_q or {}).get(q, set()) else None
+        cell = drivers.get(bit)
+        if cell is None or _kind(str(cell.get("type"))) != "comb":
+            return None
+        support = set()
+        for pin, values in (cell.get("connections") or {}).items():
+            if cell.get("port_directions", {}).get(pin) == "input":
+                for value in values:
+                    below = payload_expression_support(value, q, seen | {bit})
+                    if below is None:
+                        return None
+                    support.update(below)
+        return support
+
     def mask_control(bit, q, seen=frozenset()):
         """A control cannot be selected by a shared cofactor payload value.
 
@@ -743,11 +764,12 @@ def _transition_pair(mod: dict, reset_bit: int,
 
                     answer = xor_roles(a, b)
                     if cofactor is None:
-                        # Keep correlations with an original shared payload atom.
+                        # Keep correlations with an original shared payload expression.
                         # BOTH values must force the same result, so this is not
                         # a SAT witness choosing lucky data. The original value
                         # model and all native role/undef/priority proofs remain.
-                        for atom in {left, right} & free & (payload_by_q or {}).get(q, set()):
+                        for atom in (value for value in {left, right}
+                                     if payload_expression_support(value, q)):
                             halves = [xor_roles(
                                 d_roles(left, arm, q, seen, (atom, value)),
                                 d_roles(right, arm, q, seen, (atom, value)))

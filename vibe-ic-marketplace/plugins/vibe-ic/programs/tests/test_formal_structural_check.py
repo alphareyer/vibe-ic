@@ -493,3 +493,50 @@ def test_parity_reduction_preserves_ordinary_data_current_q_and_undef_refusals(t
                        for row in mapping["rows"] for role in row["conditional_roles"]), mapping
         print("PARITY_REFUSAL_OBSERVATION " + json.dumps({"case": name, "rc": rc,
             "verdict": rec["verdict"], "mapping": mapping}, sort_keys=True))
+
+
+def test_derived_shared_payload_normal_cli_matches_factored_reset_roles(tmp_path):
+    """The same derived parity must not change a reset role or its wrong sense."""
+    _yosys()
+    observations = []
+    for name, expression in [
+        ("derived", "p ^ (p & (rst & clear))"),
+        ("factored", "p & !(rst & clear)"),
+    ]:
+        for sense in ("active_high", "active_low"):
+            work = tmp_path / name / sense
+            work.mkdir(parents=True)
+            rtl, output = work / "m.v", work / "mapping.json"
+            rtl.write_text("module m #(parameter W=3)(input clk,rst,clear,input[W-1:0] d,output reg q);\n"
+                           "wire p=^d;\n"
+                           f"always @(posedge clk) q <= {expression};\nendmodule\n")
+            rc = fsc.main(["--rtl", str(rtl), "--top", "m", "--claim",
+                f"reset_polarity:rst:{sense}", "--work-dir", str(work), "--json", str(output)])
+            rec = json.loads(output.read_text())
+            observations.append((name, sense, rc, rec["verdict"]))
+    assert observations == [
+        ("derived", "active_high", 0, fsc.PASS),
+        ("derived", "active_low", 1, fsc.REFUTED),
+        ("factored", "active_high", 0, fsc.PASS),
+        ("factored", "active_low", 1, fsc.REFUTED),
+    ], observations
+    for name in ("derived", "factored"):
+        work = tmp_path / name / "active_high"
+        mapping = json.loads((work / "mapping.json").read_text())["claims"][0]["reset_control_mapping"]
+        assert mapping["complete"] and not mapping["unresolved"], mapping
+        assert mapping["shared_current_q_and_data"] and mapping["paired_domain_reachable"], mapping
+        assert len(mapping["raw_identities"]) == len(mapping["rows"]) == 1, mapping
+        assert mapping["native_exit_code"] == mapping["payload_analysis"]["native_exit_code"] == 0, mapping
+        progress = mapping["query_progress"]
+        assert progress["completed"] == progress["planned"] and not progress["unknown"], mapping
+        row = mapping["rows"][0]
+        assert row["classification"] == "RESET_FORCE" and row["polarity"] == "active_high", row
+        assert row["total_force"] is False, row
+        assert any(role["reset_value"] == 1 and role["role"] == "FORCE_ZERO" and
+                   role["reachable"] and role["implication_query"] == "PROVED"
+                   for role in row["conditional_roles"]), row
+        assert all(row["native_queries"][f"roles_{proof}{arm}"] == "PROVED"
+                   for arm in (0, 1) for proof in ("cover", "disjoint")), row
+        assert row["native_queries"]["undef0"] == row["native_queries"]["undef1"] == "NO_UNDEF", row
+        if name == "derived":
+            assert any("cofactored_shared_payload_bit" in p for p in row["role_provenance"]), row
