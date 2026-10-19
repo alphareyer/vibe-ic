@@ -334,8 +334,10 @@ def _project(tmp_path, with_chip_gds=False):
         "link_design chip_top\n")
     (p / "phase3/stage4/gds").mkdir(parents=True)
     name = "alpha.gds" if with_chip_gds else "chip_top.gds"
-    (p / "phase3/stage4/gds" / name).write_bytes(
-        _GDS_BOUNDARY_RECORD + b"\x00\x06\x00\x02alph")
+    # Ordinary caller metadata now reads the physical hierarchy. Keep the
+    # original alpha assertion and provide an actual alpha-root GDS stream.
+    from test_foundry_handoff_pack_gen import _physical_gds
+    (p / "phase3/stage4/gds" / name).write_bytes(_physical_gds(("alpha",)))
     (p / "phase1/generated_docs").mkdir(parents=True)
     (p / "phase1/generated_docs/L1_DATASHEET.json").write_text(
         json.dumps({"ic_name": "alpha"}))
