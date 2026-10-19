@@ -554,8 +554,11 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
         bound_files={str(path):digest(path) for path in closure if path.is_file()}
         bound_files[py]=digest(py_path)
         tracked_paths = [name for name in bound_files if Path(name).is_relative_to(repo)]
-        if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD','--',*tracked_paths],
-                          capture_output=True).returncode != 0:
+        if repo == source_path.parent.parent:
+            for name in tracked_paths:
+                em._tracked_clean_file(Path(name))
+        elif subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD','--',*tracked_paths],
+                            capture_output=True).returncode != 0:
             raise ValueError('frontend provider source is dirty; refusing registration')
         objective={'parameters_from':'issued_manifest'}
         # D1 runs docs extraction, the expert track and their producer stamp;
