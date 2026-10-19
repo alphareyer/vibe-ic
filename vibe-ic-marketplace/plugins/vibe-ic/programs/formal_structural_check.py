@@ -1305,7 +1305,7 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
                 "cofactor0_bits": sorted(pair[0]), "cofactor1_bits": sorted(pair[1]),
                 "shared_payload_bits": sorted(shared),
                 "total_force_arms": [arm for arm in (0, 1) if any(
-                    mod["ports"][row["query_ports"][f"{role}_guard{arm}"]]["bits"] == ["1"]
+                    mod["ports"].get(row["query_ports"].get(f"{role}_guard{arm}"), {}).get("bits") == ["1"]
                     for role in ("force_zero", "force_one"))]})
         info["status"] = "NATIVE_NORMALIZED_COFACTOR_SUPPORT"
     except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
