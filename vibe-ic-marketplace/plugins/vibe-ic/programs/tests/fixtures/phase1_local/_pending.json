@@ -240,5 +240,27 @@
     "version_observed": "1.29.96; isolated composed source a4aea2fc71495cfc94df700ceec6997ba7833f52",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_reset_domain_phases/reset.md"
+  },
+  {
+    "issue": 3225,
+    "project": "neutral_clock_sdc_bootstrap",
+    "layer": "L8_RTL_CONSTANTS / L8_TIMING_WAVEFORM",
+    "field": "clock_domains; clock_and_reset_waveform",
+    "expected": "Two declared scalar clock inputs retain typed periods16ns and31ns from faithful staged create_clock commands. Ordinary public CLI can initialize empty clock domain records from the actual staged design constraints.",
+    "actual": "On official f38 and the isolated #3223 candidate, both L8 clock_domains remain empty and L8 timing lacks the waveform. Candidate L9 phase bindings correctly retain2/3 stages; they do not recover the missing L8 clock/period antecedent.",
+    "version_observed": "1.29.96 official frozen f38b8dc032effcd63a4f210fc9404aa0f43342d5 and versionless own-only candidate51cc9f20384a21c627e9582dec112cbe66d393cf.",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_clock_sdc_bootstrap/01-current-mixed-stages.md"
+  },
+  {
+    "issue": 3226,
+    "project": "neutral_named_legacy_reset",
+    "layer": "L9_INTEGRATION_SPEC",
+    "field": "reset_domains",
+    "expected": "The explicitly current physical input sys_reset_n has a legacy reset row with polarity active_low and sync asynchronous. No release clock/depth is invented; the explicitly non-operative historical reset must not become current.",
+    "actual": "Both official f38 and the isolated #3223 candidate retain the scalar physical input sys_reset_n in L1 but emit no current L9 reset_domains row. Absence of phase bindings prevents historical pollution but does not satisfy the legacy positive.",
+    "version_observed": "1.29.96 official frozen f38b8dc032effcd63a4f210fc9404aa0f43342d5 and versionless own-only candidate51cc9f20384a21c627e9582dec112cbe66d393cf.",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_named_legacy_reset/02-current-legacy-with-history.md"
   }
 ]

@@ -61418,6 +61418,13 @@ def _post_emit_sdc_constraints(project: Path) -> None:
     _declared = [c for c in _sdc.collect_create_clocks(project)
                  if isinstance(c, dict) and c.get("period_ns")]
     _primary_port = str(port_name or "")
+    l9 = _try_load_l_doc(project, "L9_INTEGRATION_SPEC") or {}
+    scalar_inputs = {
+        p.get("name") or p.get("port_name")
+        for p in (l9.get("top_ports") or l9.get("ports") or [])
+        if isinstance(p, dict) and (p.get("direction") or p.get("mode")) == "input"
+        and type(p.get("width")) is int and p["width"] == 1
+    }
 
     def _same_clock(entry: dict, port: str) -> bool:
         """Whether `entry` already describes the SDC clock on `port`."""
@@ -61436,6 +61443,30 @@ def _post_emit_sdc_constraints(project: Path) -> None:
             continue
         clock_domains = l8.get("clock_domains")
         if not isinstance(clock_domains, list) or not clock_domains:
+            # A staged clock can initialize an empty contract only when its
+            # get_ports target is an actual scalar input. The SDC clock name
+            # is a label and does not declare a physical port.
+            clock_domains = []
+            for rec in _declared:
+                rport = rec.get("port_name")
+                if rport not in scalar_inputs or any(_same_clock(d, rport) for d in clock_domains):
+                    continue
+                rperiod = rec["period_ns"]
+                rfreq = int(round(1.0e9 / rperiod)) if rperiod > 0 else None
+                first = not clock_domains
+                clock_domains.append({
+                    "name": rport, "source_pin": rport,
+                    "domain_kind": "primary" if first else "secondary",
+                    "role": "master" if first else "secondary",
+                    "freq_hz": rfreq, "freq_mhz": rfreq / 1_000_000.0 if rfreq else None,
+                    "period_ns": rperiod, "source": "input/constraints/*.sdc",
+                    "evidence": project_relative_source(rec["source"], project)[0],
+                    "reset_strategy": "unspecified",
+                })
+            if clock_domains:
+                l8["clock_domains"] = clock_domains
+                l8["no_clock_domains_in_input"] = False
+                _stamp.dump(_pl.generated_docs_dir(project) / f"{doc_name}.json", l8)
             continue
         target = next((d for d in clock_domains
                         if isinstance(d, dict)
@@ -62037,7 +62068,11 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
         # The v1.6.369 base regex stayed in place above so call sites
         # outside this function continue to work unchanged.
         m_reset = _v1_6_382_match_reset_port(name)
-        if not m_reset:
+        from _reset_input_semantics import explicit_reset_port
+        explicit_input = ((port.get("direction") or port.get("mode")) == "input"
+                          and type(port.get("width")) is int and port["width"] == 1
+                          and explicit_reset_port(name, evidence_joined))
+        if not m_reset and not explicit_input:
             continue
         seen_names.add(name)
         # Strip direction prefix BEFORE polarity classification so a
@@ -62046,9 +62081,9 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
         # heuristic would still get the right answer for this case
         # but for `i_rst` vs `rst` they must classify identically.
         _stem_v1_6_382 = _v1_6_382_strip_direction_prefix(name)
-        _dirpref_v1_6_382 = m_reset.group("dirpref") or None
+        _dirpref_v1_6_382 = (m_reset.group("dirpref") or None) if m_reset else None
         polarity = _v1_6_369_classify_reset_polarity(
-            _stem_v1_6_382.lower())
+            _stem_v1_6_382.lower()) if m_reset else "unknown"
         from _reset_input_semantics import reset_semantics
         explicit = reset_semantics(name, evidence_joined)
         polarity = explicit.get("polarity", polarity)

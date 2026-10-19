@@ -83,6 +83,26 @@ def current_clause(line):
     return line
 
 
+def explicit_reset_port(name, text):
+    """Whether current source explicitly assigns this exact port the reset role."""
+    from _prose_polarity import is_denied
+    if any(row['reset'] == name for row in phase_declarations(text)):
+        return True
+    port = r'`?' + re.escape(name) + r'`?(?![\w])'
+    role_first = re.compile(r'\breset(?:\s+(?:input|signal|port))?\s*(?:is|:|=)\s*' + port, re.I)
+    name_first = re.compile(
+        r'(?<![\w])' + port + r'\s*(?:is|:)\s*'
+        r'(?:(?:an?|the|current|external|global|system|input|asynchronous|synchronous|'
+        r'active[- _]?(?:low|high))\s+)*reset\b', re.I)
+    for raw in text.splitlines():
+        for clause in re.split(r'[;；。]|(?<=[a-zA-Z])\.\s+', raw):
+            line = current_clause(clause)
+            match = role_first.search(line) or name_first.search(line)
+            if match and not is_denied(line[:match.end()], ignore_bracketed=False):
+                return True
+    return False
+
+
 def declarations(text, name=None):
     """Yield source-line-bound reset declarations; never borrow another port."""
     port = re.compile(r'(?<![\w])' + re.escape(name) + r'(?![\w])', re.I) if name else None
