@@ -32938,8 +32938,8 @@ class _Layergate2Result(list):
 def _run_layergate2(project: Path, gates=None, gate_dir=None) -> _Layergate2Result:
     """BLOCKING: judge every selected final-layer gate and record its run.
 
-    FAIL and NOT_MEASURED both block Phase 1. An explicit gate SKIP is a
-    terminal NOT_APPLICABLE verdict with its reason captured in the receipt.
+    FAIL and NOT_MEASURED both block Phase 1. An explicit gate SKIP or
+    structural N/A is terminal NOT_APPLICABLE with its reason in the receipt.
     """
     gate_dir = gate_dir or Path(__file__).resolve().parent
     result = _Layergate2Result()
@@ -32999,6 +32999,10 @@ def _run_layergate2(project: Path, gates=None, gate_dir=None) -> _Layergate2Resu
               and _gate_cp.stdout.lstrip().startswith("[SKIP]")):
             _verdict = "NOT_APPLICABLE"
             _reason = "gate_declared_skip"
+        elif (_reason is None and _rc == 2 and _gate_cp is not None
+              and _gate_cp.stdout.lstrip().startswith("[NOT_APPLICABLE_BY_STRUCTURE]")):
+            _verdict = "NOT_APPLICABLE"
+            _reason = "gate_declared_not_applicable_by_structure"
         else:
             _verdict = "NOT_MEASURED"
             _reason = _reason or "no_terminal_verdict"
