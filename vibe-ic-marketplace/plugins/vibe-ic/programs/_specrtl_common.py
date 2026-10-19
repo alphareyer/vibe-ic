@@ -1627,6 +1627,15 @@ def extract_spec_contract(text: str, is_json: bool = False,
             # conformance verdict was rendered against the wrong module.
             mod = data.get('module') or data.get('top_module')
             lat = data.get('latency_registered')
+        # The canonical Phase1/L9 row is a logical bundle, not a physical
+        # Port with a missing width. Only explicit selected physical payload
+        # ports may replace it before this boundary.
+        for d in port_dicts:
+            if (d.get('interface_type') == 'req_rsp'
+                    and (d.get('mode') or d.get('direction')) == 'interface'):
+                raise ValueError('UNRESOLVED_STRUCTURED_INTERFACE: ' + str(d.get('name'))
+                                 + ' type=' + str(d.get('package_struct'))
+                                 + '; bind directed payload ports before physical conformance')
         ports = [Port(d['name'], _json_port_direction(d), _json_port_width(d),
                       bool(d.get('optional')) if isinstance(d, dict) else False)
                  for d in port_dicts]

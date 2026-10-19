@@ -2766,7 +2766,19 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
     spec_raw = spec_path.read_text(errors='replace')
-    spec = extract_spec_contract(spec_raw, is_json=spec_path.suffix == '.json')
+    try:
+        spec = extract_spec_contract(spec_raw, is_json=spec_path.suffix == '.json')
+    except ValueError as exc:
+        if not str(exc).startswith('UNRESOLVED_STRUCTURED_INTERFACE:'):
+            raise
+        # A logical bundle has not yet declared physical payload ports. This
+        # is an incomplete spec contract, not a measured DUT mismatch.
+        finding = Finding(str(spec_path), 'INFO', 'unresolved-structured-interface',
+                          '', str(exc))
+        print('spec_conformance_check: NOT_MEASURED — ' + str(exc), file=sys.stderr)
+        if args.json:
+            Path(args.json).write_text(json.dumps([asdict(finding)], indent=2))
+        return 2
     # The two advisory body-scan WARNs (pipelined-width / 1-based index) need the
     # prompt prose, not just the extracted contract. A JSON contract carries no
     # prose body, so pass it only for natural-language / markdown / Verilog specs.
