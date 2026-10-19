@@ -1618,7 +1618,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                             (a.get(f"undef{1-arm}") == "HAS_UNDEF" or
                              (a.get(f"undef{1-arm}") == "NO_UNDEF" and
                               a.get(f"zero{1-arm}") == "REFUTED" and
-                              a.get(f"one{1-arm}") == "REFUTED")) and
+                              a.get(f"one{1-arm}") == "REFUTED" and
+                              all(proof == "PROVED" for proof in role_proofs))) and
                             a.get(f"{'zero' if value == 0 else 'one'}{arm}") == "PROVED" and
                             a.get(f"{role}_reachable{arm}") == "REFUTED" and
                             all(proof == "PROVED" for proof in active_proofs) and
