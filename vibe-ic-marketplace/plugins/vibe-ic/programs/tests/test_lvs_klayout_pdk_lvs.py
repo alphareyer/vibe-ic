@@ -435,3 +435,31 @@ def test_native_binding_rejects_changed_or_missing_required_source(tmp_path, cha
         report.write_text(json.dumps(record))
     with pytest.raises(ValueError):
         mod.read_current_verdict(tmp_path, report, layout)
+
+
+def test_native_geometry_bridge_accepts_only_date_rewrites_and_is_rechecked(tmp_path):
+    from test_gds_canonical_digest import _stream, _RUN_A, _RUN_B
+    layout, report, record = _bound_native_record(tmp_path)
+    old = tmp_path / "extracted-layout.gds"
+    old.write_bytes(_stream(_RUN_A, _RUN_A))
+    layout.write_bytes(_stream(_RUN_B, _RUN_B))
+    source = {"kind": "gds", **mod._file_record(old)}
+    record["layout_source"] = {"kind": "gds", **mod._file_record(layout)}
+    manifest = tmp_path / "old-inputs.json"; manifest.write_text("[]")
+    old_report = tmp_path / "old-verdict.json"; old_report.write_text("{}")
+    record["extraction_basis"] = {
+        "report": mod._file_record(old_report), "native_result": record["native_result"],
+        "inputs_manifest": mod._file_record(manifest), "layout_source": source}
+    record["geometry_equivalence"] = mod._native_geometry_equivalence(
+        tmp_path, source, record["layout_source"])
+    assert record["geometry_equivalence"]["source_raw_sha256"] != (
+        record["geometry_equivalence"]["target_raw_sha256"])
+    report.write_text(json.dumps(record))
+    assert mod.read_current_verdict(tmp_path, report, layout)["status"] == "PASS"
+    # Replacing the layout and its declared raw hash cannot turn this proof
+    # into permission for a different polygon. The consumer measures again.
+    layout.write_bytes(_stream(_RUN_B, _RUN_B, width=1400))
+    record["layout_source"] = {"kind": "gds", **mod._file_record(layout)}
+    report.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="LAYOUT_NOT_EQUIVALENT"):
+        mod.read_current_verdict(tmp_path, report, layout)

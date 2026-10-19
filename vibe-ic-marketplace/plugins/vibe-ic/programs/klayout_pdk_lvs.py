@@ -748,6 +748,29 @@ def _native_status(result, rc):
     return "PASS"
 
 
+def _native_geometry_equivalence(project, source, target):
+    """Prove equality of every GDS record except its declared date fields."""
+    from gds_canonical_digest import canonical_digest
+    from _gds_geometry import GdsError
+    paths = []
+    for row in (source, target):
+        path = Path(row["path"])
+        if not path.is_absolute():
+            path = Path(project) / path
+        if _file_record(path)["sha256"] != row["sha256"]:
+            raise ValueError("NATIVE_LVS_EQUIVALENCE_SOURCE_CHANGED")
+        paths.append(path)
+    try:
+        canonical = [canonical_digest(path) for path in paths]
+    except GdsError as exc:
+        raise ValueError(f"NATIVE_LVS_LAYOUT_UNREADABLE: {exc}") from exc
+    if canonical[0] != canonical[1]:
+        raise ValueError("NATIVE_LVS_LAYOUT_NOT_EQUIVALENT")
+    return {"method": "gds_canonical_digest/date-fields-only",
+            "source_raw_sha256": source["sha256"], "target_raw_sha256": target["sha256"],
+            "source_canonical_sha256": canonical[0], "target_canonical_sha256": canonical[1]}
+
+
 def read_current_verdict(project, report_path, layout):
     """The Step-31 native result reader shared with release packaging.
 
@@ -793,6 +816,11 @@ def read_current_verdict(project, report_path, layout):
                 path = project / path
             if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
                 raise ValueError("NATIVE_LVS_EXTRACTION_BASIS_CHANGED:" + key)
+        original = basis.get("layout_source")
+        if original and (original != bound or record.get("geometry_equivalence")):
+            measured = _native_geometry_equivalence(project, original, bound)
+            if record.get("geometry_equivalence") != measured:
+                raise ValueError("NATIVE_LVS_GEOMETRY_EQUIVALENCE_MISSING")
     result = record.get("native_result", {})
     expected = _native_status(result, record.get("execution", {}).get("rc"))
     if (not record.get("compare_performed") or expected == "NOT_MEASURED"
@@ -958,7 +986,14 @@ def cmd_native_recompare(args, pya):
         raise ValueError("native-recompare requires source report, work-dir and out")
     prior_path = Path(args.source).resolve()
     layout = Path(args.gds).resolve()
-    prior = read_current_verdict(prior_path.parent, prior_path, layout)
+    original = json.loads(prior_path.read_text())["layout_source"]
+    old_layout = Path(original["path"])
+    if not old_layout.is_absolute():
+        old_layout = prior_path.parent / old_layout
+    prior = read_current_verdict(prior_path.parent, prior_path, old_layout)
+    subject = {"kind": "gds", **_file_record(layout)}
+    geometry = (_native_geometry_equivalence(prior_path.parent, prior["layout_source"], subject)
+                if subject != prior["layout_source"] else None)
     if prior["execution"]["rc"] != 0:
         raise ValueError("NATIVE_LVS_EXTRACTION_DID_NOT_COMPLETE")
     supplied = dict(item.split("=", 1) for item in args.parameter)
@@ -985,12 +1020,13 @@ def cmd_native_recompare(args, pya):
                "native_result", "cell_library_bundle", "source_netlist", "driver_source",
                "log", "inputs_manifest")]
     records += prior.get("runset_sources", []) + prior.get("cell_libraries", [])
-    records += [basis["report"]]
+    records += [basis["report"], subject]
     manifest = [_file_record(row["path"]) for row in records]
     (work / "inputs.json").write_text(json.dumps(manifest, indent=2) + "\n")
     tools = work / "tools"
     tools.mkdir()
-    for name in ("klayout_pdk_lvs.py", "_atomic_artefact.py"):
+    for name in ("klayout_pdk_lvs.py", "_atomic_artefact.py",
+                 "gds_canonical_digest.py", "_gds_geometry.py"):
         shutil.copyfile(Path(__file__).with_name(name), tools / name)
     db, log, driver = work / "result.lvsdb", work / "native.log", work / "recompare.py"
     driver.write_text("import sys, pya\nfrom pathlib import Path\n"
@@ -1033,6 +1069,7 @@ def cmd_native_recompare(args, pya):
         tool_version=version.stdout.strip(),
         options={**prior["options"], "combine": "true", "report": str(db)},
         comparison_policy=policy, extraction_basis=basis,
+        layout_source=subject, geometry_equivalence=geometry,
         compare_performed=result["compare_performed"],
         native_result=({**_file_record(db), **result} if db.is_file() else result),
         driver_source=_file_record(driver), producer_sources=[_file_record(path) for path in sorted(tools.glob("*.py"))],
