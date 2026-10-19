@@ -700,7 +700,11 @@ def authored_oracle_preserved(out_dir: Path, name: str,
     `ORACLE_GENERATED_MARKER` (that file is this producer's own previous output
     and stays refreshable, so a plugin upgrade still reaches it).
     """
-    authored = Path(out_dir) / f"{name}.v"
+    variants = _unit_tb_variants(Path(out_dir), name)
+    if len(variants) > 1:
+        raise ValueError(f"duplicate unit TB case {name}: "
+                         + ", ".join(str(path) for path in variants))
+    authored = variants[0] if variants else Path(out_dir) / f"{name}.v"
     if not _is_authored_tb(authored):
         return None
     if report is not None:
@@ -721,6 +725,21 @@ def _is_authored_tb(path: Path) -> bool:
                 and ORACLE_GENERATED_MARKER not in prior)
 
 
+def _unit_tb_variants(out_dir: Path, name: str) -> List[Path]:
+    """The two ordinary consumer source names for one declared case."""
+    return [path for suffix in ('.v', '.sv')
+            if (path := out_dir / f'{name}{suffix}').is_file()]
+
+
+def _duplicate_unit_tb_cases(tb_dir: Path) -> List[str]:
+    if not tb_dir.is_dir():
+        return []
+    names = {p.stem for suffix in ('.v', '.sv') for p in tb_dir.glob('*' + suffix)}
+    return sorted(name for name in names
+                  if len(variants := _unit_tb_variants(tb_dir, name)) > 1
+                  and any(is_unit_tb(path) for path in variants))
+
+
 def authored_unit_tb_paths(project: Path) -> List[Path]:
     """Persistent authored cases from the ordinary unit-TB consumer's inputs.
 
@@ -728,6 +747,9 @@ def authored_unit_tb_paths(project: Path) -> List[Path]:
     build products are never candidate sources.
     """
     tb_dir = _pl.sim_dir(project) / "tb"
+    duplicates = _duplicate_unit_tb_cases(tb_dir)
+    if duplicates:
+        raise ValueError('duplicate unit TB case: ' + ', '.join(duplicates))
     return [path for path in sorted(tb_dir.glob("*.v")) + sorted(tb_dir.glob("*.sv"))
             if _is_authored_tb(path) and is_unit_tb(path)]
 
@@ -1801,7 +1823,7 @@ def oracle_provenance(project: Path) -> dict:
     out_dir = _pl.sim_dir(project) / "tb"
     cases: list = []
     if out_dir.is_dir():
-        for tb in sorted(out_dir.glob("*.v")):
+        for tb in sorted(out_dir.glob("*.v")) + sorted(out_dir.glob("*.sv")):
             try:
                 text = tb.read_text(errors="replace")
             except OSError as exc:
@@ -1976,6 +1998,18 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
 
     out_dir = Path(out_dir) if out_dir is not None else _pl.sim_dir(project) / "tb"
     out_dir.mkdir(parents=True, exist_ok=True)
+    duplicates = _duplicate_unit_tb_cases(out_dir)
+    if duplicates:
+        report['reason'] = 'duplicate unit TB case: ' + ', '.join(duplicates)
+        return -2
+    # A refreshable .sv has no .sv writer in this producer. Refuse before a
+    # .v scaffold creates two source identities for the declared case.
+    for case in cases:
+        name = str(case.get('name') or case.get('id') or '')
+        sv = out_dir / f'{name}.sv'
+        if sv.is_file() and not _is_authored_tb(sv):
+            report['reason'] = f'cannot refresh non-authored SystemVerilog unit TB: {sv}'
+            return -2
     # For the arithmetic-primitive family the L10 functional_vector cases have a
     # closed-form golden (the declared function p = a OP b mod 2^N). Author a
     # REAL per-case golden oracle (drive the declared operands, compare the DUT
@@ -2335,6 +2369,10 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
            if is_unit_tb(p)] if tb_dir.is_dir() else []
     report["tb_total"] = len(tbs)
     report["sim_executed"] = False
+    duplicates = _duplicate_unit_tb_cases(tb_dir)
+    if duplicates:
+        report['reason'] = 'NOT_EXECUTED: duplicate unit TB case: ' + ', '.join(duplicates)
+        return -2
     if not tbs:
         report["reason"] = f"no unit TB under {tb_dir} — nothing to execute"
         return -1

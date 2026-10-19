@@ -8,8 +8,13 @@ The generic and Ultra P3 emitter remains unchanged.
 from pathlib import Path
 import json
 import re
+import os as _os
+import sys as _sys
 
-import phase3_one_shot_runner as R
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+import phase3_one_shot_runner as R  # noqa: E402
 
 
 def emit(project: Path, top: str, pdk: R.PdkConfig,

@@ -332,7 +332,7 @@ def require_native(project: Path, doc: dict, rec: dict):
     argv = rec.get("argv", [])
     if (not isinstance(argv, list) or argv[-4:] != ["-Q", "-T", "-p", rec["script"]] or
             not (argv[0] == "yosys" or
-                 (argv[:2] == ["docker", "run"] and
+                 (argv[0] == "docker" and argv[1] == "run" and
                   any(argv[i:i+2] == ["--entrypoint", "yosys"] for i in range(len(argv)))))):
         raise Refusal("native invocation differs from the declared hierarchy producer")
     for name, key in (("hierarchy.json", "hierarchy_sha256"), ("hierarchy.log", "log_sha256")):

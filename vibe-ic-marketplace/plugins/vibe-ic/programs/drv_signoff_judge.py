@@ -15,11 +15,11 @@ import json
 import re
 import subprocess
 import sys
-from librelane_contract import Refusal as LocalProviderRefusal
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from librelane_contract import Refusal as LocalProviderRefusal  # noqa: E402
 from _atomic_artefact import write_text  # noqa: E402
 from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 

@@ -16,7 +16,8 @@ from pathlib import Path
 import sys
 import traceback
 
-from _atomic_artefact import write_json
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _atomic_artefact import write_json  # noqa: E402
 
 
 def _file(path):
