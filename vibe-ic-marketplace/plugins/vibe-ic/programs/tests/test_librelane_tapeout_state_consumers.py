@@ -21,16 +21,19 @@ from _native_signoff_fixture import producer, finished_producer, antenna_produce
 
 @pytest.mark.parametrize('case,expected',[
     ('clean','PASS'),('changed','NOT_MEASURED'),
-    ('missing','NOT_MEASURED'),('native_red','FAIL')])
+    ('missing','NOT_MEASURED'),('native_red','FAIL'),('same_project','PASS')])
 def test_explicit_external_full_gds_lvs_uses_current_receipted_inputs(tmp_path,monkeypatch,case,expected):
     import librelane_contract as contract
     import librelane_signoff_evidence as evidence
     import librelane_pv_signoff as pv
     measurement=tmp_path/'measurement';measurement.mkdir()
     current=tmp_path/'current-owner';current.mkdir()
-    layout=current/'current.gds';layout.write_bytes(b'current neutral full-GDS subject')
-    old=measurement/'phase3/stage4/gds/old.gds';old.parent.mkdir(parents=True)
-    old.write_bytes(b'older retained stream; not this explicit invocation')
+    layout=(measurement/'phase3/stage4/gds/current.gds' if case=='same_project'
+            else current/'current.gds')
+    layout.parent.mkdir(parents=True,exist_ok=True);layout.write_bytes(b'current neutral full-GDS subject')
+    if case!='same_project':
+        old=measurement/'phase3/stage4/gds/old.gds';old.parent.mkdir(parents=True)
+        old.write_bytes(b'older retained stream; not this explicit invocation')
     chain=contract.run_chain
     def explicit_inputs(*args,**kwargs):
         monkeypatch.setattr(contract,'run_chain',chain)
@@ -48,14 +51,19 @@ def test_explicit_external_full_gds_lvs_uses_current_receipted_inputs(tmp_path,m
     elif case=='missing':reference.rename(reference.with_suffix('.held'))
     observed=evidence.obligation(measurement,'lvs',layout=layout)
     assert observed['verdict']==expected,{'observed':observed,'expected':expected}
-    if case=='clean':
+    if case in ('clean','same_project'):
         assert set(observed['rows'])=={'magic__illegal_overlap__count',*pv.PRODUCED['Netgen.LVS']}
         assert all(type(row['value']) is int and row['value']==0 for row in observed['rows'].values())
         # This allowance does not let a same-project subject bypass its current
         # canonical stream or let another PV kind adopt an external subject.
-        internal=measurement/'other.gds';internal.write_bytes(layout.read_bytes())
+        internal=measurement/'other.gds'
+        internal.write_bytes(b'stale subject' if case=='same_project' else layout.read_bytes())
         assert evidence.obligation(measurement,'lvs',layout=internal)['verdict']=='NOT_MEASURED'
         assert evidence.obligation(measurement,'drc',layout=layout)['verdict']=='NOT_MEASURED'
+        if case=='same_project':
+            original=reference.read_bytes();reference.write_text('changed external reference after receipt\n')
+            assert evidence.obligation(measurement,'lvs',layout=layout)['verdict']=='NOT_MEASURED'
+            reference.write_bytes(original)
         record=json.loads(info['record'].read_text());record['scope']['magic_ext_use_gds']=False
         put(info['record'],record)
         assert evidence.obligation(measurement,'lvs',layout=layout)['verdict']=='NOT_MEASURED'

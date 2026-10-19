@@ -269,13 +269,13 @@ def count_row(project: Path, folder: Path, step: str, key: str,
                  and _member(_read(folder / 'config.json'), 'meta').get('step') == step,
                  'LL_CONFIG_WRONG_STEP')
         _hashes(fp.get('state_files'))
-        external_lvs = False
-        if step in pv.HALVES['lvs'] and not layout.resolve().is_relative_to(project.resolve()):
+        full_gds_lvs = False
+        if step in pv.HALVES['lvs']:
             scope = _member(_read(project / pv.RECORD_REL.format(half='lvs')), 'scope')
-            external_lvs = (scope.get('magic_ext_use_gds') is True
+            full_gds_lvs = (scope.get('magic_ext_use_gds') is True
                             and scope.get('gds_sha256') == scope.get('extracted_gds_sha256') == digest(layout))
         _require(all(Path(p).resolve().is_relative_to(project.resolve())
-                     for p in fp['state_files']) or external_lvs, 'LL_FOREIGN_INPUT_SOURCE')
+                     for p in fp['state_files']) or full_gds_lvs, 'LL_FOREIGN_INPUT_SOURCE')
         _hashes(fp.get('config_files'), mounts)
         # Every PDK/config file actually named must have a producer hash, also
         # when its name is a container path. Older receipts lacking these
