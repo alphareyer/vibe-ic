@@ -9380,6 +9380,7 @@ steps:
       - tapeout_checklist_gen
     required_outputs:
       - "reports/audit/tapeout_checklist.json"
+      - "phase3/stage4/foundry_handoff/release_manifest.json"
       - "phase3/stage4/foundry_handoff/mask_spec.json"
       - "phase3/stage4/foundry_handoff/wat_plan.json"
       # The scribe-line PCM/alignment frame is FOUNDRY-SUPPLIED — this flow
@@ -9404,7 +9405,7 @@ steps:
       # its own path (see the clause below).
     gate:
       all_of:
-        - program_exit_zero: "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"
+        - program_exit_zero: "foundry_handoff_package_check . --design-release --json reports/phase3/foundry_handoff_check.json"
         - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
     # R-0929-TAIL-CONTINUES: 38 packages the antenna sign-off record (26's
     # output); it used to reach 26 through 32, whose inverted edges now point

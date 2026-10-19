@@ -6,7 +6,9 @@ Step 35 → 38 by the later renumbering the flow yaml already carries).
 
 Step 38 — foundry-handoff kit completeness
 
-ENFORCEMENT: advisory
+ENFORCEMENT: blocking at canonical Step 38 when --design-release is selected.
+The unflagged historical interface only judges the legacy planning skeleton;
+it never certifies a complete technical design release.
 
 WHERE THE VERDICT IS CONSUMED: the flow's step 38 gate clause
 (`program_exit_zero: "foundry_handoff_package_check . --json
@@ -83,6 +85,7 @@ from pathlib import Path
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 import _foundry_signoff_pdk as _fsp
+import _gds_geometry as _geometry
 
 
 #: The owner token `foundry_handoff_pack_gen.OWNER_US` writes for an item this
@@ -704,7 +707,7 @@ def layout_member_sources(project):
     return out
 
 
-def stale_layout_members(project):
+def stale_layout_members(project, selected_sources=None):
     """Package layout members whose bytes are not their source's -- by sha256,
     against the signed-off GDS of the same name (else the member's own derived
     source), plus any member whose recorded digest (mask_spec.json
@@ -713,7 +716,7 @@ def stale_layout_members(project):
     hd = project / "phase3/stage4/foundry_handoff"
     if not hd.is_dir():
         return []
-    sources = layout_member_sources(project)
+    sources = selected_sources if selected_sources is not None else layout_member_sources(project)
     recorded = {}
     try:
         spec = json.loads((hd / "mask_spec.json").read_text(errors="replace"))
@@ -738,7 +741,7 @@ def stale_layout_members(project):
         if why:
             stale.append({"member": str(m.relative_to(project)),
                           "member_sha256": m_sha,
-                          "source": str(src.relative_to(project)),
+                          "source": str(src.relative_to(project)) if src.is_relative_to(project) else str(src),
                           "source_sha256": s_sha, "why": why})
     return stale
 
@@ -762,13 +765,21 @@ RULE_LAYOUT_NOT_TOOL_OUTPUT = "FOUNDRY_HANDOFF_LAYOUT_NOT_THE_TOOL_OUTPUT"
 _LL_PROMOTION = "phase3/librelane/37-promotion.json"
 
 
-def tool_layout_binding(project):
+def tool_layout_binding(project, assembly=None):
     """Findings (list of dicts) binding the package layout member to the
     LibreLane step-37 promotion receipt. [] when step 37 ran direct or the
     kit has not been written yet."""
     project = Path(project)
     hd = project / "phase3/stage4/foundry_handoff"
     if not hd.is_dir():
+        return []
+    if assembly is not None:
+        # The provider-finishing owner has validated the original stream and
+        # the new final output. Do not compare that output with the earlier
+        # core-only promotion as if they were the same material subject.
+        member = hd / Path(assembly['gds']).name
+        if not member.is_file() or sha256_file(member) != assembly['sha256']:
+            return [{"why": "package differs from the admitted provider assembly"}]
         return []
     try:
         from librelane_contract import Refusal, selected_mode
@@ -854,7 +865,7 @@ def _any_real_gds(project):
     return out
 
 
-def packageable_chip_gds(project):
+def packageable_chip_gds(project, selected=None):
     """Return (gds_path_or_None, rule_or_None, detail).
 
     `rule` is None only when a real, geometry-carrying chip GDS is on disk.
@@ -868,6 +879,8 @@ def packageable_chip_gds(project):
     project = Path(project)
     ic_name = _read_l1_ic_name(project)
     chip_gds, scribe_only, physical_tops = _find_chip_gds(project, ic_name)
+    if selected is not None:
+        chip_gds = Path(selected)
     if chip_gds is None:
         # No L1.ic_name is not a licence to package: fall back to "did the flow
         # stream ANY non-scribe, non-empty die?" before concluding absence.
@@ -908,17 +921,355 @@ REFERENCE_ONLY_SUFFIXES = (".prefinish.gds", ".ring_reference.gds")
 RULE_REFERENCE_LAYOUT_IN_PACK = "FOUNDRY_HANDOFF_REFERENCE_LAYOUT_IN_PACK"
 
 
+
+# The archive is a finite copy/index of existing producer outputs. It neither
+# runs a signoff tool nor promotes a report merely because a filename exists.
+RELEASE_MANIFEST = "release_manifest.json"
+RELEASE_ROLES = ("final_gds", "physical_reference_netlist", "die_stack",
+                 "stream_inputs", "layer_map", "stream_log", "tool_provenance",
+                 "drc_report", "lvs_report", "antenna_report", "density_report",
+                 "sta_report", "sdc", "spef")
+
+
+def admitted_provider_release(project, record_path=None):
+    """Use the finishing producer's reader for the selected release, if any."""
+    project = Path(project)
+    record = Path(record_path) if record_path else project / 'reports/phase3/provider_die_assembly.json'
+    if record_path is None and not record.is_file():
+        return None
+    import die_finishing_gen as finishing_owner
+    return finishing_owner.read_admitted_release(project, record)
+
+
+def design_release_sources(project, layout, assembly=None):
+    """Existing selected producers supply the archive readset and judgments."""
+    import librelane_signoff_evidence as native
+    import librelane_fill_dfm as finishing
+    import librelane_signoff as timing
+    import _stream_input_record as stream_inputs
+    import librelane_contract as lc
+    project = Path(project).resolve()
+    files, validation, external = {}, {}, {}
+    physical_project = Path(assembly["report"]).parents[2] if assembly else project
+    def add(path, role, expected=None):
+        path = Path(path)
+        if not path.is_absolute():
+            path = project / path
+        path = path.resolve()
+        if not path.is_file() or path.stat().st_size == 0:
+            return
+        digest = sha256_file(path)
+        if expected is not None and digest != expected:
+            raise ValueError(f"archive source changed: {path}")
+        entry = files.setdefault(str(path), {"sha256": digest, "roles": []})
+        if role not in entry["roles"]:
+            entry["roles"].append(role)
+    def retained(folder, role):
+        receipt_path = folder / 'vibeic_receipt.json'
+        receipt = json.loads(receipt_path.read_text())
+        add(receipt_path, 'tool_provenance')
+        for rel, digest in (receipt.get('sha256') or {}).items():
+            path = (folder / rel).resolve()
+            if not path.is_relative_to(folder.resolve()):
+                raise ValueError('producer output escapes its retained folder')
+            # Large implementation views are not copied just because a PV
+            # receipt contains them; final GDS and timed views have owners.
+            if path.suffix.lower() not in ('.gds','.odb','.def','.spef'):
+                add(path, role if path.suffix.lower() not in ('.json',) else 'tool_provenance', digest)
+        fp = receipt.get('input') or {}
+        pdk_record=folder/'pdk_root.json'
+        mounts=[]
+        if pdk_record.is_file():
+            root_doc=json.loads(pdk_record.read_text())
+            mounts=root_doc.get('requested_mounts') or root_doc.get('mounts_under_it') or []
+        for source, digest in (fp.get('config_files') or {}).items():
+            # Open process maps/decks may be redistributed with their source
+            # record; proprietary dependencies remain named external inputs.
+            path = Path(source)
+            for host, guest in sorted(mounts,key=lambda row:len(str(row[1])),reverse=True):
+                if path.is_relative_to(guest):
+                    path=Path(host)/path.relative_to(guest);break
+            if path.is_file() and path.suffix.lower() in ('.lym','.lyt','.lyp','.map'):
+                if any(token in str(path) for token in ('gf180mcu','sky130','ihp-sg13g2')):
+                    add(path, 'layer_map', digest)
+                else:
+                    external[source] = {"sha256":digest,"reason":"PDK dependency; redistribution permission required"}
+            elif not path.is_relative_to(project):
+                external[source] = {"sha256":digest,"reason":"Tool/PDK dependency; not a provider upload"}
+        for source, digest in (fp.get('liberty_files') or {}).items():
+            external[source]={"sha256":digest,"reason":"Retained timing library dependency; not a provider upload"}
+        if role == 'lvs_report':
+            state = json.loads((folder / 'state_in.json').read_text())
+            reference = state.get('pnl') or state.get('nl')
+            if reference:
+                add(reference,'physical_reference_netlist',(fp.get('state_files') or {}).get(str(reference)))
+    add(layout, 'final_gds', assembly['sha256'] if assembly else None)
+    if assembly:
+        add(assembly['report'],'stream_inputs')
+        validation['provider_assembly']={'verdict':'PASS','sha256':assembly['sha256'],'basis':assembly.get('basis',{})}
+    # This is the same strict retained reader used by normal signoff gates.
+    for kind in ('drc','lvs','antenna','density'):
+        report_path = physical_project / 'reports/phase3/lvs_verdict.json'
+        if kind == 'lvs' and report_path.is_file():
+            try:
+                import klayout_pdk_lvs as native_lvs
+                verdict = native_lvs.read_current_verdict(physical_project, report_path, layout)
+                circuits = verdict['native_result']['circuits']
+                validation[kind] = {
+                    'verdict': verdict['status'],
+                    'gds_sha256': verdict['layout_source']['sha256'],
+                    'record': str(report_path),
+                    'rows': {'unmatched_circuits': {'value': sum(row['status'] != 'Match' for row in circuits)}},
+                    'tool': verdict['tool'], 'tool_version': verdict.get('tool_version'),
+                    'options': verdict.get('options')}
+                add(report_path, 'lvs_report')
+                for name in ('reference_source','native_result','deck','driver_source',
+                             'source_netlist','extracted_netlist','log','inputs_manifest'):
+                    entry = verdict.get(name)
+                    if not isinstance(entry, dict) or not entry.get('path'):
+                        continue
+                    path = Path(entry['path'])
+                    if not path.is_absolute():path = physical_project / path
+                    role = ('physical_reference_netlist' if name == 'reference_source'
+                            else 'lvs_report' if name in ('native_result','log') else 'tool_provenance')
+                    add(path, role, entry['sha256'])
+                for entry in verdict.get('cell_libraries', []):
+                    external[entry['path']] = {'sha256': entry['sha256'],
+                                               'reason': 'Native LVS library dependency; not a provider upload'}
+            except (OSError, ValueError, KeyError, AttributeError) as exc:
+                validation[kind] = {'verdict': 'NOT_MEASURED', 'reason': str(exc)}
+            continue
+        result = native.obligation(physical_project, kind, layout=Path(layout))
+        validation[kind] = result or {"verdict":"NOT_MEASURED","reason":"No selected native producer; no legacy PASS inferred"}
+        if not result:
+            continue
+        for row in result.get('rows',{}).values():
+            if row.get('record'):
+                add(row['record'],kind+'_report')
+            if row.get('source'):
+                add(row['source'],'tool_provenance')
+            if row.get('receipt'):
+                retained(Path(row['receipt']).parent,kind+'_report')
+    try:
+        settled = lc.settled_floorplan_geometry(project)
+        validation['die_stack'] = {"verdict":"PASS","retained_core_die_um":settled[0],"core_um":settled[1],"source":settled[2]}
+        if assembly:
+            validation['die_stack']['provider_assembly_basis']=assembly.get('basis',{})
+        # Preserve the existing declared stack/geometry inputs. Actual native
+        # config/state/receipt files also arrive through retained producers.
+        for rel in ('phase3/librelane_floorplan_core.json','reports/phase3/floorplan_rectangles.json',
+                    'phase1/generated_docs/L19_CONSTRAINTS_PDK.json','generated_docs/L19_CONSTRAINTS_PDK.json',
+                    'input/submission_template/tapeout_declaration.json'):
+            add(rel,'die_stack')
+    except (OSError, ValueError, lc.Refusal) as exc:
+        validation['die_stack'] = {"verdict":"NOT_MEASURED","reason":str(exc)}
+    try:
+        bound = finishing.validate_default_stream(project)
+        if not assembly and sha256_file(Path(bound['canonical'])) != sha256_file(Path(layout)):
+            raise ValueError('stream subject differs from selected final GDS')
+        validation['stream'] = {"verdict":"PASS","canonical_sha256":bound['canonical_sha256']}
+        pnr = project / 'phase3/stage3/pnr'
+        readset_path = stream_inputs.record_path(pnr / (str(bound['file_top'])+'.gds'))
+        readset, why = stream_inputs.read(readset_path)
+        if readset is None:
+            raise ValueError(why)
+        add(readset_path,'stream_inputs')
+        for key in ('recipe','def'):
+            entry = readset[key]
+            add(entry['project_rel'],'stream_inputs',entry['sha256'])
+        commands = (readset.get('native_cli') or {}).get('commands')
+        if commands:
+            add(commands,'stream_log',(readset['native_cli'])['commands_sha256'])
+            retained(Path(commands).parent,'stream_log')
+            add(Path(commands).parent/'config.json','die_stack')
+        for entry in stream_inputs.all_entries(readset):
+            path = project / entry['project_rel'] if entry.get('project_rel') else Path(entry['path'])
+            if path.is_file() and path.suffix.lower() in ('.lym','.lyt','.lyp','.map'):
+                add(path,'layer_map',entry['sha256'])
+    except (OSError, ValueError, KeyError, lc.Refusal) as exc:
+        validation['stream'] = {"verdict":"NOT_MEASURED","reason":str(exc)}
+    try:
+        arm = timing.step23_tool_arm(project,artefacts=())
+        if arm is None:
+            raise ValueError('No retained native STA source selected')
+        gaps = {name:row.get('scope_gaps') for name,row in arm['corners'].items() if row.get('scope_gaps')}
+        if gaps:
+            raise ValueError(f'incomplete STA scene coverage: {gaps}')
+        record = project / timing.SIGNOFF_RECORD
+        doc = json.loads(record.read_text()); state = Path(doc['sta_state'])
+        views = json.loads(state.read_text())
+        add(record,'sta_report');retained(state.parent,'sta_report')
+        add(views['sdc'],'sdc')
+        for path in (views.get('spef') or {}).values():
+            add(path,'spef')
+        for role, key in (('timed_reference_netlist','pnl'),('timed_reference_netlist','nl')):
+            if views.get(key):add(views[key],role)
+        validation['sta'] = {"verdict":"PASS","basis":timing.tool_arm_basis(arm),
+                             "scope":"Retained timed netlist/SDC/SPEF and routing checkpoint; not a new parasitic measurement of provider finishing"}
+    except (OSError, ValueError, KeyError, lc.Refusal) as exc:
+        validation['sta'] = {"verdict":"NOT_MEASURED","reason":str(exc)}
+    # These are retained electrical/logic closure results, not extra provider
+    # uploads. No P0/audit/checker is dispatched by the archive assembler.
+    for rel in ('phase3/final/metrics.json','reports/phase3/signoff_metrics_aggregate.json',
+                'reports/phase3/lec_post_layout.json','reports/phase3/erc.rpt',
+                'reports/phase3/ir_drop.rpt','reports/phase3/em.rpt',
+                'reports/phase3/power.rpt','reports/phase3/layout_receipts.json',
+                'reports/phase3/general_precheck.json','reports/phase3/shuttle_precheck.json',
+                'input/step_0_5ic_answers.json','input/submission_template/operator_answers.json'):
+        add(rel,'internal_closure')
+    return {"files":files,"validation":validation,"external_dependencies":external}
+
+
+def emit_design_release(project, destination, layout, physical_top, assembly=None):
+    """Copy a portable, checksummed archive without writing the source tree."""
+    import shutil
+    project, destination = Path(project).resolve(), Path(destination).resolve()
+    source = design_release_sources(project,layout,assembly=assembly) if layout else {
+        "files":{},"validation":{},"external_dependencies":{}}
+    members=[]
+    for name, entry in source['files'].items():
+        path=Path(name)
+        rel=(Path('archive/project')/path.relative_to(project) if path.is_relative_to(project)
+             else Path('archive/dependencies')/entry['sha256']/path.name)
+        target=destination/rel;target.parent.mkdir(parents=True,exist_ok=True)
+        if not target.is_file() or sha256_file(target)!=entry['sha256']:
+            temporary=target.with_name('.'+target.name+'.tmp')
+            shutil.copyfile(path,temporary);temporary.replace(target)
+        members.append({"path":rel.as_posix(),"source":name,"sha256":entry['sha256'],
+                        "bytes":target.stat().st_size,"roles":entry['roles']})
+    roles={role for entry in members for role in entry['roles']}
+    missing=[role for role in RELEASE_ROLES if role not in roles]
+    incomplete=[kind for kind,row in source['validation'].items() if row.get('verdict')!='PASS']
+    if not physical_top.get('top'):missing.append('physical_top')
+    provider={"status":"NOT_MEASURED","accepted":False,
+              "reason":"Provider contract/precheck must bind this final layout; no slot, CoB or submission approval inferred"}
+    # Only the actual selected operator result can describe submission scope.
+    precheck=project/'reports/phase3/shuttle_precheck.json'
+    if precheck.is_file():
+        provider['retained_report']={"source":str(precheck),"sha256":sha256_file(precheck)}
+        try:
+            report=json.loads(precheck.read_text())
+            provider['reported_verdict']=report.get('verdict')
+            provider['provider']=report.get('shuttle') or report.get('operator')
+        except (OSError, ValueError, AttributeError) as exc:
+            provider['reported_verdict']='NOT_MEASURED'
+            provider['reason']='Unreadable retained provider result: '+str(exc)
+    manifest={"schema":"vibeic.design_release/1","physical_top":physical_top,
+              "assembly_record":str(assembly['report']) if assembly else None,
+              "files":members,"required_roles":list(RELEASE_ROLES),"missing":missing,
+              "validation":source['validation'],"incomplete_validation":incomplete,
+              "external_dependencies":source['external_dependencies'],
+              "archive_status":"COMPLETE" if not missing and not incomplete else "INCOMPLETE",
+              "provider_submission":provider,
+              "upload_subset":[entry['path'] for entry in members if 'final_gds' in entry['roles']],
+              "scope":"Portable internal design-closure archive; provider upload requirements and acceptance are separate."}
+    atomic_write_text(destination/RELEASE_MANIFEST,json.dumps(manifest,indent=2)+'\n')
+    atomic_write_text(destination/'SHA256SUMS',''.join(f"{entry['sha256']}  {entry['path']}\n" for entry in members))
+    return manifest
+
+
+
+def seal_design_release(destination):
+    """Include the producer's own metadata and write ordinary SHA256SUMS."""
+    destination=Path(destination)
+    doc=json.loads((destination/RELEASE_MANIFEST).read_text())
+    candidates=[p for p in destination.rglob('*') if p.is_file()
+                and p.relative_to(destination).as_posix() not in (RELEASE_MANIFEST,'SHA256SUMS')]
+    known={entry['path'] for entry in doc['files']}
+    for path in sorted(candidates):
+        rel=path.relative_to(destination).as_posix()
+        if rel not in known:
+            doc['files'].append({"path":rel,"source":"generated by foundry_handoff_pack_gen",
+                                 "sha256":sha256_file(path),"bytes":path.stat().st_size,
+                                 "roles":["package_metadata"]})
+    atomic_write_text(destination/RELEASE_MANIFEST,json.dumps(doc,indent=2)+'\n')
+    sums=''.join(f"{entry['sha256']}  {entry['path']}\n" for entry in doc['files'])
+    sums+=f"{sha256_file(destination/RELEASE_MANIFEST)}  {RELEASE_MANIFEST}\n"
+    atomic_write_text(destination/'SHA256SUMS',sums)
+    return doc
+
+
+def check_design_release(package):
+    """Verify the package after relocation; original absolute paths are provenance only."""
+    package=Path(package).resolve();bad=[]
+    try:
+        doc=json.loads((package/RELEASE_MANIFEST).read_text())
+        if doc.get('schema')!='vibeic.design_release/1':raise ValueError('unknown design-release manifest')
+        roles=set()
+        expected_sums=''.join(f"{entry['sha256']}  {entry['path']}\n" for entry in doc['files'])
+        expected_sums+=f"{sha256_file(package/RELEASE_MANIFEST)}  {RELEASE_MANIFEST}\n"
+        if (package/'SHA256SUMS').read_text()!=expected_sums:
+            bad.append('SHA256SUMS differs from the complete package manifest')
+        for entry in doc['files']:
+            path=(package/entry['path']).resolve()
+            if not path.is_relative_to(package) or not path.is_file() or path.stat().st_size!=entry['bytes'] or sha256_file(path)!=entry['sha256']:
+                bad.append(f"missing/changed archive member: {entry.get('path')}")
+            roles.update(entry['roles'])
+        actual={p.relative_to(package).as_posix() for p in package.rglob('*') if p.is_file()}
+        indexed={entry['path'] for entry in doc['files']} | {RELEASE_MANIFEST,'SHA256SUMS'}
+        if actual != indexed:bad.append('package file manifest is incomplete')
+        bad.extend('required role absent: '+role for role in RELEASE_ROLES if role not in roles)
+        bad.extend('signoff not measured/passed: '+kind for kind in ('drc','lvs','antenna','density','die_stack','stream','sta')
+                   if (doc.get('validation',{}).get(kind) or {}).get('verdict')!='PASS')
+        final_entries=[entry for entry in doc['files'] if 'final_gds' in entry['roles']]
+        if len(final_entries)!=1:
+            bad.append('exactly one selected final GDS required')
+        else:
+            final=final_entries[0]
+            import _gds_geometry as geometry
+            facts=geometry.read_layout(package/final['path'])
+            if facts.truncated or facts.top_cells()!=[doc.get('physical_top',{}).get('top')]:
+                bad.append('physical top differs from archived final GDS')
+            for kind in ('drc','lvs','antenna','density'):
+                evidence=doc.get('validation',{}).get(kind) or {}
+                if evidence.get('gds_sha256')!=final['sha256']:
+                    bad.append(kind+': signoff subject differs from selected final GDS')
+                rows=evidence.get('rows') or {}
+                if not rows or any(type(row.get('value')) is not int or row['value']!=0 for row in rows.values()):
+                    bad.append(kind+': missing or nonzero measured counts')
+        if doc.get('archive_status')!='COMPLETE' or doc.get('missing') or doc.get('incomplete_validation'):
+            bad.append('archive is incomplete')
+        if not doc.get('physical_top',{}).get('top'):bad.append('physical top not measured')
+    except (OSError, ValueError, KeyError, TypeError, _geometry.GdsError) as exc:
+        bad.append(str(exc));doc={}
+    return doc,bad
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("project_dir")
     parser.add_argument("--json", default=None)
     parser.add_argument("--step-label", default=_GATE_LABEL)
+    parser.add_argument("--design-release", action="store_true", help="require the complete portable design-closure archive")
+    parser.add_argument("--package-dir", type=Path, help="validate a relocated timestamp package without original project paths")
     args = parser.parse_args(argv)
 
     project = Path(args.project_dir).resolve()
     if not project.is_dir():
         print(f"[{_GATE_NAME}] project dir not found: {project}", file=sys.stderr)
         return 2
+
+    if args.package_dir:
+        doc, bad = check_design_release(args.package_dir)
+        report={"program":_GATE_NAME,"verdict":"FAIL" if bad else "PASS",
+                "scope":"PORTABLE_DESIGN_RELEASE","findings":bad,"archive":doc}
+        if args.json:atomic_write_text(Path(args.json),json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report,indent=2));return 1 if bad else 0
+
+    assembly = None
+    if args.design_release:
+        try:
+            index_path = project / 'phase3/stage4/foundry_handoff' / RELEASE_MANIFEST
+            index = json.loads(index_path.read_text()) if index_path.is_file() else {}
+            assembly = admitted_provider_release(project, index.get('assembly_record'))
+        except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+            report = {'program': _GATE_NAME, 'verdict': 'FAIL', 'scope': 'DESIGN_RELEASE',
+                      'technical_release_complete': False,
+                      'findings': [{'severity': 'ERROR', 'rule': 'DESIGN_RELEASE_ADMISSION_INVALID',
+                                    'message': str(exc)}]}
+            if args.json:atomic_write_text(Path(args.json),json.dumps(report,indent=2)+'\n')
+            print(json.dumps(report,indent=2));return 1
+    selected_sources = {Path(assembly['gds']).name: Path(assembly['gds'])} if assembly else None
 
     found, missing = [], []
     scribe_satisfied_by_note = False
@@ -935,6 +1286,8 @@ def main(argv=None):
     # v1.6.162 (#60 P2-7) — chip-GDS gate.
     ic_name = _read_l1_ic_name(project)
     chip_gds, scribe_only, physical_tops = _find_chip_gds(project, ic_name)
+    if assembly:
+        chip_gds = project / 'phase3/stage4/foundry_handoff' / Path(assembly['gds']).name
     chip_gds_finding = None
     if ic_name and chip_gds is None:
         if scribe_only:
@@ -980,7 +1333,7 @@ def main(argv=None):
     # already FOUNDRY_HANDOFF_CHIP_GDS_MISSING above, and re-reporting it here
     # would double-count one defect.
     if chip_gds is not None and chip_gds_finding is None:
-        _pkg_gds, _pkg_rule, _pkg_detail = packageable_chip_gds(project)
+        _pkg_gds, _pkg_rule, _pkg_detail = packageable_chip_gds(project, selected=chip_gds if assembly else None)
         if _pkg_rule in (RULE_HOLLOW_CHIP_GDS,
                          RULE_GEOMETRY_PREDICATE_UNAVAILABLE):
             chip_gds_finding = {
@@ -1012,11 +1365,14 @@ def main(argv=None):
                 f"{zero_members[:6]}"),
         }]
         report = {"program": _GATE_NAME, "verdict": verdict,
+                  "scope": "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON",
                   "findings": findings,
                   "zero_byte_members": zero_members}
         # R-0915-152 -- the document states WHO INVOKED this writer, beside the
         # verdict it already composes. Unstated role == producer, so the run's
         # own path is unchanged.
+        report.setdefault("scope", "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON")
+        report.setdefault("technical_release_complete", False)
         _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
@@ -1040,7 +1396,7 @@ def main(argv=None):
     # it carries real geometry. The runner no longer packages one; this gate refuses
     # one however it arrived, because "the producer stopped doing it" is not the
     # same guarantee as "the package cannot contain it".
-    stale = stale_layout_members(project)
+    stale = stale_layout_members(project, selected_sources=selected_sources)
     if stale:
         verdict, rc = "FAIL", 1
         _s0 = stale[0]
@@ -1058,6 +1414,8 @@ def main(argv=None):
         }]
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings, "stale_layout_members": stale}
+        report.setdefault("scope", "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON")
+        report.setdefault("technical_release_complete", False)
         _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
@@ -1066,7 +1424,7 @@ def main(argv=None):
         print(out)
         return rc
 
-    unbound = tool_layout_binding(project)
+    unbound = tool_layout_binding(project, assembly=assembly)
     if unbound:
         verdict, rc = "FAIL", 1
         findings = [{
@@ -1079,6 +1437,8 @@ def main(argv=None):
         }]
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings, "tool_layout_binding": unbound}
+        report.setdefault("scope", "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON")
+        report.setdefault("technical_release_complete", False)
         _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
@@ -1134,7 +1494,19 @@ def main(argv=None):
     pending_foundry_fields = []
     handoff_open_items = []          # the OWNED open items, per member
     declared_modes = set()           # what the kit says its mode is
+    handoff_dir = project / "phase3/stage4/foundry_handoff"
+    archive_sources = set()
+    try:
+        _index = json.loads((handoff_dir / RELEASE_MANIFEST).read_text())
+        archive_sources = {entry['path'] for entry in _index.get('files', [])
+                           if isinstance(entry, dict) and str(entry.get('path', '')).startswith('archive/')}
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
     for hf in sorted(project.glob("phase3/stage4/foundry_handoff/**/*")):
+        # Copied producer evidence is checked by the archive's checksum/source
+        # contract, not as newly authored mask/WAT placeholder instructions.
+        if hf.relative_to(handoff_dir).as_posix() in archive_sources:
+            continue
         if not hf.is_file() or hf.stat().st_size == 0:
             continue
         if hf.suffix.lower() in (".gds", ".gds2", ".gdsii", ".oas"):
@@ -1364,6 +1736,12 @@ def main(argv=None):
                 f"wrong one reassigns every open item in this kit."),
         })
 
+    archive_problems = []
+    if args.design_release:
+        _archive, archive_problems = check_design_release(project/'phase3/stage4/foundry_handoff')
+        substance_findings.extend({"severity":"ERROR","rule":"DESIGN_RELEASE_INCOMPLETE","message":problem}
+                                  for problem in archive_problems)
+
     waiver = _step_waived(project, args.step_label)
     signoff_pdk, pdk_candidates = _fsp.signoff_pdk_evidence(project)
     substance_findings.extend(pdk_consistency_findings(project, signoff_pdk))
@@ -1382,7 +1760,7 @@ def main(argv=None):
                         f"flow: {pdk_consistency} (/foss/pdks/<name>/ paths "
                         f"in the published phase2/phase3 files)."),
         }]
-    if substance_findings and not waiver:
+    if substance_findings and (not waiver or archive_problems):
         verdict, rc = "FAIL", 1
         findings = substance_findings + pdk_notes
         report = {"program": _GATE_NAME, "verdict": verdict,
@@ -1392,6 +1770,8 @@ def main(argv=None):
         # R-0915-152 -- the document states WHO INVOKED this writer, beside the
         # verdict it already composes. Unstated role == producer, so the run's
         # own path is unchanged.
+        report.setdefault("scope", "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON")
+        report.setdefault("technical_release_complete", False)
         _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
@@ -1465,6 +1845,8 @@ def main(argv=None):
     out = {
         "gate": _GATE_NAME,
         "verdict": verdict,
+        "scope": "DESIGN_RELEASE" if args.design_release else "LEGACY_SKELETON",
+        "technical_release_complete": bool(args.design_release and not archive_problems and verdict == "PASS"),
         "step_label": args.step_label,
         # Report the LABELS (tuple entries flattened to "A OR B") so the JSON
         # stays a list of strings for downstream readers.

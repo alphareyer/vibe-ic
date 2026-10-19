@@ -12,6 +12,33 @@ Tape-out is a one-way door. This skill is the last-mile gate: every
 signoff item must be accounted for, with either a green status or a
 documented waiver approved by a named engineer.
 
+## Portable design-release archive
+
+The existing Step38 producer writes `release_manifest.json`, `SHA256SUMS`
+and a relative `archive/` tree. The manifest separates final-GDS design
+material, retained internal STA/SDC/SPEF and logic/electrical closure, external
+PDK/tool dependencies, and the provider upload subset. A file's presence does
+not qualify its signoff: existing producer readers must measure the selected
+final-GDS subject, and incomplete or failed measurements remain incomplete.
+Manufacturing-service `PENDING_FOUNDRY_*` fields are not seven universal gates.
+
+For a new version without changing the source project:
+
+```bash
+python3 programs/foundry_handoff_pack_gen.py <project> --out-dir <new-version-dir>
+python3 programs/foundry_handoff_package_check.py <new-version-dir> \
+  --package-dir <new-version-dir> --json <check-output.json>
+```
+
+`--out-dir` must not already exist; old versions are retained. A provider die
+assembly is selected only through its producer-owned `--release-record` and
+`die_finishing_gen.read_admitted_release`, never an arbitrary GDS override.
+The normal Step38 YAML command uses `--design-release`; the compatibility
+checker without that flag reports `LEGACY_SKELETON`, not technical release
+completion. A relocated check validates the retained archive; it does not
+rerun EDA or claim provider submission/order acceptance. Slot, CoB and IDs
+must come from the actual selected provider inputs and current precheck.
+
 ## Mandatory Deterministic Preflight
 
 Run all four programs and read their JSON outputs BEFORE narrating any
