@@ -523,9 +523,7 @@ authoring. Canonical acceptance follows the review/prove/repair sequence above.
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT}/programs/enhancement_emit.py \
        --records <recoveries.json> \
-       --out-skill-section <patch.md> \
-       --out-program-rules <patch.py> \
-       --out-backlogs <dir>/
+       --out-dir <candidates-dir>/
    ```
 
 4. **Review the candidates** (Bucket A program rules need corpus-sweep verification BEFORE being applied; Bucket B skills can be appended directly; Bucket C backlogs can be filed immediately).
