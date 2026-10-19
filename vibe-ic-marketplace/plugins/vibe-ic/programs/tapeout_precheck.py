@@ -549,6 +549,15 @@ def resolve_slot(project: Path,
     NEVER "pick the first one": several slots means the question is open, and
     picking one closes it with an answer the design never gave.
     """
+    from die_finishing_gen import provider_target, PROVIDER_TARGET_REL
+    profile = provider_target(project)
+    if profile is not None:
+        slot = profile["technical_target"].get("slot")
+        if not isinstance(slot, str) or not slot.strip():
+            return None, f"{PROVIDER_TARGET_REL}: engineering slot is missing"
+        if explicit.strip() and explicit.strip() != slot:
+            return None, f"--slot conflicts with {PROVIDER_TARGET_REL} engineering target"
+        return slot, f"{PROVIDER_TARGET_REL}.technical_target.slot (engineering target; not a reservation)"
     if explicit.strip():
         return explicit.strip(), "--slot"
     names: Dict[str, str] = {}
@@ -626,6 +635,19 @@ def operator_arm_applicability(project: Path, pdk: Optional[str],
     The four states are the ones in this module's docstring, and the whole
     point of having four is that only ONE of them is a legitimate absence.
     """
+    from die_finishing_gen import provider_target, PROVIDER_TARGET_REL
+    profile = provider_target(project)
+    if profile is not None:
+        shuttle = _theirs.shuttle_for_pdk(pdk) if pdk else None
+        if (shuttle is None or profile.get("provider") != "wafer.space"
+                or shuttle.shuttle_id != "wafer_space_gf180mcu"):
+            return (NOT_DETERMINED,
+                    f"{PROVIDER_TARGET_REL}: selected provider has no matching live PDK precheck",
+                    shuttle)
+        return (RAN,
+                f"{PROVIDER_TARGET_REL} selects the engineering slot for {profile['provider']}; "
+                "the technical precheck is required without claiming a purchase or reservation",
+                shuttle)
     import submission_template_check as template_check
     if not explicit_slot.strip():
         is_self, reason = template_check.catalogue_selects_self_tapeout(project)

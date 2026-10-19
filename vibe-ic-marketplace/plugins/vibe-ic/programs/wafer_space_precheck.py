@@ -28,6 +28,110 @@ def _file(path):
     return {"path": str(path), "sha256": h.hexdigest(), "bytes": path.stat().st_size}
 
 
+def read_signoff_evidence(project, release_record):
+    """Read actual selected-engine counts, bound to the delivered GDS.
+
+    The official WriteLayout can change timestamps without changing geometry.
+    Every input GDS view must therefore have the same existing canonical GDS
+    digest as the delivered file. This is a read-only consumer, not a new PV
+    run or an LVS substitute. Magic's independent operator policy is disclosed.
+    """
+    from die_finishing_gen import read_admitted_release
+    from gds_canonical_digest import canonical_digest
+
+    release = read_admitted_release(Path(project), Path(release_record))
+    record = json.loads(release["report"].read_text())
+    official_ref = record["basis"]["files"]["official_precheck"]
+    official = json.loads(Path(official_ref["path"]).read_text())
+    final = dict(record["output"])
+    final["canonical_digest"] = canonical_digest(release["gds"])
+    finite = {}
+    def keep(path, role):
+        ref = _file(path)
+        key = ref["path"]
+        if key not in finite:
+            finite[key] = dict(ref, roles=[])
+        if role not in finite[key]["roles"]:
+            finite[key]["roles"].append(role)
+        return ref
+    keep(release["report"], "assembly_record")
+    keep(Path(official_ref["path"]), "official_precheck_record")
+    finite[final["path"]] = dict(record["output"], roles=["delivered_gds"])
+    views = {}
+    def equivalent(path):
+        path = str(Path(path).resolve())
+        if path not in views:
+            source = keep(path, "official_input_gds")
+            source["canonical_digest"] = canonical_digest(Path(path))
+            views[path] = {"method": "gds_canonical_digest (only BGNLIB/BGNSTR timestamps zeroed)",
+                           "input": source, "output": final,
+                           "equivalent": source["canonical_digest"] == final["canonical_digest"]}
+        return views[path]
+    steps = {}
+    for step_id, item in zip(official["expected_steps"], official["steps"]):
+        folder = Path(item["folder"])
+        inp_path, out_path = folder / "state_in.json", folder / "state_out.json"
+        keep(inp_path, "official_state_in")
+        keep(out_path, "official_state_out")
+        inp, state = json.loads(inp_path.read_text()), json.loads(out_path.read_text())
+        if inp.get("gds") is not None:
+            equivalent(inp["gds"])
+        steps[step_id] = (folder, inp, state)
+    all_views_equal = bool(views) and all(v["equivalent"] for v in views.values())
+    rows = {}
+    for kind, step_id, metric in [
+            ("density", "KLayout.Density", "klayout__density_error__count"),
+            ("antenna", "KLayout.Antenna", "klayout__antenna_error__count"),
+            ("drc", "KLayout.DRC", "klayout__drc_error__count")]:
+        row = {"verdict": "NOT_MEASURED", "value": "NOT_MEASURED",
+               "selected_engine": "KLayout", "gds_sha256": final["sha256"]}
+        try:
+            folder, inp, state = steps[step_id]
+            cfg_path = folder / "config.json"
+            config = json.loads(cfg_path.read_text())
+            if config.get("meta", {}).get("step") != step_id:
+                raise ValueError("native step configuration belongs to another engine")
+            report = folder / "reports" / (kind + ".klayout.json")
+            measured = json.loads(report.read_text())
+            count = state.get("metrics", {}).get(metric)
+            if (isinstance(count, bool) or not isinstance(count, int) or count < 0
+                    or isinstance(measured.get("total"), bool)
+                    or not isinstance(measured.get("total"), int)
+                    or measured.get("total") != count):
+                raise ValueError("native count is missing or differs from its raw report")
+            evidence = keep(report, kind + "_raw_report")
+            state_ref = keep(folder / "state_out.json", kind + "_state")
+            keep(cfg_path, kind + "_config")
+            keep(folder / "COMMANDS", kind + "_native_command")
+            bridge = equivalent(inp["gds"])
+            row.update(value=count, source=evidence["path"], source_sha256=evidence["sha256"],
+                       record=state_ref["path"], record_sha256=state_ref["sha256"],
+                       receipt=official_ref["path"], receipt_sha256=official_ref["sha256"],
+                       subject_sha256=bridge["input"]["sha256"], equivalence=bridge,
+                       source_verdict="PASS" if count == 0 else "FAIL")
+            if not all_views_equal:
+                raise ValueError("an official input GDS view is not canonically identical to the delivered GDS")
+            row["verdict"] = "PASS" if count == 0 else "FAIL"
+        except (KeyError, OSError, ValueError, TypeError) as exc:
+            row["reason"] = str(exc)
+        rows[kind] = row
+    disclosures = []
+    if "Magic.DRC" in steps:
+        folder, inp, state = steps["Magic.DRC"]
+        config = json.loads((folder / "config.json").read_text())
+        disclosures.append({"engine": "Magic", "value": state.get("metrics", {}).get("magic__drc_error__count", "NOT_MEASURED"),
+                            "error_on_magic_drc": config.get("ERROR_ON_MAGIC_DRC"),
+                            "state": keep(folder / "state_out.json", "magic_disclosure"),
+                            "equivalence": equivalent(inp["gds"]),
+                            "scope": "operator Magic policy disclosure; selected Default DRC is KLayout; not LVS"})
+        keep(folder / "config.json", "magic_disclosure_config")
+    verdicts = [row["verdict"] for row in rows.values()]
+    verdict = "FAIL" if "FAIL" in verdicts else "PASS" if all(v == "PASS" for v in verdicts) else "NOT_MEASURED"
+    return {"verdict": verdict, "gds_sha256": final["sha256"], "rows": rows,
+            "input_view_equivalence": list(views.values()), "disclosures": disclosures,
+            "finite_files": list(finite.values()), "scope": "selected KLayout DRC/antenna/density; LVS is independent"}
+
+
 def run(args):
     from librelane.state import State
 
