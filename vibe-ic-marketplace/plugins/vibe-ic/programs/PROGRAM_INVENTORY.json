@@ -15,18 +15,18 @@
     },
     "programs_tree_all_py": {
       "definition": "Every *.py at ANY depth under plugins/vibe-ic/programs/, including programs/tests/ and the sub-packages. Roughly programs_top_level + test_files + sub-package modules.",
-      "count": 6186,
-      "sha256_of_sorted_paths": "cc2a27e74783d3df6125c7f4b978a3161b198952bc8f6f750895aaac2c4b1e78"
+      "count": 6187,
+      "sha256_of_sorted_paths": "a929c0821772db5208a23cd2fb4a86977a387614416571c8cd40f3d019210cc5"
     },
     "test_files": {
       "definition": "Every test_*.py at any depth under plugins/vibe-ic/programs/tests/.",
-      "count": 4439,
-      "sha256_of_sorted_paths": "9d74aa83cd63b69217bf8b920dfbc50e58d231c4d9e795822fd4cdc5ffff6589"
+      "count": 4440,
+      "sha256_of_sorted_paths": "f4e45d67fdabe3d4980beb1a3d97de141df9c47a126ca25cbe449235d813e4e9"
     },
     "mcp_eda_test_files": {
       "definition": "Every test_*.py directly under plugins/vibe-ic/mcp-eda/test/.",
-      "count": 54,
-      "sha256_of_sorted_paths": "3fd323852655da42cf06c3f0ad688f5fba5a08e6b497280d3af4db57e16c6af3"
+      "count": 55,
+      "sha256_of_sorted_paths": "1f1e2ce9733b2671505befa68b1ded6971cebf4357c86b71e02abed046b5dc41"
     },
     "programs_helpers_and_shims": {
       "definition": "programs_top_level minus programs_catalogued: the helper modules and deprecation shims that INDEX.md deliberately omits. Stated in the plugin README so the gap between the two program counts is accounted for rather than left as an unexplained discrepancy.",
