@@ -73,8 +73,12 @@ def _fetch_official(version):
     if target['type'] != 'commit' or not re.fullmatch('[0-9a-f]{40}', target['sha']):
         raise RuntimeError('SOURCE_AUTHORITY_UNAVAILABLE: official tag is not a commit')
     revision = target['sha']
-    tree = _official_json(API + '/git/trees/' + revision + '?recursive=1')
-    if tree.get('truncated') is not False or not re.fullmatch('[0-9a-f]{40}', tree.get('sha', '')):
+    commit = _official_json(API + '/git/commits/' + revision)
+    tree_sha = (commit.get('tree') or {}).get('sha')
+    if not isinstance(tree_sha, str) or not re.fullmatch('[0-9a-f]{40}', tree_sha):
+        raise RuntimeError('SOURCE_AUTHORITY_UNAVAILABLE: official commit tree missing')
+    tree = _official_json(API + '/git/trees/' + tree_sha + '?recursive=1')
+    if tree.get('truncated') is not False or tree.get('sha') != tree_sha:
         raise RuntimeError('SOURCE_AUTHORITY_UNAVAILABLE: incomplete official tree')
     blobs = {row['path'][len(PREFIX):]: row['sha'] for row in tree['tree']
              if row.get('type') == 'blob' and row.get('mode') in ('100644', '100755')
