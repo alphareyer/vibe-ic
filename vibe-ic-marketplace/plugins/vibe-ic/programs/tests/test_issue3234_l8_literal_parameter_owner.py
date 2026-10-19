@@ -102,8 +102,29 @@ def test_selected_module_owns_literal_defaults_in_both_source_orders(
 def test_multiple_modules_without_selected_owner_fail_closed(tmp_path):
     text = _generic_owned_modules("selected-first").replace(
         "The top module is `frame_top`.\n\n", "")
-    doc = _emit_l8(tmp_path, "unowned_modules.md", text)
-    assert _pairs(doc) == []
+    _stage(tmp_path, "unowned_modules.md", text)
+    command = [
+        sys.executable,
+        str(PROGRAMS / "phase1_doc_one_shot_runner.py"),
+        str(tmp_path),
+        "--ic-name",
+        "neutral_literal_parameter_owner",
+    ]
+    run = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert run.returncode == 0, run.stdout + run.stderr
+    generated = tmp_path / "phase1" / "generated_docs"
+    outcome = json.loads((
+        tmp_path / "reports" / "audit" / "phase1"
+        / "L8_RTL_CONSTANTS_step_outcome.json"
+    ).read_text())
+    l8 = json.loads((generated / "L8_RTL_CONSTANTS.json").read_text())
+    l9 = json.loads((generated / "L9_INTEGRATION_SPEC.json").read_text())
+    for record in (outcome, l8):
+        assert record["phase1_step_error"] is True
+        assert record["error_class"] == "ValueError"
+        assert "L8_PARAMETER_OWNER_UNRESOLVED" in record["error_message"]
+    assert "parameters" not in l8
+    assert not l9.get("parameters")
 
 
 def test_example_fence_is_not_current_parameter_authority(tmp_path):

@@ -43011,10 +43011,9 @@ def _l8_literal_parameter_rows(
     """Keep fenced literal defaults inside the selected module namespace.
 
     This is the public PR #3239 walker on the current-base identical producer,
-    with two measured repairs: an explicit Example/History section is not
-    current authority, and an unresolved single fenced compilation unit emits
-    a named refusal instead of silently appearing absent.  Multiple independent
-    module fences retain the proposal's hard ``ValueError`` refusal.
+    with an explicit Example/History authority repair.  Unresolved module
+    ownership retains the proposal's hard ``ValueError`` refusal regardless of
+    whether the documented modules share one fence or span several fences.
     """
     declarations: List[Tuple[str, Any, Optional[str]]] = []
     module_names: Set[str] = set()
@@ -43072,16 +43071,9 @@ def _l8_literal_parameter_rows(
     else:
         top = (next(iter(module_names)) if len(module_names) == 1 else None)
     if module_names and top is None:
-        if module_fence_count > 1:
-            raise ValueError(
-                "L8_PARAMETER_OWNER_UNRESOLVED: "
-                "multiple documented modules require selected top")
-        return [], {
-            "verdict": "REFUSED",
-            "reason": "MULTIPLE_MODULES_WITHOUT_SELECTED_OWNER",
-            "module_count": len(module_names),
-            "literal_declarations_seen": literal_declarations_seen,
-        }
+        raise ValueError(
+            "L8_PARAMETER_OWNER_UNRESOLVED: "
+            "multiple documented modules require selected top")
     if module_names and top not in module_names:
         if module_fence_count > 1:
             raise ValueError(
