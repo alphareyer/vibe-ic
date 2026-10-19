@@ -306,5 +306,16 @@
     "version_observed": "1.30.7\n\n## Evidence\n\nDefect artifacts: `phase1/generated_docs/L24_SIGNOFF.json` on the real case and `producer-output.json` from `l24_signoff_requirements_extract.extract_signoff_requirements` on the exact neutral fixture. Both retained locally under the continuation's captures directory. No oracle RTL, hidden harness, report fabrication or gate relaxation was involved. Current Phase3 status programs do not read/write L24, so this issue makes no claim about a native execution failure.\n\n## Acceptance\n\nPlace the supplied snippet at `$PROJECT/input/docs/signoff.md`, then exercise the owning extractor and normal Phase1 producer:\n\n```bash\nPYTHONDONTWRITEBYTECODE=1 python3 -B vibe-ic-marketplace/plugins/vibe-ic/programs/phase1_doc_one_shot_runner.py \"$PROJECT\" --strict --ic-name neutral_reg --pdk sky130A\npython3 - \"$PROJECT\" <<'PY_CHECK'\nimport json,pathlib,sys\nrows=json.loads((pathlib.Path(sys.argv[1])/'phase1/generated_docs/L24_SIGNOFF.json').read_text())['fields']['signoff_requirements']\nstated=[r for r in rows if r.get('stated')]\nassert any(r.get('check')=='DRC' for r in stated)\nfor term in ['slew','cap','fanout']:\n    assert any(term in str(r.get('check','')).lower() for r in stated), (term,stated)\nPY_CHECK\n```\n\nAcceptance must retain source qualification/citation and demonstrate predecessorRED/fixedGREEN with independent reverse and absent/contradictory-source controls. The sample assertion may be adapted to a justified grouped checklist representation; it must not be satisfied by a generic raw source blob. No signoff result or whole-IC PASS can be derived from declaration extraction alone.",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_electrical_signoff/signoff.md"
+  },
+  {
+    "issue": 3234,
+    "project": "l8_literal_parameter_owner",
+    "layer": "L8",
+    "field": "L8_RTL_CONSTANTS.parameters[] -> L9_INTEGRATION_SPEC.parameters[]",
+    "expected": "{\"parameters\":[{\"name\":\"TAG_BITS\",\"default\":\"80\"},{\"name\":\"DIGEST_BITS\",\"default\":\"224\"}]}",
+    "actual": "{\"L8_RTL_CONSTANTS.parameters\":[],\"L9_INTEGRATION_SPEC.parameters\":[],\"ordinary_cli_natural_rc\":0}",
+    "version_observed": "1.30.8 exact official 164664a5d7495802fe09f22feb59ed76d79c7d89",
+    "version_lkg": "Not established. Current official source omission, not an invented release regression interval.",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/l8_literal_parameter_owner/literal_parameters.md"
   }
 ]
