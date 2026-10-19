@@ -195,6 +195,18 @@ def test_complete_reset_mapping_normal_cli_preserves_force_priority_and_unknowns
             assert all(r["native_queries"]["zero1"] == "PROVED" for r in forced), mapping
     if case in {"literal-x", "mixed-unclosed"}:
         assert mapping["unresolved"] and not mapping["complete"], mapping
+    if case == "mixed-unclosed":
+        residual = next(r for r in mapping["rows"] if r["classification"] == "UNRESOLVED_DATA_DEPENDENCE")
+        relation = residual["native_relation"]
+        assert relation["name"] == "DEFINED_NONFORCING_RESET_DEPENDENCE", relation
+        assert relation["proof_basis"] == "native_paired_cofactor_queries", relation
+        for arm, detail in enumerate(relation["arms"]):
+            assert detail["reset_value"] == arm and detail["definedness"] == "NO_UNDEF", detail
+            assert detail["roles"] == [r for r in residual["conditional_roles"] if r["reset_value"] == arm], detail
+            assert all(residual["native_queries"][f"{role}_reachable{arm}"] == "PROVED"
+                       for role in ("force_zero", "force_one")), residual
+            assert all(residual["native_queries"][f"{proof}{arm}"] == "PROVED"
+                       for proof in ("roles_disjoint", "roles_cover")), residual
 
 
 @pytest.mark.parametrize("width,value", [(1,1),(3,5)])
