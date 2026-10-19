@@ -66,3 +66,10 @@ def test_non_declarations_do_not_invent_a_top(tmp_path, text):
     l9 = published(tmp_path, text)
     assert l9["top_module"] is None
     assert l9["top_module_status"] == "top_undeclared"
+
+
+@pytest.mark.parametrize("declaration", ["Module Name: wrapper_top", "The top module is `wrapper_top`."])
+def test_explicit_top_authority_stays_above_a_comportable_child(tmp_path, declaration):
+    l9 = published(tmp_path, PUBLIC_SNIPPET + "\n" + declaration + "\n")
+    assert l9["top_module"] == "wrapper_top"
+    assert l9["top_module_status"] == "declared_in_input"
