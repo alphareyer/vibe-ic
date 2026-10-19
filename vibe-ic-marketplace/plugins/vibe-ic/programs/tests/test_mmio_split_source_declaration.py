@@ -197,6 +197,22 @@ def test_foreign_owner_cannot_supply_cross_document_port_binding():
     assert actual['kind'] == 'undeclared', actual
 
 
+def test_foreign_mandarin_owner_cannot_bind_current_ports_or_reach_l10(tmp_path):
+    protocol = (DECLARATION + '\n'
+                'neighbor_unit 透過 select_i/write_i/index_i 存取暫存器。')
+    actual = transport({'protocol.md': protocol, 'ports.md': PORT_TEXT},
+                       owner='neutral_unit')
+    assert actual['kind'] == 'undeclared', actual
+    l9, l10 = run_phase1(tmp_path, protocol)
+    assert l9['interface_type'] != 'memory_mapped_register'
+    assert l10['known_answer_vector_census']['transport']['kind'] == 'undeclared'
+    own_protocol = (DECLARATION + '\n'
+                    'neutral_unit 透過 select_i/write_i/index_i 存取暫存器。')
+    own = transport({'protocol.md': own_protocol, 'ports.md': PORT_TEXT},
+                    owner='neutral_unit')
+    assert own['kind'] == 'memory_mapped_register', own
+
+
 @pytest.mark.parametrize('verb', ['have', 'use', 'implement', 'adopt', 'provide', 'expose'])
 def test_current_owner_denials_block_an_affirmative_declaration(verb):
     denial = 'The peripheral does not ' + verb + ' a memory-mapped register interface.'

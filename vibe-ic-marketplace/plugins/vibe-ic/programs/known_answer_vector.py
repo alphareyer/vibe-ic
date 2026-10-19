@@ -457,8 +457,10 @@ def declared_mmio_interface(extracted: dict, ports: list,
         # no named RTL owner; a named subject must match the bound owner.
         subject = re.match(
             r'^\s*(?:the\s+)?(?:module\s+)?`?([A-Za-z_][A-Za-z0-9_$]*)`?'
-            r'\s+(?:module\s+)?(?:uses?|has|access(?:es)?|drives?|'
-            r'implements?|adopts?|provides?|exposes?)\b', line, re.I)
+            r'\s*(?:module\s+)?(?:uses?|has|access(?:es)?|drives?|'
+            r'implements?|adopts?|provides?|exposes?|'
+            r'透過|通过|經由|使用|採用|采用|存取|讀取|读取|寫入|写入)\b',
+            line, re.I)
         if subject is None:
             return True
         name = subject[1]
