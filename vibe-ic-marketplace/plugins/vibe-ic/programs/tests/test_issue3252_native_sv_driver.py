@@ -36,6 +36,19 @@ def test_real_procedural_and_continuous_drivers_remain_error():
                for f in findings), findings
 
 
+def test_for_header_update_does_not_hide_real_procedural_driver():
+    rtl = """module sample(input clk, input d, output y);
+  logic phase;
+  always @(posedge clk) for(integer i=0; i<1; i=i+1) phase <= d;
+  assign phase=d;
+  assign y=phase;
+endmodule
+"""
+    findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
+    assert any(f.rule == 'multidriven-continuous-procedural' and f.symbol == 'phase'
+               for f in findings), findings
+
+
 def test_sv_native_driver_uses_selected_top_params_defines_and_no_implicit_synthesis(tmp_path, monkeypatch):
     sv = tmp_path / 'sample.sv'
     sv.write_text('module sample #(parameter W=4)(input [W-1:0] d, output [W-1:0] y); assign y=d; endmodule\n')

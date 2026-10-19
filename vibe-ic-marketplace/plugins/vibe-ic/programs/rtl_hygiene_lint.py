@@ -3936,7 +3936,15 @@ def rule_continuous_vs_procedural_driver(src: str, path: str) -> List[Finding]:
                 # token part of its RHS. For example, `wire bounded = phase
                 # <= 5;` reads phase; it does not write phase. The classifier
                 # ignores comparisons in parenthesized `if` conditions.
-                statement_start = body_noassign.rfind(';', 0, am.start()) + 1
+                statement_start = 0
+                paren_depth = 0
+                for offset, char in enumerate(body_noassign[:am.start()]):
+                    if char == '(':
+                        paren_depth += 1
+                    elif char == ')':
+                        paren_depth = max(0, paren_depth - 1)
+                    elif char == ';' and paren_depth == 0:
+                        statement_start = offset + 1
                 if _procedural_assigned_lhs(body_noassign[statement_start:am.start()]):
                     continue
                 # The regex only locates a possible write. Reuse the existing
