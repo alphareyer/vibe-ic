@@ -2149,6 +2149,9 @@ def test_step14_remains_unsupported_as_a_runner_entry(tmp_path, monkeypatch, cap
 def test_unbounded_refused_checkpoint_cannot_succeed(tmp_path, monkeypatch):
     import execution_backend_gates as gates
 
+    # The aggregate/report writer is real; unrelated full-flow summary/audit
+    # generation is outside this software caller's proof population.
+    monkeypatch.setattr(_pl, "emit_final_summary", lambda *a, **k: False)
     project, _, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
     _sign_d1_checkpoint(project)
     consume = gates.evaluate
@@ -2190,3 +2193,41 @@ def test_unbounded_refused_checkpoint_cannot_succeed(tmp_path, monkeypatch):
     forged_path = tmp_path / "forged-success.json"
     forged_path.write_text(json.dumps(forged) + "\n")
     assert not GUARD._is_orchestrator_report(forged_path, project)
+
+
+@pytest.mark.parametrize("phase2_verdict", ["PASS", "FAIL"])
+def test_terminal_halt_context_preserves_full_success_and_phase_failure(
+        project, monkeypatch, phase2_verdict):
+    """Real coordinator/axis/report/replay; phase execution is software IO."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(_pl, "emit_final_summary", lambda *a, **k: False)
+    monkeypatch.setattr(V._canonical_admission, "admit_span", lambda *a, **k:
+                        SimpleNamespace(admitted=True, identity_sha256="source-control"))
+    monkeypatch.setattr(V._canonical_admission, "child_env",
+                        lambda _identity, env: dict(env))
+    read_axis = V._completion_audit_axis
+
+    def current_axis(project, *, phase3_ran, started_at):
+        if phase3_ran:
+            _audit(project, "PASS", scope=WHOLE)
+        return read_axis(project, phase3_ran=phase3_ran, started_at=started_at)
+
+    monkeypatch.setattr(V, "_completion_audit_axis", current_axis)
+    rc, doc = _drive_main(project, monkeypatch, phase1=("PASS", 0, None),
+                          phase2=(phase2_verdict, 0 if phase2_verdict == "PASS" else 1),
+                          phase3=({"verdict": "PASS"}, 0))
+    observation = {"scope": "Software phase/admission/audit-writer leaves; real coordinator and audit reader",
+                   "rc": rc, "report": doc}
+    (project / "TERMINAL_HALT_CONTEXT_OBSERVATION.json").write_text(
+        json.dumps(observation, indent=2) + "\n")
+    assert doc["verdict"] == phase2_verdict, observation
+    assert rc == (0 if phase2_verdict == "PASS" else 1), observation
+    assert doc["halted_at"] == (None if phase2_verdict == "PASS" else "phase2"), observation
+    assert GUARD._expected_front_door_verdict(doc, doc["phases"]) == phase2_verdict
+    if phase2_verdict == "PASS":
+        assert doc["completion_audit_axis"]["state"] == "PASS"
+        assert all(row["verdict"] == "PASS" for row in doc["phases"]
+                   if row["name"] in ("phase1", "phase2", "phase3"))
+    else:
+        assert next(row for row in doc["phases"] if row["name"] == "phase3")["verdict"] == "SKIPPED"
