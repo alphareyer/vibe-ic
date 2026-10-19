@@ -473,9 +473,10 @@ def seal_ring_facility(volume: Optional[Path], reader=None
                        ) -> Tuple[Optional[bool], Optional[str], List[str]]:
     """(does this technology ship a seal-ring generator, the path, tried).
 
-    None means the question could not be reached at all — no volume. False is a
-    MEASUREMENT: the volume is here and it ships no generator, so this process
-    has no seal-ring facility and a seal ring is not applicable to it.
+    None means the question could not be reached at all — no volume or an
+    unreadable authority. False means neither known provider family was found.
+    True means the technology has a provider; it does NOT say that this flow's
+    KLayout-only die-finishing caller can invoke a different provider family.
     """
     from die_finishing_gen import _PDK_SCRIPT_REL as REL
     tried: List[str] = []
@@ -489,7 +490,29 @@ def seal_ring_facility(volume: Optional[Path], reader=None
     except OSError as exc:
         tried.append(str(exc))
         return None, None, tried
+    # Some PDK volumes ship a Magic generator with a positional CLI instead of
+    # KLayout's sealring.py. Its presence prevents a process-absence N/A; the
+    # caller must still report unsupported invocation until an adapter exists.
+    magic_pattern = "libs.tech/magic/seal_ring_generator/*sealring*.py"
+    tried.append(str(volume / magic_pattern))
+    try:
+        for name in _query(volume, "glob", magic_pattern, reader=reader):
+            tried.append(str(name))
+            if _query(Path(name), "is_file", reader=reader):
+                return True, str(name), tried
+    except OSError as exc:
+        tried.append(str(exc))
+        return None, None, tried
     return False, None, tried
+
+
+def seal_ring_invocation_supported(volume: Optional[Path], provider: Optional[str]
+                                   ) -> Optional[bool]:
+    """Whether the discovered provider has the KLayout form this flow drives."""
+    if volume is None or provider is None:
+        return None
+    from die_finishing_gen import _PDK_SCRIPT_REL as rel
+    return provider == str(volume / rel)
 
 
 #: THE FLOW'S OWN MARKER LAYERS, derived from the writer, never typed here.

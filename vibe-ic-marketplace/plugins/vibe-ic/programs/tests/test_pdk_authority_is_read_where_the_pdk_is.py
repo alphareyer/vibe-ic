@@ -87,6 +87,16 @@ def test_a_container_reader_answers_the_three_readings(tmp_path):
     assert rd.name == "container:some-container"
 
 
+def test_a_container_reader_finds_a_magic_provider_without_claiming_invocation():
+    vol = "/foss/pdks/somepdk"
+    provider = f"{vol}/libs.tech/magic/seal_ring_generator/neutral_gen_sealring.py"
+    rd, _ = _reader({provider: "# positional generator\n"})
+    has, path, tried = A.seal_ring_facility(Path(vol), reader=rd)
+    assert has is True and path == provider
+    assert A.seal_ring_invocation_supported(Path(vol), path) is False
+    assert any("libs.tech/magic/seal_ring_generator" in item for item in tried)
+
+
 def test_the_same_pdk_is_unreadable_from_the_host_filesystem(tmp_path):
     """The defect, stated as a test: a container path is not a host path."""
     registry = tmp_path / "reg.json"

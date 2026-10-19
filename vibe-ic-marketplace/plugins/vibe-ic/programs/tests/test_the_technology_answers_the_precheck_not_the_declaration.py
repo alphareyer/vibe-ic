@@ -191,6 +191,31 @@ def test_a_technology_with_no_seal_ring_facility_reaches_not_applicable(
                for p in ev.measured["seal_ring_facility_tried"])
 
 
+@pytest.mark.parametrize("required", [False, TD.NOT_DETERMINED])
+def test_magic_provider_is_available_but_cannot_grant_process_absence(
+        tmp_path, pdkroot, required):
+    """A non-KLayout generator is a facility, not a supported invocation."""
+    volume = _technology(pdkroot, "magictech", pairs=[MAPPED], sealring=False)
+    generator = (volume / "libs.tech" / "magic" / "seal_ring_generator"
+                 / "neutral_gen_sealring.py")
+    generator.parent.mkdir(parents=True)
+    generator.write_text("# positional width height target_dir provider\n")
+    proj = _project(tmp_path, _die, {"deliverable": "DIE",
+                                     "top_cell": "chip_top",
+                                     "seal_ring_required": required})
+    rep = GP.evaluate(proj, runner=_NEVER_RAN, pdk="magictech")
+    ev = _step(rep, "General.SealRing")
+    assert rep.technology["seal_ring_facility"] is True
+    assert rep.technology["seal_ring_facility_path"] == str(generator)
+    assert rep.technology["seal_ring_invocation_supported"] is False
+    assert ev.verdict == GP.NOT_DETERMINED, ev.evidence
+    assert ev.verdict != GP.NOT_APPLICABLE
+    assert ev.measured["seal_ring_facility_path"] == str(generator)
+    assert ev.measured["seal_ring_invocation_supported"] is False
+    if required is False:
+        assert "not supported by the current KLayout" in ev.evidence
+
+
 def test_not_applicable_does_not_block_the_precheck_verdict(tmp_path, pdkroot):
     """The row the ruling asks the precheck to PASS over."""
     _technology(pdkroot, "notech", pairs=[MAPPED], sealring=False)
@@ -216,6 +241,7 @@ def test_a_declared_false_is_refused_where_the_facility_EXISTS(tmp_path,
     ev = _step(GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech"),
                "General.SealRing")
     assert ev.verdict == GP.NOT_DETERMINED, ev.evidence
+    assert ev.measured["seal_ring_invocation_supported"] is True
     assert "HAS the facility" in ev.evidence
     assert "declared not-applicable is refused" in ev.evidence
 

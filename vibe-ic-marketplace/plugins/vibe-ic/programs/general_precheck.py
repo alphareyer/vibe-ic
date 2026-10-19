@@ -1401,6 +1401,7 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    pdk: Optional[str] = None,
                    seal_facility: Optional[bool] = None,
                    seal_facility_path: Optional[str] = None,
+                   seal_invocation_supported: Optional[bool] = None,
                    seal_facility_tried: Optional[List[str]] = None,
                    volume_why: str = "",
                    layout: Optional[Path] = None,
@@ -1460,6 +1461,7 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                        "route": seal_route,
                        "technology_seal_ring_facility": seal_facility,
                        "seal_ring_facility_path": seal_facility_path,
+                       "seal_ring_invocation_supported": seal_invocation_supported,
                        "seal_ring_facility_tried": list(seal_facility_tried
                                                         or [])}
         seal_question = _decl.question("seal_ring_required")
@@ -1507,7 +1509,10 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                 "seal ring is applicable to it and the layout was still not "
                 "measured for one. A declared not-applicable is refused; only "
                 "a technology with no seal-ring facility at all earns "
-                "NOT_APPLICABLE")
+                "NOT_APPLICABLE"
+                + (". This provider is not supported by the current KLayout "
+                   "die-finishing caller" if seal_invocation_supported is False
+                   else ""))
             return
 
     prog = programs_dir / f"{d.program}.py"
@@ -1769,6 +1774,8 @@ def evaluate(project: Path,
         volume, reader=_pdk_reader)
     seal_facility, seal_path, seal_tried = _pdkauth.seal_ring_facility(
         volume, reader=_pdk_reader)
+    seal_invocation_supported = _pdkauth.seal_ring_invocation_supported(
+        volume, seal_path)
     # What THIS FLOW declares it writes into a stream. Derived from the writer's
     # own constants, asked once, consumed by two rungs.
     flow_markers = _pdkauth.flow_marker_layers()
@@ -1788,7 +1795,8 @@ def evaluate(project: Path,
                       "layer_table": layer_authority,
                       "layer_table_pairs": len(allowed) if allowed else None,
                       "seal_ring_facility": seal_facility,
-                      "seal_ring_facility_path": seal_path}
+                      "seal_ring_facility_path": seal_path,
+                      "seal_ring_invocation_supported": seal_invocation_supported}
 
     by_id = {s.step_id: s for s in steps}
     for step in LADDER:
@@ -1846,6 +1854,7 @@ def evaluate(project: Path,
                                           else _decl.NOT_DETERMINED),
                            pdk=pdk, seal_facility=seal_facility,
                            seal_facility_path=seal_path,
+                           seal_invocation_supported=seal_invocation_supported,
                            seal_facility_tried=seal_tried,
                            volume_why=volume_why, layout=chosen,
                            seal_deliverable=deliverable, seal_route=seal_route,
