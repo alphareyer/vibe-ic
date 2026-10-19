@@ -275,6 +275,12 @@ def test_explicit_detection_only_cli_report_cannot_lower_asil_floor(tmp_path):
     report["asil"] = "A"  # The native result, floor, and source remain unchanged.
     report_path.write_text(json.dumps(report))
     assert consume().returncode == 1
+    report["mechanism"].pop("source")  # An editable marker cannot choose policy.
+    report_path.write_text(json.dumps(report))
+    assert consume().returncode == 1
+    report["mechanism"]["source"] = "unknown"
+    report_path.write_text(json.dumps(report))
+    assert consume().returncode == 1
     producer_args[producer_args.index("--asil") + 1] = "A"
     assert subprocess.run(producer_args, capture_output=True, text=True).returncode == 0
     assert json.loads(report_path.read_text())["dc_floor_pct"] is None
@@ -378,3 +384,14 @@ def test_detection_only_na_is_not_a_correction(golden, fault, expected):
 def test_absent_manifest_does_not_take_over_legacy_gate(tmp_path):
     report = {"applicable": False, "reason": "legacy classification"}
     assert gate.check(report, None, None, tmp_path)["verdict"] == "VACUOUS_PASS"
+
+
+def test_legacy_measured_report_without_source_uses_consumer_default_d(tmp_path):
+    report = {"applicable": True, "baseline_valid": True,
+              "injected_faults": 10, "detected_faults": 10, "verdict": "PASS"}
+    assert gate.check(report, None, None, tmp_path)["passed"]
+    report["detected_faults"] = 0
+    assert not gate.check(report, None, None, tmp_path)["passed"]
+    report["asil"] = "A"
+    assert not gate.check(report, None, None, tmp_path)["passed"]
+    assert gate.check(report, "A", None, tmp_path)["passed"]

@@ -113,23 +113,18 @@ def check(report: dict, asil_override: Optional[str],
         return {"gate": "fmeda_coverage_check", "verdict": "VACUOUS_PASS",
                 "passed": True,
                 "reason": report.get("reason", "no safety mechanism — N/A")}
-    if isinstance(mechanism, dict) and mechanism.get("source") == "explicit":
-        # The new complete explicit CLI can produce detection-only evidence
-        # without a project manifest. Its report is still evidence, never the
-        # authority for a weaker ASIL or floor. The ordinary consumer is D;
-        # non-D or --min-dc must be supplied to this CLI independently.
-        trusted_asil = asil_override if asil_override is not None else "D"
-        trusted_floor = fi.asil_floor(trusted_asil, min_dc)
-        if (trusted_asil not in fi.ASIL_DC_FLOOR or
-                report.get("asil") != trusted_asil or
-                report.get("dc_floor_pct") != trusted_floor):
-            return {"gate": "fmeda_coverage_check", "verdict": "FAIL",
-                    "passed": False,
-                    "reason": "explicit mechanism ASIL/DC floor differs from consumer CLI/flow policy"}
-        asil = trusted_asil
-    else:
-        asil = asil_override or report.get("asil", "D")
+    # The source/schema fields are report content and may be absent in older
+    # reports. They must never choose a weaker policy for a measured result.
+    # An absent --asil means D on every consumer path; a non-D policy must be
+    # supplied to this CLI independently of the producer report.
+    asil = asil_override if asil_override is not None else "D"
     floor = fi.asil_floor(asil, min_dc)
+    if (asil not in fi.ASIL_DC_FLOOR or
+            report.get("asil", asil) != asil or
+            report.get("dc_floor_pct", floor) != floor):
+        return {"gate": "fmeda_coverage_check", "verdict": "FAIL",
+                "passed": False,
+                "reason": "measured ASIL/DC floor differs from consumer CLI/flow policy"}
     injected = int(report.get("injected_faults", 0))
     detected = int(report.get("detected_faults", 0))
     baseline_ok = bool(report.get("baseline_valid", False))

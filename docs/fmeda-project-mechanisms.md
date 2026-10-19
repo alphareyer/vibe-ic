@@ -33,5 +33,6 @@ The expected census is the Cartesian product of the deterministic stimulus list 
 
 The consumer's ordinary CLI/flow policy defaults to ASIL D. A non-D ASIL or explicit `--min-dc` must also be supplied to the consumer through its own CLI/flow invocation. The consumer refuses a report whose ASIL or effective floor differs from that independent policy; the report cannot lower its own acceptance threshold.
 The same policy applies to complete explicit CLI measurements without a project manifest, including detection-only reports.
+For measured legacy reports without ASIL/source fields, the consumer still uses D by default; no editable report marker selects the policy.
 
 Required controls: two reachable neutral mechanisms; native width/type/direction/unreachable and source/hash changes; duplicate keys/IDs; declaration removed; baseline false alarm; disabled detector for each mechanism; >512 faults with a row removed; per-mechanism floor masking; byte restoration; correction-mode compatibility; unchanged absent-declaration classification. No global gate, policy/threshold, version, or auto-pairing repair is included. Scope is the measured codeword boundary and current reachable implementation modules, not whole-chip safety qualification or FIT/SPFM/LFM/PMHF.
