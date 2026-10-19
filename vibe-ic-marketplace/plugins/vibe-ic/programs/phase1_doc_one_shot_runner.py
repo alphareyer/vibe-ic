@@ -62053,6 +62053,10 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
         explicit = reset_semantics(name, evidence_joined)
         polarity = explicit.get("polarity", polarity)
         sync = explicit.get("sync", "unknown")
+        from _reset_input_semantics import reset_domain_bindings
+        bindings = reset_domain_bindings(name, {
+            (str(fname) if str(fname).startswith("input/") else f"input/docs/{fname}"): text
+            for fname, text in (extracted or {}).items()})
         out.append({
             "name": name,
             "polarity": polarity,
@@ -62061,6 +62065,7 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
                 or _stem_v1_6_382.lower().startswith("scan_"),
             "direction_prefix": _dirpref_v1_6_382,
             "extraction_strategy": "l9_port_reset_shape_v1_6_369",
+            **({"domain_bindings": bindings} if bindings else {}),
         })
     if out:
         l9["reset_domains"] = out
@@ -62173,6 +62178,33 @@ def _v1_6_397_merge_clock_domains(clock_domains: list) -> list:
             existing.get("merged_extractor_count_v1_6_397", 1) + 1
         )
     return list(by_name.values())
+
+
+def _project_reset_domain_bindings(document: dict, reset_domains: list) -> bool:
+    """Project the canonical reset-domain facts onto existing clock records."""
+    import copy
+    changed = False
+    for clock in document.get("clock_domains") or []:
+        if not isinstance(clock, dict):
+            continue
+        names = {clock.get("name"), clock.get("source_pin")}
+        bindings = [dict(reset=reset["name"], **copy.deepcopy(binding))
+                    for reset in reset_domains if isinstance(reset, dict) and reset.get("name")
+                    for binding in reset.get("domain_bindings", [])
+                    if isinstance(binding, dict) and binding.get("clock") in names
+                    and binding.get("clock") != "unknown"]
+        if not bindings:
+            continue
+        phases = {(row["assertion"], row["release"]) for row in bindings}
+        strategy = "unknown"
+        if len(phases) == 1:
+            assertion, release = next(iter(phases))
+            if "unknown" not in (assertion, release):
+                strategy = f"{assertion} assertion; {release} release"
+        if clock.get("reset_bindings") != bindings or clock.get("reset_strategy") != strategy:
+            clock.update(reset_strategy=strategy, reset_bindings=bindings)
+            changed = True
+    return changed
 
 
 def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
@@ -62441,6 +62473,12 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             if not existing_r:
                 l9["resets"] = resets
                 changed = True
+    reset_domains = l9.get("reset_domains") or []
+    changed = _project_reset_domain_bindings(l9, reset_domains) or changed
+    for doc_name in ("L8_RTL_CONSTANTS", "L8_TIMING_WAVEFORM"):
+        reset_l8 = _try_load_l_doc(project, doc_name)
+        if isinstance(reset_l8, dict) and _project_reset_domain_bindings(reset_l8, reset_domains):
+            _stamp.dump(_pl.generated_docs_dir(project) / (doc_name + ".json"), reset_l8)
     if changed:
         _ensure_bool_flags(l9)
         out = (_pl.generated_docs_dir(project)

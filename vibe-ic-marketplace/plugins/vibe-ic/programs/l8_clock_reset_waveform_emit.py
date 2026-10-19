@@ -167,6 +167,7 @@ def _project(l8: Dict[str, Any], l9: Dict[str, Any]) -> Optional[Dict[str, Any]]
     for row in clocks:
         rec = _copy_stated(row, (
             "name", "edge", "period_ns", "freq_mhz", "pdk_scoped_target",
+            "reset_strategy", "reset_bindings",
         ))
         name = rec.get("name")
         if "edge" not in rec and isinstance(name, str) and name in edges:
@@ -178,7 +179,7 @@ def _project(l8: Dict[str, Any], l9: Dict[str, Any]) -> Optional[Dict[str, Any]]
     reset_rows: List[Dict[str, Any]] = []
     for row in resets:
         rec = _copy_stated(row, (
-            "name", "polarity", "sync", "synchrony", "edge",
+            "name", "polarity", "sync", "synchrony", "edge", "domain_bindings",
         ))
         name = rec.get("name")
         if isinstance(name, str) and name in descriptions:

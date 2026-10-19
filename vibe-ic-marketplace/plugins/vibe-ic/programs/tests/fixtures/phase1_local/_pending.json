@@ -229,5 +229,16 @@
     "version_observed": "1.29.96-derived exact source 5ba5c1bca92c3edb98e1aacbdba340f9cfb20b12",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/logical_role_not_physical_pin/interfaces.md"
+  },
+  {
+    "issue": 3223,
+    "project": "neutral_reset_domain_phases",
+    "layer": "L9 reset_domains; L8 clock_domains and timing_waveform",
+    "field": "L9.reset_domains[0].sync and domain_bindings; L8/L9.clock_domains[].reset_strategy",
+    "expected": "Existing sync enum is asynchronous as the explicit assertion summary. Both clk_i and clk_aux_i retain assertion=asynchronous, release=synchronous, release_clock equal to their own clock, release_stages=2, polarity=active_low in actionable typed reset domain bindings. The L8 waveform and clock reset strategies carry the same source-bound domain facts. Legacy sync strings remain compatible; no timing cut or implementation PASS is inferred.",
+    "actual": "Observed existing sync value is unknown (expected asynchronous), polarity active_low. Both clock_domains reset_strategy values are unspecified. No typed assertion/release/domain/stage mapping is emitted; L8 waveform retains only reset identity and polarity. Natural reproduction rc=1 on concrete existing-value comparison unknown != asynchronous.",
+    "version_observed": "1.29.96; isolated composed source a4aea2fc71495cfc94df700ceec6997ba7833f52",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_reset_domain_phases/reset.md"
   }
 ]
