@@ -1235,6 +1235,7 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
     work_dir.mkdir(parents=True, exist_ok=True)
     initial = work_dir / "cofactor_support_input.json"
     normalized = work_dir / "cofactor_support_normalized.json"
+    prior_normalized = normalized.stat() if normalized.exists() else None
     ys, log_path = work_dir / "cofactor_support.ys", work_dir / "cofactor_support.log"
     _aa.write_json(initial, model)
     _aa.write_text(ys, f"read_json {initial.resolve()}\nhierarchy -top transition_pair\n"
@@ -1258,6 +1259,10 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
             return info, payloads
         mod = json.loads(normalized.read_text())["modules"]["transition_pair"]
         info["normalized_sha256"] = file_sha256(normalized)
+        current_normalized = normalized.stat()
+        info["normalization_output_current"] = (prior_normalized is None or
+            (current_normalized.st_ino, current_normalized.st_mtime_ns, current_normalized.st_ctime_ns) !=
+            (prior_normalized.st_ino, prior_normalized.st_mtime_ns, prior_normalized.st_ctime_ns))
         roots = {port["bits"][0]: int(name[len("input_"):])
                  for name, port in mod["ports"].items()
                  if port["direction"] == "input" and name.startswith("input_")
@@ -1484,6 +1489,10 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                                     identities[-1]["reset_independence_certificate"] = cert
                                     row["reset_independence_certificate"] = cert
                                     if (cert.get("complete_raw_fanin") and cert.get("reset_reachable") and
+                                            payload_analysis.get("status") == "NATIVE_NORMALIZED_COFACTOR_SUPPORT" and
+                                            payload_analysis.get("native_exit_code") == 0 and
+                                            payload_analysis.get("native_run", {}).get("termination") == "COMPLETED" and
+                                            payload_analysis.get("normalization_output_current") and
                                             row["payload_support"].get("total_force_arms") and
                                             row["unsupported"] == "literal-X/undef retained from raw next-state transition"):
                                         row["raw_undef_native_candidate"] = True
