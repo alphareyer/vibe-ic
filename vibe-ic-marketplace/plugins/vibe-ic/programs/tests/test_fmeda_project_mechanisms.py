@@ -6,6 +6,7 @@ import copy
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -240,6 +241,45 @@ def test_report_asil_cannot_lower_native_campaign_floor(tmp_path):
     assert strict_rc == 0 and strict_report["dc_floor_pct"] == 99.5
     assert not gate.check(strict_report, None, None, tmp_path)["passed"]
     assert gate.check(strict_report, None, 99.5, tmp_path)["passed"]
+
+
+@native
+def test_explicit_detection_only_cli_report_cannot_lower_asil_floor(tmp_path):
+    doc, source = fixture(tmp_path)
+    (tmp_path / declared.MANIFEST).unlink()  # Exercise the new no-manifest CLI path.
+    text = source.read_text()
+    begin = text.index("module small_check")
+    end = text.index("endmodule", begin)
+    body = text[begin:end].replace("assign err_o = |(expected_code ^ code_i);",
+                                  "assign err_o = (|(expected_code ^ code_i)) && (code_i[2:0] != 3'd0);")
+    source.write_text(text[:begin] + body + text[end:])
+    report_path = tmp_path / "explicit_report.json"
+    producer_args = [
+        sys.executable, str(Path(fi.__file__)), str(tmp_path),
+        "--enc-module", "small_encode", "--enc-in", "data_i", "--enc-out", "code_o",
+        "--dec-module", "small_check", "--dec-in", "code_i", "--detect-port", "err_o",
+        "--data-width", "3", "--code-width", "4", "--rtl-file",
+        str(source.relative_to(tmp_path)), "--asil", "D", "--json", str(report_path),
+    ]
+    producer = subprocess.run(producer_args, capture_output=True, text=True)
+    report = json.loads(report_path.read_text())
+    assert producer.returncode == 1 and report["measured"] is True
+    assert (report["detected_faults"], report["injected_faults"]) == (28, 32)
+
+    def consume(*policy):
+        return subprocess.run([sys.executable, str(Path(gate.__file__)),
+                               str(tmp_path), "--report", str(report_path), *policy],
+                              capture_output=True, text=True)
+
+    assert consume().returncode == 1
+    report["asil"] = "A"  # The native result, floor, and source remain unchanged.
+    report_path.write_text(json.dumps(report))
+    assert consume().returncode == 1
+    producer_args[producer_args.index("--asil") + 1] = "A"
+    assert subprocess.run(producer_args, capture_output=True, text=True).returncode == 0
+    assert json.loads(report_path.read_text())["dc_floor_pct"] is None
+    assert consume().returncode == 1
+    assert consume("--asil", "A").returncode == 0
 
 
 @native
