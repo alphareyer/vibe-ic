@@ -1117,7 +1117,37 @@ def design_release_sources(project, layout, assembly=None):
                 'reports/phase3/general_precheck.json','reports/phase3/shuttle_precheck.json',
                 'input/step_0_5ic_answers.json','input/submission_template/operator_answers.json'):
         add(rel,'internal_closure')
-    return {"files":files,"validation":validation,"external_dependencies":external}
+    provider = None
+    if assembly:
+        provider = {'status': 'NOT_MEASURED', 'technical_precheck_status': 'NOT_MEASURED',
+                    'accepted': False, 'reason': 'No bound provider precheck for the selected assembly'}
+        try:
+            selected = assembly['basis']['provider_precheck']
+            source = selected['source']
+            path = Path(source['path'])
+            if not path.is_absolute():path = physical_project / path
+            if (selected['layout_sha256'] != assembly['sha256']
+                    or not path.is_file() or not source.get('sha256')
+                    or sha256_file(path) != source['sha256']):
+                raise ValueError('provider precheck does not bind the selected final GDS')
+            add(path, 'provider_precheck', source['sha256'])
+            for entry in selected.get('files', []):
+                material = Path(entry['path'])
+                if not material.is_absolute():material = physical_project / material
+                if not material.is_file():raise ValueError('provider precheck material missing: '+str(material))
+                add(material, 'provider_precheck', entry['sha256'])
+            provider = {key: selected.get(key) for key in
+                        ('provider','slot','cob','official_revision','options','layout_sha256')}
+            provider.update(status='NOT_SUBMITTED', accepted=False,
+                            technical_precheck_status=selected['status'],
+                            retained_report={'source':str(path),'sha256':source['sha256']},
+                            reason='Technical precheck is separate from provider acceptance or a slot reservation')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            provider['reason'] = str(exc)
+        validation['provider_precheck'] = {'verdict': provider['technical_precheck_status'],
+                                           'gds_sha256': assembly['sha256']}
+    return {"files":files,"validation":validation,"external_dependencies":external,
+            "provider_submission":provider}
 
 
 def emit_design_release(project, destination, layout, physical_top, assembly=None):
@@ -1141,11 +1171,11 @@ def emit_design_release(project, destination, layout, physical_top, assembly=Non
     missing=[role for role in RELEASE_ROLES if role not in roles]
     incomplete=[kind for kind,row in source['validation'].items() if row.get('verdict')!='PASS']
     if not physical_top.get('top'):missing.append('physical_top')
-    provider={"status":"NOT_MEASURED","accepted":False,
+    provider=source.get('provider_submission') or {"status":"NOT_MEASURED","accepted":False,
               "reason":"Provider contract/precheck must bind this final layout; no slot, CoB or submission approval inferred"}
     # Only the actual selected operator result can describe submission scope.
     precheck=project/'reports/phase3/shuttle_precheck.json'
-    if precheck.is_file():
+    if not assembly and precheck.is_file():
         provider['retained_report']={"source":str(precheck),"sha256":sha256_file(precheck)}
         try:
             report=json.loads(precheck.read_text())
@@ -1229,6 +1259,8 @@ def check_design_release(package):
                     bad.append(kind+': missing or nonzero measured counts')
         if doc.get('archive_status')!='COMPLETE' or doc.get('missing') or doc.get('incomplete_validation'):
             bad.append('archive is incomplete')
+        if doc.get('assembly_record') and (doc.get('provider_submission') or {}).get('technical_precheck_status')!='PASS':
+            bad.append('selected provider technical precheck has not passed for this assembly')
         if not doc.get('physical_top',{}).get('top'):bad.append('physical top not measured')
     except (OSError, ValueError, KeyError, TypeError, _geometry.GdsError) as exc:
         bad.append(str(exc));doc={}
