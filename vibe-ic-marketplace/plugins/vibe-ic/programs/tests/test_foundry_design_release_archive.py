@@ -581,7 +581,7 @@ def test_selected_ll_full_gds_lvs_uses_its_real_owner_and_portable_materials(tmp
                   counts={'design__lvs_error__count':2} if case=='measured_fail' else {})
     # No copied PASS record: real Python producer created the owner judgment.
     # An explicit provider publisher file-ref selects that existing LL owner.
-    record=project/'reports/phase3/provider_die_assembly.json';record.write_text('{}\n')
+    record=project/'reports/phase3/neutral-selected-assembly.json';record.write_text('{}\n')
     assembly={'gds':layout,'sha256':digest(layout),'report':record,'source_project':project,
               'basis':{'current_signoff':{'lvs':_file_ref(info['record'])}},'scope':'provider_die_assembly'}
     measured=_REAL_RELEASE_SOURCES(project,layout,assembly)
