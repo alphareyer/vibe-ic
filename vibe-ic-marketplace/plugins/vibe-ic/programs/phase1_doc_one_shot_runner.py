@@ -42915,6 +42915,229 @@ def _l8_confirmed_width_declarations(
     return confirmed
 
 
+# Ported from public PR #3239 (e0750b5), then authority-bounded for the
+# current-base #3234 contract.  Literal defaults are scoped before the flat
+# L9 mirror; only Markdown HDL fences can declare them.
+_L8_LITERAL_PARAM_DECL = re.compile(
+    r"\b(?P<kind>parameter|localparam)\s+"
+    r"(?:(?:(?:integer|int|longint|shortint|byte|bit|logic|reg|wire|signed|unsigned)\b"
+    r"|\[[^\]\r\n]+\])\s+)*"
+    r"(?P<name>[A-Za-z_]\w*)\s*=\s*"
+    r"(?P<value>\d+'[bBhHdDoO][0-9a-fA-F_]+|0[xX][0-9a-fA-F]+|\d+)"
+    r"[ \t]*(?=[;,\r\n`]|$)")
+_ISSUE3234_MD_SV_FENCE = re.compile(
+    r"(?ms)^[ \t]*```(?:systemverilog|verilog|sv)\b[^\n]*\n"
+    r"(?P<body>.*?)^[ \t]*```[ \t]*$"
+)
+_ISSUE3234_MODULE_START = re.compile(
+    r"(?m)^[ \t]*module(?:[ \t]+(?:automatic|static))?[ \t]+"
+    r"(?P<name>[A-Za-z_]\w*)[ \t]*(?=[#(;])"
+)
+_ISSUE3234_MODULE_END = re.compile(r"(?m)^[ \t]*endmodule\b")
+_ISSUE3234_NONCURRENT_HEADING = re.compile(
+    r"\b(?:examples?|options?|alternatives?|hypothetical|historical|legacy)\b",
+    re.IGNORECASE,
+)
+_ISSUE3234_NONCURRENT_LEADIN = re.compile(
+    r"(?is)^\s*(?:for\s+)?(?:an?\s+)?"
+    r"(?:example|hypothetical|historical|legacy)\b"
+)
+
+
+def _issue3234_position_is_current(text: str, position: int) -> bool:
+    """True when ``position`` is not under an explicit example/history scope.
+
+    A language fence says what grammar its body uses; it does not by itself say
+    that the body is the current design contract.  Keep that authority decision
+    at the Markdown section boundary instead of promoting every quoted example.
+    """
+    prefix = text[:max(0, position)]
+    headings = list(re.finditer(
+        r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(?P<title>[^\n]+)$", prefix))
+    if headings and _ISSUE3234_NONCURRENT_HEADING.search(
+            headings[-1].group("title")):
+        return False
+    section_start = headings[-1].end() if headings else 0
+    paragraphs = re.split(r"\n[ \t]*\n", prefix[section_start:].strip())
+    return not (paragraphs and _ISSUE3234_NONCURRENT_LEADIN.search(
+        paragraphs[-1]))
+
+
+def _issue3234_explicit_parameter_owner(
+        extracted: Dict[str, str]) -> Tuple[Optional[str], bool]:
+    """Return the one current explicit module owner, or a conflict marker."""
+    names: Set[str] = set()
+    saw_explicit = False
+    for text in (extracted or {}).values():
+        if not isinstance(text, str) or not text:
+            continue
+        prose = _strip_hdl_comments(text)
+        for match in _RE_DOC_TOP_MODULE_NAME_LABEL.finditer(prose):
+            if not _issue3234_position_is_current(prose, match.start()):
+                continue
+            saw_explicit = True
+            name = (match.group("n1") or match.group("n2")
+                    or match.group("n3") or "").strip()
+            if name and _is_valid_explicit_module_name_candidate(name):
+                names.add(name)
+        for match in _RE_DOC_TOP_MODULE_TOP_IS_NAMED.finditer(prose):
+            if not _issue3234_position_is_current(prose, match.start()):
+                continue
+            saw_explicit = True
+            quoted = (match.group("q") or "").strip()
+            bare = (match.group("b") or "").strip()
+            if quoted and _is_valid_explicit_module_name_candidate(quoted):
+                names.add(quoted)
+            elif bare and _is_valid_top_module_candidate(bare):
+                names.add(bare)
+        for match in _RE_DOC_TOP_MODULE_DESIGN_REQUEST_NAMED.finditer(prose):
+            if not _issue3234_position_is_current(prose, match.start()):
+                continue
+            lo, hi = _prose_sentence_scope(
+                prose, match.start("name"), match.end("name"),
+                extra_breaks=("; ",))
+            if _prose_is_denied(prose[lo:hi]) is not None:
+                continue
+            saw_explicit = True
+            name = (match.group("name") or "").strip()
+            if name and _is_valid_explicit_module_name_candidate(name):
+                names.add(name)
+    return (next(iter(names)) if len(names) == 1 else None, saw_explicit)
+
+
+def _l8_literal_parameter_rows(
+        extracted: Dict[str, str]
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Keep fenced literal defaults inside the selected module namespace.
+
+    This is the public PR #3239 walker on the current-base identical producer,
+    with two measured repairs: an explicit Example/History section is not
+    current authority, and an unresolved single fenced compilation unit emits
+    a named refusal instead of silently appearing absent.  Multiple independent
+    module fences retain the proposal's hard ``ValueError`` refusal.
+    """
+    declarations: List[Tuple[str, Any, Optional[str]]] = []
+    module_names: Set[str] = set()
+    module_fence_count = 0
+    literal_declarations_seen = 0
+    noncurrent_literal_fences = 0
+    for fname, original in (extracted or {}).items():
+        if not isinstance(original, str) or not original:
+            continue
+        for fence in _ISSUE3234_MD_SV_FENCE.finditer(original):
+            code = _strip_hdl_comments(fence.group("body") or "")
+            matches = list(_L8_LITERAL_PARAM_DECL.finditer(code))
+            if not _issue3234_position_is_current(original, fence.start()):
+                declarations_here = len(matches)
+                if declarations_here:
+                    noncurrent_literal_fences += 1
+                continue
+            literal_declarations_seen += len(matches)
+            starts = list(_ISSUE3234_MODULE_START.finditer(code))
+            if starts:
+                module_fence_count += 1
+            regions: List[Tuple[int, int, str]] = []
+            for index, start in enumerate(starts):
+                end = _ISSUE3234_MODULE_END.search(code, start.end())
+                if end is None or (index + 1 < len(starts)
+                                   and end.start() > starts[index + 1].start()):
+                    raise ValueError(
+                        "L8_PARAMETER_OWNER_UNRESOLVED: "
+                        "unclosed documented module")
+                owner = start.group("name")
+                module_names.add(owner)
+                regions.append((start.start(), end.end(), owner))
+            for match in matches:
+                owner = next((name for lo, hi, name in regions
+                              if lo <= match.start() < hi), None)
+                declarations.append((fname, match, owner))
+
+    if not declarations:
+        if noncurrent_literal_fences:
+            return [], {
+                "verdict": "SKIPPED",
+                "reason": "NONCURRENT_EXAMPLE_OR_HISTORY",
+                "fence_count": noncurrent_literal_fences,
+            }
+        return [], None
+
+    explicit_owner, saw_explicit = _issue3234_explicit_parameter_owner(
+        extracted)
+    if saw_explicit:
+        if explicit_owner is None:
+            raise ValueError(
+                "L8_PARAMETER_OWNER_UNRESOLVED: "
+                "conflicting explicit top modules")
+        top = explicit_owner
+    else:
+        top = (next(iter(module_names)) if len(module_names) == 1 else None)
+    if module_names and top is None:
+        if module_fence_count > 1:
+            raise ValueError(
+                "L8_PARAMETER_OWNER_UNRESOLVED: "
+                "multiple documented modules require selected top")
+        return [], {
+            "verdict": "REFUSED",
+            "reason": "MULTIPLE_MODULES_WITHOUT_SELECTED_OWNER",
+            "module_count": len(module_names),
+            "literal_declarations_seen": literal_declarations_seen,
+        }
+    if module_names and top not in module_names:
+        if module_fence_count > 1:
+            raise ValueError(
+                "L8_PARAMETER_OWNER_UNRESOLVED: selected top not declared")
+        return [], {
+            "verdict": "REFUSED",
+            "reason": "SELECTED_OWNER_NOT_DECLARED",
+            "selected_module": top,
+            "module_count": len(module_names),
+            "literal_declarations_seen": literal_declarations_seen,
+        }
+
+    rows: List[Dict[str, Any]] = []
+    for fname, match, owner in declarations:
+        if module_names and owner is None:
+            raise ValueError(
+                "L8_PARAMETER_OWNER_UNRESOLVED: "
+                "literal declaration outside documented module")
+        if owner is not None and owner != top:
+            continue
+        row: Dict[str, Any] = {
+            "name": match.group("name"),
+            "default": match.group("value"),
+            "source": fname,
+            "declaration_kind": match.group("kind"),
+            "extraction_strategy": "literal_rtl_parameter_declaration",
+        }
+        if owner is not None:
+            row["module_owner"] = owner
+        rows.append(row)
+
+    if module_names and not rows:
+        if module_fence_count > 1:
+            raise ValueError(
+                "L8_PARAMETER_OWNER_UNRESOLVED: "
+                "selected top has no literal parameters")
+        return [], {
+            "verdict": "REFUSED",
+            "reason": "SELECTED_OWNER_HAS_NO_LITERAL_PARAMETERS",
+            "selected_module": top,
+            "literal_declarations_seen": literal_declarations_seen,
+        }
+    if module_names:
+        return rows, {
+            "verdict": "EMITTED",
+            "ownership": "selected_module",
+            "selected_module": top,
+            "emitted": len(rows),
+        }
+    return rows, {
+        "verdict": "EMITTED",
+        "ownership": "standalone_declaration",
+        "emitted": len(rows),
+    }
+
+
 def gen_l8_timing_waveform(project: Path,
                            extracted: Dict[str, str]) -> LDocResult:
     """L8: RX classifier ticks + TX bit cell + frame-end gap.
@@ -44415,6 +44638,30 @@ def gen_l8_timing_waveform(project: Path,
     # L5 bullet_kv) and a README H4 lands once at each L doc.
     _l8_parameters: List[Dict[str, Any]] = []
     _l8_param_seen: Set[Tuple[str, str]] = set()
+
+    # Public PR #3239 core, with the measured authority/refusal repairs above.
+    # Run before the legacy heading/table extractors so a source declaration is
+    # the owning structural fact, then reuse their existing dedup and evidence.
+    (_l8_literal_parameters,
+     _l8_literal_parameter_extraction) = _l8_literal_parameter_rows(extracted)
+    for p_entry in _l8_literal_parameters:
+        p_name = (p_entry.get("name") or "").strip()
+        p_default = p_entry.get("default")
+        if not p_name:
+            continue
+        key = (p_name.upper(),
+               p_default if p_default is not None else "")
+        if key in _l8_param_seen:
+            continue
+        _l8_param_seen.add(key)
+        _l8_parameters.append(dict(p_entry))
+        _v1_6_395_push_l8_evidence(
+            evidence,
+            p_entry.get("source") or "",
+            f"{p_name}"
+            + (f" = {p_default}" if p_default is not None else ""),
+            p_entry.get("extraction_strategy") or "")
+
     for fname, text in extracted.items():
         for p_entry in _v1_6_321_extract_design_parameters(text or ""):
             p_name = (p_entry.get("name") or "").strip()
@@ -44610,6 +44857,13 @@ def gen_l8_timing_waveform(project: Path,
         "no_synthesis_targets_in_input": len(synthesis_targets) == 0,
         # v1.6.321 — for #220 ORGANIC P2.
         "parameters": _l8_parameters,
+        # Issue #3234 — present only when the literal-fence walker had an
+        # applicable declaration or an explicit non-current/refusal outcome.
+        # A refusal is therefore visible and cannot masquerade as "nothing in
+        # the input"; ordinary documents with no such fence gain no new field.
+        **({"literal_parameter_extraction":
+            _l8_literal_parameter_extraction}
+           if _l8_literal_parameter_extraction is not None else {}),
         # v1.6.376 — for #265 R3 ORGANIC. Provenance counter: number
         # of peripheral-only first-mention emits the gate suppressed
         # (chip-top doc never literally named the domain). Audits the
