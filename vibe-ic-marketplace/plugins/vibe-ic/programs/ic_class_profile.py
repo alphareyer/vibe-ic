@@ -1320,15 +1320,21 @@ def _looks_like_serial_peripheral_protocol(
     # Internal serial arithmetic also shifts data and transmits/receives
     # register values. Pin count or a generic clock divider does not make it
     # a wire protocol: require serial-link, framing or bit-timing semantics.
+    # A standalone START/STOP bit may only initiate a software-controlled
+    # operation; it does not independently establish an external wire.
     wire_evidence = re.search(
         r"\b(?:baud\s*(?:rate|divisor|generator)|"
         r"(?:nominal\s+)?bit\s+(?:rate|time|timing)|"
-        r"(?:slave|chip)\s+select|start\s+bit|stop\s+bit|"
+        r"(?:slave|chip)\s+select|"
         r"serial\s+(?:interface|port|link|protocol|communications?|bus|"
         r"data\s+line|clock\s+line)|asynchronous\s+communication\s+bits|"
         r"start\s+of\s+frame|end\s+of\s+frame|frame\s+delimiter)\b",
         text, re.IGNORECASE)
-    if not wire_evidence:
+    framing_evidence = any(
+        all(re.search(pattern, sentence, re.IGNORECASE) for pattern in (
+            r"\bframes?\b", r"\bstart\s+bit\b", r"\bstop\s+bit\b"))
+        for part in parts for sentence in re.split(r"[.!?]", part))
+    if not (wire_evidence or framing_evidence):
         return False
     hits = sum(1 for _, pat in _SERIAL_PROTO_FEATURES if pat.search(text))
     return hits >= 3
