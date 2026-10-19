@@ -213,6 +213,41 @@ def test_lvs_half_bridges_a_powered_netlist_from_the_routed_database(tmp_path, m
     assert "write_verilog -include_pwr_gnd" in (bridge / "to_pnl.tcl").read_text()
 
 
+def test_lvs_half_extracts_gds_with_the_supplied_physical_reference(tmp_path, monkeypatch):
+    project, pnr, configs, pdk_root = _half_project(tmp_path, pv.LVS_CHAIN)
+    supplied = pnr / "current-powered.v"; supplied.write_text("powered current layout")
+    seen = {}
+    def resolve(*args, **kwargs):
+        seen.update(kwargs)
+        return configs
+    monkeypatch.setattr(pv, "resolve_step_configs", resolve)
+    calls = _fake_tool(monkeypatch, {
+        "Magic.SpiceExtraction": {"magic__illegal_overlap__count": 0},
+        "Netgen.LVS": {k: 0 for k in pv.PRODUCED["Netgen.LVS"]}})
+    record = pv.run_half(project, "img", pdk_root, "procA", "lvs",
+                         gds=pnr / "chip.gds", routed_def=pnr / "chip.def",
+                         netlist=pnr / "chip_pnr.v", sdc=pnr / "constraint.sdc",
+                         powered_netlist=supplied, physical_top="physical_chip")
+    assert seen["overlay"]["MAGIC_EXT_USE_GDS"][0] is True
+    assert seen["overlay"]["MAGIC_EXT_ABSTRACT"][0] is False
+    assert seen["overlay"]["DESIGN_NAME"][0] == "physical_chip"
+    state = json.loads((project / "phase3/librelane/31-lvs-config/bridge/state_in.json").read_text())
+    assert state["pnl"] == str(supplied.resolve())
+    assert not any("openroad" in call for call in calls)
+    assert record["scope"]["extracted_gds_sha256"] == contract.digest(pnr / "chip.gds")
+
+
+def test_lvs_half_missing_supplied_reference_refuses_before_native(tmp_path, monkeypatch):
+    project, pnr, configs, pdk_root = _half_project(tmp_path, pv.LVS_CHAIN)
+    monkeypatch.setattr(pv, "resolve_step_configs", lambda *a, **k: configs)
+    calls = _fake_tool(monkeypatch, {})
+    with pytest.raises(contract.Refusal, match="LL_PV_VIEW_MISSING: pnl"):
+        pv.run_half(project, "img", pdk_root, "procA", "lvs", gds=pnr / "chip.gds",
+                    routed_def=pnr / "chip.def", netlist=pnr / "chip_pnr.v",
+                    sdc=pnr / "constraint.sdc", powered_netlist=pnr / "missing.v")
+    assert not any("--id" in call for call in calls)
+
+
 def test_a_bridge_that_writes_no_powered_netlist_refuses(tmp_path, monkeypatch):
     project, pnr, configs, pdk_root = _half_project(tmp_path, pv.LVS_CHAIN)
     monkeypatch.setattr(pv, "resolve_step_configs", lambda *a, **k: configs)
@@ -382,7 +417,72 @@ def _published_half(tmp_path, runner, monkeypatch, half, record, files):
     monkeypatch.setattr(pv, "run_half", lambda *a, **k: _put(
         project / pv.RECORD_REL.format(half=half), record) and record)
     pdk = SimpleNamespace(name="procA")
+    if half == "lvs":
+        current = importlib.import_module("_physical_current")
+        selected = {}
+        for key, name in (("gds", "current.gds"), ("def", "current.def"),
+                          ("netlist", "current.v")):
+            selected[key] = project / name; selected[key].write_text(name)
+        monkeypatch.setattr(current, "default_signoff_inputs", lambda p: selected)
+        monkeypatch.setattr(runner, "_streamout_top", lambda *a: ("chip", None))
+        monkeypatch.setattr(runner, "_stage_padring_io_lefs_for_lvs", lambda *a: [])
+        monkeypatch.setattr(runner._lvs_pa, "emit_to_file",
+                            lambda source, pdk, output, **kwargs: output.write_text("powered"))
+        pdk.cell_lef = "cells.lef"
     return project, runner._step31_librelane(project, "chip", pdk, half, publish=True)
+
+
+@pytest.mark.parametrize("current_available,provider_release", [(True, False),
+                                                               (False, False),
+                                                               (True, True)])
+def test_librelane_lvs_caller_uses_current_final_and_well_tied_reference(
+        tmp_path, runner, monkeypatch, current_available, provider_release):
+    current = importlib.import_module("_physical_current")
+    pnr = tmp_path / "phase3/stage3/pnr"; pnr.mkdir(parents=True)
+    (pnr / "core.gds").write_text("old unadopted stream")
+    selected = {}
+    for key, name in (("gds", "current-final.gds"), ("def", "filled.def"),
+                      ("netlist", "physical.v")):
+        selected[key] = tmp_path / name; selected[key].write_text(name)
+    monkeypatch.setattr(current, "default_signoff_inputs",
+                        lambda p: selected if current_available else None)
+    provider_gds = None
+    if provider_release:
+        import die_finishing_gen
+        record = tmp_path / "reports/phase3/provider_die_assembly.json"
+        record.parent.mkdir(parents=True); record.write_text("producer release")
+        provider_gds = tmp_path / "provider-final.gds"; provider_gds.write_text("provider final")
+        def admitted(project, path):
+            assert path == record
+            return {"gds": provider_gds, "source_project": tmp_path}
+        monkeypatch.setattr(die_finishing_gen, "read_admitted_release", admitted)
+    monkeypatch.setattr(contract, "resolve_image", lambda p: "img")
+    monkeypatch.setattr(contract, "resolve_pdk_root", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(runner, "_streamout_top", lambda *a: ("physical_chip", None))
+    monkeypatch.setattr(runner, "_stage_padring_io_lefs_for_lvs", lambda *a: [])
+    emitted, consumed = {}, {}
+    def emit(source, pdk, output, **kwargs):
+        emitted.update(source=source, output=output, **kwargs)
+        output.write_text("explicit power-aware physical reference")
+    def run(*args, **kwargs):
+        consumed.update(kwargs)
+        return {"verdict": "PASS", "reasons": [], "metrics": {}}
+    monkeypatch.setattr(runner._lvs_pa, "emit_to_file", emit)
+    monkeypatch.setattr(pv, "run_half", run)
+    pdk = SimpleNamespace(name="procA", cell_lef="cells.lef")
+    result = runner._step31_librelane(tmp_path, "core", pdk, "lvs", publish=False)
+    if not current_available:
+        assert result.status == "NOT_MEASURED"
+        assert consumed == {} and emitted == {}
+    else:
+        assert result.status == "PASS"
+        assert consumed["gds"] == (provider_gds or selected["gds"])
+        assert consumed["routed_def"] == selected["def"]
+        assert consumed["netlist"] == emitted["source"] == selected["netlist"]
+        assert consumed["physical_top"] == emitted["top"] == "physical_chip"
+        assert consumed["powered_netlist"] == emitted["output"]
+        assert emitted["rails_as_ports"] is True
+        assert emitted["tie_wells_to_rails"] is True
 
 
 _DECK_LYRDB = ("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<report-database>\n"

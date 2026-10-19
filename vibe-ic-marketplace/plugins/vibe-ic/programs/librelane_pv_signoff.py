@@ -219,7 +219,9 @@ def bridge(project: Path, image: str, pdk_root: Path, pdk: str, configs: dict[st
 
 
 def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
-             gds: Path, routed_def: Path, netlist: Path, sdc: Path) -> dict:
+             gds: Path, routed_def: Path, netlist: Path, sdc: Path,
+             powered_netlist: Path | None = None,
+             physical_top: str | None = None) -> dict:
     """Step 31, one half, on the shipped GDS and the routed DEF it came from.
 
     The halves run in separate lanes (``31-drc``, ``31-lvs``) so the runner's
@@ -228,17 +230,29 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
     if half not in HALVES:
         raise Refusal('LL_PV_HALF_UNKNOWN', half)
     chain = HALVES[half]
+    options = dict(tech_lef_overlay(project) or {})
+    if half == 'lvs':
+        options.update({key: (value, 'Step31 verifies the actual final GDS')
+                        for key, value in {'MAGIC_EXT_USE_GDS': True,
+                                           'MAGIC_EXT_ABSTRACT': False}.items()})
+    if physical_top:
+        options['DESIGN_NAME'] = (physical_top, 'Current physical layout top')
     configs = resolve_step_configs(project, image, pdk, list(chain), pdk_root=pdk_root,
                                    folder=f'31-{half}-config',
-                                   overlay=tech_lef_overlay(project))
+                                   overlay=options)
+    views = {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds}
+    if powered_netlist is not None:
+        views['pnl'] = powered_netlist
     state = bridge(project, image, pdk_root, pdk, configs, chain,
-                   {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds},
+                   views,
                    f'31-{half}-config')
     folders = run_chain(project, image, [(step, configs[step], state) for step in chain],
                         mounts=[(pdk_root.resolve(), PDK_GUEST_ROOT)], lane=f'31-{half}', pdk_root=PDK_GUEST_ROOT)
     required = tuple(step for step in chain if step in PRODUCED)
     return judge_pv(folders, required, project / RECORD_REL.format(half=half),
-                    scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)})
+                    scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def),
+                           **({'magic_ext_use_gds': True, 'extracted_gds_sha256': digest(gds)}
+                              if half == 'lvs' else {})})
 
 
 def run_mixed_top(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,

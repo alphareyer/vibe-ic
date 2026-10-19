@@ -52690,10 +52690,42 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                           "LL_PDK_ROOT_NOT_RESOLVABLE",
                           reason_class=_V.ReasonClass.TOOL_ABSENT)
     try:
+        views = {"gds": pnr / f"{top}.gds", "def": pnr / f"{top}.def",
+                 "netlist": pnr / f"{top}_pnr.v"}
+        powered = None
+        physical_top = None
+        if half == "lvs":
+            import _physical_current as current
+            reference_project = project
+            release = None
+            release_record = project / "reports/phase3/provider_die_assembly.json"
+            if release_record.is_file():
+                from die_finishing_gen import read_admitted_release
+                release = read_admitted_release(project, release_record)
+                reference_project = release["source_project"]
+            selected = current.default_signoff_inputs(reference_project)
+            if not selected:
+                raise Refusal("LL_PV_VIEW_MISSING", "current final GDS and physical reference")
+            views = {**selected, **({"gds": release["gds"]} if release else {})}
+            pnr = _pl.pnr_dir(reference_project)
+            physical_top, _ = _streamout_top(views["def"], top)
+            job = project / "reports/phase3" / f"librelane_lvs_reference_{time.time_ns()}"
+            job.mkdir(parents=True)
+            powered = job / "reference.v"
+            additional_lefs = sorted({
+                *_pl.extracted_dir(reference_project).glob("*.extract.lef"),
+                *_stage_padring_io_lefs_for_lvs(project, pdk, image)}, key=str)
+            _lvs_pa.emit_to_file(views["netlist"], pdk.name, powered,
+                                top=physical_top, rails_as_ports=True,
+                                tie_wells_to_rails=True, cell_lef=pdk.cell_lef,
+                                additional_lefs=additional_lefs)
         record = _pv.run_half(project, image, Path(root), pdk.name, half,
-                              gds=pnr / f"{top}.gds", routed_def=pnr / f"{top}.def",
-                              netlist=pnr / f"{top}_pnr.v",
-                              sdc=pnr / "constraint.sdc")
+                              gds=views["gds"], routed_def=views["def"],
+                              netlist=views["netlist"], sdc=pnr / "constraint.sdc",
+                              powered_netlist=powered, physical_top=physical_top)
+    except (OSError, ValueError) as exc:
+        return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
     except Refusal as exc:
         if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
             return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
