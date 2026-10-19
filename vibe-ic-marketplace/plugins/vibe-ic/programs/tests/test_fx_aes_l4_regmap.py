@@ -331,6 +331,7 @@ def test_an_unrun_selected_gate_blocks_and_has_a_typed_receipt(
 @pytest.mark.parametrize("line, expected", [
     ("[SKIP] no register map applies", "NOT_APPLICABLE"),
     ("", "NOT_MEASURED"),
+    ("rc2 without a terminal classification", "NOT_MEASURED"),
 ])
 def test_rc2_needs_an_explicit_nonapplicable_verdict(tmp_path, line, expected):
     gates = tmp_path / "gates"
@@ -368,3 +369,55 @@ def test_the_tail_failure_line_names_the_report_directory():
     src = RUNNER.read_text()
     assert "— see reports/phase1/\")" not in src
     assert "and reports/phase1/*.json" not in src
+
+
+@pytest.mark.parametrize("case, expected_rc, expected_verdict", [
+    ("one_bit", 2, "NOT_APPLICABLE"),
+    ("typed_enum", 0, "PASS"),
+    ("missing_enum", 1, "FAIL"),
+])
+def test_actual_enum_layergate_terminal_verdict(
+        tmp_path, case, expected_rc, expected_verdict):
+    """The real enum producer's measured N/A is terminal, never a PASS."""
+    project = tmp_path / "project"
+    docs = project / "phase1/generated_docs"
+    docs.mkdir(parents=True)
+    field = ({"name": "ENABLE", "bits": "0:0"} if case == "one_bit" else
+             {"name": "MODE", "bits": "1:0"})
+    if case == "typed_enum":
+        field["enumerated_values"] = [
+            {"code": 0, "meaning": "Idle"},
+            {"code": 1, "meaning": "Run"},
+        ]
+    (docs / "L4_REGMAP.json").write_text(json.dumps({
+        "registers": [{"name": "CTRL", "fields": [field]}]}))
+    gate = "l4_regmap_enumerated_values_typed_check"
+    result = R._run_layergate2(
+        project, gates=((gate, "l4_regmap_enumerated_values"),))
+    receipt = json.loads(R._pl.report_path(
+        project, "phase1/l4_regmap_enumerated_values.run.json").read_text())
+    gate_report = json.loads(R._pl.report_path(
+        project, "phase1/l4_regmap_enumerated_values.json").read_text())
+    observed = {
+        "blocking": list(result), "failed": result.failed,
+        "not_measured": result.not_measured,
+        "not_applicable": result.not_applicable,
+        "receipt": receipt, "gate_report": gate_report,
+    }
+    (tmp_path / "TERMINAL_OBSERVATION.json").write_text(
+        json.dumps(observed, indent=2) + "\n")
+    assert receipt["returncode"] == expected_rc
+    assert gate_report["stdout"] == receipt["stdout"]
+    assert gate_report["stderr"] == receipt["stderr"]
+    if case == "one_bit":
+        assert receipt["stdout"].startswith("[NOT_APPLICABLE_BY_STRUCTURE]")
+        assert "enumerated 1 register field(s) L4 carries and found 0" in receipt["stdout"]
+        assert "examined 0" in receipt["stdout"]
+        assert "of 1 considered" in receipt["stdout"]
+    expected = ([gate], [gate], [], []) if expected_verdict == "FAIL" else (
+        [], [], [], [gate] if expected_verdict == "NOT_APPLICABLE" else [])
+    assert (list(result), result.failed, result.not_measured,
+            result.not_applicable) == expected
+    assert receipt["verdict"] == expected_verdict
+    if expected_verdict == "NOT_APPLICABLE":
+        assert receipt["reason"] == "gate_declared_not_applicable_by_structure"
