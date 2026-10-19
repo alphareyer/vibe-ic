@@ -26742,14 +26742,24 @@ def main() -> int:
     # post-authoring re-invoke, AI-authored RTL) so a hidden TB instantiating
     # either spelling elaborates — without the author having to remember to run
     # the program. Best-effort + collision-safe; never gates.
-    plan.append(step_leaf_typo_aliases(project))
+    if _before_entry("rtl_gen", _entry_site):
+        plan.append(_entry_sentinel("leaf_typo_aliases"))
+    elif _after_exit("rtl_gen"):
+        plan.append(_exit_sentinel("leaf_typo_aliases"))
+    else:
+        plan.append(step_leaf_typo_aliases(project))
 
     # ORGANIC #518 — auto-emit a reset/clock NAME-VARIANT alias wrapper for the
     # TOP module so a hidden TB using an equivalent STANDARD spelling (reset_n
     # design vs .rst_n TB) elaborates. Same wiring intent as #517 but the
     # wrapper TAKES OVER the top name (port-rename, not module-rename). Best-
     # effort + polarity-safe; never gates.
-    plan.append(step_reset_clock_variant_aliases(project, args.top_name))
+    if _before_entry("rtl_gen", _entry_site):
+        plan.append(_entry_sentinel("reset_clock_variant_aliases"))
+    elif _after_exit("rtl_gen"):
+        plan.append(_exit_sentinel("reset_clock_variant_aliases"))
+    else:
+        plan.append(step_reset_clock_variant_aliases(project, args.top_name))
 
     # F28 — step 1's catalog synth-safe gate, INLINE and blocking, on the RTL as
     # staged above (generator, reused-IP consume and aliases included): a
