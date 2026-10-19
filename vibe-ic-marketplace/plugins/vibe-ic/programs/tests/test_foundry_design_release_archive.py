@@ -333,6 +333,7 @@ def test_selected_provider_pv_archive_reads_native_rows_and_geometry(tmp_path,mo
 
 def test_native_lvs_bundle_relative_includes_survive_real_relocation(tmp_path,monkeypatch):
     import pya
+    import klayout_pdk_lvs as native_owner
     project,source=neutral(tmp_path/'pack',monkeypatch)
     layout=project/'phase3/stage4/gds/alpha.gds'
     work=tmp_path/'native-job';work.mkdir()
@@ -370,10 +371,25 @@ def test_native_lvs_bundle_relative_includes_survive_real_relocation(tmp_path,mo
             'runset_sources':[deck,sub,tool], 'library_translation':{'tool':tool,'input':raw,'output':cells,'log':translated},
             'extraction_basis':extraction,'producer_sources':[producer],
             'log':log,'inputs_manifest':inputs,'execution':{'rc':0,'inputs_unchanged':True}}
+    record['geometry_equivalence']=native_owner._native_geometry_equivalence(
+        project,extraction['layout_source'],record['layout_source'])
     report=project/'reports/phase3/lvs_verdict.json';report.parent.mkdir(parents=True,exist_ok=True)
     report.write_text(json.dumps(record)+'\n')
     measured=_REAL_RELEASE_SOURCES(project,layout)
     assert measured['validation']['lvs']['verdict']=='PASS',measured['validation']['lvs']
+    # A current record cannot reuse the proof after its actual geometry changes.
+    prior_bytes,report_bytes=prior_layout.read_bytes(),report.read_bytes()
+    from test_foundry_handoff_pack_gen import _physical_gds
+    prior_layout.write_bytes(_physical_gds(('different_root',)))
+    damaged=copy.deepcopy(record)
+    damaged['extraction_basis']['layout_source']=dict(_file_ref(prior_layout),kind='gds')
+    report.write_text(json.dumps(damaged)+'\n')
+    try:
+        refused=_REAL_RELEASE_SOURCES(project,layout)['validation']['lvs']
+        assert refused['verdict']=='NOT_MEASURED'
+        assert 'NATIVE_LVS_LAYOUT_NOT_EQUIVALENT' in refused['reason']
+    finally:
+        prior_layout.write_bytes(prior_bytes);report.write_bytes(report_bytes)
     missing_path=Path(raw['path']);held_path=missing_path.with_suffix('.held')
     missing_path.rename(held_path)
     try:missing_translation=_REAL_RELEASE_SOURCES(project,layout)['validation']['lvs']['verdict']
