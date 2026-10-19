@@ -2250,7 +2250,7 @@ def test_explicit_frontend_window_preserves_signed_d1_success(tmp_path, monkeypa
 
     def bounded_child(label, runner, args, env=None):
         calls.append(runner.name)
-        assert runner.name == "design_one_shot_runner.py", calls
+        assert runner.name == "phase2_one_shot_runner.py", calls
         assert args[args.index("--exit-step") + 1] == "2", args
         _report(project, "phase2_one_shot.json", {
             "verdict": "PASS", "bounded": True,
@@ -2273,7 +2273,7 @@ def test_explicit_frontend_window_preserves_signed_d1_success(tmp_path, monkeypa
     assert doc["dispatched_verdict"] == "PASS", observation
     assert doc["verdict"] == doc["whole_flow_verdict"] == "NOT_MEASURED", observation
     assert doc["declared_window"] == {"entry_step": None, "exit_step": "2"}
-    assert doc.get("halted_at") is None and calls == ["design_one_shot_runner.py"]
+    assert doc.get("halted_at") is None and calls == ["phase2_one_shot_runner.py"]
     assert doc["phases"][0] == {"name": "phase1", "verdict": "PASS", "rc": 0}
     assert versions.latest_pass(project, "D1")["canonical_pass"] is True
     assert {path: path.read_bytes() for path in before} == before
