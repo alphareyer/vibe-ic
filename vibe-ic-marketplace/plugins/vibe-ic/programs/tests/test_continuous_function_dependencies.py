@@ -179,3 +179,29 @@ function automatic bit f(input bit q); f=q & b; endfunction
 generate if (1) begin:g assign y=f(a); end endgenerate
 endmodule''')
     assert len(rows) == 1 and rows[0].symbol == 'b'
+
+
+@pytest.mark.parametrize('declaration', [
+    'localparam bit b=1',
+    'parameter bit b=1',
+    'localparam b=1',
+    'parameter b=1',
+], ids=['typed-localparam', 'typed-parameter', 'untyped-localparam', 'untyped-parameter'])
+def test_generated_constant_actual_keeps_hidden_module_read_unresolved(tmp_path, declaration):
+    source = tmp_path / 'generated_shadow.sv'
+    source.write_text((FIXTURES / 'generated_constant_shadow.sv').read_text().replace(
+        'localparam bit b=1', declaration))
+    direct = [f for f in lint.lint_file(source) if f.rule == UNRESOLVED]
+    report = tmp_path / 'lint.json'
+    cp = subprocess.run([sys.executable, lint.__file__, '--json', str(report), str(source)],
+                        capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    rows = json.loads(report.read_text())
+    actual = [f for f in rows if f['rule'] == UNRESOLVED]
+    expected = [('WARN', False, True)]
+    assert [(f.severity, f.block_eligible, 'NOT_MEASURED' in f.message)
+            for f in direct] == expected
+    assert [(f['severity'], f['block_eligible'], 'NOT_MEASURED' in f['message'])
+            for f in actual] == expected
+    assert 'actual argument may bind a nested declaration' in actual[0]['message']
+    assert not [f for f in rows if f['rule'] == RULE]
