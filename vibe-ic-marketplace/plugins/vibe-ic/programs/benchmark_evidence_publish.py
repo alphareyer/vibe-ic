@@ -1909,23 +1909,22 @@ _RELEASE_DOCS_STEP_ID = "37.5{arm}"
 #: run is. A name-derived kind would be a chip literal in a chip-AGNOSTIC
 #: program and would be wrong the first time a die is called `*_ip`.
 #:
-#: WHY AN IC OWES BOTH SETS. A die that will be fabricated is also a part
-#: somebody integrates, and the owner's ruling is that its cell carries the
-#: die's own sign-off document set AND the IP-style document set. An IP owes
-#: the IP set only: it has no die, no pad ring and no tape-out precheck, and
-#: demanding a die's documents of it would be demanding evidence of something
-#: it is not.
+#: Each route owes its own documents (owner ruling, 2026-10-19). An IC owes
+#: its die sign-off outputs and IC documents; it need not produce an IP release
+#: or hardmacro merely to publish. An IP still owes its IP document set and
+#: does not owe die, pad-ring or tape-out-precheck documents. Existing optional
+#: documents remain eligible for staging when the run actually carries them.
 _KIND_IC = "IC"
 _KIND_IP = "IP"
 _KIND_UNDECLARED = "UNDECLARED"
 _KIND_ARMS: Dict[str, Tuple[str, ...]] = {
-    _KIND_IC: ("ic", "ip"),
+    _KIND_IC: ("ic",),
     _KIND_IP: ("ip",),
 }
 
 #: The arms whose STEP-DECLARED outputs — not merely whose documents — a cell
-#: must carry, exactly as the owner's ruling names them: "the 37.5ic set (9
-#: outputs) AND the 37.5ip set (7 docs)".
+#: must carry: an IC's 37.5ic set (9 outputs), while an IP owes the 37.5ip
+#: document set. Selecting one route does not require generating the other.
 #:
 #: THE ASYMMETRY IS THE RULING, NOT A CHOICE MADE HERE, and the second half is
 #: stated so it is not read as an oversight. 37.5ip's eleven declared outputs
@@ -2160,10 +2159,10 @@ def release_docs_invariant(run_dir: Path,
                            cell_rels: set) -> Tuple[Dict[str, object], List[str]]:
     """(what each documentation arm did, every way this cell breaks the rule).
 
-    THE RULE IS PER DESIGN KIND (owner ruling, 2026-09-02 on #2017):
+    THE RULE IS PER DESIGN KIND (owner ruling, 2026-10-19):
 
-        IC — a die / tape-out route is declared: the cell carries BOTH step
-             37.5ic's declared outputs AND step 37.5ip's document set.
+        IC — a die / tape-out route is declared: the cell carries step
+             37.5ic's declared outputs, including its IC documents.
         IP — no die route: step 37.5ip's document set only.
 
     and the kind is read from the run's delivery route, NEVER from the design
@@ -2198,14 +2197,9 @@ def release_docs_invariant(run_dir: Path,
     publish. Measured on the spm run tree that is 7 files where the declared
     set alone is 6.
 
-    A KNOWN CONSEQUENCE, STATED RATHER THAN DISCOVERED LATER. The flow's own
-    conditions make 37.5ic and 37.5ip MUTUALLY EXCLUSIVE (`slots/*.yaml` or
-    `SELF_TAPEOUT.txt` selects the first; `NO_TEMPLATE.txt` selects the
-    second), so an IC-route run as the flow stands today produces no `ip/`
-    documentation tree and CANNOT satisfy the IC clause. This function
-    implements the ruling as given and names the run's own state in the
-    refusal; reconciling the ruling with the flow's routing is a flow change
-    and is not made here.
+    The flow routes 37.5ic and 37.5ip separately, so an IC route need not
+    produce an IP documentation tree. This invariant requires the selected
+    route's own products; it does not invent the other route's deliverables.
 
     Decided against `cell_rels` — the set of paths the cell WILL carry, built
     by the same walks that stage them — so `--dry-run` and a real publish reach

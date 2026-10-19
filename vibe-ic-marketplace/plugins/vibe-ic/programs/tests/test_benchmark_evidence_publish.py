@@ -782,7 +782,8 @@ def test_a_closure_staged_document_is_itself_closed_and_recorded_on_a_restage(tm
 # and the published cell carried NONE of it, every file recorded
 # OUT_OF_PUBLISHED_SCOPE. The owner's ruling makes the set an INVARIANT keyed
 # on the design KIND read from the delivery route — an IC owes 37.5ic's nine
-# declared outputs AND the 37.5ip document set; an IP owes the 37.5ip set.
+# declared outputs; an IP owes the 37.5ip document set. Neither needs the
+# other route's documents (owner ruling, 2026-10-19).
 # --------------------------------------------------------------------------
 
 sys.path.insert(0, str(PROG.parent))
@@ -912,9 +913,9 @@ def test_an_ip_run_with_no_document_set_at_all_is_REFUSED(tmp_path):
     assert "NO release directory" in (r.stdout + r.stderr)
 
 
-def test_an_ic_run_owes_BOTH_sets_and_a_complete_one_is_staged(tmp_path):
-    """The IC kind: 37.5ic's nine declared outputs AND the 37.5ip document
-    set, both in the cell."""
+def test_an_ic_run_stages_its_required_and_existing_optional_document_sets(tmp_path):
+    """An IC owes its nine outputs; optional IP documents already produced
+    by the run are still staged rather than silently dropped."""
     run = _make_run(tmp_path)
     _declare_route(run, _TD.DELIVERABLE_DIE)
     _plant_ic_signoff(run)
@@ -929,20 +930,23 @@ def test_an_ic_run_owes_BOTH_sets_and_a_complete_one_is_staged(tmp_path):
         assert (cell / rel).is_file(), rel
     state = json.loads(out.read_text())["release_documentation"]
     assert state["design_kind"] == "IC"
-    assert sorted(state["arms_required"]) == ["ic", "ip"]
+    assert state["arms_required"] == ["ic"]
+    assert state["arms"]["ip"]["required_by_this_kind"] is False
     # The count the owner ruled on, DERIVED from the flow rather than typed.
     assert len(state["arms"]["ic"]["declared_outputs_enforced"]) == 9
 
 
-def test_an_ic_run_missing_the_ip_document_set_is_REFUSED(tmp_path):
+def test_an_ic_run_without_ip_documents_is_published(tmp_path):
     run = _make_run(tmp_path)
     _declare_route(run, _TD.DELIVERABLE_DIE)
     _plant_ic_signoff(run)
     _plant_docs(run, "ic", "widgetdie", _IC_DOC_SET)
     dest_root = tmp_path / "benchmark-data"
     r = _run(_base_args(run, dest_root))
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "37.5ip" in (r.stdout + r.stderr)
+    assert r.returncode == 0, r.stdout + r.stderr
+    cell = dest_root / "ic" / "widgetmul" / "v9.9.9_openpdkx"
+    assert (cell / _RDC.doc_dir("ic")).is_dir()
+    assert not (cell / _RDC.doc_dir("ip")).exists()
 
 
 def test_an_ic_run_missing_a_declared_signoff_output_is_REFUSED(tmp_path):
@@ -1020,3 +1024,56 @@ def test_an_undeclared_route_is_disclosed_and_not_silently_passed(tmp_path):
     state = json.loads(out.read_text())["release_documentation"]
     assert state["design_kind"] == "UNDECLARED"
     assert state["enforced"] is False
+
+
+@pytest.mark.parametrize("kind,missing,expected_rc", [
+    ("IC", None, 0),
+    ("IC", "PRELIMINARY_DATASHEET.md", 1),
+    ("IP", "IP_INTEGRATION_GUIDE.md", 1),
+])
+def test_publication_requires_the_selected_delivery_document_arm(
+        tmp_path, kind, missing, expected_rc):
+    """Exercise the real publisher CLI, route reader and repository flow
+    output contract. Other-arm documents cannot replace a required document.
+    All artefacts are neutral transport fixtures, not native signoff evidence.
+    """
+    run = _make_run(tmp_path)
+    deliverable = (_TD.DELIVERABLE_DIE if kind == "IC"
+                   else _TD.DELIVERABLE_HARDMACRO)
+    _declare_route(run, deliverable)
+    arm = kind.lower()
+    if kind == "IC":
+        _plant_ic_signoff(run)
+    own = _plant_docs(run, arm, "neutral-release",
+                      _IC_DOC_SET if kind == "IC" else _IP_DOC_SET)
+    if missing:
+        (run / _RDC.doc_dir(arm) / "neutral-release" / missing).unlink()
+        # Having the other arm's complete documents cannot excuse the loss.
+        other = "ip" if kind == "IC" else "ic"
+        _plant_docs(run, other, "neutral-release",
+                    _IP_DOC_SET if other == "ip" else _IC_DOC_SET)
+        if kind == "IP":
+            _plant_ic_signoff(run)
+    dest = tmp_path / "benchmark-data"
+    report = tmp_path / "publication.json"
+    proc = _run(_base_args(run, dest) + ["--json", str(report)])
+    cell = dest / "ic" / "widgetmul" / "v9.9.9_openpdkx"
+    observed = {"rc": proc.returncode, "cell_exists": cell.exists()}
+    expected = {"rc": expected_rc, "cell_exists": expected_rc == 0}
+    (tmp_path / "delivery-document-observation.json").write_text(json.dumps({
+        "kind": kind, "missing": missing, "observed": observed,
+        "expected": expected, "argv": proc.args,
+        "stdout": proc.stdout, "stderr": proc.stderr,
+        "scope": "Real publication CLI; neutral source transport only."},
+        indent=2))
+    assert observed == expected, {"observed": observed, "expected": expected,
+                                  "stderr": proc.stderr}
+    if expected_rc:
+        assert missing in proc.stdout + proc.stderr
+        assert "IN THE RUN ITSELF" in proc.stdout + proc.stderr
+    else:
+        state = json.loads(report.read_text())["release_documentation"]
+        assert state["arms_required"] == [arm]
+        assert len(state["arms"]["ic"]["declared_outputs_enforced"]) == 9
+        assert not (cell / _RDC.doc_dir("ip")).exists()
+        assert all((cell / rel).is_file() for rel in own)

@@ -105,7 +105,7 @@ def test_a_bound_slot_is_still_a_shuttle(tmp_path):
     kind, why = B.design_kind(run)
     assert kind == B._KIND_IC, why
     assert "binds operator slot" in why
-    assert B._KIND_ARMS[kind] == ("ic", "ip")
+    assert B._KIND_ARMS[kind] == ("ic",)
 
 
 def test_a_bound_slot_by_PATH_also_counts(tmp_path):
