@@ -292,8 +292,19 @@ def test_a_declaration_found_and_not_read_is_kept_not_swallowed(tmp_path,
 # ── the reader itself ──────────────────────────────────────────────────────
 def test_an_unreachable_image_is_unknown_never_a_default():
     reader = authority.ImageReader(DIGEST, runner=lambda _i, _a: (127, ""))
-    assert reader.is_file("/x") is False and reader.is_dir("/x") is False
-    assert reader.read_text("/x") is None and reader.glob("/x", "*") == []
+    for query in (lambda: reader.is_file("/x"),
+                  lambda: reader.is_dir("/x"),
+                  lambda: reader.read_text("/x"),
+                  lambda: reader.glob("/x", "*")):
+        with pytest.raises(OSError, match="rc=127"):
+            query()
+    absent = authority.ImageReader(
+        DIGEST, runner=lambda _i, argv: (0, "[]") if argv[0] == "python3"
+        else (1, ""))
+    assert absent.is_file("/x") is False
+    assert absent.is_dir("/x") is False
+    assert absent.read_text("/x") is None
+    assert absent.glob("/x", "*") == []
 
 
 def test_a_docker_that_cannot_run_is_127_not_a_silent_empty_success():
@@ -311,10 +322,13 @@ def test_a_docker_that_cannot_run_is_127_not_a_silent_empty_success():
     subprocess.run = explode
     try:
         rc, out = reader._docker(DIGEST, ["test", "-f", "/x"])
+        assert (rc, out) == (127, "")
+        with pytest.raises(OSError, match="rc=127"):
+            reader.is_file("/x")
+        with pytest.raises(OSError, match="rc=127"):
+            reader.read_text("/x")
     finally:
         subprocess.run = original
-    assert (rc, out) == (127, "")
-    assert reader.is_file("/x") is False and reader.read_text("/x") is None
 
 
 def test_a_read_only_image_is_asked_each_question_once():
