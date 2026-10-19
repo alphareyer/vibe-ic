@@ -248,6 +248,41 @@ def _drivers(mod: dict) -> Dict[int, dict]:
     return out
 
 
+def _raw_undef_q(mod: dict) -> set:
+    """Retain raw literal-undef provenance before optimizing its data away."""
+    drivers = _drivers(mod)
+    raw_q = {q for _, c, k in _cells(mod) if k == "ff" for q in _bits(c, "Q")}
+
+    def literal_undef(bit):
+        pending, visited = [bit], set()
+        while pending:
+            current = pending.pop()
+            if isinstance(current, str):
+                if current.lower() in {"x", "z"}:
+                    return True
+                continue
+            if current in visited or current in raw_q:
+                continue
+            visited.add(current)
+            driver = drivers.get(current)
+            if driver is not None:
+                pending.extend(b for pin, bits in (driver.get("connections") or {}).items()
+                               if (driver.get("port_directions") or {}).get(pin) == "input"
+                               for b in bits)
+        return False
+
+    undef_q = set()
+    for _, cell, kind in _cells(mod):
+        if kind == "ff":
+            bad_value = any(isinstance(v, str) and any(x in v.lower() for x in "xz")
+                            for p, v in (cell.get("parameters") or {}).items()
+                            if p.endswith("_VALUE"))
+            if bad_value or any(literal_undef(b) for p, bits in cell["connections"].items()
+                                if p != "Q" for b in bits):
+                undef_q.update(_bits(cell, "Q"))
+    return undef_q
+
+
 def _raw_reset_independence(mod: dict, signal: str, targets: list) -> dict:
     """Certify reset absence in a complete raw one-step transition fan-in.
 
@@ -308,6 +343,7 @@ def _raw_reset_independence(mod: dict, signal: str, targets: list) -> dict:
                 raise ValueError("unmodelled raw storage or D/Q/control identity")
             pending = [(b, False) for bits in roots.values() for b in bits]
             active, done, visited_cells, primary, cuts, undef = set(), set(), set(), set(), set(), set()
+            reaches_reset = False
             while pending:
                 bit, leaving = pending.pop()
                 if isinstance(bit, str):
@@ -316,8 +352,10 @@ def _raw_reset_independence(mod: dict, signal: str, targets: list) -> dict:
                     if bit in {"x", "z"}:
                         undef.add(bit)
                     continue
-                if not isinstance(bit, int) or bit == reset:
-                    raise ValueError("declared reset reaches raw transition" if bit == reset else "unknown raw bit")
+                if not isinstance(bit, int):
+                    raise ValueError("unknown raw bit")
+                if bit == reset:
+                    reaches_reset = True
                 if leaving:
                     active.remove(bit)
                     done.add(bit)
@@ -354,9 +392,13 @@ def _raw_reset_independence(mod: dict, signal: str, targets: list) -> dict:
                 active.add(bit)
                 pending.append((bit, True))
                 pending.extend((b, False) for b in fanin)
-            cert.update(status="CERTIFIED", visited_cells=sorted(visited_cells),
+            cert.update(status="UNAVAILABLE" if reaches_reset else "CERTIFIED",
+                        complete_raw_fanin=True, reset_reachable=reaches_reset,
+                        visited_cells=sorted(visited_cells),
                         primary_input_bits=sorted(primary), current_q_cut_bits=sorted(cuts),
                         literal_undef_bits=sorted(undef))
+            if reaches_reset:
+                cert["reason"] = "declared reset reaches raw transition"
         except ValueError as exc:
             cert["reason"] = str(exc)
     return certificates
@@ -1343,6 +1385,7 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     # proc/flatten twin as one whole model in that case; do not invent an
     # optimized Q, drop the identity, or combine unrelated state snapshots.
     raw_tm = _top_module(raw, top) if isinstance(raw, dict) else None
+    raw_undef_q = _raw_undef_q(raw_tm[1]) if raw_tm is not None else set()
     result["state_model"] = "optimized_current_source"
     if raw_tm is not None:
         raw_mod = raw_tm[1]
@@ -1367,10 +1410,11 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                         (not projection[q] and len(values[q]) == 1 and values[q] <= {"0", "1"})
                         for q in raw_q_bits)
         result["optimized_projection_explained"] = explained
-        if explained and (any(values.values()) or len(set(targets)) != len(targets)):
+        if raw_undef_q or (explained and (any(values.values()) or len(set(targets)) != len(targets))):
             mod = raw_mod
             result["state_model"] = "raw_pre_cleanup_current_source"
-            result["state_model_reason"] = "optimization eliminated or merged original current-Q identities"
+            result["state_model_reason"] = ("raw literal undef must remain in the paired transition model" if raw_undef_q else
+                "optimization eliminated or merged original current-Q identities")
     bit, why = _port_bit(mod, signal)
     if bit is None:
         return dict(result, unresolved=[why])
@@ -1399,39 +1443,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
         raw_census = _state_census(raw_mod, raw)
         result["unresolved"] += raw_census["latch"] + raw_census["memory"] + raw_census["unclassified"]
         aliases = {}
-        raw_drivers = _drivers(raw_mod)
         raw_q = {q for _, c, k in _cells(raw_mod) if k == "ff" for q in _bits(c, "Q")}
-
-        def literal_undef(bit):
-            # This is graph reachability, not path enumeration. Visit shared
-            # combinational fan-in once per query; current Q remains a cut.
-            pending, visited = [bit], set()
-            while pending:
-                current = pending.pop()
-                if isinstance(current, str):
-                    if current.lower() in {"x", "z"}:
-                        return True
-                    continue
-                if current in visited or current in raw_q:
-                    continue
-                visited.add(current)
-                driver = raw_drivers.get(current)
-                if driver is not None:
-                    pending.extend(b
-                        for pin, bits in (driver.get("connections") or {}).items()
-                        if (driver.get("port_directions") or {}).get(pin) == "input"
-                        for b in bits)
-            return False
-
-        undef_q = set()
-        for _name, cell, kind in _cells(raw_mod):
-            if kind == "ff":
-                bad_value = any(isinstance(v, str) and any(x in v.lower() for x in "xz")
-                                for p, v in (cell.get("parameters") or {}).items()
-                                if p.endswith("_VALUE"))
-                if bad_value or any(literal_undef(b) for p, bits in cell["connections"].items()
-                                    if p != "Q" for b in bits):
-                    undef_q.update(_bits(cell, "Q"))
+        undef_q = raw_undef_q
         for name, net in (raw_mod.get("netnames") or {}).items():
             other = (mod.get("netnames") or {}).get(name, {}).get("bits") or []
             for i, qb in enumerate(net.get("bits") or []):
@@ -1467,6 +1480,9 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                                 if cert is not None:
                                     identities[-1]["reset_independence_certificate"] = cert
                                     row["reset_independence_certificate"] = cert
+                                    if (cert.get("complete_raw_fanin") and cert.get("reset_reachable") and
+                                            row["unsupported"] == "literal-X/undef retained from raw next-state transition"):
+                                        row["raw_undef_native_candidate"] = True
                     if len(mapped) != 1:
                         result["unresolved"].append(f"{name}.Q[{i}]: missing/ambiguous current Q identity")
     result["raw_identities"] = identities
@@ -1481,7 +1497,7 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
               "log VIBEIC_TRANSITION_COMPLETE domain"]
     specs = {}
     for i, row in enumerate(rows):
-        if row.get("unsupported"):
+        if row.get("unsupported") and not row.get("raw_undef_native_candidate"):
             continue
         ports = row["query_ports"]
         # Import the complete fan-in of every value/guard observed for this
@@ -1571,11 +1587,46 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             for arm in (0, 1) if f"priority_domain{arm}" in a]
         role_proofs += [a[f"priority_valid{arm}"] for arm in (0, 1)
                         if f"priority_valid{arm}" in a]
+        # Undef in the inactive arm is not a defined value. Only the whole
+        # raw model may prove the opposite arm is a total, defined force for
+        # every free current-Q/data/control input, with its actual priority.
+        raw_force = []
+        if (row.get("raw_undef_native_candidate") and domain_reachable and rc == 0
+                and a and "UNKNOWN" not in a.values()):
+            for arm in (0, 1):
+                active_proofs = [a.get(f"{role}_valid{arm}") for role in
+                                 ("force_zero", "force_one", "retain")]
+                active_proofs += [a.get(f"{proof}{arm}") for proof in
+                                  ("roles_disjoint", "roles_cover")]
+                active_proofs += [a[f"priority_valid{v}"] for v in (0, 1)
+                                  if f"priority_valid{v}" in a]
+                for value, role in ((0, "force_zero"), (1, "force_one")):
+                    if (a.get(f"undef{arm}") == "NO_UNDEF" and
+                            a.get(f"undef{1-arm}") == "HAS_UNDEF" and
+                            a.get(f"{'zero' if value == 0 else 'one'}{arm}") == "PROVED" and
+                            a.get(f"{role}_reachable{arm}") == "REFUTED" and
+                            all(proof == "PROVED" for proof in active_proofs) and
+                            all(a.get(f"{other}_reachable{arm}") == "PROVED" for other in
+                                ("force_one" if value == 0 else "force_zero", "retain", "data"))):
+                        raw_force.append((arm, value))
         if (row.get("reset_independence_certificate", {}).get("status") == "CERTIFIED"
                 and row.get("unsupported") == "literal-X/undef retained from raw next-state transition"):
             row["classification"] = "NO_DEPENDENCE"
             row["proof_basis"] = "complete_raw_transition_fanin"
             row["reason"] = "declared reset absent from complete raw one-step transition fan-in; literal undef retained"
+        elif len(raw_force) == 1:
+            arm, value = raw_force[0]
+            row["classification"] = "RESET_FORCE"
+            row["polarity"] = "active_high" if arm else "active_low"
+            row["total_force"] = True
+            row["timing"] = "asynchronous" if any(p in row["reset_reaches"] for p in _ASYNC_PINS) else "synchronous"
+            row["proof_basis"] = "native_raw_paired_reset_domain"
+            row["raw_reset_domain_proof"] = {"status": "CERTIFIED",
+                "proof_basis": row["proof_basis"], "scope": "one_step_shared_current_q",
+                "active_reset_value": arm, "inactive_reset_value": 1-arm,
+                "force_value": value, "active_definedness": a[f"undef{arm}"],
+                "inactive_definedness": a[f"undef{1-arm}"], "queries": dict(a)}
+            row["reason"] = "native raw active reset arm is a total defined force; inactive literal undef retained"
         elif row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
             row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
         elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):
@@ -1603,6 +1654,18 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             else:
                 row["classification"] = "UNRESOLVED_DATA_DEPENDENCE"
                 row["reason"] = "paired dependence has no closed reset-force sense/priority"
+                if all(a.get(f"{role}_reachable{arm}") == "PROVED" for arm in (0, 1)
+                       for role in ("force_zero", "force_one")):
+                    row["native_relation"] = {"name": "DEFINED_NONFORCING_RESET_DEPENDENCE",
+                        "proof_basis": "native_paired_cofactor_queries",
+                        "scope": "one_step_shared_current_q",
+                        "arms": [{"reset_value": arm, "definedness": a[f"undef{arm}"],
+                                  "roles": [r for r in row["conditional_roles"] if r["reset_value"] == arm]}
+                                 for arm in (0, 1)],
+                        "partition_and_priority_queries": {k: v for k, v in a.items() if
+                            k.startswith(("roles_disjoint", "roles_cover", "priority_"))},
+                        "reason": "both cofactors are defined and roles close, but neither has a feasible force domain; data/retention dependence does not establish reset-force intent"}
+                    row["reason"] = "DEFINED_NONFORCING_RESET_DEPENDENCE: native data/retention roles do not establish reset-force sense"
         if row["classification"] in {"UNSUPPORTED", "UNRESOLVED_DATA_DEPENDENCE"}:
             result["unresolved"].append(f"{row['cell']}.Q[{row['bit_index']}]: {row.get('reason')}")
     result.update(complete=not result["unresolved"], native_exit_code=rc,
