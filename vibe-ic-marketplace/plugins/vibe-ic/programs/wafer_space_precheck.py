@@ -32,9 +32,10 @@ def read_signoff_evidence(project, release_record):
     """Read actual selected-engine counts, bound to the delivered GDS.
 
     The official WriteLayout can change timestamps without changing geometry.
-    Every input GDS view must therefore have the same existing canonical GDS
-    digest as the delivered file. This is a read-only consumer, not a new PV
-    run or an LVS substitute. Magic's independent operator policy is disclosed.
+    Compare each selected measurement's actual input with the delivered file.
+    Timestamp canonical equality is the fast path; a strict KLayout LayoutDiff
+    also handles serialization order without ignoring text or properties.
+    This is a read-only consumer, not a new PV run or an LVS substitute.
     """
     from die_finishing_gen import read_admitted_release
     from gds_canonical_digest import canonical_digest
@@ -66,6 +67,24 @@ def read_signoff_evidence(project, release_record):
             views[path] = {"method": "gds_canonical_digest (only BGNLIB/BGNSTR timestamps zeroed)",
                            "input": source, "output": final,
                            "equivalent": source["canonical_digest"] == final["canonical_digest"]}
+            if not views[path]["equivalent"]:
+                try:
+                    import pya
+                    before, after = pya.Layout(), pya.Layout()
+                    before.read(path)
+                    after.read(str(release["gds"]))
+                    flags = pya.LayoutDiff.Silent
+                    equal = pya.LayoutDiff().compare(before, after, flags, 0)
+                    views[path].update(
+                        method="KLayout.LayoutDiff.compare(Layout, Layout, Silent), tolerance=0",
+                        flags=int(flags), tool_version=pya.__version__,
+                        equivalent=bool(equal))
+                    for item, layout in ((source, before), (final, after)):
+                        item.update(layout_dbu=layout.dbu,
+                                    top_cells=sorted(c.name for c in layout.top_cells()),
+                                    cells=layout.cells())
+                except (ImportError, RuntimeError) as exc:
+                    raise ValueError(f"strict layout comparison unavailable: {exc}") from exc
         return views[path]
     steps = {}
     for step_id, item in zip(official["expected_steps"], official["steps"]):
@@ -74,10 +93,7 @@ def read_signoff_evidence(project, release_record):
         keep(inp_path, "official_state_in")
         keep(out_path, "official_state_out")
         inp, state = json.loads(inp_path.read_text()), json.loads(out_path.read_text())
-        if inp.get("gds") is not None:
-            equivalent(inp["gds"])
         steps[step_id] = (folder, inp, state)
-    all_views_equal = bool(views) and all(v["equivalent"] for v in views.values())
     rows = {}
     for kind, step_id, metric in [
             ("density", "KLayout.Density", "klayout__density_error__count"),
@@ -109,8 +125,8 @@ def read_signoff_evidence(project, release_record):
                        receipt=official_ref["path"], receipt_sha256=official_ref["sha256"],
                        subject_sha256=bridge["input"]["sha256"], equivalence=bridge,
                        source_verdict="PASS" if count == 0 else "FAIL")
-            if not all_views_equal:
-                raise ValueError("an official input GDS view is not canonically identical to the delivered GDS")
+            if not bridge["equivalent"]:
+                raise ValueError("the selected native measurement input differs from the delivered GDS")
             row["verdict"] = "PASS" if count == 0 else "FAIL"
         except (KeyError, OSError, ValueError, TypeError) as exc:
             row["reason"] = str(exc)

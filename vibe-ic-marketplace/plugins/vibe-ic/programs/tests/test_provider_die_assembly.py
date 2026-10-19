@@ -224,3 +224,87 @@ def test_provider_pv_reader_binds_real_gds_records_and_preserves_native_counts(
         assert row["verdict"] == "NOT_MEASURED"
     after = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.rglob("*") if p.is_file()}
     assert before == after, "the PV consumer must be read-only"
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("reordered_cells", "PASS"), ("shape", "NOT_MEASURED"),
+    ("text", "NOT_MEASURED"), ("units", "NOT_MEASURED"),
+    ("reference", "NOT_MEASURED")])
+def test_provider_pv_reader_uses_strict_native_semantic_comparison(tmp_path, case, expected):
+    import struct
+    import pya
+    from _gds_geometry import _iter_records
+    from wafer_space_precheck import read_signoff_evidence
+
+    def layout(change=None):
+        result = pya.Layout()
+        result.dbu = 0.002 if change == "units" else 0.001
+        top, leaf = result.create_cell("top"), result.create_cell("leaf")
+        layer = result.layer(1, 0)
+        leaf.shapes(layer).insert(pya.Box(0, 0, 11 if change == "shape" else 10, 10))
+        top.insert(pya.CellInstArray(leaf.cell_index(), pya.Trans(11 if change == "reference" else 10, 20)))
+        top.shapes(layer).insert(pya.Text("changed" if change == "text" else "electrical_label", pya.Trans()))
+        return result
+
+    subject, final = tmp_path / "subject.gds", tmp_path / "delivered.gds"
+    layout().write(str(final))
+    if case == "reordered_cells":
+        header, cells, tail, current = [], [], [], None
+        for rt, dt, payload in _iter_records(final.read_bytes()):
+            record = struct.pack(">HBB", len(payload) + 4, rt, dt) + payload
+            if rt == 5:
+                current = []
+            if current is not None:
+                current.append(record)
+                if rt == 7:
+                    cells.append(b"".join(current))
+                    current = None
+            elif cells:
+                tail.append(record)
+            else:
+                header.append(record)
+        subject.write_bytes(b"".join(header + cells[::-1] + tail))
+    else:
+        layout(case).write(str(subject))
+
+    def write(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return finishing._release_file(path)
+
+    files = {name: write(tmp_path / (name + ".json"), {}) for name in [
+        "source_admission", "source_stream", "raw_gds", "seal_report", "sealed_gds",
+        "instruction", "finished_def"]}
+    ids = ["ReadLayout", "Hierarchy", "Size", "GenerateID", "Render", "KLayout.Density",
+           "Checker.KLayoutDensity", "ZeroArea", "CheckerZero", "KLayout.Antenna",
+           "Checker.KLayoutAntenna", "Magic.DRC", "Checker.MagicDRC", "KLayout.DRC",
+           "Checker.KLayoutDRC", "WriteLayout"]
+    metrics = {"klayout__density_error__count": 0, "klayout__antenna_error__count": 0,
+               "klayout__drc_error__count": 0, "magic__drc_error__count": 0}
+    steps = []
+    for i, sid in enumerate(ids):
+        folder = tmp_path / f"{i + 1:02d}-stage"
+        write(folder / "state_in.json", {"gds": str(subject)})
+        state = write(folder / "state_out.json", {"gds": str(subject), "metrics": metrics})
+        write(folder / "config.json", {"meta": {"step": sid}, "ERROR_ON_MAGIC_DRC": False})
+        (folder / "COMMANDS").write_text("neutral source-control record; no physical verification run\n")
+        for kind in ("density", "antenna", "drc"):
+            write(folder / "reports" / (kind + ".klayout.json"), {"total": 0})
+        files[f"official_state_{i + 1}"] = state
+        steps.append({"folder": str(folder), "state_out": state})
+    output = finishing._release_file(final)
+    files["official_precheck"] = write(tmp_path / "operator.json", {
+        "verdict": "PASS", "returncode": 0, "all_steps_requested": True,
+        "input_unchanged": True, "steps": steps, "expected_steps": ids, "output": output})
+    release = tmp_path / "release.json"
+    write(release, {"producer": "die_finishing_gen", "kind": "provider_die_assembly",
+                    "verdict": "PASS", "source_project": str(tmp_path), "output": output,
+                    "basis": {"files": files}})
+    result = read_signoff_evidence(tmp_path, release)
+    assert result["verdict"] == expected
+    assert all(row["verdict"] == expected for row in result["rows"].values())
+    if expected == "PASS":
+        assert all("KLayout.LayoutDiff" in row["equivalence"]["method"] for row in result["rows"].values())
+    for row in result["rows"].values():
+        if "KLayout.LayoutDiff" in row["equivalence"]["method"]:
+            assert row["equivalence"]["flags"] == int(pya.LayoutDiff.Silent)
