@@ -42773,6 +42773,121 @@ def _stated_period_ns_on_row(text: str, match_start: int, match_end: int,
     return None
 
 
+def _l8_confirmed_width_declarations(
+        project: Path, extracted: Dict[str, str]
+) -> Dict[Tuple[str, int], str]:
+    """Confirm only literal declarations in the current, complete text corpus.
+
+    This does not add width rows or qualify inferred/paired widths. Unsupported
+    source formats, stale extraction and unclosed alternative declarations keep
+    the original weak marker. Normal input identity and D1 review still own
+    freshness after emission; no separate qualification receipt is created.
+    """
+    docs = project / "input/docs"
+    texts: Dict[str, str] = {}
+    try:
+        for path in sorted(docs.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {"", ".md", ".txt", ".rst", ".adoc", ".asciidoc"}:
+                return {}
+            if path.stat().st_size > 4_000_000:
+                return {}
+            texts[path.relative_to(docs).as_posix()] = path.read_text(encoding="utf-8")
+        if not texts or texts != extracted:
+            return {}
+        # Include the other existing Phase-1 prose inputs, even when a caller
+        # omitted them from extracted. They may contain another width binding.
+        corpus = dict(texts)
+        for pattern in ("phase1/input_doc/**/*", "phase1/input_prompt/**/*",
+                        "input/*.md", "input/design_input.txt",
+                        "input/phase1_structured.yaml"):
+            for path in sorted(project.glob(pattern)):
+                if path.is_file():
+                    if path.stat().st_size > 4_000_000:
+                        return {}
+                    corpus[path.relative_to(project).as_posix()] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}
+
+    declaration = re.compile(
+        r"The output is an? (?P<digest>\d+)[- ]bits? digest\."
+        r"|The register interface uses an? (?P<address>\d+)[- ]bits? address space\.",
+        re.IGNORECASE)
+    approved: Dict[str, List[Tuple[int, int, str, int, int, str]]] = {}
+    for fname, text in corpus.items():
+        spans: List[Tuple[int, int, str, int, int, str]] = []
+        fenced = False
+        example_level: Optional[int] = None
+        for paragraph in re.finditer(r"\S.*?(?=\n[ \t]*\n|\Z)", text, re.DOTALL):
+            block = paragraph.group()
+            fence_lines = re.findall(r"(?m)^[ \t]*(?:`{3,}|~{3,})", block)
+            if fenced or fence_lines:
+                if len(fence_lines) % 2:
+                    fenced = not fenced
+                continue
+            heading = re.match(r"(#{1,6}|={1,6})[ \t]+([^\n]+)", block)
+            setext = re.fullmatch(r"([^\n]+)\n(=+|-+)[ \t]*", block.strip())
+            if heading or setext:
+                level = len(heading.group(1)) if heading else (1 if setext.group(2).startswith("=") else 2)
+                title = heading.group(2) if heading else setext.group(1)
+                # A child heading cannot close an Examples/Options parent.
+                if example_level is None or level <= example_level:
+                    example_level = level if re.search(
+                        r"\b(?:examples?|options?|alternatives?|hypothetical)\b", title, re.I) else None
+                continue
+            if re.fullmatch(r"(?:For\s+)?examples?[:.]?", block.strip(), re.I):
+                example_level = 0  # Unscoped prose prefix: remain conservative.
+            if example_level is not None or re.search(
+                    r"\b(?:examples?|optional|alternatives?|hypothetical)\b", block, re.I):
+                continue
+            # Sentence boundaries allow both real declarations on the public
+            # single line. An Example prefix above cannot become a new claim.
+            for sentence in re.finditer(r"[^.!?\n]+(?:[.!?]|$)", block):
+                raw = sentence.group()
+                stripped = raw.strip()
+                match = declaration.fullmatch(stripped)
+                if match is None:
+                    continue
+                role = "digest" if match.group("digest") is not None else "address"
+                start = paragraph.start() + sentence.start() + len(raw) - len(raw.lstrip())
+                spans.append((start, start + len(stripped), role,
+                              int(match.group(role)), start + match.start(role), stripped))
+        approved[fname] = spans
+
+    confirmed: Dict[Tuple[str, int], str] = {}
+    for role in ("digest", "address"):
+        values = {span[3] for spans in approved.values() for span in spans if span[2] == role}
+        if len(values) != 1:
+            continue
+        # Inventory width candidates BEFORE the emitter's name deduplication.
+        # A normal 'read the digest' mention is not another width declaration.
+        role_token = re.compile(rf"\b{role}[A-Za-z_]*\b", re.I)
+        width_cue = re.compile(
+            r"\d|(?<![A-Za-z0-9])(?:width|bits?|bytes?|wide|size|length|"
+            r"variable|optional|configurable)(?![A-Za-z0-9])", re.I)
+        unresolved = False
+        for fname, text in corpus.items():
+            # Inspect entire source sentences, without a finite character
+            # window that could hide a later width/variable-length qualifier.
+            for paragraph in re.finditer(r"\S.*?(?=\n[ \t]*\n|\Z)", text, re.DOTALL):
+                for sentence in re.finditer(r"[^.!?]+(?:[.!?]|$)", paragraph.group()):
+                    raw = sentence.group()
+                    if not role_token.search(raw) or not width_cue.search(raw):
+                        continue
+                    start_of_claim = paragraph.start() + sentence.start() + len(raw) - len(raw.lstrip())
+                    end_of_claim = paragraph.start() + sentence.start() + len(raw.rstrip())
+                    if not any(start <= start_of_claim and end_of_claim <= end and own_role == role
+                               for start, end, own_role, _, _, _ in approved[fname]):
+                        unresolved = True
+        if not unresolved:
+            for fname in texts:
+                for _, _, own_role, _, number_start, quote in approved[fname]:
+                    if own_role == role:
+                        confirmed[fname, number_start] = quote
+    return confirmed
+
+
 def gen_l8_timing_waveform(project: Path,
                            extracted: Dict[str, str]) -> LDocResult:
     """L8: RX classifier ticks + TX bit cell + frame-end gap.
@@ -44034,12 +44149,14 @@ def gen_l8_timing_waveform(project: Path,
     def _norm_role(s: str) -> str:
         return re.sub(r"[\s_-]+", "_", s.strip()).lower()
 
+    confirmed_widths = _l8_confirmed_width_declarations(project, extracted)
     seen_widths: Set[str] = set()
 
     def _add_width(name: str, width: int, role: str, fname: str,
                    line_no: int,
                    strategy: str = "width_role_bigram_match",
-                   derived_from: Optional[Dict[str, Any]] = None
+                   derived_from: Optional[Dict[str, Any]] = None,
+                   source_start: Optional[int] = None
                    ) -> None:
         key = name
         if key in seen_widths:
@@ -44061,6 +44178,11 @@ def gen_l8_timing_waveform(project: Path,
         }
         if derived_from is not None:
             entry["evidence"]["derived_from_pair"] = derived_from
+        quote = confirmed_widths.get((fname, source_start))
+        if quote is not None and strategy == "width_role_bigram_match" and derived_from is None:
+            entry["low_confidence"] = False
+            entry["evidence"]["quote"] = quote
+            entry["evidence"]["confirmation_basis"] = "explicit_source_width_declaration"
         timing_parameters.append(entry)
 
     for fname, text in extracted.items():
@@ -44105,7 +44227,7 @@ def gen_l8_timing_waveform(project: Path,
                     text, name, m.start()):
                 if name.lower() in _ROLE_DENY_BARE_NOUN_V1_6_360:
                     continue
-            _add_width(name, w, role, fname, line_no)
+            _add_width(name, w, role, fname, line_no, source_start=m.start())
 
     # v1.6.64 — populate timing_constants from harvested timing_parameters.
     # Promote only parameters with an explicit or name-encoded timing unit.
