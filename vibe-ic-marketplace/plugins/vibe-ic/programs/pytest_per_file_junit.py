@@ -483,9 +483,11 @@ class _HermeticAggregateProgress:
             nodes = set(ordered_nodes)
             # A file whose every item was deselected has no finish event to
             # await; wait for the actual session terminal before checkpointing.
-            terminal = getattr(probe, "complete", None)
+            streams = getattr(probe, "streams", {})
+            terminal = (bool(streams) and all(
+                stream.stage == "finished" for stream in streams.values()))
             if (nodes <= probe.finished
-                    and (nodes or callable(terminal) and terminal()[0])):
+                    and (nodes or terminal and probe.complete()[0])):
                 self.completed.add(test_file)
         # Preserve the exact parent-owned schedule.  A nested checkpoint is
         # available only after the strict pytest FSM accepted the exact

@@ -995,12 +995,17 @@ def test_aggregate_progress_uses_selected_consistency_items(
 def test_aggregate_progress_checkpoints_fully_deselected_file_only_at_terminal(
         tmp_path, monkeypatch):
     monkeypatch.delenv("VIBEIC_RUN_CONSISTENCY", raising=False)
+    monkeypatch.setattr(D, "DEFAULT_POLL_S", 0.02)
     corpus = _tree(tmp_path, {
         "test_optional.py": (
             "import pytest\n"
             "@pytest.mark.consistency\n"
             "def test_bookkeeping(): assert True\n"),
-        "test_active.py": "def test_behavior(): assert True\n",
+        "test_active.py": (
+            "import time\n"
+            "def test_behavior():\n"
+            "    time.sleep(0.5)\n"
+            "    assert True\n"),
     })
     (corpus / "conftest.py").write_text(
         f"import sys\nsys.path.insert(0, {str(_PROGRAMS)!r})\n"
@@ -1008,10 +1013,19 @@ def test_aggregate_progress_checkpoints_fully_deselected_file_only_at_terminal(
     relay = D._HermeticAggregateProgress(
         ["test_optional.py", "test_active.py"], emitter=_OuterEmitter())
     assert relay.start()
+    running_samples = []
+
+    def observe(probe):
+        running_samples.append(any(
+            stream.stage == "running" for stream in probe.streams.values()))
+        relay.observe(probe)
+
     merged = tmp_path / "selected.xml"
     rc, out, incomplete = D.run_aggregate(
         _pytest_cmd(), ["test_optional.py", "test_active.py"], merged,
-        stall_window(2), str(corpus), progress_observer=relay.observe)
+        stall_window(2), str(corpus), progress_observer=observe)
+    assert any(running_samples), "the test did not observe an active session"
+    assert int(incomplete) == 0, out
     assert rc == 0 and not incomplete, out
     assert len(relay.emitter.rows) == 4
     assert relay.emitter.rows == [
