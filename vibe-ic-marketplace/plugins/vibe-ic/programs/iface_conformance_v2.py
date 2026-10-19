@@ -1221,6 +1221,9 @@ def _table_ports(prompt: str) -> Dict[str, str]:
                 if len(cells) > max(name_col, dir_col):
                     name = cells[name_col].strip().strip("*_` ")
                     direction = cells[dir_col].strip().strip("*_` ").lower()
+                    leading_direction = re.match(r"^(input|output|inout)\b", direction)
+                    if leading_direction:
+                        direction = leading_direction.group(1)
                     direction = {"in": "input", "out": "output", "i/o": "inout"}.get(
                         direction, direction)
                     if (re.fullmatch(r"[A-Za-z_]\w*", name)
