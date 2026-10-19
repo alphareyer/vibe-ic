@@ -540,3 +540,16 @@ def test_l23_preserves_source_options_and_negations_at_section_boundary(
     assert records[0]["description"] == body
     assert doc["fields"]["key_handling"] == []
     assert doc["fields"]["secure_boot"] is False
+
+
+def test_l23_fenced_documentation_does_not_declare_security(tmp_path):
+    from programs.phase1_post_process import emit_l_doc_skeleton
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "examples.md").write_text(
+        "# Documentation example\n```markdown\n"
+        "## Side-channel countermeasures\n"
+        "The unit shall use masking.\n```\n")
+    doc = emit_l_doc_skeleton("L23", project_dir=tmp_path)
+    assert doc["fields"]["side_channel_mitigation"] == [], doc["fields"]
+    assert doc["fields"].get("security_requirements_present", False) is False
