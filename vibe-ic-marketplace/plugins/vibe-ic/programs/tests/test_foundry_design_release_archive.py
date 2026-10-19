@@ -549,6 +549,7 @@ def test_selected_ll_full_gds_lvs_uses_its_real_owner_and_portable_materials(tmp
     real_chain=contract.run_chain
     materials={}
     def chain(*args,**kwargs):
+        monkeypatch.setattr(contract,'run_chain',real_chain)
         # The fixture's external edge is installed immediately before this
         # real run_chain call. Generate files BEFORE normal receipt hashing.
         edge=contract.run_container
