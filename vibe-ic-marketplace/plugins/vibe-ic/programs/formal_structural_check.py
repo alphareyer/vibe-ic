@@ -248,6 +248,120 @@ def _drivers(mod: dict) -> Dict[int, dict]:
     return out
 
 
+def _raw_reset_independence(mod: dict, signal: str, targets: list) -> dict:
+    """Certify reset absence in a complete raw one-step transition fan-in.
+
+    Literal undef stays undef. Known FF Q bits are shared-current-state cuts,
+    not a claim that their sequential histories are independent of reset.
+    Missing/ambiguous drivers, unknown boundaries and combinational feedback
+    cannot supply this certificate. No SAT answer is synthesized here.
+    """
+    if not targets:
+        return {}
+    import hashlib
+    reset, reset_error = _port_bit(mod, signal)
+    cells = mod.get("cells") or {}
+    drivers = {}
+    inputs = {b for p in (mod.get("ports") or {}).values()
+              if p.get("direction") == "input" for b in p.get("bits") or []}
+    inouts = {b for p in (mod.get("ports") or {}).values()
+              if p.get("direction") == "inout" for b in p.get("bits") or []}
+    for name, cell in cells.items():
+        for pin, bits in (cell.get("connections") or {}).items():
+            if (cell.get("port_directions") or {}).get(pin) != "input":
+                for b in bits:
+                    if isinstance(b, int):
+                        drivers.setdefault(b, []).append((name, pin))
+    graph_sha = hashlib.sha256(json.dumps(mod, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    certificates = {}
+    for name, index, current_q in targets:
+        cell = cells[name]
+        conn, dirs = cell.get("connections") or {}, cell.get("port_directions") or {}
+        q = (conn.get("Q") or [])[index]
+        roots = {p: (list(bits[index:index+1]) if p == "D" else list(bits))
+                 for p, bits in conn.items() if p != "Q"}
+        cert = {"status": "UNAVAILABLE", "scope": "one_step_shared_current_q",
+                "signal": signal, "raw_reset_bit": reset, "raw_cell": name,
+                "raw_q": q, "q_index": index, "current_q": current_q,
+                "raw_module_sha256": graph_sha, "roots": roots}
+        certificates[name, index] = cert
+        try:
+            if reset_error:
+                raise ValueError(reset_error)
+            required = {"D", "CLK", "Q"}
+            kind = cell.get("type")
+            if kind in {"$dffe", "$sdffe", "$sdffce", "$adffe", "$dffsre"}:
+                required.add("EN")
+            if kind in _SYNC_RESET_FFS:
+                required.add("SRST")
+            if kind in {"$adff", "$adffe"}:
+                required.add("ARST")
+            if kind in {"$dffsr", "$dffsre"}:
+                required.update(("SET", "CLR"))
+            if (kind not in {"$dff", "$dffe", "$sdff", "$sdffe", "$sdffce",
+                             "$adff", "$adffe", "$dffsr", "$dffsre"}
+                    or set(conn) != required or len(conn["D"]) != len(conn["Q"])
+                    or dirs.get("Q") != "output"
+                    or drivers.get(q) != [(name, "Q")] or q in inputs or q in inouts
+                    or any(dirs.get(p) != "input" or not bits for p, bits in roots.items())):
+                raise ValueError("unmodelled raw storage or D/Q/control identity")
+            pending = [(b, False) for bits in roots.values() for b in bits]
+            active, done, visited_cells, primary, cuts, undef = set(), set(), set(), set(), set(), set()
+            while pending:
+                bit, leaving = pending.pop()
+                if isinstance(bit, str):
+                    if bit not in {"0", "1", "x", "z"}:
+                        raise ValueError("unknown raw literal")
+                    if bit in {"x", "z"}:
+                        undef.add(bit)
+                    continue
+                if not isinstance(bit, int) or bit == reset:
+                    raise ValueError("declared reset reaches raw transition" if bit == reset else "unknown raw bit")
+                if leaving:
+                    active.remove(bit)
+                    done.add(bit)
+                    continue
+                if bit in done:
+                    continue
+                if bit in active:
+                    raise ValueError("unclosed raw combinational feedback")
+                source = drivers.get(bit, [])
+                if bit in inouts or len(source) > 1 or (bit in inputs and source):
+                    raise ValueError("ambiguous raw input/driver")
+                if bit in inputs:
+                    primary.add(bit)
+                    done.add(bit)
+                    continue
+                if len(source) != 1:
+                    raise ValueError("missing raw driver")
+                owner, pin = source[0]
+                driver = cells[owner]
+                ports, directions = driver.get("connections") or {}, driver.get("port_directions") or {}
+                if (directions.get(pin) != "output" or set(ports) != set(directions)
+                        or any(d not in {"input", "output"} for d in directions.values())):
+                    raise ValueError("unknown raw driver ports")
+                if _kind(driver.get("type", "")) == "ff" and pin == "Q":
+                    cuts.add(bit)
+                    done.add(bit)
+                    continue
+                if driver.get("type") not in _COMB_TYPES:
+                    raise ValueError("unknown/noncombinational raw boundary")
+                fanin = [b for p, bits in ports.items() if directions[p] == "input" for b in bits]
+                if not fanin or any(not bits for p, bits in ports.items() if directions[p] == "input"):
+                    raise ValueError("missing raw combinational inputs")
+                visited_cells.add(owner)
+                active.add(bit)
+                pending.append((bit, True))
+                pending.extend((b, False) for b in fanin)
+            cert.update(status="CERTIFIED", visited_cells=sorted(visited_cells),
+                        primary_input_bits=sorted(primary), current_q_cut_bits=sorted(cuts),
+                        literal_undef_bits=sorted(undef))
+        except ValueError as exc:
+            cert["reason"] = str(exc)
+    return certificates
+
+
 _INVERTERS = {"$not", "$logic_not", "$_NOT_"}
 _BUFFERS = {"$pos", "$_BUF_"}
 
@@ -1214,6 +1328,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
     This is the reset mapping of this existing owner, not a new flow gate.
     UNSUPPORTED/UNKNOWN identities remain named and prevent full polarity PASS.
     SAT countermodels classify functions; they are not a DUT formal FAIL.
+    Raw undef may instead carry a complete-graph one-step reset-independence
+    certificate; its value and native query population remain unchanged.
     """
     result = {"signal": signal, "rows": [], "unresolved": [], "complete": False,
               "shared_current_q_and_data": True}
@@ -1321,6 +1437,18 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             for i, qb in enumerate(net.get("bits") or []):
                 if isinstance(qb, int) and i < len(other) and other[i] in current_q:
                     aliases.setdefault(qb, set()).add(other[i])
+        raw_sources = {}
+        for qb in raw_q:
+            for target in aliases.get(qb, set()):
+                raw_sources.setdefault(target, set()).add(qb)
+        row_by_q = {r["q"]: r for r in rows}
+        cert_targets = [(name, i, next(iter(aliases[qb])))
+                        for name, cell, kind in _cells(raw_mod) if kind == "ff"
+                        for i, qb in enumerate(cell.get("connections", {}).get("Q") or [])
+                        if qb in undef_q and len(aliases.get(qb, set())) == 1
+                        and len(raw_sources[next(iter(aliases[qb]))]) == 1
+                        and not row_by_q[next(iter(aliases[qb]))].get("unsupported")]
+        certificates = _raw_reset_independence(raw_mod, signal, cert_targets)
         for name, cell, kind in _cells(raw_mod):
             if kind == "ff":
                 for i, qb in enumerate(cell.get("connections", {}).get("Q") or []):
@@ -1331,7 +1459,14 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                     if qb in undef_q:
                         for row in rows:
                             if row["q"] in mapped:
-                                row["unsupported"] = "literal-X/undef retained from raw next-state transition"
+                                # Keep an earlier clock/storage/identity refusal:
+                                # raw undef cannot erase it and admit a certificate.
+                                if not row.get("unsupported"):
+                                    row["unsupported"] = "literal-X/undef retained from raw next-state transition"
+                                cert = certificates.get((name, i))
+                                if cert is not None:
+                                    identities[-1]["reset_independence_certificate"] = cert
+                                    row["reset_independence_certificate"] = cert
                     if len(mapped) != 1:
                         result["unresolved"].append(f"{name}.Q[{i}]: missing/ambiguous current Q identity")
     result["raw_identities"] = identities
@@ -1436,7 +1571,12 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             for arm in (0, 1) if f"priority_domain{arm}" in a]
         role_proofs += [a[f"priority_valid{arm}"] for arm in (0, 1)
                         if f"priority_valid{arm}" in a]
-        if row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
+        if (row.get("reset_independence_certificate", {}).get("status") == "CERTIFIED"
+                and row.get("unsupported") == "literal-X/undef retained from raw next-state transition"):
+            row["classification"] = "NO_DEPENDENCE"
+            row["proof_basis"] = "complete_raw_transition_fanin"
+            row["reason"] = "declared reset absent from complete raw one-step transition fan-in; literal undef retained"
+        elif row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
             row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
         elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):
             row["reason"] = "literal-X or undefined next-state cofactor"
@@ -1595,8 +1735,10 @@ def check_claim(netlist: dict, top: str, claim: dict,
             return dict(out, verdict=NOT_DISCHARGED,
                         finding="reset-force identity/sense/priority is not fully closed: " +
                         ("; ".join(unresolved) or "no reset-forced state or unsupported claim value"))
+        basis = ("native paired queries and raw one-step independence certificates" if any(
+            r.get("proof_basis") == "complete_raw_transition_fanin" for r in rows) else "native paired queries")
         return dict(out, verdict=PASS,
-                    finding=f"complete current-Q paired reset mapping closes {rule}={value} for every reset-force group")
+                    finding=f"complete current-Q reset mapping ({basis}) closes {rule}={value} for every reset-force group")
     forced = rm["sync"] + rm["async"] + rm["async_x"]
     out["sync_reset_flops"] = len(rm["sync"])
     out["async_reset_flops"] = len(rm["async"]) + len(rm["async_x"])
