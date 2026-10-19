@@ -102,6 +102,11 @@ def test_native_producer_records_the_measured_child_and_refuses_stale_invocation
 
     def execute(container, command, products, **kwargs):
         argv = shlex.split(command.splitlines()[0])
+        parameters = [argv[index + 1] for index, value in enumerate(argv)
+                      if value == "--parameter"]
+        assert "run_mode=flat" in parameters
+        assert "combine=true" in parameters
+        assert "top_lvl_pins=true" in parameters
         work = mod.Path(argv[argv.index("--work-dir") + 1]); work.mkdir()
         reference = mod.Path(argv[argv.index("--verilog") + 1])
         report = mod.Path(argv[argv.index("--out") + 1])
@@ -133,6 +138,10 @@ def test_native_producer_records_the_measured_child_and_refuses_stale_invocation
 
     monkeypatch.setattr(mod, "_declared_session_exec", execute)
     pdk = _min_pdk(mod); pdk.native_lvs_deck = "official.lvs"
+    registry = json.loads((mod.Path(mod.__file__).parent / "pdk_registry.json").read_text())
+    entries = registry["pdks"]
+    pdk.native_lvs_parameters = next(row for row in entries
+                                    if row["name"] == "gf180mcuD")["native_gds_lvs"]["parameters"]
     result = mod._run_native_pdk_gds_lvs(tmp_path, "unit", pdk, "unused", 0)
     assert result.status == expected
     if stale:

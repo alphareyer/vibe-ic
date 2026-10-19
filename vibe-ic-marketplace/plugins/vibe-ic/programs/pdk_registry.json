@@ -426,7 +426,7 @@
           "libs.ref/gf180mcu_fd_io/spice/gf180mcu_ef_io.spice"
         ],
         "parameters": {
-          "run_mode": "deep",
+          "run_mode": "flat",
           "metal_level": "5LM",
           "metal_top": "11K",
           "mim_option": "B",
