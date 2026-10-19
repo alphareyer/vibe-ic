@@ -46980,6 +46980,13 @@ def _normalize_top_module_case(candidate: str,
     return s
 
 
+def _doc_comportable_module_subjects(extracted: Dict[str, str]) -> set:
+    """Exact quoted interface subjects; a helper mention is not a subject."""
+    return {hit.group("name")
+            for text in (extracted or {}).values() if isinstance(text, str)
+            for hit in _RE_V638_COMPORTABLE_INTRO.finditer(_strip_hdl_comments(text))}
+
+
 def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
     """Walk the extracted-doc text and return the highest-priority top-
     module identifier. v1.6.273 — for #135 ORGANIC; v1.6.274 — for #139
@@ -47016,6 +47023,13 @@ def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
     _real = _doc_real_module_decl_name(extracted)
     if _real:
         return _normalize_top_module_case(_real, extracted)
+
+    # The documented interface subject is stronger than a passing module
+    # reference. Preserve the declared spelling; conflicting subjects have no
+    # unique design target and cannot be resolved by frequency or doc order.
+    _comportable = _doc_comportable_module_subjects(extracted)
+    if _comportable:
+        return next(iter(_comportable)) if len(_comportable) == 1 else None
 
     # A subject-first declaration names the design, rather than merely
     # mentioning a top module. Anchor the entire affirmative clause so
@@ -51940,8 +51954,11 @@ def gen_l9_integration_spec(project: Path,
     #
     # Chip-AGNOSTIC: each pattern is a structural English / Verilog token
     # rule; no chip-class literal.
+    _comportable_subject_conflict = False
     if top_module is None:
         top_module = _extract_top_module_from_docs(extracted)
+        _comportable_subject_conflict = (
+            top_module is None and len(_doc_comportable_module_subjects(extracted)) > 1)
         if top_module:
             top_module_extraction_strategy = "doc_module_decl_or_heading"
     # v1.6.545 — for #371 P3 ORGANIC. RTL-top prose walker. Some
@@ -52093,6 +52110,10 @@ def gen_l9_integration_spec(project: Path,
     # A downstream consumer that needs a filename family applies its own
     # documented default to a declared absence; what it must not do is read a
     # placeholder as an extracted name, which is what it did before.
+    # A contradictory interface subject is unresolved even if a weaker
+    # prose/name fallback later found a plausible-looking identifier.
+    if _comportable_subject_conflict:
+        top_module = None
     top_module_default_applied = False
     if top_module is None:
         top_module_default_applied = True
