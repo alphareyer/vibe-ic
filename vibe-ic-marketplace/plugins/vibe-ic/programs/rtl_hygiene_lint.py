@@ -3932,6 +3932,11 @@ def rule_continuous_vs_procedural_driver(src: str, path: str) -> List[Finding]:
                 nm = am.group(1)
                 if nm in VERILOG_KEYWORDS:
                     continue
+                # The regex only locates a possible write. Reuse the existing
+                # statement-level classifier before crediting it: `phase<=5`
+                # inside a declaration initializer's parentheses is a read.
+                if nm not in _procedural_assigned_lhs(body_noassign[:am.end()]):
+                    continue
                 proc_lhs.add(nm)
                 # report at the procedural-assignment site (where iverilog points)
                 proc_line.setdefault(nm, src[:pos + am.start()].count('\n') + 1)
@@ -6982,16 +6987,27 @@ def _native_driver_view(files, top, defines, parameters, include_dirs, output_di
                'native_returncode': None, 'transport_returncode': None}
     def quote(value):
         return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
-    # -nosynthesis prevents Yosys from silently introducing a compile define
-    # that the caller did not select. There is no guessed active branch.
-    read = 'read_verilog -sv -nosynthesis ' + ' '.join(
-        ['-D' + d for d in defines]
-        # Yosys consumes the -I suffix literally, including any quote marks.
-        + ['-I' + str(p) for p in include_dirs] + [quote(p) for p in files])
+    # Use the native SystemVerilog frontend for selected .sv sources. Preserve
+    # the caller's top, parameters and defines; neither frontend may silently
+    # introduce SYNTHESIS. No fallback may turn an elaboration error into PASS.
+    if any(p.suffix.lower() == '.sv' for p in files):
+        read = 'read_slang --single-unit --no-synthesis-define --top ' + top
+        read += ' ' + ' '.join(['-G ' + p for p in parameters]
+                                + ['-D ' + d for d in defines]
+                                # Slang receives Yosys command tokens literally:
+                                # quoted paths become filenames with quote bytes.
+                                + ['-I ' + str(p) for p in include_dirs]
+                                + [str(p) for p in files])
+    else:
+        read = 'read_verilog -sv -nosynthesis ' + ' '.join(
+            ['-D' + d for d in defines]
+            # Yosys consumes the -I suffix literally, including any quote marks.
+            + ['-I' + str(p) for p in include_dirs] + [quote(p) for p in files])
     commands = [read]
-    for parameter in parameters:
-        name, value = parameter.split('=', 1)
-        commands.append(f'chparam -set {name} {value} {top}')
+    if not any(p.suffix.lower() == '.sv' for p in files):
+        for parameter in parameters:
+            name, value = parameter.split('=', 1)
+            commands.append(f'chparam -set {name} {value} {top}')
     native_json = work / 'design.json'
     commands += [f'hierarchy -check -top {top}', 'proc', 'check -assert',
                  'write_json ' + quote(native_json)]
