@@ -956,6 +956,13 @@ def audit(project: Path) -> Tuple[List[Finding], Dict[str, Any]]:
             continue
         _sym = _src.get("width_symbolic")
         _w = _src.get("width")
+        # The scaffold keeps an unexpanded typed bundle unresolved without
+        # inventing a numeric width or a physical member list.
+        if (_src.get("interface_type") == "req_rsp"
+                and (_src.get("mode") or _src.get("direction")) == "interface"
+                and _w is None):
+            _sym = _sym or ("unresolved req_rsp interface: " +
+                            str(_src.get("package_struct") or _src.get("name")))
         _string_width = (isinstance(_w, str)
                          and not str(_w).strip().isdigit())
         if not ((_sym and str(_sym).strip()) or _string_width):
