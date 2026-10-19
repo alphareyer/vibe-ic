@@ -262,5 +262,16 @@
     "version_observed": "1.29.96 official frozen f38b8dc032effcd63a4f210fc9404aa0f43342d5 and versionless own-only candidate51cc9f20384a21c627e9582dec112cbe66d393cf.",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_named_legacy_reset/02-current-legacy-with-history.md"
+  },
+  {
+    "issue": 3227,
+    "project": "l8_width_role_authority",
+    "layer": "L8",
+    "field": "L8_RTL_CONSTANTS.timing_parameters[] and parameters[]",
+    "expected": "{\"parameters\":[{\"name\":\"QUEUE_DEPTH\",\"default\":\"17\"}],\"timing_parameters\":[]}",
+    "actual": "{\n  \"parameters\": [\n    {\n      \"name\": \"QUEUE_DEPTH\",\n      \"default\": \"17\",\n      \"source\": \"02-unrelated-nearby-anchor.md\",\n      \"extraction_strategy\": \"md_param_h4_heading_v1_6_390\"\n    }\n  ],\n  \"timing_parameters\": [\n    {\n      \"name\": \"counter\",\n      \"width_bits\": 24,\n      \"role\": \"counter\",\n      \"unit\": \"bits\",\n      \"source\": \"input/docs/02-unrelated-nearby-anchor.md\",\n      \"literal\": \"24\",\n      \"evidence\": {\n        \"source\": \"input/docs/02-unrelated-nearby-anchor.md\",\n        \"line\": 8,\n        \"extraction_strategy\": \"width_role_bigram_match\"\n      },\n      \"low_confidence\": true\n    },\n    {\n      \"name\": \"tag\",\n      \"width_bits\": 80,\n      \"role\": \"tag\",\n      \"unit\": \"bits\",\n      \"source\": \"input/docs/02-unrelated-nearby-anchor.md\",\n      \"literal\": \"80\",\n      \"evidence\": {\n        \"source\": \"input/docs/02-unrelated-nearby-anchor.md\",\n        \"line\": 9,\n        \"extraction_strategy\": \"width_role_bigram_match\"\n      },\n      \"low_confidence\": true\n    }\n  ],\n  \"timing_constants\": []\n}",
+    "version_observed": "1.29.96-derived exact source e907cbfc746889bbc0d67d9a4937f711ac5ffd5a",
+    "version_lkg": "Not established. This is a frozen neutral current-source counterexample, not a fabricated release regression interval.",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/l8_width_role_authority/width_authority.md"
   }
 ]

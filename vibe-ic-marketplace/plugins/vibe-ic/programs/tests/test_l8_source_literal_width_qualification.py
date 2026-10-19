@@ -24,14 +24,20 @@ def _write(root, relative, text):
     return path
 
 
-def _emit(root, source=PUBLIC, *, extracted=None):
+def _emit(root, source=PUBLIC, *, extracted=None, weak_artifact_row=None):
     if extracted is None:
         _write(root, "input/docs/design.md", source)
         extracted = {"design.md": source}
     result = runner.gen_l8_timing_waveform(root, extracted)
     data = json.loads(result.path.read_text())
-    rows = {r["name"]: r for r in data["timing_parameters"]
-            if "width_bits" in r}
+    if weak_artifact_row is not None:
+        # Explicit consumer fixture, not an ordinary producer-output claim.
+        data["timing_parameters"].append(weak_artifact_row)
+        result.path.write_text(json.dumps(data))
+    rows = {}
+    for row in data["timing_parameters"]:
+        if "width_bits" in row:
+            rows.setdefault(row["name"], row)
     step = compliance.StepResult(id="D1", name="public L8 evidence",
                                  stage="phase1", status="PASS",
                                  evidence=[str(result.path.relative_to(root))])
@@ -124,7 +130,13 @@ def test_unqualified_source_keeps_the_original_strict_refusal(tmp_path, case):
 
 
 def test_unrelated_low_confidence_row_still_blocks_the_same_artifact(tmp_path):
-    _, rows, step = _emit(tmp_path, PUBLIC + "\n\nA 64-bit timestamp is recorded.")
+    _, rows, step = _emit(tmp_path, PUBLIC + "\n\nA 64-bit timestamp is recorded.",
+                         weak_artifact_row={
+                             "name": "timestamp", "role": "timestamp", "width_bits": 64,
+                             "unit": "bits", "source": "input/docs/design.md", "literal": "64",
+                             "evidence": {"source": "input/docs/design.md", "line": 3,
+                                          "extraction_strategy": "explicit_test_weak_artifact"},
+                             "low_confidence": True})
     assert rows["digest"]["low_confidence"] is False
     assert rows["timestamp"]["low_confidence"] is True
     assert step.status == "PASS_WITH_WAIVERS", step.reasons

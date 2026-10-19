@@ -42683,23 +42683,20 @@ _ROLE_DENY_BARE_NOUN_V1_6_360 = frozenset({
 
 def _v1_6_360_width_role_has_structural_anchor(
     text: str, name: str, match_start: int, window: int = 200,
+    *, width: Optional[int] = None,
 ) -> bool:
-    """v1.6.360 — for #255 P2 ORGANIC. Return True if ``name`` appears
-    in a structural identifier context (RTL declaration keyword prefix
-    OR backtick code-fence) within ``window`` chars around
-    ``match_start``. Otherwise False — caller must check the bare-noun
-    deny-list (``_ROLE_DENY_BARE_NOUN_V1_6_360``) before deciding to
-    emit.
-
-    Chip-AGNOSTIC: structural regex (RTL keyword vocabulary +
-    markdown backtick convention) only; no chip-class literal
-    participates.
-    """
+    """A declaration must bind this exact name and literal width together."""
     snippet = text[max(0, match_start - window): match_start + window]
-    if _RE_WIDTH_ROLE_IDENT_PREFIX_V1_6_360.search(snippet):
-        return True
-    if _RE_WIDTH_ROLE_CODE_FENCE_V1_6_360.search(snippet):
-        return True
+    declared = re.compile(
+        r"(?:parameter|localparam|generic|`define)\s+"
+        r"(?:(?:integer|int|logic|bit|signed|unsigned)\s+)*"
+        r"(?P<ident>[A-Za-z_]\w*)\s*(?:[:=]\s*|\s+)"
+        r"(?P<width>\d+)\b", re.I)
+    fenced = re.compile(r"`(?P<ident>\w{3,40})`\s*[:\-—]\s*(?P<width>\d+)\s*[-\s]?\s*bits?\b", re.I)
+    for pattern in (declared, fenced):
+        for match in pattern.finditer(snippet):
+            if match['ident'] == name and (width is None or int(match['width']) == width):
+                return True
     return False
 
 
@@ -44180,7 +44177,7 @@ def gen_l8_timing_waveform(project: Path,
         return re.sub(r"[\s_-]+", "_", s.strip()).lower()
 
     confirmed_widths = _l8_confirmed_width_declarations(project, extracted)
-    seen_widths: Set[str] = set()
+    seen_widths: Set[Tuple[str, Optional[int], str, int]] = set()
 
     def _add_width(name: str, width: int, role: str, fname: str,
                    line_no: int,
@@ -44188,7 +44185,7 @@ def gen_l8_timing_waveform(project: Path,
                    derived_from: Optional[Dict[str, Any]] = None,
                    source_start: Optional[int] = None
                    ) -> None:
-        key = name
+        key = (fname, source_start, name, width)
         if key in seen_widths:
             return
         seen_widths.add(key)
@@ -44232,8 +44229,9 @@ def gen_l8_timing_waveform(project: Path,
             r1 = m.group(2).split()[-1].lower()
             r2 = m.group(4).split()[-1].lower()
             _add_width(n1, w1, r1, fname, line_no,
-                       derived_from={"name": n2, "width_bits": w2})
-            _add_width(n2, w2, r2, fname, line_no)
+                       derived_from={"name": n2, "width_bits": w2},
+                       source_start=m.start(1))
+            _add_width(n2, w2, r2, fname, line_no, source_start=m.start(3))
         # Pass B: width+role bigram.
         for m in _RE_WIDTH_ROLE.finditer(text):
             try:
@@ -44244,19 +44242,25 @@ def gen_l8_timing_waveform(project: Path,
             name = _norm_role(role_phrase)
             line_no = text.count("\n", 0, m.start()) + 1
             role = role_phrase.split()[-1].lower()
-            # v1.6.360 — for #255 P2 ORGANIC. Structural-anchor gate:
-            # emit only when the role-noun appears in a real RTL
-            # declaration keyword context (parameter / localparam /
-            # generic / `define) OR a backtick code-fence pre-width.
-            # Otherwise fall back to the bare-noun deny-list filter —
-            # generic English nouns like "register" / "input" / etc.
-            # are rejected; unknown nouns are still emitted with
-            # `low_confidence: True` (preserves pre-v1.6.360 behaviour
-            # for the unknown-noun branch).
-            if not _v1_6_360_width_role_has_structural_anchor(
-                    text, name, m.start()):
-                if name.lower() in _ROLE_DENY_BARE_NOUN_V1_6_360:
-                    continue
+            # Preserve the existing finite source-literal qualification path,
+            # including its weak negated/example/conflicting candidates. Its
+            # independent full-corpus check still owns confirmation. A nearby
+            # unrelated parameter cannot authorize arbitrary bare role nouns.
+            literal_candidate = False
+            for statement in re.finditer(
+                    r"The output is\b[^.!?\n]*\d+[- ]bits? (?P<digest>digest)\b"
+                    r"|The register interface uses\b[^.!?\n]*\d+[- ]bits? (?P<address>address) space\b",
+                    text, re.I):
+                if (statement.lastgroup == name and statement.start() <= m.start()
+                        and m.end() <= statement.end()):
+                    legacy_window = text[max(0, m.start() - 200):m.start() + 200]
+                    literal_candidate = (name not in _ROLE_DENY_BARE_NOUN_V1_6_360
+                                         or bool(_RE_WIDTH_ROLE_IDENT_PREFIX_V1_6_360.search(legacy_window))
+                                         or bool(_RE_WIDTH_ROLE_CODE_FENCE_V1_6_360.search(legacy_window)))
+                    break
+            if not literal_candidate and not _v1_6_360_width_role_has_structural_anchor(
+                    text, name, m.start(), width=w):
+                continue
             _add_width(name, w, role, fname, line_no, source_start=m.start())
 
     # v1.6.64 — populate timing_constants from harvested timing_parameters.
