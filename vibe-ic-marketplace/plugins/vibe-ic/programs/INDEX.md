@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1444
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1444)
+- **Total programs (excluding helpers / shims):** 1446
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1446)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1435 |
+| `any` | 1437 |
 
 ## Alphabetical listing
 
@@ -443,6 +443,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `execution_provider_catalog` | any | — | Source-owned provider census for the backend and release adapter families. |
 | `execution_release_rows` | any | — | Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p... |
 | `execution_release_worker` | any | — | Real source-owned release component for the common execution controller. |
+| `execution_source_identity` | any | — | Source identity for Git development and officially installed Ultra packages. |
 | `execution_source_snapshot` | any | — | One-operation source snapshot for adapter registration. |
 | `execution_step4` | any | — | Step 4 simulator arms over one frozen professional cocotb bundle. |
 | `execution_step4_icarus` | any | — | Native Icarus Step 4 candidate; fixed simulator, shared canonical consumers. |
@@ -505,7 +506,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `formal_proof_evidence_check` | any | — | Step 5 formal proof EVIDENCE-CHAIN gate (ORGANIC-20260606 #448). |
 | `formal_property_run` | any | — | Step 5 formal-property RUNNER. |
 | `formal_structural_check` | any | — | Step 5: discharge STRUCTURAL clock/reset declarations with a deterministic structural check (R-0915-144). |
-| `foundry_handoff_pack_gen` | any | — | emit Step 35 foundry handoff package skeleton. |
+| `foundry_handoff_pack_gen` | any | — | assemble the Step38 design-release package. |
 | `foundry_handoff_package_check` | any | Wave 88 | gate (v1.6.13 Wave 88, integerised in v1.6.14 Wave 90, renumbered Step 34 → 35 in v1.6.15 Wave 91, and Step 35 → 38 by the later renumber... |
 | `foundry_signoff_plan_check` | any | v0.113 | v0.113 (BACKLOG-v10 P1.2). |
 | `fpga_async_input_synchronizer_check` | any | — | Verify every external input/inout on the FPGA top routes through ≥ 2 sequential FFs before reaching clocked logic. |
@@ -1441,6 +1442,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `vibe_ic_one_shot_runner` | any | — | full Vibe-IC flow orchestrator. |
 | `wafer_map_pattern_classify` | any | — | D3 program-first extraction of the yield-diagnostic skill's spatial-signature -> root-cause LOOKUP TABLE. |
 | `wafer_sort_yield_check` | any | Wave 88 | gate (v1.6.13 Wave 88, renumbered in v1.6.14 Wave 90: Step 36 → 37; v1.6.15 Wave 91: Step 37 → 38; re-numbered again to Step 39 in the ph... |
+| `wafer_space_precheck` | any | — | Run the official wafer.space flow with LibreLane's typed initial state. |
 | `waiver_growth_check` | any | v0.112 | v0.112 release-gate (BACKLOG-v10 P0 follow-up). |
 | `waiver_legitimacy_check` | any | v0.116 | v0.116 (BACKLOG-v11 candidate). |
 | `waiver_staleness` | any | — | REFUSE to honor a waiver whose reason-condition no longer holds (the FALSE-CLEAN guard). |
@@ -1516,7 +1518,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1435 programs)
+### `any` (1437 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1931,6 +1933,7 @@ _(no programs in this group)_
 - `execution_provider_catalog` — Source-owned provider census for the backend and release adapter families.
 - `execution_release_rows` — Frozen original F4 INPUT/obligations; no catalog or design PASS. Generated mechanically from the root-staged STEP_IMPLEMENTATION_INPUTS p...
 - `execution_release_worker` — Real source-owned release component for the common execution controller.
+- `execution_source_identity` — Source identity for Git development and officially installed Ultra packages.
 - `execution_source_snapshot` — One-operation source snapshot for adapter registration.
 - `execution_step4` — Step 4 simulator arms over one frozen professional cocotb bundle.
 - `execution_step4_icarus` — Native Icarus Step 4 candidate; fixed simulator, shared canonical consumers.
@@ -1993,7 +1996,7 @@ _(no programs in this group)_
 - `formal_proof_evidence_check` — Step 5 formal proof EVIDENCE-CHAIN gate (ORGANIC-20260606 #448).
 - `formal_property_run` — Step 5 formal-property RUNNER.
 - `formal_structural_check` — Step 5: discharge STRUCTURAL clock/reset declarations with a deterministic structural check (R-0915-144).
-- `foundry_handoff_pack_gen` — emit Step 35 foundry handoff package skeleton.
+- `foundry_handoff_pack_gen` — assemble the Step38 design-release package.
 - `foundry_handoff_package_check` — gate (v1.6.13 Wave 88, integerised in v1.6.14 Wave 90, renumbered Step 34 → 35 in v1.6.15 Wave 91, and Step 35 → 38 by the later renumber...  _[Wave 88]_
 - `foundry_signoff_plan_check` — v0.113 (BACKLOG-v10 P1.2).  _[v0.113]_
 - `fpga_async_input_synchronizer_check` — Verify every external input/inout on the FPGA top routes through ≥ 2 sequential FFs before reaching clocked logic.
@@ -2926,6 +2929,7 @@ _(no programs in this group)_
 - `vibe_ic_one_shot_runner` — full Vibe-IC flow orchestrator.
 - `wafer_map_pattern_classify` — D3 program-first extraction of the yield-diagnostic skill's spatial-signature -> root-cause LOOKUP TABLE.
 - `wafer_sort_yield_check` — gate (v1.6.13 Wave 88, renumbered in v1.6.14 Wave 90: Step 36 → 37; v1.6.15 Wave 91: Step 37 → 38; re-numbered again to Step 39 in the ph...  _[Wave 88]_
+- `wafer_space_precheck` — Run the official wafer.space flow with LibreLane's typed initial state.
 - `waiver_growth_check` — v0.112 release-gate (BACKLOG-v10 P0 follow-up).  _[v0.112]_
 - `waiver_legitimacy_check` — v0.116 (BACKLOG-v11 candidate).  _[v0.116]_
 - `waiver_staleness` — REFUSE to honor a waiver whose reason-condition no longer holds (the FALSE-CLEAN guard).
