@@ -470,7 +470,9 @@ def direct_half(project, top, pdk, half, producer):
         for role, source in {**selected, "pdk_tech_lef": pdk.tech_lef,
                              "pdk_cell_lef": pdk.cell_lef}.items():
             inputs[role] = entry(project, source, external=role.startswith("pdk_"))
-        deck = pdk.drc_deck if half == "drc" else getattr(pdk, "bridge_netgen_setup", None)
+        deck = pdk.drc_deck if half == "drc" else (
+            getattr(pdk, "native_lvs_deck", None)
+            or getattr(pdk, "bridge_netgen_setup", None))
         if not deck and half == "lvs":
             deck = Path("/foss/pdks") / pdk.name / "libs.tech/netgen" / f"{pdk.name}_setup.tcl"
         if not deck:
@@ -493,6 +495,13 @@ def direct_half(project, top, pdk, half, producer):
         native_report = project / "phase3/reports/drc.rpt" if half == "drc" else report
         new = list(sdf._prov_entries(project))[len(before):]
         if half == "lvs":
+            verdict_path = project / "reports/phase3/lvs_verdict.json"
+            if verdict_path.is_file():
+                verdict = json.loads(verdict_path.read_text())
+                if verdict.get("schema") == "vibeic.native_gds_lvs/1":
+                    import klayout_pdk_lvs as native_lvs
+                    verdict = native_lvs.read_current_verdict(project, verdict_path, selected["gds"])
+                    native_report = Path(verdict["log"]["path"])
             raw = project / "reports/phase3/lvs_power_aware.rpt"
             alias = entry(project, report)
             if raw.is_file() and digest(raw) == alias["sha256"] and any(
@@ -596,7 +605,7 @@ def _direct_half_refusal(project, half):
     if half == "lvs" and raw["path"] != canonical["path"]:
         if raw["sha256"] != canonical["sha256"] or not any(
                 e.get("record") == "declared_transform"
-                and e.get("producing_step") == "lvs:power_aware"
+                and e.get("producing_step") in ("lvs:power_aware", "lvs:native_gds_report")
                 and _bound(raw, e.get("inputs") or {})
                 and _bound(canonical, e.get("outputs") or {}) for e in entries):
             return "CURRENT_NATIVE_REPORT_TRANSFORM_UNBOUND"

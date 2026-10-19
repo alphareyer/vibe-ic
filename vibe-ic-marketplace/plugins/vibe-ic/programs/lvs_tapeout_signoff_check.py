@@ -110,7 +110,41 @@ def evaluate(blob: str) -> Dict[str, object]:
     }
 
 
+def native_project_verdict(project: Path):
+    """Consume the existing Step-31 native record against the current final GDS."""
+    path = project / "reports/phase3/lvs_verdict.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if record.get("schema") != "vibeic.native_gds_lvs/1":
+        return None
+    import _physical_current as current
+    import klayout_pdk_lvs as native
+    selected = current.default_signoff_inputs(project)
+    if selected:
+        layout = selected["gds"]
+    else:
+        candidates = list((project / "phase3/stage4/gds").glob("*.gds"))
+        if len(candidates) != 1:
+            raise ValueError("NATIVE_LVS_CURRENT_FINAL_GDS_UNDETERMINED")
+        layout = candidates[0]
+    return native.read_current_verdict(project, path, layout)
+
+
 def check(target: Path) -> Dict[str, object]:
+    if target.is_dir():
+        try:
+            native = native_project_verdict(target)
+        except (OSError, ValueError, KeyError) as exc:
+            return {"tapeout_verdict": "INCOMPLETE", "passed": False, "error": str(exc)}
+        if native is not None:
+            return {"tapeout_verdict": "GENUINE_MATCH" if native["status"] == "PASS" else "SIGNAL_NET_MISMATCH",
+                    "passed": native["status"] == "PASS", "base_verdict": native["status"],
+                    "detail": "official PDK final-GDS LVS machine circuit/pin comparison",
+                    "native": native}
     rpt = _find_report(target)
     if rpt is None:
         return {"tapeout_verdict": "IO_ERROR", "passed": False,

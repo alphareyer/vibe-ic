@@ -305,6 +305,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     project = Path(args.project_dir) if args.project_dir else None
+    if project is not None and not args.spice:
+        from lvs_tapeout_signoff_check import native_project_verdict
+        try:
+            native = native_project_verdict(project)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"LVS-GUARD FAIL: current native GDS result: {exc}", file=sys.stderr)
+            return 1
+        if native is not None:
+            print(f"LVS-GUARD {native['status']}: native GDS comparison retained "
+                  f"its measured top-level pins: {native['native_result']['path']}")
+            return 0 if native["status"] == "PASS" else 1
     if args.spice:
         files: List[Path] = []
         for spec in args.spice:

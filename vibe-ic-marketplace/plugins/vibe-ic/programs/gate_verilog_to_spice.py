@@ -79,10 +79,10 @@ def norm(net):
     return net.replace("[", ".").replace("]", "")
 
 
-def parse_verilog(vtext):
+def parse_verilog(vtext, preserve_supply_ports=False):
     vtext = re.sub(r"//[^\n]*", "", vtext)
     vtext = re.sub(r"/\*.*?\*/", "", vtext, flags=re.S)
-    mm = re.search(r"module\s+(\w+)\s*\((.*?)\)\s*;(.*)endmodule", vtext, re.S)
+    mm = re.search(r"module\s+(\w+)\s*\((.*?)\)\s*;(.*?)endmodule", vtext, re.S)
     top, body = mm.group(1), mm.group(3)
 
     alias = {}
@@ -114,10 +114,11 @@ def parse_verilog(vtext):
     # power ports), so leaving them here gives the netgen SOURCE side 2 extra
     # ports -> "Top level cell failed pin matching". Drop supply-named ports (they
     # stay connected via .GLOBAL). Chip-AGNOSTIC name match.
-    ports = [p for p in ports if not _is_supply_port(p)]
+    if not preserve_supply_ports:
+        ports = [p for p in ports if not _is_supply_port(p)]
 
     insts = []
-    for m in re.finditer(r"\b([A-Z]\w+)\s+(\S+)\s*\(([^;]*?)\)\s*;", body, re.S):
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s+(\S+)\s*\(([^;]*?)\)\s*;", body, re.S):
         cell, inst, conns = m.group(1), m.group(2), m.group(3)
         pinmap = {}
         for pm in re.finditer(r"\.(\w+)\s*\(\s*([^)]*?)\s*\)", conns):
@@ -126,13 +127,21 @@ def parse_verilog(vtext):
     return top, ports, insts
 
 
-def convert(vfile, cellspice, out, include_cells=True):
+def convert(vfile, cellspice, out, include_cells=True,
+            preserve_supply_ports=False, strict_cell_coverage=False,
+            include_reference=None):
     cell_pins = parse_cell_pins(open(cellspice).read())
-    top, ports, insts = parse_verilog(open(vfile).read())
+    top, ports, insts = parse_verilog(open(vfile).read(), preserve_supply_ports)
+
+    unknown = sorted({cell for cell, _, _ in insts if cell not in cell_pins})
+    if strict_cell_coverage and (unknown or not insts):
+        print(f"REFUSED incomplete cell coverage: instances={len(insts)} unknown={unknown}",
+              file=sys.stderr)
+        return 2
 
     lines = ["* gate_verilog_to_spice (netgen LVS source side)", ".GLOBAL VDD VSS"]
     if include_cells:
-        lines.append(f".include {cellspice}")
+        lines.append(f'.include "{include_reference or cellspice}"')
     lines.append("")
     lines.append(f".SUBCKT {top} {' '.join(ports)}")
     dangle = [0]
@@ -169,8 +178,14 @@ def main(argv=None):
     ap.add_argument("--verilog", required=True)
     ap.add_argument("--cells", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--preserve-supply-ports", action="store_true",
+                    help="Keep explicit power pins for PDK decks that compare them")
+    ap.add_argument("--strict-cell-coverage", action="store_true",
+                    help="Refuse absent instances or cells missing from the reference library")
     a = ap.parse_args(argv)
-    return convert(a.verilog, a.cells, a.out)
+    return convert(a.verilog, a.cells, a.out,
+                   preserve_supply_ports=a.preserve_supply_ports,
+                   strict_cell_coverage=a.strict_cell_coverage)
 
 
 if __name__ == "__main__":

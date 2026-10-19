@@ -418,6 +418,24 @@
       "_lvs_deck_comment": "gf180mcuD DOES ship both sign-off LVS routes; both were declared absent, which made the LVS-capability report call this PDK LVS-incapable. Paths verified present in the shipped image: libs.tech/netgen/gf180mcuD_setup.tcl (netgen) and libs.tech/klayout/tech/lvs/gf180mcu.lvs (KLayout). Same defect class, same two directory conventions, as the ihp-sg13g2 entry below. NOTE the digital phase3 LVS route does NOT read this key \u2014 it builds the netgen setup path by convention (libs.tech/netgen/<pdk>_setup.tcl) and was already working; this key feeds the analog/PV availability report and the A5/A7 gates.",
       "lvs_deck": "libs.tech/netgen/gf180mcuD_setup.tcl",
       "klayout_lvs_deck": "libs.tech/klayout/tech/lvs/gf180mcu.lvs",
+      "native_gds_lvs": {
+        "library_translator": "libs.tech/klayout/tech/lvs/gf180_xschem_klayout_spice_convert.py",
+        "cell_libraries": [
+          "libs.ref/gf180mcu_fd_sc_mcu7t5v0/spice/gf180mcu_fd_sc_mcu7t5v0.spice",
+          "libs.ref/gf180mcu_fd_io/spice/gf180mcu_fd_io.spice",
+          "libs.ref/gf180mcu_fd_io/spice/gf180mcu_ef_io.spice"
+        ],
+        "parameters": {
+          "run_mode": "deep",
+          "metal_level": "5LM",
+          "metal_top": "11K",
+          "mim_option": "B",
+          "mim_cap": "2",
+          "poly_res": "1k",
+          "top_lvl_pins": "true",
+          "combine": "true"
+        }
+      },
       "_lefdef_layermap_comment": "LEF/DEF -> GDS streamout layer map. `--pdk sky130A` and `--pdk nangate45` each resolve one (sky130A.map / FreePDK45.map) from their hardcoded named branches; every registry-resolved PDK needs the key, and gf180mcuD had none, so streamout fell back to the DEF reader's COMPACT numbering. The gf180mcu.drc sign-off deck reads the foundry numbers (verified in libs.tech/klayout/tech/gf180mcu.map: Metal1=34/0, Metal2=36/0, Metal3=42/0, Metal4=46/0, Metal5=81/0, Via1=35/0), so on compact numbering the routing and PDN shapes land on the deck's FEOL device numbers and the DRC report is a numbering artefact, not a design measurement \u2014 the nangate45 branch records 18.7M spurious FEOL items from exactly this cause. This is the same file gf180mcuD's own librelane config.tcl sets as KLAYOUT_DEF_LAYER_MAP.",
       "lefdef_layermap": "libs.tech/klayout/tech/gf180mcu.map",
       "_pnr_exclude_comment": "PnR cell-exclusion list. Absent => the flow falls back to a get_lib_cells family heuristic. gf180mcuD ships the real list at libs.tech/librelane/gf180mcu_fd_sc_mcu7t5v0/pnr_exclude.cells (verified present in the shipped image).",

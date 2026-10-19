@@ -11536,6 +11536,10 @@ class PdkConfig:
     # commercial-PDK LEF-abstract collapses Magic's top extraction.
     # Config-gated so the general flow is unchanged; requires port_label_restore.
     lvs_engine: str = "magic"
+    native_lvs_deck: Optional[str] = None
+    native_lvs_library_translator: Optional[str] = None
+    native_lvs_cell_libraries: List[str] = field(default_factory=list)
+    native_lvs_parameters: Dict[str, str] = field(default_factory=dict)
     # v1.3.91 — optional PDK layer-map JSON (container/host path) for the KLayout
     # LVS engine's geometric device recognition (klayout_pdk_lvs --layermap). None
     # → the program's built-in commercial-PDK map. Chip-AGNOSTIC: any PDK supplies its own.
@@ -13590,6 +13594,13 @@ def _pdk_config_from_registry(project: Path, reg: Dict[str, Any]
         cell_gds=cell_gds,
         site=site,
         drc_deck=_opt("drc_deck"),
+        native_lvs_deck=(_opt("klayout_lvs_deck") if reg.get("native_gds_lvs") else None),
+        native_lvs_library_translator=_registry_glob_one(
+            container, root, reg.get("native_gds_lvs", {}).get("library_translator")),
+        native_lvs_cell_libraries=[
+            _registry_glob_one(container, root, pattern) or str(Path(root) / pattern)
+            for pattern in reg.get("native_gds_lvs", {}).get("cell_libraries", [])],
+        native_lvs_parameters=dict(reg.get("native_gds_lvs", {}).get("parameters", {})),
         metal_prefix=metal_prefix,
         # Declared (a name, or null = tapless) or asked of this PDK's own
         # LEF by `_derive_tapcell_master`. It is NEVER defaulted to another
@@ -53942,6 +53953,8 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                         "macro_v":   pdk.macro_v})
         # calibre absent + bridge OSS tech present → fall through to the
         # #443 Magic+netgen route below (v1.3.83).
+    if getattr(pdk, "native_lvs_deck", None):
+        return _run_native_pdk_gds_lvs(project, top, pdk, container, t0)
     # ORGANIC-20260606 #443 — open-source LVS is REACHABLE: Magic
     # ext2spice extraction (hierarchy-preserved, cell-level — the
     # canonical OpenLane recipe) + netgen compare against the gate
@@ -55314,6 +55327,91 @@ def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
                 "power_aware_stats": stats,
                 "ext2spice_warning": ext_warning,
                 "extracted_netlist": str(spice_out.relative_to(project))})
+
+
+def _run_native_pdk_gds_lvs(project: Path, top: str, pdk: PdkConfig,
+                            container: str, t0: float) -> StepResult:
+    """Step 31's PDK-owned final-GDS route; never substitute a DEF-only match."""
+    import _physical_current as current
+    import klayout_pdk_lvs as native
+    report = project / "reports/phase3/lvs_verdict.json"
+    raw = project / "reports/phase3/lvs.rpt"
+    raw_log = raw.with_suffix(".log")
+    try:
+        selected = current.default_signoff_inputs(project)
+        if not selected:
+            raise ValueError("NATIVE_LVS_FINAL_STREAM_MISSING")
+        layout, def_file, netlist = selected["gds"], selected["def"], selected["netlist"]
+        physical_top, _ = _streamout_top(def_file, top)
+        job = project / "reports/phase3" / f"native_gds_lvs_{time.time_ns()}"
+        tools = job / "tools"
+        tools.mkdir(parents=True)
+        for name in ("klayout_pdk_lvs.py", "gate_verilog_to_spice.py", "_atomic_artefact.py"):
+            _ship_program(name, tools)
+        reference = job / "reference.v"
+        additional_lefs = sorted({
+            *_pl.extracted_dir(project).glob("*.extract.lef"),
+            *_stage_padring_io_lefs_for_lvs(project, pdk, container)}, key=str)
+        _lvs_pa.emit_to_file(netlist, pdk.name, reference, top=physical_top,
+                            rails_as_ports=True, tie_wells_to_rails=True,
+                            cell_lef=pdk.cell_lef, additional_lefs=additional_lefs)
+        work = job / "native"
+        inside = lambda path: _to_container_path(str(path), container)
+        argv = ["python3", inside(tools / "klayout_pdk_lvs.py"), "native", inside(layout),
+                "--verilog", inside(reference), "--deck", str(pdk.native_lvs_deck),
+                "--top", physical_top, "--work-dir", inside(work), "--out", inside(report),
+                "--threads", str(min(4, os.cpu_count() or 1)), "--timeout", "2700"]
+        for path in pdk.native_lvs_cell_libraries:
+            argv.extend(["--cell-library", str(path)])
+        if pdk.native_lvs_library_translator:
+            argv.extend(["--library-translator", pdk.native_lvs_library_translator])
+        for key, value in pdk.native_lvs_parameters.items():
+            argv.extend(["--parameter", f"{key}={value}"])
+        # The canonical report contains the native transcript, never a made-up
+        # Netgen sentence. Its existing current-subject owner records the same
+        # invocation and the final GDS input before any consumer runs.
+        command = (shlex.join(argv) + "\nnative_lvs_rc=$?\n"
+                   + f"if test -f {shlex.quote(inside(work / 'native.log'))}; then\n"
+                   + f"  cp {shlex.quote(inside(work / 'native.log'))} {shlex.quote(inside(raw))}\n"
+                   + f"  cp {shlex.quote(inside(work / 'native.log'))} {shlex.quote(inside(raw_log))}\n"
+                   + "fi\nexit \"$native_lvs_rc\"")
+        rc, out, err = _declared_session_exec(container, command,
+            [report, raw, raw_log, work / "native.log", work / "result.lvsdb", work / "extracted.spice"],
+            marker=inside(layout), timeout=2760)
+        verdict = native.read_current_verdict(project, report, layout)
+        if Path(verdict["native_result"]["path"]).resolve() != (work / "result.lvsdb").resolve():
+            raise ValueError("NATIVE_LVS_REPORT_FROM_ANOTHER_INVOCATION")
+        execution = verdict["execution"]
+        child_argv = execution["argv"]
+        if Path(child_argv[0]).name != "klayout":
+            raise ValueError("NATIVE_LVS_CHILD_TOOL_MISMATCH")
+        # The adapter measured its child. Record that child's original outputs
+        # separately from the Python wrapper and the canonical report copies.
+        _log_invocation(shlex.join(child_argv), execution["rc"],
+                        int(execution["elapsed_s"] * 1000), marker=inside(layout),
+                        container=container,
+                        outputs=[work / "native.log", work / "result.lvsdb",
+                                 work / "extracted.spice"],
+                        input_hashes={str(layout.relative_to(project)):
+                                      "sha256:" + verdict["layout_source"]["sha256"]})
+        for output in (raw, raw_log):
+            if native._file_record(output)["sha256"] != verdict["log"]["sha256"]:
+                raise ValueError("NATIVE_LVS_CANONICAL_LOG_COPY_CHANGED")
+            _declare_immutable_transform(project, work / "native.log", output,
+                                         "lvs:native_gds_report", "python3",
+                                         "copy the unchanged native LVS transcript")
+        status = verdict["status"]
+        return StepResult("lvs", status, time.time() - t0,
+            f"native PDK GDS LVS {status}; actual circuit/pin comparison in {report}",
+            output_files=[str(report), str(raw), str(work / "result.lvsdb"),
+                          str(work / "extracted.spice")],
+            extras={"finding": verdict["finding"], "lvs_engine": "klayout_native_pdk",
+                    "layout_source": verdict["layout_source"], "lvs_verdict": verdict,
+                    "lvs_report": str(raw.relative_to(project))})
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        return StepResult("lvs", "NOT_MEASURED", time.time() - t0,
+                          f"native final-GDS LVS not certified: {exc}",
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
 
 
 def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,

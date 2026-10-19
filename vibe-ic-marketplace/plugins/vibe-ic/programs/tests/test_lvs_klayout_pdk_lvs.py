@@ -14,6 +14,7 @@ Chip- and PDK-AGNOSTIC; the layermap is data, not hardcoded chip logic.
 import importlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -309,3 +310,97 @@ def test_resolve_layermap_no_shrink_when_map_has_fewer(tmp_path):
     lm, note = mod._resolve_layermap(str(full), str(small))
     assert len(lm["metal"]) == 6           # kept the supplied 6, not shrunk to 2
     assert note is None                     # nothing extended -> no note
+
+
+@pytest.mark.parametrize("native,expected", [
+    ("Match", "PASS"), ("Mismatch", "FAIL"), ("NoMatch", "FAIL"),
+    ("Skipped", "NOT_MEASURED"), ("MatchWithWarning", "NOT_MEASURED"),
+    ("None_", "NOT_MEASURED"), ("UNKNOWN", "NOT_MEASURED"),
+])
+def test_native_database_status_is_not_an_english_match(native, expected):
+    result = {"compare_performed": True, "top": "unit_top", "circuits": [
+        {"layout": "unit_top", "reference": "UNIT_TOP", "status": native,
+         "layout_pins": 3, "reference_pins": 3}]}
+    assert mod._native_status(result, 0) == expected
+
+
+def test_native_measured_mismatch_keeps_precedence_over_incomplete_exit():
+    result = {"compare_performed": True, "top": "unit_top", "circuits": [
+        {"layout": "unit_top", "reference": "unit_top", "status": "Mismatch",
+         "layout_pins": 3, "reference_pins": 3}]}
+    assert mod._native_status(result, 1) == "FAIL"
+
+
+@pytest.mark.parametrize("rows", [[], [
+    {"layout": "child", "reference": "child", "status": "Match",
+     "layout_pins": 3, "reference_pins": 3}], [
+    {"layout": "unit_top", "reference": "unit_top", "status": "Match",
+     "layout_pins": 0, "reference_pins": 0}], [
+    {"layout": "unit_top", "reference": "unit_top", "status": "Match",
+     "layout_pins": 3, "reference_pins": 2}],
+])
+def test_native_absent_top_or_pins_never_certifies_a_layout(rows):
+    assert mod._native_status({"compare_performed": bool(rows),
+                              "top": "unit_top", "circuits": rows}, 0) == "NOT_MEASURED"
+
+
+def test_native_reader_rejects_bare_pass_without_sources(tmp_path):
+    gds = tmp_path / "layout.gds"; gds.write_bytes(b"layout")
+    report = tmp_path / "result.json"
+    report.write_text(json.dumps({"status": "PASS"}))
+    with pytest.raises(ValueError, match="SCHEMA_MISSING"):
+        mod.read_current_verdict(tmp_path, report, gds)
+
+
+def _bound_native_record(project, state="Match"):
+    layout = project / "phase3/stage4/gds/unit.gds"
+    layout.parent.mkdir(parents=True)
+    layout.write_bytes(b"unit-layout-for-binding-test")
+    report = project / "reports/phase3/lvs_verdict.json"
+    report.parent.mkdir(parents=True)
+    record = {"schema": "vibeic.native_gds_lvs/1", "compare_performed": True,
+              "execution": {"rc": 0, "inputs_unchanged": True},
+              "layout_source": {"kind": "gds", **mod._file_record(layout)}}
+    for key in ("reference_source", "deck", "native_result", "cell_library_bundle",
+                "source_netlist", "driver_source", "log"):
+        path = report.parent / key
+        path.write_bytes(key.encode())
+        record[key] = mod._file_record(path)
+    result = {"compare_performed": True, "top": "unit", "circuits": [
+        {"layout": "unit", "reference": "UNIT", "status": state,
+         "layout_pins": 4, "reference_pins": 4}]}
+    record["native_result"].update(result)
+    record["status"] = mod._native_status(result, 0)
+    record["finding"] = "NATIVE_FINAL_GDS_LVS_" + record["status"]
+    report.write_text(json.dumps(record))
+    return layout, report, record
+
+
+@pytest.mark.parametrize("state,passed", [("Match", True), ("NoMatch", False)])
+def test_native_reader_and_existing_consumers_agree(tmp_path, monkeypatch, state, passed):
+    import _physical_current as current
+    import lvs_tapeout_signoff_check as signoff
+    import eda_report_audit as audit
+    import lvs_signoff_guard as guard
+    layout, report, record = _bound_native_record(tmp_path, state)
+    monkeypatch.setattr(current, "default_signoff_inputs", lambda project: {"gds": layout})
+    assert mod.read_current_verdict(tmp_path, report, layout)["status"] == record["status"]
+    assert signoff.check(tmp_path)["passed"] is passed
+    assert audit._check_lvs(tmp_path).passed is passed
+    assert guard.main([str(tmp_path)]) == (0 if passed else 1)
+
+
+@pytest.mark.parametrize("change", ["layout", "bundle", "native_result", "comparison"])
+def test_native_binding_rejects_changed_or_missing_required_source(tmp_path, change):
+    layout, report, record = _bound_native_record(tmp_path)
+    if change == "layout":
+        layout.write_bytes(b"another-layout")
+    elif change == "bundle":
+        Path(record["cell_library_bundle"]["path"]).unlink()
+    elif change == "native_result":
+        Path(record["native_result"]["path"]).write_bytes(b"another-result")
+    else:
+        record["compare_performed"] = False
+        report.write_text(json.dumps(record))
+    with pytest.raises(ValueError):
+        mod.read_current_verdict(tmp_path, report, layout)

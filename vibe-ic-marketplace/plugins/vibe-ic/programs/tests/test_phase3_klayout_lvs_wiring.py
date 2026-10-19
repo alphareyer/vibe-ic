@@ -10,6 +10,10 @@ The load-bearing guarantee here: the new engine + restore are STRICTLY OPT-IN
 (config-gated), so the general (sky130 / gf180) flow is byte-for-byte unchanged.
 """
 import importlib
+import json
+import shlex
+
+import pytest
 
 mod = importlib.import_module("phase3_one_shot_runner")
 guard_mod = importlib.import_module("decap_route_short_guard")
@@ -72,6 +76,73 @@ class TestRestoreGatedOff:
             tmp_path / "spm.gds", tmp_path / "spm.def")
         assert ok is False
         assert "no port_label_restore config" in note
+
+
+@pytest.mark.parametrize("state,stale,expected", [
+    ("Match", False, "PASS"), ("NoMatch", False, "FAIL"),
+    ("Match", True, "NOT_MEASURED"),
+])
+def test_native_producer_records_the_measured_child_and_refuses_stale_invocation(
+        tmp_path, monkeypatch, state, stale, expected):
+    import _physical_current as current
+    import klayout_pdk_lvs as native
+    layout = tmp_path / "layout.gds"; layout.write_bytes(b"layout")
+    netlist = tmp_path / "routed.v"; netlist.write_text("module unit(); endmodule")
+    def_file = tmp_path / "routed.def"; def_file.write_text("DESIGN unit ;")
+    monkeypatch.setattr(current, "default_signoff_inputs", lambda project:
+                        {"gds": layout, "def": def_file, "netlist": netlist})
+    monkeypatch.setattr(mod, "_streamout_top", lambda *a: ("unit", None))
+    monkeypatch.setattr(mod, "_stage_padring_io_lefs_for_lvs", lambda *a: [])
+    monkeypatch.setattr(mod, "_to_container_path", lambda path, container: str(path))
+    monkeypatch.setattr(mod._lvs_pa, "emit_to_file", lambda src, pdk, out, **kw:
+                        out.write_text("module unit(); endmodule"))
+    measured = []
+    monkeypatch.setattr(mod, "_log_invocation", lambda *a, **kw: measured.append((a, kw)))
+    monkeypatch.setattr(mod, "_declare_immutable_transform", lambda *a: True)
+
+    def execute(container, command, products, **kwargs):
+        argv = shlex.split(command.splitlines()[0])
+        work = mod.Path(argv[argv.index("--work-dir") + 1]); work.mkdir()
+        reference = mod.Path(argv[argv.index("--verilog") + 1])
+        report = mod.Path(argv[argv.index("--out") + 1])
+        raw = report.with_name("lvs.rpt")
+        for path in (work / "native.log", raw, raw.with_suffix(".log")):
+            path.write_text("official native transcript")
+        record = {"schema": "vibeic.native_gds_lvs/1", "compare_performed": True,
+                  "layout_source": {"kind": "gds", **native._file_record(layout)},
+                  "reference_source": native._file_record(reference),
+                  "execution": {"rc": 0, "inputs_unchanged": True,
+                                "argv": ["klayout", "-b", "-r", "official.lvs"],
+                                "elapsed_s": 1.2},
+                  "log": native._file_record(work / "native.log")}
+        for key, name in (("native_result", "result.lvsdb"), ("deck", "deck.lvs"),
+                          ("cell_library_bundle", "cells.spice"),
+                          ("source_netlist", "source.spice"),
+                          ("driver_source", "driver.lvs")):
+            path = work / ("stale.lvsdb" if stale and key == "native_result" else name)
+            path.write_text(name)
+            record[key] = native._file_record(path)
+        result = {"compare_performed": True, "top": "unit", "circuits": [
+            {"layout": "unit", "reference": "UNIT", "status": state,
+             "layout_pins": 4, "reference_pins": 4}]}
+        record["native_result"].update(result)
+        record["status"] = native._native_status(result, 0)
+        record["finding"] = "NATIVE_FINAL_GDS_LVS_" + record["status"]
+        report.write_text(json.dumps(record))
+        return (0 if state == "Match" else 1), "", ""
+
+    monkeypatch.setattr(mod, "_declared_session_exec", execute)
+    pdk = _min_pdk(mod); pdk.native_lvs_deck = "official.lvs"
+    result = mod._run_native_pdk_gds_lvs(tmp_path, "unit", pdk, "unused", 0)
+    assert result.status == expected
+    if stale:
+        assert measured == []
+        assert "ANOTHER_INVOCATION" in result.detail
+    else:
+        assert measured[0][0][0].startswith("klayout ")
+        assert measured[0][0][1] == 0
+        assert measured[0][1]["input_hashes"]["layout.gds"] == (
+            "sha256:" + native._file_record(layout)["sha256"])
 
 
 def _min_pdk(mod):

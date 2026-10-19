@@ -2440,6 +2440,23 @@ def _lvs_blocked_verdict(project_dir: Path) -> Optional[dict]:
 
 def _check_lvs(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:lvs", passed=False)
+    from lvs_tapeout_signoff_check import native_project_verdict
+    try:
+        native = native_project_verdict(project_dir)
+    except (OSError, ValueError, KeyError) as exc:
+        result.findings.append(Finding("LVS_NATIVE_NOT_MEASURED", "ERROR", str(exc)))
+        result.summary = {"files_found": 0, "terminal_verdict": "INCOMPLETE"}
+        return result
+    if native is not None:
+        result.passed = native["status"] == "PASS"
+        result.summary = {"files_found": 1,
+                          "terminal_verdict": "MATCH" if result.passed else "MISMATCH",
+                          "native": native}
+        result.subject_files = [native["native_result"]["path"]]
+        if not result.passed:
+            result.findings.append(Finding("LVS_NATIVE_MISMATCH", "ERROR",
+                                          "official PDK final-GDS circuit/pin comparison failed"))
+        return result
     files = _discover(project_dir, ["*lvs*.rpt", "*lvs*.log", "*LVS*.rpt",
                                      "*LVS*.log", "*comp*.out"])
     if not files:

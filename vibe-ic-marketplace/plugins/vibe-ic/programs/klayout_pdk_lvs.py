@@ -50,6 +50,12 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 # ---------------------------------------------------------------------------
 
 import sys, os, re, json, argparse
+import hashlib
+import subprocess
+import time
+import signal
+import shutil
+from pathlib import Path
 from _atomic_artefact import writing as atomic_writing  # vibe-ic#1082 (helper from PR #1094)
 
 # A GENERIC example layer map (a common 180nm-style GDS numbering) so the tool is
@@ -689,9 +695,231 @@ def cmd_compare(args, pya):
     return 0 if ok else 4
 
 
+def _file_record(path):
+    path = Path(path).resolve()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"path": str(path), "sha256": digest.hexdigest(),
+            "bytes": path.stat().st_size}
+
+
+def _native_database_result(path, top, pya):
+    """Read the official deck's machine comparison, never an English match token."""
+    database = pya.LayoutVsSchematic()
+    database.read(str(path))
+    cross = database.xref()
+    if cross is None:
+        return {"compare_performed": False, "circuits": [], "top": top}
+    status_names = ("Match", "MatchWithWarning", "Mismatch", "NoMatch",
+                    "Skipped", "None_")
+    circuits = []
+    for pair in cross.each_circuit_pair():
+        native_status = pair.status()
+        first, second = pair.first(), pair.second()
+        status = next((name for name in status_names
+                       if native_status == getattr(pya.NetlistCrossReference, name)),
+                      "UNKNOWN")
+        circuits.append({"layout": first.name if first else None,
+                         "reference": second.name if second else None,
+                         "status": status,
+                         "layout_pins": first.pin_count() if first else 0,
+                         "reference_pins": second.pin_count() if second else 0})
+    return {"compare_performed": bool(circuits), "circuits": circuits, "top": top}
+
+
+def _native_status(result, rc):
+    circuits = result.get("circuits", [])
+    if result.get("compare_performed") and any(
+            row.get("status") in ("Mismatch", "NoMatch") for row in circuits):
+        return "FAIL"
+    if rc != 0 or not result.get("compare_performed") or not circuits:
+        return "NOT_MEASURED"
+    top = result.get("top")
+    roots = [row for row in circuits
+             if str(row.get("layout", "")).casefold() == str(top).casefold()
+             and str(row.get("reference", "")).casefold() == str(top).casefold()]
+    if (not roots or not all(row.get("status") == "Match" for row in circuits)
+            or any(row.get("layout_pins", 0) <= 0
+                   or row.get("layout_pins") != row.get("reference_pins")
+                   for row in roots)):
+        return "NOT_MEASURED"
+    return "PASS"
+
+
+def read_current_verdict(project, report_path, layout):
+    """The Step-31 native result reader shared with release packaging.
+
+    FAIL remains a measured FAIL. An absent, unbound or incomplete measurement
+    raises ValueError; a bare status word cannot certify a submitted layout.
+    """
+    project, layout = Path(project), Path(layout).resolve()
+    report_path = Path(report_path)
+    if not report_path.is_absolute():
+        report_path = project / report_path
+    record = json.loads(report_path.read_text())
+    if record.get("schema") != "vibeic.native_gds_lvs/1":
+        raise ValueError("NATIVE_LVS_SCHEMA_MISSING")
+    bound = record.get("layout_source", {})
+    bound_path = Path(bound.get("path", ""))
+    if not bound_path.is_absolute():
+        bound_path = project / bound_path
+    if (bound.get("kind") != "gds"
+            or bound_path.resolve() != layout
+            or bound.get("sha256") != _file_record(layout)["sha256"]):
+        raise ValueError("NATIVE_LVS_LAYOUT_MISMATCH")
+    for key in ("layout_source", "reference_source", "deck", "native_result",
+                "cell_library_bundle", "source_netlist", "driver_source", "log"):
+        source = record.get(key, {})
+        path = Path(source.get("path", ""))
+        if not path.is_absolute():
+            path = project / path
+        if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
+            raise ValueError("NATIVE_LVS_SOURCE_MISMATCH:" + key)
+    for source in record.get("runset_sources", []) + record.get("cell_libraries", []):
+        path = Path(source.get("path", ""))
+        if not path.is_absolute():
+            path = project / path
+        if not path.is_file() or _file_record(path)["sha256"] != source.get("sha256"):
+            raise ValueError("NATIVE_LVS_DEPENDENCY_MISMATCH")
+    result = record.get("native_result", {})
+    expected = _native_status(result, record.get("execution", {}).get("rc"))
+    if (not record.get("compare_performed") or expected == "NOT_MEASURED"
+            or record.get("execution", {}).get("inputs_unchanged") is not True
+            or record.get("status") != expected):
+        raise ValueError("NATIVE_LVS_NOT_MEASURED")
+    return record
+
+
+def cmd_native(args, pya):
+    """Run a PDK's own LVS deck on the actual final GDS, with explicit inputs."""
+    import gate_verilog_to_spice as converter
+    if not (args.deck and args.verilog and args.cell_library and args.out
+            and args.top and args.work_dir):
+        raise ValueError("native requires deck, verilog, cell-library, top, work-dir and out")
+    work = Path(args.work_dir).resolve()
+    work.mkdir(parents=True, exist_ok=False)
+    deck, layout, reference = map(Path, (args.deck, args.gds, args.verilog))
+    libraries = [Path(path) for path in args.cell_library]
+    runset_files = sorted(path for path in deck.parent.rglob("*") if path.is_file())
+    inputs = list(dict.fromkeys([layout, reference, deck, *libraries, *runset_files]))
+    manifest = [_file_record(path) for path in inputs]
+    (work / "inputs.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # The native image owns these small sources, but the host-side consumers
+    # and the delivered archive need the same bytes without an image mount.
+    original_deck_path = deck
+    original_deck = _file_record(deck)
+    snapshot = work / "pdk_runset"
+    for source_path in runset_files:
+        destination = snapshot / source_path.relative_to(deck.parent)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, destination)
+    deck = snapshot / deck.name
+    if _file_record(deck)["sha256"] != original_deck["sha256"]:
+        raise ValueError("NATIVE_LVS_RUNSET_COPY_CHANGED")
+    copied_libraries = []
+    for index, source_path in enumerate(libraries):
+        destination = work / f"cell_library_{index}.spice"
+        shutil.copyfile(source_path, destination)
+        copied_libraries.append(destination)
+    cells = work / "cells.spice"
+    raw_cells = work / "cells.original.spice"
+    raw_cells.write_text("\n".join(path.read_text() for path in copied_libraries))
+    translation = None
+    if args.library_translator:
+        translator = snapshot / Path(args.library_translator).relative_to(original_deck_path.parent)
+        translation_log = work / "library-translation.log"
+        translation_argv = [sys.executable, str(translator), str(raw_cells), "-o", str(cells)]
+        with translation_log.open("w") as stream:
+            translated = subprocess.run(translation_argv, stdout=stream,
+                                        stderr=subprocess.STDOUT, timeout=120, cwd=work)
+        if translated.returncode or not cells.is_file() or not cells.stat().st_size:
+            raise ValueError("NATIVE_LVS_LIBRARY_TRANSLATION_FAILED")
+        translation = {"tool": _file_record(translator), "input": _file_record(raw_cells),
+                       "output": _file_record(cells), "log": _file_record(translation_log),
+                       "argv": translation_argv, "rc": translated.returncode}
+    else:
+        shutil.copyfile(raw_cells, cells)
+    source = work / "source.spice"
+    if converter.convert(str(reference), str(cells), str(source),
+                         preserve_supply_ports=True, strict_cell_coverage=True,
+                         include_reference=cells.name):
+        raise ValueError("NATIVE_LVS_REFERENCE_INCOMPLETE")
+    db, extracted, log = work / "result.lvsdb", work / "extracted.spice", work / "native.log"
+    parameters = dict(item.split("=", 1) for item in args.parameter)
+    # Required paths and identity belong to this invocation, never a caller's
+    # free-form -rd option. All other options are the chosen PDK's runset inputs.
+    reserved = {"input", "schematic", "report", "target_netlist", "topcell"}
+    if reserved.intersection(parameters):
+        raise ValueError("NATIVE_LVS_RESERVED_PARAMETER")
+    parameters.update(input=str(layout.resolve()), schematic=str(source),
+                      report=str(db), target_netlist=str(extracted), topcell=args.top)
+    if args.threads < 1:
+        raise ValueError("NATIVE_LVS_THREADS_INVALID")
+    driver = work / "official-deck-driver.lvs"
+    driver.write_text(f"threads({args.threads})\n# %include {deck.relative_to(work)}\n")
+    argv = ["klayout", "-b", "-r", str(driver)]
+    for name, value in parameters.items():
+        argv.extend(["-rd", f"{name}={value}"])
+    started = time.monotonic()
+    with log.open("w") as stream:
+        cp = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT,
+                              cwd=work, start_new_session=True)
+        try:
+            rc = cp.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(cp.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                cp.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(cp.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                cp.wait(timeout=5)
+            rc = 124
+    try:
+        result = (_native_database_result(db, args.top, pya) if db.is_file()
+                  else {"compare_performed": False, "circuits": [], "top": args.top})
+    except (RuntimeError, ValueError, TypeError) as exc:
+        result = {"compare_performed": False, "circuits": [], "top": args.top,
+                  "read_error": str(exc)}
+    unchanged = all(_file_record(row["path"])["sha256"] == row["sha256"]
+                    for row in manifest)
+    status = _native_status(result, rc) if unchanged else "NOT_MEASURED"
+    version = subprocess.run(["klayout", "-b", "-v"], capture_output=True,
+                             text=True, timeout=30)
+    payload = {"schema": "vibeic.native_gds_lvs/1", "status": status,
+               "finding": "NATIVE_FINAL_GDS_LVS_" + status,
+               "tool": "klayout", "tool_version": version.stdout.strip(),
+               "options": parameters, "cell_libraries": [_file_record(path) for path in copied_libraries],
+               "cell_library_bundle": _file_record(cells), "library_translation": translation,
+               "runset_sources": [_file_record(snapshot / path.relative_to(original_deck_path.parent))
+                                  for path in runset_files],
+               "compare_performed": result["compare_performed"],
+               "layout_source": {"kind": "gds", **_file_record(layout)},
+               "reference_source": _file_record(reference),
+               "deck": {**_file_record(deck), "original_source": original_deck},
+               "driver_source": _file_record(driver),
+               "native_result": ({**_file_record(db), **result} if db.is_file() else result),
+               "extracted_netlist": _file_record(extracted) if extracted.is_file() else None,
+               "source_netlist": _file_record(source), "log": _file_record(log),
+               "inputs_manifest": _file_record(work / "inputs.json"),
+               "execution": {"rc": rc, "argv": argv, "elapsed_s": time.monotonic() - started,
+                             "inputs_unchanged": unchanged}}
+    with atomic_writing(args.out) as stream:
+        json.dump(payload, stream, indent=2)
+    print(json.dumps(payload))
+    return 0 if status == "PASS" else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Net-correct KLayout transistor LVS extraction + compare")
-    ap.add_argument("cmd", choices=["extract", "lib", "cell", "compare"])
+    ap.add_argument("cmd", choices=["extract", "lib", "cell", "compare", "native"])
     ap.add_argument("gds", help="GDS (extract/lib/cell) or LAYOUT SPICE netlist (compare)")
     ap.add_argument("--cell")
     ap.add_argument("--out")
@@ -710,10 +938,17 @@ def main(argv=None):
                          "coverage to the PDK's full routing stack so upper-metal nets "
                          "are not split (prevents a false LVS mismatch on >4-metal PDKs)")
     ap.add_argument("--threads", type=int, default=_default_threads())
+    ap.add_argument("--deck", help="native: the PDK's official LVS runset")
+    ap.add_argument("--verilog", help="native: current physical power-aware reference")
+    ap.add_argument("--cell-library", action="append", help="native: reference SPICE library")
+    ap.add_argument("--library-translator", help="native: PDK's reference library syntax converter")
+    ap.add_argument("--parameter", action="append", default=[], help="native: PDK NAME=VALUE option")
+    ap.add_argument("--work-dir", help="native: a new directory preserving this invocation")
+    ap.add_argument("--timeout", type=int, default=1800, help="native: bounded tool runtime in seconds")
     args = ap.parse_args(argv)
     pya = _require_pya()
     return {"extract": cmd_extract, "lib": cmd_lib, "cell": cmd_cell,
-            "compare": cmd_compare}[args.cmd](args, pya)
+            "compare": cmd_compare, "native": cmd_native}[args.cmd](args, pya)
 
 
 if __name__ == "__main__":

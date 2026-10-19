@@ -118,6 +118,21 @@ class TestParseVerilog:
         # A/B are bus bits (dotted); Y is the y_r net resolved through the alias.
         assert pinmap == {"A": "a.0", "B": "a.1", "Y": "y"}
 
+    def test_lowercase_cell_master_is_preserved(self):
+        text = PARSE_V.replace("NOR2D1", "logic_buf_2")
+        assert mod.parse_verilog(text)[2][0][0] == "logic_buf_2"
+
+    def test_following_module_does_not_enter_the_top(self):
+        text = PARSE_V + "\nmodule extra(a,y); input a; output y; BUFD1 other(.A(a),.Y(y)); endmodule\n"
+        _, ports, instances = mod.parse_verilog(text)
+        assert ports == ["a.3", "a.2", "a.1", "a.0", "y"]
+        assert [name for _, name, _ in instances] == ["u0"]
+
+    def test_preserve_supply_ports_is_explicit(self):
+        text = "module top(a,y,VDD,VSS); input a; output y; inout VDD,VSS; BUFD1 u(.A(a),.Y(y)); endmodule"
+        assert mod.parse_verilog(text)[1] == ["a", "y"]
+        assert mod.parse_verilog(text, preserve_supply_ports=True)[1] == ["a", "y", "VDD", "VSS"]
+
 
 class TestConvert:
     def _write(self, tmp_path, vtext=SYNTH_V, ctext=SYNTH_CELLS):
@@ -156,6 +171,28 @@ class TestConvert:
         mod.convert(v, c, out)
         text = (tmp_path / "source.spice").read_text()
         assert ".include" in text
+
+    def test_include_path_is_quoted_for_spice_reader(self, tmp_path):
+        v, c, out = self._write(tmp_path)
+        assert mod.convert(v, c, out) == 0
+        assert f'.include "{c}"' in (tmp_path / "source.spice").read_text()
+
+    def test_strict_coverage_rejects_unknown_cell_without_output(self, tmp_path):
+        v, c, out = self._write(tmp_path)
+        assert mod.convert(v, c, out, strict_cell_coverage=True) == 2
+        assert not (tmp_path / "source.spice").exists()
+
+    def test_strict_coverage_rejects_empty_conversion(self, tmp_path):
+        v, c, out = self._write(tmp_path, vtext="module top(a); input a; endmodule")
+        assert mod.convert(v, c, out, strict_cell_coverage=True) == 2
+        assert not (tmp_path / "source.spice").exists()
+
+    def test_lowercase_known_cell_is_emitted_under_strict_coverage(self, tmp_path):
+        v, c, out = self._write(tmp_path,
+            vtext=PARSE_V.replace("NOR2D1", "logic_buf_2"),
+            ctext=SYNTH_CELLS.replace("NOR2D1", "logic_buf_2"))
+        assert mod.convert(v, c, out, strict_cell_coverage=True) == 0
+        assert "Xu0 a.0 a.1 y VDD VSS logic_buf_2" in (tmp_path / "source.spice").read_text()
 
     def test_include_cells_can_be_disabled(self, tmp_path):
         v, c, out = self._write(tmp_path)
