@@ -132,6 +132,7 @@ fixed strings are upstream's own variable names and this flow's relative paths.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1113,10 +1114,20 @@ def validate(doc: Any) -> List[Dict[str, Any]]:
                     RULE_POINT_INVALID,
                     f"{q.key!r} must be [x, y] in microns", key=q.key))
         elif q.kind == "number":
-            if not _is_number(v) or v <= 0:
+            # The IO library may explicitly place its row at the die edge.
+            # Check floats for finiteness without converting arbitrary-size
+            # integers to float (which can overflow).
+            if q.key == "pad_edge_spacing_um":
+                valid = (_is_number(v) and v >= 0
+                         and (not isinstance(v, float) or math.isfinite(v)))
+                requirement = "a finite non-negative number"
+            else:
+                valid = _is_number(v) and v > 0
+                requirement = "a positive number"
+            if not valid:
                 out.append(_refusal(
                     RULE_NUMBER_INVALID,
-                    f"{q.key!r} must be a positive number, got {v!r}",
+                    f"{q.key!r} must be {requirement}, got {v!r}",
                     key=q.key))
         elif q.kind == "bool" and not isinstance(v, bool):
             out.append(_refusal(
