@@ -1144,7 +1144,7 @@ def current_metal_density(project: Path, arm: dict, promotion: dict) -> dict:
                                            'report_sha256': digest(ratio_report)}):
         raise Refusal('LL_METAL_DENSITY_SUBJECT_UNBOUND', str(report))
     state = Path(arm['state'])
-    image = resolve_image(project)
+    image = resolve_image(project, record=False)
     # Default finishing needs no step switch; the PDK declaration and root
     # receipt still bind its materials in _pdk_mounts, as at _current_stage.
     switch_path = project / 'phase3/librelane_switch.json'
@@ -1601,7 +1601,7 @@ def validate_density_result(project: Path, arm: dict, *, layout: Path | None = N
         receipt = validate_step_receipt(state.parent, 'KLayout.Density')
         switch_path = project / 'phase3/librelane_switch.json'
         switch = _load(switch_path) if switch_path.is_file() else {}
-        mounts = native._pdk_mounts(project, switch, state.parent, resolve_image(project))
+        mounts = native._pdk_mounts(project, switch, state.parent, resolve_image(project, record=False))
         config = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.Density.json')
         if receipt['input'].get('config_files') != config_file_hashes(config, mounts):
             raise ValueError('density PDK material population changed')

@@ -435,7 +435,7 @@ def _sha256_of(path: Path):
         return None
 
 
-def _handoff_mode(project: Path) -> dict:
+def _handoff_mode(project: Path, assembly=None) -> dict:
     """Which of the two situations this hand-off is in, and on what evidence.
 
     Precedence:
@@ -448,6 +448,14 @@ def _handoff_mode(project: Path) -> dict:
          this is the shuttle path and the operator is named.
       3. UNDECLARED. Not dedicated. See the block comment above.
     """
+    if assembly is not None:
+        provider = _fhpc.selected_provider_precheck(assembly)
+        report = provider.get('retained_report') or {}
+        return {'mode':MODE_SHUTTLE,'basis':'selected provider assembly: '+provider['reason'],
+                'operator':provider.get('provider'),'operator_status':'TECHNICAL_PRECHECK_ONLY',
+                'precheck_verdict':provider['technical_precheck_status'],
+                'precheck_report':report.get('source'),'precheck_report_sha256':report.get('sha256'),
+                'accepted':False}
     declared = _l1_tapeout_metadata(project).get("handoff_mode")
     if isinstance(declared, str) and declared.strip().lower() in (
             MODE_SHUTTLE, MODE_DEDICATED):
@@ -1031,7 +1039,7 @@ def main(argv=None) -> int:
     # every member, so a reader who opens ONE member still learns whether the
     # reticle is theirs or the slot operator's — and so the gate can compare
     # the mode the kit CLAIMS against the evidence on disk.
-    mode_info = _handoff_mode(project)
+    mode_info = _handoff_mode(project, assembly=release_info)
 
     # The corners the sign-off liberty files declare. Measured, not defaulted.
     corners = _signoff_liberty_corners(project)

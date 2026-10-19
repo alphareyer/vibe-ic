@@ -300,7 +300,7 @@ _MODE_UNDECLARED = 'undeclared'
 _PRECHECK_ACCEPTS = ('PASS',)
 
 
-def _read_shuttle_precheck(project):
+def _read_shuttle_precheck(project, assembly=None):
     """(exists, is_an_operators, verdict, operator) off 37.5ic's own report.
 
     `exists` is a fact about the FILE and keeps its old meaning, because the
@@ -313,6 +313,10 @@ def _read_shuttle_precheck(project):
     `verdict` is None when the file is present but unparseable — which is NOT
     an accept: an unreadable verdict is reported as NOT_DETERMINED so that a
     corrupt report cannot become a quiet pass."""
+    if assembly is not None:
+        provider = selected_provider_precheck(assembly)
+        return (bool(provider.get('retained_report')), True,
+                provider['technical_precheck_status'], provider.get('provider'))
     p = project / _SHUTTLE_PRECHECK_REPORT
     if not p.is_file():
         return False, False, None, None
@@ -941,6 +945,39 @@ def admitted_provider_release(project, record_path=None):
     return finishing_owner.read_admitted_release(project, record)
 
 
+def selected_provider_precheck(assembly):
+    """One selected-service basis for the kit, manifest and normal gate.
+
+    An unreadable selected result remains owed; it cannot select an older
+    checkpoint's operator or turn a technical precheck into order acceptance.
+    """
+    provider = {'status': 'NOT_MEASURED', 'technical_precheck_status': 'NOT_MEASURED',
+                'accepted': False, 'reason': 'No bound provider precheck for the selected assembly',
+                'materials': []}
+    try:
+        selected = assembly['basis']['provider_precheck']
+        provider.update({key: selected.get(key) for key in
+                         ('provider','slot','cob','official_revision','options','layout_sha256')})
+        root = Path(assembly['report']).parents[2]
+        materials = []
+        for source in [selected['source'], *selected.get('files', [])]:
+            path = Path(source['path'])
+            if not path.is_absolute():path = root / path
+            if (not path.is_file() or not source.get('sha256')
+                    or sha256_file(path) != source['sha256']):
+                raise ValueError('provider precheck material missing/changed: '+str(path))
+            materials.append({'path':str(path),'sha256':source['sha256']})
+        if selected['layout_sha256'] != assembly['sha256']:
+            raise ValueError('provider precheck does not bind the selected final GDS')
+        provider.update(status='NOT_SUBMITTED', technical_precheck_status=selected['status'],
+                        retained_report={'source':materials[0]['path'],'sha256':materials[0]['sha256']},
+                        materials=materials,
+                        reason='Technical precheck is separate from provider acceptance or a slot reservation')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        provider['reason'] = str(exc)
+    return provider
+
+
 def design_release_sources(project, layout, assembly=None):
     """Existing selected producers supply the archive readset and judgments."""
     import librelane_signoff_evidence as native
@@ -1089,7 +1126,8 @@ def design_release_sources(project, layout, assembly=None):
     except (OSError, ValueError, KeyError, lc.Refusal) as exc:
         validation['stream'] = {"verdict":"NOT_MEASURED","reason":str(exc)}
     try:
-        arm = timing.step23_tool_arm(project,artefacts=())
+        import sta_corner_record_completeness_check as sta_corners
+        arm = sta_corners.read_tool_arm(project)
         if arm is None:
             raise ValueError('No retained native STA source selected')
         gaps = {name:row.get('scope_gaps') for name,row in arm['corners'].items() if row.get('scope_gaps')}
@@ -1104,7 +1142,23 @@ def design_release_sources(project, layout, assembly=None):
             add(path,'spef')
         for role, key in (('timed_reference_netlist','pnl'),('timed_reference_netlist','nl')):
             if views.get(key):add(views[key],role)
-        validation['sta'] = {"verdict":"PASS","basis":timing.tool_arm_basis(arm),
+        import eda_report_audit as sta_audit
+        from dataclasses import asdict
+        complete = sta_corners.evaluate_tool(project, arm)
+        verdict = complete['verdict']
+        report_audit = None
+        subjects = [Path(row['files'][timing.CORNER_REPORT]['path']) for row in arm['corners'].values()
+                    if timing.CORNER_REPORT in row['files']]
+        if subjects:
+            with sta_audit.scoped_discovery([Path(arm['folder'])]), sta_audit.named_subjects(subjects):
+                judged = sta_audit._check_sta(project)
+            report_audit = asdict(judged)
+            if verdict == 'PASS':
+                verdict = judged.verdict or ('PASS' if judged.passed else 'FAIL')
+            elif any(finding.rule == 'STA_REAL_VIOLATION_FOUND' for finding in judged.findings):
+                verdict = 'FAIL'
+        validation['sta'] = {"verdict":verdict,"corner_consumer":complete,
+                             "report_consumer":report_audit,"basis":timing.tool_arm_basis(arm),
                              "scope":"Retained timed netlist/SDC/SPEF and routing checkpoint; not a new parasitic measurement of provider finishing"}
     except (OSError, ValueError, KeyError, lc.Refusal) as exc:
         validation['sta'] = {"verdict":"NOT_MEASURED","reason":str(exc)}
@@ -1119,31 +1173,9 @@ def design_release_sources(project, layout, assembly=None):
         add(rel,'internal_closure')
     provider = None
     if assembly:
-        provider = {'status': 'NOT_MEASURED', 'technical_precheck_status': 'NOT_MEASURED',
-                    'accepted': False, 'reason': 'No bound provider precheck for the selected assembly'}
-        try:
-            selected = assembly['basis']['provider_precheck']
-            source = selected['source']
-            path = Path(source['path'])
-            if not path.is_absolute():path = physical_project / path
-            if (selected['layout_sha256'] != assembly['sha256']
-                    or not path.is_file() or not source.get('sha256')
-                    or sha256_file(path) != source['sha256']):
-                raise ValueError('provider precheck does not bind the selected final GDS')
-            add(path, 'provider_precheck', source['sha256'])
-            for entry in selected.get('files', []):
-                material = Path(entry['path'])
-                if not material.is_absolute():material = physical_project / material
-                if not material.is_file():raise ValueError('provider precheck material missing: '+str(material))
-                add(material, 'provider_precheck', entry['sha256'])
-            provider = {key: selected.get(key) for key in
-                        ('provider','slot','cob','official_revision','options','layout_sha256')}
-            provider.update(status='NOT_SUBMITTED', accepted=False,
-                            technical_precheck_status=selected['status'],
-                            retained_report={'source':str(path),'sha256':source['sha256']},
-                            reason='Technical precheck is separate from provider acceptance or a slot reservation')
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            provider['reason'] = str(exc)
+        provider = selected_provider_precheck(assembly)
+        for material in provider.pop('materials'):
+            add(material['path'], 'provider_precheck', material['sha256'])
         validation['provider_precheck'] = {'verdict': provider['technical_precheck_status'],
                                            'gds_sha256': assembly['sha256']}
     return {"files":files,"validation":validation,"external_dependencies":external,
@@ -1730,7 +1762,7 @@ def main(argv=None):
     # the shuttle path, so neither the mode nor the operator-refusal rule below
     # applies to it.
     precheck_present, precheck_is_an_operators, precheck_verdict, \
-        precheck_operator = _read_shuttle_precheck(project)
+        precheck_operator = _read_shuttle_precheck(project, assembly=assembly)
     evidence_mode = (_MODE_SHUTTLE if precheck_is_an_operators
                      else _MODE_UNDECLARED)
 

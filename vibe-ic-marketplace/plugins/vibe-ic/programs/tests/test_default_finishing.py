@@ -610,3 +610,23 @@ def test_retained_local_finishing_still_refuses_true_material_and_input_changes(
             observations.append({'changed': changed, 'refusal': str(refused.value)})
     BF.put(tmp_path / 'LOCAL_FINISHING_NEGATIVES.json', observations)
     print(json.dumps(observations, indent=2))
+
+
+def test_retained_density_consumers_leave_readonly_project_unchanged(tmp_path,monkeypatch):
+    p,record,_namespace,_receipts,_source,_executable,_calls=_typed_local_finishing(tmp_path,monkeypatch)
+    arm=json.loads((p/LF.RECORD_REL).read_text())['gds']['librelane']
+    material=[path for path in p.rglob('*') if path.is_file()]
+    directories=[p,*[path for path in p.rglob('*') if path.is_dir()]]
+    before={str(path.relative_to(p)):LC.digest(path) for path in material}
+    modes={path:path.stat().st_mode & 0o777 for path in material+directories}
+    try:
+        for path in material:path.chmod(0o444)
+        for path in directories:path.chmod(0o555)
+        current=LF.validate_density_result(p,arm,layout=Path(record['canonical']))
+        (tmp_path/'READONLY_DENSITY_OBSERVATION.json').write_text(json.dumps(current,indent=2)+'\n')
+        assert current['value']==0,current
+        measured=LF.current_metal_density(p,arm,record)
+        assert measured['verdict']=='PASS',measured
+        assert before=={str(path.relative_to(p)):LC.digest(path) for path in material}
+    finally:
+        for path,mode in modes.items():path.chmod(mode)
