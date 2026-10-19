@@ -24321,9 +24321,16 @@ def step_emit_phase2_manifests(project: Path,
             _rtl_dir_rel = rtl_dir.relative_to(project).as_posix()
         except ValueError:                      # pragma: no cover
             _rtl_dir_rel = str(rtl_dir)
-        _synth_log = _synthesis_log_path(project) if _lint_rtl else project / _SYNTH_LOG_REL
-        _synth_log_rel = _synth_log.relative_to(project).as_posix()
-        _synth_log_present = _synth_log.is_file() and _synth_log.stat().st_size > 0
+        _synth_log_error = None
+        try:
+            _synth_log = _synthesis_log_path(project) if _lint_rtl else project / _SYNTH_LOG_REL
+            _synth_log_rel = _synth_log.relative_to(project).as_posix()
+            _synth_log_present = _synth_log.is_file() and _synth_log.stat().st_size > 0
+        except Exception as exc:  # reporting must preserve a failed producer's refusal
+            _synth_log_error = f"{type(exc).__name__}: {exc}"
+            _synth_log_present = False
+            # No legacy alias is admissible when the selected source refused.
+            _synth_log_rel = None
         if not _lint_rtl:
             _hyg = {
                 "verdict": "INCOMPLETE",
@@ -24335,6 +24342,16 @@ def step_emit_phase2_manifests(project: Path,
                     f" — a lint verdict over zero files states nothing about "
                     f"this design, so this refuses instead of passing"),
                 "rtl_files": [],
+                "rule_set": "yosys-elaborate-noncrit-warn",
+            }
+        elif _synth_log_error:
+            _hyg = {
+                "verdict": "INCOMPLETE",
+                "reason_class": "tool_handoff_invalid",
+                "reason": _synth_log_error,
+                "source": "yosys_synth (errors-as-fail)",
+                "synth_status": by_name.get("yosys_synth", _ABSENT_STEP).status,
+                "rtl_files": _lint_rtl,
                 "rule_set": "yosys-elaborate-noncrit-warn",
             }
         elif not _synth_log_present:
