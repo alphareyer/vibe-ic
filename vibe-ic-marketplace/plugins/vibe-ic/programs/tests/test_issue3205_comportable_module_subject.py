@@ -10,9 +10,7 @@ sys.path.insert(0, str(PROGRAMS))
 from phase1_doc_one_shot_runner import gen_l1_datasheet, gen_l9_integration_spec
 
 PUBLIC_SNIPPET = """# Hardware Interfaces
-
 the module **`packet_engine`** has the following hardware interfaces defined
-
 - Primary Clock: **`clk_i`**
 - Bus Device Interfaces (TL-UL): *none*
 
