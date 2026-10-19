@@ -10508,6 +10508,78 @@ def step_step4_functional_evidence(project: Path,
                 if _vacuous_skip else {}))
 
 
+def _adopted_step4_producer(project: Path, rows: list,
+                            name: str) -> Optional[StepResult]:
+    """Reuse only this Ultra invocation's imported, accepted producer bytes.
+
+    This is not a second simulation or a historical PASS lookup. Uncovered
+    full-stack/reference/analog work and the normal consumers remain owned by
+    the ordinary runner. A missing or changed imported report cannot grant
+    reuse merely because an earlier current report happens to say PASS.
+    """
+    import execution_policy as execution
+    runtime = execution._ordinary_runtime or {}
+    if runtime.get('policy', {}).get('mode') != 'ultra':
+        return None
+    results = [result for row in rows
+               for result in (row.extras or {}).get('execution_results', ())
+               if isinstance(result, dict) and result.get('step_id') == '4'
+               and result.get('status') == 'ADOPTED']
+    if len(results) != 1:
+        return None
+    result = results[0]
+    outputs = (result.get('selected_generation') or {}).get('outputs') or {}
+    reports = {
+        'l10_unit_tb_gen': ('reports/phase2/sim/l10_execution.json',
+                           'phase2/stage1/sim_professional/l10_unit_tb/results.xml'),
+        'l10_unit_tb_run': ('reports/phase2/sim/l10_execution.json',
+                           'phase2/stage1/sim_professional/l10_unit_tb/results.xml'),
+        'professional_tb_gen': ('reports/phase2/gates/professional_tb.json',),
+        'verilator_coverage': ('reports/phase2/coverage/coverage_verilator.json',),
+    }[name]
+    try:
+        import execution_modes as em
+        from execution_step4 import continuation_paths
+        record_path = project / 'step4_execution.json'
+        if em.digest(record_path) != outputs.get('step4_execution.json'):
+            raise ValueError('selected execution record missing or changed')
+        record = json.loads(record_path.read_text())
+        arm_root = Path(result['run_root']) / result['selected'] / 'outputs'
+        professional = tuple(str(Path(record['functional'][key]).relative_to(arm_root))
+                             for key in ('junit', 'log'))
+        generated_tbs = tuple(rel for rel in outputs
+                              if rel.startswith('phase2/stage1/sim/tb/tb_')
+                              and Path(rel).suffix in ('.v', '.sv'))
+        for rel in (*reports, *professional, *continuation_paths(project), *generated_tbs):
+            path = project / rel
+            if rel not in outputs or not path.is_file() or em.digest(path) != outputs[rel]:
+                raise ValueError('selected producer artifact missing or changed: ' + rel)
+        if name.startswith('l10_unit_tb_'):
+            observed = record['scenario_execution']
+            if (observed.get('sim_executed') is not True or
+                    observed.get('failed', 0) or observed.get('errored', 0)):
+                raise ValueError('selected unit execution is not complete and passing')
+        elif name == 'professional_tb_gen':
+            observed = record['functional']
+            if observed.get('verdict') != 'PASS' or observed.get('rc') != 0:
+                raise ValueError('selected professional execution did not pass')
+            report = json.loads((project / reports[0]).read_text())
+            if report.get('status') != 'PASS' or report.get('functional_mismatch') is not False:
+                raise ValueError('selected professional report did not pass')
+        else:
+            observed = record['coverage']
+            if observed.get('verdict') != 'PASS':
+                raise ValueError('selected coverage execution did not pass')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return StepResult(name, 'NOT_MEASURED', 0.0,
+                          'Ultra selected producer cannot be reused: ' + str(exc),
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    return StepResult(name, 'PASS', 0.0,
+                      'Reused this invocation\'s selected and imported Step4 producer; no second measurement',
+                      list(reports), extras={'execution_result': result,
+                          'reused_selected_producer': True})
+
+
 def step_l10_unit_tb_gen(project: Path,
                          top_name: str = "chip_top") -> StepResult:
     """ORGANIC #797 — run the testbench_gen PRODUCER so L10 `functional_vector`
@@ -26760,10 +26832,17 @@ def main() -> int:
         # professional cocotb path below) sits past the declared exit.
         plan.append(_exit_sentinel("sim"))
     else:
-        _dispatch_site("sim", lambda: [_spf.gate(
+        _sim_rows = _dispatch_site("sim", lambda: [_spf.gate(
             project, "design_one_shot_runner", "sim",
             _preflight_refusal("sim"),
             step_full_stack_tb_gen, project, args.top_name)])
+        if any(result.get('status') == 'ADOPTED'
+               for row in _sim_rows
+               for result in (row.extras or {}).get('execution_results', ())
+               if isinstance(result, dict)):
+            # The selected simulator did not produce the full-stack skeleton.
+            # Keep this uncovered ordinary responsibility before its consumer.
+            plan.append(step_full_stack_tb_gen(project, args.top_name))
         # ORGANIC #797 — wire the testbench_gen PRODUCER (it was never called by any
         # one-shot runner, so L10 `functional_vector` cases got NO Step-4 evidence).
         # Runs AFTER full_stack_tb_gen (RTL/L9 stable) and BEFORE reference_tb /
@@ -26771,13 +26850,17 @@ def main() -> int:
         # land under sim/tb/ in time to be counted. KIND-SCOPED to functional_vector
         # (§4.05 no-leak: a cmd_response case never gets manufactured id-substring
         # evidence — it stays gated by its opcode/summary oracle).
-        plan.append(step_l10_unit_tb_gen(project, args.top_name))
+        _reused = _adopted_step4_producer(project, _sim_rows, 'l10_unit_tb_gen')
+        plan.append(_reused if _reused is not None else
+                    step_l10_unit_tb_gen(project, args.top_name))
         # THE CONSUMER. The producer above has been wired since #797 and the
         # Step-4 functional denominator was STILL zero, because nothing ran
         # what it wrote. This executes those TBs and writes the JUnit the
         # Step-4 bridge reads. Fail-closed: no simulator / nothing to run
         # writes NOTHING and does not report a pass.
-        plan.append(step_l10_unit_tb_run(project, args.container))
+        _reused = _adopted_step4_producer(project, _sim_rows, 'l10_unit_tb_run')
+        plan.append(_reused if _reused is not None else
+                    step_l10_unit_tb_run(project, args.container))
         # FULLSTACKTB — the FUNCTIONAL full-stack population. The skeleton
         # `step_full_stack_tb_gen` emitted above is connectivity-only; Step 5's
         # `bit_level_full_stack_tb_check` now refuses it as functional evidence
@@ -26803,8 +26886,9 @@ def main() -> int:
         # AFTER the TB producers (RTL/L9 stable) and, when the container has
         # cocotb+iverilog, actually RUNS the TB so the functional verdict is REAL.
         # Was declared in flow step-4 but never invoked by any runner until now.
-        plan.append(step_professional_tb_gen(project, args.top_name,
-                                             args.container))
+        _reused = _adopted_step4_producer(project, _sim_rows, 'professional_tb_gen')
+        plan.append(_reused if _reused is not None else
+                    step_professional_tb_gen(project, args.top_name, args.container))
 
     # v1.6.170 (#60 P0-2) — deterministic RTL-repair-inert hint extractor.
     # When the RTL repair/retry loop detects byte-identical RTL retry it now
@@ -27397,8 +27481,9 @@ def main() -> int:
     elif _after_exit("sim"):
         plan.append(_exit_sentinel("verilator_coverage"))
     else:
-        plan.append(step_verilator_coverage(project, args.top_name,
-                                            args.container))
+        _reused = _adopted_step4_producer(project, _sim_rows, 'verilator_coverage')
+        plan.append(_reused if _reused is not None else
+                    step_verilator_coverage(project, args.top_name, args.container))
     if _bounded and any(_step_requested(s) for s in ("2", "3", "4")):
         _disclose_runs_anyway(
             "emit_phase2_manifests",

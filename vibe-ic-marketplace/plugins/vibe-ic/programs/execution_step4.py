@@ -404,6 +404,45 @@ def gate_commands(contract):
     return commands
 
 
+def continuation_paths(project):
+    """The produced reports read after a selected Step4 arm is imported.
+
+    Source plans/TBs stay inputs. These are the existing executor reports and
+    the measurement named by the retained professional plan, not an arbitrary
+    copy of its mixed source/output directory. Referenced native run paths in
+    these reports still name the retained arm that actually executed them.
+    """
+    root = Path(project)
+    paths = [root / 'reports/phase2/gates/professional_tb.json',
+             root / 'reports/phase2/sim/l10_execution.json']
+    record = root / 'step4_execution.json'
+    executed = json.loads(record.read_text()) if record.is_file() else {}
+    top = Path(executed.get('functional', {}).get('junit', '')).parent.name
+    plan_path = root / 'phase2/stage1/sim_professional' / top / 'verification_plan.json'
+    if top and plan_path.is_file():
+        plan = json.loads(plan_path.read_text()).get('random_goal_plan')
+        if isinstance(plan, dict) and plan.get('measurement_file'):
+            measurement = plan_path.parent / plan['measurement_file']
+            if not measurement.resolve().is_relative_to(plan_path.parent.resolve()):
+                raise ValueError('4: random measurement outside its bundle')
+            paths.append(measurement)
+    return tuple(str(path.relative_to(root)) for path in paths)
+
+
+def continuation_artifacts(project, facts):
+    root = Path(project)
+    paths = set(continuation_paths(root))
+    # The L12 continuation reads generated unit-TB source at the ordinary
+    # sim/tb seam. Publish only newly produced files, never replace an issued
+    # source TB or the retained professional plan with an arm-local rewrite.
+    for path in (root / 'phase2/stage1/sim/tb').glob('tb_*'):
+        rel = str(path.relative_to(root))
+        if path.suffix in ('.v', '.sv') and rel not in facts['inputs']:
+            paths.add(rel)
+    return {rel: coverage_hash(root / rel) for rel in sorted(paths)
+            if (root / rel).is_file() and not (root / rel).is_symlink()}
+
+
 def validate(project, facts, gate_names):
     """BLOCKING: canonical Step4 and every mandatory consumer must pass."""
     import _flow_yaml
@@ -439,6 +478,7 @@ def validate(project, facts, gate_names):
     required = tuple(contract.get('required_outputs') or ())
     concrete = _concrete_outputs(root, required)
     outputs = {rel: em.digest(root / rel) for rel in concrete}
+    outputs.update(continuation_artifacts(root, facts))
     for path in root.glob('phase2/stage1/sim_professional/*/*'):
         if path.is_file() and not path.is_symlink() and path.suffix in ('.dat', '.log'):
             outputs[str(path.relative_to(root))] = em.digest(path)
