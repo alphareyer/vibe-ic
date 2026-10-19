@@ -1077,16 +1077,20 @@ def design_release_sources(project, layout, assembly=None):
                 import klayout_pdk_lvs as native_lvs
                 verdict = native_lvs.read_current_verdict(physical_project, report_path, layout)
                 circuits = verdict['native_result']['circuits']
+                subject = verdict.get('requested_subject') or verdict['layout_source']
                 validation[kind] = {
                     'verdict': verdict['status'],
-                    'gds_sha256': verdict['layout_source']['sha256'],
+                    'gds_sha256': subject['sha256'],
+                    'requested_subject': subject,
+                    'native_layout_source': verdict['layout_source'],
+                    'subject_equivalence': verdict.get('subject_equivalence'),
                     'record': str(report_path),
                     'rows': {'unmatched_circuits': {'value': sum(row['status'] != 'Match' for row in circuits)}},
                     'tool': verdict['tool'], 'tool_version': verdict.get('tool_version'),
                     'options': verdict.get('options')}
                 add(report_path, 'lvs_report')
                 materials = []
-                for name in ('reference_source','native_result','deck','driver_source',
+                for name in ('layout_source','reference_source','native_result','deck','driver_source',
                              'source_netlist','extracted_netlist','log','inputs_manifest',
                              'cell_library_bundle'):
                     entry = verdict.get(name)
@@ -1098,7 +1102,7 @@ def design_release_sources(project, layout, assembly=None):
                 dependencies = [*verdict.get('cell_libraries', []),
                                 *verdict.get('runset_sources', []),
                                 *verdict.get('producer_sources', [])]
-                for name in ('library_translation','extraction_basis'):
+                for name in ('library_translation','extraction_basis','subject_equivalence'):
                     dependencies.extend(entry for entry in (verdict.get(name) or {}).values()
                                         if isinstance(entry, dict) and entry.get('path') and entry.get('sha256'))
                 materials.extend((entry, 'tool_provenance') for entry in dependencies)

@@ -441,3 +441,92 @@ def test_native_lvs_bundle_relative_includes_survive_real_relocation(tmp_path,mo
     _doc,bad=check.check_design_release(moved)
     assert any('changed archive member' in item for item in bad),bad
     print('NATIVE_BUNDLE_RELOCATION',json.dumps(actual))
+
+
+@pytest.mark.parametrize('case,expected',[
+    ('serialization','PASS'),('shape','NOT_MEASURED'),
+    ('text','NOT_MEASURED'),('units','NOT_MEASURED')])
+def test_archive_requested_lvs_subject_uses_verified_semantics(tmp_path,monkeypatch,case,expected):
+    import pya
+    import struct
+    import _gds_admission as admission
+    import klayout_pdk_lvs as native_owner
+    from _gds_geometry import _iter_records
+    project,source=neutral(tmp_path/'pack',monkeypatch)
+    final=project/'phase3/stage4/gds/alpha.gds'
+    native_bytes=final.read_bytes()
+    # Reverse complete structure blocks, preserving their records/geometry.
+    # Raw and date-only canonical digests differ, while LayoutDiff must judge
+    # the actual layouts rather than a supplied equality status word.
+    prefix,blocks,suffix=[],[],[]
+    block=None
+    for rt,dt,payload in _iter_records(native_bytes):
+        raw=struct.pack('>HBB',len(payload)+4,rt,dt)+payload
+        if rt==0x05:block=[]
+        if block is not None:
+            block.append(raw)
+            if rt==0x07:blocks.append(b''.join(block));block=None
+        elif blocks:suffix.append(raw)
+        else:prefix.append(raw)
+    final.write_bytes(b''.join(prefix+list(reversed(blocks))+suffix))
+    if case!='serialization':
+        layout=pya.Layout();layout.read(str(final))
+        if case=='shape':layout.cell('primitive_cell').shapes(layout.layer(1,0)).insert(pya.Box(20,20,30,30))
+        elif case=='text':layout.cell('alpha').shapes(layout.layer(1,0)).insert(pya.Text('changed marker',pya.Trans()))
+        else:layout.dbu*=2
+        layout.write(str(final))
+    stream=project/'phase3/stage3/pnr/alpha.gds';stream.write_bytes(final.read_bytes())
+    admission.admit_gds(project,stream,'a'*64,[stream.parent/'routed.def',stream.parent/'constraint.sdc'])
+    work=tmp_path/'native-basis';work.mkdir()
+    native_layout=work/'native-layout.gds';native_layout.write_bytes(native_bytes)
+    def material(name,text):
+        path=work/name;path.write_text(text);return _file_ref(path)
+    cells=material('cells.spice','* neutral cells\n.SUBCKT unit a b\nR1 a b 1000\n.ENDS unit\n')
+    schematic=material('source.spice','* neutral reference\n.include "cells.spice"\n')
+    native=material('actual.lvsdb','neutral recorded native result; no extraction was run\n')
+    native.update(compare_performed=True,circuits=[{'layout':'alpha','reference':'alpha',
+                  'status':'Match','layout_pins':2,'reference_pins':2}],top='alpha')
+    record={'schema':'vibeic.native_gds_lvs/1','status':'PASS','tool':'klayout',
+            'compare_performed':True,'layout_source':dict(_file_ref(native_layout),kind='gds'),
+            'reference_source':material('reference.v','module alpha(input a,output b); assign b=a; endmodule\n'),
+            'deck':material('deck.lvs','# neutral retained runset\n'),
+            'driver_source':material('driver.lvs','# neutral retained driver\n'),
+            'native_result':native,'source_netlist':schematic,'cell_library_bundle':cells,
+            'log':material('native.log','neutral native output fixture\n'),
+            'inputs_manifest':material('inputs.json','[]\n'),
+            'execution':{'rc':0,'inputs_unchanged':True}}
+    report=project/'reports/phase3/lvs_verdict.json';report.parent.mkdir(parents=True,exist_ok=True)
+    report.write_text(json.dumps(record)+'\n')
+    before={str(path):digest(path) for path in [report,native_layout,*work.iterdir()] if path.is_file()}
+    measured=_REAL_RELEASE_SOURCES(project,final)
+    result=measured['validation']['lvs']
+    actual={'verdict':result['verdict'],'binds_requested_final':result.get('gds_sha256')==digest(final)}
+    wanted={'verdict':expected,'binds_requested_final':expected=='PASS'}
+    observation={'case':case,'observed':actual,'expected':wanted,'archive_lvs':result,
+                 'native_layout_source':record['layout_source'],'requested_final':_file_ref(final)}
+    (tmp_path/'SEMANTIC_SUBJECT_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
+    assert actual==wanted,{'observed':actual,'expected':wanted}
+    if expected=='PASS':
+        verified=native_owner.read_current_verdict(project,report,final)
+        assert result['requested_subject']==verified['requested_subject']
+        assert result['native_layout_source']==record['layout_source']
+        assert result['subject_equivalence']==verified['subject_equivalence']
+        assert record['layout_source']['sha256']!=digest(final)
+        assert str(native_layout.resolve()) in measured['files']
+    else:
+        assert 'reason' in result
+    assert before=={path:digest(Path(path)) for path in before}
+    source['files'].update(measured['files'])
+    source['files'][str(final.resolve())]['sha256']=digest(final)
+    for kind in ('drc','antenna','density'):source['validation'][kind]['gds_sha256']=digest(final)
+    source['validation']['lvs']=result
+    monkeypatch.setattr(check,'design_release_sources',lambda *a,**kw:copy.deepcopy(source))
+    assert gen.main([str(project)])==0
+    rc,gate,command=_in_process_canonical_gate(project,monkeypatch)
+    assert (rc,gate['verdict'])==((0,'PASS') if expected=='PASS' else (1,'FAIL')),gate
+    manifest=json.loads((project/'phase3/stage4/foundry_handoff/release_manifest.json').read_text())
+    if expected=='PASS':
+        assert manifest['validation']['lvs']['native_layout_source']==record['layout_source']
+        assert manifest['validation']['lvs']['requested_subject']['sha256']==digest(final)
+    assert before=={path:digest(Path(path)) for path in before}
+    print('VERIFIED_REQUESTED_SUBJECT',json.dumps({'case':case,'lvs':actual,'normal_gate':command,'rc':rc}))
