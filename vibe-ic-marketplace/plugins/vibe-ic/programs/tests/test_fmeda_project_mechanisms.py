@@ -204,6 +204,45 @@ def test_large_mechanism_cannot_mask_smaller_below_99_percent(tmp_path):
 
 
 @native
+def test_report_asil_cannot_lower_native_campaign_floor(tmp_path):
+    doc, source = fixture(tmp_path)
+    text = source.read_text()
+    begin = text.index("module small_check")
+    end = text.index("endmodule", begin)
+    body = text[begin:end].replace("assign err_o = |(expected_code ^ code_i);",
+                                  "assign err_o = (|(expected_code ^ code_i)) && (code_i[2:0] != 3'd0);")
+    source.write_text(text[:begin] + body + text[end:])
+    doc["rtl_files"][0]["sha256"] = declared.digest(source)
+    write_doc(tmp_path, doc)
+    rc, report = fi.run(tmp_path, args())
+    assert rc == 1 and report["asil"] == "D"
+    assert [(row["detected_faults"], row["injected_faults"])
+            for row in report["mechanisms"]] == [(576, 576), (28, 32)]
+    assert not gate.check(report, None, None, tmp_path)["passed"]
+    lowered = copy.deepcopy(report)
+    lowered["asil"] = "A"  # Only the report changes; native transcript and inputs stay fixed.
+    assert not gate.check(lowered, None, None, tmp_path)["passed"]
+    # An intentional non-D campaign remains available only when the consumer
+    # receives that policy independently through its own CLI argument.
+    a_args = args()
+    a_args.asil = "A"
+    a_rc, a_report = fi.run(tmp_path, a_args)
+    assert a_rc == 0 and a_report["asil"] == "A"
+    assert not gate.check(a_report, None, None, tmp_path)["passed"]
+    assert gate.check(a_report, "A", None, tmp_path)["passed"]
+    assert not gate.check(a_report, "D", None, tmp_path)["passed"]
+    source.write_text(text)
+    doc["rtl_files"][0]["sha256"] = declared.digest(source)
+    write_doc(tmp_path, doc)
+    strict_args = args()
+    strict_args.min_dc = 99.5
+    strict_rc, strict_report = fi.run(tmp_path, strict_args)
+    assert strict_rc == 0 and strict_report["dc_floor_pct"] == 99.5
+    assert not gate.check(strict_report, None, None, tmp_path)["passed"]
+    assert gate.check(strict_report, None, 99.5, tmp_path)["passed"]
+
+
+@native
 @pytest.mark.parametrize("location", ["checker_header", "checker_body", "encoder_dependency", "macro_body"])
 def test_parameterized_reachable_instance_cannot_measure_default_module(tmp_path, location):
     doc, source = fixture(tmp_path)

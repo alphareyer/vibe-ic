@@ -433,6 +433,15 @@ def consume(project: Path, report: dict, asil, min_dc):
     doc, binding = declaration(project)
     if report.get("schema") != REPORT_SCHEMA or report.get("input_binding") != binding:
         raise Refusal("missing/stale declared mechanism measurement")
+    # The report is evidence to check, not an authority for its own threshold.
+    # The ordinary CLI/flow defaults to D; a different ASIL or --min-dc must be
+    # supplied to this consumer independently of the producer's report.
+    trusted_asil = asil if asil is not None else "D"
+    trusted_floor = fi.asil_floor(trusted_asil, min_dc)
+    if (trusted_asil not in fi.ASIL_DC_FLOOR or
+            report.get("asil") != trusted_asil or
+            report.get("dc_floor_pct") != trusted_floor):
+        raise Refusal("reported ASIL/DC floor differs from consumer CLI/flow policy")
     require_native(project, doc, report.get("native_hierarchy", {}))
     rows = report.get("mechanisms")
     if (not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows) or
@@ -462,13 +471,14 @@ def consume(project: Path, report: dict, asil, min_dc):
                 row.get("baseline_valid") != results.golden_ok or
                 row.get("correction_applicable") != (spec.dec_out is not None)):
             raise Refusal("written baseline/fault census/counts differ from native transcript")
-        passed, why = fi.dc_verdict(results.dc_pct, fi.asil_floor(asil or report.get("asil", "D"), min_dc))
+        passed, why = fi.dc_verdict(results.dc_pct, trusted_floor)
         recomputed.append({"id": declaration_row["id"], "passed": results.golden_ok and passed,
                            "injected_faults": results.injected, "detected_faults": results.detected,
                            "recomputed_dc_pct": results.dc_pct, "baseline_valid": results.golden_ok,
                            "reason": why if results.golden_ok else "invalid fault-free baseline"})
     passed = all(r["passed"] for r in recomputed)
     return {"gate": "fmeda_coverage_check", "passed": passed,
+            "asil": trusted_asil, "dc_floor_pct": trusted_floor,
             "verdict": "PASS" if passed else "FAIL", "mechanisms": recomputed,
             "reason": "each mechanism independently recomputed from current native evidence"
                       if passed else "one or more mechanisms independently fails"}
