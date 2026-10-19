@@ -34,6 +34,7 @@ what the document says.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -241,3 +242,35 @@ def test_the_guard_holds_through_the_real_function(runner):
 def test_it_runs_after_tier_2_so_the_bare_binary_rows_win():
     assert (_SRC.index("_V1_6_512_ENCODING_TABLE_ROW_RE.finditer(window_text)")
             < _SRC.index("_V1_6_592_ENCODING_TABLE_HEXROW_RE.finditer(window_text)"))
+
+
+def test_public_regmap_encoding_rows_belong_to_their_qualified_field(
+        runner, tmp_path):
+    """#3204's unmodified neutral input must keep neighboring owners apart."""
+    fixture = pathlib.Path(__file__).parent / "fixtures/phase1_local/l4_owned_field_encoding/registers.md"
+    result = runner.gen_l4_regmap(tmp_path, {"registers.md": fixture.read_text()})
+    document = json.loads(result.path.read_text())
+    registers = [r for r in document["registers"]
+                 if (r.get("register_name") or r.get("name")) == "CONFIG"]
+    assert len(registers) == 1, document
+    actual = {(f.get("field_name") or f.get("name")):
+              [e.get("mnem") for e in f.get("encoding", []) if e.get("mnem")]
+              for f in registers[0]["fields"]}
+    (tmp_path / "ENCODING_OBSERVATION.json").write_text(
+        json.dumps({"actual": actual, "document": document}, indent=2) + "\n")
+    assert actual == {
+        "ENABLE": [], "RATE": ["RATE_SLOW", "RATE_FAST"],
+        "SIZE": ["SIZE_SMALL", "SIZE_LARGE"],
+        "ACTION": ["DO_READ", "DO_WRITE"],
+    }
+
+
+def test_bitfield_access_rows_do_not_become_binary_encoding(runner, tmp_path):
+    """The bit index11 is not a two-bit code whose mnemonic is access rw."""
+    fixture = pathlib.Path(__file__).parent / "fixtures/phase1_local/l4_owned_field_encoding/registers.md"
+    summary = fixture.read_text().split("#### CONFIG . RATE", 1)[0]
+    field = {"field_name": "ACTION", "width": 2}
+    runner._v1_6_512_lift_field_encoding(field, summary)
+    (tmp_path / "ACCESS_OBSERVATION.json").write_text(
+        json.dumps(field, indent=2) + "\n")
+    assert field.get("encoding", []) == [], field
