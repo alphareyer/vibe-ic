@@ -2385,7 +2385,24 @@ def _professional_python_audit(tb: Path) -> Dict[str, Any]:
     reads.update(_professional_local_helper_reads(tree, port_names))
     sibling_reads, helper_sources = _professional_sibling_asserted_reads(
         tb, tree, port_names)
-    reads.update(sibling_reads)
+    if not reads:
+        # The small sibling resolver identifies a possible source, but its
+        # result alone cannot establish execution across conditional branches
+        # or unknown instance mutators. Require one reachable asserted value
+        # from the bounded same-bundle evaluator for sibling and deep paths.
+        from _professional_helper_observation import asserted_helper_observations
+        deeper = asserted_helper_observations(
+            tb, port_names, scope_nodes=_python_scope_nodes,
+            bound_names=_python_bound_names, data_inputs=data_inputs)
+        if (deeper['reads'] and deeper['sources']
+                and (not sibling_reads
+                     or sibling_reads <= set(deeper['reads']))):
+            reads.update(deeper['reads'])
+            dynamic.update(set(deeper['driven']) & data_inputs)
+            helper_sources = {tb.parent / row['path']
+                              for row in deeper['sources']}
+        else:
+            helper_sources = set()
     out["adopted_helper_sources"] = sorted(str(path) for path in helper_sources)
     for path in sorted(helper_sources):
         out["python_source_sha256"][str(path)] = hashlib.sha256(
