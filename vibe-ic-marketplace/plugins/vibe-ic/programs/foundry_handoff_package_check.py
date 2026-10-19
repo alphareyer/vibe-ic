@@ -93,7 +93,7 @@ import _gds_geometry as _geometry
 _OWNER_THIS_FLOW = "this_flow"
 
 
-def _closing_evidence_problems(project, evidence):
+def _closing_evidence_problems(project, evidence, package=None):
     """Why a CLOSED this_flow item's evidence does not stand ([] = it does).
 
     Every entry must name a file under the project whose sha256 is the one
@@ -103,12 +103,20 @@ def _closing_evidence_problems(project, evidence):
         return ["no evidence list"]
     bad = []
     root = Path(project).resolve()
+    package = (Path(package) if package is not None else
+               root / 'phase3/stage4/foundry_handoff').resolve()
+    def current_file(value):
+        for base in (package, root):
+            path = (base / str(value)).resolve()
+            if path.is_relative_to(base) and path.is_file():
+                return path
+        return None
     for ev in evidence:
         if not isinstance(ev, dict) or not ev.get("path"):
             bad.append(f"malformed entry {ev!r}")
             continue
-        f = (root / str(ev["path"])).resolve()
-        if root not in f.parents or not f.is_file():
+        f = current_file(ev['path'])
+        if f is None:
             bad.append(f"{ev['path']}: absent")
             continue
         if sha256_file(f) != ev.get("sha256"):
@@ -125,9 +133,8 @@ def _closing_evidence_problems(project, evidence):
         if not isinstance(vf, dict) or not vf.get("path"):
             bad.append(f"{ev['path']}: names no vectors_file")
             continue
-        v = (root / str(vf["path"])).resolve()
-        if root not in v.parents or not v.is_file() \
-                or sha256_file(v) != vf.get("sha256"):
+        v = current_file(vf['path'])
+        if v is None or sha256_file(v) != vf.get("sha256"):
             bad.append(f"{ev['path']}: its vectors_file {vf['path']} is "
                        f"absent or no longer hashes to the header's record")
             continue
@@ -135,15 +142,26 @@ def _closing_evidence_problems(project, evidence):
         if not isinstance(src, dict) or not src.get("path"):
             bad.append(f"{ev['path']}: names no source trace")
             continue
-        t = (root / str(src["path"])).resolve()
-        if root not in t.parents or not t.is_file() \
-                or sha256_file(t) != src.get("sha256"):
+        t = current_file(src['path'])
+        if t is None or sha256_file(t) != src.get("sha256"):
             bad.append(f"{ev['path']}: its source trace {src['path']} is "
                        f"absent or no longer hashes to the pattern's record")
             continue
         # ...and the trace must be the one Step 5 recorded for this case, in
         # a state the design PASSED — not any file that happens to hash.
-        if not _is_step5_passed_trace(root, doc.get("case"), src):
+        trace_root = root
+        if t.is_relative_to(package / 'archive/project'):
+            trace_root = package / 'archive/project'
+        trace_ref = dict(src, path=t.relative_to(trace_root).as_posix())
+        if trace_root != root:
+            # Normal Step38 still checks the current source project. Only the
+            # relocated archive consumer uses its retained immutable copies.
+            current = root / trace_ref['path']
+            if not current.is_file() or sha256_file(current) != src.get('sha256'):
+                bad.append(f"{ev['path']}: its current source trace changed or is missing")
+                continue
+            trace_root = root
+        if not _is_step5_passed_trace(trace_root, doc.get("case"), trace_ref):
             bad.append(f"{ev['path']}: its source trace is not the trace the "
                        f"Step-5 record ({_STEP5_RECORD_REL}) lists for a "
                        f"PASSED case {doc.get('case')!r}")
@@ -1419,6 +1437,12 @@ def check_design_release(package):
         if doc.get('assembly_record') and (doc.get('provider_submission') or {}).get('technical_precheck_status')!='PASS':
             bad.append('selected provider technical precheck has not passed for this assembly')
         if not doc.get('physical_top',{}).get('top'):bad.append('physical top not measured')
+        corner = package / 'corner_test_vectors.json'
+        if corner.is_file():
+            for item in json.loads(corner.read_text()).get('open_items', []):
+                if item.get('owner') == _OWNER_THIS_FLOW and item.get('status') == 'CLOSED':
+                    bad.extend(_closing_evidence_problems(package / 'archive/project',
+                                                         item.get('evidence'), package))
     except (OSError, ValueError, KeyError, TypeError, _geometry.GdsError) as exc:
         bad.append(str(exc));doc={}
     return doc,bad

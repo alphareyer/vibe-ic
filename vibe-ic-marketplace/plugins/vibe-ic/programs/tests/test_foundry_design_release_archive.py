@@ -635,3 +635,51 @@ def test_selected_ll_full_gds_lvs_uses_its_real_owner_and_portable_materials(tmp
                  'source_only':'neutral process edge; actual run_chain receipts/judge/obligation/archive/parser'}
     (tmp_path/'LL_RELEASE_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
     print('LL_RELEASE_VALUES',json.dumps(observation))
+
+
+def test_timestamp_kit_ate_closure_survives_normal_gate_and_source_free_relocation(tmp_path,monkeypatch):
+    project,_source=neutral(tmp_path/'source',monkeypatch)
+    source_record=project/step5.STEP5_REL
+    source_trace=project/json.loads(source_record.read_text())['cases'][0]['trace']['vcd']
+    original={str(p):digest(p) for p in (source_record,source_trace)}
+    destination=tmp_path/'timestamp-kit'
+    assert gen.main([str(project),'--out-dir',str(destination)])==0
+    # This is the normal canonical Step38 gate over a RO-equivalent kit
+    # overlay. Only transport creates the link; the producer's source inputs
+    # and the real repository VCD/Step5 record stay byte-identical.
+    canonical=project/'phase3/stage4/foundry_handoff'
+    canonical.parent.mkdir(parents=True,exist_ok=True)
+    canonical.symlink_to(destination,target_is_directory=True)
+    rc,report,command=_in_process_canonical_gate(project,monkeypatch)
+    observed={'rc':rc,'verdict':report['verdict']}
+    assert observed=={'rc':0,'verdict':'PASS'},{'observed':observed,'expected':{'rc':0,'verdict':'PASS'},'findings':report['findings']}
+    corner=json.loads((destination/'corner_test_vectors.json').read_text())
+    item=next(row for row in corner['open_items'] if row['field']=='PENDING_FOUNDRY_test_patterns')
+    assert item['status']=='CLOSED' and len(item['evidence'])==1
+    header=destination/item['evidence'][0]['path'];doc=json.loads(header.read_text())
+    assert not Path(item['evidence'][0]['path']).is_absolute()
+    assert not Path(doc['vectors_file']['path']).is_absolute()
+    for name,path in (('source_trace',source_trace),('step5_record',source_record)):
+        assert (destination/doc[name]['path']).read_bytes()==path.read_bytes()
+    assert original=={p:digest(Path(p)) for p in original}
+    project.rename(tmp_path/'held-original')
+    relocated=tmp_path/'relocated-kit';destination.rename(relocated)
+    retained=relocated/'archive/project'
+    bad=check._closing_evidence_problems(retained,item['evidence'],relocated)
+    assert bad==[],bad
+    _manifest,bad=check.check_design_release(relocated);assert not bad,bad
+    # Original missing-vector and failed-Step5 refusal contracts still apply
+    # to the same retained consumer after relocation.
+    vector=relocated/doc['vectors_file']['path'];held=vector.with_suffix('.held')
+    vector.rename(held)
+    assert check._closing_evidence_problems(retained,item['evidence'],relocated)
+    held.rename(vector)
+    record=relocated/doc['step5_record']['path'];before=record.read_bytes()
+    changed=json.loads(before);changed['cases'][0]['state']='failed';record.write_text(json.dumps(changed))
+    assert any('PASSED case' in problem for problem in check._closing_evidence_problems(retained,item['evidence'],relocated))
+    record.write_bytes(before)
+    assert not check.check_design_release(relocated)[1]
+    observation={'normal':observed,'command':command,'relocated_closure':True,'item':item,
+                 'header':doc,'source_inputs_unchanged':True,'missing_vector_refused':True,'failed_step5_refused':True}
+    (tmp_path/'PORTABLE_ATE_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
+    print('PORTABLE_ATE_VALUES',json.dumps(observation))

@@ -853,6 +853,36 @@ def package_layout_members(project: Path, destination: Path | None = None, selec
             "zero_byte_sources": zero}
 
 
+def _portable_ate_patterns(project, handoff_dir, ate):
+    """Keep the current kit's ATE links relative and retain their real inputs."""
+    import shutil
+    project, handoff_dir = Path(project).resolve(), Path(handoff_dir).resolve()
+    def retain(ref):
+        source = (project / ref['path']).resolve()
+        if not source.is_relative_to(project) or _ate.sha256_file(source) != ref['sha256']:
+            raise ValueError('ATE source changed before packaging: '+str(source))
+        relative = Path('archive/project') / source.relative_to(project)
+        target = handoff_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return dict(ref, path=relative.as_posix())
+    for pattern in ate['patterns']:
+        header = (project / pattern['path']).resolve()
+        doc = json.loads(header.read_text())
+        vector = (project / doc['vectors_file']['path']).resolve()
+        if (not vector.is_relative_to(handoff_dir)
+                or _ate.sha256_file(vector) != doc['vectors_file']['sha256']):
+            raise ValueError('ATE vector changed before packaging: '+str(vector))
+        doc['vectors_file']['path'] = vector.relative_to(handoff_dir).as_posix()
+        doc['source_trace'] = retain(doc['source_trace'])
+        doc['step5_record'] = retain(doc['step5_record'])
+        _aa.write_text(header, json.dumps(doc, indent=2)+'\n')
+        pattern.update(path=header.relative_to(handoff_dir).as_posix(),
+                       sha256=_ate.sha256_file(header), source_trace=doc['source_trace'])
+        ate['step5_record'] = doc['step5_record']
+    return ate
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("project", type=Path)
@@ -1136,7 +1166,8 @@ def main(argv=None) -> int:
     # of every seed now. The item closes only when every seed Step 5 counted
     # as a functional case has a pattern; otherwise it stays OPEN, naming the
     # seeds and why, and the Step-38 gate refuses the kit.
-    ate = _ate.emit(project, handoff_dir / _ate.PATTERN_SUBDIR, l10_ids)
+    ate = _portable_ate_patterns(project, handoff_dir,
+                                _ate.emit(project, handoff_dir / _ate.PATTERN_SUBDIR, l10_ids))
     patterns_closed = bool(l10_ids) and bool(ate["patterns"]) \
         and not ate["not_converted"]
     corner_kit = {
