@@ -219,6 +219,32 @@ def test_issue3238_write_only_loop_does_not_claim_readback_coverage():
     assert not any(item["covered"] for item in _registers(report).values())
 
 
+def test_issue3238_write_enable_deasserted_before_write_edge_is_refused(
+        tmp_path: Path):
+    prompt = tmp_path / "prompt.txt"
+    rtl = tmp_path / "dut.v"
+    tb = tmp_path / "tb.sv"
+    report_path = tmp_path / "report.json"
+    prompt.write_text(REG_PROMPT)
+    rtl.write_text(REG_RTL)
+    tb.write_text(REG_TB.replace(
+        "write_data=i;@(posedge clk);",
+        "write_data=i;we=0;@(posedge clk);",
+    ))
+    cp = subprocess.run(
+        [sys.executable, "-B", str(PROG), "--prompt", str(prompt),
+         "--rtl", str(rtl), "--tb", str(tb), "--strict", "--json",
+         str(report_path)],
+        text=True, capture_output=True, check=False,
+    )
+    report = json.loads(report_path.read_text())
+    covered = {offset for offset, item in _registers(report).items()
+               if item["covered"]}
+    assert len(covered) == 0, sorted(covered)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert report["blocked"] is True
+
+
 def test_issue3238_generic_loop_body_identifiers_do_not_claim_coverage():
     tb = """module tb; reg clk=0,we=0; reg[7:0] address=0,scratch=0; reg[31:0] write_data=0; wire[31:0]read_data; integer i; dut u(clk,we,address,write_data,read_data); always #1 clk=~clk; initial begin for(i=0;i<16;i=i+1)begin scratch=8'h40+i; write_data=i; if(scratch!==i) $display("write read register address"); end $finish; end endmodule
 """
