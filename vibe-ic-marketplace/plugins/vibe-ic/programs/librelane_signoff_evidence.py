@@ -269,8 +269,13 @@ def count_row(project: Path, folder: Path, step: str, key: str,
                  and _member(_read(folder / 'config.json'), 'meta').get('step') == step,
                  'LL_CONFIG_WRONG_STEP')
         _hashes(fp.get('state_files'))
+        external_lvs = False
+        if step in pv.HALVES['lvs'] and not layout.resolve().is_relative_to(project.resolve()):
+            scope = _member(_read(project / pv.RECORD_REL.format(half='lvs')), 'scope')
+            external_lvs = (scope.get('magic_ext_use_gds') is True
+                            and scope.get('gds_sha256') == scope.get('extracted_gds_sha256') == digest(layout))
         _require(all(Path(p).resolve().is_relative_to(project.resolve())
-                     for p in fp['state_files']), 'LL_FOREIGN_INPUT_SOURCE')
+                     for p in fp['state_files']) or external_lvs, 'LL_FOREIGN_INPUT_SOURCE')
         _hashes(fp.get('config_files'), mounts)
         # Every PDK/config file actually named must have a producer hash, also
         # when its name is a container path. Older receipts lacking these
@@ -356,7 +361,14 @@ def obligation(project: Path, kind: str, layout: Path | None = None, *, mixed_to
         return None
     rows = {}
     try:
-        chosen = finished_layout(project, layout, mixed_top=mixed_top)
+        if (kind == 'lvs' and not mixed_top and layout is not None
+                and not layout.resolve().is_relative_to(project.resolve())):
+            # run_half accepts explicit same-host inputs. Its current full-GDS
+            # scope and every receipt below own this subject, not an older
+            # stream alias retained in the measurement job's lean directory.
+            chosen = layout.resolve()
+        else:
+            chosen = finished_layout(project, layout, mixed_top=mixed_top)
         # Final Step37 density is its own producer. Other metrics remain on
         # Step31; a stale Step31 record is not replaced by a legacy report.
         if kind == 'antenna':
