@@ -16,17 +16,20 @@ while `baseline_valid=false` is FAILed (a bogus measurement is not a pass).
     never fail. WHICH kind of skip is mirrored from the producer's own report,
     never re-derived here: when that report carries a valid R-0915-119
     `structural_absence` record — the RTL was read, its modules enumerated and
-    none of them is a safety mechanism — this gate states the same
+    none of them is a safety mechanism candidate — this gate states the same
     NOT_APPLICABLE_BY_STRUCTURE with the same enumeration and exits 2 (the
     non-verdict-candidate code). Every other inapplicable shape — an input
-    nobody read, a mechanism found with no encoder, a missing report — keeps
+    nobody read or a missing report — keeps
     the disclosed VACUOUS PASS at exit 0. Mirroring rather than re-deriving is
     the point: two gates of one step must not hold two opinions about one
     design, and a second scanner is a second answer waiting to disagree with
     the first.
-  * applicable=true → recompute DC = detected/injected, compare to the resolved
-    ASIL floor, require baseline_valid. Mismatch with the written verdict is
-    reported and the RECOMPUTED verdict is authoritative.
+  * applicable=true, binding=UNBOUND → NOT_MEASURED and non-PASS. A port-shape
+    candidate or embedded checker without a bound source path is not a DC result.
+  * applicable=true with a measured, bound mechanism → recompute DC from raw
+    counts, compare to the resolved ASIL floor, require baseline_valid.
+    Mismatch with the written verdict is reported and the RECOMPUTED verdict
+    is authoritative.
   * missing report → this gate is a no-op VACUOUS PASS ONLY IF the design has no
     safety mechanism is UNKNOWN here, so a missing report is a soft skip (exit 0)
     unless --require is passed (then a missing report FAILs).
@@ -64,6 +67,13 @@ import fmeda_fault_injection_coverage as fi  # noqa: E402
 def check(report: dict, asil_override: Optional[str],
           min_dc: Optional[float]) -> dict:
     """Recompute the verdict from raw counts. Pure — the authoritative gate."""
+    if report.get("mechanism_binding") == "UNBOUND":
+        # The producer discovered only a port-shaped candidate. Even a
+        # contradictory applicable=false flag cannot turn it into N/A.
+        return {"gate": "fmeda_coverage_check", "verdict": "NOT_MEASURED",
+                "passed": False, "recomputed_dc_pct": None,
+                "reason": "mechanism candidate is unbound; no fault injection "
+                          "or diagnostic-coverage measurement exists"}
     if not report.get("applicable", False):
         # THE PRODUCER'S OWN ENUMERATION, MIRRORED — not a second scan. If it
         # established that the design's modules were walked and none is a

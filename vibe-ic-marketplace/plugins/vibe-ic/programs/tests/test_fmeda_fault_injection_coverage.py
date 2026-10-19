@@ -362,6 +362,23 @@ class _Args:
         self.json = None
 
 
+def _bound_hamming_args():
+    """Declare the actual source modules/ports for native DC measurement.
+
+    #3246: selector port shape remains a useful candidate, but no longer
+    licenses injection. These tests assert REAL fault results from the Hamming
+    pair, so they use the existing explicit binding route instead of treating
+    an inferred width match as source authority.
+    """
+    args = _Args()
+    args.enc_module, args.enc_in, args.enc_out = "ham_enc", "data_in", "code_out"
+    args.dec_module, args.dec_in, args.dec_out = "ham_dec", "code_in", "data_out"
+    args.detect_port = "syndrome_err"
+    args.data_width, args.code_width = 4, 7
+    args.rtl_file = ["phase2/stage1/rtl/enc.v", "phase2/stage1/rtl/dec.v"]
+    return args
+
+
 def _ecc_project(tmp_path: Path, dec_body: str) -> Path:
     rtl = tmp_path / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
@@ -403,7 +420,7 @@ def test_dc_below_the_asil_floor_is_a_real_non_zero_exit(tmp_path):
         import pytest
         pytest.skip(missing)
     project = _ecc_project(tmp_path, _DEC_BLIND)
-    rc, rep = fi.run(project, _Args())
+    rc, rep = fi.run(project, _bound_hamming_args())
     assert rep["applicable"] is True, rep
     assert rep["baseline_valid"] is True, rep
     assert rep["injected_faults"] > 0, rep
@@ -424,7 +441,7 @@ def test_dc_at_or_above_the_asil_floor_is_a_measured_pass(tmp_path):
         import pytest
         pytest.skip(missing)
     project = _ecc_project(tmp_path, _DEC_OK)
-    rc, rep = fi.run(project, _Args())
+    rc, rep = fi.run(project, _bound_hamming_args())
     assert rep["applicable"] is True, rep
     assert rep["baseline_valid"] is True, rep
     assert rep["diagnostic_coverage_pct"] >= rep["dc_floor_pct"], rep
@@ -444,11 +461,11 @@ def test_the_floor_itself_is_load_bearing(tmp_path):
         import pytest
         pytest.skip(missing)
     project = _ecc_project(tmp_path, _DEC_BLIND)
-    strict = _Args()
+    strict = _bound_hamming_args()
     rc_strict, rep_strict = fi.run(project, strict)
     assert rc_strict == 1, rep_strict
 
-    relaxed = _Args()
+    relaxed = _bound_hamming_args()
     relaxed.min_dc = 0.0
     rc_relaxed, rep_relaxed = fi.run(project, relaxed)
     assert rep_relaxed["dc_floor_pct"] == 0.0, rep_relaxed
@@ -779,7 +796,7 @@ def test_the_declared_regenerated_paths_are_the_ones_it_actually_writes(
     project = _ecc_project(tmp_path, _DEC_OK)
     before = {str(p.relative_to(project))
               for p in project.rglob("*") if p.is_file()}
-    rc, rep = fi.run(project, _Args())
+    rc, rep = fi.run(project, _bound_hamming_args())
     assert rep["applicable"] is True, rep      # the write path really ran
     after = {str(p.relative_to(project))
              for p in project.rglob("*") if p.is_file()}
@@ -804,11 +821,11 @@ def test_a_second_run_rewrites_exactly_the_declared_paths(tmp_path):
         import pytest
         pytest.skip(missing)
     project = _ecc_project(tmp_path, _DEC_OK)
-    fi.run(project, _Args())
+    fi.run(project, _bound_hamming_args())
     stamps = {rel: (project / rel).stat().st_mtime_ns
               for rel in fi.REGENERATED_PROJECT_PATHS}
     time.sleep(0.02)
-    fi.run(project, _Args())
+    fi.run(project, _bound_hamming_args())
     moved = {rel for rel, m in stamps.items()
              if (project / rel).stat().st_mtime_ns != m}
     assert moved == set(fi.REGENERATED_PROJECT_PATHS), (

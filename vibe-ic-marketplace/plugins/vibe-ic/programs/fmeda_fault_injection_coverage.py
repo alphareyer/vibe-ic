@@ -75,7 +75,7 @@ MEASURED-DC half (the fault-grading engine); it never fabricates the FIT half.
 
 USAGE
 -----
-  # auto-detect the mechanism from an RTL dir, then inject:
+  # scan an RTL dir for mechanism candidates; injection requires binding:
   python3 fmeda_fault_injection_coverage.py <project> --rtl-dir phase2/stage1/rtl \\
       --asil D [--json <out>]
 
@@ -90,7 +90,8 @@ EXIT CODES
 ----------
   0 — DC >= ASIL floor AND baseline valid, OR a DISCLOSED vacuous skip
       (nothing was enumerated, so nothing is claimed about the design)
-  1 — DC < ASIL floor OR baseline invalid (false-alarm / can't encode)
+  1 — DC < ASIL floor, invalid baseline, OR a mechanism candidate that this
+      builder cannot bind to a source-declared protected path
   2 — NON-VERDICT CANDIDATE: usage / IO / tool error, OR the R-0915-119
       decided state — the modules were enumerated and none is a safety
       mechanism. Both are classified by the consumer from the report, never
@@ -440,7 +441,7 @@ def detect_safety_mechanism(rtl_dir: Path,
                             ) -> Optional[MechanismSpec]:
     """Scan an RTL directory (+ optional L23/doc text) for a DECLARED ECC/parity
     safety mechanism and infer the encode/decode modules + protected ports.
-    Returns None (→ NOT_APPLICABLE) when no mechanism is unambiguously pinned —
+    Returns None (→ NOT_APPLICABLE) when no candidate is found —
     §4.05 PARSE-OR-SKIP: a non-safety design must skip, never fake a pass.
 
     Recognises a decoder as a module with a protected (widest) input port AND a
@@ -676,7 +677,7 @@ _CLK_RST = {"clk", "clock", "clk_i", "rst", "reset", "rst_n", "rstn",
 _CLK_RST_ROOTS = {"clk", "clock", "clks", "rst", "reset", "arst", "areset",
                   "en", "enable", "ena", "clken", "clkin", "sclk", "aclk"}
 # Decorations that may accompany a root without changing what the pin IS.
-_CLK_RST_DECOR = {"n", "b", "i", "o", "p", "a", "x", "in", "not", "neg", "inv",
+_CLK_RST_DECOR = {"n", "ni", "no", "b", "i", "o", "p", "a", "x", "in", "not", "neg", "inv",
                   "async", "asynch", "sync", "l", "h", "g", "gated", "bar"}
 # Glued polarity suffixes: `rstn`, `resetn`, `resetb`, `rst_ni` -> root + tail.
 _GLUED_POLARITY = ("ni", "no", "n", "b", "l")
@@ -1350,15 +1351,31 @@ def run(project: Path, args) -> Tuple[int, dict]:
             return RC_NON_VERDICT, rep
         return 0, rep
 
-    if not spec.enc_module:
-        # decoder-only auto-detect: this builder needs an encoder for stimulus.
-        rep = build_report(None, None, args.asil, floor)
-        rep["verdict"] = "NOT_APPLICABLE"
-        rep["reason"] = ("safety mechanism found but no encoder to generate "
-                         "valid codewords for injection — supply --enc-module "
-                         "or codeword stimulus; skipped (no fabricated DC)")
-        rep["applicable"] = False
-        return 0, rep
+    if spec.source != "explicit":
+        # #3246: matching port widths and an error-named output discover a
+        # CANDIDATE, not an encoder/checker relationship. A plain stream
+        # expander + slicer has the exact same shape as a Hamming pair; its
+        # status output can even be tied low. Likewise a real parity checker
+        # implemented inside one endpoint has no separate encoder module for
+        # this builder. In either case, the RTL has a candidate safety shape,
+        # but this tool has NOT bound a protected source path for injection.
+        # Existing explicit --enc/--dec port wiring is the bounded supported
+        # route. It is then challenged by the native golden baseline and fault
+        # results below. Preserve the candidate for review without reporting a
+        # measured ECC mechanism or falsely claiming structural absence.
+        rep = build_report(spec, None, args.asil, floor)
+        rep["mechanism_candidate"] = rep.pop("mechanism")
+        rep.pop("mechanism_kind")
+        rep["mechanism_binding"] = "UNBOUND"
+        rep["verdict"] = "NOT_MEASURED"
+        rep["reason"] = (
+            "auto-detected port shape is an unbound mechanism candidate; "
+            "encoder/checker protected-data relationship was not established. "
+            "Supply explicit --enc-module/--dec-module port wiring for a "
+            "supported module pair. Embedded parity/protocol functions require "
+            "source-bound codeword stimulus before diagnostic coverage can "
+            "be measured")
+        return 1, rep
 
     # 3) render TB + run the REAL injection
     tb = build_ecc_injection_tb(spec, max_vectors=args.max_vectors)
