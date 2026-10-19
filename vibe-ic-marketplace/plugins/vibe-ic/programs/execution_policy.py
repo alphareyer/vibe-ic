@@ -1074,6 +1074,23 @@ def _prepare_step9(runtime: dict, parameters: dict) -> None:
     runtime['step9_dispatch_parameters'] = identity
 
 
+def _publish_dispatch_result(run: Path, result: dict) -> None:
+    """Advance a pending current report after its real consumer succeeds.
+
+    This report grants no adoption authority. Preserve its exact earlier
+    bytes through the existing copy-aside writer; measured terminal reports
+    and later refusal records keep their existing ownership.
+    """
+    path = run / 'result.json'
+    if json.loads(path.read_text()).get('status') != 'AWAITING_AI_SELECTION':
+        return
+    from _auditor_write import copy_aside
+    import execution_modes as em
+    tag = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + str(time.time_ns())
+    copy_aside(path, path.with_name('result.superseded-' + tag + '.json'))
+    em._write(path, result)
+
+
 def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
                         parameters=None, choice=None) -> dict | None:
     """Dispatch one caller-selected canonical row; gates/adoption remain Core's.
@@ -1204,7 +1221,10 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
         raise Refusal('FIXED_STEP_SELECTION_CHANGED', step_id)
     if analog_prepared is not None:
         consumed = analog.consume(runtime['project'], analog_prepared, controller, run, result)
-        return dict(consumed, execution_result=result)
+        reported = dict(consumed, execution_result=result)
+        if result.get('status') == 'ADOPTED' and consumed.get('status') == 'PASS':
+            _publish_dispatch_result(run, reported)
+        return reported
     if result.get('status') == 'ADOPTED':
         if step_id == '9':
             # Step 9's immutable generation carries its arm-local outputs
@@ -1219,7 +1239,9 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
                                        run, result)
             result = dict(result, consumer=imported)
             runtime['runs'][step_id] = (run, result)
-            return dict(result, step_id=step_id, run_root=str(run))
+            reported = dict(result, step_id=step_id, run_root=str(run))
+            _publish_dispatch_result(run, reported)
+            return reported
         result = controller.verify_adoption(context, run)
         from execution_backend_snapshot import Journal
         generation = result['selected_generation']
@@ -1237,7 +1259,10 @@ def dispatch_fixed_step(project: Path, step_id: str, *, inputs=None,
             journal.rollback()
             raise
     runtime['runs'][step_id] = (run, result)
-    return dict(result, step_id=step_id, run_root=str(run))
+    reported = dict(result, step_id=step_id, run_root=str(run))
+    if result.get('status') == 'ADOPTED':
+        _publish_dispatch_result(run, reported)
+    return reported
 
 
 def dispatch_ordinary_site(project, runner: str, site: str, refusal_factory):
