@@ -1001,8 +1001,12 @@ def test_issue3241_untrusted_helper_controls_remain_refused(
     if control == 'ambiguous-binding':
         (bundle / 'other_bfm.py').write_text(_ISSUE3241_WIRE_BFM)
     audit = V.functional_stimulus_audit(tb)
-    assert audit['reason'] == (
-        'no observed DUT read and self-check assertion in the Python source'), audit
+    if control == 'no-assertion':
+        assert audit['reason'].startswith(
+            'PROFESSIONAL_COVERAGE_PLAN_INCOMPLETE:'), audit
+    else:
+        assert audit['reason'] == (
+            'no observed DUT read and self-check assertion in the Python source'), audit
     assert not audit['decidable'] and audit['driven'] == [], audit
     assert audit.get('adopted_helper_sources', []) == [], audit
 
