@@ -243,3 +243,185 @@ def test_current_provider_refusal_or_missing_evidence_never_uses_old_pass(tmp_pa
             rc,report,command=_in_process_canonical_gate(project,m)
             assert (rc,report['verdict'])==(1,'FAIL'),report
             print('CURRENT_PROVIDER_REFUSAL',json.dumps({'selected':state,'missing_basis':missing,'rc':rc,'verdict':report['verdict'],'gate':command}))
+
+
+# Combined-reader integration uses the frozen provider/native-LVS owners. Their
+# output files are neutral fixtures; no PV, extraction or simulation is run.
+def _file_ref(path):
+    return {'path':str(path.resolve()),'sha256':digest(path),'bytes':path.stat().st_size}
+
+
+@pytest.mark.parametrize('case,expected',[
+    ('timestamps','PASS'),('native_red','FAIL'),
+    ('changed_geometry','NOT_MEASURED'),('missing_count','NOT_MEASURED')])
+def test_selected_provider_pv_archive_reads_native_rows_and_geometry(tmp_path,monkeypatch,case,expected):
+    import die_finishing_gen as owner
+    import wafer_space_precheck as pv_owner
+    from test_gds_canonical_digest import _rec,_RUN_A
+    from _gds_geometry import _iter_records
+    import struct
+    project,source=neutral(tmp_path/'pack',monkeypatch)
+    layout=project/'phase3/stage4/gds/alpha.gds'
+    physical=tmp_path/'selected';physical.mkdir()
+    subject=physical/'subject.gds'
+    records=[]
+    for rt,dt,payload in _iter_records(layout.read_bytes()):
+        if rt in (0x01,0x05):payload=struct.pack('>12h',*_RUN_A)
+        if rt==0x10 and case=='changed_geometry':
+            coords=list(struct.unpack('>'+str(len(payload)//4)+'i',payload))
+            coords[0]+=100
+            payload=struct.pack('>'+str(len(coords))+'i',*coords)
+        records.append(_rec(rt,dt,payload))
+    subject.write_bytes(b''.join(records))
+    def write(path,value):
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(json.dumps(value)+'\n');return _file_ref(path)
+    ids=['ReadLayout','Hierarchy','Size','GenerateID','Render','KLayout.Density',
+         'Checker.KLayoutDensity','ZeroArea','CheckerZero','KLayout.Antenna',
+         'Checker.KLayoutAntenna','Magic.DRC','Checker.MagicDRC','KLayout.DRC',
+         'Checker.KLayoutDRC','WriteLayout']
+    count=3 if case=='native_red' else None if case=='missing_count' else 0
+    metrics={'klayout__density_error__count':0,'klayout__antenna_error__count':0,
+             'klayout__drc_error__count':count,'magic__drc_error__count':7}
+    steps=[]
+    for index,sid in enumerate(ids):
+        folder=physical/f'{index+1:02d}-stage'
+        write(folder/'state_in.json',{'gds':str(subject)})
+        state=write(folder/'state_out.json',{'gds':str(subject),'metrics':metrics})
+        write(folder/'config.json',{'meta':{'step':sid},'ERROR_ON_MAGIC_DRC':False})
+        (folder/'COMMANDS').write_text('neutral source-control native output; no tool dispatched\n')
+        for kind in ('density','antenna','drc'):
+            write(folder/'reports'/(kind+'.klayout.json'),{'total':count if kind=='drc' else 0})
+        steps.append({'folder':str(folder),'state_out':state})
+    official=write(physical/'official.json',{'expected_steps':ids,'steps':steps})
+    record=physical/'reports/phase3/provider_die_assembly.json'
+    write(record,{'basis':{'files':{'official_precheck':official}},'output':_file_ref(layout)})
+    assembly={'gds':layout,'sha256':digest(layout),'report':record,'source_project':project,
+              'basis':{},'scope':'provider_die_assembly'}
+    # Only admission is neutral. The real selected PV reader re-reads the GDS
+    # record streams, all native states and integer raw counts.
+    monkeypatch.setattr(owner,'read_admitted_release',lambda *a,**kw:copy.deepcopy(assembly))
+    direct=pv_owner.read_signoff_evidence(project,record)
+    measured=_REAL_RELEASE_SOURCES(project,layout,assembly)
+    actual={kind:measured['validation'][kind]['verdict'] for kind in ('drc','antenna','density')}
+    wanted={kind:direct['rows'][kind]['verdict'] for kind in actual}
+    observation={'case':case,'observed':actual,'expected':wanted,'reader':direct,
+                 'archive':{kind:measured['validation'][kind] for kind in actual}}
+    (tmp_path/'PV_MAPPING_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
+    assert actual==wanted,{'observed':actual,'expected':wanted}
+    assert actual['drc']==expected
+    for kind in actual:
+        if actual[kind]!='NOT_MEASURED':
+            row=measured['validation'][kind]['rows'][kind]
+            assert row==direct['rows'][kind]
+            assert measured['validation'][kind]['gds_sha256']==digest(layout)
+    if case=='timestamps':
+        assert direct['rows']['drc']['subject_sha256']!=digest(layout)
+        assert direct['rows']['drc']['equivalence']['equivalent'] is True
+        assert direct['disclosures'][0]['value']==7
+    # The normal producer/checker retain bad PV as incomplete, while a good
+    # selected-engine result can be archived without borrowing the old flow.
+    source['files'][str(layout.resolve())]['sha256']=digest(layout)
+    for kind in actual:source['validation'][kind]=measured['validation'][kind]
+    source['files'].update(measured['files'])
+    monkeypatch.setattr(check,'design_release_sources',lambda *a,**kw:copy.deepcopy(source))
+    assert gen.main([str(project)])==0
+    rc,report,command=_in_process_canonical_gate(project,monkeypatch)
+    assert (rc,report['verdict'])==((0,'PASS') if expected=='PASS' else (1,'FAIL')),report
+    print('SELECTED_PV_MAPPING',json.dumps({'case':case,'rows':actual,'normal_rc':rc,'gate':command}))
+
+
+def test_native_lvs_bundle_relative_includes_survive_real_relocation(tmp_path,monkeypatch):
+    import pya
+    project,source=neutral(tmp_path/'pack',monkeypatch)
+    layout=project/'phase3/stage4/gds/alpha.gds'
+    work=tmp_path/'native-job';work.mkdir()
+    def material(name,text):
+        path=work/name;path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(text);return _file_ref(path)
+    cells=material('cells.spice','* neutral unit\n.SUBCKT unit a b\nR1 a b 1000\n.ENDS unit\n')
+    spice=material('source.spice','* neutral reference\n.include "cells.spice"\n.SUBCKT alpha a b\nX1 a b unit\n.ENDS alpha\n')
+    original_driver=material('official-deck-driver.lvs','threads(1)\n# %include pdk_runset/neutral.lvs\n')
+    driver=material('../recompare-job/recompare.py',
+                    "from pathlib import Path\nimport sys\nsys.path.insert(0,str(Path(__file__).parent/'tools'))\nimport producer\n")
+    deck=material('pdk_runset/neutral.lvs','# %include rules/connect.lvs\n')
+    sub=material('pdk_runset/rules/connect.lvs','# neutral finite rule source\n')
+    library=material('cell_library_0.spice',Path(cells['path']).read_text())
+    raw=material('cells.original.spice',Path(cells['path']).read_text())
+    tool=material('pdk_runset/tools/translate.py','# neutral translator source\n')
+    translated=material('library-translation.log','neutral source-control conversion log\n')
+    native=material('actual.lvsdb','neutral native database fixture, not an actual measurement\n')
+    native.update(compare_performed=True,circuits=[{'layout':'alpha','reference':'alpha',
+                  'status':'Match','layout_pins':2,'reference_pins':2}],top='alpha')
+    reference=material('reference.v','module alpha(input a,output b); assign b=a; endmodule\n')
+    log=material('native.log','neutral recorded native outcome\n')
+    inputs=material('inputs.json','[]\n')
+    extraction={key:material('previous/'+name,'neutral retained extraction source\n') for key,name in
+                [('report','lvs.json'),('native_result','actual.lvsdb'),('inputs_manifest','inputs.json'),('log','native.log')]}
+    extraction['driver_source']=original_driver
+    prior_layout=work/'prior.gds';prior_layout.write_bytes(layout.read_bytes())
+    extraction['layout_source']=dict(_file_ref(prior_layout),kind='gds')
+    producer=material('../recompare-job/tools/producer.py','# neutral retained source\n')
+    record={'schema':'vibeic.native_gds_lvs/1','status':'PASS','tool':'klayout',
+            'compare_performed':True,'layout_source':dict(_file_ref(layout),kind='gds'),
+            'reference_source':reference,'deck':dict(deck,original_source={'path':'/unmounted-pdk/neutral.lvs','sha256':deck['sha256']}),
+            'driver_source':driver,'native_result':native,'source_netlist':spice,
+            'cell_library_bundle':cells,'cell_libraries':[library],
+            'runset_sources':[deck,sub,tool], 'library_translation':{'tool':tool,'input':raw,'output':cells,'log':translated},
+            'extraction_basis':extraction,'producer_sources':[producer],
+            'log':log,'inputs_manifest':inputs,'execution':{'rc':0,'inputs_unchanged':True}}
+    report=project/'reports/phase3/lvs_verdict.json';report.parent.mkdir(parents=True,exist_ok=True)
+    report.write_text(json.dumps(record)+'\n')
+    measured=_REAL_RELEASE_SOURCES(project,layout)
+    assert measured['validation']['lvs']['verdict']=='PASS',measured['validation']['lvs']
+    missing_path=Path(raw['path']);held_path=missing_path.with_suffix('.held')
+    missing_path.rename(held_path)
+    try:missing_translation=_REAL_RELEASE_SOURCES(project,layout)['validation']['lvs']['verdict']
+    finally:held_path.rename(missing_path)
+    source['validation']['lvs']=measured['validation']['lvs']
+    source['files'].update(measured['files'])
+    source['external_dependencies']=measured['external_dependencies']
+    monkeypatch.setattr(check,'design_release_sources',lambda *a,**kw:copy.deepcopy(source))
+    destination=tmp_path/'release-version'
+    assert gen.main([str(project),'--out-dir',str(destination)])==0
+    manifest=json.loads((destination/'release_manifest.json').read_text())
+    original={e['source']:e for e in manifest['files']}
+    # Move both source trees out of reach. An actual SPICE reader must follow
+    # the original relative include in the relocated archive, not just hashes.
+    project.rename(tmp_path/'held-project');work.rename(tmp_path/'held-native-job')
+    moved=tmp_path/'relocated-release';destination.rename(moved)
+    archived=moved/original[spice['path']]['path']
+    netlist=pya.Netlist();error=None
+    try:netlist.read(str(archived),pya.NetlistSpiceReader())
+    except RuntimeError as exc:error=str(exc)
+    actual={'include_loaded':error is None and netlist.circuit_by_name('unit') is not None,
+            'source_bytes_same':digest(archived)==spice['sha256']}
+    observation={'observed':actual,'expected':{'include_loaded':True,'source_bytes_same':True},
+                 'parse_error':error,'members':manifest['files']}
+    (tmp_path/'BUNDLE_MAPPING_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
+    assert actual==observation['expected'],{'observed':actual,'expected':observation['expected'],'parse_error':error}
+    required=[cells,spice,driver,deck,sub,library,raw,tool,translated,*extraction.values(),producer]
+    import os
+    bundle_root=Path(os.path.commonpath([str(Path(entry['source']).parent) for entry in manifest['files']
+                                      if '/archive/native_lvs/' in '/'+entry['path']]))
+    archive_root=next(parent for parent in archived.parents if parent.name==digest(tmp_path/'held-project/reports/phase3/lvs_verdict.json'))
+    for entry in required:
+        target=moved/original[entry['path']]['path']
+        assert target==archive_root/Path(entry['path']).relative_to(bundle_root)
+        assert digest(target)==entry['sha256']
+    assert missing_translation=='NOT_MEASURED'
+    assert (moved/original[driver['path']]['path']).parent/'tools/producer.py'==moved/original[producer['path']]['path']
+    # Resolve the driver's actual two-level %include closure as written.
+    import re
+    def included(path):
+        names=re.findall(r'^#\s*%include\s+(\S+)\s*$',path.read_text(),re.M)
+        return [path.parent/name for name in names]
+    root=moved/original[original_driver['path']]['path'];first=included(root)
+    assert first==[moved/original[deck['path']]['path']]
+    assert included(first[0])==[moved/original[sub['path']]['path']]
+    doc,bad=check.check_design_release(moved);assert not bad,bad
+    assert '/unmounted-pdk/neutral.lvs' in doc['external_dependencies']
+    (moved/original[cells['path']]['path']).write_text('damaged cells\n')
+    _doc,bad=check.check_design_release(moved)
+    assert any('changed archive member' in item for item in bad),bad
+    print('NATIVE_BUNDLE_RELOCATION',json.dumps(actual))

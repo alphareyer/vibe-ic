@@ -988,7 +988,7 @@ def design_release_sources(project, layout, assembly=None):
     project = Path(project).resolve()
     files, validation, external = {}, {}, {}
     physical_project = Path(assembly["report"]).parents[2] if assembly else project
-    def add(path, role, expected=None):
+    def add(path, role, expected=None, bundle=None):
         path = Path(path)
         if not path.is_absolute():
             path = project / path
@@ -1001,6 +1001,11 @@ def design_release_sources(project, layout, assembly=None):
         entry = files.setdefault(str(path), {"sha256": digest, "roles": []})
         if role not in entry["roles"]:
             entry["roles"].append(role)
+        if bundle and path.is_relative_to(bundle[0]):
+            # Keep the producer's source.spice -> cells.spice and driver ->
+            # pdk_runset/... relative references without rewriting its bytes.
+            entry['native_bundle'] = {'sha256':bundle[1],
+                                      'relative':path.relative_to(bundle[0]).as_posix()}
     def retained(folder, role):
         receipt_path = folder / 'vibeic_receipt.json'
         receipt = json.loads(receipt_path.read_text())
@@ -1044,8 +1049,28 @@ def design_release_sources(project, layout, assembly=None):
     if assembly:
         add(assembly['report'],'stream_inputs')
         validation['provider_assembly']={'verdict':'PASS','sha256':assembly['sha256'],'basis':assembly.get('basis',{})}
+        try:
+            import wafer_space_precheck as provider_pv
+            pv = provider_pv.read_signoff_evidence(project, Path(assembly['report']).resolve())
+            if pv['gds_sha256'] != assembly['sha256']:
+                raise ValueError('provider PV does not bind the selected final GDS')
+            for kind in ('drc','antenna','density'):
+                row = pv['rows'][kind]
+                validation[kind] = {'verdict':row['verdict'], 'gds_sha256':pv['gds_sha256'],
+                                    'rows':{kind:row}, 'scope':pv['scope'],
+                                    'disclosures':pv.get('disclosures', [])}
+            for ref in pv['finite_files']:
+                roles = [kind+'_report' for kind in ('drc','antenna','density')
+                         if kind+'_raw_report' in ref['roles']]
+                for role in roles or ['tool_provenance']:
+                    add(ref['path'], role, ref['sha256'])
+        except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+            for kind in ('drc','antenna','density'):
+                validation[kind] = {'verdict':'NOT_MEASURED', 'reason':str(exc)}
     # This is the same strict retained reader used by normal signoff gates.
     for kind in ('drc','lvs','antenna','density'):
+        if assembly and kind != 'lvs':
+            continue  # Selected provider PV and internal LVS have separate owners.
         report_path = physical_project / 'reports/phase3/lvs_verdict.json'
         if kind == 'lvs' and report_path.is_file():
             try:
@@ -1060,20 +1085,40 @@ def design_release_sources(project, layout, assembly=None):
                     'tool': verdict['tool'], 'tool_version': verdict.get('tool_version'),
                     'options': verdict.get('options')}
                 add(report_path, 'lvs_report')
+                materials = []
                 for name in ('reference_source','native_result','deck','driver_source',
-                             'source_netlist','extracted_netlist','log','inputs_manifest'):
+                             'source_netlist','extracted_netlist','log','inputs_manifest',
+                             'cell_library_bundle'):
                     entry = verdict.get(name)
                     if not isinstance(entry, dict) or not entry.get('path'):
                         continue
-                    path = Path(entry['path'])
-                    if not path.is_absolute():path = physical_project / path
                     role = ('physical_reference_netlist' if name == 'reference_source'
                             else 'lvs_report' if name in ('native_result','log') else 'tool_provenance')
-                    add(path, role, entry['sha256'])
-                for entry in verdict.get('cell_libraries', []):
-                    external[entry['path']] = {'sha256': entry['sha256'],
-                                               'reason': 'Native LVS library dependency; not a provider upload'}
-            except (OSError, ValueError, KeyError, AttributeError) as exc:
+                    materials.append((entry, role))
+                dependencies = [*verdict.get('cell_libraries', []),
+                                *verdict.get('runset_sources', []),
+                                *verdict.get('producer_sources', [])]
+                for name in ('library_translation','extraction_basis'):
+                    dependencies.extend(entry for entry in (verdict.get(name) or {}).values()
+                                        if isinstance(entry, dict) and entry.get('path') and entry.get('sha256'))
+                materials.extend((entry, 'tool_provenance') for entry in dependencies)
+                paths = [(Path(entry['path']) if Path(entry['path']).is_absolute()
+                          else physical_project / entry['path']).resolve()
+                         for entry, _role in materials]
+                # Recomparison can keep the original extraction bundle and a
+                # second driver/tools directory. Preserve their common finite
+                # path hierarchy; never scan or copy the surrounding directory.
+                bundle = (Path(_os.path.commonpath([str(path.parent) for path in paths])),
+                          sha256_file(report_path))
+                for (entry, role), path in zip(materials, paths):
+                    if not path.is_file() or not path.stat().st_size:
+                        raise ValueError('native LVS bundle source missing: '+str(path))
+                    add(path, role, entry['sha256'], bundle)
+                original_deck = (verdict.get('deck') or {}).get('original_source')
+                if original_deck:
+                    external[original_deck['path']] = {'sha256':original_deck['sha256'],
+                        'reason':'Original PDK source; the native producer snapshot is archived separately'}
+            except (OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
                 validation[kind] = {'verdict': 'NOT_MEASURED', 'reason': str(exc)}
             continue
         result = native.obligation(physical_project, kind, layout=Path(layout))
@@ -1191,7 +1236,9 @@ def emit_design_release(project, destination, layout, physical_top, assembly=Non
     members=[]
     for name, entry in source['files'].items():
         path=Path(name)
-        rel=(Path('archive/project')/path.relative_to(project) if path.is_relative_to(project)
+        bundle=entry.get('native_bundle')
+        rel=(Path('archive/native_lvs')/bundle['sha256']/bundle['relative'] if bundle else
+             Path('archive/project')/path.relative_to(project) if path.is_relative_to(project)
              else Path('archive/dependencies')/entry['sha256']/path.name)
         target=destination/rel;target.parent.mkdir(parents=True,exist_ok=True)
         if not target.is_file() or sha256_file(target)!=entry['sha256']:
