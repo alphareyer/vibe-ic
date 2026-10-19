@@ -9,9 +9,10 @@ orchestrator's ForbiddenLayers ruling of 2026-09-06):
                             KLayout layer table defines. The ALLOWED set —
                             everything else in a GDS is a layer the process
                             does not know.
-    seal_ring_facility(v)   whether this technology can build a seal ring at
-                            all, i.e. whether the volume ships the generator
-                            `die_finishing_gen` drives.
+    seal_ring_facility(v)   whether the volume ships a recognized seal-ring
+                            provider. Caller support and actual generation
+                            are separate obligations; a Magic provider is
+                            available even before its geometry is declared.
 
 WHY A DECLARATION CANNOT ANSWER EITHER
 ======================================
@@ -560,12 +561,13 @@ def layer_table(volume: Optional[Path], reader=None
 
 def seal_ring_facility(volume: Optional[Path], reader=None
                        ) -> Tuple[Optional[bool], Optional[str], List[str]]:
-    """(does this technology ship a seal-ring generator, the path, tried).
+    """(does this technology ship a seal-ring generator, unique path, tried).
 
     None means the question could not be reached at all — no volume or an
     unreadable authority. False means neither known provider family was found.
-    True means the technology has a provider; it does NOT say that this flow's
-    KLayout-only die-finishing caller can invoke a different provider family.
+    True means the technology has a provider; it does not prove that its
+    invocation is supported. Multiple providers return True with no selected
+    path: ambiguity must not become technology absence.
     """
     from die_finishing_gen import _PDK_SCRIPT_REL as REL
     tried: List[str] = []
@@ -580,38 +582,47 @@ def seal_ring_facility(volume: Optional[Path], reader=None
         tried.append(str(exc))
         return None, None, tried
     # Some PDK volumes ship a Magic generator with a positional CLI instead of
-    # KLayout's sealring.py. Its presence prevents a process-absence N/A; the
-    # caller must still report unsupported invocation until an adapter exists.
+    # KLayout's sealring.py. Inspect all Python basenames so both sealring and
+    # seal_ring are recognized; multiple matches cannot select an invocation.
     magic_pattern = "libs.tech/magic/seal_ring_generator/*.py"
     tried.append(str(volume / magic_pattern))
     try:
+        candidates = []
         for name in _query(volume, "glob", magic_pattern, reader=reader):
             tried.append(str(name))
             if ("sealring" in Path(name).stem.lower().replace("_", "")
                     and _query(Path(name), "is_file", reader=reader)):
-                return True, str(name), tried
+                candidates.append(str(name))
     except OSError as exc:
         tried.append(str(exc))
         return None, None, tried
+    if candidates:
+        candidates.sort()
+        return True, candidates[0] if len(candidates) == 1 else None, tried
     return False, None, tried
 
 
 def seal_ring_invocation_supported(volume: Optional[Path], provider: Optional[str],
                                    reader=None
                                    ) -> Optional[bool]:
-    """Whether the discovered provider has the KLayout form this flow drives."""
+    """Whether this flow recognizes the selected provider's actual interface.
+
+    Provider presence, readable source, and supported invocation are separate
+    questions. Use the producer's own classifier on the selected PDK reader;
+    a Magic symlink under the conventional KLayout name must be classified by
+    its resolved family and script bytes, not by its spelling.
+    """
     if volume is None or provider is None:
         return None
-    from die_finishing_gen import _PDK_SCRIPT_REL as rel
-    if provider != str(volume / rel):
-        return False
+    from die_finishing_gen import detect_form_source
     try:
         resolved = _query(Path(provider), "realpath", reader=reader)
+        source = _query(Path(provider), "read", reader=reader)
     except OSError:
         return None
-    # A conventional KLayout pathname can be a symlink to a positional Magic
-    # generator. In that case its spelling is not proof of invocation support.
-    return str(resolved) == str(volume / rel)
+    form, _ = detect_form_source(str(resolved),
+                                 "\n".join(source.splitlines()[:200]))
+    return form in ("pya-cli", "klayout-rd", "magic-positional")
 
 
 #: THE FLOW'S OWN MARKER LAYERS, derived from the writer, never typed here.

@@ -239,6 +239,7 @@ _ENV_SCRIPT = "KLAYOUT_SEALRING_SCRIPT"
 #: STRUCTURE, not a PDK name — it resolves for any PDK laid out that way and
 #: for none that is not.
 _PDK_SCRIPT_REL = "libs.tech/klayout/tech/scripts/sealring.py"
+_MAGIC_PROVIDER_GLOB = "libs.tech/magic/seal_ring_generator/*seal*ring*.py"
 _BRIDGE_CFG = "input/pdk/bridge/signoff_config.json"
 _BRIDGE_KEY = "die_finishing"
 _CFG_GLOBS = (
@@ -262,7 +263,7 @@ _ROUTED_DEF_GLOBS = ("phase3/stage3/pnr/routed.def",
 #: `pya-cli` is its `run_generic` default; `klayout-rd` is the KLayout-batch
 #: form. Declared, never guessed: silently retrying the other shape when one
 #: produces nothing is how a wrong invocation becomes a false PASS.
-_FORMS = ("pya-cli", "klayout-rd")
+_FORMS = ("pya-cli", "klayout-rd", "magic-positional")
 
 
 def _first(project: Path, globs) -> Optional[Path]:
@@ -483,9 +484,10 @@ def resolve_script(project: Path, explicit: Optional[str],
     before this step existed, because an unanswered field never returns a
     value.
 
-    Existence is NOT checked here. The script lives wherever KLayout lives,
-    which may be inside a container with no host counterpart, so only the
-    resolved runner can answer that (see `KLayoutRunner.exists`).
+    Explicit selections are not checked here: the resolved runner owns their
+    existence. Default provider-family discovery asks the PDK authority reader
+    in that same selected environment; it never substitutes a host PDK for an
+    unreachable container.
     """
     tried: List[str] = []
     if explicit:
@@ -563,6 +565,23 @@ def resolve_script(project: Path, explicit: Optional[str],
     if root and name:
         cand = f"{root.rstrip('/')}/{name}/{_PDK_SCRIPT_REL}"
         tried.append(cand)
+        from _pdk_layer_authority import _query
+        volume = Path(root) / name
+        # Ask the same filesystem the ordinary PDK reader uses. Explicit
+        # script/bridge/declaration/environment precedence above is unchanged.
+        try:
+            if not _query(Path(cand), "is_file"):
+                tried.append(str(volume / _MAGIC_PROVIDER_GLOB))
+                candidates = [str(p) for p in _query(volume, "glob", _MAGIC_PROVIDER_GLOB)
+                              if _query(Path(p), "is_file")]
+                if len(candidates) == 1:
+                    tried.extend(candidates)
+                    return candidates[0], "$PDK_ROOT/$PDK/" + _MAGIC_PROVIDER_GLOB, tried
+                if len(candidates) > 1:
+                    raise ValueError("ambiguous seal-ring providers; declare --script: "
+                                     + ", ".join(candidates))
+        except OSError as exc:
+            raise ValueError(f"seal-ring provider discovery unavailable: {exc}") from exc
         return cand, "$PDK_ROOT/$PDK/" + _PDK_SCRIPT_REL, tried
     tried.append("$PDK_ROOT/$PDK/" + _PDK_SCRIPT_REL
                  + " (PDK_ROOT/PDK not set)")
@@ -588,6 +607,38 @@ def provider_target(project: Path) -> Optional[Dict[str, Any]]:
     return value
 
 
+def built_die_rectangle(project: Path, declared: Optional[Dict[str, Any]] = None
+                        ) -> Tuple[Optional[List[float]], str]:
+    """The built DIEAREA, or the declared rectangle when no DEF exists.
+
+    A GDS bounding box is not a die boundary: pre-existing core/outline
+    geometry can keep it full-sized even when an imported ring is too small.
+    """
+    for pat in ("phase3/stage3/pnr/routed.def", "phase3/stage3/pnr/*.def",
+                "**/*.def"):
+        for d in sorted(project.glob(pat)):
+            if not d.is_file():
+                continue
+            try:
+                text = d.read_text(errors="ignore")
+            except OSError:
+                continue
+            m = re.search(r"DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*"
+                          r"\(\s*(-?\d+)\s+(-?\d+)\s*\)", text)
+            u = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", text)
+            if m:
+                scale = float(u.group(1)) if u else 1000.0
+                return ([int(m.group(i)) / scale for i in (1, 2, 3, 4)],
+                        f"DIEAREA of {d.relative_to(project)}")
+    rect = _declared(declared or {}, _DECL_DIE_AREA)
+    if (isinstance(rect, (list, tuple)) and len(rect) == 4
+            and all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                    and math.isfinite(c) for c in rect)
+            and rect[2] > rect[0] and rect[3] > rect[1]):
+        return [float(c) for c in rect], f"{_DECL_SOURCE}.{_DECL_DIE_AREA}"
+    return None, "no DEF DIEAREA or answered die_area_um"
+
+
 def die_size(project: Path, gds: Path,
              width: Optional[float],
              height: Optional[float],
@@ -605,10 +656,9 @@ def die_size(project: Path, gds: Path,
     ring must fit the layout it is being added to, so where both exist the
     built one wins and this changes nothing for any project that has a DEF —
     which is every project that has ever reached this step. Where they
-    DISAGREE that is a real defect, and it is 37.5ic's general precheck that
-    owns it: comparing the layout against the declaration is that step's job,
-    and quietly sealing to the declared number here would erase the evidence
-    it reads.
+    DISAGREE that is a real defect. The Magic seal-ring producer refuses the
+    disagreement before promotion; 37.5ic's general precheck independently
+    compares the finished layout against the declaration.
 
     What it DOES close: a self-tape-out that streamed a GDS and carries no DEF
     used to reach "no DIEAREA found; caller must pass --die-width/--die-height"
@@ -620,32 +670,13 @@ def die_size(project: Path, gds: Path,
     if profile is not None:
         width, height = profile["technical_target"]["dimensions_um"]
         return float(width), float(height), PROVIDER_TARGET_REL + ".technical_target.dimensions_um (engineering target, not a reservation)"
-    for pat in ("phase3/stage3/pnr/routed.def", "phase3/stage3/pnr/*.def",
-                "**/*.def"):
-        for d in sorted(project.glob(pat)):
-            if not d.is_file():
-                continue
-            try:
-                text = d.read_text(errors="ignore")
-            except OSError:
-                continue
-            m = re.search(r"DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*"
-                          r"\(\s*(-?\d+)\s+(-?\d+)\s*\)", text)
-            u = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", text)
-            if not m:
-                continue
-            scale = float(u.group(1)) if u else 1000.0
-            x0, y0, x1, y1 = (int(m.group(i)) for i in (1, 2, 3, 4))
-            return ((x1 - x0) / scale, (y1 - y0) / scale,
-                    f"DIEAREA of {d.relative_to(project)}")
-    rect = _declared(declared or {}, _DECL_DIE_AREA)
-    if (isinstance(rect, (list, tuple)) and len(rect) == 4
-            and all(isinstance(c, (int, float)) and not isinstance(c, bool)
-                    for c in rect)):
-        w, h = float(rect[2]) - float(rect[0]), float(rect[3]) - float(rect[1])
+    rect, rect_source = built_die_rectangle(project, declared)
+    if rect is not None:
+        w, h = rect[2] - rect[0], rect[3] - rect[1]
         if w > 0 and h > 0:
-            return w, h, (f"{_DECL_SOURCE}.{_DECL_DIE_AREA} {list(rect)} "
-                          "(no DEF DIEAREA on this tree)")
+            suffix = (f" {rect} (no DEF DIEAREA on this tree)"
+                      if rect_source.startswith(_DECL_SOURCE) else "")
+            return w, h, rect_source + suffix
     return None, None, ("no DIEAREA found in any DEF and "
                         f"{_DECL_SOURCE}.{_DECL_DIE_AREA} is "
                         f"{_td.NOT_DETERMINED}; caller must pass "
@@ -689,6 +720,20 @@ def _read_remote(runner, path: str, limit: int = 200) -> Optional[str]:
     return out if rc == 0 else None
 
 
+def detect_form_source(script: str, text: str) -> Tuple[str, str]:
+    """Classify a provider from bytes read in the selected PDK environment."""
+    if _PYA_CLI_MARKER in text:
+        return "pya-cli", f"the script declares {_PYA_CLI_MARKER}"
+    if (re.search(r"\bwidth\s+height\s+target_dir\b", text)
+            and "-outer" in text and "-keep" in text
+            and re.search(r"def\s+generate_sealring\s*\(", text)):
+        return "magic-positional", "the provider declares width height target_dir and -outer/-keep"
+    if "/libs.tech/magic/" in str(script).replace("\\", "/"):
+        return "unsupported", "the Magic provider does not declare a supported invocation interface"
+    return "klayout-rd", (f"the script does not declare {_PYA_CLI_MARKER}, so it "
+                          "is driven as a KLayout batch script")
+
+
 def detect_form(runner, script: str) -> Tuple[str, str]:
     """(form, why) — how this PDK script wants to be invoked.
 
@@ -700,10 +745,7 @@ def detect_form(runner, script: str) -> Tuple[str, str]:
     if text is None:
         return "pya-cli", ("could not read the script to detect its interface; "
                            "kept the default pya-cli form")
-    if _PYA_CLI_MARKER in text:
-        return "pya-cli", f"the script declares {_PYA_CLI_MARKER}"
-    return "klayout-rd", (f"the script does not declare {_PYA_CLI_MARKER}, so it "
-                          "is driven as a KLayout batch script")
+    return detect_form_source(script, text)
 
 
 def derive_tech(runner, script: str) -> Tuple[Optional[str], str]:
@@ -1105,7 +1147,8 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         out: Optional[str], in_place: bool,
         report: Optional[str], sealed_by: Optional[str] = None,
         sealed_by_record: Optional[str] = None,
-        sealed_by_error: Optional[str] = None) -> Dict[str, Any]:
+        sealed_by_error: Optional[str] = None,
+        magic_geometry: Any = None) -> Dict[str, Any]:
     """``sealed_by``: a GDS some other caller of the SAME PDK generator already
     produced from ``gds`` (step 26.5ic on LibreLane `KLayout.SealRing`).  It
     takes the place of this program's own invocation and nothing else: the
@@ -1253,7 +1296,11 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
                 ((cfg.get("die_id") or {}).get("cells") or [])
                 if isinstance(c, str)]
 
-    script, src, tried = resolve_script(project, script, pdk_root, pdk, decl)
+    try:
+        script, src, tried = resolve_script(project, script, pdk_root, pdk, decl)
+    except ValueError as exc:
+        return done({"state": "FAIL", "rule": "SEALRING_PROVIDER_UNRESOLVED",
+                     "reason": str(exc)})
     if not script:
         # LibreLane's own wording for this case names the PDK and says the step
         # is skipped: "KLAYOUT_SEALRING_SCRIPT is unset. KLayout.SealRing may
@@ -1327,6 +1374,9 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         form, form_why = declared_form, "declared"
     else:
         form, form_why = detect_form(runner, script)
+    if form not in _FORMS:
+        return done({"state": "FAIL", "rule": "SEALRING_PROVIDER_INTERFACE_UNSUPPORTED",
+                     "reason": form_why, "script": script})
     tech_why = "declared" if tech else "not needed for this form"
     if form == "klayout-rd" and not tech:
         tech, tech_why = derive_tech(runner, script)
@@ -1342,6 +1392,29 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     if not w or not h:
         return done(_skip(f"cannot determine the die size: {die_src}",
                           script=script, script_source=src))
+
+    if form == "magic-positional":
+        geometry = magic_geometry if magic_geometry is not None else cfg.get("magic_geometry")
+        if isinstance(geometry, str):
+            try:
+                geometry = json.loads(geometry)
+            except ValueError:
+                geometry = None
+        finite = lambda v: (not isinstance(v, bool) and isinstance(v, (int, float))
+                            and math.isfinite(v))
+        if (not isinstance(geometry, dict)
+                or set(geometry) != {"size_convention", "provider_size_um", "offset_um"}
+                or geometry.get("size_convention") not in ("chip", "outer")
+                or not isinstance(geometry.get("provider_size_um"), list)
+                or len(geometry["provider_size_um"]) != 2
+                or not all(finite(v) and v > 0 for v in geometry["provider_size_um"])
+                or not isinstance(geometry.get("offset_um"), list)
+                or len(geometry["offset_um"]) != 2
+                or not all(finite(v) for v in geometry["offset_um"])):
+            return done({"state": "FAIL", "rule": "MAGIC_GEOMETRY_AUTHORITY_REQUIRED",
+                         "reason": "magic-positional requires explicit magic_geometry with "
+                                   "size_convention chip|outer, positive finite provider_size_um[2], "
+                                   "and finite offset_um[2]; whole-DIE dimensions are never a provider frame default"})
 
     engine = _kl.find_engine("sealring", "sealring_verify.py")
     if engine is None:
@@ -1429,10 +1502,47 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
             rc = 1
             serr = f"sealed-by GDS not found: {produced}"
     else:
-        argv = _emit_argv(form, runner, script, python, tech,
-                          runner.cpath(gds_path), runner.cpath(staged), w, h)
-        seal["argv"] = list(argv)
-        rc, sout, serr = runner.run_argv(argv, env, timeout=3600)
+        if form == "magic-positional":
+            adapter = _kl.find_engine("sealring", "magic_provider.py")
+            if adapter is None:
+                return done({"state": "FAIL", "reason": "sealring/magic_provider.py adapter not found"})
+            if not runner.covers(adapter):
+                local = rep.parent / "magic_provider.py"
+                atomic_write_text(local, Path(adapter).read_text())
+                adapter = local
+            provider_report = rep.parent / "magic_provider.json"
+            if provider_report.is_file():
+                provider_report.unlink()
+            geometry_source = ("--magic-geometry" if magic_geometry is not None
+                               else f"{_BRIDGE_CFG}:{_BRIDGE_KEY}.magic_geometry")
+            penv = dict(env, MAGIC_PROVIDER_SCRIPT=str(script),
+                        MAGIC_PROVIDER_PYTHON=python, MAGIC_PROVIDER_IN=str(gds_path),
+                        MAGIC_PROVIDER_OUT=str(staged), MAGIC_PROVIDER_REPORT=str(provider_report),
+                        MAGIC_PROVIDER_GEOMETRY=json.dumps(geometry),
+                        MAGIC_PROVIDER_GEOMETRY_SOURCE=geometry_source)
+            rc, sout, serr = runner.run(adapter, penv,
+                path_keys=("MAGIC_PROVIDER_IN", "MAGIC_PROVIDER_OUT", "MAGIC_PROVIDER_REPORT"),
+                timeout=3600)
+            seal["provider_adapter_rc"] = rc
+            if provider_report.is_file():
+                try:
+                    seal["provider_run"] = json.loads(provider_report.read_text())
+                except (OSError, ValueError) as exc:
+                    seal["provider_report_error"] = str(exc)
+            seal["whole_die_dimensions_um"] = [w, h]
+            seal["magic_geometry"] = geometry
+            seal["magic_geometry_source"] = geometry_source
+            if rc != 0:
+                seal["state"] = "FAIL"
+                seal["generator_rc"] = rc
+                seal["reason"] = "Magic provider invocation/import refused; see provider_run and tool output"
+                seal["generator_output"] = ((sout or "") + (serr or ""))[-2000:]
+                return done(seal)
+        else:
+            argv = _emit_argv(form, runner, script, python, tech,
+                              runner.cpath(gds_path), runner.cpath(staged), w, h)
+            seal["argv"] = list(argv)
+            rc, sout, serr = runner.run_argv(argv, env, timeout=3600)
     seal["generator_rc"] = rc
     tail = ((sout or "") + (serr or "")).strip()
     if tail:
@@ -1506,6 +1616,70 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         pass
 
     if ring_check.get("verdict") == "PASS":
+        if form == "magic-positional":
+            expected_box, expected_source = built_die_rectangle(project, decl)
+            extent = ring_check.get("ring_extent") or {}
+            outer = (extent.get("outer") or {}).get("um")
+            input_box = ring_check.get("die_box_um")
+            declared_box = _declared(decl, _DECL_DIE_AREA)
+            # The verifier proves annulus topology around the INPUT geometry.
+            # A small ring around a small core can pass that test while the
+            # rest of the built die remains outside it; the final GDS bbox may
+            # still equal DIEAREA because its old geometry supplies the edges.
+            # Compare the RING'S OWN measured outer edge to the built die.
+            seal["ring_die_extent"] = {
+                "expected_um": expected_box, "expected_source": expected_source,
+                "measured_ring_outer_um": outer,
+                "measured_input_gds_um": input_box,
+                "answered_die_area_um": declared_box,
+                "comparison_tolerance_um": 0.0001,
+            }
+            if (expected_box is None or not isinstance(outer, list)
+                    or len(outer) != 4
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) for v in outer)
+                    or any(abs(a - b) > 0.0001
+                           for a, b in zip(outer, expected_box))):
+                seal["state"] = "FAIL"
+                seal["rule"] = "SEAL_RING_DIE_EXTENT_MISMATCH"
+                seal["reason"] = (
+                    f"the Magic ring's own outer extent {outer} um does not "
+                    f"match the built die rectangle {expected_box} um "
+                    f"({expected_source}); whole-GDS bounding box and ring "
+                    "topology alone cannot prove die-edge enclosure")
+                seal["gds_out_unpromoted"] = str(staged)
+                return done(seal, ring_check)
+            if (not isinstance(input_box, list) or len(input_box) != 4
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) for v in input_box)
+                    or input_box[0] < outer[0] - 0.0001
+                    or input_box[1] < outer[1] - 0.0001
+                    or input_box[2] > outer[2] + 0.0001
+                    or input_box[3] > outer[3] + 0.0001):
+                seal["state"] = "FAIL"
+                seal["rule"] = "SEAL_RING_INPUT_OUTSIDE_DIE"
+                seal["reason"] = (
+                    f"original input GDS geometry {input_box} um is not fully "
+                    f"contained by the Magic ring's measured outer edge {outer} um; "
+                    "a stale DEF cannot authorize sealing only part of the die")
+                seal["gds_out_unpromoted"] = str(staged)
+                return done(seal, ring_check)
+            if declared_box is not None and (
+                    not isinstance(declared_box, (list, tuple))
+                    or len(declared_box) != 4
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) for v in declared_box)
+                    or any(abs(a - b) > 0.0001
+                           for a, b in zip(declared_box, expected_box))):
+                seal["state"] = "FAIL"
+                seal["rule"] = "SEAL_RING_DECLARED_DIE_MISMATCH"
+                seal["reason"] = (
+                    f"answered die area {declared_box} um disagrees with built "
+                    f"die rectangle {expected_box} um ({expected_source}); "
+                    "a ring matching only one authority cannot be promoted")
+                seal["gds_out_unpromoted"] = str(staged)
+                return done(seal, ring_check)
+            seal["ring_die_extent"]["state"] = "PASS"
         # ── REFUSE TO SEAL A CORE THAT IS ALREADY IN THE BAND ──────────────
         # MEASURED (vibe-ic#2122 / vibeic-eda#189) on one gf180mcuD die: the
         # same generator and the same deck gave 16 violations for the ring on
@@ -1790,6 +1964,9 @@ def main(argv=None) -> int:
                          "or $PDK_ROOT/$PDK)")
     ap.add_argument("--form", default=None, choices=list(_FORMS),
                     help="invocation shape (default: read off the script)")
+    ap.add_argument("--magic-geometry", default=None,
+                    help="explicit JSON size_convention, provider_size_um, offset_um; "
+                         "provider frame is separate from the unchanged whole-DIE constraint")
     ap.add_argument("--tech", default=None,
                     help="KLayout technology name (klayout-rd form only)")
     ap.add_argument("--pdk-root", default=None)
@@ -1839,7 +2016,8 @@ def main(argv=None) -> int:
                   ns.pdk, ns.python, ns.marker, ns.die_width, ns.die_height,
                   ns.out, ns.in_place, ns.report, sealed_by=ns.sealed_by,
                   sealed_by_record=ns.sealed_by_record,
-                  sealed_by_error=ns.sealed_by_error)
+                  sealed_by_error=ns.sealed_by_error,
+                  magic_geometry=ns.magic_geometry)
     except Exception as exc:                                 # noqa: BLE001
         res = {"producer": _PRODUCER, "check": _CHECK,
                "seal_ring": {"state": "FAIL", "reason": f"gate error: {exc}"},
