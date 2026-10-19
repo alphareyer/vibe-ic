@@ -19794,11 +19794,11 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
             "synth_log_audit", "PASS", time.time() - t0,
             f"synth log audit NOT_APPLICABLE — yosys_synth {synth.status}",
             extras={"synth_log_audit": row}, disclosures=[_V.Disclosure.ADVISORY])
-    log = _synthesis_log_path(project)
-    row['log_file'] = str(log)
     out = _pl.report_path(project, "gates/synth_log_audit.json")
     buf_out, buf_err = io.StringIO(), io.StringIO()
     try:
+        log = _synthesis_log_path(project)
+        row['log_file'] = str(log)
         with contextlib.redirect_stdout(buf_out), \
                 contextlib.redirect_stderr(buf_err):
             rc = _eda_log.main(["--log-file", str(log),

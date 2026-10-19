@@ -364,7 +364,10 @@ def test_native_log_refusals_never_fall_back_to_an_unrelated_legacy_log(tmp_path
             elif damage == 'rtl':
                 (project / 'phase2/stage1/rtl/core.v').write_text('module changed; endmodule\n')
             with pytest.raises((ValueError, OSError, RuntimeError)):
-                DOSR.step_synth_log_audit(project, _synth('PASS'))
+                DOSR._synthesis_log_path(project)
+            row = _row(DOSR.step_synth_log_audit(project, _synth('PASS')))
+            assert row['verdict'] == 'NOT_MEASURED' and row['reason'], row
+            assert row.get('rc') is None, row
             with pytest.raises((ValueError, OSError, RuntimeError)):
                 DOSR.step_emit_phase2_manifests(project, [])
 
@@ -375,3 +378,62 @@ def test_a_bound_native_log_without_accounting_keeps_a_real_fail_receipt(tmp_pat
     assert row['verdict'] == 'FINDING' and row['categories'] == ['EXPECTED_NOT_FOUND'], row
     receipt = json.loads((project / 'reports/phase2/gates/eda_log_check_receipt.json').read_text())
     assert receipt['verdict'] == 'FAIL' and receipt['examined'] > 0
+
+
+def _absent_selected_handoff(project):
+    import synth_handoff_netlist_check as handoff
+    switch = project / 'phase3/librelane_switch.json'
+    switch.parent.mkdir(parents=True, exist_ok=True)
+    switch.write_text('{"steps":{"9":"librelane"}}\n')
+    current = handoff.bound_handoff(project.resolve())
+    assert current['verdict'] == 'FAIL', current
+    assert current['reason_class'] == 'tool_handoff_invalid', current
+    assert 'current LibreLane synthesis handoff is absent' in current['findings'], current
+    return 'ValueError: SYNTH_LOG_HANDOFF_UNBOUND: ' + str(current)
+
+
+def test_absent_selected_handoff_is_disclosed_without_running_log_gate(tmp_path, monkeypatch):
+    expected = _absent_selected_handoff(tmp_path)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('an unbound transcript reached eda_log_check')
+    monkeypatch.setattr(DOSR._eda_log, 'main', forbidden)
+    result = DOSR.step_synth_log_audit(tmp_path, _synth('FAIL'))
+    row = _row(result)
+    assert row['verdict'] == 'NOT_MEASURED' and row['reason'] == expected, row
+    assert row['synth_status'] == 'FAIL' and row.get('rc') is None, row
+    assert result.disclosures == [DOSR._V.Disclosure.ADVISORY]
+    assert not (tmp_path / _SYNTH_LOG_REL).exists()
+
+
+def test_normal_phase2_report_survives_absent_advisory_handoff(tmp_path, monkeypatch):
+    """Real coordinator/audit/report writer; unrelated producers are neutral leaves."""
+    expected = _absent_selected_handoff(tmp_path)
+    docs = tmp_path / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    for number in range(1, 14):
+        (docs / f'L{number}.json').write_text('{}')
+    for name in list(vars(DOSR)):
+        if not name.startswith('step_') or name == 'step_synth_log_audit':
+            continue
+        def neutral(*args, _name=name, **kwargs):
+            result = (_synth('FAIL') if _name == 'step_yosys_synth' else
+                      DOSR.StepResult(_name.removeprefix('step_'), 'NOT_APPLICABLE', 0.0,
+                                      'unrelated producer outside this advisory regression',
+                                      declared_by='neutral coordinator fixture'))
+            return [result] if _name == 'step_dft_lec_chain' else result
+        monkeypatch.setattr(DOSR, name, neutral)
+    monkeypatch.setattr(DOSR._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:
+                        fn(*a, **{k: v for k, v in kw.items() if not k.startswith('_preflight')}))
+    import execution_policy
+    monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
+    monkeypatch.setattr(sys, 'argv', ['design', str(tmp_path), '--skip-hardware',
+                                    '--skip-phase3', '--skip-analog', '--exit-step', '9',
+                                    '--max-rtl-repair-retries', '0'])
+    assert DOSR.main() == 1
+    report = json.loads((tmp_path / 'reports/orchestrator/phase2_one_shot.json').read_text())
+    rows = {row['name']: row for row in report['steps']}
+    assert report['verdict'] == 'FAIL', report
+    assert rows['yosys_synth']['status'] == 'FAIL', rows['yosys_synth']
+    audit = rows['synth_log_audit']['extras']['synth_log_audit']
+    assert audit['verdict'] == 'NOT_MEASURED' and audit['reason'] == expected, audit
+    assert not (tmp_path / _SYNTH_LOG_REL).exists()
