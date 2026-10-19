@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
 import rtl_hygiene_lint as lint
 
 
@@ -47,6 +48,43 @@ endmodule
     findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
     assert any(f.rule == 'multidriven-continuous-procedural' and f.symbol == 'phase'
                for f in findings), findings
+
+
+@pytest.mark.parametrize('header', [
+    'phase=0;phase<4;phase=phase+1',
+    'q=0;q<4;phase=phase+1',
+    'phase=0,q=0;q<4;q=q+1',
+    'phase[1:0]=0;q<4;q=q+1',
+])
+def test_for_header_first_and_third_clause_real_writes(header):
+    rtl = f'''module sample(input clk, input [3:0] d, output [3:0] y);
+  reg [3:0] phase, q;
+  always @(posedge clk) for({header}) begin end
+  assign phase=d;
+  assign y=phase;
+endmodule
+'''
+    findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
+    assert any(f.rule == 'multidriven-continuous-procedural' and f.symbol == 'phase'
+               for f in findings), findings
+
+
+@pytest.mark.parametrize('header', [
+    "q=0;phase<=4'd5;q=q+1",
+    "q=phase<=4'd5;q<4;q=q+1",
+    "q=0;q<4;q=phase<=4'd5",
+])
+def test_for_header_condition_and_rhs_comparisons_remain_reads(header):
+    rtl = f'''module sample(input clk, input [3:0] d, output [3:0] y);
+  reg [3:0] q;
+  always @(posedge clk) for({header}) begin end
+  wire [3:0] phase;
+  assign phase=d;
+  assign y=phase;
+endmodule
+'''
+    findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
+    assert not any(f.rule == 'multidriven-continuous-procedural' for f in findings), findings
 
 
 def test_sv_native_driver_uses_selected_top_params_defines_and_no_implicit_synthesis(tmp_path, monkeypatch):

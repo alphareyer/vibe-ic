@@ -3926,32 +3926,51 @@ def rule_continuous_vs_procedural_driver(src: str, path: str) -> List[Finding]:
                 r'\bassign\b[^;]*;',
                 lambda m: ''.join('\n' if c == '\n' else ' ' for c in m.group(0)),
                 body)
+            # The first and third clauses of a for header may write a real
+            # signal even though they are parenthesized. Record only their
+            # leading assignment LHS sites, never the condition or RHS reads.
+            header_write_offsets = set()
+            for loop in re.finditer(r'\bfor\s*\(', body_noassign):
+                parsed = _module_ports.extract_balanced(body_noassign, loop.end() - 1)
+                if parsed is None:
+                    continue
+                clauses = _module_ports.split_top_level(parsed[0], separator=';')
+                if len(clauses) != 3:
+                    continue
+                for clause_index in (0, 2):
+                    clause_offset = loop.end() + sum(len(c) + 1 for c in clauses[:clause_index])
+                    part_offset = 0
+                    for part in _module_ports.split_top_level(clauses[clause_index]):
+                        lhs = re.match(r'\s*([A-Za-z_]\w*)\s*(?:\[[^\]]+\]\s*)*'
+                                       r'(?:<=|=(?!=))', part)
+                        if lhs:
+                            header_write_offsets.add(clause_offset + part_offset + lhs.start(1))
+                        part_offset += len(part) + 1
             for am in re.finditer(
                     r'(?<![<>!=])\b([A-Za-z_]\w*)\s*(?:\[[^\]]+\])?\s*(?:<=|=)(?!=)',
                     body_noassign):
                 nm = am.group(1)
                 if nm in VERILOG_KEYWORDS:
                     continue
-                # An earlier assignment in the same statement makes this
-                # token part of its RHS. For example, `wire bounded = phase
-                # <= 5;` reads phase; it does not write phase. The classifier
-                # ignores comparisons in parenthesized `if` conditions.
-                statement_start = 0
-                paren_depth = 0
-                for offset, char in enumerate(body_noassign[:am.start()]):
-                    if char == '(':
-                        paren_depth += 1
-                    elif char == ')':
-                        paren_depth = max(0, paren_depth - 1)
-                    elif char == ';' and paren_depth == 0:
-                        statement_start = offset + 1
-                if _procedural_assigned_lhs(body_noassign[statement_start:am.start()]):
-                    continue
-                # The regex only locates a possible write. Reuse the existing
-                # statement-level classifier before crediting it: `phase<=5`
-                # inside a declaration initializer's parentheses is a read.
-                if nm not in _procedural_assigned_lhs(body_noassign[:am.end()]):
-                    continue
+                if am.start() not in header_write_offsets:
+                    # An earlier assignment in the same statement makes this
+                    # candidate part of its RHS. Only parentheses-external
+                    # semicolons bound a statement: for-header separators do not.
+                    statement_start = 0
+                    paren_depth = 0
+                    for offset, char in enumerate(body_noassign[:am.start()]):
+                        if char == '(':
+                            paren_depth += 1
+                        elif char == ')':
+                            paren_depth = max(0, paren_depth - 1)
+                        elif char == ';' and paren_depth == 0:
+                            statement_start = offset + 1
+                    if _procedural_assigned_lhs(body_noassign[statement_start:am.start()]):
+                        continue
+                    # The regex locates a possible write; the classifier
+                    # rejects comparison reads such as `(phase <= 5)`.
+                    if nm not in _procedural_assigned_lhs(body_noassign[:am.end()]):
+                        continue
                 proc_lhs.add(nm)
                 # report at the procedural-assignment site (where iverilog points)
                 proc_line.setdefault(nm, src[:pos + am.start()].count('\n') + 1)
