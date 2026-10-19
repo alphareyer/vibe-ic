@@ -113,7 +113,9 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
 
     def resolve(project, image, source, output, **kw):
         cfg = json.loads(source.read_text())
-        cfg.update({"SYNTH_TIEHI_CELL": "lib__tieh/Z", "SYNTH_TIELO_CELL": "lib__tiel/ZN"})
+        cfg.update({"SYNTH_TIEHI_CELL": "lib__tieh/Z", "SYNTH_TIELO_CELL": "lib__tiel/ZN",
+                    "TRISTATE_CELLS": [], "SYNTH_CHECKS_ALLOW_TRISTATE": True,
+                    "SYNTH_ELABORATE_ONLY": False, "SYNTH_TIE_UNDEFINED": "low"})
         put(output, cfg)
         return output
     monkeypatch.setattr(LC, "resolve_step_config", resolve)
@@ -150,6 +152,23 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
                     f"       {n} {n} {c}\n" for c, n in counts.items()) +
                     "   Chip area for module '\\top': 10.000000\n"
                     "     of which used for sequential elements: 4.000000\n")
+                # Model Yosys.Synthesis's two CHECK reports and run_chain's
+                # receipt-bound command/log envelope before sealing the bytes.
+                # These remain neutral transport outputs, not native EDA proof.
+                from test_step14_native_receipt_contract import _REAL_LIBRELANE_COMMAND
+                for name in ("pre_synth_chk.rpt", "chk.rpt"):
+                    (folder / "reports" / name).write_text("Found and reported 0 problems.\n")
+                put(folder / "extra.json", {})
+                (folder / "COMMANDS").write_text(
+                    _REAL_LIBRELANE_COMMAND.replace("__FOLDER__", str(folder)) + "\n")
+                (folder / "invocation.log").write_text(
+                    "Yosys SOFTWARE_FIXTURE\n"
+                    "1. Executing DFFLIBMAP pass (mapping DFF/DLATCH cells).\n"
+                    "2. Executing ABC pass (technology mapping).\n"
+                    "3. Executing SETUNDEF pass (replace undef values).\n"
+                    "4. Executing OPT_CLEAN pass (remove unused cells and wires).\n"
+                    "5. Executing HILOMAP pass (mapping to constant drivers).\n"
+                    "6. Executing INSBUF pass (insert buffer cells for connected wires).\n")
             put(folder / "state_out.json", state)
             if sid == "Yosys.Synthesis":
                 fingerprint = {"step": sid, "image": image,
@@ -424,7 +443,15 @@ def test_step9_phase2_default_publishes_exact_tool_bytes_and_step14_passes(tmp_p
     mapped = p / "phase2/stage2/synth/top_synth.v"
     assert mapped.read_bytes() == (mapped.parent / "netlist.v").read_bytes()
     assert P3.pnr_input_netlist(p, "top")[0].read_bytes() == mapped.read_bytes()
-    for gate in ("yosys_hilomap_required_check", "yosys_script_template_check"):
+    folder = p / "phase3/librelane/02-yosys-synthesis"
+    receipt = json.loads((folder / "vibeic_receipt.json").read_text())
+    assert H.critical_synthesis_checks(
+        folder, json.loads((folder / "config.json").read_text())) == {
+            "pre_synth_chk.rpt": 0, "chk.rpt": 0}
+    for report in ("reports/pre_synth_chk.rpt", "reports/chk.rpt"):
+        assert receipt["sha256"][report] == LC.digest(folder / report)
+    for gate in ("yosys_hilomap_required_check", "yosys_script_template_check",
+                 "yosys_tiecell_recipe_order_check"):
         cp = _run_clause(p, _clause("14", gate))
         assert cp.returncode == 0, cp.stdout + cp.stderr
         assert "VACUOUS" not in cp.stdout
@@ -609,7 +636,8 @@ def test_step9_failed_rerun_invalidates_previous_publication(tmp_path, monkeypat
     assert _run_clause(p, _clause('14', 'yosys_hilomap_required_check')).returncode == 1
 
 
-@pytest.mark.parametrize("damage", ["canonical", "mapped", "raw", "rtl", "receipt", "config", "stat", "header", "pretool", "bypass"])
+@pytest.mark.parametrize("damage", ["canonical", "mapped", "raw", "rtl", "receipt", "config", "stat", "header", "pretool", "bypass",
+                                    "pre_check", "final_check", "missing_pre_check", "missing_final_check"])
 def test_step9_changed_or_bypassed_tool_output_blocks_gates_and_pnr(tmp_path, monkeypatch, damage):
     p, rtl, _ = _produce(tmp_path, monkeypatch)
     folder = p / "phase3/librelane/02-yosys-synthesis"
@@ -617,10 +645,14 @@ def test_step9_changed_or_bypassed_tool_output_blocks_gates_and_pnr(tmp_path, mo
              "mapped": p / "phase2/stage2/synth/top_synth.v", "raw": folder / "top.nl.v",
              "rtl": rtl, "receipt": folder / "vibeic_receipt.json",
              "config": folder / "config.json", "stat": folder / "reports/stat.json",
-             "header": p / 'phase3/librelane/01-yosys-jsonheader/top.h.json'}
+             "header": p / 'phase3/librelane/01-yosys-jsonheader/top.h.json',
+             "pre_check": folder / "reports/pre_synth_chk.rpt",
+             "final_check": folder / "reports/chk.rpt"}
     if damage in files:
         with files[damage].open('a') as f:
             f.write("\n ")  # valid bytes, different identity (timestamps are irrelevant)
+    elif damage in ("missing_pre_check", "missing_final_check"):
+        files[damage.removeprefix("missing_")].unlink()
     elif damage == "pretool":
         (p / "phase2/stage2/synth/netlist.v").write_text("module old; endmodule\n")
     else:
@@ -638,6 +670,25 @@ def test_step9_changed_or_bypassed_tool_output_blocks_gates_and_pnr(tmp_path, mo
     row = P3.step_pnr(p, "top", None, "unused", "1000x1000", 0.5)
     assert row.status == "FAIL" and "LL_SYNTH_HANDOFF_INVALID" in row.detail
     assert D.step_lec_equivalence(p, "top", "unused")[-1].status == "FAIL"
+
+
+@pytest.mark.parametrize("damaged", ["COMMANDS", "invocation.log"])
+def test_step14_recipe_consumer_rejects_changed_native_envelope(tmp_path, monkeypatch, damaged):
+    p, _, _ = _produce(tmp_path, monkeypatch)
+    source = p / "phase3/librelane/02-yosys-synthesis" / damaged
+    source.write_text(source.read_text() + "\n ")
+    # The two product checks stay current. The separately declared advisory
+    # recipe-order check must disclose NOT_CHECKED for the stale witness.
+    for gate in ("yosys_hilomap_required_check", "yosys_script_template_check"):
+        cp = _run_clause(p, _clause("14", gate))
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+    cp = _run_clause(p, _clause("14", "yosys_tiecell_recipe_order_check"))
+    assert cp.returncode == 2, cp.stdout + cp.stderr
+    report = json.loads((p / "reports/phase2/gates/yosys_tiecell_recipe_order_verdict.json").read_text())
+    assert report["verdict"] == "NOT_CHECKED"
+    assert any(f"digest mismatch: {damaged}" in row.get("reason", "")
+               for row in report["findings"])
+    assert H.bound_handoff(p)["verdict"] == "PASS"
 
 
 def test_step9_consumers_refuse_changed_canonical_bytes(tmp_path, monkeypatch):
