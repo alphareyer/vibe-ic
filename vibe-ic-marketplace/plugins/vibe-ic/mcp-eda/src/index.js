@@ -49,6 +49,7 @@ import { z } from "zod";
 import { execSync } from "child_process";
 import { registerDevices } from "./devices/_registry.js";
 import { parseYosysSynthStats } from "./lib/yosys_synth_stats.mjs";
+import { cocotbJunitScript, cocotbJunitResult } from "./lib/cocotb_results.mjs";
 // Shell-safety validators (command-injection hardening). The argv-based
 // _spawnSync used by dockerExec + host handlers is the existing legacy
 // import declared further down (`spawnSync as _spawnSyncEarly`).
@@ -5449,6 +5450,9 @@ server.tool(
     const simMap = { verilator: "verilator", icarus: "icarus" };
     const sim = simMap[simulator];
     const verilogSources = verilog_files.join(" ");
+    // A native destination unique to this invocation cannot read an earlier
+    // results.xml. Keep all prior native result files intact.
+    const resultsFile = `results.${randomUUID()}.xml`;
 
     const makefileContent = `
 SIM ?= ${sim}
@@ -5474,39 +5478,38 @@ cd ${work_dir} && \\
 export PYTHONPATH="$(pwd):$PYTHONPATH" && \\
 export PATH=${TOOLS}/verilator/bin:${TOOLS}/iverilog/bin:${TOOLS}/bin:$PATH && \\
 export LD_LIBRARY_PATH=${TOOLS}/iverilog/lib:$LD_LIBRARY_PATH && \\
-make -j${_edaThreadsToken()} SIM=${sim} 2>&1
+make -j${_edaThreadsToken()} SIM=${sim} COCOTB_RESULTS_FILE=${resultsFile} 2>&1
+_vic_cocotb_rc=$?
+${cocotbJunitScript(resultsFile)}
+exit "$_vic_cocotb_rc"
 `;
 
     const result = dockerExec(script, 300000);
 
-    const passMatch = result.output.match(/(\d+)\s+passed/i);
-    const failMatch = result.output.match(/(\d+)\s+failed/i);
-    const totalMatch = result.output.match(/(\d+)\s+tests?\s+(?:ran|total)/i);
-    const passed = passMatch ? parseInt(passMatch[1]) : 0;
-    const failed = failMatch ? parseInt(failMatch[1]) : 0;
-    const total = totalMatch ? parseInt(totalMatch[1]) : passed + failed;
+    const measured = cocotbJunitResult(result, resultsFile);
+    const { success, tests_passed: passed, tests_failed: failed, tests_total: total } = measured;
 
-    const success = result.success && failed === 0 && passed > 0;
-
-    if (success) {
-      writeManifest(work_dir, {
+    // Publish this attempt even when it did not pass, so a previous PASS in
+    // the same working directory is not left as the latest result.
+    writeManifest(work_dir, {
         step: "cocotb",
-        status: "PASS",
+        status: measured.status,
         tool: `cocotb/${simulator}`,
         tests_passed: passed,
         tests_failed: failed,
         tests_total: total,
+        tests_errors: measured.tests_errors,
+        tests_skipped: measured.tests_skipped,
+        results_xml: `${work_dir}/${resultsFile}`,
+        native_exit_code: measured.native_exit_code,
       });
-    }
 
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
-          success,
-          tests_passed: passed,
-          tests_failed: failed,
-          tests_total: total,
+          ...measured,
+          results_xml: `${work_dir}/${resultsFile}`,
           simulator,
           output: result.output.slice(-3000),
         }),
