@@ -1021,8 +1021,9 @@ def test_issue3241_direct_dut_read_remains_observed(tmp_path):
     assert audit.get('adopted_helper_sources', []) == [], audit
 
 
-def test_issue3241_adopted_helper_bytes_are_source_identity(tmp_path):
+def test_issue3241_adopted_helper_bytes_are_source_identity(tmp_path, monkeypatch):
     import hashlib
+    import _sim_results_bridge as bridge
     _project, bundle, tb = _issue3241_project(tmp_path)
     before = V.functional_stimulus_audit(tb)
     helper = bundle / 'wire_bfm.py'
@@ -1031,7 +1032,28 @@ def test_issue3241_adopted_helper_bytes_are_source_identity(tmp_path):
         str(helper): hashlib.sha256(helper.read_bytes()).hexdigest(),
     }
     assert before['python_source_sha256'] == expected
+    attempt = tmp_path / 'attempt'
+    attempt.mkdir()
+    dat = attempt / 'coverage.dat'
+    dat.write_text('tool coverage bytes')
+    junit = attempt / 'coverage_results.xml'
+    junit.write_text(
+        '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase name="port_result"/></testsuite>')
+    summary = bridge.parse_junit(junit)
+    (attempt / 'coverage_cocotb_execution.json').write_text(json.dumps({
+        'testbench': str(tb),
+        'testbench_sha256': expected[str(tb)],
+        'python_source_sha256': expected,
+        'test_denominator': summary,
+        'observed_functional_input_toggles': {'data_i': 1},
+    }))
+    monkeypatch.setattr(
+        V, '_professional_input_activity',
+        lambda _dat, _top, _inputs: {'data_i': 1})
+    assert V._check_professional_execution(tb, dat) is None
     helper.write_text(_ISSUE3241_WIRE_BFM + '\n# identity change\n')
     after = V.functional_stimulus_audit(tb)
     assert after['python_source_sha256'][str(tb)] == expected[str(tb)]
     assert after['python_source_sha256'][str(helper)] != expected[str(helper)]
+    assert 'source/JUnit is missing, changed' in V._check_professional_execution(tb, dat)
