@@ -1298,7 +1298,10 @@ def _cofactor_payload_support(model: dict, rows: List[dict], work_dir: Path,
             payloads[row["q"]] = shared
             info["rows"].append({"q": row["q"], "status": "NATIVE_NORMALIZED_COFACTOR_SUPPORT",
                 "cofactor0_bits": sorted(pair[0]), "cofactor1_bits": sorted(pair[1]),
-                "shared_payload_bits": sorted(shared)})
+                "shared_payload_bits": sorted(shared),
+                "total_force_arms": [arm for arm in (0, 1) if any(
+                    mod["ports"][row["query_ports"][f"{role}_guard{arm}"]]["bits"] == ["1"]
+                    for role in ("force_zero", "force_one"))]})
         info["status"] = "NATIVE_NORMALIZED_COFACTOR_SUPPORT"
     except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
         info["reason"] = str(exc)
@@ -1481,6 +1484,7 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                                     identities[-1]["reset_independence_certificate"] = cert
                                     row["reset_independence_certificate"] = cert
                                     if (cert.get("complete_raw_fanin") and cert.get("reset_reachable") and
+                                            row["payload_support"].get("total_force_arms") and
                                             row["unsupported"] == "literal-X/undef retained from raw next-state transition"):
                                         row["raw_undef_native_candidate"] = True
                     if len(mapped) != 1:
