@@ -1110,9 +1110,8 @@ def _rtl_files(project: Path, top: str) -> List[str]:
     if rtl_dir.is_dir():
         for f in sorted(rtl_dir.rglob("*")):
             if f.suffix.lower() in (".v", ".sv"):
-                out.append(f)
-    from testbench_gen import package_first_order
-    return [str(path) for path in package_first_order(out)]
+                out.append(str(f))
+    return out
 
 
 def generate(project: Path, out_dir: Optional[Path] = None) -> dict:
@@ -1169,7 +1168,9 @@ def generate(project: Path, out_dir: Optional[Path] = None) -> dict:
     rtl = _rtl_files(project, top)
     # Make runs inside the emitted bundle, potentially under a different
     # project mount. Keep source references relative to that consumer cwd.
-    mk = emit_makefile(shape, [os.path.relpath(path, out) for path in rtl])
+    from testbench_gen import package_first_order
+    ordered_rtl = package_first_order([Path(path) for path in rtl])
+    mk = emit_makefile(shape, [os.path.relpath(path, out) for path in ordered_rtl])
     vplan = {
         "top": top, "ic_class": ic_class, "dut_kind": run_kind,
         "reference_model_tier": ref_tier,

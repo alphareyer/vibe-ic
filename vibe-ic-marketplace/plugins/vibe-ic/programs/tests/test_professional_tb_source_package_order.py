@@ -108,3 +108,47 @@ def test_a_package_cycle_keeps_all_sources_and_does_not_fake_compile_pass(tmp_pa
     names, native = generate_and_compile(project(tmp_path, sources))
     assert len(names) == 3 and set(names) == set(sources)
     assert native.returncode != 0, 'unresolved cycle cannot be certified by a file-list sort'
+
+
+def test_package_compile_order_does_not_replace_the_top_parameter_width(tmp_path):
+    """Review R1 neutral unit: package AUX_WIDTH is not the top size default."""
+    root = tmp_path / 'width-project'
+    gd = root / 'phase1/generated_docs'
+    gd.mkdir(parents=True)
+    l9 = {'fields': {'top_module': 'spm', 'top_ports': [{'name': 'clk', 'dir': 'input', 'width': 1}, {'name': 'rst', 'dir': 'input', 'width': 1}, {'name': 'x', 'dir': 'input', 'width': 'size'}, {'name': 'y', 'dir': 'input', 'width': 1}, {'name': 'p', 'dir': 'output', 'width': 1}], 'clocks': [{'name': 'clk', 'period_ns': 10}], 'reset_domains': [{'name': 'rst', 'polarity': 'active_high', 'sync': 'sync'}]}}
+    (gd / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps(l9))
+    (gd / 'L2_FRS.json').write_text(json.dumps({'frs_sections': [
+        {'title': 'Function', 'content': 'serial-parallel multiplier p = (x * y) mod 2^N'}]}))
+    rtl = root / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    sources = {'a_spm.sv': 'import z_defs::*;\nmodule spm #(parameter size = 32)(input logic clk, rst, input logic [size-1:0] x, input logic y, output logic p);\nendmodule\n', 'z_defs.sv': 'package z_defs;\n  parameter AUX_WIDTH = 4;\nendpackage\n'}
+    for name, text in sources.items():
+        (rtl / name).write_text(text)
+    emitted = subprocess.run([sys.executable, str(PROGRAMS / 'professional_tb_gen.py'),
+                              str(root)], capture_output=True, text=True, check=False)
+    (root / 'producer.stdout').write_text(emitted.stdout)
+    (root / 'producer.stderr').write_text(emitted.stderr)
+    assert emitted.returncode == 0, emitted.stdout + emitted.stderr
+    result = json.loads(emitted.stdout)
+    assert result['status'] == 'PASS' and result['dut_kind'] == 'serial_stream', result
+    out = Path(result['out_dir'])
+    makefile = out / 'Makefile'
+    before = makefile.read_bytes()
+    line = next(line for line in before.decode().replace('\\\n', ' ').splitlines()
+                if line.startswith('VERILOG_SOURCES = '))
+    refs = line.split('=', 1)[1].split()
+    argv = ['iverilog', '-g2012', '-s', 'spm', '-o', 'compiled.vvp', *refs]
+    native = subprocess.run(argv, cwd=out, capture_output=True, text=True, check=False)
+    tb = (out / 'tb_spm.py').read_text()
+    n_line = next(line for line in tb.splitlines() if line.startswith('N = '))
+    (root / 'native.json').write_text(json.dumps({'argv': argv, 'cwd': str(out),
+        'returncode': native.returncode, 'stderr': native.stderr,
+        'makefile_sha256': hashlib.sha256(before).hexdigest(), 'N_line': n_line,
+        'refs': refs}, indent=2) + '\n')
+    print('PARAMETRIC_WIDTH_OBSERVATION ' + json.dumps({'refs': refs,
+        'compile_rc': native.returncode, 'N_line': n_line}, sort_keys=True))
+    assert native.returncode == 0, native.stdout + native.stderr
+    assert n_line == 'N = 32', n_line
+    assert [Path(ref).name for ref in refs] == ['z_defs.sv', 'a_spm.sv']
+    assert len(refs) == len(sources) and all(not Path(ref).is_absolute() for ref in refs)
+    assert makefile.read_bytes() == before
