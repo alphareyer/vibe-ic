@@ -4,6 +4,10 @@ FROZEN_OFFICIAL_RESPONSE_SEAM: the positive installation response is assembled
 from the exact local candidate's real Git objects. The candidate may be unpublished;
 this fixture does not claim that its version tag resolves to it on GitHub. Shipping
 must additionally exercise the actual official release after publication.
+
+The GitHub response contract follows the observed official v1.29.90 HTTP result:
+GET git/trees/<commit> reports that requested commit in response.sha, not its tree.
+Resolve GET git/commits/<commit>.tree.sha before GET git/trees/<actual-tree>.
 """
 from contextlib import contextmanager
 import copy
@@ -75,28 +79,42 @@ def isolated_cache(tmp_path, monkeypatch):
     return cache
 
 
-@pytest.fixture
-def prepared(frozen_package, isolated_cache, monkeypatch):
-    import execution_source_identity as source
-    calls = []
+def _official_fixture(source, frozen_package, calls, *, tree_response_sha=None):
+    """Use the real HTTP shapes, including the legacy commit-as-tree request."""
     tag_url = source.API + '/git/ref/tags/v' + frozen_package['version']
-    tree_url = source.API + '/git/trees/' + frozen_package['revision'] + '?recursive=1'
+    commit_url = source.API + '/git/commits/' + frozen_package['revision']
+    tree_url = source.API + '/git/trees/' + frozen_package['tree'] + '?recursive=1'
+    legacy_tree_url = source.API + '/git/trees/' + frozen_package['revision'] + '?recursive=1'
 
     def frozen_official_response(url):
         calls.append(url)
         if url == tag_url:
             return {'object': {'type': 'commit', 'sha': frozen_package['revision']}}
-        assert url == tree_url, url
-        return dict(sha=frozen_package['tree'], truncated=False,
-                    tree=copy.deepcopy(frozen_package['rows']))
+        if url == commit_url:
+            return {'sha': frozen_package['revision'], 'tree': {'sha': frozen_package['tree']}}
+        assert url in (tree_url, legacy_tree_url), url
+        # The legacy shape must expose the published v90 defect rather than
+        # silently replacing its response.sha with the desired true tree.
+        sha = ((tree_response_sha or frozen_package['tree'])
+               if url == tree_url else frozen_package['revision'])
+        return dict(sha=sha, truncated=False, tree=copy.deepcopy(frozen_package['rows']))
 
-    monkeypatch.setattr(source, '_official_json', frozen_official_response)
+    return frozen_official_response, [tag_url, commit_url, tree_url]
+
+
+@pytest.fixture
+def prepared(frozen_package, isolated_cache, monkeypatch):
+    import execution_source_identity as source
+    calls = []
+    response, expected_calls = _official_fixture(source, frozen_package, calls)
+
+    monkeypatch.setattr(source, '_official_json', response)
     record = source.prepare_installed(frozen_package['package'])
-    assert calls == [tag_url, tree_url]
+    frozen_package['transport_calls'] = calls
+    frozen_package['expected_transport_calls'] = expected_calls
     identity = source.current(frozen_package['package'])
     assert identity.kind == 'installed'
     assert identity.revision == frozen_package['revision']
-    assert identity.tree == frozen_package['tree']
     print('FROZEN_OFFICIAL_RESPONSE_SEAM ' + json.dumps({
         'revision': identity.revision, 'version': frozen_package['version'],
         'not_a_live_official_release_claim': True, 'transport_calls': calls}))
@@ -190,7 +208,7 @@ print('INSTALLED_ULTRA_REGISTRY_READY_NO_PRODUCER')
     return result
 
 
-def test_official_installed_package_issues_actual_ultra_route(prepared, tmp_path):
+def test_official_installed_package_issues_actual_ultra_route(prepared, frozen_package, tmp_path):
     source, package, record, identity = prepared
     result = _canonical_issue(package, tmp_path / 'legitimate', bootstrap=True)
     assert result['returncode'] == 0, result
@@ -198,10 +216,26 @@ def test_official_installed_package_issues_actual_ultra_route(prepared, tmp_path
     assert payload['request']['mode'] == 'ultra'
     assert payload['request']['intent_label'] == 'USER_EXPLICIT_ULTRA'
     assert payload['route']['source_sha'] == identity.revision
-    assert payload['route']['source_tree'] == identity.tree
+    # Check the actual CLI result against the real Git object, independently
+    # of whatever tree the source manifest happened to record.
+    assert payload['route']['source_tree'] == frozen_package['tree']
+    assert identity.tree == frozen_package['tree']
+    assert frozen_package['transport_calls'] == frozen_package['expected_transport_calls']
     assert payload['source_blobs']
     assert payload['issuer_blob'] == record['files']['programs/execution_authority.py']['blob']
     assert source.current(package).revision == identity.revision
+
+
+def test_official_tree_response_must_match_commit_tree(frozen_package, isolated_cache, monkeypatch):
+    import execution_source_identity as source
+    calls = []
+    response, expected_calls = _official_fixture(source, frozen_package, calls,
+                                                tree_response_sha='0' * 40)
+    monkeypatch.setattr(source, '_official_json', response)
+    with pytest.raises(RuntimeError, match='SOURCE_AUTHORITY_UNAVAILABLE: incomplete official tree'):
+        source.prepare_installed(frozen_package['package'])
+    assert calls == expected_calls
+    assert not source.receipt_path(frozen_package['package']).exists()
 
 
 def test_changed_installed_producer_is_refused(prepared, tmp_path):
