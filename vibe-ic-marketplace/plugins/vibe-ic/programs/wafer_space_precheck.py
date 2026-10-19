@@ -38,7 +38,7 @@ def read_signoff_evidence(project, release_record):
     This is a read-only consumer, not a new PV run or an LVS substitute.
     """
     from die_finishing_gen import read_admitted_release
-    from gds_canonical_digest import canonical_digest
+    from gds_canonical_digest import canonical_digest, semantic_layout_equivalence
 
     release = read_admitted_release(Path(project), Path(release_record))
     record = json.loads(release["report"].read_text())
@@ -69,20 +69,16 @@ def read_signoff_evidence(project, release_record):
                            "equivalent": source["canonical_digest"] == final["canonical_digest"]}
             if not views[path]["equivalent"]:
                 try:
-                    import pya
-                    before, after = pya.Layout(), pya.Layout()
-                    before.read(path)
-                    after.read(str(release["gds"]))
-                    flags = pya.LayoutDiff.Silent
-                    equal = pya.LayoutDiff().compare(before, after, flags, 0)
-                    views[path].update(
-                        method="KLayout.LayoutDiff.compare(Layout, Layout, Silent), tolerance=0",
-                        flags=int(flags), tool_version=pya.__version__,
-                        equivalent=bool(equal))
-                    for item, layout in ((source, before), (final, after)):
-                        item.update(layout_dbu=layout.dbu,
-                                    top_cells=sorted(c.name for c in layout.top_cells()),
-                                    cells=layout.cells())
+                    compared = semantic_layout_equivalence(Path(path), release["gds"])
+                    if (compared["source"]["sha256"] != source["sha256"]
+                            or compared["target"]["sha256"] != final["sha256"]):
+                        raise ValueError("the compared layout differs from the bound input or output")
+                    views[path].update({key: compared[key] for key in
+                                        ("method", "flags", "tolerance", "tool_version", "equivalent")})
+                    for item, identity in ((source, compared["source"]),
+                                           (final, compared["target"])):
+                        item.update(layout_dbu=identity["dbu"],
+                                    top_cells=identity["top_cells"], cells=identity["cells"])
                 except (ImportError, RuntimeError) as exc:
                     raise ValueError(f"strict layout comparison unavailable: {exc}") from exc
         return views[path]

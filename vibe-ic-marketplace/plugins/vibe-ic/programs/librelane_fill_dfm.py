@@ -500,6 +500,24 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
     fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
     if not fill_cfg or not fill_cfg.get('layers'):
         raise Refusal('LL_DENSITY_FILL_NO_DERIVED_LAYERS', str(density_config))
+    from die_finishing_gen import PROVIDER_TARGET_REL, provider_target
+    profile = provider_target(project)
+    if profile is not None and profile.get('provider') == 'wafer.space':
+        # The selected operator's ReadLayout maps these dummy datatypes to
+        # active metal/poly. Emit that same encoding before final sign-off,
+        # preserving all PDK spacing, width, density and keepout parameters.
+        mapped = {(30, 0), (34, 0), (36, 0), (42, 0), (46, 0), (81, 0)}
+        changes = []
+        for row in fill_cfg['layers']:
+            if tuple(row['layer']) in mapped and row.get('fill_datatype') == 4:
+                row['fill_datatype'] = 0
+                changes.append({'layer': row['layer'][0], 'from': 4, 'to': 0})
+        if changes:
+            target = project / PROVIDER_TARGET_REL
+            fill_cfg['_derivation']['provider_fill_encoding'] = {
+                'source': str(target), 'sha256': digest(target),
+                'basis': 'selected wafer.space ReadLayout dummy-to-active layer map',
+                'changes': changes}
     root = project / 'phase3/librelane' / lane
     placed = _placed_keepout_boxes(project, image, pdk_root, pdk, cfg, root)
     try:

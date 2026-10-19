@@ -308,3 +308,49 @@ def test_provider_pv_reader_uses_strict_native_semantic_comparison(tmp_path, cas
     for row in result["rows"].values():
         if "KLayout.LayoutDiff" in row["equivalence"]["method"]:
             assert row["equivalence"]["flags"] == int(pya.LayoutDiff.Silent)
+
+
+@pytest.mark.parametrize("provider", [None, "wafer.space", "other.provider"])
+def test_normal_density_materializes_selected_provider_encoding(tmp_path, monkeypatch, provider):
+    import copy
+    import librelane_fill_dfm as fill
+
+    if provider is not None:
+        target = profile(tmp_path)
+        value = json.loads(target.read_text())
+        value["provider"] = provider
+        target.write_text(json.dumps(value))
+    original = {"boundary_layer": [235, 0], "window_um": None, "max_passes": 8,
+                "mfg_grid_um": 0.005, "keepout_edge_um": 1.0,
+                "_derivation": {"density_floor_pct": 30}, "layers": [
+                    {"name": "metal1", "layer": [34, 0], "target": 0.34,
+                     "max": 0.95, "space": 0.98, "space_to_metal": 2.0,
+                     "width": 1.4, "fill_datatype": 4}]}
+    monkeypatch.setattr(fill, "_density_source", lambda *a: ({}, "map", "lef", "deck"))
+    monkeypatch.setattr(fill, "build_metal_fill_config", lambda *a: copy.deepcopy(original))
+    routed = tmp_path / "routed.def"
+    routed.write_text("neutral placed-instance source control\n")
+    monkeypatch.setattr(fill, "_placed_keepout_boxes", lambda *a: {
+        "dbu": 1000, "total": 0, "boxes": [], "source": str(routed)})
+
+    class ReachedNative(Exception):
+        pass
+
+    observed = []
+    def native_leaf(command, log):
+        config_path = Path(command[command.index("--config") + 1])
+        observed.append(json.loads(config_path.read_text()))
+        raise ReachedNative("configuration reached the existing native filler")
+    monkeypatch.setattr(fill, "_run_logged", native_leaf)
+    with pytest.raises(ReachedNative):
+        fill.top_up_density(tmp_path, "neutral-image", tmp_path, "open-pdk",
+                            tmp_path / "source.gds", tmp_path / "density.json", "normal-fill")
+    config, = observed
+    expected = copy.deepcopy(original["layers"][0])
+    expected["fill_datatype"] = 0 if provider == "wafer.space" else 4
+    assert config["layers"] == [expected]
+    assert config["keepout_edge_um"] == original["keepout_edge_um"]
+    assert config["window_um"] == original["window_um"]
+    assert config["mfg_grid_um"] == original["mfg_grid_um"]
+    assert config["_derivation"]["density_floor_pct"] == original["_derivation"]["density_floor_pct"]
+    assert bool(config["_derivation"].get("provider_fill_encoding")) == (provider == "wafer.space")

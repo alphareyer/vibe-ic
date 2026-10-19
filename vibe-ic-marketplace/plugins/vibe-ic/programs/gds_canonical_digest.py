@@ -135,6 +135,37 @@ def canonical_digest(path: Path) -> str:
     return hashlib.sha256(canonical_bytes(path)).hexdigest()
 
 
+def semantic_layout_equivalence(left: Path, right: Path) -> dict:
+    """Compare full native layout semantics, including text and properties.
+
+    This does not change the timestamp-only record digest above. No comparison
+    relaxation flags are enabled; an unavailable tool or unreadable layout raises.
+    """
+    import pya
+
+    left, right = Path(left).resolve(), Path(right).resolve()
+    before, after = pya.Layout(), pya.Layout()
+    before.read(str(left))
+    after.read(str(right))
+    flags = pya.LayoutDiff.Silent
+    equal = pya.LayoutDiff().compare(before, after, flags, 0)
+
+    def identity(path, layout):
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {"path": str(path), "sha256": digest.hexdigest(),
+                "bytes": path.stat().st_size, "dbu": layout.dbu,
+                "top_cells": sorted(cell.name for cell in layout.top_cells()),
+                "cells": layout.cells()}
+
+    return {"equivalent": bool(equal),
+            "method": "KLayout.LayoutDiff.compare(Layout, Layout, Silent)",
+            "flags": int(flags), "tolerance": 0, "tool_version": pya.__version__,
+            "source": identity(left, before), "target": identity(right, after)}
+
+
 def main(argv: List[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="sha256 of a GDSII stream with its write times zeroed")
