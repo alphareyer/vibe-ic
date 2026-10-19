@@ -83,4 +83,4 @@ def test_normal_conformance_entry_reports_unresolved_without_dut_failure(tmp_pat
     assert len(findings) == 1
     assert findings[0]["severity"] == "INFO"
     assert findings[0]["rule"] == "unresolved-structured-interface"
-    assert "UNRESOLVED_STRUCTURED_INTERFACE: bus" in findings[0]["message"]
+    assert findings[0]["message"].startswith("NOT_MEASURED: UNRESOLVED_STRUCTURED_INTERFACE: bus")

@@ -2774,7 +2774,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # A logical bundle has not yet declared physical payload ports. This
         # is an incomplete spec contract, not a measured DUT mismatch.
         finding = Finding(str(spec_path), 'INFO', 'unresolved-structured-interface',
-                          '', str(exc))
+                          '', 'NOT_MEASURED: ' + str(exc))
         print('spec_conformance_check: NOT_MEASURED — ' + str(exc), file=sys.stderr)
         if args.json:
             Path(args.json).write_text(json.dumps([asdict(finding)], indent=2))
