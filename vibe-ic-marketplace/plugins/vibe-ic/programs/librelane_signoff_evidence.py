@@ -499,7 +499,8 @@ def obligation(project: Path, kind: str, layout: Path | None = None, *, mixed_to
                 _require(scope.get('magic_ext_use_gds') is True
                          and scope.get('extracted_gds_sha256') == digest(chosen),
                          'LL_LVS_EXTRACTION_SCOPE_UNBOUND')
-            required = dict(COUNTS[kind])
+            required = {producer: keys for producer, keys in COUNTS[kind].items()
+                        if producer in pv.HALVES[kind]}
             # Additional declared count producers are obligations too. Never
             # take a record's omission as permission to drop a built-in engine.
             if kind in ('drc', 'lvs'):

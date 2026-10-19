@@ -530,3 +530,107 @@ def test_archive_requested_lvs_subject_uses_verified_semantics(tmp_path,monkeypa
         assert manifest['validation']['lvs']['requested_subject']['sha256']==digest(final)
     assert before=={path:digest(Path(path)) for path in before}
     print('VERIFIED_REQUESTED_SUBJECT',json.dumps({'case':case,'lvs':actual,'normal_gate':command,'rc':rc}))
+
+
+@pytest.mark.parametrize('case,expected',[
+    ('full_gds','PASS'),('def_only','NOT_MEASURED'),
+    ('missing_spice','NOT_MEASURED'),('measured_fail','FAIL')])
+def test_selected_ll_full_gds_lvs_uses_its_real_owner_and_portable_materials(tmp_path,monkeypatch,case,expected):
+    """Real run_chain/judge/consumer; only the external process is neutral."""
+    import librelane_contract as contract
+    import librelane_pv_signoff as pv
+    import librelane_signoff_evidence as evidence
+    from _native_signoff_fixture import producer,put
+    project,source=neutral(tmp_path/'pack',monkeypatch)
+    layout=project/'phase3/stage4/gds/alpha.gds'
+    ll=tmp_path/'selected-ll';ll.mkdir()
+    ll_gds=ll/'phase3/stage4/gds/alpha.gds';ll_gds.parent.mkdir(parents=True)
+    ll_gds.write_bytes(layout.read_bytes())
+    real_chain=contract.run_chain
+    materials={}
+    def chain(*args,**kwargs):
+        # The fixture's external edge is installed immediately before this
+        # real run_chain call. Generate files BEFORE normal receipt hashing.
+        edge=contract.run_container
+        for step,config,_state in args[2]:
+            doc=json.loads(config.read_text())
+            if case=='def_only':doc['MAGIC_EXT_USE_GDS']=False
+            model=ll/'native-inputs/cells.spice';model.parent.mkdir(exist_ok=True)
+            model.write_text('.SUBCKT unit a b\nR1 a b 1000\n.ENDS unit\n')
+            setup=ll/'native-inputs/setup.tcl';setup.write_text('# neutral native setup\n')
+            doc.update(SPICE_MODELS=[str(model)],NETGEN_SETUP_FILE=str(setup))
+            put(config,doc);materials.update(model=model,setup=setup)
+        def process(command,**kw):
+            result=edge(command,**kw)
+            folder=Path(command[command.index('-o')+1])
+            step=command[command.index('--id')+1]
+            if step=='Magic.SpiceExtraction' and case!='missing_spice':
+                spice=folder/'alpha.spice'
+                spice.write_text('.include "../../../../native-inputs/cells.spice"\n'
+                                 '.SUBCKT alpha a b\nX1 a b unit\n.ENDS alpha\n')
+                state=json.loads((folder/'state_out.json').read_text());state['spice']=str(spice)
+                put(folder/'state_out.json',state);materials['spice']=spice
+            if step=='Netgen.LVS':
+                report=folder/'reports/lvs.netgen.rpt';report.parent.mkdir(exist_ok=True)
+                report.write_text('neutral compare process transcript\n')
+            return result
+        monkeypatch.setattr(contract,'run_container',process)
+        return real_chain(*args,**kwargs)
+    monkeypatch.setattr(contract,'run_chain',chain)
+    info=producer(ll,monkeypatch,'lvs',gds_path=ll_gds,
+                  counts={'design__lvs_error__count':2} if case=='measured_fail' else {})
+    # No copied PASS record: real Python producer created the owner judgment.
+    # An explicit provider publisher file-ref selects that existing LL owner.
+    record=project/'reports/phase3/provider_die_assembly.json';record.write_text('{}\n')
+    assembly={'gds':layout,'sha256':digest(layout),'report':record,'source_project':project,
+              'basis':{'current_signoff':{'lvs':_file_ref(info['record'])}},'scope':'provider_die_assembly'}
+    measured=_REAL_RELEASE_SOURCES(project,layout,assembly)
+    observed=measured['validation']['lvs']
+    assert observed['verdict']==expected,{'observed':observed,'expected':expected}
+    if case=='full_gds':
+        assert set(observed['rows'])=={'magic__illegal_overlap__count',*pv.PRODUCED['Netgen.LVS']}
+        assert any('physical_reference_netlist' in e['roles'] for e in measured['files'].values())
+        assert all(str(materials[k]) in measured['files'] for k in ('model','setup','spice'))
+        # Current record selection must not accept wrong bytes or an arbitrary
+        # same-hash sibling. No legacy report or alternate owner is guessed.
+        for damage in ('hash','path'):
+            bad=copy.deepcopy(assembly)
+            if damage=='hash':bad['basis']['current_signoff']['lvs']['sha256']='0'*64
+            else:
+                sibling=ll/'reports/phase3/other.json';sibling.write_bytes(info['record'].read_bytes())
+                bad['basis']['current_signoff']['lvs']=_file_ref(sibling)
+            assert _REAL_RELEASE_SOURCES(project,layout,bad)['validation']['lvs']['verdict']=='NOT_MEASURED'
+        import phase3_one_shot_runner as runner
+        pv.publish_report(info['folders'][-1],'reports/lvs.netgen.rpt',ll/'reports/phase3/lvs.rpt')
+        runner._write_lvs_verdict(ll,'PASS','LVS_MATCH_LIBRELANE_NETGEN','neutral protocol compare',
+            {'generated_by':'librelane_pv_signoff.run_half (mig105)','librelane_pv':str(info['record'])})
+        assert _REAL_RELEASE_SOURCES(ll,ll_gds)['validation']['lvs']['verdict']=='PASS'
+        # Without an explicit selection, a corrupt canonical native report
+        # must not fall back to otherwise valid LL receipts.
+        canonical=ll/'reports/phase3/lvs_verdict.json';canonical.write_text('{ corrupt current native record')
+        assert _REAL_RELEASE_SOURCES(ll,ll_gds)['validation']['lvs']['verdict']=='NOT_MEASURED'
+        canonical.unlink()
+        before=info['record'].read_bytes();declared=json.loads(before)
+        for engine in ('KLayout.LVS','Unknown.Measurement'):
+            declared['required_steps']=[*pv.HALVES['lvs'],engine];put(info['record'],declared)
+            assert evidence.obligation(ll,'lvs',ll_gds)['verdict']=='NOT_MEASURED'
+        info['record'].write_bytes(before)
+    source['validation']['lvs']=observed;source['files'].update(measured['files'])
+    monkeypatch.setattr(check,'design_release_sources',lambda *a,**kw:copy.deepcopy(source))
+    assert gen.main([str(project)])==0
+    rc,gate,command=_in_process_canonical_gate(project,monkeypatch)
+    assert (rc,gate['verdict'])==((0,'PASS') if expected=='PASS' else (1,'FAIL')),gate
+    if case=='full_gds':
+        import pya
+        package=project/'phase3/stage4/foundry_handoff'
+        manifest=json.loads((package/'release_manifest.json').read_text())
+        archived=next(e['path'] for e in manifest['files'] if e['source']==str(materials['spice']))
+        project.rename(tmp_path/'held-project');ll.rename(tmp_path/'held-ll')
+        relocated=tmp_path/'relocated';shutil.move(str(tmp_path/'held-project/phase3/stage4/foundry_handoff'),relocated)
+        parsed=pya.Netlist();parsed.read(str(relocated/archived),pya.NetlistSpiceReader())
+        assert parsed.circuit_by_name('unit') is not None
+        _manifest,bad=check.check_design_release(relocated);assert not bad,bad
+    observation={'case':case,'expected':expected,'lvs':observed,'normal_gate':command,'rc':rc,
+                 'source_only':'neutral process edge; actual run_chain receipts/judge/obligation/archive/parser'}
+    (tmp_path/'LL_RELEASE_OBSERVATION.json').write_text(json.dumps(observation,indent=2)+'\n')
+    print('LL_RELEASE_VALUES',json.dumps(observation))

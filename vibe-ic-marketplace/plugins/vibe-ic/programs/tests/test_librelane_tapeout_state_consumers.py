@@ -110,7 +110,7 @@ def test_measured_failure_dominates_missing_engine(tmp_path, monkeypatch, obliga
 
 
 def test_standalone_old_producer_cannot_drop_second_lvs_engine(tmp_path, monkeypatch):
-    producer(tmp_path, monkeypatch, 'lvs')
+    producer(tmp_path, monkeypatch, 'lvs', missing=('Netgen.LVS',))
     assert ladder.check_tier_lvs_tapeout(tmp_path).verdict == 'NOT_RUN'
 
 

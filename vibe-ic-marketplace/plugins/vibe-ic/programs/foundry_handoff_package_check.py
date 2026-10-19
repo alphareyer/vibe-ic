@@ -1006,10 +1006,14 @@ def design_release_sources(project, layout, assembly=None):
             # pdk_runset/... relative references without rewriting its bytes.
             entry['native_bundle'] = {'sha256':bundle[1],
                                       'relative':path.relative_to(bundle[0]).as_posix()}
-    def retained(folder, role):
+    def retained(folder, role, owner_project=project):
+        collected = set()
+        def keep(path, kind, expected=None):
+            add(path, kind, expected)
+            collected.add(str(Path(path).resolve()))
         receipt_path = folder / 'vibeic_receipt.json'
         receipt = json.loads(receipt_path.read_text())
-        add(receipt_path, 'tool_provenance')
+        keep(receipt_path, 'tool_provenance')
         for rel, digest in (receipt.get('sha256') or {}).items():
             path = (folder / rel).resolve()
             if not path.is_relative_to(folder.resolve()):
@@ -1017,7 +1021,7 @@ def design_release_sources(project, layout, assembly=None):
             # Large implementation views are not copied just because a PV
             # receipt contains them; final GDS and timed views have owners.
             if path.suffix.lower() not in ('.gds','.odb','.def','.spef'):
-                add(path, role if path.suffix.lower() not in ('.json',) else 'tool_provenance', digest)
+                keep(path, role if path.suffix.lower() not in ('.json',) else 'tool_provenance', digest)
         fp = receipt.get('input') or {}
         pdk_record=folder/'pdk_root.json'
         mounts=[]
@@ -1031,9 +1035,13 @@ def design_release_sources(project, layout, assembly=None):
             for host, guest in sorted(mounts,key=lambda row:len(str(row[1])),reverse=True):
                 if path.is_relative_to(guest):
                     path=Path(host)/path.relative_to(guest);break
-            if path.is_file() and path.suffix.lower() in ('.lym','.lyt','.lyp','.map'):
+            if role == 'lvs_report' and path.suffix.lower() in ('.spice','.sp','.cdl','.tcl') and (
+                    path.is_relative_to(owner_project) or any(token in str(path) for token in ('gf180mcu','sky130','ihp-sg13g2'))):
+                if not path.is_file():raise ValueError('LL LVS configured material missing: '+str(path))
+                keep(path, 'tool_provenance', digest)
+            elif path.is_file() and path.suffix.lower() in ('.lym','.lyt','.lyp','.map'):
                 if any(token in str(path) for token in ('gf180mcu','sky130','ihp-sg13g2')):
-                    add(path, 'layer_map', digest)
+                    keep(path, 'layer_map', digest)
                 else:
                     external[source] = {"sha256":digest,"reason":"PDK dependency; redistribution permission required"}
             elif not path.is_relative_to(project):
@@ -1044,7 +1052,8 @@ def design_release_sources(project, layout, assembly=None):
             state = json.loads((folder / 'state_in.json').read_text())
             reference = state.get('pnl') or state.get('nl')
             if reference:
-                add(reference,'physical_reference_netlist',(fp.get('state_files') or {}).get(str(reference)))
+                keep(reference,'physical_reference_netlist',(fp.get('state_files') or {}).get(str(reference)))
+        return collected
     add(layout, 'final_gds', assembly['sha256'] if assembly else None)
     if assembly:
         add(assembly['report'],'stream_inputs')
@@ -1071,11 +1080,45 @@ def design_release_sources(project, layout, assembly=None):
     for kind in ('drc','lvs','antenna','density'):
         if assembly and kind != 'lvs':
             continue  # Selected provider PV and internal LVS have separate owners.
-        report_path = physical_project / 'reports/phase3/lvs_verdict.json'
-        if kind == 'lvs' and report_path.is_file():
+        measurement_project = physical_project
+        selected_ll_record = None
+        if kind == 'lvs' and assembly and 'lvs' in (assembly.get('basis', {}).get('current_signoff') or {}):
+            try:
+                selected = assembly['basis']['current_signoff']['lvs']
+                selected_ll_record = Path(selected['path'])
+                if not selected_ll_record.is_absolute():selected_ll_record = physical_project / selected_ll_record
+                selected_ll_record = selected_ll_record.resolve()
+                measurement_project = selected_ll_record.parents[2]
+                if (selected_ll_record != measurement_project / native.pv.RECORD_REL.format(half='lvs')
+                        or type(selected.get('bytes')) is not int
+                        or selected_ll_record.stat().st_size != selected['bytes']
+                        or sha256_file(selected_ll_record) != selected['sha256']):
+                    raise ValueError('Selected LL LVS owner record missing or changed')
+            except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                validation[kind] = {'verdict':'NOT_MEASURED', 'reason':str(exc)}
+                continue
+        report_path = measurement_project / 'reports/phase3/lvs_verdict.json'
+        if selected_ll_record is not None:
+            # The assembly's normal publisher selected this exact owner record;
+            # an unrelated older canonical report is not a fallback authority.
+            report_path = selected_ll_record
+        ll_publication = None
+        if kind == 'lvs' and report_path.is_file() and selected_ll_record is None:
+            try:
+                published = json.loads(report_path.read_text())
+                if str(published.get('generated_by', '')).startswith('librelane_pv_signoff.run_half'):
+                    owner_path = Path(published['librelane_pv'])
+                    if not owner_path.is_absolute():owner_path = measurement_project / owner_path
+                    if owner_path.resolve() != (measurement_project / native.pv.RECORD_REL.format(half='lvs')).resolve():
+                        raise ValueError('LL canonical LVS publication names another owner record')
+                    ll_publication = published
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                validation[kind] = {'verdict':'NOT_MEASURED', 'reason':str(exc)}
+                continue
+        if kind == 'lvs' and report_path.is_file() and ll_publication is None and selected_ll_record is None:
             try:
                 import klayout_pdk_lvs as native_lvs
-                verdict = native_lvs.read_current_verdict(physical_project, report_path, layout)
+                verdict = native_lvs.read_current_verdict(measurement_project, report_path, layout)
                 circuits = verdict['native_result']['circuits']
                 subject = verdict.get('requested_subject') or verdict['layout_source']
                 validation[kind] = {
@@ -1107,7 +1150,7 @@ def design_release_sources(project, layout, assembly=None):
                                         if isinstance(entry, dict) and entry.get('path') and entry.get('sha256'))
                 materials.extend((entry, 'tool_provenance') for entry in dependencies)
                 paths = [(Path(entry['path']) if Path(entry['path']).is_absolute()
-                          else physical_project / entry['path']).resolve()
+                          else measurement_project / entry['path']).resolve()
                          for entry, _role in materials]
                 # Recomparison can keep the original extraction bundle and a
                 # second driver/tools directory. Preserve their common finite
@@ -1125,17 +1168,48 @@ def design_release_sources(project, layout, assembly=None):
             except (OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
                 validation[kind] = {'verdict': 'NOT_MEASURED', 'reason': str(exc)}
             continue
-        result = native.obligation(physical_project, kind, layout=Path(layout))
+        result = native.obligation(measurement_project, kind, layout=Path(layout))
         validation[kind] = result or {"verdict":"NOT_MEASURED","reason":"No selected native producer; no legacy PASS inferred"}
         if not result:
             continue
-        for row in result.get('rows',{}).values():
-            if row.get('record'):
-                add(row['record'],kind+'_report')
-            if row.get('source'):
-                add(row['source'],'tool_provenance')
-            if row.get('receipt'):
-                retained(Path(row['receipt']).parent,kind+'_report')
+        lvs_materials = set()
+        try:
+            if ll_publication is not None:
+                add(report_path, 'lvs_report')
+                lvs_materials.add(str(report_path.resolve()))
+                if result['verdict'] == 'PASS' and (ll_publication.get('status') != 'PASS'
+                        or ll_publication.get('compare_performed') is not True):
+                    raise ValueError('LL canonical LVS publication does not record a completed clean compare')
+            folders = set()
+            for row in result.get('rows',{}).values():
+                if row.get('record'):add(row['record'],kind+'_report')
+                if row.get('source'):add(row['source'],'tool_provenance')
+                if row.get('receipt'):folders.add(Path(row['receipt']).parent)
+            for folder in folders:
+                lvs_materials.update(retained(folder,kind+'_report',measurement_project))
+                if kind == 'lvs':
+                    config = json.loads((folder/'config.json').read_text())
+                    if (config.get('meta') or {}).get('step') == 'Magic.SpiceExtraction':
+                        if config.get('MAGIC_EXT_USE_GDS') is not True or config.get('MAGIC_EXT_ABSTRACT') is not False:
+                            raise ValueError('LL extraction is not full devices from the final GDS')
+                        state = json.loads((folder/'state_out.json').read_text())
+                        spice = Path(state.get('spice') or '')
+                        if not spice.is_absolute():spice = measurement_project / spice
+                        receipt = json.loads((folder/'vibeic_receipt.json').read_text())
+                        if (not spice.resolve().is_relative_to(folder.resolve()) or not spice.is_file()
+                                or not spice.stat().st_size or (receipt.get('sha256') or {}).get(
+                                    spice.resolve().relative_to(folder.resolve()).as_posix()) != sha256_file(spice)):
+                            raise ValueError('LL actual extracted SPICE missing or not bound to its extraction receipt')
+                        add(spice,'lvs_report');lvs_materials.add(str(spice.resolve()))
+            if kind == 'lvs' and lvs_materials:
+                bundle = (Path(_os.path.commonpath([str(Path(path).parent) for path in lvs_materials])),
+                          sha256_file(measurement_project / native.pv.RECORD_REL.format(half='lvs')))
+                for path in lvs_materials:
+                    if path in files:
+                        files[path]['native_bundle'] = {'sha256':bundle[1], 'relative':Path(path).relative_to(bundle[0]).as_posix()}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            if validation[kind]['verdict'] != 'FAIL':
+                validation[kind] = {'verdict':'NOT_MEASURED','reason':str(exc)}
     try:
         settled = lc.settled_floorplan_geometry(project)
         validation['die_stack'] = {"verdict":"PASS","retained_core_die_um":settled[0],"core_um":settled[1],"source":settled[2]}
