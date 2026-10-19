@@ -190,3 +190,66 @@ def test_current_source_phase_admission_refuses(tmp_path, mutation):
     with pytest.raises(ValueError, match='RESET_PHASE_SOURCE_ADMISSION_REFUSED'):
         T._load_clock_reset(tmp_path, docs['L9_INTEGRATION_SPEC.json']['ports'])
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+_NONCURRENT_PHASE_INPUTS = {'denied_note': '# NeutralCore\n\nThe module **`reset_bridge`** has the following hardware interfaces defined.\n\n| Signal | Direction | Type | Width | Description |\n|---|---|---|---:|---|\n| clk_i | input | logic | 1 | Main rising-edge clock, period 20 ns. |\n| clk_aux_i | input | logic | 1 | Auxiliary rising-edge clock, period 32 ns. |\n| rst_n | input | logic | 1 | System-supplied active-low global reset for both clock domains. |\n| ready_o | output | logic | 1 | Ready output. |\n\n## Current legacy reset contract\n\nrst_n is an active-low asynchronous reset. Separate release stages are not specified.\n\n## Non-binding comparison table\n\n| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages | Note |\n|---|---|---|---|---|---:|---|\n| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 | Not a current implementation requirement |\n| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 | Not a current implementation requirement |\n', 'historical_heading': '# NeutralCore\n\nThe module **`reset_bridge`** has the following hardware interfaces defined.\n\n| Signal | Direction | Type | Width | Description |\n|---|---|---|---:|---|\n| clk_i | input | logic | 1 | Main rising-edge clock, period 20 ns. |\n| clk_aux_i | input | logic | 1 | Auxiliary rising-edge clock, period 32 ns. |\n| rst_n | input | logic | 1 | System-supplied active-low global reset for both clock domains. |\n| ready_o | output | logic | 1 | Ready output. |\n\n## Current legacy reset contract\n\nrst_n is an active-high synchronous reset. Separate release stages are not specified.\n\n## Historical comparison\n\nThe following obsolete alternative is not the current implementation.\n\n| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages | Note |\n|---|---|---|---|---|---:|---|\n| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 | Alternative only |\n| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 | Alternative only |\n'}
+
+
+@pytest.mark.parametrize('scope', ['denied_note', 'historical_heading'])
+def test_noncurrent_phase_table_preserves_legacy_and_is_not_admission_authority(tmp_path, scope):
+    import professional_tb_gen as T
+    import _reset_input_semantics as R
+    text = _NONCURRENT_PHASE_INPUTS[scope]
+    project = tmp_path / 'legacy'
+    docs = _emit(project, text)
+    reset = next(r for r in docs['L9_INTEGRATION_SPEC.json']['reset_domains'] if r['name'] == 'rst_n')
+    assert reset.get('domain_bindings', []) == [], reset
+    expected = 'synchronous' if scope == 'historical_heading' else 'asynchronous'
+    assert reset['sync'] == expected, reset
+    assert R.reset_semantics('rst_n', text)['sync'] == expected
+    cr, cp = _consume(project, docs)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert cr['sync'] is (expected == 'synchronous')
+    assert 'release_stages' not in cr
+
+    # A stale typed projection cannot legitimize the denied table merely by
+    # citing its actual line and quote. Both normal consumers must refuse it.
+    stale = tmp_path / 'stale'
+    stale_docs = _emit(stale, FIXTURE.read_text())
+    (stale / 'input/docs/reset.md').write_text(text)
+    table_rows = {clock: (number, line) for number, line in enumerate(text.splitlines(), 1)
+                  for clock in ('clk_i', 'clk_aux_i') if line.startswith('| ' + clock + ' |')}
+    def retarget_basis(value):
+        if isinstance(value, dict):
+            if 'basis' in value and value.get('clock') in table_rows:
+                number, line = table_rows[value['clock']]
+                value['basis'] = [{'file': 'input/docs/reset.md', 'line': number, 'quote': line}]
+            for child in value.values():
+                retarget_basis(child)
+        elif isinstance(value, list):
+            for child in value:
+                retarget_basis(child)
+    for name, doc in stale_docs.items():
+        retarget_basis(doc)
+        (stale / 'phase1/generated_docs' / name).write_text(json.dumps(doc))
+    before = {p: p.read_bytes() for p in (stale / 'phase1/generated_docs').glob('*.json')}
+    cp = subprocess.run([sys.executable, str(PROGRAMS / 'sdc_gen.py'), str(stale), '--force'],
+                        capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert 'RESET_PHASE_SOURCE_ADMISSION_REFUSED' in cp.stdout + cp.stderr
+    with pytest.raises(ValueError, match='RESET_PHASE_SOURCE_ADMISSION_REFUSED'):
+        T._load_clock_reset(stale, stale_docs['L9_INTEGRATION_SPEC.json']['ports'])
+    assert all(p.read_bytes() == data for p, data in before.items())
+
+
+def test_current_phase_no_enable_note_keeps_the_declared_release(tmp_path):
+    text = (FIXTURE.read_text()
+            .replace('Release synchronizer stages |', 'Release synchronizer stages | Note |')
+            .replace('|---:|', '|---:|---|')
+            .replace('| 2 |', '| 2 | No enable signal is required |'))
+    docs = _emit(tmp_path, text)
+    cr, cp = _consume(tmp_path, docs)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert cr['release_stages'] == 2
+    assert cr['sync'] is False
+    assert len(cr['domain_bindings']) == 2
