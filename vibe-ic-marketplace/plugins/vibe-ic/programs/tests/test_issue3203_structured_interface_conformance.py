@@ -58,3 +58,29 @@ def test_explicit_scalar_and_physical_inout_keep_their_contract(tmp_path):
     got = {port.name: (port.direction, port.width) for port in contract.ports}
     assert got["ready_o"] == ("output", 1)
     assert got["data_io"] == ("inout", 8)
+
+
+def test_normal_conformance_entry_reports_unresolved_without_dut_failure(tmp_path):
+    import subprocess
+
+    docs = {"interfaces.md": FIXTURE}
+    gen_l1_datasheet(tmp_path, docs)
+    l9_path = Path(gen_l9_integration_spec(tmp_path, docs, {}).path)
+    rtl = tmp_path / "packet_engine.sv"
+    rtl.write_text("module packet_engine(input clk_i, output ready_o); assign ready_o = clk_i; endmodule\n")
+    report = tmp_path / "conformance.json"
+    result = subprocess.run(
+        [sys.executable, str(PROGRAMS / "spec_conformance_check.py"),
+         "--spec", str(l9_path), "--json", str(report), str(rtl)],
+        text=True, capture_output=True)
+    (tmp_path / "CLI_RESULT.json").write_text(json.dumps({
+        "returncode": result.returncode, "stdout": result.stdout,
+        "stderr": result.stderr}, indent=2) + "\n")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "NOT_MEASURED" in result.stderr
+    assert "Traceback" not in result.stderr and "FAIL" not in result.stderr
+    findings = json.loads(report.read_text())
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "INFO"
+    assert findings[0]["rule"] == "unresolved-structured-interface"
+    assert "UNRESOLVED_STRUCTURED_INTERFACE: bus" in findings[0]["message"]
