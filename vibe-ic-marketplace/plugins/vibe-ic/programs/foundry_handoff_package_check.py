@@ -2043,15 +2043,17 @@ def main(argv=None):
 
     findings.extend(pdk_notes)
 
-    # #449 — PENDING_FOUNDRY_* open items: a NAMED INFO finding so the
-    # tapeout checklist lists them; never an ERROR (foundry-supplied by
-    # definition).
+    # #449 — Retain provider-owned and conditional manufacturing/test fields
+    # as coordination information. The selected service defines applicability;
+    # these fields are not universal designer submission prerequisites.
     if pending_foundry_fields:
         findings.append({
             "severity": "INFO",
             "rule": "FOUNDRY_HANDOFF_PENDING_FOUNDRY",
-            "message": (f"{len(pending_foundry_fields)} foundry-supplied "
-                        f"open item(s) pending before tapeout (#449): "
+            "message": (f"{len(pending_foundry_fields)} provider-owned or conditional "
+                        f"manufacturing/test field(s) retained for coordination; "
+                        f"applicability follows the selected service contract, "
+                        f"not universal designer submission prerequisites: "
                         + "; ".join(pending_foundry_fields[:12])),
         })
 
