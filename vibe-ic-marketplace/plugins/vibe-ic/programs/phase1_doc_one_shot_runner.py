@@ -10996,6 +10996,7 @@ def _v455_expand_pin_token(tok: str) -> List[str]:
 _V455_EXPLICIT_DIR: tuple = (
     (r"\binputs?\b", "input"),
     (r"\boutputs?\b", "output"),
+    (r"\binouts?\b", "inout"),
 )
 _V455_ROLE_DIR: tuple = (
     (r"\bclocks?\b", "input"),
@@ -11032,7 +11033,26 @@ def _v455_dir_from_line(line: str) -> str:
 #: every token on the line, including the clocks in the trailing clause, is
 #: emitted mode=output. Resolving the SAME precedence per clause fixes it
 #: without inventing any new vocabulary. chip-AGNOSTIC: punctuation only.
-_RE_V455_CLAUSE_SPLIT = re.compile(r"[,;]|，|；")
+_RE_V455_SENTENCE_SPLIT = re.compile(r"[.!?](?=\s|$)")
+_RE_V455_CLAUSE_SPLIT = re.compile(r"[,;]|，|；|[.!?](?=\s|$)")
+
+
+def _v455_sentence_for_span(line: str, pos: int) -> str:
+    """The sentence owning this token; another declaration cannot lend I/O."""
+    start = 0
+    for sep in _RE_V455_SENTENCE_SPLIT.finditer(line):
+        if sep.start() > pos:
+            return line[start:sep.start()]
+        start = sep.end()
+    return line[start:]
+
+
+def _v455_logical_declaration_token(line: str, pos: int) -> bool:
+    """A named interface/role slot is not a physical pin declaration."""
+    prefix = _v455_clause_for_span(line[:pos], pos)
+    return bool(re.search(
+        r"\b(?:logical(?:\s+[A-Za-z_][\w-]*)*\s+interface|(?:local\s+)?role)\s*$",
+        prefix, re.IGNORECASE))
 
 
 def _v455_clause_for_span(line: str, pos: int) -> str:
@@ -11048,8 +11068,8 @@ def _v455_clause_for_span(line: str, pos: int) -> str:
 def _v455_dir_for_span(line: str, pos: int, line_dir: str) -> str:
     """Direction for the token at `pos`, resolved from ITS OWN clause.
 
-    Falls back to the whole-line answer when the token's clause states no
-    direction of its own, so a single-clause line behaves exactly as before.
+    Falls back only within the owning sentence when a clause has no direction.
+    A separate sentence on the physical line cannot declare this token's I/O.
     """
     return _v455_dir_for_span_ex(line, pos, line_dir)[0]
 
@@ -11082,14 +11102,15 @@ def _v455_dir_for_span_ex(line: str, pos: int, line_dir: str) -> tuple:
     chip-AGNOSTIC: punctuation + the English vocabulary already in the table.
     """
     clause = _v455_clause_for_span(line, pos)
+    sentence = _v455_sentence_for_span(line, pos)
     clause_dir, clause_tier = _v455_dir_from_line_tiered(clause)
     if clause_dir == "unspecified":
-        return line_dir, None
+        return _v455_dir_from_line(sentence), None
     if clause_tier != "role":
         return clause_dir, None
     # the clause INFERRED its direction from a role noun — ask whether the
     # line it belongs to STATES a direction, and whether the two agree.
-    line_stated, line_tier = _v455_dir_from_line_tiered(line)
+    line_stated, line_tier = _v455_dir_from_line_tiered(sentence)
     if line_tier != "explicit" or line_stated == clause_dir:
         return clause_dir, None
     return clause_dir, {
@@ -11203,6 +11224,9 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
                     # token is a port (a later-cell width / parameter / mapped
                     # submodule-port token is not promoted).
                     if _is_pipe_row and tok not in _leading_cell_toks:
+                        continue
+                    if (not _is_pipe_row
+                            and _v455_logical_declaration_token(line, _tm.start())):
                         continue
                     # A pipe-table row's direction lives in its own cell and is
                     # already row-scoped; only the PROSE bullet shape needs the
@@ -22807,15 +22831,21 @@ def gen_l1_datasheet(project: Path,
             mode_token = ml.group(1).lower()
             if mode_token not in {"input", "output", "inout"}:
                 continue
-            tokens = re.split(r"[\s\t\|,]+", scan_line.strip())
-            tokens = [t for t in tokens if t]
+            tokens = list(re.finditer(r"[^\s\t\|,]+", scan_line))
             if len(tokens) < 2:
                 continue
-            for t in tokens:
+            for token_match in tokens:
+                t = token_match.group()
                 if re.match(r"^[A-Z][A-Z0-9_]{1,15}$", t) and t.upper() not in {
                     "INPUT", "OUTPUT", "INOUT", "BIDIR", "POWER", "GROUND",
                     "AC", "DC", "DUT", "VDD", "VSS",
                 } and t.upper() not in _PROTOCOL_ACRONYM_DENY:
+                    own_sentence = _v455_sentence_for_span(scan_line, token_match.start())
+                    own_direction = _PIN_TABLE_LINE_RE.search(own_sentence)
+                    if own_direction is None or own_direction.group(1).lower() not in {"input", "output", "inout"}:
+                        continue
+                    token_mode = _v455_dir_for_span(
+                        scan_line, token_match.start(), own_direction.group(1).lower())
                     # v1.6.264 — for #122 ORGANIC. Common-English
                     # deny-list for narrative-fallback emission.
                     # Structural extractors carry
@@ -22863,7 +22893,7 @@ def gen_l1_datasheet(project: Path,
                     _v1_6_363_emit_name = _v1_6_363_strip_pipe_from_name(t)
                     pins.append({
                         "name": _v1_6_363_emit_name,
-                        "mode": mode_token,
+                        "mode": token_mode,
                         # Wave 38/B2: typed-depth fields. aliases/rtl_name/
                         # board_name are required by l1_pin_table_aliases_typed_check
                         # for downstream RTL/board cross-referencing.
@@ -22888,7 +22918,7 @@ def gen_l1_datasheet(project: Path,
                         # resolved at emit time on the legacy line-scan
                         # path too.
                         "function": _infer_pin_function(
-                            _v1_6_363_emit_name, mode=mode_token),
+                            _v1_6_363_emit_name, mode=token_mode),
                         "evidence": f"input/docs/{fname}",
                     })
                     pin_index[_v1_6_363_emit_name] = len(pins) - 1
