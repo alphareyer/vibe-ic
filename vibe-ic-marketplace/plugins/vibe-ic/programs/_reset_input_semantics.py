@@ -11,10 +11,32 @@ _PHASE_COLUMNS = ('clock', 'reset', 'polarity', 'assertion', 'release',
                   'release synchronizer stages')
 
 
-def phase_declarations(text):
-    """Read only explicit reset-phase table columns, with original line basis."""
+def _current_phase_authority(text):
+    """Apply existing history/denial rules to this phase authority only."""
+    from _prose_polarity import is_denied
+    if not current_clause(text):
+        return False
+    # Denial must govern current/binding authority, not an unrelated Note
+    # such as "No enable signal is required" on a valid phase declaration.
+    for phrase in re.finditer(
+            r'\b(?:[A-Za-z]+(?:\s+(?:a|an|the))?\s+|non-)(?:current|binding)\b',
+            text, re.I):
+        if is_denied(phrase[0], ignore_bracketed=False):
+            return False
+    return True
+
+
+def _phase_table_rows(text):
+    """Keep each phase row's source position and local heading authority."""
     columns = None
+    headings = []
     for number, raw in enumerate(text.splitlines(), 1):
+        heading = re.match(r'^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$', raw)
+        if heading:
+            level = len(heading[1])
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            headings.append((level, _current_phase_authority(heading[2])))
         if not raw.strip().startswith('|'):
             columns = None
             continue
@@ -28,9 +50,16 @@ def phase_declarations(text):
             continue
         if len(cells) <= max(columns.values()):
             continue
-        if not current_clause(raw):
-            continue
         values = {key: cells[index] for key, index in columns.items()}
+        yield number, raw, values, (all(current for _, current in headings)
+                                    and _current_phase_authority(raw))
+
+
+def phase_declarations(text):
+    """Read only current explicit reset-phase rows, with original line basis."""
+    for number, raw, values, current in _phase_table_rows(text):
+        if not current:
+            continue
         reset = values['reset']
         if not _NAME.fullmatch(reset):
             continue
@@ -222,6 +251,7 @@ def declarations(text, name=None):
     """Yield source-line-bound reset declarations; never borrow another port."""
     port = re.compile(r'(?<![\w])' + re.escape(name) + r'(?![\w])', re.I) if name else None
     phases = {row['line']: row for row in phase_declarations(text)}
+    phase_lines = {number for number, _, _, _ in _phase_table_rows(text)}
     for number, raw in enumerate(text.splitlines(), 1):
         phase = phases.get(number)
         if phase is not None:
@@ -229,6 +259,10 @@ def declarations(text, name=None):
                 yield {'line': number, 'evidence': raw.strip(),
                        'sync_values': {phase['assertion']},
                        'polarity_values': {phase['polarity']}}
+            continue
+        # A filtered phase row is not legacy prose: release wording must not
+        # become a second assertion declaration through the generic fallback.
+        if number in phase_lines:
             continue
         for clause in re.split(r'[;；。]|(?<=[a-zA-Z])\.\s+', raw):
             line = current_clause(clause)
