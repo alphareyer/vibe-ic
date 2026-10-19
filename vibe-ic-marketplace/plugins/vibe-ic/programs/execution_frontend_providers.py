@@ -341,6 +341,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
     source=str(source_path); worker=str(worker_path)
     py_path=Path(shutil.which('python3') or sys.executable).resolve(); py=str(py_path)
     from execution_provider_catalog import current_source_identity
+    repo=em._REPO_ROOT
     sha=current_source_identity()
     _machine_contracts()
     portfolio_rows=_portfolio_contracts()
