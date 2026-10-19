@@ -244,11 +244,16 @@ def test_it_runs_after_tier_2_so_the_bare_binary_rows_win():
             < _SRC.index("_V1_6_592_ENCODING_TABLE_HEXROW_RE.finditer(window_text)"))
 
 
+@pytest.mark.parametrize("unqualified_field", [False, True],
+                         ids=["qualified", "mixed-legacy"])
 def test_public_regmap_encoding_rows_belong_to_their_qualified_field(
-        runner, tmp_path):
+        runner, tmp_path, unqualified_field):
     """#3204's unmodified neutral input must keep neighboring owners apart."""
     fixture = pathlib.Path(__file__).parent / "fixtures/phase1_local/l4_owned_field_encoding/registers.md"
-    result = runner.gen_l4_regmap(tmp_path, {"registers.md": fixture.read_text()})
+    text = fixture.read_text()
+    if unqualified_field:
+        text = text.replace("#### CONFIG . SIZE", "#### SIZE")
+    result = runner.gen_l4_regmap(tmp_path, {"registers.md": text})
     document = json.loads(result.path.read_text())
     registers = [r for r in document["registers"]
                  if (r.get("register_name") or r.get("name")) == "CONFIG"]
@@ -257,7 +262,8 @@ def test_public_regmap_encoding_rows_belong_to_their_qualified_field(
               [e.get("mnem") for e in f.get("encoding", []) if e.get("mnem")]
               for f in registers[0]["fields"]}
     (tmp_path / "ENCODING_OBSERVATION.json").write_text(
-        json.dumps({"actual": actual, "document": document}, indent=2) + "\n")
+        json.dumps({"actual": actual, "document": document,
+                    "input_text": text}, indent=2) + "\n")
     assert actual == {
         "ENABLE": [], "RATE": ["RATE_SLOW", "RATE_FAST"],
         "SIZE": ["SIZE_SMALL", "SIZE_LARGE"],
