@@ -104,3 +104,16 @@ def test_width_first_direction_mismatch_is_blocking(tmp_path):
     assert len(mismatches) == 1, report
     assert mismatches[0]['block_eligible'] is True
     assert report['blocking_findings'] == 1, report
+
+
+def test_qualified_direction_keeps_existing_structural_provenance(tmp_path):
+    prompt = ('| Signal | Direction | Width |\n|---|---|---|\n'
+              '| `enable` | input (active-high) | 1 |\n')
+    process, report = _run(tmp_path, prompt,
+                           'module neutral_reg(output wire enable); endmodule\n')
+    assert process.returncode == 1, report
+    assert len(report['findings']) == 1, report
+    finding = report['findings'][0]
+    assert finding['kind'] == 'PORT-DIRECTION', finding
+    assert finding['block_eligible'] is True, finding
+    assert report['blocking_findings'] == 1, report
