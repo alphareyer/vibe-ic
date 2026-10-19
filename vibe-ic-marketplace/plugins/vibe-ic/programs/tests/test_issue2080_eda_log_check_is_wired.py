@@ -462,13 +462,19 @@ def test_normal_phase2_report_survives_absent_advisory_handoff(tmp_path, monkeyp
         DOSR.StepResult('final_audit', 'NOT_MEASURED', 0.0,
                         'unrelated whole-flow audit outside this reporting fixture',
                         reason_class=DOSR._V.ReasonClass.NOT_EXECUTED))
+    # The manifest's canonical step consumers are separate from this writer.
+    # Keep their absence explicit, not PASS, while exercising real retention.
+    import execution_backend_gates
+    monkeypatch.setattr(execution_backend_gates, 'evaluate', lambda *a, **kw:
+                        {'status': 'NOT_MEASURED',
+                         'reasons': ['unrelated canonical consumer outside reporting fixture']})
     monkeypatch.setattr(DOSR._pl, 'emit_final_summary', lambda *a, **kw: False)
     monkeypatch.setattr(execution_policy, '_ordinary_runtime', None)
     monkeypatch.setattr(sys, 'argv', ['design', str(project), '--skip-hardware',
                                     '--skip-phase3', '--skip-analog',
                                     '--max-rtl-repair-retries', '0'])
     rc = DOSR.main()
-    assert rc != 0  # incomplete neutral fixture is never whole-flow PASS
+    assert rc == 1  # incomplete neutral fixture is never whole-flow PASS
     report = json.loads((project / 'reports/orchestrator/phase2_one_shot.json').read_text())
     rows = {row['name']: row for row in report['steps']}
     assert not report.get('final_audit_pending'), report
