@@ -1600,8 +1600,8 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
             for arm in (0, 1) if f"priority_domain{arm}" in a]
         role_proofs += [a[f"priority_valid{arm}"] for arm in (0, 1)
                         if f"priority_valid{arm}" in a]
-        # Undef in the inactive arm is not a defined value. Only the whole
-        # raw model may prove the opposite arm is a total, defined force for
+        # The inactive arm may be undefined or defined but nonconstant. Only
+        # the whole raw model may prove the opposite arm is a total, defined force for
         # every free current-Q/data/control input, with its actual priority.
         raw_force = []
         if (row.get("raw_undef_native_candidate") and domain_reachable and rc == 0
@@ -1615,7 +1615,10 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                                   if f"priority_valid{v}" in a]
                 for value, role in ((0, "force_zero"), (1, "force_one")):
                     if (a.get(f"undef{arm}") == "NO_UNDEF" and
-                            a.get(f"undef{1-arm}") == "HAS_UNDEF" and
+                            (a.get(f"undef{1-arm}") == "HAS_UNDEF" or
+                             (a.get(f"undef{1-arm}") == "NO_UNDEF" and
+                              a.get(f"zero{1-arm}") == "REFUTED" and
+                              a.get(f"one{1-arm}") == "REFUTED")) and
                             a.get(f"{'zero' if value == 0 else 'one'}{arm}") == "PROVED" and
                             a.get(f"{role}_reachable{arm}") == "REFUTED" and
                             all(proof == "PROVED" for proof in active_proofs) and
@@ -1639,7 +1642,7 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                 "active_reset_value": arm, "inactive_reset_value": 1-arm,
                 "force_value": value, "active_definedness": a[f"undef{arm}"],
                 "inactive_definedness": a[f"undef{1-arm}"], "queries": dict(a)}
-            row["reason"] = "native raw active reset arm is a total defined force; inactive literal undef retained"
+            row["reason"] = "native raw active reset arm is a total defined force; raw literal undef retained"
         elif row.get("unsupported") or rc or not a or "UNKNOWN" in a.values():
             row["reason"] = row.get("unsupported") or f"native transition query unavailable (rc={rc})"
         elif any(a[k] != "NO_UNDEF" for k in ("undef0", "undef1")):

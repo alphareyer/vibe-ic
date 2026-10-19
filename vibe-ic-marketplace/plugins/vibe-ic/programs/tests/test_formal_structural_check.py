@@ -732,3 +732,30 @@ def test_native_cofactor_keeps_named_container_on_the_existing_local_route(tmp_p
     assert observed == (0, 'NATIVE_NORMALIZED_COFACTOR_SUPPORT'), observed
     assert payloads == {9: {7}}, observation
     assert info['native_run']['supervision'] == 'host_process_and_progress', observation
+
+
+def test_raw_pmux_unreachable_default_undef_does_not_replace_reset_proof(tmp_path):
+    _yosys()
+    rtl = tmp_path / "m.v"
+    rtl.write_text("module m(input clk,rst,en,d,output reg q);\n"
+                   "always @(posedge clk) if(rst) q<=0; else case(en)\n"
+                   "1'b0:q<=q; 1'b1:q<=d; default:q<=1'bx; endcase\nendmodule\n")
+    rec = fsc.check([rtl], "m", [{"rule": "reset_polarity", "signal": "rst",
+                                "value": "active_high"}], tmp_path)
+    assert rec["verdict"] == fsc.PASS, rec
+    mapping = rec["claims"][0]["reset_control_mapping"]
+    assert len(mapping["raw_identities"]) == len(mapping["rows"]) == 1
+    assert mapping["state_model"] == "raw_pre_cleanup_current_source"
+    assert mapping["raw_identities"][0]["literal_undef_in_transition"]
+    row = mapping["rows"][0]
+    assert row["classification"] == "RESET_FORCE"
+    assert "literal-X/undef" in row["unsupported"]
+    proof = row["raw_reset_domain_proof"]
+    assert proof["status"] == "CERTIFIED"
+    assert proof["active_reset_value"] == 1 and proof["force_value"] == 0
+    assert proof["queries"]["undef0"] == proof["queries"]["undef1"] == "NO_UNDEF"
+    assert proof["queries"]["zero0"] == proof["queries"]["one0"] == "REFUTED"
+    assert proof["queries"]["zero1"] == "PROVED"
+    progress = mapping["query_progress"]
+    assert progress["planned"] == progress["started"] == progress["completed"] == 30
+    assert mapping["native_row_cone"]["eligible"] is False
