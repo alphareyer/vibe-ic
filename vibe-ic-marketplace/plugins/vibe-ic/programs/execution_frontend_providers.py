@@ -340,8 +340,8 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
     source_path=Path(__file__).resolve(); worker_path=source_path.with_name('execution_frontend_worker.py')
     source=str(source_path); worker=str(worker_path)
     py_path=Path(shutil.which('python3') or sys.executable).resolve(); py=str(py_path)
-    repo=next(p for p in source_path.parents if (p/'.git').exists())
-    sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    from execution_provider_catalog import current_source_identity
+    sha=current_source_identity()
     _machine_contracts()
     portfolio_rows=_portfolio_contracts()
     if not set(ROWS).issubset(portfolio_rows):

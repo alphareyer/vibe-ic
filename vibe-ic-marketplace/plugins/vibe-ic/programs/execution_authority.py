@@ -22,7 +22,10 @@ import tempfile
 import threading
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from execution_source_identity import current as source_identity, source_root
+ROOT = source_root(HERE.parent)
 FD_ENV = 'VIBEIC_EXECUTION_CAP_FD'
 SOCKET_ENV = 'VIBEIC_EXECUTION_AUTH_SOCKET'
 _SOURCE_CLOSURES = {}
@@ -33,13 +36,7 @@ def sha(value):
 
 
 def tracked(path):
-    relative = str(path.resolve().relative_to(ROOT))
-    blob = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD:' + relative], text=True).strip()
-    content = path.read_bytes()
-    observed = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-    if blob != observed or path.is_symlink():
-        raise ValueError('dirty canonical entry: ' + relative)
-    return blob
+    return source_identity(HERE.parent).verify(path)
 
 
 def read_line(sock):
@@ -57,7 +54,8 @@ def read_line(sock):
 
 def source_closure():
     """Verify the issuer's complete tracked local importer closure."""
-    head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    identity = source_identity(HERE.parent)
+    head = identity.revision
     prior = _SOURCE_CLOSURES.get(head)
     if prior is not None:
         blobs, candidates = prior
@@ -76,16 +74,7 @@ def source_closure():
                'execution_policy.py', 'execution_modes.py', 'vibe_ic_one_shot_runner.py')]
     # Use the same NUL-delimited tree format as SourceSnapshot.  The fleet's
     # Git 2.34 supports it; --format would fail before the normal CLI starts.
-    objects = subprocess.check_output(
-        ['git', '-C', str(ROOT), 'ls-tree', '-r', '-z', head])
-    by_path = {}
-    for record in objects.split(b'\0'):
-        if not record:
-            continue
-        header, name = record.split(b'\t', 1)
-        mode, kind, blob = header.decode().split()
-        if kind == 'blob' and mode in ('100644', '100755'):
-            by_path[name.decode()] = blob
+    by_path = identity.blobs
     blobs = {}
     candidates = set()
     while pending:
@@ -147,9 +136,8 @@ def validate_payload(payload, credential):
                         ('request_digest', request['request_digest']), ('route_digest', route['route_digest'])):
         if credential.get(name) != value:
             raise ValueError('capability belongs to another invocation')
-    head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-    tree = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
-    if head != route['source_sha'] or tree != route['source_tree']:
+    identity = source_identity(HERE.parent)
+    if identity.revision != route['source_sha'] or identity.tree != route['source_tree']:
         raise ValueError('source invocation drift')
     closure = source_closure()
     if (not payload['source_blobs'] or payload['source_blobs'] != closure or
@@ -205,7 +193,7 @@ def consume():
             # All canonical entry objects and the exact source commit remain
             # current. Rehashed caller files cannot change the issuer's ledger.
             return validate_payload(result['payload'], credential)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         raise Refusal('REQUEST_CAPABILITY_INVALID', str(exc)) from exc
 
 
@@ -228,8 +216,8 @@ def main():
         raise ValueError(_delivery_route.refusal_message(refusal))
     owner = args.project.resolve() / 'input/step_0_5ic_answers.json'
     project_digest = hashlib.sha256(owner.read_bytes()).hexdigest()
-    source = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
-    tree = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    identity = source_identity(HERE.parent)
+    source, tree = identity.revision, identity.tree
     token = secrets.token_hex(32)
     invocation = secrets.token_hex(32)
     request = dict(schema=1, mode=args.execution_mode,
@@ -297,6 +285,6 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         print('REFUSED: CANONICAL_ISSUANCE_INVALID: ' + str(exc), file=sys.stderr)
         sys.exit(2)

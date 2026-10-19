@@ -224,17 +224,39 @@ def _hash(value: object) -> str:
                                      separators=(',', ':')).encode()).hexdigest()
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+from execution_source_identity import PACKAGE_ROOT as _SOURCE_PACKAGE_ROOT, source_root as _source_root
+_REPO_ROOT = _source_root()
 # Bound pack mappings within the existing worker address-space limit. Git's
 # 64-bit default maps up to 1 GiB at once, regardless of the object's size.
 _PACKED_GIT_OPTIONS = ('-c', 'core.packedGitWindowSize=16m',
                        '-c', 'core.packedGitLimit=64m')
 
 
+def _installed_source_identity():
+    if _REPO_ROOT != _SOURCE_PACKAGE_ROOT:
+        return None
+    from execution_source_identity import current
+    try:
+        return current()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
+
+
+def _current_source_head():
+    identity = _installed_source_identity()
+    return identity.revision if identity else subprocess.check_output(
+        ['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+
+
 def _git_source_authority(source_sha: str) -> tuple[str, str]:
     """Resolve a source commit and tree from the clean repository object DB."""
     if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha):
         raise Refusal('INVALID_SOURCE_SHA', str(source_sha))
+    identity = _installed_source_identity()
+    if identity is not None:
+        if source_sha != identity.revision:
+            raise Refusal('SOURCE_AUTHORITY_STALE', source_sha)
+        return identity.revision, identity.tree
     try:
         commit = subprocess.run(
             ['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{commit}}'],
@@ -258,6 +280,11 @@ def _git_blob_at_commit(source_sha: str, relative: str) -> str:
     if (not isinstance(relative, str) or not relative or relative.startswith('/') or
             '..' in Path(relative).parts):
         raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', relative)
+    identity = _installed_source_identity()
+    if identity is not None:
+        if source_sha != identity.revision or relative not in identity.blobs:
+            raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', f'{source_sha}:{relative}')
+        return identity.blobs[relative]
     try:
         return subprocess.run(
             ['git', *_PACKED_GIT_OPTIONS, '-C', str(_REPO_ROOT), 'rev-parse', '--verify',
@@ -282,6 +309,9 @@ def _verified_current_source_commit(source_sha: str) -> str:
     commit, _ = _git_source_authority(source_sha)
     canonical = _canonical_flow_path()
     relative = str(canonical.relative_to(_REPO_ROOT))
+    if _installed_source_identity() is not None:
+        _tracked_clean_file(canonical)
+        return commit
     try:
         current_blob = subprocess.run(
             ['git', '-C', str(_REPO_ROOT), 'hash-object', str(canonical)],
@@ -294,6 +324,8 @@ def _verified_current_source_commit(source_sha: str) -> str:
 
 
 def _canonical_flow_path() -> Path:
+    if _REPO_ROOT == _SOURCE_PACKAGE_ROOT:
+        return _SOURCE_PACKAGE_ROOT / 'flow/phase1_phase2_phase3.yaml'
     return _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
 
 
@@ -317,12 +349,16 @@ def _tracked_clean_file(path: Path) -> None:
                 raise Refusal(code if code.startswith('SOURCE_AUTHORITY_') else
                               'SOURCE_AUTHORITY_UNAVAILABLE', str(path)) from exc
             return
+        identity = _installed_source_identity()
+        if identity is not None:
+            identity.verify(path)
+            return
         relative = str(path.relative_to(_REPO_ROOT))
         head = subprocess.check_output(['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip()
         expected = _git_blob_at_commit(head, relative)
         if _blob_bytes(path) != expected:
             raise Refusal('SOURCE_AUTHORITY_DIRTY', str(path))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', str(path)) from exc
 
 
@@ -339,6 +375,14 @@ def _git_source_blobs(commit: str, paths) -> dict[str, str]:
     if snapshot is not None:
         try:
             return snapshot.git_blobs(commit, paths)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', 'source population') from exc
+    identity = _installed_source_identity()
+    if identity is not None:
+        if identity.revision != commit:
+            raise Refusal('SOURCE_AUTHORITY_STALE', commit)
+        try:
+            return {str(path): identity.verify(path) for path in paths}
         except (OSError, ValueError, RuntimeError) as exc:
             raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', 'source population') from exc
     try:
@@ -1495,7 +1539,7 @@ class Registry:
         _verified_current_source_commit(adapter.source_sha)
         snapshot_session = _active_source_snapshot()
         head = (snapshot_session.commit if snapshot_session is not None else
-                subprocess.check_output(['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip())
+                _current_source_head())
         if head != adapter.source_sha:
             raise Refusal('SOURCE_AUTHORITY_STALE', adapter.source_sha)
         executable_paths = []
@@ -1580,7 +1624,7 @@ class Registry:
         # mutable.  Publish an immutable registration snapshot so a later
         # ``arm.source_files[path] = new_digest`` cannot rehash authority.
         current_head = (snapshot_session.commit if snapshot_session is not None else
-                        subprocess.check_output(['git', '-C', str(_REPO_ROOT), 'rev-parse', 'HEAD'], text=True).strip())
+                        _current_source_head())
         if current_head != adapter.source_sha:
             raise Refusal('SOURCE_AUTHORITY_STALE', adapter.source_sha)
         snapshot = replace(
@@ -1720,13 +1764,11 @@ def _validate_portfolio(data: dict, *, snapshot=None) -> None:
                 str(source.get('canonical_step_id')) != str(row.get('id')) or
                 source.get('canonical_blob') != meta.get('canonical_flow_git_blob')):
             raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
-        row_current_blob = current_blob or subprocess.check_output(
-            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(_canonical_flow_path())],
-            text=True).strip()
+        row_current_blob = current_blob or _blob_bytes(_canonical_flow_path())
         if row_current_blob != meta.get('canonical_flow_git_blob'):
             raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
         for program in source.get('programs') or ():
-            program_path = _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/programs' / f'{program}.py'
+            program_path = _canonical_flow_path().parent.parent / 'programs' / f'{program}.py'
             _tracked_clean_file(program_path)
         if not req['gates'].issubset(set(row.get('mandatory_gate_programs') or ())):
             raise Refusal('PORTFOLIO_GATES_STALE', str(row.get('id')))

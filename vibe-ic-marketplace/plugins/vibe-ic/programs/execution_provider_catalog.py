@@ -56,7 +56,10 @@ for _sid, _release_row in RELEASE_ROWS.items():
 
 @lru_cache(maxsize=1)
 def current_source_identity() -> str:
-    """Return the current checked-out commit identity; caller labels are ignored."""
+    """Return the verified Git or installed Ultra revision; no caller labels."""
+    from execution_source_identity import current, source_root
+    if source_root() == HERE.parent:
+        return current().revision
     try:
         value = subprocess.check_output(
             ["git", "-C", str(HERE), "rev-parse", "HEAD"],
@@ -71,6 +74,9 @@ def current_source_identity() -> str:
 @lru_cache(maxsize=1)
 def current_source_tree_identity() -> str:
     """Return the HEAD tree identity used beside the commit binding."""
+    from execution_source_identity import current, source_root
+    if source_root() == HERE.parent:
+        return current().tree
     try:
         value = subprocess.check_output(
             ["git", "-C", str(HERE), "rev-parse", "HEAD^{tree}"],

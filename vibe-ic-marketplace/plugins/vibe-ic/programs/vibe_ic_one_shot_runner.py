@@ -4103,6 +4103,16 @@ if __name__ == "__main__":
             print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
             sys.exit(2)
         route = selected.route or _delivery_route.report_label(selected.project)['delivery_route'].lower()
+        if selected.execution_mode == 'ultra':
+            # Codex and direct CLI installs do not necessarily execute Claude's
+            # SessionStart hook. Finish normal Ultra installation here once;
+            # the isolated issuer and all later consumers remain offline.
+            from execution_source_identity import prepare_installed
+            try:
+                prepare_installed()
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                print('REFUSED: CANONICAL_ISSUANCE_INVALID: ' + str(exc), file=sys.stderr)
+                sys.exit(2)
         command = [str(Path(sys.executable).resolve()), '-I', '-S',
                    str(PROGRAMS_DIR / 'execution_authority.py'), '--project', str(selected.project.resolve()),
                    '--route', route, '--execution-mode', selected.execution_mode]

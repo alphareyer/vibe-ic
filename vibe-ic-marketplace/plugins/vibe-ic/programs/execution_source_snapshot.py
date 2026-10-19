@@ -94,9 +94,15 @@ class SourceSnapshot:
                       "provider_import_misses": 0, "provider_import_hits": 0,
                       "import_probes": 0, "import_probe_hits": 0,
                       "module_lookup_misses": 0, "module_lookup_hits": 0}
-        self.commit = self._git_text("rev-parse", "--verify", f"{source_sha}^{{commit}}")
-        self.tree = self._git_text("rev-parse", "--verify", f"{self.commit}^{{tree}}")
-        head = self._git_text("rev-parse", "HEAD")
+        from execution_source_identity import current, source_root, PACKAGE_ROOT
+        self._installed = current() if source_root() == PACKAGE_ROOT and self.repo == PACKAGE_ROOT else None
+        if self._installed is not None:
+            self.commit, self.tree = self._installed.revision, self._installed.tree
+            head = source_sha
+        else:
+            self.commit = self._git_text("rev-parse", "--verify", f"{source_sha}^{{commit}}")
+            self.tree = self._git_text("rev-parse", "--verify", f"{self.commit}^{{tree}}")
+            head = self._git_text("rev-parse", "HEAD")
         if head != self.commit:
             raise RuntimeError("SOURCE_AUTHORITY_STALE")
         self._bytes: dict[Path, bytes] = {}
@@ -236,6 +242,9 @@ class SourceSnapshot:
             raise RuntimeError(f"SOURCE_AUTHORITY_DIRTY: {path}")
 
     def _tree_blobs(self) -> dict[str, str]:
+        if self._installed is not None:
+            self._installed.verify_current()
+            return self._installed.blobs
         if self._git_blobs is None:
             self.stats["git_commands"] += 1
             raw = subprocess.run(["git", *_PACKED_GIT_OPTIONS, "-C", str(self.repo), "ls-tree", "-r", "-z",
@@ -260,7 +269,9 @@ class SourceSnapshot:
     def finalize(self) -> None:
         if self.finalized:
             return
-        if (self._git_text("rev-parse", "HEAD") != self.commit or
+        if self._installed is not None:
+            self._installed.verify_current()
+        elif (self._git_text("rev-parse", "HEAD") != self.commit or
                 self._git_text("rev-parse", "HEAD^{tree}") != self.tree):
             raise RuntimeError("SOURCE_AUTHORITY_STALE")
         blobs = self._tree_blobs()
