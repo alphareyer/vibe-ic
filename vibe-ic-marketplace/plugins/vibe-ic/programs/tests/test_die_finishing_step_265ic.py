@@ -501,6 +501,32 @@ def test_an_existing_blockages_section_is_merged_not_clobbered(tmp_path):
     assert text.count("- PLACEMENT RECT") == 5
 
 
+@pytest.mark.parametrize("outer", [[0, 0, 400, 500], [-10, -20, 400, 500]])
+def test_finished_def_uses_measured_provider_diearea_without_moving_routes(
+        tmp_path, outer):
+    routed = tmp_path / "routed.def"
+    source = ("VERSION 5.8 ;\nDESIGN t ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+              "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\n"
+              "COMPONENTS 1 ;\n- u cell + PLACED ( 10000 20000 ) N ;\n"
+              "END COMPONENTS\nNETS 0 ;\nEND NETS\nEND DESIGN\n")
+    routed.write_text(source)
+    out = tmp_path / "die_finished.def"
+    inner = [outer[0] + 5, outer[1] + 5, outer[2] - 5, outer[3] - 5]
+    ok, why = DFG.write_finished_def(
+        routed, out, {"outer": {"um": outer}, "inner": {"um": inner}})
+    assert ok, why
+    text = out.read_text()
+    expected = [round(value * 1000) for value in outer]
+    actual = [int(value) for value in re.search(
+        r"DIEAREA \( (-?\d+) (-?\d+) \) \( (-?\d+) (-?\d+) \) ;",
+        text).groups()]
+    assert actual == expected, "finished DIEAREA must describe the measured ring"
+    assert "- u cell + PLACED ( 10000 20000 ) N ;" in text
+    assert "NETS 0 ;\nEND NETS" in text
+    assert text.count("- PLACEMENT RECT") == 4
+    assert routed.read_text() == source
+
+
 # ── the honest skip ─────────────────────────────────────────────────────────
 
 def test_a_pdk_with_no_generator_skips_out_loud_and_names_the_pdk(

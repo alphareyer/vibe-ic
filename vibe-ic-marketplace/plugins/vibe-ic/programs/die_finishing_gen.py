@@ -145,6 +145,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -568,6 +569,25 @@ def resolve_script(project: Path, explicit: Optional[str],
     return None, "", tried
 
 
+PROVIDER_TARGET_REL = "input/submission_template/provider_target.json"
+
+
+def provider_target(project: Path) -> Optional[Dict[str, Any]]:
+    path = Path(project) / PROVIDER_TARGET_REL
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or not value.get("provider"):
+        raise ValueError(f"{path}: the selected provider is missing")
+    target = value.get("technical_target")
+    dims = target.get("dimensions_um") if isinstance(target, dict) else None
+    if (not isinstance(dims, list) or len(dims) != 2
+            or any(isinstance(x, bool) or not isinstance(x, (int, float))
+                   or not math.isfinite(x) or x <= 0 for x in dims)):
+        raise ValueError(f"{path}: engineering dimensions are not positive finite spans")
+    return value
+
+
 def die_size(project: Path, gds: Path,
              width: Optional[float],
              height: Optional[float],
@@ -596,6 +616,10 @@ def die_size(project: Path, gds: Path,
     """
     if width and height:
         return float(width), float(height), "--die-width/--die-height"
+    profile = provider_target(project)
+    if profile is not None:
+        width, height = profile["technical_target"]["dimensions_um"]
+        return float(width), float(height), PROVIDER_TARGET_REL + ".technical_target.dimensions_um (engineering target, not a reservation)"
     for pat in ("phase3/stage3/pnr/routed.def", "phase3/stage3/pnr/*.def",
                 "**/*.def"):
         for d in sorted(project.glob(pat)):
@@ -827,6 +851,15 @@ def write_finished_def(routed: Path, out: Path,
     if "END DESIGN" not in text:
         return False, f"{routed.name} has no END DESIGN section"
     scale = _def_scale(text)
+    # The ring can target a different provider die size from the routed core.
+    # Carry its measured outer extent into the finished DEF, while preserving
+    # every routed instance, net and pin at its existing coordinates.
+    ol, ob, orr, ot = extent["outer"]["um"]
+    diearea = (f"DIEAREA ( {round(ol * scale)} {round(ob * scale)} ) "
+               f"( {round(orr * scale)} {round(ot * scale)} ) ;")
+    text, dieareas = re.subn(r"\bDIEAREA\b[^;]*;", diearea, text)
+    if dieareas != 1:
+        return False, "the routed DEF must declare exactly one DIEAREA"
     rects = [f"    - PLACEMENT RECT ( {round(x0 * scale)} {round(y0 * scale)} ) "
              f"( {round(x1 * scale)} {round(y1 * scale)} ) ;"
              for x0, y0, x1, y1 in bands]
@@ -961,6 +994,14 @@ def die_id_state(cfg: Dict[str, Any],
     packaging = declared.get("packaging")
     cells = [c for c in (declared.get("cells") or []) if isinstance(c, str)]
     base = {"packaging": packaging, "cells": cells}
+
+    profile = provider_target(project) if project is not None else None
+    if (profile is not None and profile.get("provider") == "wafer.space"
+            and profile["technical_target"].get("packaging") in
+            ("bare_die", "non-CoB bare-die technical profile")):
+        return {**base, "packaging": "bare_die", "state": "NOT_APPLICABLE",
+                "packaging_basis": PROVIDER_TARGET_REL,
+                "reason": "wafer.space non-CoB bare-die profile; operator ID cells are required only for CoB, not this engineering target"}
 
     if not isinstance(packaging, str) or not packaging.strip():
         # R-0929-DIEID-BASIS: die ID is OPERATOR-specific (the shuttle
@@ -1578,6 +1619,164 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     return done(seal, ring_check)
 
 
+def _release_file(path: Path) -> Dict[str, Any]:
+    path = Path(path).resolve()
+    digest = _sha256_file(path)
+    if digest is None:
+        raise ValueError(f"provider release evidence is unreadable: {path}")
+    return {"path": str(path), "sha256": digest, "bytes": path.stat().st_size}
+
+
+def read_admitted_release(project: Path, record_path: Path) -> Dict[str, Any]:
+    """Read this producer's provider assembly, never an arbitrary GDS path.
+
+    This admits a layout and its actual operator-precheck lineage. It does not
+    supply missing final-GDS LVS/STA or claim a purchased/accepted submission.
+    Those remain the existing sign-off and delivery consumers' responsibility.
+    """
+    project = Path(project).resolve()
+    record_path = Path(record_path)
+    if not record_path.is_absolute():
+        record_path = project / record_path
+    record = json.loads(record_path.read_text())
+    if (record.get("producer") != "die_finishing_gen"
+            or record.get("kind") != "provider_die_assembly"
+            or record.get("verdict") != "PASS"):
+        raise ValueError("provider assembly was not admitted by its producer")
+    required = {"source_admission", "source_stream", "raw_gds", "seal_report",
+                "sealed_gds", "instruction", "official_precheck", "finished_def"}
+    if not required.issubset(record["basis"]["files"]):
+        raise ValueError("provider assembly evidence is incomplete")
+    for item in record["basis"]["files"].values():
+        if _release_file(Path(item["path"])) != item:
+            raise ValueError(f"provider release evidence changed: {item['path']}")
+    if _release_file(Path(record["output"]["path"])) != record["output"]:
+        raise ValueError("the provider release GDS changed")
+    official = json.loads(Path(record["basis"]["files"]["official_precheck"]["path"]).read_text())
+    if (official.get("verdict") != "PASS" or official.get("returncode") != 0
+            or official.get("all_steps_requested") is not True
+            or official.get("input_unchanged") is not True
+            or len(official.get("steps", [])) != 16
+            or official.get("output") != record["output"]):
+        raise ValueError("the current operator precheck does not admit this release")
+    for index, step in enumerate(official["steps"]):
+        if step.get("state_out") != record["basis"]["files"].get(f"official_state_{index + 1}"):
+            raise ValueError("operator completion evidence differs from the assembly")
+    return {"gds": Path(record["output"]["path"]),
+            "sha256": record["output"]["sha256"],
+            "report": record_path.resolve(),
+            "source_project": Path(record["source_project"]),
+            "basis": record["basis"], "scope": "provider_die_assembly"}
+
+
+def publish_provider_release(project: Path, record_path: Path, *,
+                             source_project: Path, instruction: Path,
+                             precheck: Path, finishing: Path,
+                             fill_report: Optional[Path] = None,
+                             current_signoff: Optional[Dict[str, Any]] = None):
+    """Publish real finishing -> fill -> full operator-precheck evidence."""
+    import _gds_admission as admission
+
+    project, source_project = Path(project).resolve(), Path(source_project).resolve()
+    old = json.loads(admission.admission_path(source_project).read_text())
+    old_gds = source_project / old["gds_relpath"]
+    if not admission.admitted_gds(source_project, old_gds):
+        raise ValueError("the source design has no current GDS admission")
+    stream_report = source_project / "reports/phase3/fill_librelane.json"
+    stream = json.loads(stream_report.read_text())["default_stream"]
+    raw = _release_file(Path(stream["stream"]))
+    if (raw["sha256"] != stream["stream_sha256"]
+            or raw["sha256"] not in old["gds_members"].values()):
+        raise ValueError("the unsealed source is not the admitted stream checkpoint")
+    seal_doc = json.loads(Path(finishing).read_text())
+    seal = seal_doc["seal_ring"]
+    clearance = seal.get("core_clearance") or seal.get("ring_check", {}).get("core_clearance", {})
+    if (seal.get("state") != "PASS" or Path(seal["gds_in"]).resolve() != Path(raw["path"])
+            or clearance.get("state") != "MEASURED"
+            or clearance.get("population_empty") is not False
+            or clearance.get("encroaching_polygons") != 0):
+        raise ValueError("the new assembly has no measured clear seal-ring evidence")
+    sealed = _release_file(Path(seal["gds_out"]))
+    files = {"source_admission": _release_file(admission.admission_path(source_project)),
+             "source_stream": _release_file(stream_report),
+             "raw_gds": raw, "seal_report": _release_file(finishing), "sealed_gds": sealed,
+             "instruction": _release_file(instruction), "official_precheck": _release_file(precheck)}
+    official = json.loads(Path(precheck).read_text())
+    if (official.get("producer") != "wafer_space_precheck"
+            or official.get("returncode") != 0 or official.get("verdict") != "PASS"
+            or official.get("input_unchanged") is not True
+            or official.get("all_steps_requested") is not True
+            or len(official.get("expected_steps", [])) != 16
+            or len(official.get("steps", [])) != 16):
+        raise ValueError("the complete official provider precheck did not pass")
+    if fill_report is not None:
+        fill = json.loads(Path(fill_report).read_text())
+        if (fill.get("verdict") != "PASS"
+                and not (fill.get("verdict") == "PARTIAL" and fill.get("promoted_on_foundry_floor"))):
+            raise ValueError("the density fill was not admitted by its producer")
+        if Path(fill["gds_in"]).resolve() != Path(sealed["path"]):
+            raise ValueError("the filler did not consume this sealed assembly")
+        precheck_input = _release_file(Path(fill["gds_out"]))
+        files["fill_report"] = _release_file(fill_report)
+        files["filled_gds"] = precheck_input
+    else:
+        precheck_input = sealed
+    if official["input"] != precheck_input:
+        # A normal complete Default stream can include its PDK filler before
+        # density top-up. Reuse that existing exact chain, never invent one.
+        from librelane_fill_dfm import validate_default_stream
+        normal = validate_default_stream(source_project)
+        current = _release_file(old_gds)
+        if official["input"] != current or normal.get("canonical_sha256") != current["sha256"]:
+            raise ValueError("the operator did not check this assembly revision")
+        files["filled_gds"] = current
+    for index, step in enumerate(official["steps"]):
+        state = step.get("state_out")
+        if state is None or _release_file(Path(state["path"])) != state:
+            raise ValueError(f"operator step {index + 1} lacks current completion evidence")
+        files[f"official_state_{index + 1}"] = state
+    final = _release_file(Path(official["output"]["path"]))
+    if official["output"] != final:
+        raise ValueError("the operator's final layout changed")
+    owner = json.loads(Path(instruction).read_text())
+    target = owner["technical_target"]
+    if owner.get("provider") != "wafer.space" or target["slot"] != official["slot"]:
+        raise ValueError("the requested engineering target differs from the operator run")
+    if official["packaging"] != "bare_die" or official.get("assigned_id") is not None:
+        raise ValueError("this bare-die engineering release cannot claim an assigned ID")
+    finished_def = project / "phase3/stage3/pnr/provider_die_finished.def"
+    ok, why = write_finished_def(Path(seal_doc["artefacts"]["routed_def_in"]), finished_def,
+                                 seal["ring_check"]["ring_extent"])
+    if not ok:
+        raise ValueError(why)
+    files["finished_def"] = _release_file(finished_def)
+    record = {"producer": "die_finishing_gen", "kind": "provider_die_assembly",
+              "verdict": "PASS", "source_project": str(source_project), "input": raw,
+              "output": final,
+              "basis": {"files": files, "current_signoff": current_signoff or {},
+                        "provider": "wafer.space", "slot": official["slot"], "CoB": False,
+                        "engineering_target": target, "platform_accepted": False,
+                        "official_precheck_report": files["official_precheck"],
+                        "official_revision": official["official_entry"],
+                        "provider_precheck": {
+                            "provider": "wafer.space", "slot": official["slot"], "cob": False,
+                            "engineering_target": True, "status": "PASS", "accepted": False,
+                            "layout_sha256": final["sha256"],
+                            "official_revision": official["official_entry"],
+                            "source": files["official_precheck"],
+                            "options": {"slot": official["slot"], "cob": False,
+                                        "assigned_id": None, "all_steps_requested": True},
+                            "files": [*files.values()]},
+                        "die_id": {"state": "NOT_APPLICABLE",
+                                   "reason": "wafer.space bare-die non-CoB profile; ID cells are required only for CoB",
+                                   "assigned_id": None}}}
+    record_path = Path(record_path)
+    if not record_path.is_absolute():
+        record_path = project / record_path
+    atomic_write_json(record_path, record)
+    return read_admitted_release(project, record_path)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Step 26.5ic producer — run the PDK's own seal-ring "
@@ -1613,11 +1812,28 @@ def main(argv=None) -> int:
     ap.add_argument("--sealed-by-error", default=None,
                     help="the producer refused; report it, never run our own")
     ap.add_argument("--json", dest="json_out", default=None)
+    ap.add_argument("--publish-provider-precheck")
+    ap.add_argument("--source-project")
+    ap.add_argument("--provider-instruction")
+    ap.add_argument("--fill-report")
+    ap.add_argument("--release-record", default="reports/phase3/provider_die_assembly.json")
     ap.add_argument("--strict", action="store_true",
                     help="treat a disclosed skip as a FAIL (tapeout sign-off)")
     ns = ap.parse_args(argv)
 
     project = Path(ns.project_dir).resolve()
+    if ns.publish_provider_precheck:
+        try:
+            release = publish_provider_release(
+                project, Path(ns.release_record), source_project=Path(ns.source_project),
+                instruction=Path(ns.provider_instruction), precheck=Path(ns.publish_provider_precheck),
+                finishing=Path(ns.report) if ns.report else project / _REPORT_REL,
+                fill_report=Path(ns.fill_report) if ns.fill_report else None)
+            print(json.dumps(release, indent=2, default=str))
+            return PASS
+        except Exception as exc:
+            print(f"die_finishing_gen: provider release refused: {exc}", file=sys.stderr)
+            return FAIL
     try:
         res = run(project, ns.gds, ns.script, ns.form, ns.tech, ns.pdk_root,
                   ns.pdk, ns.python, ns.marker, ns.die_width, ns.die_height,

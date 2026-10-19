@@ -905,6 +905,7 @@ def evaluate(
     runner: Optional[Runner] = None,
     docker_bin: str = "docker",
     programs_dir: Optional[Path] = None,
+    precheck_src: Optional[Path] = None,
 ) -> ReadinessReport:
     """Ask the shuttle, and report what came back — including nothing."""
     shuttle = SHUTTLES.get(shuttle_id)
@@ -984,9 +985,27 @@ def evaluate(
     top = top or chosen.name.split(os.extsep)[0]
 
     # (3) Resolve the external tool. Unreachable is NOT_DETERMINED, never a pass.
+    from die_finishing_gen import PROVIDER_TARGET_REL, provider_target
+    try:
+        profile = provider_target(project)
+    except (ValueError, OSError) as exc:
+        return _report(NOT_DETERMINED, f"the provider target is unreadable: {exc}",
+                       layouts_found=len(hits), layout=str(chosen))
+    if profile is not None:
+        selected = "wafer.space" if shuttle == _WAFER_SPACE_GF180MCU else shuttle.shuttle_id
+        if profile.get("provider") != selected:
+            return _report(NOT_DETERMINED, "the selected provider differs from this shuttle",
+                           layouts_found=len(hits), layout=str(chosen))
+        slot = profile["technical_target"]["slot"]
+        precheck_src = precheck_src or profile.get("precheck_source")
+        if profile["technical_target"].get("packaging") in ("bare_die", "non-CoB bare-die technical profile"):
+            if cob:
+                return _report(NOT_DETERMINED, "CoB conflicts with the selected bare-die profile",
+                               layouts_found=len(hits), layout=str(chosen))
+            cob = False
     img = image or shuttle.default_image
     resolve = image_resolver or default_image_resolver
-    resolved = resolve(img, allow_pull)
+    resolved = ("current native runtime" if precheck_src else resolve(img, allow_pull))
     if not resolved:
         rep = _report(
             NOT_DETERMINED,
@@ -1003,11 +1022,44 @@ def evaluate(
     run_root = (rundir or (project / "reports" / "phase3" /
                            "shuttle_precheck")).resolve()
     run_root.mkdir(parents=True, exist_ok=True)
-    cmd = build_command(shuttle, resolved, chosen, run_root,
-                        top, slot, cob, die_id, docker_bin=docker_bin)
+    if precheck_src:
+        import datetime
+        from die_finishing_gen import _DEF_REL
+        finished_def = project / _DEF_REL
+        if not finished_def.is_file():
+            return _report(NOT_DETERMINED, "the native precheck requires the real finished DEF",
+                           layouts_found=len(hits), layout=str(chosen))
+        state = run_root / "initial_state.json"
+        atomic_write_text(state, json.dumps({"def": str(finished_def.resolve()), "metrics": {}}))
+        tag = datetime.datetime.now(datetime.timezone.utc).strftime("provider-%Y%m%dT%H%M%S%fZ")
+        official_source = Path(precheck_src)
+        if not official_source.is_absolute():
+            official_source = project / official_source
+        cmd = [sys.executable, str(Path(__file__).with_name("wafer_space_precheck.py")),
+               "--official-source", str(official_source.resolve()),
+               "--input", str(chosen.resolve()), "--output", str(run_root / "processed.gds"),
+               "--top", top, "--slot", slot, "--dir", str(run_root), "--run-tag", tag,
+               "--with-initial-state", str(state), "--record", str(run_root / "provider_precheck.json")]
+        if cob:
+            cmd.append("--cob")
+        if die_id:
+            cmd += ["--id", die_id]
+    else:
+        cmd = build_command(shuttle, resolved, chosen, run_root,
+                            top, slot, cob, die_id, docker_bin=docker_bin)
     run = runner or default_runner
     try:
         rc, out, err = run(cmd, timeout)
+        if precheck_src and profile is not None and rc == 0:
+            from die_finishing_gen import publish_provider_release, _REPORT_REL
+            fill_report = project / "reports/phase3/cmp_fill_emit.json"
+            publish_provider_release(
+                project, Path("reports/phase3/provider_die_assembly.json"),
+                source_project=Path(profile.get("source_checkpoint") or project),
+                instruction=project / PROVIDER_TARGET_REL,
+                precheck=run_root / "provider_precheck.json",
+                finishing=project / _REPORT_REL,
+                fill_report=fill_report if fill_report.is_file() else None)
     except Exception as e:  # noqa: BLE001 — any orchestration crash is undetermined
         rep = _report(
             NOT_DETERMINED,
@@ -1124,6 +1176,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Die id passed through to the shuttle tool.")
     p.add_argument("--image", default="",
                    help="Override the shuttle precheck container image.")
+    p.add_argument("--precheck-src", type=Path,
+                   help="Official source checkout in the admitted current native runtime; runs all operator steps.")
     p.add_argument("--pull", action="store_true",
                    help="Attempt to pull the image when it is not local.")
     p.add_argument("--rundir", type=Path, default=None,
@@ -1150,6 +1204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         top=args.top, slot=args.slot, cob=args.cob, die_id=args.die_id,
         image=args.image, rundir=args.rundir, timeout=args.timeout,
         allow_pull=args.pull,
+        precheck_src=args.precheck_src,
     )
     payload = rep.as_dict()
     out_json = args.out_json or (project / READINESS_ARTEFACT)
