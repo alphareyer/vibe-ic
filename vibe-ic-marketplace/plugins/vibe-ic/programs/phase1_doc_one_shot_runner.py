@@ -27377,7 +27377,11 @@ def _l4_encoding_text_without_access_tables(text: str) -> str:
 
 def _l4_encoding_heading_scopes(text: str) -> List[Tuple[int, int, str, str]]:
     """A qualified register.field heading owns its section, within one file."""
-    headings = list(re.finditer(r"(?m)^(#{1,6})[ \t]+([^\n]+)$", text))
+    # Fence examples are not document headings; retain offsets into raw text.
+    heading_text = re.sub(
+        r"(?ms)^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}\1[ \t]*$",
+        lambda match: re.sub(r"[^\n]", " ", match.group(0)), text)
+    headings = list(re.finditer(r"(?m)^(#{1,6})[ \t]+([^\n]+)$", heading_text))
     owner = re.compile(r"^`?([A-Za-z_]\w*)`?\s*\.\s*`?([A-Za-z_]\w*)`?\s*#*\s*$")
     scopes = []
     for i, heading in enumerate(headings):
@@ -27831,14 +27835,14 @@ def _v1_6_512_lift_encoding_for_registers(
         # inserts BETWEEN slices.
         _cursor += len(_ftext) + 1
     qualified_scopes = [
-        (lo + start, lo + end, reg_name, field_name)
+        (lo + start, lo + end, _fname, reg_name, field_name)
         for lo, hi, _fname in _v1_6_517_file_fences
         for start, end, reg_name, field_name in
         _l4_encoding_heading_scopes(joined_text[lo:hi])]
     # Legacy proximity fallback may use unqualified prose, never another
     # explicitly owned field section. Preserve offsets for its file fences.
     unowned_parts, cursor = [], 0
-    for lo, hi, _reg_name, _field_name in qualified_scopes:
+    for lo, hi, _fname, _reg_name, _field_name in qualified_scopes:
         unowned_parts += [joined_text[cursor:lo],
                           re.sub(r"[^\n]", " ", joined_text[lo:hi])]
         cursor = hi
@@ -27854,9 +27858,23 @@ def _v1_6_512_lift_encoding_for_registers(
         # mentions ONCE per register (shared across all this
         # register's fields).
         reg_name = reg.get("register_name") or reg.get("name") or ""
+        evidence = reg.get("evidence")
+        source_keys = {fname for _lo, _hi, fname in _v1_6_517_file_fences
+                       if not isinstance(evidence, str) or not evidence
+                       or evidence in (fname, f"input/docs/{fname}")}
+        # Exact extracted keys own evidence. Mask foreign files without moving
+        # offsets used by the existing proximity/fallback paths.
+        source_text = "\n".join(
+            joined_text[lo:hi] if fname in source_keys
+            else re.sub(r"[^\n]", " ", joined_text[lo:hi])
+            for lo, hi, fname in _v1_6_517_file_fences)
+        source_unowned = "\n".join(
+            unowned_text[lo:hi] if fname in source_keys
+            else re.sub(r"[^\n]", " ", unowned_text[lo:hi])
+            for lo, hi, fname in _v1_6_517_file_fences)
         owned_sections = [(lo, hi, field_name)
-                          for lo, hi, owner_name, field_name in qualified_scopes
-                          if isinstance(reg_name, str)
+                          for lo, hi, fname, owner_name, field_name in qualified_scopes
+                          if fname in source_keys and isinstance(reg_name, str)
                           and owner_name.casefold() == reg_name.casefold()]
         reg_anchor_mentions: List[Tuple[int, int]] = []
         if isinstance(reg_name, str) and len(reg_name) >= 2:
@@ -27865,7 +27883,7 @@ def _v1_6_512_lift_encoding_for_registers(
                     r"\b" + re.escape(reg_name) + r"\b")
                 reg_anchor_mentions = [
                     (m.start(), m.end())
-                    for m in reg_pat.finditer(joined_text)
+                    for m in reg_pat.finditer(source_text)
                 ]
             except re.error:
                 reg_anchor_mentions = []
@@ -27896,7 +27914,7 @@ def _v1_6_512_lift_encoding_for_registers(
                         r"\b" + re.escape(field_name) + r"\b")
                     field_mentions = [
                         (m.start(), m.end())
-                        for m in fld_pat.finditer(joined_text)
+                        for m in fld_pat.finditer(source_text)
                     ]
                 except re.error:
                     field_mentions = []
@@ -27921,7 +27939,7 @@ def _v1_6_512_lift_encoding_for_registers(
                 if bucket in seen_buckets:
                     continue
                 seen_buckets.add(bucket)
-                window = unowned_text[lo:hi]
+                window = source_unowned[lo:hi]
                 total += _v1_6_512_lift_field_encoding(
                     fld, window)
             _v1_6_516_field_post = (
@@ -28015,7 +28033,7 @@ def _v1_6_512_lift_encoding_for_registers(
                         _v1_6_517_reg_pat = re.compile(
                             r"\b" + re.escape(reg_name) + r"\b")
                         _v1_6_517_reg_match = (
-                            _v1_6_517_reg_pat.search(joined_text))
+                            _v1_6_517_reg_pat.search(source_text))
                         if _v1_6_517_reg_match is not None:
                             _v1_6_517_reg_first_mention = (
                                 _v1_6_517_reg_match.start())
@@ -28045,7 +28063,7 @@ def _v1_6_512_lift_encoding_for_registers(
                         _v1_6_517_is_plain_token = (
                             _sig in _v1_6_517_plain_token_sig_ids)
                         for _sm in _sig_pat.finditer(
-                                joined_text):
+                                source_text):
                             _sig_lo = max(0, _sm.start() - 1200)
                             _sig_hi = min(
                                 len(joined_text),
@@ -28077,7 +28095,7 @@ def _v1_6_512_lift_encoding_for_registers(
                             if _bk in _v1_6_516_t3_buckets:
                                 continue
                             _v1_6_516_t3_buckets.add(_bk)
-                            _sig_window = unowned_text[
+                            _sig_window = source_unowned[
                                 _sig_lo:_sig_hi]
                             total += (
                                 _v1_6_512_lift_field_encoding(
