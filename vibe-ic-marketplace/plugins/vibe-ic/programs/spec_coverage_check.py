@@ -2579,6 +2579,306 @@ def _is_single_signal_concat_assignment(spec_text: str, brace_match) -> bool:
 # ---------------------------------------------------------------------------
 # Coverage attribution against the authored TESTBENCH
 # ---------------------------------------------------------------------------
+_CLOCK_HISTORY_CONTEXT_RE = re.compile(
+    r"\b(?:historical(?:ly)?|prior|previous|formerly|earlier|used\s+to|"
+    r"once\s+(?:ran|reached|achieved))\b", re.I)
+_CLOCK_PHYSICAL_CONTEXT_RE = re.compile(
+    r"\b(?:physical\s+signoff|physical\s+timing|post[- ]?route|"
+    r"sign[- ]?off\s+(?:timing|requires?)|STA)\b", re.I)
+_HDL_INT = r"(?:\d+'[sS]?[bBoOdDhH][0-9A-Fa-f_]+|0[xX][0-9A-Fa-f_]+|\d+)"
+
+
+def _clock_requirement_role(evidence: str) -> str:
+    """Classify an explicit clock datum without dropping it from the report."""
+    if _CLOCK_HISTORY_CONTEXT_RE.search(evidence or ""):
+        return "historical"
+    if _CLOCK_PHYSICAL_CONTEXT_RE.search(evidence or ""):
+        return "physical"
+    return "current"
+
+
+def _split_top_level_args(blob: str) -> List[str]:
+    out: List[str] = []
+    start = 0
+    depth = 0
+    for pos, char in enumerate(blob):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            out.append(blob[start:pos].strip())
+            start = pos + 1
+    out.append(blob[start:].strip())
+    return out
+
+
+def _tb_bound_port_roles(rtl_text: Optional[str], tb_code: str) -> Dict[str, str]:
+    """Return TB locals bound to one unambiguous DUT's relevant ports.
+
+    Both named and positional instance connections are resolved through the
+    canonical RTL port parser.  Multiple DUT instances are refused: choosing
+    one would let a decoy instance manufacture source coverage.
+    """
+    if not rtl_text or not tb_code:
+        return {}
+    modules = set(re.findall(r"\bmodule\s+([A-Za-z_]\w*)\b", rtl_text))
+    types = _tb_instantiated_module_types(tb_code, modules)
+    if len(types) != 1:
+        return {}
+    top = types[0]
+    try:
+        _, ports = _SRC.parse_rtl_ports(rtl_text, top)
+    except Exception:
+        return {}
+    instances = list(re.finditer(
+        rf"\b{re.escape(top)}\s*(?:#\s*\(.*?\)\s*)?"
+        r"[A-Za-z_]\w*\s*\((.*?)\)\s*;",
+        tb_code, re.DOTALL))
+    if len(instances) != 1:
+        return {}
+    args = instances[0].group(1)
+    binding: Dict[str, str] = {}
+    named = list(_NAMED_CONN_RE.finditer(args))
+    if named:
+        for match in named:
+            binding[match.group(1).lower()] = match.group(2).lower()
+    else:
+        actuals = _split_top_level_args(args)
+        if len(actuals) != len(ports):
+            return {}
+        for port, actual in zip(ports, actuals):
+            if re.fullmatch(r"[A-Za-z_]\w*", actual):
+                binding[port.name.lower()] = actual.lower()
+
+    def one(role: str, direction: str, pattern: str) -> None:
+        hits = [p for p in ports
+                if p.direction.lower() == direction
+                and re.search(pattern, p.name, re.I)
+                and p.name.lower() in binding]
+        if len(hits) == 1:
+            binding[role] = binding[hits[0].name.lower()]
+
+    one("clock", "input", r"(?:^|_)(?:clk|clock)(?:$|_)")
+    one("address", "input", r"(?:addr|address)")
+    one("write_enable", "input", r"(?:^|_)(?:we|wen|wr_en|write_en|write_enable)(?:$|_)")
+    one("write_data", "input", r"(?:^|_)(?:wdata|wr_data|write_data)(?:$|_)")
+    one("read_data", "output", r"(?:^|_)(?:rdata|rd_data|read_data)(?:$|_)")
+    return binding
+
+
+def _parse_hdl_int(token: str) -> Optional[int]:
+    text = token.strip().replace("_", "")
+    sized = re.fullmatch(r"\d+'[sS]?([bBoOdDhH])([0-9A-Fa-f]+)", text)
+    if sized:
+        base = {"b": 2, "o": 8, "d": 10, "h": 16}[sized.group(1).lower()]
+        try:
+            return int(sized.group(2), base)
+        except ValueError:
+            return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        return None
+
+
+def _finite_for_loops(tb_code: str) -> List[dict]:
+    """Resolve literal finite Verilog ``for`` loops, including reverse loops."""
+    header = re.compile(
+        rf"\bfor\s*\(\s*(?P<var>[A-Za-z_]\w*)\s*=\s*"
+        rf"(?P<start>{_HDL_INT})\s*;\s*(?P=var)\s*"
+        rf"(?P<op><=|>=|<|>)\s*(?P<bound>{_HDL_INT})\s*;\s*"
+        r"(?P<step>[^)]+)\)\s*begin\b", re.I)
+    loops: List[dict] = []
+    for match in header.finditer(tb_code):
+        var = match.group("var")
+        start = _parse_hdl_int(match.group("start"))
+        bound = _parse_hdl_int(match.group("bound"))
+        if start is None or bound is None:
+            continue
+        step_text = re.sub(r"\s+", "", match.group("step"))
+        delta: Optional[int] = None
+        if re.fullmatch(rf"{re.escape(var)}\+\+", step_text, re.I):
+            delta = 1
+        elif re.fullmatch(rf"{re.escape(var)}--", step_text, re.I):
+            delta = -1
+        else:
+            sm = re.fullmatch(
+                rf"{re.escape(var)}(?:=\s*{re.escape(var)}|)"
+                rf"(?P<sign>[+-])(?P<amount>{_HDL_INT})",
+                step_text, re.I)
+            if sm:
+                amount = _parse_hdl_int(sm.group("amount"))
+                if amount:
+                    delta = amount if sm.group("sign") == "+" else -amount
+        if delta is None:
+            continue
+        op = match.group("op")
+        predicate = {
+            "<": lambda value: value < bound,
+            "<=": lambda value: value <= bound,
+            ">": lambda value: value > bound,
+            ">=": lambda value: value >= bound,
+        }[op]
+        if (op in {"<", "<="} and delta <= 0) or (op in {">", ">="} and delta >= 0):
+            continue
+        values: List[int] = []
+        value = start
+        while predicate(value) and len(values) <= 4096:
+            values.append(value)
+            value += delta
+        if not values or len(values) > 4096:
+            continue
+        depth = 1
+        body_end = None
+        for token in re.finditer(r"\bbegin\b|\bend\b", tb_code[match.end():], re.I):
+            depth += 1 if token.group(0).lower() == "begin" else -1
+            if depth == 0:
+                body_end = match.end() + token.start()
+                loop_end = match.end() + token.end()
+                break
+        if body_end is None:
+            continue
+        loops.append({"var": var, "values": values,
+                      "body": tb_code[match.end():body_end],
+                      "start": match.start(), "end": loop_end})
+    return loops
+
+
+def _assigned_expressions(code: str, signal: str) -> List[str]:
+    return [m.group(1).strip() for m in re.finditer(
+        rf"\b{re.escape(signal)}\b\s*(?:<=|=(?!=))\s*([^;]+)", code, re.I)]
+
+
+def _loop_address_values(loop: dict, address_signal: str) -> set:
+    var = loop["var"]
+    values: set = set()
+    for expr in _assigned_expressions(loop["body"], address_signal):
+        compact = re.sub(r"\s+", "", expr).strip("()")
+        match = re.fullmatch(
+            rf"(?:(?P<left>{_HDL_INT})\+{re.escape(var)}|"
+            rf"{re.escape(var)}\+(?P<right>{_HDL_INT}))",
+            compact, re.I)
+        if not match:
+            continue
+        base = _parse_hdl_int(match.group("left") or match.group("right"))
+        if base is not None:
+            values |= {base + value for value in loop["values"]}
+    return values
+
+
+def _last_assigned_int(code: str, signal: str) -> Optional[int]:
+    values = _assigned_expressions(code, signal)
+    return _parse_hdl_int(values[-1]) if values else None
+
+
+def _tb_register_loop_coverage(tb_code: str,
+                               rtl_text: Optional[str]) -> tuple:
+    """Return ``(loop_attempted, proven_offsets)`` for bound write/read loops."""
+    attempted = bool(re.search(r"\b(?:for|while|repeat|forever)\b", tb_code, re.I))
+    roles = _tb_bound_port_roles(rtl_text, tb_code)
+    required = ("address", "write_enable", "write_data", "read_data")
+    if not all(roles.get(role) for role in required):
+        return attempted, set()
+    write_offsets: set = set()
+    read_offsets: set = set()
+    for loop in _finite_for_loops(tb_code):
+        addresses = _loop_address_values(loop, roles["address"])
+        if not addresses:
+            continue
+        we_values = [_parse_hdl_int(value) for value in
+                     _assigned_expressions(loop["body"], roles["write_enable"])]
+        writes_data = any(re.search(rf"\b{re.escape(loop['var'])}\b", expr, re.I)
+                          for expr in _assigned_expressions(
+                              loop["body"], roles["write_data"]))
+        if any(value not in (None, 0) for value in we_values) and writes_data:
+            write_offsets |= addresses
+
+        read_compare = bool(re.search(
+            rf"(?:\b{re.escape(roles['read_data'])}\b\s*(?:!==|!=|===|==)\s*"
+            rf"\b{re.escape(loop['var'])}\b|"
+            rf"\b{re.escape(loop['var'])}\b\s*(?:!==|!=|===|==)\s*"
+            rf"\b{re.escape(roles['read_data'])}\b)",
+            loop["body"], re.I))
+        has_verdict = bool(re.search(r"\bassert\b|\$(?:fatal|error)\b",
+                                     loop["body"], re.I))
+        we_before = _last_assigned_int(tb_code[:loop["start"]],
+                                       roles["write_enable"])
+        if read_compare and has_verdict and we_before == 0:
+            read_offsets |= addresses
+    return attempted, write_offsets & read_offsets
+
+
+def _time_unit_ns(unit: str) -> Optional[float]:
+    return {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0,
+            "ps": 1e-3, "fs": 1e-6}.get(unit.lower())
+
+
+def _clock_target_mhz(item: ChecklistItem) -> Optional[float]:
+    if len(item.coverage_tokens) < 2:
+        return None
+    try:
+        value = float(item.coverage_tokens[0].replace("_", "").replace(",", ""))
+    except ValueError:
+        return None
+    scale = {"ghz": 1000.0, "mhz": 1.0, "khz": 1e-3, "hz": 1e-6}
+    factor = scale.get(item.coverage_tokens[1].lower())
+    return value * factor if factor is not None else None
+
+
+def _tb_proves_clock_frequency(item: ChecklistItem, tb_code: str,
+                               rtl_text: Optional[str]) -> tuple:
+    target_mhz = _clock_target_mhz(item)
+    roles = _tb_bound_port_roles(rtl_text, tb_code)
+    clock = roles.get("clock")
+    if target_mhz is None or target_mhz <= 0 or not clock:
+        return False, "no unambiguous DUT clock binding for a measured period proof"
+    timescale = re.search(
+        r"`timescale\s+(\d+(?:\.\d+)?)\s*(s|ms|us|ns|ps|fs)\b",
+        tb_code, re.I)
+    scale_ns = (float(timescale.group(1)) * _time_unit_ns(timescale.group(2))
+                if timescale and _time_unit_ns(timescale.group(2)) is not None
+                else None)
+    delay = re.search(
+        rf"\balways\s*#\s*(\d+(?:\.\d+)?)\s*(s|ms|us|ns|ps|fs)?\s*"
+        rf"\b{re.escape(clock)}\b\s*=\s*~\s*\b{re.escape(clock)}\b",
+        tb_code, re.I)
+    if not delay:
+        return False, "no periodic drive of the bound DUT clock"
+    if delay.group(2):
+        unit_ns = _time_unit_ns(delay.group(2))
+    else:
+        unit_ns = scale_ns
+    if unit_ns is None:
+        return False, "clock delay has no resolvable time unit"
+    generated_period_ns = 2.0 * float(delay.group(1)) * unit_ns
+    edges = len(re.findall(
+        rf"@\s*\(\s*(?:pos|neg)edge\s+{re.escape(clock)}\b", tb_code, re.I))
+    if edges < 2:
+        return False, "no two-edge measurement on the bound DUT clock"
+    for prior in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*\$time\b", tb_code, re.I):
+        stamp = prior.group(1)
+        measured = re.search(
+            rf"\$time\s*-\s*{re.escape(stamp)}\s*\)?\s*"
+            rf"(?:!==|!=)\s*(\d+(?:\.\d+)?)",
+            tb_code[prior.end():], re.I)
+        if not measured:
+            continue
+        tail = tb_code[prior.end() + measured.end():
+                       prior.end() + measured.end() + 120]
+        if not re.search(r"\$(?:fatal|error)\b", tail, re.I):
+            continue
+        measured_period_ns = float(measured.group(1)) * (scale_ns or unit_ns)
+        target_period_ns = 1000.0 / target_mhz
+        tolerance = max(1e-9, target_period_ns * 1e-6)
+        if (abs(generated_period_ns - measured_period_ns) <= tolerance
+                and abs(measured_period_ns - target_period_ns) <= tolerance):
+            return True, (f"TB proves actual DUT clock `{clock}` with a measured "
+                          f"{measured_period_ns:g} ns period equivalent to "
+                          f"{target_mhz:g} MHz")
+    return False, "no fatal-backed two-edge period measurement matches the current clock target"
+
+
 def _pulse_receipt_admissible(item: ChecklistItem, rtl_text: Optional[str],
                               receipt: Optional[dict]) -> bool:
     if not isinstance(receipt, dict) or not rtl_text:
@@ -2634,10 +2934,40 @@ def attribute_coverage(items: List[ChecklistItem], tb_text: Optional[str],
                                tb_clean))
     tb_values_norm = {_norm_value(v) for v in tb_values}
 
+    register_loop_attempted, register_loop_offsets = \
+        _tb_register_loop_coverage(
+            _HDL.strip_hdl_comments_and_strings(tb_text), rtl_text)
+
     members_norm = {_norm_value(m) for m in enum_members_all
                     if re.fullmatch(r"(0[xXbB][0-9A-Fa-f_]+|\d+|\d+'[bdh][0-9A-Fa-fxXzZ_]+)", m)}
 
     for it in items:
+        if it.kind == "clock_frequency":
+            role = _clock_requirement_role(it.evidence)
+            if role == "historical":
+                it.covered = False
+                it.coverage_note = (
+                    "historical clock datum is informational context, not the "
+                    "current functional-TB target")
+            elif role == "physical":
+                it.covered = False
+                it.coverage_note = (
+                    "NOT_MEASURED on physical/post-route signoff axis; a TB "
+                    "delay or functional period assertion cannot close Fmax")
+            else:
+                it.covered, it.coverage_note = _tb_proves_clock_frequency(
+                    it, _HDL.strip_hdl_comments_and_strings(tb_text), rtl_text)
+            continue
+        if it.kind == "register" and register_loop_attempted:
+            offsets = [_parse_hdl_int(token) for token in it.coverage_tokens]
+            offset = next((value for value in offsets if value is not None), None)
+            it.covered = offset is not None and offset in register_loop_offsets
+            it.coverage_note = (
+                f"finite write/read loop on the bound DUT bus covers offset 0x{offset:x}"
+                if it.covered else
+                "no finite write/read loop bound to the DUT address/data bus "
+                "proves this register offset")
+            continue
         # The enum-boundary item needs an OUTSIDE-the-set value in the TB.
         if "__OUTSIDE_SET__" in it.coverage_tokens:
             # When the enum has NO value-shaped members (identifier-only set),
@@ -3107,6 +3437,17 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
         if _BYTEORDER_RE.search(_table_txt):
             _structural_kinds.add("byte_order")
     for it in items:
+        if it.kind == "clock_frequency":
+            role = _clock_requirement_role(it.evidence)
+            if role in {"historical", "physical"}:
+                it.provenance = _prov.PROSE_HEURISTIC
+                it.block_eligible = False
+                it.advisory_note = (
+                    "historical clock context is informational"
+                    if role == "historical" else
+                    "physical/post-route Fmax is owned by timing signoff, not "
+                    "the functional RTL testbench")
+                continue
         if it.kind in _PROSE_HEURISTIC_KINDS and it.kind not in _structural_kinds:
             it.provenance = _prov.PROSE_HEURISTIC
             corr = _prov.UNKNOWN
