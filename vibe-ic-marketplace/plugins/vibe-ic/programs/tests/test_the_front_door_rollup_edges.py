@@ -2231,3 +2231,50 @@ def test_terminal_halt_context_preserves_full_success_and_phase_failure(
                    if row["name"] in ("phase1", "phase2", "phase3"))
     else:
         assert next(row for row in doc["phases"] if row["name"] == "phase3")["verdict"] == "SKIPPED"
+
+
+def test_explicit_frontend_window_preserves_signed_d1_success(tmp_path, monkeypatch):
+    """A signed D1 and a software Phase-2 child close only the explicit window."""
+    from types import SimpleNamespace
+    import step_output_collector as versions
+
+    project, _, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    monkeypatch.setattr(_pl, "emit_final_summary", lambda *a, **k: False)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (False, ""))
+    monkeypatch.setattr(V._canonical_admission, "admit_span", lambda *a, **k:
+                        SimpleNamespace(admitted=True, identity_sha256="source-control"))
+    monkeypatch.setattr(V._canonical_admission, "child_env",
+                        lambda _identity, env: dict(env))
+    calls = []
+
+    def bounded_child(label, runner, args, env=None):
+        calls.append(runner.name)
+        assert runner.name == "design_one_shot_runner.py", calls
+        assert args[args.index("--exit-step") + 1] == "2", args
+        _report(project, "phase2_one_shot.json", {
+            "verdict": "PASS", "bounded": True,
+            "declared_window": {"entry_step": None, "exit_step": "2"},
+            "scope": "SOURCE_CONTROL Phase-2 subprocess writer; no native producer"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", bounded_child)
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+        "--no-dashboard", "--skip-hardware", "--skip-analog", "--exit-step", "2"])
+    real_entry("IC", "default", project)
+    rc = V.main()
+    report = _pl.report_path(project, "vibe_ic_one_shot.json")
+    doc = json.loads(report.read_text())
+    observation = {"scope": "Signed retained neutral D1 and real main/rollup/report/replay; Phase-2 admission/subprocess are software leaves",
+                   "rc": rc, "report": doc, "phase_calls": calls}
+    (tmp_path / "EXPLICIT_BOUNDED_SUCCESS_OBSERVATION.json").write_text(
+        json.dumps(observation, indent=2) + "\n")
+    assert rc == 0 and doc["bounded"] is True, observation
+    assert doc["dispatched_verdict"] == "PASS", observation
+    assert doc["verdict"] == doc["whole_flow_verdict"] == "NOT_MEASURED", observation
+    assert doc["declared_window"] == {"entry_step": None, "exit_step": "2"}
+    assert doc.get("halted_at") is None and calls == ["design_one_shot_runner.py"]
+    assert doc["phases"][0] == {"name": "phase1", "verdict": "PASS", "rc": 0}
+    assert versions.latest_pass(project, "D1")["canonical_pass"] is True
+    assert {path: path.read_bytes() for path in before} == before
+    assert GUARD._is_orchestrator_report(report, project)
