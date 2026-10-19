@@ -2171,7 +2171,8 @@ def _professional_sibling_asserted_reads(
         return function_result(function, parameter_values, parameter_objects,
                                blocked, active, depth + 1)
 
-    def method_result(call, obj, values, objects, blocked, active, depth):
+    def method_result(call, obj, values, objects, blocked, active, depth,
+                      awaited):
         if call.args or call.keywords or not isinstance(call.func, ast.Attribute):
             return set(), set()
         methods = [item for item in obj['class'].body
@@ -2183,6 +2184,8 @@ def _professional_sibling_asserted_reads(
         if len(methods) != 1 or member_binding_count != 1:
             return set(), set()
         method = methods[0]
+        if isinstance(method, ast.AsyncFunctionDef) != awaited:
+            return set(), set()
         positional = [*method.args.posonlyargs, *method.args.args]
         if len(positional) != 1 or positional[0].arg != obj['self']:
             return set(), set()
@@ -2190,12 +2193,13 @@ def _professional_sibling_asserted_reads(
                                blocked | obj['module_bound'],
                                active, depth + 1)
 
-    def expression_result(expr, values, objects, blocked, active, depth):
+    def expression_result(expr, values, objects, blocked, active, depth,
+                          awaited=False):
         if expr is None or depth > 16:
             return set(), set()
         if isinstance(expr, ast.Await):
             return expression_result(expr.value, values, objects,
-                                     blocked, active, depth + 1)
+                                     blocked, active, depth + 1, awaited=True)
         if isinstance(expr, ast.Name):
             return values.get(expr.id, (set(), set()))
         if (isinstance(expr, ast.Attribute) and expr.attr == 'value'
@@ -2217,13 +2221,17 @@ def _professional_sibling_asserted_reads(
                                          blocked, active, depth + 1)
             if (isinstance(expr.func, ast.Name) and expr.func.id not in blocked
                     and expr.func.id in local_functions):
-                return call_function(expr, local_functions[expr.func.id], values,
-                                     objects, blocked, active, depth + 1)
+                function = local_functions[expr.func.id]
+                if isinstance(function, ast.AsyncFunctionDef) != awaited:
+                    return set(), set()
+                return call_function(expr, function, values, objects, blocked,
+                                     active, depth + 1)
             if (isinstance(expr.func, ast.Attribute)
                     and isinstance(expr.func.value, ast.Name)
                     and expr.func.value.id in objects):
                 return method_result(expr, objects[expr.func.value.id], values,
-                                     objects, blocked, active, depth + 1)
+                                     objects, blocked, active, depth + 1,
+                                     awaited)
             return set(), set()
         if isinstance(expr, (ast.Compare, ast.BinOp, ast.UnaryOp)):
             return merge(expression_result(child, values, objects, blocked,
