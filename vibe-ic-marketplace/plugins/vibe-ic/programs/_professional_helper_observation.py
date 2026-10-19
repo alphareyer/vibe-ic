@@ -310,8 +310,14 @@ class _Graph:
                 condition = self.expr(node.test, env, module)
                 if not isinstance(condition, _Data) or condition.literal is _UNKNOWN:
                     left, right = dict(env), dict(env)
+                    preceding = set(self.asserted)
                     returns.extend(self.statements(node.body, left, module))
+                    body_asserted = self.asserted - preceding
+                    self.asserted = set(preceding)
                     returns.extend(self.statements(node.orelse, right, module))
+                    # Both branches may run. A read asserted on only one of
+                    # them cannot establish an observed output for this call.
+                    self.asserted = preceding | (body_asserted & (self.asserted - preceding))
                     for name in set(left) | set(right):
                         a, b = left.get(name, _UNKNOWN), right.get(name, _UNKNOWN)
                         env[name] = (a if a is b else _joined([a, b])

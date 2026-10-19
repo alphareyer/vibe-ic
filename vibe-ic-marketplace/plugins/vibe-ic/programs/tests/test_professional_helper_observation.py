@@ -35,16 +35,19 @@ def project(tmp_path, variant='sibling'):
             'multi_hop_no_await': ('actual = await block_value(env)', 'actual = block_value(env)'),
             'multi_hop_dead_loop': ('for _ in range(2):', 'for _ in range(0):'),
             'multi_hop_dead_comparison_assert': None,
+            'multi_hop_dead_unknown_comparison_assert': None,
         }
         change = changes[variant]
         if change:
             source, helper = source.replace(*change), helper.replace(*change)
-        if variant == 'multi_hop_dead_comparison_assert':
+        if variant in ('multi_hop_dead_comparison_assert',
+                       'multi_hop_dead_unknown_comparison_assert'):
             source = source.replace('expected = bytes([value ^ 0x3a]) * 2',
                                     'expected = b"::"')
             helper = helper[:helper.index('    async def output(self):')] + (
-                '    async def output(self):\n'
-                '        if 1 == 0:\n'
+                '    async def output(self):\n' +
+                ('        if 1 < 0:\n' if variant == 'multi_hop_dead_unknown_comparison_assert'
+                 else '        if 1 == 0:\n') +
                 '            assert int(self.dut.out_o.value) == 0\n'
                 '        return b"::"\n')
     elif variant == 'module_alias':
@@ -188,7 +191,8 @@ def test_unestablished_or_unasserted_helper_observation_stays_refused(tmp_path, 
 @pytest.mark.parametrize('variant', ['multi_hop', 'multi_hop_constant_return',
     'multi_hop_unasserted_result', 'multi_hop_constant_drive',
     'multi_hop_no_await', 'multi_hop_dead_loop',
-    'multi_hop_dead_comparison_assert'])
+    'multi_hop_dead_comparison_assert',
+    'multi_hop_dead_unknown_comparison_assert'])
 def test_multihop_return_assertion_and_reachable_input_drive(tmp_path, variant):
     audit = coverage.functional_stimulus_audit(project(tmp_path, variant))
     established = audit['decidable'] and bool(audit['driven'])
