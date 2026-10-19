@@ -1181,14 +1181,65 @@ def _table_ports(prompt: str) -> Dict[str, str]:
     # the shared `_parse_md_table_ports` Direction-column discipline.
     directionless = _directionless_table_names(prompt)
     configuration_spans = _configuration_table_spans(prompt)
+    table_spans = []
+    # Bind proper tables by column role: Width may separate Name and Direction.
+    # A register-map row is excluded at this occurrence, never by its name, so
+    # the same identifier can still be an explicitly declared physical port.
+    lines = prompt.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    register_map_section = False
+    for i, line in enumerate(lines[:-1]):
+        if re.match(r"^\s{0,3}#{1,6}\s+", line):
+            register_map_section = bool(_REGMAP_STRICT_HEADING_RE.match(line))
+        header = [cell.strip().strip("*_` ") for cell in _split_md_row_local(line)]
+        delimiter = _split_md_row_local(lines[i + 1])
+        if ("|" not in line or len(header) != len(delimiter)
+                or not _is_md_delim_local(delimiter)):
+            continue
+        name_col = next((k for k, cell in enumerate(header) if re.fullmatch(
+            r"(?:(?:ports?|signals?|pins?)(?:\s+names?)?|name|訊號|信號|信号|名稱|名称)",
+            cell, re.I)), None)
+        dir_col = next((k for k, cell in enumerate(header) if re.fullmatch(
+            r"(?:direction|dir\.?|i\s*/\s*o|方向)", cell, re.I)), None)
+        register_table = (register_map_section and dir_col is None
+                          and any(re.fullmatch(
+                              r"(?:offset|address|addr|regoffset|位址|地址)", cell, re.I)
+                                  for cell in header)
+                          and any(re.fullmatch(
+                              r"(?:name|register(?:\s+name)?|reg|field(?:\s+name)?|csr|名稱|名称)",
+                              cell, re.I) for cell in header)
+                          and any(re.fullmatch(r"(?:access|r\s*/\s*w|存取|訪問|访问)",
+                                               cell, re.I) for cell in header))
+        if not register_table and (name_col is None or dir_col is None):
+            continue
+        end = i + 2
+        while end < len(lines) and "|" in lines[end] and lines[end].strip():
+            if not register_table:
+                cells = _split_md_row_local(lines[end])
+                if len(cells) > max(name_col, dir_col):
+                    name = cells[name_col].strip().strip("*_` ")
+                    direction = cells[dir_col].strip().strip("*_` ").lower()
+                    direction = {"in": "input", "out": "output", "i/o": "inout"}.get(
+                        direction, direction)
+                    if (re.fullmatch(r"[A-Za-z_]\w*", name)
+                            and name not in _SV_PORT_KEYWORDS):
+                        if direction in ("input", "output", "inout"):
+                            out[name] = direction
+                        else:
+                            out.setdefault(name, "")
+            end += 1
+        table_spans.append((offsets[i + 2], offsets[end]))
     # Split on the pipe so an inline single-line table (the acceptance shape)
     # and a true multi-row markdown table both work: scan windows of
     # ``name` | dir` regardless of line boundaries.
     for cell_m in re.finditer(r"`([A-Za-z_]\w*)`\s*\|\s*([A-Za-z]+)", prompt):
         name = cell_m.group(1)
         word = cell_m.group(2).lower()
-        if word not in ("input", "output", "inout") and any(
-                start <= cell_m.start() < end for start, end in configuration_spans):
+        if (any(start <= cell_m.start() < end for start, end in table_spans)
+                or (word not in ("input", "output", "inout") and any(
+                    start <= cell_m.start() < end for start, end in configuration_spans))):
             continue
         # (FIR_0001) a candidate name equal (whole-token) to a reserved SV
         # type/direction keyword is a Type-column cell, not a port — skip it.
