@@ -1071,3 +1071,69 @@ def test_recorded_window_does_not_hide_an_accidental_dispatch():
     exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])),
                  str(RUNNER), 'exec'), env)
     assert env['_window_step_ids']() == {'4', '7', '9', '11', '12', '13'}
+
+
+@pytest.mark.parametrize("entry,exit_step,selected", [
+    (None, "D1", False),
+    ("7", "9", False),
+    ("1", "1", True),
+    (None, None, True),
+])
+def test_real_rtl_alias_leaves_follow_their_owned_dispatch_span(
+        tmp_path, entry, exit_step, selected):
+    """Actual main statements/predicates and both real absent-RTL readers.
+
+    Only these owning dispatch statements are extracted; no alias leaf is
+    mocked and no signed checkpoint, full main/frontdoor or IC run is claimed.
+    """
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    import step_preflight as spf
+
+    dsr = _load("design_one_shot_runner")
+    sites = spf.RUNNER_PLANS['design_one_shot_runner'].sites
+    entry_site = spf.site_for_step('design_one_shot_runner', entry) if entry else None
+    pruned = dsr._exit_pruned_sites(sites, exit_step) if exit_step else []
+    targets = {'step_leaf_typo_aliases', 'step_reset_clock_variant_aliases'}
+    helpers = {'_site_order', '_before_entry', '_after_exit',
+               '_exit_sentinel', '_entry_sentinel'}
+    nodes = []
+    for node in _main_node().body:
+        if isinstance(node, ast.FunctionDef):
+            if node.name in helpers:
+                nodes.append(node)
+            continue
+        calls = {n.func.id for n in ast.walk(node)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        if calls & targets:
+            nodes.append(node)
+    assert sum(not isinstance(n, ast.FunctionDef) for n in nodes) == 2
+    plan = []
+    env = {'_spf': spf, '_entry_site': entry_site, '_exit_pruned': pruned,
+           'StepResult': dsr.StepResult, 'project': tmp_path, 'plan': plan,
+           'args': SimpleNamespace(entry_step=entry, exit_step=exit_step,
+                                   top_name='unit_top'),
+           'step_leaf_typo_aliases': dsr.step_leaf_typo_aliases,
+           'step_reset_clock_variant_aliases': dsr.step_reset_clock_variant_aliases}
+    assert not dsr._pl.rtl_dir(tmp_path).is_dir()
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                 str(RUNNER), 'exec'), env)
+    observation = {'scope': 'Actual extracted main alias dispatch, real window predicates and real no-RTL leaves; not full main or signed-D1/frontdoor replay',
+                   'entry': entry, 'exit_step': exit_step,
+                   'rows': [asdict(row) for row in plan]}
+    (tmp_path / 'REAL_ALIAS_WINDOW_OBSERVATION.json').write_text(
+        json.dumps(observation, indent=2) + '\n')
+    assert [row.name for row in plan] == ['leaf_typo_aliases', 'reset_clock_variant_aliases']
+    assert [row.status for row in plan] == [
+        'NOT_MEASURED' if selected else 'NOT_APPLICABLE'] * 2, observation
+    if selected:
+        assert all(row.reason_class == dsr._V.ReasonClass.INPUT_ABSENT for row in plan)
+        assert all(row.detail == 'no rtl/ directory yet' for row in plan)
+        assert dsr._aggregate_verdict(plan) == 'NOT_MEASURED'
+    else:
+        assert all(row.declared_by == (
+            '--exit-step D1' if exit_step == 'D1' else '--entry-step 7') for row in plan)
+    # A measured failure still outranks any unmeasured or out-of-window rows.
+    fail = dsr.StepResult('measured_control', 'FAIL', 0.0, 'measured software failure')
+    assert dsr._aggregate_verdict([fail, *plan]) == 'FAIL'
+    assert not dsr._pl.rtl_dir(tmp_path).exists()
