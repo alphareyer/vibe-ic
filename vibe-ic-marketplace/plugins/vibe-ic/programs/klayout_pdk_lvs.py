@@ -788,9 +788,8 @@ def read_current_verdict(project, report_path, layout):
     bound_path = Path(bound.get("path", ""))
     if not bound_path.is_absolute():
         bound_path = project / bound_path
-    if (bound.get("kind") != "gds"
-            or bound_path.resolve() != layout
-            or bound.get("sha256") != _file_record(layout)["sha256"]):
+    if (bound.get("kind") != "gds" or not bound_path.is_file()
+            or bound.get("sha256") != _file_record(bound_path)["sha256"]):
         raise ValueError("NATIVE_LVS_LAYOUT_MISMATCH")
     for key in ("layout_source", "reference_source", "deck", "native_result",
                 "cell_library_bundle", "source_netlist", "driver_source", "log"):
@@ -827,7 +826,19 @@ def read_current_verdict(project, report_path, layout):
             or record.get("execution", {}).get("inputs_unchanged") is not True
             or record.get("status") != expected):
         raise ValueError("NATIVE_LVS_NOT_MEASURED")
-    return record
+    requested = {"kind": "gds", **_file_record(layout)}
+    equivalence = None
+    if requested["sha256"] != bound["sha256"]:
+        from gds_canonical_digest import semantic_layout_equivalence
+        equivalence = semantic_layout_equivalence(bound_path, layout)
+        if (equivalence.get("equivalent") is not True
+                or equivalence.get("source", {}).get("sha256") != bound["sha256"]
+                or equivalence.get("target", {}).get("sha256") != requested["sha256"]):
+            raise ValueError("NATIVE_LVS_LAYOUT_NOT_EQUIVALENT")
+    # This is a consumer view. The producer report, its extraction subject and
+    # its raw native database remain unchanged and visible to the archive.
+    return {**record, "requested_subject": requested,
+            "subject_equivalence": equivalence}
 
 
 def cmd_native(args, pya):

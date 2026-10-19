@@ -463,3 +463,52 @@ def test_native_geometry_bridge_accepts_only_date_rewrites_and_is_rechecked(tmp_
     report.write_text(json.dumps(record))
     with pytest.raises(ValueError, match="LAYOUT_NOT_EQUIVALENT"):
         mod.read_current_verdict(tmp_path, report, layout)
+
+
+@pytest.mark.skipif(not _HAS_PYA, reason="KLayout semantic comparison requires pya")
+@pytest.mark.parametrize("case", ["same_bytes", "rewritten", "shape_change",
+                                  "basis_changed", "measured_fail"])
+def test_native_requested_subject_preserves_extraction_and_checks_semantics(tmp_path, case):
+    import struct
+    layout, report, record = _bound_native_record(
+        tmp_path, "NoMatch" if case == "measured_fail" else "Match")
+
+    def write_subject(path, width):
+        database = pya.Layout(); database.dbu = 0.001
+        top = database.create_cell("unit")
+        top.shapes(database.layer(1, 0)).insert(pya.Box(0, 0, width, 500))
+        top.shapes(database.layer(1, 1)).insert(pya.Text("input", pya.Trans()))
+        database.write(str(path))
+
+    write_subject(layout, 1000)
+    record["layout_source"] = {"kind": "gds", **mod._file_record(layout)}
+    requested = tmp_path / "delivered.gds"
+    requested.write_bytes(layout.read_bytes())
+    if case in ("rewritten", "measured_fail"):
+        rewritten = bytearray(requested.read_bytes()); offset = 0
+        while offset < len(rewritten):
+            length, record_type, _ = struct.unpack_from(">HBB", rewritten, offset)
+            if record_type in (0x01, 0x05):
+                struct.pack_into(">h", rewritten, offset + 4, 2025)
+            offset += length
+        requested.write_bytes(rewritten)
+        assert mod._file_record(requested)["sha256"] != record["layout_source"]["sha256"]
+    elif case == "shape_change":
+        write_subject(requested, 1400)
+    elif case == "basis_changed":
+        layout.write_bytes(b"changed-original-extraction-subject")
+    report.write_text(json.dumps(record))
+    original_report = report.read_bytes()
+    original_database = Path(record["native_result"]["path"]).read_bytes()
+    if case in ("shape_change", "basis_changed"):
+        with pytest.raises(ValueError, match="LAYOUT_(NOT_EQUIVALENT|MISMATCH)"):
+            mod.read_current_verdict(tmp_path, report, requested)
+    else:
+        verdict = mod.read_current_verdict(tmp_path, report, requested)
+        assert verdict["layout_source"] == record["layout_source"]
+        assert verdict["requested_subject"] == {"kind": "gds", **mod._file_record(requested)}
+        assert verdict["status"] == record["status"]
+        if case != "same_bytes":
+            assert verdict["subject_equivalence"]["equivalent"] is True
+    assert report.read_bytes() == original_report
+    assert Path(record["native_result"]["path"]).read_bytes() == original_database
