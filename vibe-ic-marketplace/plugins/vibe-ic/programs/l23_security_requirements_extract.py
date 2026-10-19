@@ -55,7 +55,12 @@ def extract_security_requirements(project: Path) -> Optional[Dict[str, Any]]:
     }
     for path, text in input_doc_texts(project):
         source = path.relative_to(project).as_posix()
-        hits = headings(text, source_path=source, deduplicate=False)
+        # Markdown examples do not declare requirements. Mask their headings
+        # without moving offsets used to slice the original source and cite it.
+        heading_text = re.sub(
+            r"(?ms)^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}\1[ \t]*$",
+            lambda match: re.sub(r"[^\n]", " ", match.group(0)), text)
+        hits = headings(heading_text, source_path=source, deduplicate=False)
         stack = []
         for index, hit in enumerate(hits):
             section = hit["section_id"]
