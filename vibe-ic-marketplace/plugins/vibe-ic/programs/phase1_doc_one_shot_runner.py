@@ -52966,6 +52966,15 @@ def gen_l9_integration_spec(project: Path,
     import interface_bindings
     bound = interface_bindings.admit(project, bound)
     bound = _admit_qualified_output_input(project, bound)
+    if not bound.get("interface_type") and not bound.get("interface_types"):
+        import known_answer_vector
+        declared = known_answer_vector.declared_mmio_interface(
+            extracted, bound.get("top_ports") or bound.get("ports") or [])
+        if declared is not None:
+            bound["interface_type"] = declared["name"]
+            bound["interface_types"] = [declared]
+            bound["no_interface_type_in_input"] = False
+            bound["no_interface_types_in_input"] = False
     return _write_l_doc(
         project, "L9_INTEGRATION_SPEC", bound, evidence,
         source_documents=_source_documents_from_extracted(project, extracted))
@@ -56405,11 +56414,11 @@ def _post_emit_ic_class_into_L9_L1(project: Path,
                                 and _c.get("kind") == _kav_pp.KIND):
                             _c["transport"] = _tr
                             _touched += 1
-                    if _touched:
-                        _cen = _l10.get("known_answer_vector_census")
-                        if isinstance(_cen, dict):
-                            _cen["transport"] = _tr
-                            _cen["transport_resolved_in"] = "l9_post_pass"
+                    _cen = _l10.get("known_answer_vector_census")
+                    if isinstance(_cen, dict):
+                        _cen["transport"] = _tr
+                        _cen["transport_resolved_in"] = "l9_post_pass"
+                    if _touched or isinstance(_cen, dict):
                         _stamp.dump(_l10_p, _l10)
             except Exception:  # nosec — a transport refresh must never break L9
                 pass

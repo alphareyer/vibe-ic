@@ -10,10 +10,10 @@ _HEADING = re.compile(r'^#{1,6}\s+`*([A-Za-z_]\w*)`*\s+Register\s*\(\s*(0x[0-9a-
 _BITS = re.compile(r'^(\d+)(?:\s*[-:]\s*(\d+))?$')
 
 
-def _fields(lines):
+def _fields(lines, *, source, first_line):
     roles = None
     fields, spans, names = [], [], set()
-    for line in lines:
+    for line_number, line in enumerate(lines, first_line):
         if not line.strip().startswith('|'):
             if roles is not None:
                 break
@@ -40,9 +40,14 @@ def _fields(lines):
             return None
         spans.append((lo, hi))
         name = cells[ni]
-        # This producer owns named fields only; reserved rows carry no new
-        # scalar reset/mask or write policy. Preserve their span for overlap checks.
+        # An explicit reserved row has its own source-owned span and policy.
+        # Preserve the local description without inventing scalar behavior.
         if name.lower() in {'reserved', '保留'}:
+            fields.append({'bits': str(lo) if lo == hi else f'{hi}:{lo}',
+                           'field_name': name, 'role': 'reserved',
+                           'description': cells[di] if di is not None else '',
+                           'evidence': {'source': source, 'line': line_number,
+                                        'quote': line}})
             continue
         if not re.fullmatch(r'[A-Za-z_]\w*', name) or name in names:
             return None
@@ -66,7 +71,8 @@ def attach_named_fields(registers, extracted):
             end = next((j for j in range(i + 1, len(lines))
                         if re.match(r'^#{1,6}\s', lines[j].strip())), len(lines))
             key = (f'input/docs/{source}', heading[1], int(heading[2], 16))
-            declarations.setdefault(key, []).append(_fields(lines[i + 1:end]))
+            declarations.setdefault(key, []).append(_fields(
+                lines[i + 1:end], source=key[0], first_line=i + 2))
     for row in registers:
         if not isinstance(row, dict) or row.get('fields') or row.get('bits'):
             continue
@@ -77,6 +83,10 @@ def attach_named_fields(registers, extracted):
             except (ValueError, TypeError):
                 continue
         tables = declarations.get((row.get('evidence'), row.get('name'), addr), [])
-        if not tables or any(table is None or table != tables[0] for table in tables):
+        def contract(table):
+            return [{k: v for k, v in field.items() if k != 'evidence'}
+                    for field in table] if table is not None else None
+        if not tables or any(table is None or contract(table) != contract(tables[0])
+                             for table in tables):
             continue
         row['fields'] = [dict(field) for field in tables[0]]

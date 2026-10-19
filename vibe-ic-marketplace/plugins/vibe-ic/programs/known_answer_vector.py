@@ -349,6 +349,43 @@ def vectors_from_named_standards(text: str,
     return out, named
 
 
+def declared_mmio_interface(extracted: dict, ports: list) -> Optional[dict]:
+    """Bind an explicit register-interface declaration to its own typed ports.
+
+    This describes source transport for an author handoff; it does not provide
+    a bus driver or infer roles from signal names.
+    """
+    import _prose_polarity as polarity
+    from _reset_input_semantics import current_clause
+    phrase = re.compile(r'\bmemory[- ]mapped\s+register\s+interface\b', re.I)
+    assertion = re.compile(r'\b(?:has|use[sd]?|with|implements)\s+(?:an?\s+)?'
+                           r'memory[- ]mapped\s+register\s+interface\b', re.I)
+    declarations, denied = [], False
+    for source, text in extracted.items():
+        for line_number, quote in enumerate(str(text).splitlines(), 1):
+            current = re.split(r'\bfor\s+comparison\b', quote, maxsplit=1, flags=re.I)[0]
+            line = current_clause(current)
+            if not phrase.search(line):
+                continue
+            if polarity.is_denied(line):
+                denied = True
+            elif assertion.search(line):
+                declarations.append((source, line_number, quote))
+    if denied or not declarations or len({d[0] for d in declarations}) != 1:
+        return None
+    source, line_number, quote = declarations[0]
+    source = str(source) if str(source).startswith('input/') else f'input/docs/{source}'
+    bound = [dict(port) for port in ports if isinstance(port, dict)
+             and port.get('evidence') == source and port.get('name')
+             and (port.get('direction') or port.get('mode')) in {'input', 'output', 'inout'}
+             and type(port.get('width')) is int and port['width'] > 0]
+    if not bound:
+        return None
+    return {'name': 'memory_mapped_register', 'matched_token': 'memory-mapped register interface',
+            'ports': bound, 'author_handoff_required': True,
+            'citation': {'source': source, 'line': line_number, 'quote': quote}}
+
+
 def resolve_transport(l9: Optional[dict], l3: Optional[dict]) -> dict:
     """HOW a vector is driven, taken from the design's OWN L9/L3 — never
     assumed. A design that states no interface gets `undeclared`, and the
@@ -358,6 +395,13 @@ def resolve_transport(l9: Optional[dict], l3: Optional[dict]) -> dict:
     iface = str(l9.get("interface_type") or "").strip()
     opcodes = [o for o in (l3.get("opcodes") or []) if isinstance(o, dict)]
     if iface:
+        if iface == 'memory_mapped_register':
+            declared = [row for row in l9.get('interface_types', [])
+                        if isinstance(row, dict) and row.get('name') == iface]
+            if len(declared) == 1:
+                return {'kind': iface, 'evidence': 'L9_INTEGRATION_SPEC.interface_types',
+                        'opcode_count': len(opcodes), 'ports': declared[0].get('ports', []),
+                        'citation': declared[0].get('citation'), 'author_handoff_required': True}
         return {"kind": iface,
                 "evidence": "L9_INTEGRATION_SPEC.interface_type",
                 "opcode_count": len(opcodes)}

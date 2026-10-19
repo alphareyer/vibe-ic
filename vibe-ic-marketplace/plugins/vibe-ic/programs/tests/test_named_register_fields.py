@@ -16,7 +16,7 @@ def generate(tmp_path,text):
  result=D.gen_l4_regmap(tmp_path,{'L5_register_map.md':text})
  return {r['name']:r for r in json.loads(result.path.read_text())['registers']}
 def named(row):
- return {f['field_name']:R._parse_bits(f) for f in row.get('fields',[]) if f.get('field_name')!='WHOLE_REG'}
+ return {f['field_name']:R._parse_bits(f) for f in row.get('fields',[]) if f.get('field_name')!='WHOLE_REG' and f.get('role')!='reserved'}
 def block(name='CTRL',addr='0x08',rows='| 0 | START | Start operation |',header='| Bit | Name | Function |'):
  return f'\n## {name} Register({addr})Bit Fields\n\n{header}\n|---|---|---|\n{rows}\n'
 

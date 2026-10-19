@@ -103,7 +103,32 @@ SIGNOFF_CHECKS: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
     ("SI", ("signal integrity", "signal-integrity", "crosstalk",
             "cross-talk"),
      ("si", "si_crosstalk", "si_mcf_sta", "crosstalk")),
+    ("max_slew", ("max slew", "maximum slew"),
+     ("max_slew", "max_transition", "slew_violations", "drv_signoff")),
+    ("max_capacitance", ("max cap", "max capacitance", "maximum capacitance"),
+     ("max_capacitance", "max_cap", "capacitance_violations", "drv_signoff")),
+    ("max_fanout", ("max fanout", "maximum fanout"),
+     ("max_fanout", "fanout_violations", "drv_signoff")),
 )
+
+_ELECTRICAL_TERMS = {'max_slew': ('slew',),
+                     'max_capacitance': ('capacitance', 'cap'),
+                     'max_fanout': ('fanout',)}
+
+
+def _electrical_table_clause(line: str, check: str):
+    """A grouped Check cell shares only its own Requirement cell."""
+    if check not in _ELECTRICAL_TERMS or not line.strip().startswith('|'):
+        return None
+    cells = [cell.strip() for cell in line.strip().strip('|').split('|')]
+    if len(cells) != 2 or not re.fullmatch(
+            r'(?:max|maximum)\s+(?:slew|cap(?:acitance)?|fanout)'
+            r'(?:\s*/\s*(?:slew|cap(?:acitance)?|fanout))*', cells[0], re.I):
+        return None
+    for term in _ELECTRICAL_TERMS[check]:
+        if _word_bounded(term).search(cells[0]):
+            return _word_bounded(term).search(line), ' | '.join(cells)
+    return None
 
 
 def report_tokens_for(check: str) -> Tuple[str, ...]:
@@ -357,6 +382,11 @@ def _requirement_of(clause: str, check: str = "") -> Optional[str]:
 
 
 def _threshold_of(line: str, check: str = "") -> Optional[Dict[str, Any]]:
+    if check in _ELECTRICAL_TERMS:
+        count = re.search(r'(?<![\w.+-])(\d+|zero)\s+violations?\b', line, re.I)
+        if count:
+            return {'value': 0.0 if count[1].lower() == 'zero' else float(count[1]),
+                    'unit': 'violation'}
     if check == "GDS_XOR":
         count = _DIFFERENCE_COUNT_RE.search(line)
         if not count:
@@ -454,13 +484,24 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
                     depth = len(heading.group(1))
                     headings = [(d, text) for d, text in headings if d < depth]
                     headings.append((depth, heading.group(2)))
-                match = next((m for m in (p.search(line) for p in patterns)
-                              if m), None)
+                electrical = _electrical_table_clause(line, check)
+                match = (electrical[0] if electrical else
+                         next((m for m in (p.search(line) for p in patterns) if m), None))
                 implicit = (_scoped_timing_corner_clause(line, [text for _, text in headings])
                             if check == "STA" and match is None and not in_fence else None)
                 if match is None and implicit is None:
                     continue
-                clause = implicit if implicit is not None else _clause_for(line, match)
+                clause = (electrical[1] if electrical else
+                          implicit if implicit is not None else _clause_for(line, match))
+                if check in _ELECTRICAL_TERMS:
+                    import _prose_polarity as polarity
+                    lo, hi = polarity.sentence_scope(
+                        line, match.start(), match.end(), before=len(line),
+                        after=len(line), extra_breaks=("。", ";", "；", ",", "，"))
+                    prefix = line[lo:match.start()].rsplit("|", 1)[-1]
+                    denial_clause = clause if electrical else clause[:hi - match.start()]
+                    if polarity.is_denied(prefix + denial_clause):
+                        continue
                 if check in ("GDS_XOR", "power_network"):
                     # Bound both sides to this check's own sentence/record.
                     # A later unrelated denial cannot withdraw it; the
@@ -512,12 +553,16 @@ def extract_signoff_requirements(project: Path) -> Optional[Dict[str, Any]]:
         # failing that, the first hit at all — so a reader always lands on the
         # most informative sentence the input offers.
         best = next((h for h in hits if h["requirement"]), hits[0])
+        conflict = (check in _ELECTRICAL_TERMS and len({
+            (h['threshold']['value'], h['threshold']['unit'])
+            for h in hits if h['threshold'] is not None}) > 1)
         rows.append({
             "check": check,
             "stated": True,
-            "requirement": best["requirement"],
+            "requirement": None if conflict else best["requirement"],
             "corners": sorted({c for h in hits for c in h["corners"]}),
-            "threshold": best["threshold"],
+            "threshold": None if conflict else best["threshold"],
+            **({"declaration_conflict": True} if conflict else {}),
             "engines": sorted({engine for h in hits
                                for engine in h.get("engines", [])}),
             "citation": {"document": best["document"], "line": best["line"],

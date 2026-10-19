@@ -273,5 +273,38 @@
     "version_observed": "1.29.96-derived exact source e907cbfc746889bbc0d67d9a4937f711ac5ffd5a",
     "version_lkg": "Not established. This is a frozen neutral current-source counterexample, not a fabricated release regression interval.",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/l8_width_role_authority/width_authority.md"
+  },
+  {
+    "issue": 3229,
+    "project": "neutral_mmio_transport",
+    "layer": "L9_INTEGRATION_SPEC -> L10_TEST_CASES",
+    "field": "interface_type / interface_types; known_answer_vector_census.transport",
+    "expected": "A source-owned memory-mapped register transport bound to the listed cs/we/address/write_data/read_data/error ports, with citation. L10 must consume the declared transport, or explicitly report a supported-but-unimplemented author handoff. Do not invent AXI/Wishbone/UART or a serial opcode table. The exact enum spelling is a schema choice, not a prescribed solution.",
+    "actual": "L9.interface_type=null, interface_types=[], no_interface_type_in_input=true and no_interface_types_in_input=true. L10 transport is {\"kind\":\"undeclared\",\"evidence\":\"neither L9.interface_type nor L3.opcodes is stated\"}, even though the source explicitly states a memory-mapped register interface.",
+    "version_observed": "1.30.7",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_mmio_transport/design.md"
+  },
+  {
+    "issue": 3230,
+    "project": "neutral_reserved_bitrows",
+    "layer": "L4_REGMAP",
+    "field": "registers[name=CTRL|STATUS].fields",
+    "expected": "CTRL and STATUS retain the explicitly supplied reserved range1-31, role=reserved, exact read-zero / write-ignore semantics, source/line evidence and register ownership. CTRL START and STATUS READY bit0 remain unchanged. An absent/contradictory reserved policy must remain absent/uncertain rather than inherit a blanket default; an explicit source row must not be dropped.",
+    "actual": "CTRL.fields contains only START(bit0) and STATUS.fields only READY(bit0). Both explicit reserved1-31 rows are absent. A generic L4.notes string says reserved reads zero/writes ignored, but carries neither range, source ownership nor the different STATUS read-only policy.",
+    "version_observed": "1.30.7",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_reserved_bitrows/L5_register_map.md"
+  },
+  {
+    "issue": 3231,
+    "project": "neutral_electrical_signoff",
+    "layer": "L24_SIGNOFF",
+    "field": "fields.signoff_requirements",
+    "expected": "The typed signoff checklist preserves the explicit max slew, capacitance and fanout zero-violation targets, source/line citation and baseline qualification. Exact check-kind spelling or grouped-versus-separate rows is a contract decision. The target is not a measured zero. Unspecified electrical checks must remain unspecified. Existing DRC row remains unchanged. This asks for the owning producer/shared declared report vocabulary; no new global gate or mandatory policy is requested.",
+    "actual": "The producer returns ten fixed check kinds: DRC,LVS,power_network,GDS_XOR,antenna,STA,IR_drop,EM,tapeout_precheck,SI. Only DRC is stated on this neutral input. None represents max slew, cap or fanout. In the real case the full sentence survives in L19 raw signoff prose, while L24 has no typed checklist binding. Token-anywhere retention therefore cannot certify this obligation.",
+    "version_observed": "1.30.7\n\n## Evidence\n\nDefect artifacts: `phase1/generated_docs/L24_SIGNOFF.json` on the real case and `producer-output.json` from `l24_signoff_requirements_extract.extract_signoff_requirements` on the exact neutral fixture. Both retained locally under the continuation's captures directory. No oracle RTL, hidden harness, report fabrication or gate relaxation was involved. Current Phase3 status programs do not read/write L24, so this issue makes no claim about a native execution failure.\n\n## Acceptance\n\nPlace the supplied snippet at `$PROJECT/input/docs/signoff.md`, then exercise the owning extractor and normal Phase1 producer:\n\n```bash\nPYTHONDONTWRITEBYTECODE=1 python3 -B vibe-ic-marketplace/plugins/vibe-ic/programs/phase1_doc_one_shot_runner.py \"$PROJECT\" --strict --ic-name neutral_reg --pdk sky130A\npython3 - \"$PROJECT\" <<'PY_CHECK'\nimport json,pathlib,sys\nrows=json.loads((pathlib.Path(sys.argv[1])/'phase1/generated_docs/L24_SIGNOFF.json').read_text())['fields']['signoff_requirements']\nstated=[r for r in rows if r.get('stated')]\nassert any(r.get('check')=='DRC' for r in stated)\nfor term in ['slew','cap','fanout']:\n    assert any(term in str(r.get('check','')).lower() for r in stated), (term,stated)\nPY_CHECK\n```\n\nAcceptance must retain source qualification/citation and demonstrate predecessorRED/fixedGREEN with independent reverse and absent/contradictory-source controls. The sample assertion may be adapted to a justified grouped checklist representation; it must not be satisfied by a generic raw source blob. No signoff result or whole-IC PASS can be derived from declaration extraction alone.",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_electrical_signoff/signoff.md"
   }
 ]
