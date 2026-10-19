@@ -3932,6 +3932,13 @@ def rule_continuous_vs_procedural_driver(src: str, path: str) -> List[Finding]:
                 nm = am.group(1)
                 if nm in VERILOG_KEYWORDS:
                     continue
+                # An earlier assignment in the same statement makes this
+                # token part of its RHS. For example, `wire bounded = phase
+                # <= 5;` reads phase; it does not write phase. The classifier
+                # ignores comparisons in parenthesized `if` conditions.
+                statement_start = body_noassign.rfind(';', 0, am.start()) + 1
+                if _procedural_assigned_lhs(body_noassign[statement_start:am.start()]):
+                    continue
                 # The regex only locates a possible write. Reuse the existing
                 # statement-level classifier before crediting it: `phase<=5`
                 # inside a declaration initializer's parentheses is a read.

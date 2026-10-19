@@ -22,6 +22,13 @@ def test_comparison_initializer_is_read_not_second_driver():
     assert not any(f.rule == 'multidriven-continuous-procedural' for f in findings), findings
 
 
+def test_unparenthesized_comparison_initializer_is_read_not_second_driver():
+    rtl = COMPARISON.replace("wire bounded=(phase<=4'd5);",
+                             "wire bounded = phase <= 4'd5;")
+    findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
+    assert not any(f.rule == 'multidriven-continuous-procedural' for f in findings), findings
+
+
 def test_real_procedural_and_continuous_drivers_remain_error():
     rtl = COMPARISON.replace('q <= d;', 'q <= d; phase <= d;')
     findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
