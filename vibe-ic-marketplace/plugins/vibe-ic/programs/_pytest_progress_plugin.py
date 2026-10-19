@@ -277,14 +277,11 @@ def pytest_collectreport(report) -> None:
           outcome=str(report.outcome))
 
 
-def pytest_itemcollected(item) -> None:
-    _emit("item_collected", nodeid=_bounded_nodeid(str(item.nodeid)))
-
-
 def pytest_collection_finish(session) -> None:
-    # pytest_itemcollected runs before -k/-m deselection. Carry both counts so
-    # the parent can validate a legitimate selected subset without treating it
-    # as a truncated collection.
+    # pytest_itemcollected precedes collection_modifyitems, which may remove
+    # optional tests. Only the final selected node IDs can later test_finish.
+    for item in session.items:
+        _emit("item_collected", nodeid=_bounded_nodeid(str(item.nodeid)))
     _emit("collection_finish", selected_items=len(session.items))
 
 

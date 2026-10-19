@@ -481,7 +481,11 @@ class _HermeticAggregateProgress:
             if test_file in self.completed:
                 continue
             nodes = set(ordered_nodes)
-            if nodes and nodes <= probe.finished:
+            # A file whose every item was deselected has no finish event to
+            # await; wait for the actual session terminal before checkpointing.
+            terminal = getattr(probe, "complete", None)
+            if (nodes <= probe.finished
+                    and (nodes or callable(terminal) and terminal()[0])):
                 self.completed.add(test_file)
         # Preserve the exact parent-owned schedule.  A nested checkpoint is
         # available only after the strict pytest FSM accepted the exact
@@ -772,7 +776,7 @@ class _SemanticProgressProbe:
         elif event == "collection_finish":
             count = record.get("selected_items")
             if (self.stage != "collecting" or not isinstance(count, int)
-                    or count < 0 or count > len(self.items)):
+                    or count != len(self.items)):
                 self._fail("collection count/state mismatch")
                 return
             self.declared_items = count

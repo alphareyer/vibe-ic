@@ -953,6 +953,85 @@ def test_pytest_deselection_is_a_complete_selected_subset(tmp_path):
     assert sum(D._count(s)[0] for s in suites) == 1
 
 
+@pytest.mark.parametrize("enabled,expected", [(False, 1), (True, 2)])
+def test_aggregate_progress_uses_selected_consistency_items(
+        tmp_path, monkeypatch, enabled, expected):
+    """A removed bookkeeping item cannot be owed a test_finish checkpoint."""
+    if enabled:
+        monkeypatch.setenv("VIBEIC_RUN_CONSISTENCY", "1")
+    else:
+        monkeypatch.delenv("VIBEIC_RUN_CONSISTENCY", raising=False)
+    corpus = _tree(tmp_path, {
+        "test_pair.py": (
+            "import pytest\n"
+            "@pytest.mark.consistency\n"
+            "def test_bookkeeping(): assert True\n"
+            "def test_behavior(): assert True\n"),
+    })
+    (corpus / "conftest.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(_PROGRAMS)!r})\n"
+        "pytest_plugins = ('consistency_tier',)\n", encoding="utf-8")
+    relay = D._HermeticAggregateProgress(["test_pair.py"],
+                                         emitter=_OuterEmitter())
+    assert relay.start()
+    merged = tmp_path / "selected.xml"
+    rc, out, incomplete = D.run_aggregate(
+        _pytest_cmd(), ["test_pair.py"], merged, stall_window(2),
+        str(corpus), progress_observer=relay.observe)
+    assert rc == 0 and not incomplete, out
+    assert len(relay.emitter.rows) == 3
+    assert relay.emitter.rows == [
+        ("start", None),
+        ("checkpoint", "pytest:collection-complete"),
+        ("checkpoint", "pytest:test_pair.py"),
+    ]
+    assert relay.finish(), relay.problem
+    assert ("checkpoint", "pytest:test_pair.py") in relay.emitter.rows
+    suites = D._load_suites(merged)
+    assert suites is not None
+    assert sum(D._count(s)[0] for s in suites) == expected
+
+
+def test_aggregate_progress_checkpoints_fully_deselected_file_only_at_terminal(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv("VIBEIC_RUN_CONSISTENCY", raising=False)
+    corpus = _tree(tmp_path, {
+        "test_optional.py": (
+            "import pytest\n"
+            "@pytest.mark.consistency\n"
+            "def test_bookkeeping(): assert True\n"),
+        "test_active.py": "def test_behavior(): assert True\n",
+    })
+    (corpus / "conftest.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(_PROGRAMS)!r})\n"
+        "pytest_plugins = ('consistency_tier',)\n", encoding="utf-8")
+    relay = D._HermeticAggregateProgress(
+        ["test_optional.py", "test_active.py"], emitter=_OuterEmitter())
+    assert relay.start()
+    merged = tmp_path / "selected.xml"
+    rc, out, incomplete = D.run_aggregate(
+        _pytest_cmd(), ["test_optional.py", "test_active.py"], merged,
+        stall_window(2), str(corpus), progress_observer=relay.observe)
+    assert rc == 0 and not incomplete, out
+    assert len(relay.emitter.rows) == 4
+    assert relay.emitter.rows == [
+        ("start", None),
+        ("checkpoint", "pytest:collection-complete"),
+        ("checkpoint", "pytest:test_optional.py"),
+        ("checkpoint", "pytest:test_active.py"),
+    ]
+    assert relay.finish(), relay.problem
+    assert relay.emitter.rows[-4:] == [
+        ("checkpoint", "pytest:test_optional.py"),
+        ("checkpoint", "pytest:test_active.py"),
+        ("checkpoint", "pytest:record-published"),
+        ("terminal", None),
+    ]
+    suites = D._load_suites(merged)
+    assert suites is not None
+    assert sum(D._count(s)[0] for s in suites) == 1
+
+
 @pytest.mark.measures
 def test_collect_only_has_its_own_complete_terminal_protocol(
         tmp_path, monkeypatch):
@@ -2382,6 +2461,31 @@ def test_collect_only_terminal_must_preserve_declared_count(tmp_path, terminal):
         probe.close()
     assert not ok
     assert "collect-only terminal count/state mismatch" in reason
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_collection_count_must_equal_selected_node_census(tmp_path, count):
+    sidecar = tmp_path / "selected-progress.jsonl"
+    records = [
+        ("session_start", {}),
+        ("item_collected", {"nodeid": "test_pair.py::test_behavior"}),
+        ("collection_finish", {"selected_items": count}),
+    ]
+    with sidecar.open("w", encoding="utf-8") as fh:
+        for seq, (event, fields) in enumerate(records, start=1):
+            fh.write(json.dumps({
+                "schema": 1, "nonce": "nonce", "pid": os.getpid(),
+                "seq": seq, "event": event, "monotonic_ns": seq, **fields,
+            }) + "\n")
+    probe = D._SemanticProgressProbe(
+        sidecar, "nonce", lambda: os.getpid())
+    try:
+        assert probe.sample() == 2
+        ok, reason = probe.complete()
+    finally:
+        probe.close()
+    assert not ok
+    assert "collection count/state mismatch" in reason
 
 
 def test_zero_selection_collect_requires_its_distinct_terminal(tmp_path):
