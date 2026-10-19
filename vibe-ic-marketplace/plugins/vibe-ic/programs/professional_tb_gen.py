@@ -1110,8 +1110,9 @@ def _rtl_files(project: Path, top: str) -> List[str]:
     if rtl_dir.is_dir():
         for f in sorted(rtl_dir.rglob("*")):
             if f.suffix.lower() in (".v", ".sv"):
-                out.append(str(f))
-    return out
+                out.append(f)
+    from testbench_gen import package_first_order
+    return [str(path) for path in package_first_order(out)]
 
 
 def generate(project: Path, out_dir: Optional[Path] = None) -> dict:
