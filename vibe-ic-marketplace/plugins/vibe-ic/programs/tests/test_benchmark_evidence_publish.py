@@ -1058,11 +1058,12 @@ def test_publication_requires_the_selected_delivery_document_arm(
     report = tmp_path / "publication.json"
     proc = _run(_base_args(run, dest) + ["--json", str(report)])
     cell = dest / "ic" / "widgetmul" / "v9.9.9_openpdkx"
-    observed = {"rc": proc.returncode, "cell_exists": cell.exists()}
-    expected = {"rc": expected_rc, "cell_exists": expected_rc == 0}
+    observed = {"rc": proc.returncode, "success_summary_exists": report.exists()}
+    expected = {"rc": expected_rc, "success_summary_exists": expected_rc == 0}
     (tmp_path / "delivery-document-observation.json").write_text(json.dumps({
         "kind": kind, "missing": missing, "observed": observed,
-        "expected": expected, "argv": proc.args,
+        "expected": expected, "partial_cell_exists": cell.exists(),
+        "argv": proc.args,
         "stdout": proc.stdout, "stderr": proc.stderr,
         "scope": "Real publication CLI; neutral source transport only."},
         indent=2))
@@ -1070,6 +1071,7 @@ def test_publication_requires_the_selected_delivery_document_arm(
                                   "stderr": proc.stderr}
     if expected_rc:
         assert missing in proc.stdout + proc.stderr
+        assert "release documentation INVARIANT" in proc.stdout + proc.stderr
         assert "IN THE RUN ITSELF" in proc.stdout + proc.stderr
     else:
         state = json.loads(report.read_text())["release_documentation"]
