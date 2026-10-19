@@ -280,3 +280,45 @@ def test_bitfield_access_rows_do_not_become_binary_encoding(runner, tmp_path):
     (tmp_path / "ACCESS_OBSERVATION.json").write_text(
         json.dumps(field, indent=2) + "\n")
     assert field.get("encoding", []) == [], field
+
+
+@pytest.mark.parametrize("owner_key, foreign_key", [
+    ("left/registers.md", "right/registers.md"),
+    ("nested/registers.md", "registers.md"),
+])
+def test_public_regmap_qualified_owner_uses_complete_document_key(
+        runner, tmp_path, owner_key, foreign_key):
+    fixture = pathlib.Path(__file__).parent / "fixtures/phase1_local/l4_owned_field_encoding/registers.md"
+    text = fixture.read_text()
+    foreign = text.replace("RATE_", "FOREIGN_RATE_").replace(
+        "SIZE_", "FOREIGN_SIZE_").replace("DO_", "FOREIGN_DO_")
+    docs = {owner_key: text, foreign_key: foreign}
+    result = runner.gen_l4_regmap(tmp_path, docs)
+    document = json.loads(result.path.read_text())
+    register = next(r for r in document["registers"] if r["name"] == "CONFIG")
+    actual = {f["field_name"]: [e["mnem"] for e in f.get("encoding", [])]
+              for f in register["fields"]}
+    (tmp_path / "SCOPE_OBSERVATION.json").write_text(json.dumps(
+        {"actual": actual, "document": document, "inputs": docs}, indent=2))
+    assert register["evidence"] == "input/docs/" + owner_key
+    assert actual == {"ENABLE": [], "RATE": ["RATE_SLOW", "RATE_FAST"],
+                      "SIZE": ["SIZE_SMALL", "SIZE_LARGE"],
+                      "ACTION": ["DO_READ", "DO_WRITE"]}
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_public_regmap_fenced_example_heading_does_not_end_field_owner(
+        runner, tmp_path, fence):
+    fixture = pathlib.Path(__file__).parent / "fixtures/phase1_local/l4_owned_field_encoding/registers.md"
+    text = fixture.read_text().replace("Select rate.\n", "Select rate.\n\n" +
+        fence + "text\n#### EXAMPLE . FIELD\n" + fence + "\n")
+    docs = {"registers.md": text}
+    document = json.loads(runner.gen_l4_regmap(tmp_path, docs).path.read_text())
+    register = next(r for r in document["registers"] if r["name"] == "CONFIG")
+    actual = {f["field_name"]: [e["mnem"] for e in f.get("encoding", [])]
+              for f in register["fields"]}
+    (tmp_path / "SCOPE_OBSERVATION.json").write_text(json.dumps(
+        {"actual": actual, "document": document, "inputs": docs}, indent=2))
+    assert actual == {"ENABLE": [], "RATE": ["RATE_SLOW", "RATE_FAST"],
+                      "SIZE": ["SIZE_SMALL", "SIZE_LARGE"],
+                      "ACTION": ["DO_READ", "DO_WRITE"]}
