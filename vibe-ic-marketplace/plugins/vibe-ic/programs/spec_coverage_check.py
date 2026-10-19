@@ -2772,6 +2772,28 @@ def _last_assigned_int(code: str, signal: str) -> Optional[int]:
     return _parse_hdl_int(values[-1]) if values else None
 
 
+def _loop_write_edge_offsets(loop: dict, roles: Dict[str, str]) -> set:
+    """Return offsets whose bound write signals are valid at a clock edge."""
+    clock = roles.get("clock")
+    if not clock:
+        return set()
+    offsets: set = set()
+    for edge in re.finditer(
+            rf"@\s*\(\s*posedge\s+{re.escape(clock)}\s*\)",
+            loop["body"], re.I):
+        before_edge = loop["body"][:edge.start()]
+        write_enable = _last_assigned_int(before_edge, roles["write_enable"])
+        writes_data = any(
+            re.search(rf"\b{re.escape(loop['var'])}\b", expr, re.I)
+            for expr in _assigned_expressions(before_edge, roles["write_data"]))
+        edge_loop = dict(loop)
+        edge_loop["body"] = before_edge
+        addresses = _loop_address_values(edge_loop, roles["address"])
+        if write_enable not in (None, 0) and writes_data and addresses:
+            offsets |= addresses
+    return offsets
+
+
 def _tb_register_loop_coverage(tb_code: str,
                                rtl_text: Optional[str]) -> tuple:
     """Return ``(loop_attempted, proven_offsets)`` for bound write/read loops."""
@@ -2786,13 +2808,7 @@ def _tb_register_loop_coverage(tb_code: str,
         addresses = _loop_address_values(loop, roles["address"])
         if not addresses:
             continue
-        we_values = [_parse_hdl_int(value) for value in
-                     _assigned_expressions(loop["body"], roles["write_enable"])]
-        writes_data = any(re.search(rf"\b{re.escape(loop['var'])}\b", expr, re.I)
-                          for expr in _assigned_expressions(
-                              loop["body"], roles["write_data"]))
-        if any(value not in (None, 0) for value in we_values) and writes_data:
-            write_offsets |= addresses
+        write_offsets |= _loop_write_edge_offsets(loop, roles)
 
         read_compare = bool(re.search(
             rf"(?:\b{re.escape(roles['read_data'])}\b\s*(?:!==|!=|===|==)\s*"
