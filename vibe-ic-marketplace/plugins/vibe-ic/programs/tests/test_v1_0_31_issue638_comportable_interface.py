@@ -99,7 +99,10 @@ def test_facet_b_intermodule_req_rsp_bus_row_harvested():
     names = _names(pins)
     assert "tl" in names, "Inter-Module-Signals req_rsp bus row `tl` must be harvested"
     tl = [p for p in pins if p.get("name") == "tl"][0]
-    assert tl.get("mode") == "inout", "req_rsp struct bus is bidirectional"
+    assert tl.get("mode") == "interface", "req_rsp is a logical bundle, not a tri-state pin"
+    assert tl.get("package_struct") == "tlul_pkg::tl"
+    assert tl.get("instance_count") == 1
+    assert tl.get("width") is None and tl.get("width_unresolved") is True
     assert tl.get("extraction_strategy") == "comportable_intermodule_act_v638"
 
 

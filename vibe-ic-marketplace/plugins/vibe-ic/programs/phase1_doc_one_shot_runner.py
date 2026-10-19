@@ -2510,6 +2510,9 @@ def _port_entry_score(entry: Dict[str, Any]) -> int:
         score += 2
     if es == "verilog_port_bind":
         score -= 1
+    if entry.get("interface_type") == "req_rsp":
+        score += 4 if entry.get("package_struct") else 0
+        score += 2 if entry.get("instance_count") is not None else 0
     return score
 
 
@@ -5343,16 +5346,26 @@ _RE_V638_BACKTICK_TOKEN = re.compile(
 )
 
 # Inter-Module-Signals `Act` role column keywords. `req`/`rsp` denote a
-# bidirectional request/response (struct) bus port; `rcv` is an inbound
+# logical request/response bundle, not a physical bidirectional wire; `rcv` is an inbound
 # (received) signal; `uni` is a unidirectional signal whose direction the
 # `Act` value alone does not pin down. The `Type` column distinguishes a
 # `req_rsp` struct bus from a `uni` simple signal. Chip-AGNOSTIC: these are
 # the Comportable inter-signal-handling role keywords, not chip literals.
 _V638_ACT_TO_DIRECTION = {
-    "req": "inout",   # this module drives a request (struct bus master/dev)
-    "rsp": "inout",   # this module answers a request (struct bus device)
+    "req": "interface",  # request initiator role, not a pin direction
+    "rsp": "interface",  # request responder role, not a pin direction
     "rcv": "input",   # received (inbound)
 }
+
+_REQ_RSP_INTERFACE_FIELDS = (
+    "interface_type", "interface_role", "package_struct", "instance_count",
+    "width_unresolved",
+)
+
+
+def _is_req_rsp_interface(row):
+    return (isinstance(row, dict) and row.get("interface_type") == "req_rsp"
+            and (row.get("mode") or row.get("direction")) == "interface")
 
 
 def _v638_comportable_module_name(text: str):
@@ -5374,15 +5387,15 @@ def _v638_comportable_interface_harvest(text: str):
 
     Facet (a): the `Primary Clock` / `Other Clocks` bullets emit each
     backticked token as an input clock port; the `Bus Device/Host
-    Interfaces (<proto>)` bullets emit each backticked token as an inout
-    (struct) bus port. The sentinel `*none*` and empty values emit nothing.
+    Interfaces (<proto>)` bullets emit each token as a logical req/rsp
+    interface with unresolved physical width. Sentinels emit nothing.
     `Peripheral Pins` / `Interrupts` bullet tokens emit with suffix-inferred
     direction (default input).
 
     Facet (b): the `Inter-Module Signals` pipe-table — header carrying a
     `Port Name` (name) column plus an `Act` (req/rcv/rsp/uni) role column —
-    emits the `req_rsp`/`rsp`/`req` bus row(s) (e.g. `tl`) as inout struct
-    ports. Rows whose `Act` role does not map to a direction are skipped
+    emits the `req_rsp` rows as typed interfaces. Width counts interface
+    instances; it is not a flattened bit width. Unknown Act roles are skipped
     (never emitted with a null/fabricated direction).
 
     Chip-AGNOSTIC: pure Comportable doc-convention vocabulary + pipe-table
@@ -5412,7 +5425,7 @@ def _v638_comportable_interface_harvest(text: str):
                 direction = "input"
                 strat = "comportable_clock_bullet_v638"
             elif is_bus:
-                direction = "inout"
+                direction = "interface"
                 strat = "comportable_bus_bullet_v638"
             else:
                 # Peripheral pins / interrupts — infer from RTL suffix,
@@ -5424,7 +5437,7 @@ def _v638_comportable_interface_harvest(text: str):
                 else:
                     direction = "input"
                 strat = "comportable_iface_bullet_v638"
-            yield {
+            row = {
                 "name": tok,
                 "direction": direction,
                 "width": None,
@@ -5432,6 +5445,12 @@ def _v638_comportable_interface_harvest(text: str):
                 "source_row": bm.group(0).strip()[:120],
                 "extraction_strategy": strat,
             }
+            if is_bus:
+                row.update(interface_type="req_rsp",
+                           interface_role="rsp" if "device" in label else "req",
+                           package_struct=None, instance_count=None,
+                           width_unresolved=True)
+            yield row
 
     # ---- Facet (b): the Inter-Module-Signals Act-role table ------------
     for roles, rows, _ncols in _v0_3_2_iter_gfm_act_tables(text):
@@ -5440,6 +5459,7 @@ def _v638_comportable_interface_harvest(text: str):
         type_i = roles.get("type")
         width_i = roles.get("width")
         desc_i = roles.get("description")
+        package_i = roles.get("package_struct")
         for cells in rows:
             if name_i >= len(cells) or act_i >= len(cells):
                 continue
@@ -5473,18 +5493,25 @@ def _v638_comportable_interface_harvest(text: str):
                 # An unrecognised Act value does not by itself pin a
                 # direction — skip rather than fabricate one.
                 continue
-            width_arg = None
+            instance_count = None
             if width_i is not None and width_i < len(cells):
                 wraw = (cells[width_i] or "").strip(" *`").strip()
                 if wraw.isdigit():
-                    width_arg = wraw
+                    instance_count = int(wraw)
             desc_arg = None
             if desc_i is not None and desc_i < len(cells):
                 desc_arg = (cells[desc_i] or "").strip() or None
             yield {
                 "name": name,
-                "direction": direction,
-                "width": width_arg,
+                "direction": "interface",
+                "width": None,
+                "interface_type": "req_rsp",
+                "interface_role": act,
+                "package_struct": ((cells[package_i] or "").strip(" *`")
+                                   if package_i is not None and package_i < len(cells)
+                                   else None),
+                "instance_count": instance_count,
+                "width_unresolved": True,
                 "description": desc_arg,
                 "source_row": " | ".join(cells)[:120],
                 "extraction_strategy": "comportable_intermodule_act_v638",
@@ -5513,6 +5540,8 @@ def _v638_classify_act_header(cells):
             roles["act"] = i
         elif cell == "type" and "type" not in roles:
             roles["type"] = i
+        elif cell == "package::struct" and "package_struct" not in roles:
+            roles["package_struct"] = i
         elif cell in _V0_3_2_HEADER_WIDTH_TOKENS and "width" not in roles:
             roles["width"] = i
         elif cell in _V0_3_2_HEADER_DESC_TOKENS and "description" not in roles:
@@ -14310,6 +14339,8 @@ def _force_inout_for_half_duplex(ports, l2):
     for p in ports:
         if not isinstance(p, dict):
             continue
+        if _is_req_rsp_interface(p):
+            continue
         nm = p.get("name") or ""
         if not isinstance(nm, str):
             continue
@@ -21923,6 +21954,7 @@ def gen_l1_datasheet(project: Path,
                  extraction_strategy: str = "pin_table_keyword_scan",
                  source_row: str = "",
                  optional: Optional[bool] = None,
+                 interface_metadata: Optional[Dict[str, Any]] = None,
                  ) -> None:
         """v1.6.248 — shared pin-emit helper. Used by the legacy
         `input|output|inout` keyword scan AND the new RST grid /
@@ -22035,6 +22067,10 @@ def gen_l1_datasheet(project: Path,
         # from the RTL top as advisory, not FAIL.
         if optional:
             entry["optional"] = True
+        if interface_metadata and mode == "interface":
+            entry.update({key: interface_metadata.get(key)
+                          for key in _REQ_RSP_INTERFACE_FIELDS})
+            entry["width"] = None
         existing_idx = pin_index.get(name)
         if existing_idx is None or existing_idx < 0:
             pins.append(entry)
@@ -22046,12 +22082,27 @@ def gen_l1_datasheet(project: Path,
         prev = pins[existing_idx]
         new_score = _port_entry_score(entry)
         prev_score = _port_entry_score(prev)
-        winner, loser = (entry, prev) if new_score > prev_score else (prev, entry)
+        if _is_req_rsp_interface(entry) != _is_req_rsp_interface(prev):
+            # A logical bundle must not inherit a physical interpretation
+            # from a less-specific keyword/bullet extractor of the same row.
+            winner, loser = ((entry, prev) if _is_req_rsp_interface(entry)
+                             else (prev, entry))
+        else:
+            winner, loser = (entry, prev) if new_score > prev_score else (prev, entry)
         for k in ("width", "msb", "lsb", "width_symbolic",
                   "description", "io_standard"):
+            if _is_req_rsp_interface(winner) and k != "description":
+                continue
             if winner.get(k) in (None, "", "see datasheet") \
                     and loser.get(k) not in (None, "", "see datasheet"):
                 winner[k] = loser[k]
+        if _is_req_rsp_interface(winner):
+            for key in _REQ_RSP_INTERFACE_FIELDS:
+                if winner.get(key) is None and loser.get(key) is not None:
+                    winner[key] = loser[key]
+            winner["width"] = None
+            for key in ("msb", "lsb", "width_symbolic"):
+                winner.pop(key, None)
         # v0.3.4 — #491 R4: optionality is sticky across extractor
         # merges — if EITHER extractor saw the doc-optional marker the
         # merged entry keeps it.
@@ -22386,6 +22437,7 @@ def gen_l1_datasheet(project: Path,
                 description=_row_v638.get("description"),
                 extraction_strategy=_row_v638.get("extraction_strategy"),
                 source_row=_row_v638.get("source_row") or "",
+                interface_metadata=_row_v638,
             )
             if len(ev) < 24:
                 ev.append({
@@ -50955,7 +51007,7 @@ def gen_l9_integration_spec(project: Path,
             if not _pin_has_port_like_evidence(p):
                 continue
             mode = str(p.get("mode", "inout")).strip().lower()
-            if mode not in _VALID_PORT_MODES:
+            if mode not in _VALID_PORT_MODES and not _is_req_rsp_interface(p):
                 # v1.6.255 — reject `power`/`ground`/`bidir`/empty etc.
                 continue
             entry_l9 = {
@@ -51001,6 +51053,9 @@ def gen_l9_integration_spec(project: Path,
                 _v = p.get(_k)
                 if _v is not None:
                     entry_l9[_k] = _v
+            if _is_req_rsp_interface(p):
+                entry_l9.update({key: p.get(key) for key in _REQ_RSP_INTERFACE_FIELDS})
+                entry_l9["width"] = None
             top_module_pins.append(entry_l9)
     else:
         # v1.6.65 — closes issue-#6 v1.6.64 follow-up Bug E thin-input
@@ -62893,6 +62948,11 @@ def _v1_6_555_crosswalk_l9_ports_to_l1_pin_table(
             "extraction_strategy":
                 "cross_walk_from_l9_ports_v1_6_555",
         }
+        if _is_req_rsp_interface(port):
+            row.update({key: port.get(key) for key in _REQ_RSP_INTERFACE_FIELDS})
+            row["width"] = None
+            new_rows.append(row)
+            continue
         # CARRY THE WIDTH. The cross-walk copied name + mode and dropped the
         # bus width, so `l1_pin_bus_width_actionable_check` read width=None for
         # a pin L9 had already resolved and refused the run: "the design's own
@@ -62949,7 +63009,7 @@ def _promote_l1_pins_to_l9_ports(
         if not _pin_has_port_like_evidence(p):
             continue
         mode = str(p.get("mode", "inout")).strip().lower()
-        if mode not in _VALID_PORT_MODES:
+        if mode not in _VALID_PORT_MODES and not _is_req_rsp_interface(p):
             continue
         cname = _canon_port_name(raw)
         # dedup on (canonical name, mode) — a port declared twice is a bug,
@@ -62979,6 +63039,9 @@ def _promote_l1_pins_to_l9_ports(
             _v = p.get(_k)
             if _v is not None:
                 entry[_k] = _v
+        if _is_req_rsp_interface(p):
+            entry.update({key: p.get(key) for key in _REQ_RSP_INTERFACE_FIELDS})
+            entry["width"] = None
         out.append(entry)
     return out
 

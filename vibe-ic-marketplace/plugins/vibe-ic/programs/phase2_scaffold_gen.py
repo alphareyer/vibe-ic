@@ -386,6 +386,14 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
     no diagnostic anywhere. Refusing is the only answer that a wrong number
     cannot imitate.
     """
+    # Preserve declared logical bundles before selected-port normalization.
+    # A numeric legacy/selected alias is not a package-struct flattening.
+    typed_interfaces = {
+        _sanitize_id(str(port.get("name") or "")): port
+        for key in ("top_ports", "ports") for port in _list_or_empty(l9.get(key))
+        if isinstance(port, dict) and port.get("interface_type") == "req_rsp"
+        and (port.get("mode") or port.get("direction")) == "interface"
+    }
     chosen = None
     if "selected_interface_binding" in l9:
         if project is None:
@@ -413,6 +421,8 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
         if not d:
             return "inout"
         d = d.lower()
+        if d.strip() == "inout":
+            return "inout"
         if "out" in d and "in" not in d:
             return "output"
         if "in" in d and "out" not in d:
@@ -524,6 +534,18 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
                 signal["direction"] = port.get("direction") or port.get("mode") or "input"
                 if isinstance(port.get("width"), int) and port["width"] > 0:
                     signal["width"] = port["width"]
+    # Last, after every precedence/selection override: unexpanded logical
+    # interfaces remain unresolved and reuse the existing render refusal.
+    for signal in signals:
+        interface = typed_interfaces.get(signal["name"])
+        if interface is None:
+            continue
+        signal.update({key: interface.get(key) for key in (
+            "interface_type", "interface_role", "package_struct", "instance_count",
+            "width_unresolved")})
+        signal.update(mode="interface", direction="interface", width=None,
+                      width_declared="unresolved req_rsp interface: " +
+                      str(interface.get("package_struct") or interface.get("name")))
     return signals
 
 
