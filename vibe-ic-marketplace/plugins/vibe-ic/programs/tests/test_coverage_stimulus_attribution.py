@@ -890,3 +890,144 @@ def test_rebound_helper_formals_receive_no_handle_credit(tmp_path, binding):
     assert not audit['decidable'] and audit['driven'] == [], audit
     _, selected = V.discover_measure_testbenches(project)
     assert [Path(p).name for p in selected] == ['tb_vector.v'], selected
+
+
+_ISSUE3241_WIRE_BFM = '''from cocotb.triggers import Timer
+class WireEnvironment:
+    def __init__(self, dut):
+        self.dut = dut
+    async def output(self):
+        await Timer(1, units="ns")
+        return int(self.dut.out_o.value)
+'''
+
+_ISSUE3241_EXPERT_TB = '''import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import Timer
+from wire_bfm import WireEnvironment
+
+async def block_value(env):
+    return await env.output()
+
+@cocotb.test()
+async def port_result(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 10, units="ns").start())
+    dut.rst_n.value = 0
+    dut.data_i.value = 0
+    await Timer(20, units="ns")
+    dut.rst_n.value = 1
+    env = WireEnvironment(dut)
+    for value in range(256):
+        dut.data_i.value = value
+        await Timer(10, units="ns")
+        actual = await block_value(env)
+        expected = value ^ 0x3a
+        assert actual == expected
+    print("PROFESSIONAL_TB PASS")
+'''
+
+
+def _issue3241_project(root, *, expert_source=_ISSUE3241_EXPERT_TB,
+                       helper_source=_ISSUE3241_WIRE_BFM):
+    """Literal public #3241 fixture, kept neutral and source-first."""
+    import professional_tb_gen as gen
+    docs = root / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'fields': {
+            'top_module': 'port_frame',
+            'top_ports': [
+                {'name': 'clk_i', 'dir': 'input', 'width': 1},
+                {'name': 'rst_n', 'dir': 'input', 'width': 1},
+                {'name': 'data_i', 'dir': 'input', 'width': 8},
+                {'name': 'out_o', 'dir': 'output', 'width': 8},
+            ],
+            'clocks': [{'name': 'clk_i', 'period_ns': 10}],
+            'reset_domains': [
+                {'name': 'rst_n', 'polarity': 'active_low', 'sync': 'async'}],
+        },
+    }))
+    rtl = root / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    (rtl / 'port_frame.sv').write_text(
+        'module port_frame(input logic clk_i, rst_n, input logic [7:0] data_i,\n'
+        '                  output logic [7:0] out_o);\n'
+        'always_comb begin\n'
+        "  if (!rst_n) out_o = 0;\n"
+        "  else if (data_i[0]) out_o = data_i ^ 8'h3a;\n"
+        "  else out_o = data_i ^ 8'h3a;\n"
+        'end\nendmodule\n')
+    bundle = root / 'phase2/stage1/sim_professional/port_frame'
+    bundle.mkdir(parents=True)
+    (bundle / 'wire_bfm.py').write_text(helper_source)
+    (bundle / 'expert_reference_tb.py').write_text(expert_source)
+    generated = gen.generate(root)
+    assert generated['status'] == 'PASS', generated
+    return root, bundle, bundle / 'tb_port_frame.py'
+
+
+def test_issue3241_same_bundle_constructor_awaited_helper_is_observed(tmp_path):
+    _project, _bundle, tb = _issue3241_project(tmp_path)
+    audit = V.functional_stimulus_audit(tb)
+    assert audit['reason'] == '', audit
+    assert audit['decidable'] and audit['driven'] == ['data_i'], audit
+    assert audit['adopted_helper_sources'] == [str(tb.parent / 'wire_bfm.py')], audit
+
+
+@pytest.mark.parametrize('control,expert_source,helper_source', [
+    ('constant-helper', _ISSUE3241_EXPERT_TB,
+     _ISSUE3241_WIRE_BFM.replace(
+         'return int(self.dut.out_o.value)', 'return 0x3a')),
+    ('no-assertion', _ISSUE3241_EXPERT_TB.replace(
+         '        assert actual == expected\n', ''), _ISSUE3241_WIRE_BFM),
+    ('unresolved-import', _ISSUE3241_EXPERT_TB.replace(
+         'from wire_bfm import WireEnvironment',
+         'from absent_bfm import WireEnvironment'), _ISSUE3241_WIRE_BFM),
+    ('outside-sibling', _ISSUE3241_EXPERT_TB.replace(
+         'from wire_bfm import WireEnvironment',
+         'from ..outside_bfm import WireEnvironment'), _ISSUE3241_WIRE_BFM),
+    ('ambiguous-binding', _ISSUE3241_EXPERT_TB.replace(
+         'from wire_bfm import WireEnvironment',
+         'from wire_bfm import WireEnvironment\n'
+         'from other_bfm import WireEnvironment'), _ISSUE3241_WIRE_BFM),
+], ids=['constant-helper', 'no-assertion', 'unresolved-import',
+        'outside-sibling', 'ambiguous-binding'])
+def test_issue3241_untrusted_helper_controls_remain_refused(
+        tmp_path, control, expert_source, helper_source):
+    _project, bundle, tb = _issue3241_project(
+        tmp_path, expert_source=expert_source, helper_source=helper_source)
+    if control == 'outside-sibling':
+        (bundle.parent / 'outside_bfm.py').write_text(_ISSUE3241_WIRE_BFM)
+    if control == 'ambiguous-binding':
+        (bundle / 'other_bfm.py').write_text(_ISSUE3241_WIRE_BFM)
+    audit = V.functional_stimulus_audit(tb)
+    assert audit['reason'] == (
+        'no observed DUT read and self-check assertion in the Python source'), audit
+    assert not audit['decidable'] and audit['driven'] == [], audit
+    assert audit.get('adopted_helper_sources', []) == [], audit
+
+
+def test_issue3241_direct_dut_read_remains_observed(tmp_path):
+    source = _ISSUE3241_EXPERT_TB.replace(
+        'actual = await block_value(env)', 'actual = int(dut.out_o.value)')
+    _project, _bundle, tb = _issue3241_project(tmp_path, expert_source=source)
+    audit = V.functional_stimulus_audit(tb)
+    assert audit['reason'] == '', audit
+    assert audit['decidable'] and audit['driven'] == ['data_i'], audit
+    assert audit.get('adopted_helper_sources', []) == [], audit
+
+
+def test_issue3241_adopted_helper_bytes_are_source_identity(tmp_path):
+    import hashlib
+    _project, bundle, tb = _issue3241_project(tmp_path)
+    before = V.functional_stimulus_audit(tb)
+    helper = bundle / 'wire_bfm.py'
+    expected = {
+        str(tb): hashlib.sha256(tb.read_bytes()).hexdigest(),
+        str(helper): hashlib.sha256(helper.read_bytes()).hexdigest(),
+    }
+    assert before['python_source_sha256'] == expected
+    helper.write_text(_ISSUE3241_WIRE_BFM + '\n# identity change\n')
+    after = V.functional_stimulus_audit(tb)
+    assert after['python_source_sha256'][str(tb)] == expected[str(tb)]
+    assert after['python_source_sha256'][str(helper)] != expected[str(helper)]
