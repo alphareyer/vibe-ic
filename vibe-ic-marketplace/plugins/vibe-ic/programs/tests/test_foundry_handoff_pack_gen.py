@@ -84,3 +84,93 @@ def test_vacuous_pass_when_project_missing():
         capture_output=True, text=True,
     )
     assert r.returncode == 2
+
+
+# Physical identity is measured from released layout bytes, independently of
+# the design's marketing/project label. These are neutral GDS streams only.
+import hashlib
+import struct
+import pytest
+
+
+def _physical_gds(roots=('physical_root',), leaf=True):
+    def record(kind, value=b'', dtype=0):
+        return struct.pack('>HBB',len(value)+4,kind,dtype)+value
+    def string(value):
+        raw=value.encode('ascii');return raw+b'\0'*(len(raw)%2)
+    stamp=struct.pack('>12h',*([2026,1,1,0,0,0]*2))
+    raw=record(0,struct.pack('>h',600),2)+record(1,stamp,2)+record(2,string('neutral'),6)
+    for name in (*roots, 'primitive_cell') if leaf else roots:
+        raw+=record(5,stamp,2)+record(6,string(name),6)
+        if leaf and name in roots:
+            raw+=(record(10)+record(18,string('primitive_cell'),6)
+                  +record(16,struct.pack('>2i',0,0),3)+record(17))
+        else:
+            raw+=(record(8)+record(13,struct.pack('>h',1),2)
+                  +record(14,struct.pack('>h',0),2)
+                  +record(16,struct.pack('>10i',0,0,10,0,10,10,0,10,0,0),3)
+                  +record(17))
+        raw+=record(7)
+    return raw+record(4)
+
+
+def _labelled_layout(tmp_path, data):
+    project=tmp_path/'release_project';project.mkdir()
+    docs=project/'phase1/generated_docs';docs.mkdir(parents=True)
+    (docs/'L1_DATASHEET.json').write_text(json.dumps({'ic_name':'product_label'}))
+    gd=project/'phase3/stage4/gds';gd.mkdir(parents=True)
+    # The canonical publication alias intentionally differs from STRNAME.
+    layout=gd/'product_label.gds';layout.write_bytes(data)
+    return project,layout
+
+
+@pytest.mark.parametrize('root',['physical_root','chip_wrapper'])
+def test_release_uses_gds_root_and_preserves_design_label(tmp_path,root):
+    project,layout=_labelled_layout(tmp_path,_physical_gds((root,)))
+    original=layout.read_bytes()
+    # This comparison-only artefact must not become the physical identity.
+    (layout.parent/'a.prefinish.gds').write_bytes(_physical_gds(('not_the_release',)))
+    result=_run(project)
+    assert result.returncode == 0,result.stdout+result.stderr
+    spec=json.loads((project/'phase3/stage4/foundry_handoff/mask_spec.json').read_text())
+    assert spec['design_top'] == root,spec
+    assert spec['design_label'] == 'product_label'
+    assert spec['physical_top']['root_candidates'] == [root]
+    assert spec['physical_top']['source'] == 'phase3/stage4/gds/product_label.gds'
+    assert spec['gds_path'] == spec['physical_top']['source']
+    assert spec['layout_members']['product_label.gds']['sha256'] == hashlib.sha256(original).hexdigest()
+    assert layout.read_bytes() == original
+    assert (project/'phase3/stage4/foundry_handoff/product_label.gds').read_bytes() == original
+    print('PHYSICAL_ROOT',json.dumps({'root':spec['design_top'],'label':spec['design_label'],'source':spec['physical_top']}))
+
+
+@pytest.mark.parametrize('requested',['product_label','primitive_cell'])
+def test_explicit_top_cannot_rename_the_measured_root(tmp_path,requested):
+    project,layout=_labelled_layout(tmp_path,_physical_gds())
+    original=layout.read_bytes()
+    result=subprocess.run([sys.executable,str(PROG),str(project),'--top',requested],capture_output=True,text=True)
+    assert result.returncode == 1,(result.returncode,result.stdout,result.stderr)
+    assert 'differs from final GDS root' in result.stderr
+    assert not (project/'phase3/stage4/foundry_handoff/mask_spec.json').exists()
+    assert layout.read_bytes() == original
+    accepted=subprocess.run([sys.executable,str(PROG),str(project),'--top','physical_root'],capture_output=True,text=True)
+    assert accepted.returncode == 0,accepted.stdout+accepted.stderr
+    spec=json.loads((project/'phase3/stage4/foundry_handoff/mask_spec.json').read_text())
+    assert spec['design_top'] == 'physical_root'
+    print('EXPLICIT_TOP_REFUSAL',requested,result.returncode)
+
+
+def test_unknown_root_is_disclosed_without_guessing_or_new_gate(tmp_path):
+    for kind,data in (('multiple',_physical_gds(('root_a','root_b'),leaf=False)),
+                      ('legacy_non_gds',b'\x00\x04\x08\x00legacy metadata fixture'),
+                      ('not_streamed',None)):
+        case=tmp_path/kind;case.mkdir()
+        project,layout=_labelled_layout(case,data or _physical_gds())
+        if data is None:layout.unlink()
+        result=_run(project)
+        assert result.returncode == 0,(kind,result.stdout,result.stderr)
+        spec=json.loads((project/'phase3/stage4/foundry_handoff/mask_spec.json').read_text())
+        assert spec['design_top'] is None,(kind,spec)
+        assert spec['design_label'] == 'product_label'
+        assert spec['physical_top']['reason'],(kind,spec)
+        print('UNKNOWN_ROOT',kind,json.dumps(spec['physical_top']))

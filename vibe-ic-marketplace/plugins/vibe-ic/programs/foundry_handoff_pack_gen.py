@@ -1,63 +1,27 @@
 #!/usr/bin/env python3
-"""foundry_handoff_pack_gen.py — emit Step 35 foundry handoff package skeleton.
+"""foundry_handoff_pack_gen.py — assemble the Step38 design-release package.
 
-v1.6.36 — closes the Step 35 runner-vs-flow drift waiver. The flow YAML
-expects a foundry-deliverable kit at `phase3/stage4/foundry_handoff/`
-(mask_spec.json, wat_plan.json, scribe_line_layout.gds,
-corner_test_vectors.json) plus an audit summary at
-`reports/phase3/foundry_handoff_audit.json`.
+The release copies the admitted final design GDS without changing its bytes.
+Its physical hierarchy root is the mask specification's design_top; the L1
+product/project label is recorded separately as design_label. Existing package
+and technical signoff consumers remain responsible for release acceptance.
 
-The full kit is authored by the production team + foundry-interface
-engineer. This generator emits a SKELETON pre-filled with the design's
-real cell count, area, GDS path, and a TODO list pointing at the human
-fields that still need to be authored (foundry-specific mask layer
-table, WAT structure list, scribe-line PCM coordinates, corner test
-vectors). It does NOT fabricate foundry data.
+Provider-specific submission requirements and manufacturing/test services are
+separate from universal design-release requirements. Mask preparation, reticle
+frames and PCM/WAT may be supplied by the foundry or shuttle provider. The
+applicable submission contract decides what the designer must deliver. This
+program records unresolved service data as owned open items; it does not
+invent it or claim that a foundry accepted an order.
 
-Substance gate (foundry_handoff_package_check) verifies the kit is
-complete before tapeout — this generator just gives the engineer a
-deterministic starting point so the rest of the workflow doesn't stall.
+A yield target is a contract/planning value, not measured silicon yield.
+Loadboards, ATE preparation, wafer acceptance and post-silicon yield belong to
+their applicable manufacturing/test arrangements; they are not universal
+preconditions for releasing every IC's GDS. The existing Step5-derived ATE
+pattern checks and all existing physical/signoff gates are unchanged here.
 
-WHAT THE KIT NOW PRODUCES, AND WHAT IT STILL OWES (2026-08-20)
-==============================================================
-The scribe-line frame is still not produced, and MUST NOT BE: a file named
-`.gds` that is not a GDS is a fabricated artefact, and that decision (#446)
-stands. What changed is that the remainder now names its owner instead of
-shrugging.
-
-  MEASURED IN, no longer pending on anybody
-    voltage / temperature corners   read off the liberty basenames the
-                                    sign-off flow itself consumed. They used
-                                    to be `["VDD_min","VDD_nom","VDD_max"]`
-                                    and `[-40, 25, 85, 125]` — canned literals
-                                    behind a PENDING_FOUNDRY_ prefix, wrong
-                                    for 8 of the 8 published roots carrying a
-                                    kit.
-    handoff mode                    shuttle / undeclared, resolved from step
-                                    37.5ic's own report. Absence of that
-                                    report is UNDECLARED, never "dedicated".
-    the operator's identity          named, on the shuttle path, off that
-                                    same report.
-
-  STILL OWED, each naming a party and a closing artefact in `open_items`
-    3 to the reticle owner  mask layers, steppers, WAT structures + the
-                            scribe frame — the OPERATOR's on a shuttle
-    2 to the contract       yield target, WAT acceptance limits; these do not
-                            exist at all for a shuttle slot buyer
-    1 to the test house     ATE loadboard id
-    1 to US                 ATE patterns, convertible from the L10 seeds this
-                            member already lists
-
-  MEASURED AND NOT AVAILABLE — the scribe frame. Every PDK tree in the pinned
-  image was searched: `process_monitor` 0 files, `scribe` 17 files of which
-  none is geometry, and the libs.ref of all 6 PDK roots holds only standard
-  cells, IO, primitive devices and SRAM macros. No open PDK ships a scribe or
-  PCM layout, because the scribe line belongs to whoever owns the reticle.
-  Upstream has no analogue either: LibreLane and OpenROAD have no WAT, scribe
-  or mask-spec step at all — they stop at the GDS.
-
-chip-AGNOSTIC. Exits 0 on success, 2 if project dir missing or
-prerequisites absent.
+chip-AGNOSTIC. Exits 0 when the package was emitted, 1 for an explicit top
+contradicting the measured hierarchy, and 2 when project/native prerequisites are
+unavailable. A skeleton-emission exit is not a foundry acceptance verdict.
 """
 from __future__ import annotations
 
@@ -269,16 +233,34 @@ def _l1_tapeout_node_nm(project: Path):
     return None
 
 
-def _resolve_design_top(project: Path, top_arg):
-    """#467 — design_top fallback chain: L1 ic_name → --top argument →
-    RTL-derived top module (legacy). Never a fabricated literal unless even
-    the RTL scan finds nothing (then the historical 'chip_top' default)."""
-    name = _l1_ic_name(project)
-    if name:
-        return name
-    if isinstance(top_arg, str) and top_arg.strip():
-        return top_arg.strip()
-    return _detect_top_name(project)
+def _resolve_design_top(project: Path, top_arg, gds: Path | None = None):
+    """Measure the released hierarchy; unknown metadata stays unknown.
+
+    Product labels and filenames are not physical cell names. A supplied
+    --top constrains a measured unique root; it never renames that root.
+    This metadata reader does not replace the existing GDS/signoff gates.
+    """
+    facts = {"top": None, "source": str(gds.relative_to(project)) if gds else None,
+             "method": "GDS STRNAME/SNAME", "root_candidates": [], "reason": None}
+    if gds is None:
+        facts["reason"] = "No final GDS available to measure the physical top"
+        return facts
+    import _gds_geometry as geometry
+    try:
+        layout = geometry.read_layout(gds)
+    except (OSError, geometry.GdsError) as exc:
+        facts["reason"] = f"Physical hierarchy could not be read: {exc}"
+        return facts
+    roots = layout.top_cells()
+    facts["root_candidates"] = roots
+    if layout.truncated or layout.dangling_references() or len(roots) != 1:
+        facts["reason"] = "Final GDS has no unique complete physical root"
+        return facts
+    actual = roots[0]
+    if isinstance(top_arg, str) and top_arg.strip() and top_arg.strip() != actual:
+        raise ValueError(f"--top {top_arg!r} differs from final GDS root {actual!r}")
+    facts["top"] = actual
+    return facts
 
 
 # The PnR script OpenROAD actually executed names the PDK tree every liberty /
@@ -952,6 +934,19 @@ def main(argv=None) -> int:
               "no GDS packaged", file=sys.stderr)
         return 2
 
+    # Use the admitted chip selected by the shared resolver, with the exact
+    # signed-off source the layout-member copier will publish. A filename or
+    # L1 product label cannot replace the binary hierarchy's root.
+    sources = _fhpc.layout_member_sources(project)
+    primary_gds = sources.get(_gds.name, _gds) if _gds is not None else None
+    try:
+        physical_top = _resolve_design_top(project, args.top, primary_gds)
+        design_top = physical_top["top"]
+    except (OSError, ValueError) as exc:
+        print(f"FAIL: FOUNDRY_HANDOFF_PHYSICAL_TOP_INVALID: {exc}", file=sys.stderr)
+        return 1
+    design_label = _l1_ic_name(project) or project.name
+
     handoff_dir = _pl.foundry_handoff_dir(project)
     handoff_dir.mkdir(parents=True, exist_ok=True)
     audit_dir = _pl.reports_phase3_dir(project)
@@ -960,9 +955,6 @@ def main(argv=None) -> int:
     # Collect design facts from artefacts the runner produced.
     pnr = _pl.pnr_dir(project)
     synth = _pl.synth_dir(project)
-    gds_dir = _pl.gds_dir(project)
-    gds_files = sorted(gds_dir.glob("*.gds")) + sorted(pnr.glob("*.gds"))
-    primary_gds = gds_files[0] if gds_files else None
 
     cells = _parse_synth_cell_count(synth / "synth.log")
     if cells is None:
@@ -984,13 +976,12 @@ def main(argv=None) -> int:
                 break
 
     # #467: upstream spec facts populate design_top / pdk / process node.
-    # design_top  <- L1 ic_name → --top → RTL-derived top (legacy default).
+    # design_top  <- the admitted final GDS hierarchy, resolved above.
     # pdk         <- L19 pdk_target → L1 tapeout PDK statement → PDK files.
     # process_nm  <- PDK-file derivation → node parsed from the spec PDK text.
     # Honest null is preserved only when ALL upstream sources are empty —
     # projects genuinely missing the value still get null (corpus-sweep
     # guard). PENDING_FOUNDRY_* semantics unchanged (#449).
-    design_top = _resolve_design_top(project, args.top)
     pdk_name, process_nm, spec_pdk_target = _resolve_pdk_and_node(
         project, pdk_from_files, node_from_files)
     # #484: per-design identity stamp — the project NAME is always present
@@ -1025,6 +1016,8 @@ def main(argv=None) -> int:
         "generated_by": _pmd.emitted_by("foundry_handoff_pack_gen"),
         "design_identity": _ident,
         "design_top": design_top,
+        "design_label": design_label,
+        "physical_top": physical_top,
         "process_node_nm": process_nm,
         "pdk": pdk_name,
         "gds_path": (str(primary_gds.relative_to(project))
@@ -1074,6 +1067,7 @@ def main(argv=None) -> int:
         "generated_by": _pmd.emitted_by("foundry_handoff_pack_gen"),
         "design_identity": _ident,
         "design_top": design_top,
+        "design_label": design_label,
         "pdk": pdk_name,
         "process_node_nm": process_nm,
         "gds_path": (str(primary_gds.relative_to(project))
@@ -1116,6 +1110,7 @@ def main(argv=None) -> int:
         "generated_by": _pmd.emitted_by("foundry_handoff_pack_gen"),
         "design_identity": _ident,
         "design_top": design_top,
+        "design_label": design_label,
         "pdk": pdk_name,
         "test_pattern_seeds_from_l10": l10_ids,
         "test_pattern_seed_count": len(l10_ids),
@@ -1242,11 +1237,12 @@ def main(argv=None) -> int:
             f"# pdk: {pdk_name}\n")
     readme = handoff_dir / "README.txt"
     readme.write_text(
-        "Foundry handoff package — auto-generated skeleton (v1.1).\n"
+        "Design-release package with provider/manufacturing service disclosures.\n"
         # #484: design NAME line is always present so two designs that share
         # the default top do not emit a byte-identical README.
         f"Design name: {project.name}\n"
-        f"Design: {design_top}\n"
+        f"Design label: {design_label}\n"
+        f"Physical GDS top: {design_top}\n"
         f"PDK: {pdk_name}\n"
         f"GDS: {str(primary_gds.relative_to(project)) if primary_gds else '(none)'}"
         f" ({primary_gds.stat().st_size if primary_gds else 0} B)\n"
@@ -1258,12 +1254,16 @@ def main(argv=None) -> int:
         "                                (see scribe_line_layout.PENDING_FOUNDRY.txt)\n"
         "  corner_test_vectors.json    — ATE corner test kit\n"
         "\n"
-        "PENDING_FOUNDRY_* entries inside each JSON mark fields somebody\n"
-        "OTHER THAN THIS FLOW closes before tape-out. Each one now carries an\n"
+        "PENDING_FOUNDRY_* entries identify unresolved provider/manufacturing\n"
+        "service data, not seven universal GDS release prerequisites. Each carries an\n"
         "`open_items` record naming that party, the artefact that would close\n"
-        "it, and whether it exists at all in this hand-off mode. Substance\n"
+        "it, and whether it exists in the applicable hand-off mode. Substance\n"
         "gate `foundry_handoff_package_check` (Step 38) audits completeness\n"
-        "and FAILs an open item that names no owner.\n"
+        "and FAILs an open item that names no owner. The selected provider\n"
+        "contract determines required submission material. Reticle frames/PCM\n"
+        "may be provider services; yield targets, WAT limits and loadboards\n"
+        "belong to applicable manufacturing/test arrangements. A yield target\n"
+        "is not measured yield. This package does not attest order acceptance.\n"
         "\n"
         f"Handoff mode: {mode_info['mode']}"
         + (f" (operator: {mode_info['operator']})"
@@ -1303,6 +1303,8 @@ def main(argv=None) -> int:
         },
         "design_facts": {
             "top": design_top,
+            "design_label": design_label,
+            "physical_top": physical_top,
             "cell_count": cells,
             "die_area_um2": area["die_area_um2"],
             "core_area_um2": area["core_area_um2"],
@@ -1339,8 +1341,8 @@ def main(argv=None) -> int:
         },
         "notes": (
             "Skeleton emits design facts + PENDING_FOUNDRY_* open items. "
-            "Production tape-out requires foundry-supplied scribe layout + "
-            "human-authored WAT plan + ATE test patterns. "
+            "Provider-specific submission and manufacturing/test contracts "
+            "determine which service data is owed and by whom. "
             "Substance audit performed by foundry_handoff_package_check."
         ),
     }

@@ -9362,7 +9362,7 @@ steps:
       same as a refusal: a silence credited as a pass is the defect this step
       exists for.
   - id: 38
-    name: "Foundry Handoff (mask spec + WAT plan + scribe layout + corner test kit)"
+    name: "Design Release (final GDS + signoff package + provider handoff)"
     stage: stage4
     execution_stage: 8
     required_inputs:
@@ -9412,12 +9412,15 @@ steps:
     blocks_on: [36, "37.5ic", "37.5ip"]
 
     notes: |
-      Final foundry-deliverable kit: mask reticle spec, WAT
-      (Wafer Acceptance Test) probe plan, scribe-line PCM
-      structures, corner-test ATE vector kit. Without this kit
-      the foundry cannot accept the GDS for fab. Distinct from
-      Step 36 physical sign-off identity and compliance. The full checklist
-      and its unchanged sign-off consumer finish this final handoff step.
+      Final design release: admitted GDS, design identity and the existing
+      signoff/checklist package. The selected foundry or shuttle submission
+      contract defines additional designer deliverables. Mask preparation,
+      reticle frames and PCM/WAT may be provider services; yield targets,
+      acceptance limits and loadboards belong to applicable manufacturing/test
+      arrangements, not universal design-release prerequisites. A yield target
+      is not measured yield, and package generation is not order acceptance.
+      Distinct from Step36 physical signoff. Existing technical gates and
+      required-output contracts remain unchanged.
 
   - id: 39
     name: "FPGA final sign-off (recompile + on-board test)"
