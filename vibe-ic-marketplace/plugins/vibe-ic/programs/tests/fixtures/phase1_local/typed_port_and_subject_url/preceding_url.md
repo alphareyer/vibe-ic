@@ -1,0 +1,1 @@
+Referring to [interface convention](https://example.org/convention), the module **`sha256`** has the following hardware interfaces defined
