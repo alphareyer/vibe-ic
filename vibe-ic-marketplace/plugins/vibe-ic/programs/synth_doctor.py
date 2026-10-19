@@ -217,7 +217,13 @@ def classify_line(line: str) -> Optional[str]:
     if not line or _BENIGN.search(line):
         return None
     for name, pat in SIGNATURES:
-        if pat.search(line):
+        for match in pat.finditer(line):
+            # Yosys also reports "No latch inferred" on healthy processes.
+            # Skip that negated match, preserving another real warning/error
+            # later on the same line rather than suppressing the whole line.
+            if (name == "LATCH_INFERENCE"
+                    and re.search(r"\bno\s+$", line[:match.start()], re.I)):
+                continue
             return name
     return None
 

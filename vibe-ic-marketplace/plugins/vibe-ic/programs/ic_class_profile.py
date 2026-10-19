@@ -925,7 +925,7 @@ def _detect_ic_class_infer(project_dir: Path) -> Dict[str, Any]:
             profile["ic_class"] = "serial_peripheral_protocol"
             profile["decisive_evidence"] = (
                 "no analog + serial-peripheral structural signature "
-                "(>=3 features, not bus-interconnect)")
+                "(>=3 features + serial-wire semantics, not bus-interconnect)")
             return profile
 
     # ORGANIC #542 — crypto_accelerator BEFORE bus_peripheral and
@@ -1316,6 +1316,19 @@ def _looks_like_serial_peripheral_protocol(
             _harvest_strings(layer, parts)
     text = "\n".join(parts)
     if not text:
+        return False
+    # Internal serial arithmetic also shifts data and transmits/receives
+    # register values. Pin count or a generic clock divider does not make it
+    # a wire protocol: require serial-link, framing or bit-timing semantics.
+    wire_evidence = re.search(
+        r"\b(?:baud\s*(?:rate|divisor|generator)|"
+        r"(?:nominal\s+)?bit\s+(?:rate|time|timing)|"
+        r"(?:slave|chip)\s+select|start\s+bit|stop\s+bit|"
+        r"serial\s+(?:interface|port|link|protocol|communications?|bus|"
+        r"data\s+line|clock\s+line)|asynchronous\s+communication\s+bits|"
+        r"start\s+of\s+frame|end\s+of\s+frame|frame\s+delimiter)\b",
+        text, re.IGNORECASE)
+    if not wire_evidence:
         return False
     hits = sum(1 for _, pat in _SERIAL_PROTO_FEATURES if pat.search(text))
     return hits >= 3
