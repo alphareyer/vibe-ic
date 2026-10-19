@@ -27845,7 +27845,9 @@ def _v1_6_512_lift_encoding_for_registers(
             if width is None or width < 2:
                 continue
             field_name = fld.get("field_name")
-            if owned_sections:
+            if any(isinstance(field_name, str)
+                   and owner_name.casefold() == field_name.casefold()
+                   for _lo, _hi, owner_name in owned_sections):
                 own_text = "\n".join(
                     joined_text[lo:hi] for lo, hi, owner_name in owned_sections
                     if isinstance(field_name, str)
