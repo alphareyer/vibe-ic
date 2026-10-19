@@ -5043,6 +5043,17 @@ def _v0_3_2_classify_pin_header(cells: List[str]) -> Optional[Dict[str, int]]:
             roles["description"] = i
     if "name" not in roles or "direction" not in roles:
         return None
+    # With an explicit direction column, Type names the payload rather than
+    # repeating input/output. Preserve legacy Type-as-direction tables.
+    explicit_direction = next((i for i, raw in enumerate(cells)
+        if (raw or "").strip(" *`").strip().lower() in _V0_3_2_HEADER_DIR_TOKENS
+        and (raw or "").strip(" *`").strip().lower() != "type"), None)
+    if explicit_direction is not None:
+        roles["direction"] = explicit_direction
+        for i, raw in enumerate(cells):
+            if (raw or "").strip(" *`").strip().lower() in {"type", "data type", "datatype"}:
+                roles["type_ref"] = i
+                break
     return roles
 
 
@@ -5217,6 +5228,7 @@ def _v0_3_2_emit_pins_from_gfm_tables(text: str):
     for roles, rows, ncols in _v0_3_2_iter_gfm_pin_tables(text):
         name_i = roles["name"]
         dir_i = roles["direction"]
+        type_i = roles.get("type_ref")
         width_i = roles.get("width")
         desc_i = roles.get("description")
         for cells in rows:
@@ -5271,6 +5283,8 @@ def _v0_3_2_emit_pins_from_gfm_tables(text: str):
                     "name": _split_nm,
                     "direction": dir_full,
                     "width": width_arg,
+                    "type_ref": ((cells[type_i] or "").strip(" *`").strip()
+                                 if type_i is not None and type_i < len(cells) else None),
                     "description": desc_arg,
                     "source_row": " | ".join(cells)[:120],
                 }
@@ -21955,6 +21969,7 @@ def gen_l1_datasheet(project: Path,
                  source_row: str = "",
                  optional: Optional[bool] = None,
                  interface_metadata: Optional[Dict[str, Any]] = None,
+                 type_ref: Optional[str] = None,
                  ) -> None:
         """v1.6.248 — shared pin-emit helper. Used by the legacy
         `input|output|inout` keyword scan AND the new RST grid /
@@ -22061,6 +22076,14 @@ def gen_l1_datasheet(project: Path,
                 entry["width_symbolic"] = w_sym
         if description:
             entry["description"] = description
+        if type_ref:
+            entry["type_ref"] = type_ref
+            if not width:
+                if type_ref in {"logic", "bit", "wire", "reg"}:
+                    entry.update(width=1, msb=0, lsb=0)
+                else:
+                    entry["width"] = None
+                    entry["width_symbolic"] = type_ref
         # v0.3.4 — ORGANIC #491 R4. Doc-declared optionality survives
         # to L1.pin_table (and from there to L9.top_ports) so the
         # L9↔RTL consistency gate can treat a doc-optional pin absent
@@ -22088,14 +22111,21 @@ def gen_l1_datasheet(project: Path,
             winner, loser = ((entry, prev) if _is_req_rsp_interface(entry)
                              else (prev, entry))
         else:
+            if entry.get("type_ref") and not prev.get("type_ref"):
+                new_score = max(new_score, prev_score + 1)
             winner, loser = (entry, prev) if new_score > prev_score else (prev, entry)
         for k in ("width", "msb", "lsb", "width_symbolic",
-                  "description", "io_standard"):
+                  "description", "io_standard", "type_ref"):
             if _is_req_rsp_interface(winner) and k != "description":
                 continue
             if winner.get(k) in (None, "", "see datasheet") \
                     and loser.get(k) not in (None, "", "see datasheet"):
                 winner[k] = loser[k]
+        if (winner.get("type_ref")
+                and winner.get("width_symbolic") == winner["type_ref"]):
+            winner["width"] = None
+            winner.pop("msb", None)
+            winner.pop("lsb", None)
         if _is_req_rsp_interface(winner):
             for key in _REQ_RSP_INTERFACE_FIELDS:
                 if winner.get(key) is None and loser.get(key) is not None:
@@ -22417,6 +22447,7 @@ def gen_l1_datasheet(project: Path,
                 extraction_strategy="gfm_multitable_header_role_v0_3_2",
                 source_row=_row_v032.get("source_row") or "",
                 optional=_row_v032.get("optional"),
+                type_ref=_row_v032.get("type_ref"),
             )
             if len(ev) < 24:
                 ev.append({
@@ -46989,9 +47020,16 @@ def _normalize_top_module_case(candidate: str,
 
 def _doc_comportable_module_subjects(extracted: Dict[str, str]) -> set:
     """Exact quoted interface subjects; a helper mention is not a subject."""
-    return {hit.group("name")
-            for text in (extracted or {}).values() if isinstance(text, str)
-            for hit in _RE_V638_COMPORTABLE_INTRO.finditer(_strip_hdl_comments(text))}
+    subjects = set()
+    for text in (extracted or {}).values():
+        if not isinstance(text, str):
+            continue
+        # URLs are prose, not // HDL comments. Keep actual comment delimiters
+        # (including a closing */ after a URL) visible to the normal stripper.
+        text = re.sub(r"https?://[^\s<>)*]+", lambda m: " " * len(m.group()), text)
+        subjects.update(hit.group("name") for hit in
+                        _RE_V638_COMPORTABLE_INTRO.finditer(_strip_hdl_comments(text)))
+    return subjects
 
 
 def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
@@ -51133,7 +51171,7 @@ def gen_l9_integration_spec(project: Path,
             # typed-width fields so the L9↔RTL gate sees doc-declared
             # optionality on L9.top_ports too.
             for _k in ("width", "msb", "lsb", "width_symbolic",
-                       "optional"):
+                       "optional", "type_ref"):
                 _v = p.get(_k)
                 if _v is not None:
                     entry_l9[_k] = _v
@@ -63050,6 +63088,9 @@ def _v1_6_555_crosswalk_l9_ports_to_l1_pin_table(
             "extraction_strategy":
                 "cross_walk_from_l9_ports_v1_6_555",
         }
+        for key in ("type_ref", "width_symbolic"):
+            if port.get(key) is not None:
+                row[key] = port[key]
         if _is_req_rsp_interface(port):
             row.update({key: port.get(key) for key in _REQ_RSP_INTERFACE_FIELDS})
             row["width"] = None
@@ -63130,7 +63171,7 @@ def _promote_l1_pins_to_l9_ports(
         es = p.get("extraction_strategy")
         if es:
             entry["extraction_strategy"] = es
-        for _k in ("width", "msb", "lsb", "width_symbolic", "optional"):
+        for _k in ("width", "msb", "lsb", "width_symbolic", "optional", "type_ref"):
             _v = p.get(_k)
             if _v is not None:
                 entry[_k] = _v

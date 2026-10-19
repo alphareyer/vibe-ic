@@ -59,6 +59,8 @@ def test_preceding_url_subject_reaches_normal_l9(tmp_path):
 def test_real_hdl_comment_does_not_become_a_url_subject(tmp_path):
     text = "// " + (FIXTURES / "preceding_url.md").read_text()
     assert producer._doc_module_name_label_or_inline({"interfaces.md": text}) is None
+    block_comment = "/* " + (FIXTURES / "preceding_url.md").read_text() + " */"
+    assert producer._doc_module_name_label_or_inline({"interfaces.md": block_comment}) is None
     _l1, l9 = publish(tmp_path, text)
     assert l9["top_module"] is None and l9["top_module_status"] == "top_undeclared"
 
