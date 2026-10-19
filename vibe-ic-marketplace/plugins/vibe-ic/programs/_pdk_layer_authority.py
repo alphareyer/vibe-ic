@@ -72,6 +72,7 @@ re-spelled so the two cannot drift.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -95,6 +96,37 @@ _PAIR_RE = re.compile(r"(?:^|\s)(\d+)\s*/\s*(\d+)\s*$")
 
 LayerKey = Tuple[int, int]
 
+_REMOTE_GLOB_SCRIPT = (
+    "import fnmatch,json,os,sys\n"
+    "from pathlib import Path\n"
+    "parent=Path(sys.argv[1])/Path(sys.argv[2]).parent\n"
+    "name=Path(sys.argv[2]).name\n"
+    "try:\n"
+    " with os.scandir(parent) as entries:\n"
+    "  found=sorted(e.path for e in entries if fnmatch.fnmatchcase(e.name,name))\n"
+    "except (FileNotFoundError,NotADirectoryError): found=[]\n"
+    "print(json.dumps(found))\n"
+)
+_REALPATH_SCRIPT = (
+    "from pathlib import Path; import sys; "
+    "print(Path(sys.argv[1]).resolve(strict=True))"
+)
+
+
+def _remote_glob_argv(root: str, pattern: str) -> List[str]:
+    return ["python3", "-c", _REMOTE_GLOB_SCRIPT, root, pattern]
+
+
+def _local_glob(root: Path, pattern: str) -> List[str]:
+    """List a single directory; missing is empty, unreadable is an error."""
+    parent = root / Path(pattern).parent
+    try:
+        with os.scandir(parent) as entries:
+            return sorted(e.path for e in entries
+                          if fnmatch.fnmatchcase(e.name, Path(pattern).name))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
 
 def _environment_query(path: Path, operation: str, pattern: str = "",
            environ: Optional[Dict[str, str]] = None) -> Any:
@@ -111,12 +143,18 @@ def _environment_query(path: Path, operation: str, pattern: str = "",
     container = env.get("EDA_CONTAINER") or env.get("VIBEIC_EDA_CONTAINER")
     if container and not cex.no_container_route():
         script = (
-            "import json,sys; from pathlib import Path\n"
+            "import fnmatch,json,os,sys; from pathlib import Path\n"
             "p=Path(sys.argv[1]); op=sys.argv[2]\n"
             "if op == 'is_dir': result=p.is_dir()\n"
             "elif op == 'is_file': result=p.is_file()\n"
-            "elif op == 'glob': result=[str(q) for q in sorted(p.glob(sys.argv[3]))]\n"
+            "elif op == 'glob':\n"
+            " pattern=Path(sys.argv[3]); parent=p / pattern.parent\n"
+            " try:\n"
+            "  with os.scandir(parent) as entries:\n"
+            "   result=sorted(e.path for e in entries if fnmatch.fnmatchcase(e.name, pattern.name))\n"
+            " except (FileNotFoundError, NotADirectoryError): result=[]\n"
             "elif op == 'read': result=p.read_text(encoding='utf-8', errors='replace')\n"
+            "elif op == 'realpath': result=str(p.resolve(strict=True))\n"
             "else: raise ValueError(op)\n"
             "print(json.dumps(result))\n"
         )
@@ -135,9 +173,11 @@ def _environment_query(path: Path, operation: str, pattern: str = "",
     if operation == "is_file":
         return path.is_file()
     if operation == "glob":
-        return [str(p) for p in sorted(path.glob(pattern))]
+        return _local_glob(path, pattern)
     if operation == "read":
         return path.read_text(encoding="utf-8", errors="replace")
+    if operation == "realpath":
+        return str(path.resolve(strict=True))
     raise ValueError(operation)
 
 
@@ -155,6 +195,9 @@ class LocalReader:
     def glob(self, root: str, pattern: str) -> List[str]:
         return _environment_query(Path(root), "glob", pattern)
 
+    def realpath(self, path: str) -> str:
+        return _environment_query(Path(path), "realpath")
+
     def read_text(self, path: str) -> Optional[str]:
         try:
             return _environment_query(Path(path), "read")
@@ -165,7 +208,7 @@ class LocalReader:
 class ContainerReader:
     """A running container's filesystem, read with `docker exec`.
 
-    Every answer is the container's own `test`/`ls`/`cat`; an unreadable path
+    Every answer is the container's own filesystem query; an unreadable path
     is None or False, never a default. The container name is the caller's --
     this module never discovers or starts one."""
 
@@ -191,12 +234,24 @@ class ContainerReader:
         return self._run(self.container, ["test", "-f", path])[0] == 0
 
     def glob(self, root: str, pattern: str) -> List[str]:
-        rc, out = self._run(self.container,
-                            ["bash", "-lc",
-                             f"ls -1d {shlex.quote(root)}/{pattern} 2>/dev/null"])
+        rc, out = self._run(self.container, _remote_glob_argv(root, pattern))
         if rc != 0:
-            return []
-        return sorted(line for line in out.splitlines() if line.strip())
+            raise OSError(f"PDK glob in {self.name}: rc={rc}")
+        try:
+            found = json.loads(out)
+            if not isinstance(found, list) or any(not isinstance(p, str)
+                                                   for p in found):
+                raise ValueError("expected a path list")
+            return found
+        except ValueError as exc:
+            raise OSError(f"PDK glob in {self.name}: invalid response") from exc
+
+    def realpath(self, path: str) -> str:
+        rc, out = self._run(self.container,
+                            ["python3", "-c", _REALPATH_SCRIPT, path])
+        if rc != 0 or not out.strip():
+            raise OSError(f"PDK realpath in {self.name}: rc={rc}")
+        return out.strip()
 
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._run(self.container, ["cat", path])
@@ -260,11 +315,23 @@ class ImageReader:
         return self._ask("is_file", "test", "-f", path)[0] == 0
 
     def glob(self, root: str, pattern: str) -> List[str]:
-        rc, out = self._ask("glob", "sh", "-c",
-                            f"ls -1d {shlex.quote(root)}/{pattern} 2>/dev/null")
+        rc, out = self._ask("glob", *_remote_glob_argv(root, pattern))
         if rc != 0:
-            return []
-        return sorted(line for line in out.splitlines() if line.strip())
+            raise OSError(f"PDK glob in {self.name}: rc={rc}")
+        try:
+            found = json.loads(out)
+            if not isinstance(found, list) or any(not isinstance(p, str)
+                                                   for p in found):
+                raise ValueError("expected a path list")
+            return found
+        except ValueError as exc:
+            raise OSError(f"PDK glob in {self.name}: invalid response") from exc
+
+    def realpath(self, path: str) -> str:
+        rc, out = self._ask("realpath", "python3", "-c", _REALPATH_SCRIPT, path)
+        if rc != 0 or not out.strip():
+            raise OSError(f"PDK realpath in {self.name}: rc={rc}")
+        return out.strip()
 
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._ask("read", "cat", path)
@@ -493,12 +560,13 @@ def seal_ring_facility(volume: Optional[Path], reader=None
     # Some PDK volumes ship a Magic generator with a positional CLI instead of
     # KLayout's sealring.py. Its presence prevents a process-absence N/A; the
     # caller must still report unsupported invocation until an adapter exists.
-    magic_pattern = "libs.tech/magic/seal_ring_generator/*sealring*.py"
+    magic_pattern = "libs.tech/magic/seal_ring_generator/*.py"
     tried.append(str(volume / magic_pattern))
     try:
         for name in _query(volume, "glob", magic_pattern, reader=reader):
             tried.append(str(name))
-            if _query(Path(name), "is_file", reader=reader):
+            if ("sealring" in Path(name).stem.lower().replace("_", "")
+                    and _query(Path(name), "is_file", reader=reader)):
                 return True, str(name), tried
     except OSError as exc:
         tried.append(str(exc))
@@ -506,13 +574,22 @@ def seal_ring_facility(volume: Optional[Path], reader=None
     return False, None, tried
 
 
-def seal_ring_invocation_supported(volume: Optional[Path], provider: Optional[str]
+def seal_ring_invocation_supported(volume: Optional[Path], provider: Optional[str],
+                                   reader=None
                                    ) -> Optional[bool]:
     """Whether the discovered provider has the KLayout form this flow drives."""
     if volume is None or provider is None:
         return None
     from die_finishing_gen import _PDK_SCRIPT_REL as rel
-    return provider == str(volume / rel)
+    if provider != str(volume / rel):
+        return False
+    try:
+        resolved = _query(Path(provider), "realpath", reader=reader)
+    except OSError:
+        return None
+    # A conventional KLayout pathname can be a symlink to a positional Magic
+    # generator. In that case its spelling is not proof of invocation support.
+    return str(resolved) == str(volume / rel)
 
 
 #: THE FLOW'S OWN MARKER LAYERS, derived from the writer, never typed here.

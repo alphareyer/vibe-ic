@@ -47,6 +47,14 @@ class _FakeContainer:
 
     def __call__(self, container, argv):
         self.calls.append(argv)
+        if argv[:3] == ["python3", "-c", A._REMOTE_GLOB_SCRIPT]:
+            import fnmatch
+            parent = Path(argv[3]) / Path(argv[4]).parent
+            hits = [f for f in self.files if Path(f).parent == parent
+                    and fnmatch.fnmatchcase(Path(f).name, Path(argv[4]).name)]
+            return 0, json.dumps(sorted(hits))
+        if argv[:3] == ["python3", "-c", A._REALPATH_SCRIPT]:
+            return (0, argv[3] + "\n") if argv[3] in self.files else (1, "")
         if argv[:2] == ["test", "-d"]:
             p = argv[2].rstrip("/") + "/"
             return (0 if any(f.startswith(p) for f in self.files) else 1), ""
@@ -95,6 +103,22 @@ def test_a_container_reader_finds_a_magic_provider_without_claiming_invocation()
     assert has is True and path == provider
     assert A.seal_ring_invocation_supported(Path(vol), path) is False
     assert any("libs.tech/magic/seal_ring_generator" in item for item in tried)
+
+
+def test_unreachable_remote_glob_is_unknown_not_process_absence():
+    vol = Path("/foss/pdks/somepdk")
+    def run(_identity, argv):
+        if argv[:2] == ["test", "-f"]:
+            return 1, ""
+        return 127, ""
+    for reader in (A.ContainerReader("lost-container", runner=run),
+                   A.ImageReader("lost-image", runner=run)):
+        has, path, tried = A.seal_ring_facility(vol, reader=reader)
+        state = ("UNKNOWN" if has is None else
+                 "ABSENT" if has is False else "AVAILABLE")
+        assert state == "UNKNOWN", (reader.name, tried)
+        assert path is None
+        assert any("127" in item for item in tried)
 
 
 def test_the_same_pdk_is_unreadable_from_the_host_filesystem(tmp_path):

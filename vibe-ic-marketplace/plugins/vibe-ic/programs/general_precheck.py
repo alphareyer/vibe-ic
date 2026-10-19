@@ -1775,7 +1775,7 @@ def evaluate(project: Path,
     seal_facility, seal_path, seal_tried = _pdkauth.seal_ring_facility(
         volume, reader=_pdk_reader)
     seal_invocation_supported = _pdkauth.seal_ring_invocation_supported(
-        volume, seal_path)
+        volume, seal_path, reader=_pdk_reader)
     # What THIS FLOW declares it writes into a stream. Derived from the writer's
     # own constants, asked once, consumed by two rungs.
     flow_markers = _pdkauth.flow_marker_layers()

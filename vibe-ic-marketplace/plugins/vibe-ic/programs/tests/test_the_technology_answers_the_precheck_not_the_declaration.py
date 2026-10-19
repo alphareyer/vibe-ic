@@ -192,12 +192,14 @@ def test_a_technology_with_no_seal_ring_facility_reaches_not_applicable(
 
 
 @pytest.mark.parametrize("required", [False, TD.NOT_DETERMINED])
+@pytest.mark.parametrize("script_name", ["neutral_gen_sealring.py",
+                                         "neutral_gen_seal_ring.py"])
 def test_magic_provider_is_available_but_cannot_grant_process_absence(
-        tmp_path, pdkroot, required):
+        tmp_path, pdkroot, required, script_name):
     """A non-KLayout generator is a facility, not a supported invocation."""
     volume = _technology(pdkroot, "magictech", pairs=[MAPPED], sealring=False)
     generator = (volume / "libs.tech" / "magic" / "seal_ring_generator"
-                 / "neutral_gen_sealring.py")
+                 / script_name)
     generator.parent.mkdir(parents=True)
     generator.write_text("# positional width height target_dir provider\n")
     proj = _project(tmp_path, _die, {"deliverable": "DIE",
@@ -214,6 +216,26 @@ def test_magic_provider_is_available_but_cannot_grant_process_absence(
     assert ev.measured["seal_ring_invocation_supported"] is False
     if required is False:
         assert "not supported by the current KLayout" in ev.evidence
+
+
+def test_klayout_convention_symlink_to_magic_is_not_supported_invocation(
+        tmp_path, pdkroot):
+    volume = _technology(pdkroot, "linktech", pairs=[MAPPED], sealring=False)
+    magic = (volume / "libs.tech" / "magic" / "seal_ring_generator"
+             / "neutral_gen_seal_ring.py")
+    magic.parent.mkdir(parents=True)
+    magic.write_text("# positional Magic provider\n")
+    conventional = volume / "libs.tech" / "klayout" / "tech" / "scripts" / "sealring.py"
+    conventional.parent.mkdir(parents=True)
+    conventional.symlink_to(magic)
+    proj = _project(tmp_path, _die, {"deliverable": "DIE",
+                                     "top_cell": "chip_top",
+                                     "seal_ring_required": False})
+    rep = GP.evaluate(proj, runner=_NEVER_RAN, pdk="linktech")
+    ev = _step(rep, "General.SealRing")
+    assert rep.technology["seal_ring_facility"] is True
+    assert rep.technology["seal_ring_invocation_supported"] is False
+    assert ev.verdict == GP.NOT_DETERMINED, ev.evidence
 
 
 def test_not_applicable_does_not_block_the_precheck_verdict(tmp_path, pdkroot):
