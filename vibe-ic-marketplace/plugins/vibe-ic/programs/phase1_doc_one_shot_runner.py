@@ -27320,6 +27320,49 @@ def _v1_6_512_field_width(field: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _l4_encoding_text_without_access_tables(text: str) -> str:
+    """Bit/access/reset table rows describe fields, not code meanings."""
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i + 1 < len(lines):
+        header = [c.strip().strip("`*")
+                  for c in lines[i].strip().strip("|").split("|")]
+        separator = lines[i + 1].strip()
+        if ("|" in lines[i] and "-" in separator
+                and set(separator) <= set("|-: ")
+                and any(_V1_0_80_NAMECOL_BIT.fullmatch(c) for c in header)
+                and any(_V1_0_80_NAMECOL_TYPE.fullmatch(c)
+                        or _V1_0_80_NAMECOL_RESET.fullmatch(c) for c in header)):
+            end = i + 2
+            while end < len(lines) and "|" in lines[end]:
+                end += 1
+            for row in range(i, end):
+                lines[row] = "\n" if lines[row].endswith("\n") else ""
+            i = end
+        else:
+            i += 1
+    return "".join(lines)
+
+
+def _l4_encoding_heading_scopes(text: str) -> List[Tuple[int, int, str, str]]:
+    """A qualified register.field heading owns its section, within one file."""
+    headings = list(re.finditer(r"(?m)^(#{1,6})[ \t]+([^\n]+)$", text))
+    owner = re.compile(r"^`?([A-Za-z_]\w*)`?\s*\.\s*`?([A-Za-z_]\w*)`?\s*#*\s*$")
+    scopes = []
+    for i, heading in enumerate(headings):
+        match = owner.fullmatch(heading.group(2).strip())
+        if match is None:
+            continue
+        end = len(text)
+        for following in headings[i + 1:]:
+            if (len(following.group(1)) <= len(heading.group(1))
+                    or owner.fullmatch(following.group(2).strip())):
+                end = following.start()
+                break
+        scopes.append((heading.start(), end, match.group(1), match.group(2)))
+    return scopes
+
+
 def _v1_6_512_lift_field_encoding(
         field: Dict[str, Any],
         window_text: str) -> int:
@@ -27357,6 +27400,7 @@ def _v1_6_512_lift_field_encoding(
     width = _v1_6_512_field_width(field)
     if width is None or width < 2:
         return 0
+    window_text = _l4_encoding_text_without_access_tables(window_text)
     existing = field.get("encoding")
     if not isinstance(existing, list):
         existing = []
@@ -27755,6 +27799,19 @@ def _v1_6_512_lift_encoding_for_registers(
         # +1 for the "\n" join separator that ``"\n".join(...)``
         # inserts BETWEEN slices.
         _cursor += len(_ftext) + 1
+    qualified_scopes = [
+        (lo + start, lo + end, reg_name, field_name)
+        for lo, hi, _fname in _v1_6_517_file_fences
+        for start, end, reg_name, field_name in
+        _l4_encoding_heading_scopes(joined_text[lo:hi])]
+    # Legacy proximity fallback may use unqualified prose, never another
+    # explicitly owned field section. Preserve offsets for its file fences.
+    unowned_parts, cursor = [], 0
+    for lo, hi, _reg_name, _field_name in qualified_scopes:
+        unowned_parts += [joined_text[cursor:lo],
+                          re.sub(r"[^\n]", " ", joined_text[lo:hi])]
+        cursor = hi
+    unowned_text = "".join(unowned_parts) + joined_text[cursor:]
     total = 0
     for reg in registers:
         if not isinstance(reg, dict):
@@ -27766,6 +27823,10 @@ def _v1_6_512_lift_encoding_for_registers(
         # mentions ONCE per register (shared across all this
         # register's fields).
         reg_name = reg.get("register_name") or reg.get("name") or ""
+        owned_sections = [(lo, hi, field_name)
+                          for lo, hi, owner_name, field_name in qualified_scopes
+                          if isinstance(reg_name, str)
+                          and owner_name.casefold() == reg_name.casefold()]
         reg_anchor_mentions: List[Tuple[int, int]] = []
         if isinstance(reg_name, str) and len(reg_name) >= 2:
             try:
@@ -27784,6 +27845,16 @@ def _v1_6_512_lift_encoding_for_registers(
             if width is None or width < 2:
                 continue
             field_name = fld.get("field_name")
+            if owned_sections:
+                own_text = "\n".join(
+                    joined_text[lo:hi] for lo, hi, owner_name in owned_sections
+                    if isinstance(field_name, str)
+                    and owner_name.casefold() == field_name.casefold())
+                total += _v1_6_512_lift_field_encoding(fld, own_text)
+                own_description = _cl_field_text(fld)
+                if own_description:
+                    total += _v1_6_512_lift_field_encoding(fld, own_description)
+                continue
             field_mentions: List[Tuple[int, int]] = []
             if (isinstance(field_name, str)
                     and len(field_name) >= 2):
@@ -27817,7 +27888,7 @@ def _v1_6_512_lift_encoding_for_registers(
                 if bucket in seen_buckets:
                     continue
                 seen_buckets.add(bucket)
-                window = joined_text[lo:hi]
+                window = unowned_text[lo:hi]
                 total += _v1_6_512_lift_field_encoding(
                     fld, window)
             _v1_6_516_field_post = (
@@ -27973,7 +28044,7 @@ def _v1_6_512_lift_encoding_for_registers(
                             if _bk in _v1_6_516_t3_buckets:
                                 continue
                             _v1_6_516_t3_buckets.add(_bk)
-                            _sig_window = joined_text[
+                            _sig_window = unowned_text[
                                 _sig_lo:_sig_hi]
                             total += (
                                 _v1_6_512_lift_field_encoding(
