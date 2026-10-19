@@ -185,6 +185,18 @@ def test_named_foreign_or_indirect_subjects_cannot_supply_current_transport(decl
     assert actual['kind'] == 'undeclared', actual
 
 
+def test_foreign_owner_cannot_supply_cross_document_port_binding():
+    # The MMIO declaration is current, but the only named ports belong to a
+    # separate, explicitly named unit. Matching names in neutral_unit's port
+    # table must not let neighbor_unit authorize the current owner's transport.
+    protocol = (DECLARATION + '\n'
+                'neighbor_unit uses its own register interface through '
+                'select_i/write_i/index_i.')
+    actual = transport({'protocol.md': protocol, 'ports.md': PORT_TEXT},
+                       owner='neutral_unit')
+    assert actual['kind'] == 'undeclared', actual
+
+
 @pytest.mark.parametrize('verb', ['have', 'use', 'implement', 'adopt', 'provide', 'expose'])
 def test_current_owner_denials_block_an_affirmative_declaration(verb):
     denial = 'The peripheral does not ' + verb + ' a memory-mapped register interface.'

@@ -450,6 +450,24 @@ def declared_mmio_interface(extracted: dict, ports: list,
         bounds = re.fullmatch(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', cell)
         return abs(int(bounds[1]) - int(bounds[2])) + 1 if bounds else None
 
+    def binding_owned_by_current(line):
+        # A protocol paragraph can contain a current declaration followed by
+        # a different unit's port sentence. Port spelling alone cannot move
+        # that sentence's authority to the current top. Generic SW prose has
+        # no named RTL owner; a named subject must match the bound owner.
+        subject = re.match(
+            r'^\s*(?:the\s+)?(?:module\s+)?`?([A-Za-z_][A-Za-z0-9_$]*)`?'
+            r'\s+(?:module\s+)?(?:uses?|has|access(?:es)?|drives?|'
+            r'implements?|adopts?|provides?|exposes?)\b', line, re.I)
+        if subject is None:
+            return True
+        name = subject[1]
+        if name.lower() in {'software', 'sw', 'firmware', 'cpu', 'host',
+                            'peripheral', 'device', 'design', 'block', 'module',
+                            'unit', 'core', 'chip'}:
+            return True
+        return isinstance(owner, str) and name == owner
+
     declarations, denied = [], False
     for source, text in extracted.items():
         lines = str(text).splitlines()
@@ -479,6 +497,8 @@ def declared_mmio_interface(extracted: dict, ports: list,
             for match in binding.finditer(line):
                 if polarity.is_denied(line) or denied_zh.search(line):
                     return None
+                if not binding_owned_by_current(line):
+                    continue
                 named.update(re.findall(r'[A-Za-z_][A-Za-z0-9_$]*',
                                         re.sub(r'\band\b', '', match['names'], flags=re.I)))
     groups = {}
