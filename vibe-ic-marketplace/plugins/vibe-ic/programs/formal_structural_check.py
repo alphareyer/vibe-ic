@@ -1325,8 +1325,8 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
     total = {"$and", "$or", "$xor", "$xnor", "$not", "$mux", "$eq", "$ne",
              "$eqx", "$nex", "$logic_not", "$logic_and", "$logic_or",
              "$reduce_and", "$reduce_or", "$reduce_xor", "$reduce_xnor",
-             "$reduce_bool", "$add", "$sub", "$shiftx"}
-    # Native add/sub are finite-width total functions. shiftx is total in
+             "$reduce_bool", "$add", "$sub", "$mul", "$shiftx"}
+    # Native add/sub/mul are finite-width total functions. shiftx is total in
     # Yosys's undef-aware value domain (out-of-range bits remain undef).
     # Cone selection never defines those bits: the existing undef queries
     # and every role/priority arm still run with -enable_undef.
@@ -1368,6 +1368,115 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
     return {"eligible": visited == len(cells),
             "reason": "single-driver-total-boolean-dag" if visited == len(cells)
                       else "combinational-feedback"}
+
+
+def _post_reset_independence(model: dict, rows: List[dict], work_dir: Path,
+                             container: Optional[str] = None) -> dict:
+    """Prove residual data independence after a measured synchronous reset edge.
+
+    A total-force query proves Q(t+1)=constant for *all* current Q/data. Those
+    constants therefore overapproximate the post-reset state: every other Q
+    and every data input stays free. A second native query may prove the two
+    reset cofactors equal on that reachable domain. This is a composed,
+    post-reset fact, never independence for arbitrary pre-reset state.
+
+    Only already-defined residual transition rows are eligible. A
+    partial force, opposite edge/clock, literal undef or unfinished query
+    cannot supply a premise. The original mixed-data refusal remains live.
+    """
+    mod = model["modules"]["transition_pair"]
+    forces = [r for r in rows if r.get("classification") == "RESET_FORCE"]
+    polarities = {r.get("polarity") for r in forces}
+    candidates = [r for r in rows if not r.get("unsupported") and
+                  r.get("classification") == "UNRESOLVED_DATA_DEPENDENCE"]
+    if len(polarities) != 1 or not candidates:
+        return {"status": "NOT_APPLICABLE", "certificates": []}
+    polarity = next(iter(polarities))
+    if polarity not in {"active_high", "active_low"}:
+        return {"status": "NOT_APPLICABLE", "certificates": []}
+    arm = int(polarity == "active_high")
+
+    def clock(row):
+        bits = row.get("clock") or []
+        edge = _param_bit(row.get("parameters", {}).get("CLK_POLARITY"))
+        if len(bits) != 1 or not isinstance(bits[0], int) or edge not in (0, 1):
+            return None
+        return bits[0], edge
+
+    groups = {}
+    for row in candidates:
+        key = clock(row)
+        if key is None or any(p in row.get("controls", {}) for p in _ASYNC_PINS):
+            continue
+        premises = []
+        for force in forces:
+            if (clock(force) != key or force.get("timing") != "synchronous" or not force.get("total_force")
+                    or any(p in force.get("controls", {}) for p in _ASYNC_PINS)):
+                continue
+            a = force.get("native_queries", {})
+            values = [v for v, name in ((0, "zero"), (1, "one")) if a.get(f"{name}{arm}") == "PROVED"]
+            port = f"input_{force['q']}"
+            if (a.get(f"undef{arm}") != "NO_UNDEF" or len(values) != 1 or
+                    mod.get("ports", {}).get(port, {}).get("direction") != "input" or
+                    len(mod["ports"][port]["bits"]) != 1):
+                continue
+            premises.append({"q": force["q"], "port": port, "value": values[0],
+                             "query": f"{'zero' if values[0] == 0 else 'one'}{arm}"})
+        if premises:
+            groups.setdefault(key, {"premises": premises, "rows": []})["rows"].append(row)
+    if not groups:
+        return {"status": "NOT_APPLICABLE", "certificates": []}
+    work_dir.mkdir(parents=True, exist_ok=True)
+    model_path = work_dir / "transition_pair.json"
+    _aa.write_json(model_path, model)
+    script = [f"read_json {model_path.resolve()}", "hierarchy -top transition_pair"]
+    specs, domains = {}, {}
+    cone = _reset_row_cone_eligibility(model)
+    for group_index, (key, group) in enumerate(sorted(groups.items())):
+        sets = " ".join(f"-set {p['port']} {p['value']}" for p in group["premises"])
+        domain = f"post_{group_index}_domain"
+        domains[key] = domain
+        script += ["log VIBEIC_TRANSITION_QUERY " + domain,
+                   f"sat -timeout 10 -enable_undef -set-def-inputs {sets}",
+                   "log VIBEIC_TRANSITION_COMPLETE " + domain]
+        for row_index, row in enumerate(group["rows"]):
+            ident = f"post_{group_index}_{row_index}_equal"
+            specs[ident] = key, row
+            port = row["query_ports"]["equal"]
+            if cone["eligible"]:
+                script += ["select -module transition_pair", f"select w:{port} %ci*"]
+            script += ["log VIBEIC_TRANSITION_QUERY " + ident,
+                       f"sat -timeout 10 -enable_undef -set-def-inputs {sets} -prove {port} 1 -show-inputs -show {port}",
+                       "log VIBEIC_TRANSITION_COMPLETE " + ident]
+            if cone["eligible"]:
+                script.append("select -clear")
+    ys = work_dir / "post_reset.ys"
+    _aa.write_text(ys, "\n".join(script) + "\n")
+    inner = f"yosys -Q -T -s {ys.resolve()}"
+    if container:
+        import _container_exec as ce
+        argv = ce.exec_argv(container, inner, tag="formal_structural_check")
+    else:
+        argv = ["yosys", "-Q", "-T", "-s", str(ys.resolve())]
+    rc, stdout, stderr, run = _native_query_run(argv, container=container, command=inner)
+    native = _native_artifacts(work_dir, "post_reset", stdout, stderr, run)
+    progress = _transition_query_progress(stdout + stderr, [*domains.values(), *specs])
+    complete = (rc == 0 and progress["completed"] == progress["planned"] and not progress["unknown"]
+                and all(a["result"] != "UNKNOWN" for a in progress["by_identity"].values()))
+    certificates = []
+    for ident, (key, row) in specs.items():
+        answer = progress["by_identity"][ident]
+        domain = progress["by_identity"][domains[key]]
+        if complete and domain["result"] == "HAS_UNDEF" and answer["result"] == "PROVED":
+            certificates.append({"q": row["q"], "status": "CERTIFIED",
+                "rule": "POST_RESET_COFACTOR_INDEPENDENCE", "active_reset_value": arm,
+                "scope": "current state immediately follows an asserted reset edge on the same clock and edge",
+                "clock": key[0], "clock_polarity": key[1], "premises": groups[key]["premises"],
+                "domain_query": domains[key], "equality_query": ident,
+                "other_current_q_and_data": "free; no input or scratch-value restriction"})
+    return {"status": "COMPLETED" if complete else "INCOMPLETE", "native_exit_code": rc,
+            "native_run": native, "query_progress": progress, "certificates": certificates,
+            "model_sha256": file_sha256(model_path), "script_sha256": file_sha256(ys)}
 
 
 def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
@@ -1655,6 +1764,17 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                 any(p in row["controls"] for p in ("SRST", "ARST", "SET", "CLR")) else "NO_DEPENDENCE")
         elif set(row["reset_reaches"]) <= {"EN"}:
             row["classification"] = "RETENTION_CONTROL"
+        elif (all(a.get(f"{role}_reachable{arm}") == "PROVED" for arm in (0, 1)
+                  for role in ("force_zero", "force_one")) and
+              {a["retain0"], a["retain1"]} == {"PROVED", "REFUTED"} and
+              all(a.get(f"{value}{arm}") == "REFUTED" for arm in (0, 1)
+                  if a[f"retain{arm}"] == "REFUTED" for value in ("zero", "one"))):
+            # Raw proc preserves enable as a D/feedback mux. One complete
+            # cofactor retains Q, the other is defined ordinary data, and
+            # neither has a feasible constant-force domain. This is the
+            # same retention role as an explicit EN pin, not a reset force.
+            row["classification"] = "RETENTION_CONTROL"
+            row["proof_basis"] = "native_full_domain_retention_cofactor"
         elif (a["zero0"] == "PROVED" or a["one0"] == "PROVED") and (
                 a["zero1"] == "PROVED" or a["one1"] == "PROVED"):
             row["classification"] = "DATA_VALUE"
@@ -1685,6 +1805,23 @@ def reset_control_mapping(netlist: dict, raw: Optional[dict], top: str,
                     row["reason"] = "DEFINED_NONFORCING_RESET_DEPENDENCE: native data/retention roles do not establish reset-force sense"
         if row["classification"] in {"UNSUPPORTED", "UNRESOLVED_DATA_DEPENDENCE"}:
             result["unresolved"].append(f"{row['cell']}.Q[{row['bit_index']}]: {row.get('reason')}")
+    if (rc == 0 and domain_reachable and progress["completed"] == progress["planned"]
+            and not progress["unknown"]):
+        post = _post_reset_independence(model, rows, work_dir / "post_reset", container)
+        result["post_reset_independence"] = post
+        by_q = {c["q"]: c for c in post["certificates"]}
+        for row in rows:
+            if row["q"] not in by_q:
+                continue
+            # The certificate has a reset-prefix precondition. It is useful
+            # native evidence, but cannot answer the unrestricted structural
+            # obligation for the first assertion edge. Preserve its refusal.
+            row["post_reset_certificate"] = by_q[row["q"]]
+            old = f"{row['cell']}.Q[{row['bit_index']}]: {row.get('reason')}"
+            row["reason"] = ("POST_RESET_COFACTOR_INDEPENDENCE: reset-independent in the immediate poststate of an asserted reset edge; "
+                             "unrestricted first-edge force sense remains unresolved")
+            new = f"{row['cell']}.Q[{row['bit_index']}]: {row['reason']}"
+            result["unresolved"] = [new if u == old else u for u in result["unresolved"]]
     result.update(complete=not result["unresolved"], native_exit_code=rc,
                   native_run=native, query_progress=progress,
                   paired_domain_reachable=domain_reachable,
