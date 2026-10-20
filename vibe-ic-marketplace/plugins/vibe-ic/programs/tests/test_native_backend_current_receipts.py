@@ -38,6 +38,17 @@ def _native_outputs(project: Path, step: str) -> None:
                "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
         _write(project, "phase3/stage3/cts/clock_tree.rpt",
                "clock latency 1.0 skew 0.1 buffers 2\n")
+        # _cts_split publishes this canonical Step19 output as well as the
+        # DEF/report. This fixture exercises receipt transport, not native CTS.
+        views = {}
+        for name, relative in (
+                ('post_cts_def', 'phase3/stage3/pnr/post_cts.def'),
+                ('cts_rpt', 'phase3/stage3/cts/clock_tree.rpt')):
+            views[name] = {'dest': relative, 'dest_sha256': hashlib.sha256(
+                (project / relative).read_bytes()).hexdigest()}
+        _write(project, "reports/phase3/librelane_cts_handoff.json",
+               json.dumps({'scope': 'SOURCE_FIXTURE receipt transport',
+                           'views': views}))
     else:
         _write(project, "phase3/stage3/pnr/post_hold.def",
                "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
@@ -83,10 +94,18 @@ def test_native_rows_create_current_receipt_after_producer(tmp_path, monkeypatch
         current = result["current_step_declared_producers"]
         assert events == ["producer"]
         assert current["schema"] == "vibeic/native-current-step-receipt/1"
-        assert current["verdict"] == "PRODUCED"
+        assert current["verdict"] == "PRODUCED", current
         assert current["step_id"] == step
         assert producers._current_step_producer_authority(
             current, project=project) == (True, "", "PASS")
+        if step == '19':
+            handoff = 'reports/phase3/librelane_cts_handoff.json'
+            assert handoff in current['outputs']
+            (project / handoff).unlink()
+            assert producers._current_step_producer_authority(
+                current, project=project) == (
+                    False, 'native current producer output changed: ' + handoff,
+                    'NOT_MEASURED')
 
 
 def test_native_receipt_mutation_blocks_consumer(tmp_path, monkeypatch):
@@ -364,10 +383,32 @@ def test_default_step37_finishing_publishes_measured_provenance(
             '--tool=klayout,magic,openroad', '--require-measured']
     assert provenance_check.main(argv) == 0, 'fresh normal LF publication must declare final material'
     artefacts = [entry for entry in entries if entry.get('record') == 'artefact']
-    assert any(entry.get('produced_by') == 'librelane_default_finishing'
-               and entry['outputs'] == {str(Path(first['source']).relative_to(project)):
-                                        'sha256:' + first['source_sha256']}
-               and entry.get('measurement') for entry in artefacts)
+    retained = [entry for entry in artefacts if entry.get('produced_by') ==
+                'librelane_default_finishing_retention']
+    assert len(retained) == 1
+    [(retained_relative, retained_sha)] = retained[0]['outputs'].items()
+    assert Path(retained_relative).parent == Path('phase3/stage3/pnr/streamout')
+    assert retained_relative != str(Path(first['source']).relative_to(project))
+    assert retained_sha == 'sha256:' + first['source_sha256']
+    assert LC.digest(project / retained_relative) == first['source_sha256']
+    assert retained[0]['reconstructed'] is True
+    assert retained[0]['measurement']['measured'] is True
+    assert retained[0]['measurement']['wrote'] == [retained_relative]
+    # The native lane is reusable; both delivery aliases must derive from the
+    # independently retained finished bytes, not a newly asserted invocation.
+    publications = [entry for entry in entries if entry.get('record') ==
+                    'declared_transform' and entry.get('producing_step') ==
+                    'step37_default_finishing_publication']
+    assert len(publications) == 2
+    assert {relative for entry in publications for relative in entry['outputs']} == {
+        str(Path(first[name]).relative_to(project)) for name in ('pnr_gds', 'canonical')}
+    for entry in publications:
+        assert entry['inputs'] == {retained_relative: retained_sha}
+        assert list(entry['outputs'].values()) == [retained_sha]
+        assert entry['reconstructed'] is True
+        assert entry['tool'] == 'klayout' and entry['exit_code'] == 0
+        assert entry['measurement']['measured'] is True
+        assert entry['measurement']['wrote'] == list(entry['outputs'])
     assert all(entry.get('duration_ms') is None for entry in entries if entry not in native)
     # Resume the actual historical case: only native-path provenance survived;
     # none declares the different final bytes or either delivery alias.

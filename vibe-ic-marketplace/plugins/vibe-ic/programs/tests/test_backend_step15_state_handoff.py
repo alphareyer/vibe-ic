@@ -171,22 +171,29 @@ def test_legacy_schema_one_sdc_binding_accepts_then_refuses_changed_bytes(tmp_pa
         producers._step15_sdc(isolated)
 
 
-def test_legacy_reader_refuses_changed_raw_handoff_even_with_same_sdc(tmp_path):
+@pytest.mark.parametrize("deck", ["legacy", "derived"])
+def test_legacy_reader_refuses_changed_raw_handoff_even_with_same_sdc(tmp_path, deck):
     _, isolated = _make_published_project(tmp_path)
     pnr = isolated / 'phase3/stage3/pnr'
     record = json.loads((pnr / 'step15_state.json').read_text())
-    record.pop('upstream_sdc')
-    record['views'].pop('sdc_derived')
-    record['views']['sdc'] = {'path': 'phase3/stage3/pnr/constraint.sdc',
-                              'sha256': producers.snap.sha(pnr / 'constraint.sdc')}
-    (pnr / 'step15_state.json').write_text(json.dumps(record))
+    if deck == "legacy":
+        record.pop('upstream_sdc')
+        record['views'].pop('sdc_derived')
+        record['views']['sdc'] = {'path': 'phase3/stage3/pnr/constraint.sdc',
+                                  'sha256': producers.snap.sha(pnr / 'constraint.sdc')}
+        (pnr / 'step15_state.json').write_text(json.dumps(record))
+    assert producers._step15_sdc(isolated).is_file()
     handoff = pnr / 'step15_handoff.json'
     handoff.write_text('changed-handoff\n')
     record = json.loads((pnr / 'step15_state.json').read_text())
     record['handoff']['sha256'] = producers.snap.sha(handoff)
     (pnr / 'step15_state.json').write_text(json.dumps(record))
-    with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
-        producers._step15_sdc(isolated)
+    try:
+        accepted = producers._step15_sdc(isolated)
+        outcome = 'ACCEPTED:' + accepted.name
+    except em.Refusal as exc:
+        outcome = exc.code
+    assert outcome == 'BACKEND_STEP15_SDC_BINDING_CHANGED'
 
 
 def test_legacy_reader_refuses_escaped_canonical_deck_path(tmp_path):

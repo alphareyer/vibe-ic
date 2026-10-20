@@ -180,8 +180,9 @@ def test_zero_byte_source_changes_step15_input_identity(tmp_path):
     source = tmp_path / "phase2" / "stage2" / "constraints" / "in.sdc"
     source.parent.mkdir(parents=True)
     source.write_text("create_clock -period 10 [get_ports clk]\n")
-    clauses = [{"target": "reports/step15.json", "program": "x",
-                "step": "15", "command": "x", "siblings": []}]
+    clauses = [row for row in producer.declared_producer_clauses()
+               if str(row["step"]) == "15"]
+    assert clauses
     before = producer._current_input_identity(tmp_path, clauses)
     source.write_text("")
     after = producer._current_input_identity(tmp_path, clauses)

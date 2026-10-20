@@ -403,6 +403,9 @@ def _step15_sdc(project):
             raise ValueError('upstream constraint changed')
         if info['sha256'] != snap.sha(derived):
             raise ValueError('derived SDC changed')
+        # An intact deck cannot outlive the native handoff that published it.
+        # Apply the same lineage check used for the legacy physical deck.
+        _read_step15_bounded_state(project)
         return _require(derived)
     except em.Refusal as exc:
         raise em.Refusal('BACKEND_STEP15_SDC_BINDING_CHANGED', str(record_path)) from exc

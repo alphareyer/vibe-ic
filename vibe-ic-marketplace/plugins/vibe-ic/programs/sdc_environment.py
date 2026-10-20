@@ -224,10 +224,10 @@ def _io_pad_view(text: str, masters: Optional[set[str]] = None) -> Dict[str, obj
 
     For every bond-pad pin that receives an off-chip signal (``is_pad : true``,
     direction input/inout) the SLOW end is its ``max_transition`` (pin, else
-    library default) and the FAST end is the smallest ``input_net_transition``
-    index of the delay/transition tables whose ``related_pin`` is that pad
-    (inline index, else the table template's). Where both exist the slow end is
-    capped at the tables' largest index, so it is never an extrapolation. The
+    library default) and the table bracket is the intersection of every
+    ``input_net_transition`` axis whose ``related_pin`` is that pad (inline
+    index, else the table template's). Where both exist the slow end is capped
+    at the intersected tables' upper end, so it is never an extrapolation. The
     view's bracket is the part common to all its pad pins (the slowest end
     that no pin's tables exceed, the fastest end every pin characterises): one
     SDC value reaches every pad port, and none of them may be extrapolated."""
@@ -269,7 +269,7 @@ def _io_pad_view(text: str, masters: Optional[set[str]] = None) -> Dict[str, obj
                 bound = float(bound_m.group(1)) * scale if bound_m else None
             except ValueError:
                 bound = None
-            axis: List[float] = []
+            axis_ranges: List[Tuple[float, float]] = []
             for _other, other_body in cell_pins:
                 for _t, tbody in _liberty_blocks(other_body, "timing"):
                     rel = re.search(r"\brelated_pin\s*:\s*\"?(\w+)", _own_attrs(tbody))
@@ -282,15 +282,24 @@ def _io_pad_view(text: str, masters: Optional[set[str]] = None) -> Dict[str, obj
                                     continue
                                 vals = (_index_values(table, n)
                                         or _index_values(template_index.get(tmpl, ""), n))
-                                axis.extend(v * scale for v in vals or ())
-            if bound is None and not axis:
+                                if vals:
+                                    axis_ranges.append((min(vals) * scale,
+                                                        max(vals) * scale))
+            if bound is None and not axis_ranges:
                 view["pins_without_bound"] = int(view["pins_without_bound"]) + 1
                 continue
-            slow = min([x for x in (bound, max(axis) if axis else None) if x is not None])
-            fast = min(axis) if axis else None
+            # One external stimulus reaches every simultaneously applicable
+            # receiver table.  Its legal bracket is therefore the
+            # INTERSECTION of their input_net_transition axes, not the union
+            # of every sampled index.  A pin/library max_transition is an
+            # additional upper bound; receiver-output limits are unrelated.
+            table_slow = min((hi for _lo, hi in axis_ranges), default=None)
+            slow = min(x for x in (bound, table_slow) if x is not None)
+            fast = max((lo for lo, _hi in axis_ranges), default=None)
             if fast is None:
                 view["pins_without_fast_index"] = int(view["pins_without_fast_index"]) + 1
-            pins.append({"pin": f"{cell}/{pin}", "slow_ns": slow, "fast_ns": fast})
+            pins.append({"pin": f"{cell}/{pin}", "slow_ns": slow,
+                         "fast_ns": fast})
     view["pins"] = pins
     view["selected_cells_present"] = bool(selected_cells)
     slows = [float(x["slow_ns"]) for x in pins]
@@ -508,9 +517,58 @@ def pad_operating_scene(project: Path, core_liberty: str, container: str = "",
             "liberty_sha256": sources, "complete_pin_limits": complete}
 
 
+def _pad_analysis_boundary(project: Path, analysis_top: str
+                           ) -> Tuple[str, Dict[str, object]]:
+    """Classify ``analysis_top`` against the pad producer's two boundaries.
+
+    The project may request a future DIE while the current netlist is still
+    the core.  Only the producer's explicit ``core_module`` /
+    ``chip_top_module`` identity can move the SDC boundary to the bond pads.
+    """
+    basis: Dict[str, object] = {"record": IO_PAD_RECORD,
+                                "analysis_top": analysis_top}
+
+    def classified(kind: str) -> Tuple[str, Dict[str, object]]:
+        basis["classification"] = kind
+        return kind, basis
+
+    try:
+        import hashlib
+        import json
+        raw = (Path(project) / IO_PAD_RECORD).read_bytes()
+        record = json.loads(raw)
+        basis["record_sha256"] = hashlib.sha256(raw).hexdigest()
+    except (OSError, ValueError, AttributeError):
+        if analysis_top:
+            basis["why"] = "pad producer record is absent or unreadable"
+        return classified("UNSPECIFIED" if not analysis_top else "UNRECORDED")
+    if not analysis_top:
+        return classified("UNSPECIFIED")
+    core = record.get("core_module") if isinstance(record, dict) else None
+    chip = record.get("chip_top_module") if isinstance(record, dict) else None
+    if not core and not chip:
+        basis["why"] = "pad producer boundary identity is absent"
+        return classified("UNRECORDED")
+    basis.update(core_module=core, chip_top_module=chip)
+    if not isinstance(core, str) or not core or not isinstance(chip, str) or not chip:
+        basis["why"] = "pad producer boundary identity is incomplete"
+        return classified("UNKNOWN")
+    if core == chip:
+        basis["why"] = "pad producer names the same core and chip top"
+        return classified("UNKNOWN")
+    if analysis_top == core:
+        return classified("CORE")
+    if analysis_top == chip:
+        return classified("CHIP")
+    basis["why"] = (f"analysis top {analysis_top!r} matches neither recorded "
+                    f"core {core!r} nor chip top {chip!r}")
+    return classified("UNKNOWN")
+
+
 def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]],
                      container: str = "",
-                     to_container_path: Optional[Callable[[str, str], str]] = None
+                     to_container_path: Optional[Callable[[str, str], str]] = None,
+                     analysis_top: str = ""
                      ) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, object]]:
     """R-0929-PAD-INPUT-DRIVE: resolve the off-chip drive of a DIE's inputs.
 
@@ -533,15 +591,32 @@ def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]],
         return values, {"schema": PAD_INPUT_DRIVE_SCHEMA, "applies": None,
                         "verdict": "NOT_MEASURED",
                         "reason": f"route undeterminable: {exc!r}"}
-    if not die:
+    boundary_kind, boundary = _pad_analysis_boundary(project, analysis_top)
+    identity = {"boundary": boundary}
+    if analysis_top:
+        identity["analysis_top"] = analysis_top
+    if not die or boundary_kind == "CORE":
+        reason = (f"current analysis top {analysis_top!r} is the recorded core "
+                  f"boundary; future chip top {boundary.get('chip_top_module')!r} "
+                  "does not move its inputs to the bond pads"
+                  if boundary_kind == "CORE" else
+                  "not a pad-ring (DIE) top; the synthesis driving cell models "
+                  "on-chip drive")
         return values, {"schema": PAD_INPUT_DRIVE_SCHEMA, "applies": False,
-                        "verdict": "NOT_APPLICABLE",
-                        "reason": "not a pad-ring (DIE) top; the synthesis "
-                                  "driving cell models on-chip drive"}
+                        "verdict": "NOT_APPLICABLE", "reason": reason,
+                        **identity}
     out = dict(values)
     cell = out.pop("set_driving_cell", None)
     record: Dict[str, object] = {"schema": PAD_INPUT_DRIVE_SCHEMA,
-                                 "applies": True}
+                                 "applies": True, **identity}
+    if boundary_kind in ("UNKNOWN", "UNRECORDED"):
+        if cell:
+            record["refused_core_driving_cell"] = {"value": cell[0],
+                                                   "source": cell[1]}
+        record.update(verdict="NOT_MEASURED", reason=(
+            f"analysis boundary is stale or undetermined: {boundary.get('why')}; "
+            "neither a core driving cell nor a bond-pad transition is assumed"))
+        return out, record
     if cell and cell[1].startswith(_DESIGN_TIER):
         record.update(verdict="DECLARED", model="set_driving_cell",
                       value=cell[0], source=cell[1])
@@ -649,25 +724,45 @@ def pad_drive_sdc_lines(record: Optional[Dict[str, object]],
 def staged_sdc_pad_input_drive(project: Path, text: str, staged_rel: str,
                                container: str = "",
                                to_container_path: Optional[Callable[[str, str], str]] = None,
-                               time_scale: float = 1.0
+                               time_scale: float = 1.0,
+                               analysis_top: str = ""
                                ) -> Tuple[str, Dict[str, object]]:
     """The same ladder for a design-staged SDC on a DIE top.
 
-    A staged deck that itself sets ``set_input_transition`` or
-    ``set_driving_cell`` has DECLARED the drive (its own lines are the
-    evidence). One that sets neither gets the L9 declaration, else the PDK IO
+    At a known DIE boundary, a staged deck that itself sets
+    ``set_input_transition`` or ``set_driving_cell`` has DECLARED the drive
+    (its own lines are the evidence). An absent, incomplete, stale, or unknown
+    analysis boundary stays NOT_MEASURED even if the staged deck carries such a
+    command: an SDC command cannot prove whether it applies to core pins or
+    bond pads. One that sets neither gets the L9 declaration, else the PDK IO
     bracket, else NOT_MEASURED, appended to the deck; the record is written
     either way, so a record from an earlier run can never stand for this deck.
     """
-    _, record = _pad_input_drive(project, {}, container, to_container_path)
+    _, record = _pad_input_drive(project, {}, container, to_container_path,
+                                 analysis_top=analysis_top)
     if not record.get("applies"):
         return text, record
     own = [ln.strip() for ln in text.splitlines()
            if re.match(r"\s*(set_input_transition|set_driving_cell)\b", ln)]
+    boundary = record.get("boundary")
+    if (isinstance(boundary, dict)
+            and boundary.get("classification") in ("UNKNOWN", "UNRECORDED")):
+        if own:
+            record["refused_staged_sdc_lines"] = own
+        lines = render_pad_input_drive(record, time_scale)
+        record["sdc_lines"] = pad_drive_sdc_lines(record, time_scale)
+        if lines:
+            text = text.rstrip("\n") + ("\n# R-0929-PAD-INPUT-DRIVE "
+                                        "(stale analysis boundary; staged input "
+                                        "drive not admitted)\n") + "\n".join(lines) + "\n"
+        return text, record
     if own:
+        identity = {k: record[k] for k in ("analysis_top", "boundary")
+                    if k in record}
         record = {"schema": PAD_INPUT_DRIVE_SCHEMA, "applies": True,
                   "verdict": "DECLARED", "model": "design-staged SDC",
-                  "source": f"design-staged SDC {staged_rel}", "sdc_lines": own}
+                  "source": f"design-staged SDC {staged_rel}", "sdc_lines": own,
+                  **identity}
         return text, record
     lines = render_pad_input_drive(record, time_scale)
     record["sdc_lines"] = pad_drive_sdc_lines(record, time_scale)
