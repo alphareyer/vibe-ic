@@ -494,7 +494,8 @@ def _expert_answer_pending(project: Path) -> Tuple[bool, str]:
 
 
 def _phase1_decision(project: Path, force_skip: bool,
-                     knobs: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+                     knobs: Optional[Dict[str, Any]] = None, *,
+                     checkpoint: bool = False) -> Tuple[bool, str]:
     """Decide whether to run Phase 1 and in which mode.
 
     Returns (run, mode) where:
@@ -531,8 +532,10 @@ def _phase1_decision(project: Path, force_skip: bool,
         # stale cache: a phase-1 producer fix never reached an existing
         # project (measured, subservient f4). Reuse needs the producer's own
         # identity to match; see `_phase1_producer_identity`.
-        fresh = _phase1_freshness(project, knobs)
-        if fresh["state"] == _p1id.REUSE:
+        fresh = (_phase1_checkpoint_freshness(project, knobs) if checkpoint
+                 else _phase1_freshness(project, knobs))
+        if fresh["state"] == _p1id.REUSE or (
+                checkpoint and fresh["state"] == _p1id.REVALIDATE):
             return (False, "")
         if fresh["state"] == _p1id.REFUSE:
             return (False, _P1_MODE_REFUSED)
@@ -601,6 +604,24 @@ def _phase1_freshness(project: Path,
                 "why": f"the producer identity could not be read ({exc})"}
 
 
+def _phase1_checkpoint_freshness(project: Path,
+                               knobs: Optional[Dict[str, Any]] = None) -> dict:
+    """Nominate intact historical outputs for the current D1 consumer.
+
+    Source drift is disclosed, never treated as a current producer. Only the
+    complete consumer and content-bound expert judgement can accept reuse.
+    """
+    fresh = _phase1_freshness(project, knobs)
+    if fresh.get('reason') == _p1id.PRODUCER_CHANGED:
+        try:
+            return _p1id.assess(project, PROGRAMS_DIR, knobs, checkpoint=True)
+        except Exception as exc:
+            return {"state": _p1id.REGENERATE,
+                    "reason": _p1id.NO_PRODUCER_IDENTITY,
+                    "why": f"the retained checkpoint could not be read ({exc})"}
+    return fresh
+
+
 def _revalidate_phase1_checkpoint(project: Path, knobs: Dict[str, Any]) -> dict:
     """Recheck a current D1 checkpoint; this call produces no L documents.
 
@@ -632,8 +653,11 @@ def _revalidate_phase1_checkpoint(project: Path, knobs: Dict[str, Any]) -> dict:
         bound = gates.contracts(project, row)
         if not inputs:
             raise ValueError('D1 checkpoint has no resolved input identity')
-        if _phase1_freshness(project, knobs)['state'] != _p1id.REUSE:
-            raise ValueError('D1 producer checkpoint is no longer current')
+        freshness = _phase1_checkpoint_freshness(project, knobs)
+        checkpoint['source_assessment'] = freshness
+        checkpoint['producer_current'] = freshness['state'] == _p1id.REUSE
+        if freshness['state'] not in (_p1id.REUSE, _p1id.REVALIDATE):
+            raise ValueError('D1 retained checkpoint is no longer valid')
         if previous is not None and (previous / 'outputs.json').is_file():
             retained = json.loads((previous / 'outputs.json').read_text())
             if 'inputs' in retained and retained['inputs'] != inputs:
@@ -663,7 +687,7 @@ def _revalidate_phase1_checkpoint(project: Path, knobs: Dict[str, Any]) -> dict:
                     if (outputs != bound or authority.read_bytes() != identity
                             or worker._declared_input_files(
                                 project, row.get('required_inputs', ())) != inputs
-                            or _phase1_freshness(project, knobs)['state'] != _p1id.REUSE
+                            or _phase1_checkpoint_freshness(project, knobs) != freshness
                             or not ai.check(project, 'D1')[0]):
                         error = 'D1_CHECKPOINT_BINDING_REFUSED: evidence changed during revalidation'
                     else:
@@ -2857,11 +2881,14 @@ def _main() -> int:
     # FX_STALE_LDOCS — the knobs THIS run hands phase 1, so a doc written
     # under another `--pdk` / `--ic-name` is not reused (review wave8 MAJOR).
     _p1_knobs = {"ic_name": args.ic_name, "pdk": args.pdk, "mode": "docs"}
-    run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1, _p1_knobs)
+    _p1_checkpoint = _execution.request()['mode'] == 'default'
+    run_phase1, p1_mode = _phase1_decision(
+        project, _force_skip_p1, _p1_knobs, checkpoint=_p1_checkpoint)
     # What the generated L docs on disk ARE, asked once and carried into the
     # report whatever is decided from it.
     _gd_now = _pl.generated_docs_dir(project)
-    _p1_fresh = (_phase1_freshness(project, _p1_knobs)
+    _p1_fresh = ((_phase1_checkpoint_freshness(project, _p1_knobs)
+                  if _p1_checkpoint else _phase1_freshness(project, _p1_knobs))
                  if _gd_now.is_dir() and len(list(_gd_now.glob("L*.json"))) >= 13
                  else None)
     _p1_design_input = _design_input_present(project)
@@ -3136,7 +3163,7 @@ def _main() -> int:
         plan.append(("phase1", "SKIPPED", 0))
         if (_execution.request()['mode'] == 'default'
                 and _p1_fresh is not None
-                and _p1_fresh['state'] == _p1id.REUSE):
+                and _p1_fresh['state'] in (_p1id.REUSE, _p1id.REVALIDATE)):
             # Producer freshness preserves the checkpoint; the current expert
             # consumer still decides whether Phase2 may use its documents.
             import ai_signed_judgement as _checkpoint_ai
@@ -3154,6 +3181,19 @@ def _main() -> int:
                 detail = accepted['detail']
                 _phase1_checkpoint_review.update(verdict=review, detail=detail)
                 plan[-1] = ("phase1", review, 0)
+                if credit and _p1_fresh['state'] == _p1id.REVALIDATE:
+                    # This run accepted old outputs through the current D1
+                    # consumer. The original producer record stays untouched.
+                    if _p1_stale_why in advisories:
+                        advisories.remove(_p1_stale_why)
+                    _p1_stale_why = None
+                    _p1_fresh = {**_p1_fresh,
+                                 'consumer_revalidated': True,
+                                 'revalidation_folder': accepted['folder']}
+                    advisories.append(
+                        'REVALIDATED_PHASE1_CHECKPOINT: unchanged retained '
+                        'documents passed the current D1 consumer and expert '
+                        'judgement; original producer attribution is preserved')
             if not credit:
                 # No producer process was rerun: rc remains zero. The row
                 # records the consumer verdict that stopped this transition.

@@ -167,6 +167,110 @@ def test_docs_the_current_producer_wrote_are_reused(tmp_path, monkeypatch):
     assert _decide(proj, plug, monkeypatch) == (False, "")
 
 
+# A Default continuation can submit intact historical outputs to today's D1
+# consumers. That is revalidation, never a claim about today's producer bytes.
+def _checkpoint_assess(proj, plug, knobs=KNOBS):
+    return PID.assess(proj, plug / "programs", knobs, checkpoint=True)
+
+
+def _source_drift(plug):
+    src = plug / "programs" / "fake_l_producer.py"
+    src.write_text(src.read_text() + "\n# another producer revision\n")
+
+
+def test_checkpoint_source_drift_requires_revalidation_without_restamping(tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    sidecar = proj / "phase1" / SI.SIDECAR
+    before = sidecar.read_bytes(), PID.docs_snapshot(proj)
+    _source_drift(plug)
+    fresh = _checkpoint_assess(proj, plug)
+    assert fresh["state"] == "REVALIDATE", fresh
+    assert fresh["reason"] == PID.PRODUCER_CHANGED
+    assert fresh["old"]["code"] and fresh["new"]["code"]
+    assert fresh["old"]["code"] != fresh["new"]["code"]
+    assert (sidecar.read_bytes(), PID.docs_snapshot(proj)) == before
+    assert _fresh(proj, plug)["state"] == "REGENERATE"
+
+
+def test_checkpoint_unchanged_source_is_reused(tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    assert _checkpoint_assess(proj, plug)["state"] == PID.REUSE
+
+
+def test_checkpoint_registry_content_drift_requires_current_consumers(tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    (plug / "data" / "table.json").write_text('{"v": 2}')
+    fresh = _checkpoint_assess(proj, plug)
+    assert fresh["state"] == "REVALIDATE", fresh
+    assert fresh["reason"] == PID.PRODUCER_CHANGED
+
+
+@pytest.mark.parametrize("change,reason,state", [
+    ("input", "DESIGN_INPUT_CHANGED", "REGENERATE"),
+    ("knob", "KNOBS_CHANGED", "REGENERATE"),
+    ("edited_doc", "GENERATED_DOC_EDITED", "REFUSE"),
+    ("removed_doc", "GENERATED_DOC_REMOVED", "REGENERATE"),
+    ("foreign_doc", "GENERATED_DOC_EDITED", "REFUSE"),
+])
+def test_checkpoint_source_drift_does_not_hide_other_changes(
+        tmp_path, change, reason, state):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    _source_drift(plug)
+    knobs = KNOBS
+    if change == "input":
+        (proj / "input" / "docs" / "spec.md").write_text("# revised input\n")
+    elif change == "knob":
+        knobs = dict(KNOBS, pdk="different_pdk")
+    elif change == "edited_doc":
+        (proj / "phase1/generated_docs/L1_DOC.json").write_text('{"edited": true}')
+    elif change == "removed_doc":
+        (proj / "phase1/generated_docs/L1_DOC.json").unlink()
+    else:
+        (proj / "phase1/generated_docs/L99_FOREIGN.json").write_text("{}")
+    fresh = _checkpoint_assess(proj, plug, knobs)
+    assert fresh["state"] == state and fresh["reason"] == reason, fresh
+
+
+@pytest.mark.parametrize("change", ["producer_removed", "registry_removed",
+                                    "syntax_error", "recording_missing",
+                                    "recording_digest_mismatch"])
+def test_checkpoint_requires_a_complete_rederivable_source_record(tmp_path, change):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    if change == "producer_removed":
+        (plug / "programs" / "fake_l_producer.py").unlink()
+    elif change == "registry_removed":
+        (plug / "data" / "table.json").unlink()
+    elif change == "syntax_error":
+        src = plug / "programs" / "fake_l_producer.py"
+        # Whole-file Python records do not parse source. A missing registered
+        # symbol below exercises the symbol record's unresolved source instead.
+        import _step_recorder as SR
+        digests, error = SR.stamp_digests(src, [("produce", 6)])
+        assert error is None, error
+        rec = SI.read_sidecar(proj / "phase1", "phase1")
+        rec["recording"].pop("launched:programs/fake_l_producer.py")
+        rec["recording"]["programs/fake_l_producer.py"] = digests
+        rec["code"] = SR.digest_of(rec["recording"])
+        PID._rewrite(proj, rec)
+        src.write_text("def produce(:\n")
+    else:
+        sidecar = proj / "phase1" / SI.SIDECAR
+        value = json.loads(sidecar.read_text())
+        if change == "recording_missing":
+            value["phase1"]["recording"] = {}
+        else:
+            value["phase1"]["code"] = "0" * 64
+        sidecar.write_text(json.dumps(value))
+    fresh = _checkpoint_assess(proj, plug)
+    assert fresh["state"] == "REGENERATE", fresh
+    assert fresh["reason"] == PID.PRODUCER_CHANGED
+
+
 # ---------------------------------------------------------------------------
 # B1 — design input is what phase 1 READ, not what the flow rewrites
 # ---------------------------------------------------------------------------

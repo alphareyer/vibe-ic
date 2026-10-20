@@ -141,8 +141,9 @@ def _drive_main(project: Path, monkeypatch, *, phase1, phase2, phase3=None,
         return 0
 
     monkeypatch.setattr(V, "_run_phase", fake_run_phase)
-    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k:
-                        (False, "") if reuse_phase1 else (True, "docs"))
+    if reuse_phase1 is not None:
+        monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k:
+                            (False, "") if reuse_phase1 else (True, "docs"))
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(project),
                          "--no-dashboard", "--skip-hardware", *extra_argv])
@@ -380,6 +381,93 @@ def test_d1_checkpoint_identity_still_refuses_changed_evidence(tmp_path, monkeyp
     run, mode = V._phase1_decision(project, False, knobs)
     assert (run, mode) == ((False, V._P1_MODE_REFUSED) if mutation == 'output'
                            else (True, 'docs'))
+
+
+@pytest.mark.parametrize('review', ['PASS', 'FAIL', 'missing', 'stale'])
+@pytest.mark.parametrize('mechanical', ['present', 'missing'])
+def test_source_drift_uses_current_d1_without_reextracting(
+        tmp_path, monkeypatch, review, mechanical):
+    """Run the actual front-door decision and full neutral D1 consumer."""
+    import ai_signed_judgement as ai
+    import step_output_collector as versions
+    project, plugin, ready, knobs, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    monkeypatch.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
+    _sign_d1_checkpoint(project)
+    signature = project / 'reports/audit/ai_judgements/D1.json'
+    if review == 'missing':
+        signature.unlink()
+    elif review in ('FAIL', 'stale'):
+        payload = json.loads(signature.read_text())
+        if review == 'FAIL':
+            payload['verdict'] = 'FAIL'
+        else:
+            payload['evidence_sha256'] = '0' * 64
+        signature.write_text(json.dumps(payload))
+    source = plugin / 'programs/fake_l_producer.py'
+    source.write_text(source.read_text() + '\n# A later source revision.\n')
+    if mechanical == 'missing':
+        ready.unlink()
+    docs_before = V._p1id.docs_snapshot(project)
+    assert V._phase1_freshness(project, knobs)['reason'] == 'PRODUCER_CHANGED'
+    called = []
+    _, report = _drive_main(
+        project, monkeypatch, phase1=('FAIL', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--skip-phase3', '--skip-analog'),
+        after_phase=called.append)
+    passes = review == 'PASS' and mechanical == 'present'
+    assert called == (['phase2'] if passes else [])
+    assert report['halted_at'] != 'phase1' if passes else report['halted_at'] == 'phase1'
+    assert report['phase1_generated_docs']['state'] == 'REVALIDATE'
+    if passes:
+        assert report['phase1_generated_docs']['consumer_revalidated'] is True
+        assert not any('STALE_GENERATED_DOCS' in a for a in report['advisories'])
+        accepted = versions.latest_pass(project, 'D1')
+        assert accepted is not None and accepted['canonical_pass']
+        checkpoint = accepted['result']['checkpoint']
+        assert checkpoint['producer_started'] is False
+        assert checkpoint['producer_current'] is False
+        assert checkpoint['source_assessment']['reason'] == 'PRODUCER_CHANGED'
+        original_written = next(v for p, v in before.items() if p.name == 'written.json')
+        assert (project / 'steps' / accepted['folder'] / 'written.json').read_bytes() == original_written
+    else:
+        assert versions.latest_pass(project, 'D1') is None
+        assert report['phase1_checkpoint_review']['verdict'] != 'PASS'
+        assert report['verdict'] != 'PASS'
+    assert ai.check(project, 'D1')[0] == (review == 'PASS')
+    assert V._p1id.docs_snapshot(project) == docs_before
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize('change', ['input', 'output', 'source'])
+def test_source_drift_revalidation_refuses_changes_during_consumer(
+        tmp_path, monkeypatch, change):
+    import execution_backend_gates as gates
+    import step_output_collector as versions
+    project, plugin, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    monkeypatch.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
+    _sign_d1_checkpoint(project)
+    source = plugin / 'programs/fake_l_producer.py'
+    source.write_text(source.read_text() + '\n# First source revision.\n')
+    consume = gates.evaluate
+    def mutate(project, row):
+        result = consume(project, row)
+        assert result['status'] == 'PASS'
+        path = {'input': project / 'input/docs/spec.md',
+                'output': project / 'phase1/generated_docs/L1_DOC.json',
+                'source': source}[change]
+        path.write_text(path.read_text() + '\nchanged while being reviewed\n')
+        return result
+    monkeypatch.setattr(gates, 'evaluate', mutate)
+    called = []
+    _, report = _drive_main(
+        project, monkeypatch, phase1=('FAIL', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--skip-phase3', '--skip-analog'),
+        after_phase=called.append)
+    assert called == [] and report['halted_at'] == 'phase1'
+    assert versions.latest_pass(project, 'D1') is None
+    current = next(r for r in versions.current_acceptance(project, 0) if r['id'] == 'D1')
+    assert current['status'] == 'NOT_MEASURED'
+    assert current['result']['observed_canonical_consumer']['status'] == 'PASS'
 
 
 def _save_complete_acceptance(project, sid, status, *, runner, excluded=""):

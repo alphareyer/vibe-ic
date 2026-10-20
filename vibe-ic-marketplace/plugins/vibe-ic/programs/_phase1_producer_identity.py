@@ -87,6 +87,7 @@ import _step_identity as _si
 
 KIND = "phase1"
 REUSE = "REUSE"
+REVALIDATE = "REVALIDATE"
 REGENERATE = "REGENERATE"
 REFUSE = "REFUSE"
 
@@ -783,12 +784,35 @@ def _verdict(state: str, reason: str, why: str, **kw: Any) -> Dict[str, Any]:
     return out
 
 
+def _checkpoint_recording_complete(recording: Any, code: Any) -> bool:
+    """A checkpoint keeps the historical producer identity, never repairs it."""
+    if not isinstance(recording, dict) or not recording or not code:
+        return False
+    for entries in recording.values():
+        if not isinstance(entries, dict) or not entries:
+            return False
+        if any(not isinstance(value, str) or len(value) != 64
+               or any(c not in "0123456789abcdef" for c in value)
+               for value in entries.values()):
+            return False
+    try:
+        recorded_code, _ = _si.code_from_recording(recording)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return recorded_code == code
+
+
 def assess(project: Path, programs_dir: Path,
-           knobs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """REUSE / REGENERATE / REFUSE for the generated L docs on disk.
+           knobs: Optional[Dict[str, Any]] = None, *,
+           checkpoint: bool = False) -> Dict[str, Any]:
+    """REUSE / REGENERATE / REFUSE, or an explicitly requested REVALIDATE.
 
     `knobs` are the ones THIS run would hand phase 1; None means the caller
-    does not know them, and the recorded ones are used (said in the reason)."""
+    does not know them, and the recorded ones are used (said in the reason).
+    `checkpoint` keeps intact historical outputs eligible for current D1
+    consumers after source-only drift. It does not establish equivalence to
+    the new producer, grant PASS, or update the historical producer identity.
+    The default retains the original producer-freshness decision."""
     project = Path(project)
     gd = _pl.generated_docs_dir(project)
     rec = _si.read_sidecar(sidecar_dir(project), KIND)
@@ -834,10 +858,17 @@ def assess(project: Path, programs_dir: Path,
             f"they are the current producer's", docs=sorted(carried))
     old_code = rec.get("code")
     # The recorder's root is the PLUGIN root; callers pass `programs/`.
-    new_code, code_why = _si.code_from_stored(rec.get("recording"),
-                                              Path(programs_dir).parent)
+    recording = rec.get("recording")
+    if checkpoint and not _checkpoint_recording_complete(recording, old_code):
+        new_code, code_why = None, [
+            "the stored producer recording is incomplete or does not match "
+            "its historical code digest"]
+    else:
+        new_code, code_why = _si.code_from_stored(recording,
+                                                 Path(programs_dir).parent)
+    source_drift = None
     if not old_code or new_code is None or new_code != old_code:
-        return _verdict(
+        source_drift = _verdict(
             REGENERATE, PRODUCER_CHANGED,
             f"the phase-1 producer that wrote these docs is not the current "
             f"one: code {str(old_code or 'unrecorded')[:12]} -> "
@@ -846,6 +877,16 @@ def assess(project: Path, programs_dir: Path,
             f"{_plugin_version() or '?'} ({'; '.join(code_why)})",
             old={"code": old_code, "plugin_version": rec.get("plugin_version")},
             new={"code": new_code, "plugin_version": _plugin_version()})
+        if not checkpoint or not old_code or new_code is None:
+            return source_drift
+        # A digest can be derived even when a formerly recorded file/symbol
+        # is ABSENT. That is missing evidence, not eligible source drift.
+        import _step_recorder as _sr
+        current, error = _sr.rederive(recording, Path(programs_dir).parent)
+        if error or not current or any(
+                value == "ABSENT" for entries in current.values()
+                for value in entries.values()):
+            return source_drift
     rec_knobs = normal_knobs(rec.get("knobs"))
     now_knobs = normal_knobs(knobs) if knobs is not None else rec_knobs
     if now_knobs != rec_knobs:
@@ -864,6 +905,14 @@ def assess(project: Path, programs_dir: Path,
             f"inputs {str(rec.get('inputs') or 'unrecorded')[:12]} -> "
             f"{str(new_inputs or 'unreadable')[:12]}",
             old={"inputs": rec.get("inputs")}, new={"inputs": new_inputs})
+    if source_drift is not None:
+        source_drift["state"] = REVALIDATE
+        source_drift["why"] += (
+            "; the recorded output bytes, design inputs and knobs remain "
+            "intact; current D1 consumers must revalidate this historical "
+            "checkpoint before it can advance. No equivalence to the new "
+            "producer is established")
+        return source_drift
     n_der = len(rec.get("derivations") or [])
     return _verdict(REUSE, "CURRENT",
                     f"every generated doc holds the bytes phase 1 recorded"
