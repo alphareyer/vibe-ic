@@ -29,7 +29,7 @@ def put(path, data):
 
 
 def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None, critical='clean',
-               postmap=False):
+               postmap=False, prior_provenance=None):
     project = tmp_path / 'project'
     rtl = project / 'phase2/stage1/rtl/top.v'
     rtl.parent.mkdir(parents=True)
@@ -59,6 +59,8 @@ def synth_case(tmp_path, monkeypatch, ceiling=None, damage=None, critical='clean
                         lambda project, image, raw, output, **kw: put(output, json.loads(raw.read_text())))
     folder = project / 'phase3/librelane/02-yosys-synthesis'
     raw = folder / 'top.nl.v'
+    if prior_provenance is not None:
+        put(folder / 'provenance_gate.json', prior_provenance)
 
     def chain(project, image, steps, **kwargs):
         folder.mkdir(parents=True, exist_ok=True)
@@ -387,6 +389,20 @@ def test_initial_parent_disposition_controls_publication(
         assert result.reason_class == 'inconclusive'
     elif damage and damage.startswith('report_'):
         assert 'LL_PROVENANCE_REPORT_INVALID' in result.detail
+
+
+def test_retry_retains_the_previous_provenance_report(tmp_path, monkeypatch):
+    prior = {'schema': 'prior-provenance/1', 'invocation': 'previous'}
+    result, _, published, folder = synth_case(
+        tmp_path, monkeypatch, ceiling='10x10', prior_provenance=prior)
+    assert result.status == 'PASS', result.detail
+    assert len(published) == 1
+    retained = list(folder.glob('provenance_gate.*.previous.json'))
+    assert len(retained) == 1
+    assert json.loads(retained[0].read_text()) == prior
+    current = json.loads((folder / 'provenance_gate.json').read_text())
+    assert current != prior
+    assert current['checks'][0]['status'] == 'PASS'
 
 
 @pytest.mark.parametrize('damage', ['area_report_missing', 'area_report_malformed', 'area_report_conflicting', 'area_cli_error'])

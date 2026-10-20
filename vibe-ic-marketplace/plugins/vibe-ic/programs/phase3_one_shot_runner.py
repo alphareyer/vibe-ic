@@ -17473,6 +17473,24 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         # Check its own bytes here; final aliases require the complete child
         # lineage when the ordinary Step9 consumer adopts them.
         provenance_report = folder / "provenance_gate.json"
+        if provenance_report.is_file():
+            # A retry must not destroy the previous invocation's gate bytes.
+            # The normal Default runner has an active Step-9 version folder;
+            # attach the old report to its timestamped `before/` snapshot.
+            # Direct component callers have no active owner, so retain the
+            # same bytes beside the working report with a timestamp suffix.
+            import step_output_collector as _versions
+            try:
+                _versions.retain_before(project, "9", [provenance_report])
+            except OSError as exc:
+                if "no active retained owner for step 9" not in str(exc):
+                    raise
+                stamp = (time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+                         + f"_{time.time_ns() % 1_000_000_000:09d}Z")
+                retained = provenance_report.with_name(
+                    f"{provenance_report.stem}.{stamp}.previous"
+                    f"{provenance_report.suffix}")
+                shutil.copy2(provenance_report, retained)
         provenance_report.unlink(missing_ok=True)
         provenance_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "provenance_check.py"),
