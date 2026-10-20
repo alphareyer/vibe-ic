@@ -17469,31 +17469,48 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         if pdk_gate.returncode != 0:
             raise _ll.Refusal("LL_PDK_CONSISTENCY_FAILED",
                               f"rc={pdk_gate.returncode}: " + pdk_gate.stdout[-500:])
+        # The native Yosys parent exists before publish_handoff/post-map.
+        # Check its own bytes here; final aliases require the complete child
+        # lineage when the ordinary Step9 consumer adopts them.
+        provenance_report = folder / "provenance_gate.json"
+        provenance_report.unlink(missing_ok=True)
         provenance_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "provenance_check.py"),
              str(project), "--output", str(source.relative_to(project)),
              "--tool", "yosys", "--require-measured",
-             "--json", str(folder / "provenance_gate.json")],
+             "--json", str(provenance_report)],
             capture_output=True, text=True)
         if provenance_gate.returncode:
             raise _ll.Refusal("LL_PROVENANCE_FAILED", provenance_gate.stdout[-500:])
-        # This is the immutable Yosys parent, before the typed alias handoff
-        # or any post-map child exists. rc0 can still disclose UNMEASURED;
-        # only positive parent evidence may advance to the real publisher.
-        provenance = json.loads((folder / "provenance_gate.json").read_text())
-        checks = provenance.get("checks") if isinstance(provenance, dict) else None
-        if (not isinstance(checks, list) or not checks
-                or not all(isinstance(row, dict) for row in checks)
-                or provenance.get("ok") is not True
-                or any(row.get("status") not in {"PASS", "UNMEASURED", "NOT_MEASURED"}
-                       for row in checks)):
-            raise _ll.Refusal("LL_PROVENANCE_REPORT_INVALID", str(provenance))
-        if any(row["status"] != "PASS" for row in checks):
-            return StepResult("synth", "NOT_MEASURED", time.time() - t0,
-                              "Native Yosys parent provenance is unmeasured; "
-                              "handoff was not published",
-                              [str(source), str(folder / "provenance_gate.json")],
-                              reason_class="inconclusive")
+        # rc=0 also represents UNMEASURED/NOT_MEASURED in this consumer.
+        # Only this exact, positively measured parent may reach publishers.
+        try:
+            provenance_doc = json.loads(provenance_report.read_text())
+            checks = provenance_doc.get("checks") if isinstance(provenance_doc, dict) else None
+            if (not isinstance(provenance_doc, dict) or provenance_doc.get("ok") is not True
+                    or not isinstance(checks, list) or len(checks) != 1
+                    or not isinstance(checks[0], dict)
+                    or checks[0].get("output") != str(source.relative_to(project))):
+                raise ValueError("expected exactly the native parent provenance check")
+            check = checks[0]
+            status, measurement = check.get("status"), check.get("measurement")
+            if (status not in ("PASS", "UNMEASURED", "NOT_MEASURED")
+                    or not isinstance(measurement, dict)
+                    or type(measurement.get("declared")) is not bool
+                    or "measured" not in measurement
+                    or (measurement["measured"] is not None
+                        and type(measurement["measured"]) is not bool)):
+                raise ValueError("invalid native parent provenance disposition")
+        except (OSError, ValueError) as exc:
+            raise _ll.Refusal("LL_PROVENANCE_REPORT_INVALID", str(exc)) from exc
+        if (status != "PASS" or measurement["declared"] is not True
+                or measurement["measured"] is not True):
+            return StepResult(
+                "synth", "NOT_MEASURED", time.time() - t0,
+                f"Native parent provenance {status}; no positively measured "
+                "parent was admitted, so handoff/post-map publication did not run",
+                [str(netlist), str(stat), str(stats), str(provenance_report)],
+                reason_class="uncalibrated" if status == "NOT_MEASURED" else "inconclusive")
         handoff_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "synth_handoff_netlist_check.py"),
              "--netlist", str(source), "--resolved", str(folder / "config.json"),
