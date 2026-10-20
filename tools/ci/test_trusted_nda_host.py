@@ -443,3 +443,19 @@ def test_cli_keeps_benign_and_forbidden_return_codes_distinct(subject, tmp_path)
     assert forbidden.returncode == 1
     assert all(token not in forbidden.stdout + forbidden.stderr
                for token in SYNTHETIC.values())
+
+
+def test_host_reader_loads_from_an_isolated_verifier_process(tmp_path):
+    """The final receipt reader loads by file path, without tools/ci on sys.path."""
+    code = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('verifier', {str(HERE / 'hermetic_candidate_runner.py')!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "print(module._nda_host().KIND)\n"
+    )
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                            cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "vibeic.trusted-host-nda/v1"

@@ -19,6 +19,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The final verifier loads this trusted module by file path. Its sibling
+# primitives must remain available without relying on the caller's PYTHONPATH.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 from landing_record_primitives import _git, _git_env, _object_format, _commit_and_tree
 
 PROGRAMS = "vibe-ic-marketplace/plugins/vibe-ic/programs"
