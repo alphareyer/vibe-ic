@@ -641,11 +641,54 @@ def sync_state_facts(netlist: dict, top: str, clock: str, *,
             "registers": registers}
 
 
+def _clock_combinational_rom(mod: dict, name: str, memory: dict) -> bool:
+    """Recognize the native constant-initializer/asynchronous-read ROM shape.
+
+    Every port must belong to this closed shape: no runtime writer, clocked
+    read, reset, partial/undefined initializer or unknown memory cell. Names
+    and visibility do not establish immutability. The clock-only memory_map
+    views still have to account for every sequential Q bit afterwards.
+    """
+    width, size, start = (memory[k] for k in ("width", "size", "start_offset"))
+    ports = [c for _, c, kind in _cells(mod) if kind == "memory"
+             and (c.get("parameters") or {}).get("MEMID") in (name, "\\" + name)]
+    reads = [c for c in ports if c.get("type") == "$memrd_v2"]
+    inits = [c for c in ports if c.get("type") == "$meminit"]
+    if not reads or len(inits) != 1 or len(ports) != len(reads) + 1 or start < 0:
+        return False
+    init = inits[0]
+    params, conn = init.get("parameters") or {}, init.get("connections") or {}
+    address, data = conn.get("ADDR") or [], conn.get("DATA") or []
+    if (set(conn) != {"ADDR", "DATA"}
+            or _param_bit(params.get("WIDTH")) != width
+            or _param_bit(params.get("WORDS")) != size
+            or _param_bit(params.get("ABITS")) != len(address)
+            or not address or any(b not in ("0", "1") for b in address)
+            or int("".join(reversed(address)), 2) != start
+            or len(data) != width * size or any(b not in ("0", "1") for b in data)):
+        return False
+    for read in reads:
+        params, conn = read.get("parameters") or {}, read.get("connections") or {}
+        address, data = conn.get("ADDR") or [], conn.get("DATA") or []
+        if (set(conn) != {"ADDR", "DATA", "CLK", "EN", "ARST", "SRST"}
+                or _param_bit(params.get("CLK_ENABLE")) != 0
+                or _param_bit(params.get("WIDTH")) != width
+                or _param_bit(params.get("ABITS")) != len(address)
+                or not address or any(not isinstance(b, int) and b not in ("0", "1")
+                                      for b in address)
+                or len(data) != width or any(not isinstance(b, int) for b in data)
+                or conn.get("CLK") != ["x"] or conn.get("EN") != ["1"]
+                or conn.get("ARST") != ["0"] or conn.get("SRST") != ["0"]):
+            return False
+    return True
+
+
 def _clock_memory_aliases(netlist: dict, top: str) -> Tuple[dict, str]:
     """Bind native memory_map word aliases to the original native declarations.
 
     No RTL parser or HDL observer is involved. Missing source locations,
-    hidden memories, collisions and unsupported native memory shapes refuse.
+    hidden sequential memories, collisions and unsupported native memory
+    shapes refuse. Proven combinational ROMs need no sequential word aliases.
     This mapping is exclusively for clock observations, never reset/SYNC HDL.
     """
     tm = _top_module(netlist, top)
@@ -663,9 +706,13 @@ def _clock_memory_aliases(netlist: dict, top: str) -> Tuple[dict, str]:
     for name, mem in memories.items():
         width, size, start = (mem.get(k) for k in ("width", "size", "start_offset"))
         src = (mem.get("attributes") or {}).get("src")
-        if (_param_bit(mem.get("hide_name", 0)) or not src
+        if (not src
                 or not all(isinstance(v, int) for v in (width, size, start))
                 or width <= 0 or size <= 0):
+            return {}, f"unsupported source memory declaration: {name}"
+        if _clock_combinational_rom(mod, name, mem):
+            continue
+        if _param_bit(mem.get("hide_name", 0)):
             return {}, f"unsupported source memory declaration: {name}"
         for word in range(start, start + size):
             alias = f"{name}[{word}]"

@@ -142,6 +142,39 @@ endmodule
 """
 
 
+# #3358 exact public input: independent, fully observable 16-entry case ROM.
+ARRAY_ROM = """module neutral(input clk,rst_n,we,input [1:0] addr,input [3:0] d,input [3:0] opcode,output [3:0] y,output reg [7:0] lookup);
+reg [3:0] words [0:3];
+always @(posedge clk) begin
+ if (!rst_n) words[0] <= 0;
+ else if (we) words[addr] <= d;
+end
+assign y=words[addr];
+always @* begin
+ case(opcode)
+4'd0: lookup=8'd17;
+4'd1: lookup=8'd206;
+4'd2: lookup=8'd57;
+4'd3: lookup=8'd143;
+4'd4: lookup=8'd84;
+4'd5: lookup=8'd233;
+4'd6: lookup=8'd6;
+4'd7: lookup=8'd190;
+4'd8: lookup=8'd72;
+4'd9: lookup=8'd165;
+4'd10: lookup=8'd31;
+4'd11: lookup=8'd249;
+4'd12: lookup=8'd118;
+4'd13: lookup=8'd3;
+4'd14: lookup=8'd212;
+4'd15: lookup=8'd95;
+default: lookup=8'd0;
+ endcase
+end
+endmodule
+"""
+
+
 def _array_check(tmp_path, rtl, claims=None):
     if shutil.which("yosys") is None:
         skip_not_verified("yosys unavailable for native array clock observation",
@@ -159,7 +192,11 @@ def _array_check(tmp_path, rtl, claims=None):
     (ARRAY, fsc.PASS, 16), (SCALAR, fsc.PASS, 4),
     (ARRAY.replace("posedge clk", "negedge clk"), fsc.REFUTED, 16),
     (ARRAY.replace("words", "\\bank.words$ "), fsc.PASS, 16),
-], ids=["memory", "scalar-control", "memory-negedge", "escaped-memory"])
+    (ARRAY_ROM, fsc.PASS, 16),
+    (ARRAY_ROM.replace("posedge clk", "negedge clk"), fsc.REFUTED, 16),
+    (ARRAY_ROM.replace("words", "entries").replace("opcode", "operation"), fsc.PASS, 16),
+], ids=["memory", "scalar-control", "memory-negedge", "escaped-memory",
+       "comb-rom", "comb-rom-negedge", "renamed-comb-rom"])
 def test_register_array_public_clock_census(tmp_path, rtl, verdict, width):
     result = _array_check(tmp_path, rtl)
     assert result["verdict"] == verdict, result
@@ -186,10 +223,22 @@ def test_register_array_public_clock_census(tmp_path, rtl, verdict, width):
 
 
 @pytest.mark.parametrize("case", ["mixed-edge", "second-clock", "derived-clock", "latch",
-                                  "unknown-cell", "native-failure"])
+                                  "unknown-cell", "native-failure", "rom-undefined",
+                                  "rom-writable-opposite", "rom-writable-async"])
 def test_array_clock_unsupported_state_stays_not_discharged(tmp_path, case):
     rtl = ARRAY
-    if case == "native-failure":
+    if case == "rom-undefined":
+        rtl = ARRAY_ROM.replace("8'd17", "8'bxxxxxxxx")
+    elif case.startswith("rom-writable-"):
+        # A constant initializer cannot make memory with a runtime writer ROM.
+        start = ARRAY_ROM.index("always @* begin")
+        rtl = ARRAY_ROM[:start] + "reg [7:0] table_data [0:15];\ninitial begin\n" + "".join(
+            f"table_data[{i}]=8'd{v};\n" for i, v in enumerate(
+                [17, 206, 57, 143, 84, 233, 6, 190, 72, 165, 31, 249, 118, 3, 212, 95]))
+        event = "@(negedge clk)" if case == "rom-writable-opposite" else "@*"
+        rtl += ("end\nalways " + event + " if(we) table_data[opcode] <= {4'b0,d};\n"
+                "always @* lookup=table_data[opcode];\nendmodule\n")
+    elif case == "native-failure":
         rtl = rtl.replace("endmodule", "invalid syntax\nendmodule")
     elif case == "derived-clock":
         rtl = rtl.replace("posedge clk", "posedge gated").replace(
@@ -240,7 +289,8 @@ def test_array_clock_does_not_admit_reset_claims(tmp_path):
     assert result["claims"][1]["verdict"] == fsc.NOT_DISCHARGED
 
 
-def test_array_harness_property_consumer_receives_clock_claim(tmp_path):
+@pytest.mark.parametrize("rtl", [ARRAY, ARRAY_ROM], ids=["plain", "comb-rom"])
+def test_array_harness_property_consumer_receives_clock_claim(tmp_path, rtl):
     docs = tmp_path / "phase1/generated_docs"
     docs.mkdir(parents=True)
     (docs / "L3_PROTOCOL.json").write_text(json.dumps({"no_opcodes_in_input": True}))
@@ -250,7 +300,7 @@ def test_array_harness_property_consumer_receives_clock_claim(tmp_path):
                                      "resets": [{"name": "rst_n"}]}}))
     rtl_dir = tmp_path / "phase2/stage1/rtl"
     rtl_dir.mkdir(parents=True)
-    (rtl_dir / "neutral.v").write_text(ARRAY)
+    (rtl_dir / "neutral.v").write_text(rtl)
     generated = fhg.generate(project=tmp_path, top="neutral")
     contract_path = tmp_path / "phase2/stage1/formal/property_contract.json"
     contract = json.loads(contract_path.read_text())
@@ -271,3 +321,15 @@ def test_array_harness_property_consumer_receives_clock_claim(tmp_path):
     (formal_dir / "consumer-readback.json").write_text(json.dumps(result, indent=2))
     assert clock_id in result.get("program_discharged_obligations", []), result
     assert result["unresolved_obligations"]  # reset binding remains open
+
+    # The existing immutable consumer binding must refuse a changed source,
+    # and accept the exact original bytes again without rewriting evidence.
+    source = rtl_dir / "neutral.v"
+    source.write_text(rtl + "// changed source after discharge\n")
+    stale = {"all_proved": False}
+    fpr._attach_property_contract(stale, formal_dir, None)
+    assert clock_id not in stale.get("program_discharged_obligations", []), stale
+    source.write_text(rtl)
+    restored = {"all_proved": False}
+    fpr._attach_property_contract(restored, formal_dir, None)
+    assert clock_id in restored.get("program_discharged_obligations", []), restored
