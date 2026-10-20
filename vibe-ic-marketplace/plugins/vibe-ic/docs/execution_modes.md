@@ -115,8 +115,9 @@ current binding, exact receipt digest, reviewer identity and rationale to
 `Controller.adopt`. Missing choice, changed inputs/outputs, incomplete gates,
 unmeasured candidates, wrong source or changed tool identity refuse. Adoption
 reconsumes the actual output validator and persists `adoption.json`; it records
-adoption without publishing into the project's native outputs. This is an API
-blocking boundary, not a claim that a currently unmodified runner stops here.
+adoption without publishing into the project's native outputs. The ordinary
+Ultra dispatcher then owns native import and continuation; an isolated
+`Controller.adopt` call alone does not perform that import.
 
 Adoption also checks the currently relevant applicability, qualification,
 availability, license-seat/resource declarations and selection policy against
@@ -133,7 +134,11 @@ atomic adoption record is committed. `selected_generation` identifies those
 captured bytes, rather than leaving the record pointed at mutable candidate
 outputs. Read-only files plus issued hashes expose later disk changes; they are
 not a host security sandbox. Any future native import must consume the exact
-generation and verify its manifest/digests. No such native import is added here.
+generation and verify its manifest/digests. The ordinary
+`execution_policy.dispatch_fixed_step` uses `execution_production.import_selected`
+for Step 9, a journal for the other ordinary selected outputs, and the existing
+analog consumer for A6-A8. Their success remains a separate per-invocation
+obligation.
 
 Arm IDs reject dot traversal and the controller-reserved plan/result/adoption,
 refusal, issued-plan and selected-generation names. Legitimate names such as
@@ -181,6 +186,24 @@ later Phase-3 caller could produce. A failed or unmeasured producer retains
 that verdict. A resumed window outside Step 8 does not repeat this work.
 
 ## Acceptance scope
+
+The source-family census covers the 70 canonical rows: 20 frontend/Step 9,
+23 backend, 14 release, three analog physical/hardmacro, six analog-front and
+four mixed-signal rows. Six release entries describe external or unavailable
+producers; the remaining 64 are source-backed software implementations. These
+counts do not establish installed tool availability, native qualification or
+70 passing design steps. A public catalog of 333 arm descriptions is not a
+requirement to install every described or licensed arm.
+
+The retained SPM/GF180 acceptance is 43 applicable contract rows on source
+1.29.75, including its five typed partial disclosures, plus the separately
+accepted source86 technical engineering release. New source or component
+audits do not erase those records or convert their limits into a new PASS.
+Analog A1-A9, mixed M1-M4 and the IP delivery row apply only to their declared
+paths. FPGA rows 6/39 retain the existing conditional hardware policy;
+manufacturing rows 40-44 are recorded as later service work and are outside
+the pre-tapeout design acceptance goal. Whole-Ultra qualification remains
+separate from Default and from a successful two-simulator component case.
 
 `programs/tests/test_default_mode_routing_contract.py` loads the canonical YAML
 and portfolio, checks all 70 IDs and source bindings, and proves that every

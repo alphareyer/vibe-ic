@@ -7,7 +7,7 @@
       "tools": 63,
       "arms": 333
     },
-    "as_of": "2026-10-12",
+    "as_of": "2026-10-20",
     "evidence_scope": "CURRENT_SOURCE_RUNNER_INTEGRATION; RUNTIME_AVAILABILITY_AND EDA_RESULTS REMAIN PER_INVOCATION",
     "controller_scope": "SHARED REGISTRY/CONTROLLER HOOKED INTO FIVE ORDINARY RUNNER FRONT DOORS; FIXED-STEP ADAPTER AVAILABILITY AND QUALIFICATION REMAIN PER INVOCATION",
     "default_mode": {
@@ -20,7 +20,7 @@
       "whole_flow_verdict": "NOT_CLAIMED"
     },
     "policy_globally_implemented": false,
-    "registered_production_executors": 54,
+    "registered_production_executors": 64,
     "runnable_eda_candidates": null,
     "installation_runtime_scope": "Measured per invocation. This metadata does not claim that every host has every tool, that all 333 catalog arms are installed, or that any IC/signoff result passed.",
     "legacy_native_modes": [
@@ -35,16 +35,18 @@
     "canonical_flow_sha256": "4460b433cb67db1ab9c3da9b80216a93826366f6d18a668b57df6c99f6d20bd9",
     "canonical_flow_git_blob": "45f8ee21945484976ad49bacb96b7f198c53e2f8",
     "production_runner_hooks": 5,
-    "registered_fixed_step_adapters": 60,
-    "source_candidate_implementations": 54,
+    "registered_fixed_step_adapters": 70,
+    "source_candidate_implementations": 64,
     "registered_adapter_breakdown": {
       "frontend_including_step9": 20,
       "backend": 23,
       "release_software": 8,
       "release_external_or_unavailable_placeholders": 6,
-      "analog": 3
+      "analog": 3,
+      "analog_front": 6,
+      "mixed_signal": 4
     },
-    "registered_production_executors_scope": "Source-backed software executor registrations only: 20 frontend/Step9 + 23 backend + 8 software release + 3 analog. Five external release rows and one unavailable FPGA row remain non-executors.",
+    "registered_production_executors_scope": "Source-backed software executor registrations only: 20 frontend/Step9 + 23 backend + 8 software release + 3 analog + 6 analog-front + 4 mixed-signal. Five external release rows and one unavailable FPGA row remain non-executors. These are source-family counts, not native-qualified rows or installed tools; applicability and runtime readiness remain per invocation.",
     "runnable_eda_candidates_scope": "Current installation and eligibility are NOT_MEASURED here and are evaluated per invocation. Null is not a claim of zero available tools. The 333 catalog arm descriptions are not installed executors."
   },
   "tools": {
