@@ -22,7 +22,7 @@ FRONT END. The netlist is exactly what LibreLane's `Yosys.JsonHeader` writes
 `Yosys.JsonHeader` `json_h` file. After `proc` without `opt_dff`, a sync
 reset is the outermost `$mux` in front of D with a constant arm, an enable is
 a `$mux` whose other arm is the flop's own Q, and an async reset is the `ARST`
-pin of `$adff`.
+pin of `$adff` or the constant-valued `ALOAD` of `$aldff`.
 
 SystemVerilog source uses the native Slang reader in one compilation unit,
 with the existing package/import ordering before elaboration. Plain Verilog
@@ -305,6 +305,10 @@ class Flop:
     arst: Optional[object] = None
     srst: Optional[object] = None      # outermost reset-mux select
     label: str = ""
+    arst_pin: Optional[str] = None   # native pin; arst stays the shared reset bit
+    arst_pol: Optional[int] = None   # active level at the native pin
+    arst_value: Optional[List[str]] = None  # native Q/AD bit order (LSB first)
+    arst_source: str = ""            # native cell source location
 
 
 @dataclass
@@ -518,12 +522,56 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
             continue
         c = cell["connections"]
         params = cell.get("parameters", {})
+        async_pins = set(c) & {"ARST", "ALOAD", "SET", "CLR"}
+        # One arst bit cannot represent independent set/clear controls. Refuse
+        # at the shared loader so every ordinary CDC/RDC consumer fails closed.
+        if cell["type"] in {"$dffsr", "$dffsre"} or async_pins & {"SET", "CLR"}:
+            raise Refusal("CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL",
+                          f"{cname} ({cell['type']}): multiple SET/CLR controls")
+        arst_pin = "ARST" if "ARST" in c else None
+        arst_pol = None
+        arst_value = None
+        if cell["type"] in {"$aldff", "$aldffe"}:
+            # Slang preserves async loading even when AD is a constant reset
+            # value. Only that single-control shape has the existing reset
+            # semantics; dynamic AD must not disappear from data/reset analysis.
+            try:
+                arst_pol = _int(params["ALOAD_POLARITY"])
+            except (KeyError, TypeError, ValueError):
+                arst_pol = None
+            if (async_pins != {"ALOAD"} or len(c["ALOAD"]) != 1
+                    or c["ALOAD"][0] not in ("0", "1")
+                    and not isinstance(c["ALOAD"][0], int)
+                    or arst_pol not in (0, 1)
+                    or len(c.get("CLK", [])) != 1
+                    or not c.get("Q") or len(c.get("D", [])) != len(c["Q"])
+                    or len(c.get("AD", [])) != len(c["Q"])
+                    or any(bit not in ("0", "1") for bit in c.get("AD", []))):
+                raise Refusal("CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL",
+                              f"{cname} ({cell['type']}): expected one ALOAD, "
+                              "binary polarity and constant binary AD matching Q")
+            arst_pin = "ALOAD"
+            arst_value = list(c["AD"])
+        elif "ALOAD" in c or "AD" in c:
+            raise Refusal("CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL",
+                          f"{cname} ({cell['type']}): unexpected ALOAD/AD pins")
+        elif arst_pin:
+            arst_pol = _int(params.get("ARST_POLARITY", 1))
+            if "ARST_VALUE" in params:
+                value = params["ARST_VALUE"]
+                text = format(value, f"0{len(c.get('Q', []))}b") \
+                    if isinstance(value, int) else str(value)
+                arst_value = list(reversed(text))
         if "CLK" not in c:
             continue
         flop = Flop(name=cname, type=cell["type"], clk=c["CLK"][0],
                     clk_pol=_int(params.get("CLK_POLARITY", 1)),
                     d=list(c.get("D", [])), q=list(c.get("Q", [])),
-                    arst=(c.get("ARST") or [None])[0])
+                    arst=(c.get(arst_pin) or [None])[0],
+                    arst_pin=arst_pin, arst_pol=arst_pol,
+                    arst_value=arst_value,
+                    arst_source=cell.get("attributes", {}).get("src", "")
+                    if arst_pin else "")
         flop.srst = (c.get("SRST") or [None])[0] or \
             _outer_reset_mux(nl, flop.d)
         flop.label = nl.bit_label(flop.q[0], port_labels).split("[")[0] \

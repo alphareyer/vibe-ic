@@ -105,3 +105,112 @@ def test_bad_syntax_cannot_leave_prior_native_admission(tmp_path):
     actual_rc, report = crossing(tmp_path)
     assert actual_rc == 1
     assert any(row["severity"] == "ERROR" for row in report["findings"])
+
+
+def _reset_control_source(case):
+    """Public #3335 inputs; extensions share exactly the same source bytes."""
+    if case in {"ring4", "dag4", "external4", "selfloop", "low4"}:
+        size = 1 if case == "selfloop" else 4
+        lines = [f"module neutral_reset_top(input wire clk, ext_rst, input wire [{size-1}:0] data_i, output reg [{size-1}:0] q);"]
+        for i in range(size):
+            dependency = (case not in {"dag4", "external4"} or
+                          (case == "dag4" and i != size-1))
+            expr = f"ext_rst | q[{(i+1)%size}]" if dependency else "ext_rst"
+            if case == "low4":
+                expr = f"ext_rst & ~q[{(i+1)%size}]"
+            lines.append(f"wire rst_{i} = {expr};")
+            edge, condition = ("negedge", "!") if case == "low4" else ("posedge", "")
+            lines.append(f"always @(posedge clk or {edge} rst_{i}) if ({condition}rst_{i}) q[{i}] <= 1'b0; else q[{i}] <= data_i[{i}];")
+        text = "\n".join(lines + ["endmodule"]) + "\n"
+        if case == "external4":
+            text = text.replace("ext_rst", "guard_raw")
+            text = text.replace("<= data_i[", "<= guard_raw ^ data_i[")
+        return text
+    if case == "vector_constant":
+        return ("module neutral_reset_top(input wire clk, ext_rst, input wire [2:0] data_i, output reg [2:0] q);\n"
+                "always @(posedge clk or negedge ext_rst) if (!ext_rst) q <= 3'b110; else q <= data_i;\nendmodule\n")
+    if case == "dynamic_ad":
+        return ("module neutral_reset_top(input wire clk, ext_rst, async_i, data_i, output reg q);\n"
+                "always @(posedge clk or posedge ext_rst) if (ext_rst) q <= async_i; else q <= data_i;\nendmodule\n")
+    if case == "set_clr":
+        return ("module neutral_reset_top(input wire clk, set_i, clr_i, data_i, output reg q);\n"
+                "always @(posedge clk or posedge set_i or posedge clr_i) if (clr_i) q <= 1'b0; else if (set_i) q <= 1'b1; else q <= data_i;\nendmodule\n")
+    raise ValueError(case)
+
+
+def _reset_control_native(root, case, extension):
+    source = root / "phase2/stage1/rtl" / ("neutral_reset_top." + extension)
+    source.parent.mkdir(parents=True)
+    source.write_text(_reset_control_source(case))
+    l9 = root / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9.parent.mkdir(parents=True)
+    l9.write_text(json.dumps({"top_module": "neutral_reset_top"}))
+    refusal = None
+    try:
+        native = cdc.build(root, [source], "neutral_reset_top")
+    except cdc.Refusal as error:
+        refusal = error.code
+        native = (root / cdc.NETLIST_REL).with_suffix(".json.tmp")
+    raw = json.loads(native.read_text())["modules"]["neutral_reset_top"]
+    (root / "raw_control_cells.json").write_text(json.dumps(raw["cells"], indent=2))
+    return source, native, raw, refusal
+
+
+def _reset_control_consumers(root, native, unsupported=False):
+    results = {}
+    for program in ("reset_dependency_check", "clock_domain_reg_crossing_check", "cdc_async_input_check"):
+        report = root / (program + ".json")
+        argv = [sys.executable, "-B", str(PROG / (program + ".py")), str(root),
+                "--front-end", "netlist", "--json", str(report)]
+        if unsupported:
+            argv += ["--netlist", str(native)]
+        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = process.communicate()
+        doc = json.loads(report.read_text())
+        rules = sorted({row["rule"] for row in doc["findings"] if row["severity"] == "ERROR"})
+        receipt = {"argv": argv, "pid": process.pid, "rc": process.returncode,
+                   "stdout": stdout, "stderr": stderr, "report": doc}
+        (root / (program + ".receipt.json")).write_text(json.dumps(receipt, indent=2))
+        results[program] = (process.returncode, rules)
+    return results
+
+
+@pytest.mark.parametrize("extension", ["v", "sv"])
+@pytest.mark.parametrize("case", ["ring4", "dag4", "external4", "selfloop", "low4", "vector_constant"])
+def test_native_async_reset_controls_reach_all_ordinary_consumers(tmp_path, case, extension):
+    source, native, raw, refusal = _reset_control_native(tmp_path, case, extension)
+    observed = _reset_control_consumers(tmp_path, native)
+    cycle = case in {"ring4", "selfloop", "low4"}
+    expected = {"reset_dependency_check": (1, ["CIRCULAR_RESET_DEPENDENCY"]) if cycle else (0, []),
+                "clock_domain_reg_crossing_check": (0, []), "cdc_async_input_check": (0, [])}
+    assert observed == expected, observed
+    assert refusal is None
+    model = cdc.load(native, "neutral_reset_top")
+    binding = cdc.require_binding(tmp_path, native, model)
+    assert binding["producer"]["read_order"] == [str(source.relative_to(tmp_path))]
+    assert len(model.flops) == (1 if case in {"selfloop", "vector_constant"} else 4)
+    assert all(flop.arst is not None for flop in model.flops)
+    for flop in model.flops:
+        cell = raw["cells"][flop.name]
+        pin = "ALOAD" if extension == "sv" else "ARST"
+        assert flop.arst == cell["connections"][pin][0]
+        assert flop.arst_pin == pin
+        assert flop.arst_pol == (0 if case in {"low4", "vector_constant"} else 1)
+        assert flop.arst_value == (["0", "1", "1"] if case == "vector_constant" else ["0"])
+        assert flop.arst_source == cell["attributes"]["src"]
+        assert flop.srst is None
+
+
+@pytest.mark.parametrize("case,extension", [("dynamic_ad", "v"), ("dynamic_ad", "sv"), ("set_clr", "v")],
+                         ids=["dynamic_ad-v", "dynamic_ad-sv", "set_clr-v"])
+def test_native_unsupported_async_controls_refuse_in_all_ordinary_consumers(tmp_path, case, extension):
+    _source, native, raw, refusal = _reset_control_native(tmp_path, case, extension)
+    expected_code = "CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL"
+    observed = _reset_control_consumers(tmp_path, native, unsupported=True)
+    assert observed == {name: (1, [expected_code]) for name in observed}, observed
+    assert refusal == expected_code
+    assert not (tmp_path / cdc.NETLIST_MANIFEST_REL).exists()
+    with pytest.raises(cdc.Refusal, match=expected_code):
+        cdc.load(native, "neutral_reset_top")
+    assert any(cell["type"] in {"$aldff", "$aldffe", "$dffsr", "$dffsre"}
+               for cell in raw["cells"].values())
