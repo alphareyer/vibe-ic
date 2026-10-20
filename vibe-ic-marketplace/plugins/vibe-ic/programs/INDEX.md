@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1449
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1449)
+- **Total programs (excluding helpers / shims):** 1450
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1450)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1440 |
+| `any` | 1441 |
 
 ## Alphabetical listing
 
@@ -1096,6 +1096,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `provenance_output_hash_completeness_check` | any | v0.2.102 | verify that `<project>/provenance.jsonl` carries a complete, on-disk-verifiable hash chain of every tool invocation's outputs. |
 | `provenance_value_is_resolved_not_constant` | any | — | an artefact says where its numbers came from by RESOLVING it, never by typing it. |
 | `provenance_value_is_resolved_not_constant_census` | any | — | A source-naming field filled from a path typed into the emitter. |
+| `provider_bond_pad_edge` | any | — | Read-only provider assembly measurement, consumed by its existing precheck. |
 | `psi5_protocol_synth` | any | — | Peripheral Sensor Interface 5 (PSI5) protocol synth helper. |
 | `psm_analysis_coverage` | any | — | which power nets did the grid analysis actually answer? |
 | `ptp_protocol_synth` | any | — | IEEE 1588 Precision Time Protocol (PTP) synth helper (protocol #76). |
@@ -1521,7 +1522,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1440 programs)
+### `any` (1441 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2588,6 +2589,7 @@ _(no programs in this group)_
 - `provenance_output_hash_completeness_check` — verify that `<project>/provenance.jsonl` carries a complete, on-disk-verifiable hash chain of every tool invocation's outputs.  _[v0.2.102]_
 - `provenance_value_is_resolved_not_constant` — an artefact says where its numbers came from by RESOLVING it, never by typing it.
 - `provenance_value_is_resolved_not_constant_census` — A source-naming field filled from a path typed into the emitter.
+- `provider_bond_pad_edge` — Read-only provider assembly measurement, consumed by its existing precheck.
 - `psi5_protocol_synth` — Peripheral Sensor Interface 5 (PSI5) protocol synth helper.
 - `psm_analysis_coverage` — which power nets did the grid analysis actually answer?
 - `ptp_protocol_synth` — IEEE 1588 Precision Time Protocol (PTP) synth helper (protocol #76).
