@@ -140,6 +140,39 @@ endmodule
     assert 'FOUR_NATIVE_BRANCH_CASES_PASS' in sim.stdout
 
 
+def test_fixed_nested_bit_select_is_retained_as_unknown_interface(tmp_path):
+    files = {'design.sv': r'''
+module producer(input seed, output reg flag);
+  always @* flag <= seed ^ (seed >> 1);
+endmodule
+module consumer(input flag, output seen);
+  assign seen = (flag == 1'd1);
+endmodule
+module top;
+  wire [1:0] bus [0:1];
+  producer source(.seed(1'b0), .flag(bus[0][1]));
+  consumer sink(.flag(bus[0][1]), .seen());
+endmodule
+'''}
+    result, report = run_cli(tmp_path, files, 'top')
+    assert result.returncode == 0, result.stderr
+    assert report['discovery']['complete'] is True
+    assert report['summary']['total_interfaces'] == 1
+    assert report['summary']['unknowns'] == 1
+    assert report['summary']['verdict'] == 'INCONCLUSIVE'
+    assert report['producer_returncode'] == 0
+    row = report['interfaces'][0]
+    assert row['wire_name'] == 'bus[0][1]'
+    assert row['producer_module'] == 'producer'
+    assert row['producer_port'] == 'flag'
+    assert row['consumer_module'] == 'consumer'
+    assert row['consumer_port'] == 'flag'
+    assert row['producer_encoding'] == row['consumer_encoding'] == 'UNKNOWN'
+    assert 'unsupported fixed nested bit-select carrier' in row['producer_evidence']
+    assert 'unsupported fixed nested bit-select carrier' in row['consumer_evidence']
+    assert row['status'] == 'UNKNOWN'
+
+
 _PREDICATE_ONLY_SOURCE = '''
 `ifdef OMITTED
 `endif

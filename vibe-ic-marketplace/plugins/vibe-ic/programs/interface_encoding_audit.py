@@ -245,6 +245,16 @@ def _split_ports(text: str) -> List[str]:
     return split_top_level(text)
 
 
+def _fixed_nested_bit_select(text: str) -> Optional[str]:
+    """Return a canonical fixed nested bit-select, or None if unsupported."""
+    match = re.fullmatch(
+        r'([A-Za-z_]\w*)((?:\s*\[\s*\d+\s*\]){2,})', text)
+    if match is None:
+        return None
+    indices = re.findall(r'\[\s*(\d+)\s*\]', match.group(2))
+    return match.group(1) + ''.join(f'[{index}]' for index in indices)
+
+
 # ---------------------------------------------------------------------------
 # Instance parser
 # ---------------------------------------------------------------------------
@@ -357,8 +367,14 @@ def parse_instances(body: str, parent_module: str, *, native_checked: bool = Fal
                 continue
             sig = actual_result[0].strip()
             connection_expressions[port] = sig
+            nested_select = _fixed_nested_bit_select(sig)
             sm = re.fullmatch(r'(\w+)(?:\s*\[[^\]]+\])?', sig)
-            if sm:
+            if nested_select is not None:
+                # Retain a closed, fixed nested selection in the population.
+                # Its encoding remains unsupported and is forced UNKNOWN by
+                # run_audit rather than inferred from the formal port bodies.
+                connections[port] = nested_select
+            elif sm:
                 connections[port] = sm.group(1)
             elif not sig:
                 connections[port] = ''
@@ -1324,18 +1340,25 @@ def run_audit(
         if not prod_module or not cons_module:
             continue
 
-        # Classify producer encoding (how the signal is generated)
-        prod_class = classify_producer_encoding(prod_module.body, prod_port)
+        if _fixed_nested_bit_select(wire) is not None:
+            evidence = (f'unsupported fixed nested bit-select carrier {wire}; '
+                        'retained in interface population')
+            prod_class = EncodingClassification('UNKNOWN', evidence, 0)
+            cons_class = EncodingClassification('UNKNOWN', evidence, 0)
+            predicate = None
+        else:
+            # Classify producer encoding (how the signal is generated)
+            prod_class = classify_producer_encoding(prod_module.body, prod_port)
 
-        # Classify consumer encoding (how the signal is compared)
-        cons_class = classify_consumer_encoding(cons_module.body, cons_port)
+            # Classify consumer encoding (how the signal is compared)
+            cons_class = classify_consumer_encoding(cons_module.body, cons_port)
 
-        # A measured mismatch remains authoritative. A whole scalar boundary
-        # consumed exclusively as a predicate has a finite encoding-invariance
-        # proof; unsupported references remain in the same UNKNOWN population.
-        predicate = _whole_scalar_predicate(
-            wire, prod_module, prod_port, cons_module, cons_port,
-            all_modules[parent_mod], all_instances)
+            # A measured mismatch remains authoritative. A whole scalar boundary
+            # consumed exclusively as a predicate has a finite encoding-invariance
+            # proof; unsupported references remain in the same UNKNOWN population.
+            predicate = _whole_scalar_predicate(
+                wire, prod_module, prod_port, cons_module, cons_port,
+                all_modules[parent_mod], all_instances)
 
         # Determine match status
         if predicate is not None and cons_class.encoding == 'UNKNOWN':
