@@ -12,6 +12,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
@@ -122,3 +124,150 @@ def test_harness_producer_and_structural_consumer_close_the_claim(tmp_path):
                      top=generated["harness_module"], container=None, timeout=300)
     assert "L8.clock_and_reset_waveform.clocks.0.edge" in result[
         "program_discharged_obligations"]
+
+
+# #3340 public portable fixture, verbatim; scalar is only its existing control.
+ARRAY = """module neutral(input clk,rst_n,we,input [1:0] addr,input [3:0] d,output [3:0] y);
+reg [3:0] words [0:3];
+always @(posedge clk) begin
+ if (!rst_n) words[0] <= 0;
+ else if (we) words[addr] <= d;
+end
+assign y=words[addr];
+endmodule
+"""
+SCALAR = """module neutral(input clk,rst_n,we,input [1:0] addr,input [3:0] d,output reg [3:0] y);
+always @(posedge clk) if(!rst_n) y<=0; else if(we) y<=d;
+endmodule
+"""
+
+
+def _array_check(tmp_path, rtl, claims=None):
+    if shutil.which("yosys") is None:
+        skip_not_verified("yosys unavailable for native array clock observation",
+                          "programs/tests/test_issue3165_clock_edge_claim_specific.py")
+    source = tmp_path / "neutral.v"
+    source.write_text(rtl)
+    result = fsc.check([source], "neutral", claims or [CLAIM], tmp_path / "native",
+                       klass={"clock": "clk", "resets": ["rst_n"]})
+    (tmp_path / "public-check.json").write_text(json.dumps(result, indent=2))
+    assert result["rtl_sha256"][str(source)] == fsc.file_sha256(source)
+    return result
+
+
+@pytest.mark.parametrize("rtl,verdict,width", [
+    (ARRAY, fsc.PASS, 16), (SCALAR, fsc.PASS, 4),
+    (ARRAY.replace("posedge clk", "negedge clk"), fsc.REFUTED, 16),
+    (ARRAY.replace("words", "\\bank.words$ "), fsc.PASS, 16),
+], ids=["memory", "scalar-control", "memory-negedge", "escaped-memory"])
+def test_register_array_public_clock_census(tmp_path, rtl, verdict, width):
+    result = _array_check(tmp_path, rtl)
+    assert result["verdict"] == verdict, result
+    assert result["claims"][0]["verdict"] == verdict
+    if width == 16:
+        elaboration = result["clock_edge_elaborations"][0]
+        aliases = result["clock_edge_source_aliases"]
+        assert len([a for a in aliases.values() if a.get("memory")]) == 4
+        for view in ("raw", "optimized"):
+            observed = elaboration[view]
+            assert observed["yosys_rc"] == 0
+            assert observed["sha256"] == fsc.file_sha256(Path(observed["path"]))
+            facts = observed["state"]
+            assert facts["ok"] and len(facts["q_bits"]) == 16, facts
+            assert sorted(r["width"] for r in facts["registers"]) == [4, 4, 4, 4]
+            assert len({b for r in facts["registers"] for b in r["q"]}) == 16
+            assert facts["clock_edge"] == ("negedge" if verdict == fsc.REFUTED else "posedge")
+        assert result["applicability"]["inside"] is False  # reset scope unchanged
+    else:
+        for name in ("formal_structural_netlist_raw.json", "formal_structural_netlist.json"):
+            facts = fsc.sync_state_facts(json.loads((tmp_path / "native" / name).read_text()),
+                                          "neutral", "clk")
+            assert facts["ok"] and len(facts["q_bits"]) == width
+
+
+@pytest.mark.parametrize("case", ["mixed-edge", "second-clock", "derived-clock", "latch",
+                                  "unknown-cell", "native-failure"])
+def test_array_clock_unsupported_state_stays_not_discharged(tmp_path, case):
+    rtl = ARRAY
+    if case == "native-failure":
+        rtl = rtl.replace("endmodule", "invalid syntax\nendmodule")
+    elif case == "derived-clock":
+        rtl = rtl.replace("posedge clk", "posedge gated").replace(
+            "reg [3:0] words", "wire gated = clk & we;\nreg [3:0] words")
+    else:
+        aux = {"mixed-edge": "always @(negedge clk) aux <= d;",
+               "second-clock": "always @(posedge rst_n) aux <= d;",
+               "latch": "always @* if (we) aux = d;",
+               "unknown-cell": "(* keep *) opaque cell0(.a(d), .y(aux));"}[case]
+        rtl = rtl.replace("assign y=words[addr];", "reg [3:0] aux;\n" + aux
+                          + "\nassign y=words[addr] ^ aux;")
+        if case == "unknown-cell":
+            rtl += "(* blackbox *) module opaque(input [3:0] a, output [3:0] y); endmodule\n"
+    result = _array_check(tmp_path, rtl)
+    assert result["verdict"] == fsc.NOT_DISCHARGED, result
+    assert result["clock_edge_applicability"]["inside"] is False
+
+
+@pytest.mark.parametrize("case", ["missing-word", "overlapping-words", "missing-source"])
+def test_array_clock_incomplete_source_aliases_refuse(tmp_path, monkeypatch, case):
+    native = fsc.run_yosys
+
+    def incomplete(*args, **kwargs):
+        rc, log, path = native(*args, **kwargs)
+        if rc == 0:
+            netlist = json.loads(path.read_text())
+            mod = netlist["modules"]["neutral"]
+            if case == "missing-source" and kwargs.get("tag") == "_raw":
+                mod["memories"]["words"]["attributes"].pop("src")
+            elif kwargs.get("tag") == "_clock_raw":
+                if case == "missing-word":
+                    del mod["netnames"]["words[2]"]
+                elif case == "overlapping-words":
+                    mod["netnames"]["words[2]"]["bits"] = mod["netnames"]["words[1]"]["bits"]
+            path.write_text(json.dumps(netlist))
+        return rc, log, path
+
+    monkeypatch.setattr(fsc, "run_yosys", incomplete)
+    result = _array_check(tmp_path, ARRAY)
+    assert result["verdict"] == fsc.NOT_DISCHARGED, result
+    assert result["clock_edge_applicability"]["inside"] is False
+
+
+def test_array_clock_does_not_admit_reset_claims(tmp_path):
+    result = _array_check(tmp_path, ARRAY, [CLAIM,
+        {"rule": "reset_sync", "signal": "rst_n", "value": "synchronous"}])
+    assert result["claims"][0]["verdict"] == fsc.PASS, result
+    assert result["claims"][1]["verdict"] == fsc.NOT_DISCHARGED
+
+
+def test_array_harness_property_consumer_receives_clock_claim(tmp_path):
+    docs = tmp_path / "phase1/generated_docs"
+    docs.mkdir(parents=True)
+    (docs / "L3_PROTOCOL.json").write_text(json.dumps({"no_opcodes_in_input": True}))
+    (docs / "L6_FSM.json").write_text(json.dumps({"no_fsm_in_input": True}))
+    (docs / "L8_TIMING_WAVEFORM.json").write_text(json.dumps({
+        "clock_and_reset_waveform": {"clocks": [{"name": "clk", "edge": "posedge"}],
+                                     "resets": [{"name": "rst_n"}]}}))
+    rtl_dir = tmp_path / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "neutral.v").write_text(ARRAY)
+    generated = fhg.generate(project=tmp_path, top="neutral")
+    contract_path = tmp_path / "phase2/stage1/formal/property_contract.json"
+    contract = json.loads(contract_path.read_text())
+    clock_id = "L8.clock_and_reset_waveform.clocks.0.edge"
+    obligation = next(o for o in contract["unresolved_obligations"] if o["id"] == clock_id)
+    assert "program_refused" not in obligation, obligation
+    # This original array has no registered-output temporal floor. The normal
+    # producer explicitly routes its declarations through structural_subject.
+    assert generated["verdict"] == "INCOMPLETE"
+    assert contract["structural_subject"]["top"] == "neutral"
+    formal_dir = contract_path.parent
+    # Exercise the real run() structural producer and immutable readback
+    # boundary without launching an unrelated temporal engine or claiming it.
+    receipt = fpr._program_discharge(formal_dir, None, "")
+    assert receipt is not None
+    result = {"all_proved": False}
+    fpr._attach_property_contract(result, formal_dir, None)
+    (formal_dir / "consumer-readback.json").write_text(json.dumps(result, indent=2))
+    assert clock_id in result.get("program_discharged_obligations", []), result
+    assert result["unresolved_obligations"]  # reset binding remains open

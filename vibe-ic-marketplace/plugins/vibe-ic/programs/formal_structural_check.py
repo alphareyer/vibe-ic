@@ -561,12 +561,15 @@ def _state_census(mod: dict, netlist: dict) -> Dict[str, List[str]]:
     return census
 
 
-def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
-    """Full raw Q census for the global-timestep SYNC constructor only.
+def sync_state_facts(netlist: dict, top: str, clock: str, *,
+                     source_aliases: Optional[dict] = None) -> dict:
+    """Full Q census for SYNC construction and direct clock observations.
 
     Async flops remain in the observation set: they are a counterexample to
     prove, never a reason to silently choose a smaller synchronous subset.
-    Reset/value claims continue to use their own applicability conditions.
+    Only clock observations may supply native source aliases; the SYNC HDL
+    constructor keeps its existing dotted-name grammar. Reset/value claims
+    continue to use their own applicability conditions.
     """
     tm = _top_module(netlist, top) if isinstance(netlist, dict) else None
     if tm is None:
@@ -603,10 +606,28 @@ def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
     for name, net in (mod.get("netnames") or {}).items():
         bits = net.get("bits") or []
         # Exactly the dotted grammar the existing default runner binds.
-        if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name)
+        # Clock-only observations never emit HDL references: native public
+        # word/escaped aliases can instead bind to the pre-map source census.
+        admitted = (name in source_aliases if source_aliases is not None else
+                    re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name))
+        if (admitted and (source_aliases is None or not _param_bit(net.get("hide_name", 0)))
                 and bits and all(isinstance(b, int) and b in state for b in bits)):
+            if source_aliases is not None and len(bits) != source_aliases[name]["width"]:
+                return {"ok": False, "why": f"source alias width disagrees for {name}"}
             names.append((name, bits))
-    names.sort(key=lambda x: ("." in x[0], len(x[0]), x[0]))
+    if source_aliases is not None:
+        required = {n for n, a in source_aliases.items() if a.get("memory")}
+        found = dict(names)
+        if required - found.keys():
+            return {"ok": False, "why": "missing source memory word alias: "
+                    + ", ".join(sorted(required - found.keys()))}
+        word_bits = [b for n in required for b in found[n]]
+        if len(word_bits) != len(set(word_bits)):
+            return {"ok": False, "why": "ambiguous source memory word/bit aliases"}
+        # Retain every mandatory word even when an output aliases its Q bits.
+        names.sort(key=lambda x: (x[0] not in required, "." in x[0], len(x[0]), x[0]))
+    else:
+        names.sort(key=lambda x: ("." in x[0], len(x[0]), x[0]))
     covered, registers = set(), []
     for name, bits in names:
         if set(bits) - covered:
@@ -620,8 +641,44 @@ def sync_state_facts(netlist: dict, top: str, clock: str) -> dict:
             "registers": registers}
 
 
+def _clock_memory_aliases(netlist: dict, top: str) -> Tuple[dict, str]:
+    """Bind native memory_map word aliases to the original native declarations.
+
+    No RTL parser or HDL observer is involved. Missing source locations,
+    hidden memories, collisions and unsupported native memory shapes refuse.
+    This mapping is exclusively for clock observations, never reset/SYNC HDL.
+    """
+    tm = _top_module(netlist, top)
+    if tm is None:
+        return {}, "pre-map source census unavailable"
+    mod = tm[1]
+    aliases = {}
+    for name, net in (mod.get("netnames") or {}).items():
+        if not _param_bit(net.get("hide_name", 0)) and (net.get("attributes") or {}).get("src"):
+            aliases[name] = {"width": len(net.get("bits") or []),
+                             "src": net["attributes"]["src"]}
+    memories = mod.get("memories") or {}
+    if not memories:
+        return {}, "no source memory declarations for native memory cells"
+    for name, mem in memories.items():
+        width, size, start = (mem.get(k) for k in ("width", "size", "start_offset"))
+        src = (mem.get("attributes") or {}).get("src")
+        if (_param_bit(mem.get("hide_name", 0)) or not src
+                or not all(isinstance(v, int) for v in (width, size, start))
+                or width <= 0 or size <= 0):
+            return {}, f"unsupported source memory declaration: {name}"
+        for word in range(start, start + size):
+            alias = f"{name}[{word}]"
+            if alias in (mod.get("netnames") or {}) or alias in aliases:
+                return {}, f"ambiguous source memory alias: {alias}"
+            aliases[alias] = {"width": width, "src": src,
+                              "memory": name, "word": word}
+    return aliases, ""
+
+
 def clock_edge_applicability(netlist: dict, raw_netlist: Optional[dict],
-                             top: str, clock: str) -> List[str]:
+                             top: str, clock: str, *,
+                             source_aliases: Optional[dict] = None) -> List[str]:
     """Claim-specific admission for a ``clock_edge`` observation.
 
     Clock polarity is independent of reset/value semantics.  In particular, a
@@ -631,11 +688,11 @@ def clock_edge_applicability(netlist: dict, raw_netlist: Optional[dict],
     the optimized and no-``opt_dff`` reads, and refuses if their observable
     identities or edge differ.
     """
-    optimized = sync_state_facts(netlist, top, clock)
+    optimized = sync_state_facts(netlist, top, clock, source_aliases=source_aliases)
     if not optimized.get("ok"):
         return ["clock_edge complete optimized-state census unavailable: "
                 + str(optimized.get("why") or "unknown reason")]
-    raw = sync_state_facts(raw_netlist, top, clock)
+    raw = sync_state_facts(raw_netlist, top, clock, source_aliases=source_aliases)
     if not raw.get("ok"):
         return ["clock_edge complete raw-state census unavailable: "
                 + str(raw.get("why") or "unknown reason")]
@@ -2523,7 +2580,7 @@ def run_yosys(rtl_files: List[Path], top: str, work_dir: Path,
 
 def elaborations(rtl_files: List[Path], top: str, work_dir: Path,
                  container: Optional[str] = None,
-                 simdef: str = "") -> List[dict]:
+                 simdef: str = "", *, memory_clock: bool = False) -> List[dict]:
     """ONE elaboration: the chip's read of the DUT (R-0915-157), with its
     UNOPTIMISED twin (no opt_dff — flops kept as `prep -noff` keeps them) for
     the C5 census comparison. There is no second build to compare: the proof
@@ -2535,9 +2592,15 @@ def elaborations(rtl_files: List[Path], top: str, work_dir: Path,
             except (OSError, ValueError):
                 return None
         return None
-    rc, _log, path = run_yosys(rtl_files, top, work_dir, container, simdef)
+    # Lower BOTH twins only for clock claims. The reset/cofactor/role read
+    # retains its original passes and memory refusal.
+    passes = YOSYS_PASSES.replace("flatten;", "flatten; memory_map;") if memory_clock else YOSYS_PASSES
+    raw_passes = RAW_PASSES.replace("flatten;", "flatten; memory_map;") if memory_clock else RAW_PASSES
+    tag = "_clock" if memory_clock else ""
+    rc, _log, path = run_yosys(rtl_files, top, work_dir, container, simdef,
+                              tag=tag, passes=passes)
     rrc, _rl, rpath = run_yosys(rtl_files, top, work_dir, container, simdef,
-                                tag="_raw", passes=RAW_PASSES)
+                                tag=tag + "_raw", passes=raw_passes)
     return [{"defines": f"chip read ({simdef.strip() or 'no -D'})", "rc": rc,
              "path": path, "netlist": _load(rc, path), "raw": _load(rrc, rpath),
              "raw_path": rpath, "raw_rc": rrc}]
@@ -2583,13 +2646,39 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
         record["applicability"] = {"class": "R-0915-155", "inside": not fails,
                                    "failed_preconditions": fails}
     clock_fails: List[str] = []
+    clock_elabs = elabs
     if klass is not None and any(c.get("rule") == "clock_edge" for c in claims):
-        for e in elabs:
+        source_aliases = None
+        raw_top = _top_module(elabs[0]["raw"], top) if elabs[0]["raw"] else None
+        if raw_top and _state_census(raw_top[1], elabs[0]["raw"])["memory"]:
+            source_aliases, why = _clock_memory_aliases(elabs[0]["raw"], top)
+            if why:
+                clock_fails.append("clock_edge " + why)
+            else:
+                clock_elabs = elaborations(rtl_files, top, work_dir, container,
+                                            simdef, memory_clock=True)
+                record["clock_edge_source_aliases"] = source_aliases
+                record["clock_edge_elaborations"] = [{
+                    "yosys_passes": YOSYS_PASSES.replace("flatten;", "flatten; memory_map;"),
+                    "raw_passes": RAW_PASSES.replace("flatten;", "flatten; memory_map;"),
+                    "source_rtl_sha256": record["rtl_sha256"],
+                    "source_raw_netlist": str(elabs[0]["raw_path"]),
+                    "source_raw_netlist_sha256": file_sha256(elabs[0]["raw_path"]),
+                    **{view: {"path": str(e[key]), "sha256": file_sha256(e[key]),
+                              "yosys_rc": e[rc_key],
+                              "state": sync_state_facts(e[net_key], top, klass.get("clock", ""),
+                                                        source_aliases=source_aliases)}
+                       for view, key, rc_key, net_key in (
+                           ("optimized", "path", "rc", "netlist"),
+                           ("raw", "raw_path", "raw_rc", "raw"))}}
+                    for e in clock_elabs]
+        for e in clock_elabs:
             if e["netlist"] is None:
                 clock_fails.append(f"no netlist for defines {e['defines']!r}")
                 continue
             for f in clock_edge_applicability(e["netlist"], e["raw"], top,
-                                              klass.get("clock", "")):
+                                              klass.get("clock", ""),
+                                              source_aliases=source_aliases):
                 if f not in clock_fails:
                     clock_fails.append(f)
         record["clock_edge_applicability"] = {
@@ -2631,7 +2720,8 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
                     f"yosys did not produce a netlist (rc={e['rc']}, defines "
                     f"{e['defines']!r}); nothing was measured")))
             else:
-                answers.append(check_claim(e["netlist"], top, claim,
+                observed = clock_elabs[i]["netlist"] if clock_claim else e["netlist"]
+                answers.append(check_claim(observed, top, claim,
                     mappings.get((i, claim.get("signal", ""))) if reset_claim else None))
         verdicts = {a["verdict"] for a in answers}
         if len(verdicts) == 1:
