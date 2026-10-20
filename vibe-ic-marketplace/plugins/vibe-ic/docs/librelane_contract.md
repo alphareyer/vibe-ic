@@ -292,3 +292,28 @@ this library in the reviewed W1A delta.
 The W1A chip defaults remain step 8 `dual` and steps 10/26/26.5ic
 `librelane`; thresholds, waivers and census baselines are unchanged by this
 repair. Source-only proof does not certify a native run or IC PASS.
+
+## Provider technical target and pad-opening authority
+
+The operator's `input/submission_template/provider_target.json` names `provider`
+and `technical_target`: `slot`, positive `dimensions_um: [width, height]`,
+optional `origin_um: [x, y]` (the operator slot frame starts at `[0, 0]`), and
+`packaging`. `precheck_source` optionally names the official precheck checkout.
+These inputs describe a technical target, not a purchased or accepted submission.
+
+Pad-opening measurement normally uses the project's selected PDK, its registry
+`bond_pad_opening` purpose, and that same technology's actual KLayout `.lyp`.
+The registry name/pair must match the unique current layer table; unresolved,
+empty, ambiguous or conflicting authority is `NOT_MEASURED`. The report retains
+PDK selection, purpose provenance, layer-table path/hash, and actual distances.
+No custom opening-layer field is required on this normal path.
+
+An explicit `bond_pad_edge_distance.opening_layer: {name, layer_properties}`
+remains an override; relative paths are project-relative. Optional `io_lefs`
+selects the PDK PAD-master LEFs. `max_distance_um` is only an explicitly declared
+provider/packaging maximum, never a default. No maximum yields `MANUAL_REVIEW`
+with measured distances; missing authority yields `NOT_MEASURED` with a reason.
+Both remain disclosed advisory states for bare die without a packaging limit;
+selected packaging requirements and actual measured failures keep their existing
+blocking behavior. Technical archives retain these measurements and do not claim
+platform acceptance.

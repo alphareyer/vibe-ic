@@ -1,7 +1,8 @@
 """Read-only provider assembly measurement, consumed by its existing precheck.
 
-The provider_target.json bond_pad_edge_distance section declares opening_layer
-{name, layer_properties} (a PDK .lyp) and optionally io_lefs (PDK CLASS PAD
+The selected PDK supplies its registry-declared opening purpose through its own
+authoritative .lyp. The provider_target.json bond_pad_edge_distance section may
+override opening_layer {name, layer_properties} and optionally io_lefs (PDK CLASS PAD
 masters; otherwise use the selected PDK's existing discovery). max_distance_um
 is a provider/packaging declaration, never a tool default. technical_target
 supplies dimensions_um and optional origin_um (the operator slot starts at 0,0).
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
@@ -31,6 +33,56 @@ def required_for_target(profile, *, cob=False):
             or target.get('packaging') not in ('bare_die', 'non-CoB bare-die technical profile')
             or 'max_distance_um' in rule)
 
+
+def _ordinary_opening_layer(project, profile, report):
+    """Connect existing selected-technology authority to this measurement."""
+    import _pdk_layer_authority as authority
+    from tapeout_precheck import resolve_pdk
+    from die_finishing_gen import _release_file
+
+    selected, selected_from = resolve_pdk(project)
+    if not selected:
+        selected = profile.get('pdk') or os.environ.get('PDK')
+        selected_from = 'provider profile pdk' if profile.get('pdk') else '$PDK'
+    environ = dict(os.environ)
+    if profile.get('pdk_root'):
+        environ['PDK_ROOT'] = str(profile['pdk_root'])
+    volume, why, tried = authority.resolve_volume(selected, environ=environ)
+    selection = {'pdk': selected, 'selected_from': selected_from,
+                 'volume_resolution': why, 'tried': tried}
+    report['opening_layer_selection'] = selection
+    if volume is None:
+        raise ValueError('selected PDK opening authority unavailable: ' + why)
+    selection['volume'] = str(volume)
+    if profile.get('pdk'):
+        declared, _, _ = authority.resolve_volume(profile['pdk'], environ=environ)
+        if declared is None or declared.resolve() != volume.resolve():
+            raise ValueError('provider PDK and selected technology disagree')
+    entries = [entry for entry in authority._registry()
+               if entry.get('container_path')
+               and Path(entry['container_path']).resolve() == volume.resolve()]
+    if len(entries) != 1:
+        raise ValueError('selected PDK registry purpose is missing or ambiguous')
+    purpose = entries[0].get('bond_pad_opening') or {}
+    pair = purpose.get('gds')
+    if (not purpose.get('name') or not purpose.get('source')
+            or not isinstance(pair, list) or len(pair) != 2
+            or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in pair)):
+        raise ValueError('selected PDK has no declared bond-pad-opening purpose')
+    selection.update(purpose=purpose, registry=_release_file(
+        Path(authority.__file__).with_name('pdk_registry.json')))
+    allowed, properties, table_tried = authority.layer_table(volume)
+    selection['layer_table_tried'] = table_tried
+    tables = {path.resolve() for pattern in authority._LYP_GLOBS
+              for path in volume.glob(pattern) if path.is_file()}
+    if allowed is None or properties is None:
+        raise ValueError('selected PDK layer table is missing or empty')
+    if len(tables) != 1:
+        raise ValueError('selected PDK layer table is ambiguous')
+    Path(properties).resolve().relative_to(volume.resolve())
+    if tuple(pair) not in allowed:
+        raise ValueError('declared opening purpose disagrees with selected PDK layer table')
+    return {'name': purpose['name'], 'layer_properties': properties}, volume
 
 def measure(project, gds, *, top='', profile_path=None):
     from die_finishing_gen import PROVIDER_TARGET_REL, _release_file
@@ -68,7 +120,11 @@ def measure(project, gds, *, top='', profile_path=None):
         report['die_frame_um'] = frame
         report['die_frame_source'] = PROVIDER_TARGET_REL + '.technical_target (operator slot frame)'
         rule = profile.get('bond_pad_edge_distance') or {}
-        layer_decl = rule.get('opening_layer') or {}
+        selected_volume = None
+        if 'opening_layer' in rule:
+            layer_decl = rule.get('opening_layer') or {}
+        else:
+            layer_decl, selected_volume = _ordinary_opening_layer(project, profile, report)
         if not layer_decl.get('name') or not layer_decl.get('layer_properties'):
             raise ValueError('no PDK pad-opening layer declaration in the provider profile')
         properties = local(layer_decl['layer_properties'])
@@ -82,6 +138,8 @@ def measure(project, gds, *, top='', profile_path=None):
         if len(layers) != 1:
             raise ValueError('PDK pad-opening layer is missing or ambiguous')
         layer, = layers
+        if selected_volume is not None and list(layer) != report['opening_layer_selection']['purpose']['gds']:
+            raise ValueError('named opening layer disagrees with selected PDK purpose')
         report['opening_layer'] = {'name': layer_decl['name'], 'gds': list(layer),
                                    'source': _release_file(properties)}
         lefs = rule.get('io_lefs')
@@ -89,6 +147,8 @@ def measure(project, gds, *, top='', profile_path=None):
             if not isinstance(lefs, list) or not lefs:
                 raise ValueError('no declared PDK IO LEFs')
             lefs = [local(p) for p in lefs]
+        elif selected_volume is not None:
+            lefs = pads.discover_io_lefs(str(selected_volume.parent), selected_volume.name)
         else:
             lefs = pads.discover_io_lefs(profile.get('pdk_root'), profile.get('pdk'))
         masters, sources = set(), []

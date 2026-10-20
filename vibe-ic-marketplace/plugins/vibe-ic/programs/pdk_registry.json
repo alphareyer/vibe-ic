@@ -401,6 +401,11 @@
     },
     {
       "name": "gf180mcuD",
+      "bond_pad_opening": {
+        "name": "Pad",
+        "gds": [37, 0],
+        "source": "https://gf180mcu-pdk.readthedocs.io/en/latest/physical_verification/design_manual/drm_04_1.html (Pad: Bond pad opening)"
+      },
       "process_node_nm": 180,
       "open_source": true,
       "container_path": "/foss/pdks/gf180mcuD",

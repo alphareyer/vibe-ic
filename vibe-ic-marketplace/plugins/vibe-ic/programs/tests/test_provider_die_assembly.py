@@ -638,3 +638,107 @@ def test_native_provider_bond_measurement_uses_actual_final_output(bond_geometry
     else:
         assert edge['verdict'] == 'NOT_MEASURED'
         assert edge['distances_um'] is None
+
+
+@pytest.fixture
+def ordinary_bond_geometry(bond_geometry):
+    """Ordinary target; native neutral GDS derives its layer/master from selected PDK."""
+    import os
+    import re
+    import xml.etree.ElementTree as ET
+    import klayout.db as k
+    import _pdk_layer_authority as authority
+    import _pad_ring as pads
+    project, path, gds = bond_geometry
+    selected = os.environ['PDK']
+    volume, _, _ = authority.resolve_volume(selected)
+    pairs, properties, _ = authority.layer_table(volume)
+    candidates = set()
+    for node in ET.parse(properties).getroot().iter('properties'):
+        match = re.fullmatch(r'Pad (\d+)/(\d+)@1', (node.findtext('source') or '').strip())
+        if match:
+            candidates.add(tuple(map(int, match.groups())))
+    assert len(candidates) == 1
+    pair, = candidates
+    assert pair in pairs
+    lefs = pads.discover_io_lefs(str(volume.parent), volume.name)
+    masters = {name for lef in lefs for name, cls in pads.parse_lef_macro_classes(
+        lef.read_text()).items() if cls == 'PAD INOUT'}
+    layout = k.Layout(); layout.read(str(gds))
+    layout.cell('neutral_pad').name = sorted(masters)[0]
+    layout.set_info(layout.find_layer(73, 4), k.LayerInfo(*pair))
+    layout.write(str(gds))
+    value = json.loads(path.read_text()); del value['bond_pad_edge_distance']
+    path.write_text(json.dumps(value))
+    (project / 'input/project.json').write_text(json.dumps({'pdk': selected}))
+    return project, path, gds, volume, properties, pair
+
+
+@pytest.mark.parametrize('case,expected', [('ordinary', 'MANUAL_REVIEW'),
+    ('declared_limit', 'FAIL'), ('outside_frame', 'FAIL')])
+def test_ordinary_selected_pdk_openings_reach_precheck(ordinary_bond_geometry, bond_assembly, case, expected):
+    project, path, gds, volume, properties, pair = ordinary_bond_geometry
+    value = json.loads(path.read_text())
+    if case == 'declared_limit':
+        value['bond_pad_edge_distance'] = {'max_distance_um': 199}
+    elif case == 'outside_frame':
+        value['technical_target']['origin_um'] = [25, 0]
+    path.write_text(json.dumps(value))
+    before = gds.read_bytes()
+    report = _bond_readiness(project, gds, project / 'ordinary-precheck')
+    edge = report.bond_pad_edge_distance
+    assert edge['verdict'] == expected, edge
+    assert report.verdict == ('PASS' if case == 'ordinary' else 'FAIL')
+    assert edge['distances_um'] == {'left': -5 if case == 'outside_frame' else 20,
+                                   'bottom': 30, 'right': 125 if case == 'outside_frame' else 100, 'top': 200}
+    assert edge['opening_count'] == 6
+    assert edge['opening_layer']['gds'] == list(pair)
+    assert edge['opening_layer']['source'] == finishing._release_file(Path(properties))
+    assert Path(edge['opening_layer_selection']['volume']).resolve() == volume.resolve()
+    assert edge['opening_layer_selection']['selected_from']
+    assert edge['input']['sha256'] == hashlib.sha256(before).hexdigest()
+    assert gds.read_bytes() == before
+    assert 'opening_layer' not in value.get('bond_pad_edge_distance', {})
+    assert report.as_dict()['bond_pad_edge_distance'] == json.loads(
+        (project / 'ordinary-precheck/bond_pad_edge_distance.json').read_text())
+    if case == 'ordinary':
+        assert 'bond_pad_edge_distance: MANUAL_REVIEW (advisory, bare_die)' in report.reason
+        _, _, _, operator, seal, dest = bond_assembly
+        admitted = finishing.publish_provider_release(project, dest, source_project=project,
+            instruction=path, precheck=operator, finishing=seal)
+        readback = finishing.read_admitted_release(project, dest)
+        assert readback['basis'] == admitted['basis']
+        assert readback['basis']['bond_pad_edge_distance']['verdict'] == 'MANUAL_REVIEW'
+        assert readback['basis']['bond_pad_edge_distance']['opening_layer'] == edge['opening_layer']
+        assert readback['basis']['platform_accepted'] is False
+        assert readback['basis']['provider_precheck']['accepted'] is False
+
+
+@pytest.mark.parametrize('case', ['unknown_pdk', 'missing_table', 'empty_table',
+                                  'ambiguous_layer', 'ambiguous_table', 'mismatching_layer'])
+def test_ordinary_opening_authority_remains_unmeasured(bond_geometry, monkeypatch, case):
+    import _pdk_layer_authority as authority
+    from provider_bond_pad_edge import measure
+    project, path, gds = bond_geometry
+    value = json.loads(path.read_text()); del value['bond_pad_edge_distance']
+    path.write_text(json.dumps(value))
+    volume = project / 'selected-pdk'
+    tech = volume / 'libs.tech/klayout/tech'; tech.mkdir(parents=True)
+    entry = {'name': 'neutral_selected', 'container_path': str(volume),
+             'bond_pad_opening': {'name': 'BondOpening', 'gds': [73, 4],
+                                  'source': 'neutral primary opening declaration'}}
+    monkeypatch.setattr(authority, '_registry', lambda path=None: [entry])
+    (project / 'input/project.json').write_text(json.dumps({
+        'pdk': 'unknown_selected' if case == 'unknown_pdk' else entry['name']}))
+    table = tech / 'selected.lyp'
+    if case != 'missing_table':
+        table.write_text('<layer-properties>' + ('' if case == 'empty_table' else
+            '<properties><source>BondOpening 74/4@1</source></properties>' if case == 'mismatching_layer' else
+            '<properties><source>BondOpening 73/4@1</source></properties>') +
+            ('<properties><source>BondOpening 74/4@1</source></properties>' if case == 'ambiguous_layer' else '') + '</layer-properties>')
+    if case == 'ambiguous_table':
+        table.with_name('other.lyp').write_text(table.read_text())
+    result = measure(project, gds, top='neutral_top')
+    assert result['verdict'] == 'NOT_MEASURED'
+    assert result['distances_um'] is None
+    assert result['reason']

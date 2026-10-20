@@ -1126,6 +1126,8 @@ def evaluate(
         atomic_write_text(run_root / "bond_pad_edge_distance.json",
                           json.dumps(rep.bond_pad_edge_distance, indent=2))
         edge = rep.bond_pad_edge_distance
+        if not edge["required_for_readiness"]:
+            rep.reason += f"; bond_pad_edge_distance: {edge['verdict']} (advisory, bare_die)"
         if (precheck_src and rep.verdict == PASS and edge["verdict"] != FAIL
                 and (not edge["required_for_readiness"]
                      or edge["verdict"] in (PASS, "MANUAL_REVIEW"))):
