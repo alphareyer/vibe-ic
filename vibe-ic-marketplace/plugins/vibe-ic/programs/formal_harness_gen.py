@@ -2269,20 +2269,65 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                   "construction-safe reset-safety property (needs a clock, a "
                   "reset and a registered output with a literal reset value; "
                   "no inout)")
+        # With no construction-safe floor, formal-verify owns the whole
+        # harness. Read its answer without rewriting that harness, just as
+        # the generated-floor path reads the expert fragment below.
+        subject_top = _resolve_top(rtl_files, top, project)
+        harness_path = out or (_pl.formal_dir(project) / f"formal_{subject_top}.sv")
+        closed = (_expert_closed_obligations(
+            harness_path.parent, unresolved, harness_path.read_text(errors="replace"))
+            if harness_path.is_file() else [])
+        closed_ids = {row["id"] for row in closed}
+        unresolved = [row for row in unresolved if row["id"] not in closed_ids]
         contract = {
             "program": "formal_harness_gen", "version": "2.0.0",
-            "verdict": "INCOMPLETE", "applicability": "APPLICABLE",
-            "property_denominator": len(unresolved),
-            "authored_property_count": 0,
+            "verdict": "INCOMPLETE" if unresolved else "AUTHORED",
+            "applicability": "APPLICABLE",
+            "property_denominator": len(closed) + len(unresolved),
+            "authored_property_count": len(closed),
+            "covered_obligations": closed,
             "unresolved_obligations": unresolved,
             "missing_declarations": decl["missing_declarations"],
             "layer_not_applicable": decl["layer_not_applicable"],
             **_declaration_read_state(decl),
         }
+        # A structural declaration is about the declared RTL top even when
+        # none of its outputs admits the reset-property construction rule.
+        # Keep routing those claims to the existing native structural owner.
+        modules = _module_texts(rtl_files)
+        if subject_top in modules and any(
+                (row.get("program_rule") or {}).get("kind") in (KIND_STRUCTURAL, KIND_MIXED)
+                for row in unresolved):
+            subject = parse_module(modules[subject_top][0], subject_top)
+            if subject is not None:
+                import _chip_synth_read as _csr
+                unstaged = _csr.unstaged_analog_blocks(project)
+                if unstaged:
+                    for row in unresolved:
+                        if row.get("program_rule"):
+                            row["program_refused"] = (
+                                f"unstaged analog blocks {unstaged}; the chip's "
+                                "define decision is not known at Step 5")
+                else:
+                    inputs = {p.name for p in subject.ports
+                              if p.direction == "input" and _is_scalar(p.width)}
+                    simdef, _ = _csr.chip_sim_define(rtl_files, _csr.staged_macro_files(project))
+                    contract["structural_subject"] = {
+                        "top": subject_top, "clock": classify_clock(subject.ports),
+                        "simdef": simdef,
+                        "resets": sorted({c["signal"] for row in declared
+                                          for c in (row.get("program_rule") or {}).get("claims") or []
+                                          if c.get("rule", "").startswith("reset_")
+                                          and c.get("signal") in inputs}),
+                        "rtl_files": [str(f) for f in rtl_files],
+                    }
+                    contract["chip_read_top"] = subject_top
         _write_property_contract(project, contract)
-        return {"verdict": "INCOMPLETE", "rc": 2, "reason": reason,
-                "fallback_skill": "formal-verify",
-                "property_denominator": len(unresolved),
+        return {"verdict": contract["verdict"], "rc": 2 if unresolved else 0,
+                "reason": reason if unresolved else "expert-authored whole harness read back",
+                "fallback_skill": "formal-verify" if unresolved else None,
+                "property_denominator": contract["property_denominator"],
+                "authored_property_count": len(closed),
                 "unresolved_obligations": unresolved}
     iface, dut_file, analysis, descended, selection = picked
     dut_top = iface.name

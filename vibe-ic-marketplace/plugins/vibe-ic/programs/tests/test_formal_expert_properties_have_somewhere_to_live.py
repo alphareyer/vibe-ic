@@ -509,3 +509,128 @@ def test_native_program_answer_keeps_its_distinct_provider_status(tmp_path):
     assert result.get("expert_fallback_invoked_by") == "formal_property_run"
     assert result["program_discharged_obligations"]
     assert checked["verdict"] == "PASS", checked
+
+
+def _whole_harness_flow(project, *, regenerate=True, provider="complete",
+                        expected_bit=0, reset_sync=None):
+    """#3320: neutral INPUT with no registered output, real owner/proof calls."""
+    import hashlib
+    import shutil
+    from not_verified_tier import skip_not_verified
+    if any(shutil.which(tool) is None for tool in ("yosys", "sby")):
+        skip_not_verified("whole-harness control needs yosys/sby",
+                          "Run this selector in the pinned EDA image")
+    docs = project / "phase1/generated_docs"
+    docs.mkdir(parents=True)
+    l8 = {"reset_behavior": "after an asserted reset, status_busy is cleared"}
+    if reset_sync:
+        l8["clock_and_reset_waveform"] = {
+            "clocks": [{"name": "clk", "edge": "posedge"}],
+            "resets": [{"name": "reset_n", "sync": reset_sync}]}
+    for name, data in (("L3_COMMANDS.json", {}), ("L6_FSM.json", {}),
+                       ("L8_TIMING.json", l8)):
+        (docs / name).write_text(json.dumps(data) + "\n")
+    rd = project / "phase2/stage1/rtl"
+    rd.mkdir(parents=True)
+    rtl = rd / "event_control.v"
+    rtl.write_text("module event_control(input wire clk, input wire reset_n, "
+                   "input wire request, output wire status_busy); reg busy; "
+                   "always @(posedge clk) if (!reset_n) busy <= 1'b0; "
+                   "else if (request) busy <= 1'b1; "
+                   "assign status_busy = busy ^ 1'b0; endmodule\n")
+    first = G.generate(project=project, top="event_control")
+    assert first["verdict"] == "INCOMPLETE"
+    f = project / "phase2/stage1/formal"
+    original = (f / G.AUTHORING_REQUEST).read_bytes()
+    harness = f / "formal_event_control.sv"
+    assert not harness.exists(), "this case must take the whole-harness fallback"
+    harness.write_text("module formal_event_control(input wire clk);\n"
+                       "(* anyseq *) wire reset_n, request; wire status_busy;\n"
+                       "event_control dut(.clk(clk),.reset_n(reset_n),"
+                       ".request(request),.status_busy(status_busy));\n"
+                       "reg f_past_valid=0; wire rst_active=!reset_n; "
+                       "reg rst_active_q=0;\n"
+                       "always @(posedge clk) begin f_past_valid<=1; "
+                       "rst_active_q<=rst_active; end\n"
+                       '`include "formal_expert_properties.svh"\nendmodule\n')
+    fragment = ("always @(posedge clk) if (f_past_valid && rst_active_q)\n"
+                f" p_custom_reset: assert(status_busy == 1'b{expected_bit});\n")
+    (f / G.EXPERT_PROPERTIES_SVH).write_text(fragment)
+    review = {"invocation_status": "INVOKED", "fallback_skill": "formal-verify",
+              "invoked_by": "PROGRAM_FIXTURE whole-harness provider",
+              "request_sha256": hashlib.sha256(original).hexdigest(),
+              "dispositions": [{"id": "L8.reset_behavior", "status": "AUTHORED",
+                                "property": "p_custom_reset"}]}
+    if provider == "stale_hash":
+        review["request_sha256"] = "0" * 64
+    elif provider == "missing_disposition":
+        review["dispositions"] = []
+    elif provider == "missing_assertion":
+        review["dispositions"][0]["property"] = "p_never_written"
+    elif provider == "unanswerable":
+        review["dispositions"][0]["status"] = "UNANSWERABLE"
+    elif provider == "wrong_role":
+        review["fallback_skill"] = "unrelated-role"
+    if provider is not None:
+        (f / "formal_expert_review.json").write_text(json.dumps(review) + "\n")
+    authored = harness.read_bytes()
+    if regenerate:
+        G.generate(project=project, top="event_control")
+    assert harness.read_bytes() == authored
+    contract = json.loads((f / G.PROPERTY_CONTRACT).read_text())
+    result = R.run(project, harness=harness, rtl=[rtl], top="formal_event_control",
+                   container=None, bmc_depth=12, safety_depth=20, timeout=60,
+                   mem_limit_kb=4 * 1024 * 1024, prove_engines="direct")
+    (project / "whole-harness-receipt.json").write_text(json.dumps({
+        "contract": contract, "producer": result}, indent=2))
+    return original, f, contract, result
+
+
+@pytest.mark.parametrize("regenerate", [True, False])
+def test_no_floor_whole_harness_retires_exact_request(tmp_path, regenerate):
+    original, f, contract, result = _whole_harness_flow(tmp_path, regenerate=regenerate)
+    assert result["verdict"] == "PASS", result
+    assert result["all_proved"] is True and result["unbounded_proved"] is True
+    assert result["property_denominator"] == result["covered_property_count"] == 1
+    assert result["unresolved_obligations"] == []
+    assert result["expert_fallback_invoked"] is True
+    assert G._authoring_request_snapshot(f)["text"].encode() == original
+    if regenerate:
+        assert contract["verdict"] == "AUTHORED"
+        assert [r["id"] for r in contract["covered_obligations"]] == ["L8.reset_behavior"]
+        assert not (f / G.AUTHORING_REQUEST).exists()
+
+
+@pytest.mark.parametrize("provider", ["stale_hash", "missing_disposition", "missing_assertion",
+                                      "unanswerable", "wrong_role", None])
+def test_no_floor_whole_harness_preserves_invalid_dispositions(tmp_path, provider):
+    original, f, contract, result = _whole_harness_flow(tmp_path, provider=provider)
+    assert result["all_proved"] is True
+    assert result["verdict"] == contract["verdict"] == "INCOMPLETE"
+    assert result["property_denominator"] == 1 and result["covered_property_count"] == 0
+    assert [r["id"] for r in result["unresolved_obligations"]] == ["L8.reset_behavior"]
+    assert (f / G.AUTHORING_REQUEST).read_bytes() == original
+
+
+def test_no_floor_whole_harness_wrong_expected_bit_has_real_counterexample(tmp_path):
+    _, _, _, result = _whole_harness_flow(tmp_path, expected_bit=1)
+    assert result["verdict"] == "FAIL" and result["all_proved"] is False
+    assert result["property_denominator"] == 1
+    assert {r["status"] for r in result["properties"]} == {"FAIL"}
+    assert all(r["bound"] == "cex" and r["cex_frame"] is not None
+               for r in result["properties"])
+
+
+@pytest.mark.parametrize("reset_sync", ["synchronous", "asynchronous"])
+def test_no_floor_whole_harness_measures_structural_subject(tmp_path, reset_sync):
+    _, f, contract, result = _whole_harness_flow(tmp_path, reset_sync=reset_sync)
+    assert contract.get("structural_subject", {}).get("top") == "event_control"
+    receipt = json.loads((f / R.PROGRAM_RECEIPT).read_text())
+    assert receipt["invocation_status"] == "INVOKED_BY_PROGRAM"
+    if reset_sync == "synchronous":
+        assert "L8.clock_and_reset_waveform.resets.0.sync" in result["program_discharged_obligations"]
+        assert result["all_proved"] is True
+    else:
+        assert result["verdict"] == "FAIL"
+        assert "L8.clock_and_reset_waveform.resets.0.sync" in {
+            r["id"] for r in result["structural_refutations"]}

@@ -2173,6 +2173,7 @@ def _attach_property_contract(results: dict, formal_dir: Path,
         _harness.read_text(errors="replace") if _harness is not None else "")}
     program_invoked = bool(request_obligations and (program_closed or program_refuted))
     expert_used = False
+    proved_expert_ids = set()
     receipt_unresolved: List[dict] = []
     for requested in request_obligations:
         oid = str(requested["id"])
@@ -2190,6 +2191,8 @@ def _attach_property_contract(results: dict, formal_dir: Path,
         prop = str((disposition or {}).get("property", "")).strip()
         if status == "AUTHORED" and prop and oid in expert_closed:
             expert_used = True
+            if results.get("all_proved") is True:
+                proved_expert_ids.add(oid)
             continue
         row = dict(requested)
         row["status"] = status or "EXPERT_NOT_REVIEWED"
@@ -2200,6 +2203,11 @@ def _attach_property_contract(results: dict, formal_dir: Path,
             row["description"] = (f"{requested.get('description', '')} — "
                                   f"program: {program_open[oid].get('reason', '')}")
         receipt_unresolved.append(row)
+    # Read-back can close an original request even before the generator is
+    # rerun. Do not re-union its old UNAUTHORED contract row after accepting
+    # the exact receipt/property ID and completing the native proof.
+    unresolved = [row for row in unresolved
+                  if str(row.get("id")) not in proved_expert_ids]
     by_id = {
         str(row.get("id", f"unnamed.{idx}")): row
         for idx, row in enumerate(unresolved + receipt_unresolved)
