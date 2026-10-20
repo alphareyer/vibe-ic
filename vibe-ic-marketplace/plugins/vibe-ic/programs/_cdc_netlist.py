@@ -389,6 +389,7 @@ class Flop:
     arst_pol: Optional[int] = None   # active level at the native pin
     arst_value: Optional[List[str]] = None  # native Q/AD bit order (LSB first)
     arst_source: str = ""            # native cell source location
+    srst_origin: str = "native_pin"  # an outer D-mux is only a role candidate
 
 
 @dataclass
@@ -684,8 +685,11 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
                     arst_value=arst_value,
                     arst_source=cell.get("attributes", {}).get("src", "")
                     if arst_pin else "")
-        flop.srst = (c.get("SRST") or [None])[0] or \
-            _outer_reset_mux(nl, flop.d)
+        flop.srst = (c.get("SRST") or [None])[0]
+        if flop.srst is None:
+            flop.srst = _outer_reset_mux(nl, flop.d)
+            if flop.srst is not None:
+                flop.srst_origin = "d_mux_candidate"
         flop.label = nl.bit_label(flop.q[0], port_labels).split("[")[0] \
             if flop.q else cname
         nl.flops.append(flop)
@@ -1034,9 +1038,19 @@ def async_input_findings(nl: Netlist, is_candidate,
     return findings
 
 
+def reset_role_candidates(nl: Netlist) -> List[dict]:
+    """Intrinsic pre-adoption census; reviewed roles never erase requests."""
+    return [{"state": f.name, "label": f.label, "q": f.q,
+             "selector": f.srst,
+             "source": nl.cells.get(f.name, {}).get("attributes", {}).get("src", "")}
+            for f in sorted(nl.flops, key=lambda f: f.name)
+            if f.srst is not None and not nl.is_const(f.srst)
+            and f.srst_origin == "d_mux_candidate"]
+
+
 def reset_dependency_findings(
         nl: Netlist, lookup: Optional[_LookupSnapshot] = None, *,
-        metadata: Optional[dict] = None) -> List[dict]:
+        metadata: Optional[dict] = None, reset_roles: Optional[dict] = None) -> List[dict]:
     """Complete reset-cycle detection; one ERROR witness per cyclic SCC.
 
     Reset roles and graph edges retain their existing meaning. Iterative
@@ -1048,9 +1062,14 @@ def reset_dependency_findings(
     import instrument_calibration
     instrument_calibration.assert_calibrated("_cdc_netlist::reset_dependency_findings")
     lookup = lookup or _LookupSnapshot(nl)
+    reset_roles = reset_roles or {}
+    unresolved = [r for r in reset_role_candidates(nl)
+                  if reset_roles.get(r["state"]) not in ("synchronous_reset", "functional_update")]
     resets: Dict[object, List[Flop]] = {}
     for f in nl.flops:
-        for r in (f.arst, f.srst):
+        srst = f.srst if (f.srst_origin == "native_pin"
+                         or reset_roles.get(f.name) == "synchronous_reset") else None
+        for r in (f.arst, srst):
             if r is not None and not nl.is_const(r):
                 resets.setdefault(nl.root(r), []).append(f)
     reset_of: Dict[str, Set[object]] = {}
@@ -1141,7 +1160,8 @@ def reset_dependency_findings(
     if metadata is not None:
         metadata.update({
             "reporting_policy": "one_witness_per_cyclic_scc",
-            "cycle_detection_complete": True,
+            "cycle_detection_complete": not unresolved,
+            "confirmed_reset_cycle_detection_complete": True,
             "all_cycles_enumerated": False,
             "reset_nodes": len(nodes),
             "reset_edges": sum(map(len, graph.values())),
@@ -1154,12 +1174,19 @@ def reset_dependency_findings(
             "scc_nodes_visited": node_visits,
             "scc_edges_examined": edge_visits,
             "witness_edges_examined": witness_edge_visits,
+            "intrinsic_role_candidates": len(reset_role_candidates(nl)),
+            "unresolved_role_candidates": len(unresolved),
         })
+    findings.extend(_finding(
+        "RESET_ROLE_UNRESOLVED", "ERROR",
+        f"state {row['label']!r} ({row['state']}) has a constant-arm D-mux "
+        "whose reset/functional role is unresolved; current expert intent is required",
+        candidate=row) for row in unresolved)
     return findings
 
 
 def judge(nl: Netlist, rule: str, is_candidate=None, *,
-          metadata: Optional[dict] = None) -> List[dict]:
+          metadata: Optional[dict] = None, reset_roles: Optional[dict] = None) -> List[dict]:
     """The one entry every gate uses to judge a netlist.
 
     Each rule carries its own `assert_calibrated` line: one pair per rule, so
@@ -1172,7 +1199,7 @@ def judge(nl: Netlist, rule: str, is_candidate=None, *,
         return async_input_findings(
             nl, is_candidate or (lambda _n: False), lookup)
     if rule == "reset_dependency":
-        return reset_dependency_findings(nl, lookup, metadata=metadata)
+        return reset_dependency_findings(nl, lookup, metadata=metadata, reset_roles=reset_roles)
     raise ValueError(rule)
 
 
@@ -1245,7 +1272,13 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
         nl = load(path)
         binding = require_binding(project, path, nl)
         analysis: dict = {}
-        rows = judge(nl, rule, is_candidate, metadata=analysis)
+        roles = None
+        if rule == "reset_dependency" and reset_role_candidates(nl):
+            import ai_signed_judgement as expert
+            roles, why = expert.reset_roles(project, nl, path)
+            analysis["role_authority"] = why
+            analysis["reset_role_request"] = expert.reset_role_request(project)
+        rows = judge(nl, rule, is_candidate, metadata=analysis, reset_roles=roles)
     except (Refusal, instrument_calibration.Uncalibrated) as exc:
         code = getattr(exc, "code", "NETLIST_RULE_UNCALIBRATED")
         return ([_finding(code, "ERROR", str(exc))],

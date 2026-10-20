@@ -202,3 +202,28 @@ cells or memories, and a subject whose role is unknown remain blocking
 `NOT_MEASURED` at the zero-population boundary. A zero keyword-hit count or a
 prose-only `NOT_APPLICABLE` claim cannot discharge an obligation. Existing
 applicable-result and advisory CLI policies are unchanged.
+
+## Step3 reset-role fallback
+
+A constant-arm D-mux is a role candidate, not proof of an architectural reset.
+When ordinary `reset_dependency_check` reports `RESET_ROLE_UNRESOLVED`, read
+its `summary.reset_dependency_analysis.reset_role_request` and the current
+source plus actual design INPUT. Do not change L-docs, native graph/manifest,
+RTL, native reset pins or rule severity to satisfy this request.
+
+Use `programs/ai_signed_judgement.py PROJECT --step 3` to obtain the current
+request. Author an answer with that exact `evidence_sha256`, `netlist_sha256`
+and `reset_roles[]`. Each role row includes the unchanged `candidate` object,
+`role` (`synchronous_reset`, `functional_update`, or `unresolved`), `rationale`,
+and exact `source_context` citations; resolved roles additionally require
+`intent` citations in the actual `input/` documents. Citations are
+`{file, line, quote}`. A supported role must have affirmative state-specific
+intent, not an inference from a constant arm, a signal name, existing ARST or
+missing L8 facts. Insufficient or conflicting intent stays `unresolved`.
+
+Publish through the same program with `--step 3 --answer ANSWER.json
+--signed-by REVIEWER --judgement REASON`, then rerun the same ordinary RDC
+consumer. Only the canonical `reports/audit/ai_judgements/3.json` is authority;
+the temporary authored answer is not. The unchanged intrinsic candidate census
+keeps the handoff required after adoption or request deletion. Existing native
+cycles and other gates remain authoritative; a role signature is no IC PASS.

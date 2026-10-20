@@ -376,3 +376,159 @@ def test_the_runner_writes_the_netlist_manifest_for_a_multi_clock_design(tmp_pat
         ("PASS", ["clk_a", "clk_b"], True)
     assert (crossing["verdict"], crossing["front_end"]) == ("SKIPPED-CONDITION", "netlist")
     assert crossing["clocks_found"] == ["clk_a", "clk_b"]
+
+
+def _role_project(tmp_path, case='sticky'):
+    import design_one_shot_runner as runner
+    project = tmp_path / case
+    rtl = project / 'phase2/stage1/rtl/neutral.sv'
+    rtl.parent.mkdir(parents=True)
+    bodies = {
+        'sticky': "else if(event_i || q) q<=1'b1;",
+        'data': 'else q<=event_i | q;',
+        'ready': "else if(ready_i) q<=1'b0; else if(event_i && !q) q<=1'b1;",
+        'init': "else if(event_i) q<=1'b1;",
+        'sync': "else if(q) q<=1'b0; else q<=event_i;",
+        'mixed': "else if(event_i || q) q<=1'b1;",
+    }
+    extra_ports = ',output reg a,b' if case == 'mixed' else ''
+    extra = ("always @(posedge clk or negedge b) if(!b) a<=0; else a<=event_i;\n"
+             "always @(posedge clk or negedge a) if(!a) b<=0; else b<=event_i;\n") if case == 'mixed' else ''
+    rtl.write_text('module neutral(input wire clk,rst_n,event_i,ready_i,output reg q'+extra_ports+');\n'
+                   "always @(posedge clk or negedge rst_n) if(!rst_n) q<=1'b0; "
+                   + bodies[case] + '\n'+extra+'endmodule\n')
+    l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    l9.parent.mkdir(parents=True)
+    l9.write_text(json.dumps({'top_module': 'neutral'}))
+    switch = project / 'phase3/librelane_switch.json'
+    switch.parent.mkdir(parents=True)
+    switch.write_text(json.dumps({'steps': {'3': 'librelane'}}))
+    docs = project / 'input/docs'
+    docs.mkdir(parents=True)
+    role = 'synchronous reset' if case == 'sync' else 'functional update'
+    (docs / 'control.md').write_text(f'State q uses its constant data branch as a {role}.\n')
+    # This is the runner's normal producer, not a mocked native build helper.
+    result = runner.step_emit_phase2_manifests(project, [], 'neutral')
+    assert result.status == 'PASS'
+    return project, rtl
+
+
+def _official_role_answer(project, role='functional_update', expected_write_rc=0):
+    import ai_signed_judgement as expert
+    command = [sys.executable, str(PROG / 'ai_signed_judgement.py'), str(project), '--step', '3']
+    request_run = subprocess.run(command, capture_output=True, text=True)
+    assert request_run.returncode == 0, request_run.stdout + request_run.stderr
+    request = json.loads(request_run.stdout)
+    rtl = project / 'phase2/stage1/rtl/neutral.sv'
+    source = {'file': rtl.relative_to(project).as_posix(), 'line': 2,
+              'quote': rtl.read_text().splitlines()[1]}
+    intent = {'file': 'input/docs/control.md', 'line': 1,
+              'quote': (project / 'input/docs/control.md').read_text().strip()}
+    answer = {key: request[key] for key in ('evidence_sha256', 'netlist_sha256')}
+    answer['reset_roles'] = [{'candidate': row, 'role': role, 'source_context': [source],
+                             'intent': [intent], 'rationale': 'Current stated control intent.'}
+                            for row in request['candidates']]
+    answer_path = project.parent / (project.name + '-authored-answer.json')
+    answer_path.write_text(json.dumps(answer))
+    written = subprocess.run(command + ['--answer', str(answer_path), '--signed-by',
+                                        'neutral-expert', '--judgement', 'Reviewed cited control intent.'],
+                             capture_output=True, text=True)
+    assert written.returncode == expected_write_rc, written.stdout + written.stderr
+    return expert, request, answer_path
+
+
+@pytest.mark.parametrize('case', ['sticky', 'data', 'ready', 'init', 'sync'])
+def test_native_reset_role_normal_producer_writer_consumer(tmp_path, case):
+    import hashlib
+    import _cdc_netlist as native
+    import design_one_shot_runner as runner
+    project, rtl = _role_project(tmp_path, case)
+    native_files = [project / rel for rel in (native.NETLIST_REL, native.NETLIST_LOG_REL,
+                                             native.NETLIST_MANIFEST_REL)]
+    before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in native_files}
+    rc, first = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    if case == 'data':
+        assert rc == 0 and not _rules(first)
+        return
+    assert rc == 1 and _rules(first) == ['RESET_ROLE_UNRESOLVED'], first
+    assert first['summary']['reset_dependency_analysis']['cycle_detection_complete'] is False
+    expert, request, _answer = _official_role_answer(
+        project, 'synchronous_reset' if case == 'sync' else 'functional_update')
+    rc, final = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert (rc, _rules(final)) == ((1, ['CIRCULAR_RESET_DEPENDENCY']) if case == 'sync' else (0, [])), final
+    assert expert.check(project, '3')[0]
+    assert final['summary']['reset_dependency_analysis']['cycle_detection_complete'] is True
+    assert expert._requested(project, '3')  # adoption cannot self-release review
+    # A normal producer continuation must reuse the current bound native bytes.
+    runner.step_emit_phase2_manifests(project, [], 'neutral')
+    assert before == {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in native_files}
+    assert expert.check(project, '3')[0]
+    assert native.reset_role_candidates(native.load(project / native.NETLIST_REL)) == request['candidates']
+
+
+@pytest.mark.parametrize('mutation', ['no_intent', 'source', 'foreign_graph', 'duplicate', 'conflict', 'deleted'])
+def test_native_reset_role_authority_refusals(tmp_path, mutation):
+    project, rtl = _role_project(tmp_path)
+    expert, request, answer_path = _official_role_answer(project)
+    receipt_path = project / 'reports/audit/ai_judgements/3.json'
+    receipt = json.loads(receipt_path.read_text())
+    if mutation == 'source':
+        rtl.write_text(rtl.read_text() + '// changed source\n')
+    elif mutation == 'deleted':
+        receipt_path.unlink()
+    else:
+        if mutation == 'no_intent':
+            receipt['reset_roles'][0]['intent'] = []
+        elif mutation == 'foreign_graph':
+            receipt['netlist_sha256'] = '0' * 64
+        elif mutation == 'duplicate':
+            receipt['reset_roles'].append(receipt['reset_roles'][0])
+        elif mutation == 'conflict':
+            (project / 'input/docs/control.md').write_text('State q uses a synchronous reset.\n')
+        receipt_path.write_text(json.dumps(receipt))
+    rc, report = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 1 and report['passed'] is False, report
+    assert not expert.check(project, '3')[0]
+
+
+def test_native_reset_role_writer_needs_actual_supported_intent(tmp_path):
+    project, rtl = _role_project(tmp_path)
+    (project / 'input/docs/control.md').write_text('The clock is 20 ns; state q exists.\n')
+    expert, request, answer = _official_role_answer(project, expected_write_rc=1)
+    assert not (project / 'reports/audit/ai_judgements/3.json').exists()
+    assert _run('reset_dependency_check', str(project), '--front-end', 'netlist')[0] == 1
+    assert not expert.check(project, '3')[0]
+
+
+def test_native_reset_cycle_survives_unknown_and_functional_role_adoption(tmp_path):
+    project, rtl = _role_project(tmp_path, 'mixed')
+    rc, first = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 1 and _rules(first) == ['CIRCULAR_RESET_DEPENDENCY', 'RESET_ROLE_UNRESOLVED']
+    _official_role_answer(project)
+    rc, final = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 1 and _rules(final) == ['CIRCULAR_RESET_DEPENDENCY']
+
+
+def test_step3_authoring_preserves_existing_signed_subject_bytes(tmp_path):
+    import ai_signed_judgement as expert
+    import _ai_judgement_fixture as fixture
+    project, rtl = _role_project(tmp_path)
+    subjects = {
+        'phase2/stage1/fallback_skill.md': 'spec-to-rtl',
+        'reports/phase2/gates/professional_tb.json': '{"dut_kind":"expert_reference"}',
+        'phase2/stage1/sim_professional/expert_reference_tb.py': 'expected = 1',
+        'phase2/stage1/formal/formal_authoring_request.json': '{}',
+        'phase2/stage1/formal/formal_expert_review.json': '{}',
+    }
+    for rel, value in subjects.items():
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
+    before = {sid: expert.evidence_sha256(project, sid) for sid in ('D1', '1', '4', '5')}
+    (project / 'legacy_signed_subject_hashes.json').write_text(json.dumps(before, sort_keys=True))
+    for sid in before:
+        fixture.sign(project, sid)
+        assert expert.check(project, sid)[0]
+    _official_role_answer(project)
+    assert before == {sid: expert.evidence_sha256(project, sid) for sid in before}
+    assert all(expert.check(project, sid)[0] for sid in before)

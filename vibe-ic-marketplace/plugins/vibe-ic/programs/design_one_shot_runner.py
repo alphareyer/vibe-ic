@@ -24517,9 +24517,19 @@ def step_emit_phase2_manifests(project: Path,
         _m_top = re.search(r"top module '([^']+)'", _cdc_scope)
         _nl_rec: Dict[str, Any] = {"mode": _cdc_mode, "netlist": _cdc_netlist.NETLIST_REL,
                                    "rtl_files": [f.name for f in _cdc_src]}
+        _reuse_native = False
         try:
-            _nl_path = _cdc_netlist.build(project, _cdc_src,
-                                          _m_top.group(1) if _m_top else None)
+            _nl_path = project / _cdc_netlist.NETLIST_REL
+            if _nl_path.is_file():
+                try:
+                    _existing = _cdc_netlist.load(_nl_path)
+                    _cdc_netlist.require_binding(project, _nl_path, _existing)
+                    _reuse_native = True
+                except _cdc_netlist.Refusal:
+                    pass
+            if not _reuse_native:
+                _nl_path = _cdc_netlist.build(project, _cdc_src,
+                                              _m_top.group(1) if _m_top else None)
             _nl = _cdc_netlist.load(_nl_path)
             # Preserve the native producer's input/output binding in the
             # existing manifest; domain facts alone cannot authorize reuse.
@@ -24534,7 +24544,8 @@ def step_emit_phase2_manifests(project: Path,
         except _cdc_netlist.Refusal as _exc:
             _nl_rec.update({"verdict": "FAIL", "reason": str(_exc)})
             _nl_domains = None
-        w("reports/phase2/cdc/netlist_front_end.json", _nl_rec)
+        if not _reuse_native:
+            w("reports/phase2/cdc/netlist_front_end.json", _nl_rec)
         if _cdc_mode == "librelane" and _nl_domains is not None:
             _ev = (f"Yosys JSON netlist ({_cdc_netlist.NETLIST_REL}, top "
                    f"'{_nl_rec['top']}', {_nl_rec['flops']} flop cells): clock "
@@ -27770,7 +27781,7 @@ def main() -> int:
     summary.update(_io.report_fields(project))
     _io.demote_verdict(summary)    # a step the flow did not do: never PASS
     import ai_signed_judgement as _ai_judgement
-    _ai_steps = ("1", "4", "5")
+    _ai_steps = ("1", "3", "4", "5")
     if _bounded:
         _ai_steps = tuple(s for s in _ai_steps if s in _window_step_ids())
     summary["ai_judgements"] = _ai_judgement.pending(project, _ai_steps)

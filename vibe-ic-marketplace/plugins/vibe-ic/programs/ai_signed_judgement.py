@@ -5,18 +5,21 @@ check only prevents their PASS tier from claiming the separate expert review.
 Receipt: reports/audit/ai_judgements/<step>.json, schema
 ``vibeic.ai-judgement.v1``. The reviewer signs by naming the step, judgement,
 their identity, and the SHA-256 of the exact files returned by evidence().
-No receipt is created by this program; it must come from the reviewer.
+Review content must come from the reviewer. The Step3 CLI transports that
+authored role answer to the same canonical receipt after source admission;
+it never authors roles or grants a deterministic gate PASS.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
 SCHEMA = "vibeic.ai-judgement.v1"
-STEPS = frozenset(("D1", "1", "4", "5", "A1", "A2", "A9", "36"))
+STEPS = frozenset(("D1", "1", "3", "4", "5", "A1", "A2", "A9", "36"))
 #: Step 5's one formal directory (`_path_layout.formal_dir`).
 FORMAL_DIR = "phase2/stage1/formal"
 
@@ -37,6 +40,14 @@ def _files(project: Path, *patterns: str) -> list[Path]:
 def evidence(project: Path, step_id: str) -> list[Path]:
     """The exact producer/AI output bytes reviewed, excluding audit writes."""
     sid = str(step_id)
+    if sid == "3":
+        import _cdc_netlist as native
+        project = Path(project).resolve()
+        path, _nl, binding = _reset_context(project)
+        return sorted(set([path, path.parent / Path(native.NETLIST_LOG_REL).name,
+                           path.parent / Path(native.NETLIST_MANIFEST_REL).name]
+                          + [project / row["path"] for row in binding["input"]["files"]]
+                          + _intent_files(project)))
     if sid == "D1":
         return _files(project, "input/design_input.txt",
                       "input/phase1_prompt.md", "input/phase1_structured.yaml",
@@ -99,6 +110,14 @@ def evidence(project: Path, step_id: str) -> list[Path]:
 
 
 def _requested(project: Path, sid: str) -> bool:
+    if sid == "3":
+        import _cdc_netlist as native
+        path = project / native.NETLIST_REL
+        try:
+            return bool(native.reset_role_candidates(native.load(path)))
+        except native.Refusal:
+            # A removed/unreadable graph cannot erase an existing handoff.
+            return path.exists() or (project / "reports/audit/ai_judgements/3.json").exists()
     if sid == "D1":
         return bool(_files(project, "phase1/generated_docs/L*.json"))
     if sid == "1":
@@ -181,6 +200,11 @@ def check(project: Path, step_id: str, *, expected_verdict: str = "PASS") -> Tup
     if required_ai_output and not _files(project, *required_ai_output):
         return False, (f"awaiting_signed_judgement: Step {sid} has no AI "
                        "review output to sign")
+    if sid == "3":
+        if expected_verdict != "PASS":
+            return False, "Step3 role acceptance is not a design FAIL judgement"
+        roles, why = reset_roles(project)
+        return (bool(roles) and "unresolved" not in roles.values(), why)
     sha = evidence_sha256(project, sid)
     receipt = _json(project / "reports/audit/ai_judgements" / f"{sid}.json")
     if (sha and receipt.get("schema") == SCHEMA
@@ -233,3 +257,164 @@ def restore_runner_rows(rows: list[dict]) -> None:
             row["status"] = row.pop("program_status")
             row["detail"] = row.pop("program_detail", row.get("detail", ""))
             row.pop("reason_class", None)
+
+
+def _intent_files(project: Path) -> list[Path]:
+    return _files(project, "input/design_input.txt", "input/phase1_prompt.md",
+                  "input/docs/**/*", "phase1/generated_docs/L6*.json",
+                  "phase1/generated_docs/L8*.json")
+
+
+def _reset_context(project: Path):
+    import _cdc_netlist as native
+    path = project / native.NETLIST_REL
+    nl = native.load(path)
+    return path, nl, native.require_binding(project, path, nl)
+
+
+def reset_role_request(project: Path) -> dict:
+    """Existing expert fallback, denominated before any role adoption."""
+    import _cdc_netlist as native
+    try:
+        path, nl, binding = _reset_context(project)
+        return {"step_id": "3", "scope": "reset-role", "fallback_skill": "rtl-review",
+                "receipt": "reports/audit/ai_judgements/3.json",
+                "evidence_sha256": evidence_sha256(project, "3"),
+                "netlist_sha256": binding["sha256"]["netlist.json"],
+                "candidates": native.reset_role_candidates(nl),
+                "intent_files": [p.relative_to(project).as_posix() for p in _intent_files(project)]}
+    except (native.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        return {"step_id": "3", "scope": "reset-role", "error": str(exc)}
+
+
+def _role_citations(project: Path, rows, allowed: set[Path]) -> list[str]:
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("role evidence needs nonempty exact file/line/quote citations")
+    quotes = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"file", "line", "quote"}:
+            raise ValueError("role citation requires exactly file, line and quote")
+        path = (project / str(row["file"])).resolve()
+        if path not in allowed or type(row["line"]) is not int or row["line"] < 1 \
+                or not isinstance(row["quote"], str) or not row["quote"].strip():
+            raise ValueError("role citation is outside the current evidence")
+        lines = path.read_text().splitlines()
+        if row["line"] > len(lines) or row["quote"] not in lines[row["line"] - 1]:
+            raise ValueError("role citation no longer matches current bytes")
+        quotes.append(row["quote"])
+    return quotes
+
+
+def _admit_reset_roles(project: Path, receipt: dict, request: dict) -> dict:
+    if (receipt.get("schema") != SCHEMA or receipt.get("step_id") != "3"
+            or receipt.get("scope") != "reset-role" or receipt.get("verdict") != "PASS"
+            or not request.get("evidence_sha256")
+            or receipt.get("evidence_sha256") != request["evidence_sha256"]
+            or receipt.get("netlist_sha256") != request["netlist_sha256"]
+            or not all(isinstance(receipt.get(k), str) and receipt[k].strip()
+                       for k in ("signed_by", "judgement"))):
+        raise ValueError("missing, foreign or stale Step3 reset-role judgement")
+    records = receipt.get("reset_roles")
+    candidates = {r["state"]: r for r in request["candidates"]}
+    if not isinstance(records, list) or len(records) != len(candidates):
+        raise ValueError("reset roles do not cover the intrinsic candidate population")
+    intent = {p.resolve() for p in _intent_files(project)
+              if p.resolve().is_relative_to(project / "input")}
+    _path, _nl, binding = _reset_context(project)
+    sources = {(project / p).resolve() for p in binding["input"]["rtl_files"]}
+    result = {}
+    from _prose_polarity import is_denied, sentence_scope
+    patterns = {"synchronous_reset": r"\b(?:synchronous|sync)[ -]reset\b",
+                "functional_update": r"\b(?:functional|data)[ -](?:update|control|condition)\b"}
+    for row in records:
+        if not isinstance(row, dict) or not isinstance(row.get("candidate"), dict):
+            raise ValueError("role has no exact native candidate identity")
+        candidate = row["candidate"]
+        state = candidate.get("state")
+        role = row.get("role")
+        if state in result or json.dumps(candidate, sort_keys=True) != json.dumps(candidates.get(state), sort_keys=True):
+            raise ValueError("duplicate, conflicting or foreign state/Q/selector/source identity")
+        if role not in (*patterns, "unresolved"):
+            raise ValueError("unknown reset-role disposition")
+        if not isinstance(row.get("rationale"), str) or not row["rationale"].strip():
+            raise ValueError("role needs an explicit evidence-based rationale")
+        _role_citations(project, row.get("source_context"), sources)
+        if role != "unresolved":
+            quotes = _role_citations(project, row.get("intent"), intent)
+            stated = set()
+            for quote in quotes:
+                if not re.search(r"(?<![\w$])" + re.escape(candidate["label"]) + r"(?![\w$])", quote):
+                    continue
+                for kind, pattern in patterns.items():
+                    for match in re.finditer(pattern, quote, re.I):
+                        lo, hi = sentence_scope(quote, match.start(), match.end(), extra_breaks=(";",))
+                        if is_denied(quote[lo:hi]) is None:
+                            stated.add(kind)
+            if stated != {role}:
+                raise ValueError("intent does not uniquely support this state's declared role")
+        result[state] = role
+    return result
+
+
+def reset_roles(project: Path, nl=None, path: Optional[Path] = None) -> tuple[dict, str]:
+    """A signature attributes reviewed bytes; cited intent admits each role."""
+    project = Path(project).resolve()
+    try:
+        request = reset_role_request(project)
+        if "error" in request:
+            raise ValueError(request["error"])
+        if path is not None and hashlib.sha256(path.read_bytes()).hexdigest() != request["netlist_sha256"]:
+            raise ValueError("ordinary consumer graph differs from the role request")
+        receipt = _json(project / "reports/audit/ai_judgements/3.json")
+        roles = _admit_reset_roles(project, receipt, request)
+        if "unresolved" in roles.values():
+            return roles, "RESET_ROLE_UNRESOLVED: expert could not establish every role"
+        return roles, "signed judgement bound to current source/graph and cited reset-role intent"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {}, "awaiting_signed_judgement: Step 3 reset-role: " + str(exc)
+
+
+def main(argv=None) -> int:
+    """Canonical Step3 request/answer writer; it never decides roles itself."""
+    import argparse
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("project", type=Path)
+    parser.add_argument("--step", choices=("3",), required=True)
+    parser.add_argument("--answer", type=Path)
+    parser.add_argument("--signed-by")
+    parser.add_argument("--judgement")
+    args = parser.parse_args(argv)
+    project = args.project.resolve()
+    request = reset_role_request(project)
+    if args.answer is None:
+        print(json.dumps(request, indent=2))
+        return 1 if "error" in request else 0
+    try:
+        if "error" in request:
+            raise ValueError(request["error"])
+        answer = json.loads(args.answer.read_text())
+        if any(answer.get(key) != request[key]
+               for key in ("evidence_sha256", "netlist_sha256")):
+            raise ValueError("expert answer belongs to different source/graph evidence")
+        receipt = {"schema": SCHEMA, "step_id": "3", "scope": "reset-role", "verdict": "PASS",
+                   "evidence_sha256": request["evidence_sha256"],
+                   "netlist_sha256": request["netlist_sha256"],
+                   "signed_by": args.signed_by, "judgement": args.judgement,
+                   "reset_roles": answer["reset_roles"]}
+        _admit_reset_roles(project, receipt, request)
+        from _atomic_artefact import write_json
+        target = project / request["receipt"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            import time
+            target.with_name(target.name + f".prior-{time.time_ns()}").write_bytes(target.read_bytes())
+        write_json(target, receipt)
+        print(json.dumps({"receipt": str(target), "roles": len(receipt["reset_roles"])}))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print("RESET_ROLE_UNRESOLVED: " + str(exc))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
