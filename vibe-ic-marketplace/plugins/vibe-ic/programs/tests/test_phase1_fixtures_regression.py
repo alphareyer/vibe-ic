@@ -655,3 +655,18 @@ def test_neutral_wrapped_block_latency():
     actual = extract_crypto_arch("\n".join(source.values()))
     assert "latency_cycles_per_block" not in actual, actual
     assert "latency_cycles_per_block_evidence" not in actual, actual
+
+
+def test_neutral_functional_preamble_reaches_l2(tmp_path):
+    import json
+    from programs import phase1_doc_one_shot_runner as producer
+    source = _load_fixture("neutral_functional_preamble")
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    for filename, text in source.items():
+        (docs / filename).write_text(text)
+    producer.gen_l2_frs(tmp_path, source)
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    sentence = "The cipher can either encrypt or decrypt, but not both at the same time."
+    content = "\n".join(row.get("content", "") for row in actual["frs_sections"])
+    assert sentence in content, actual["frs_sections"]
