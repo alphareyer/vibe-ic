@@ -1260,6 +1260,12 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
                         selected_root.absolute() != configured.absolute())
             selected_root = configured if selected_root is None else selected_root
         ok, reason = rtl_applicability.verify(applicability, auditor, selected_root)
+        if auditor == 'interface_encoding_audit':
+            configuration_ok, configuration_reason = \
+                rtl_applicability.receipt_configuration_matches(
+                    applicability, payload.get('configuration'), selected_root)
+            if not configuration_ok:
+                ok, reason = False, configuration_reason
         if conflict:
             ok, reason = False, 'consumer_source_root_conflict'
         if not (ok and valid_population and subject_ok and source_ok):

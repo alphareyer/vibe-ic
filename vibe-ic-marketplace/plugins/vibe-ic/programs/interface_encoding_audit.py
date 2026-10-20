@@ -1283,7 +1283,8 @@ def run_audit(
 
     for vf in vfiles:
         src = strip_comments(vf.read_text(errors='replace'))
-        configured = configured or bool(re.search(r'`|\bgenerate\b', lexical_mask(src)))
+        configured = configured or bool(re.search(
+            r'`|\\|\b(?:parameter|defparam|generate|genvar)\b', lexical_mask(src)))
         try:
             src = _hierarchy.preprocess(src, selected_defines)
         except ValueError as exc:
@@ -1489,7 +1490,7 @@ def main():
     if not results:
         applicability = _applicability.assess(
             'interface_encoding_audit', Path(args.rtl_dir),
-            top_module=args.top_module)
+            top_module=args.top_module, configuration=_CONFIGURATION)
         report['applicability'] = applicability
         if (not _DISCOVERY_ISSUES and not _NOTHING_EXAMINED and
                 applicability['state'] == _applicability.NOT_APPLICABLE):
