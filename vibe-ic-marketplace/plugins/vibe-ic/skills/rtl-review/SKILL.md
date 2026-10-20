@@ -211,8 +211,9 @@ its `summary.reset_dependency_analysis.reset_role_request` and the current
 source plus actual design INPUT. Do not change L-docs, native graph/manifest,
 RTL, native reset pins or rule severity to satisfy this request.
 
-Use `programs/ai_signed_judgement.py PROJECT --step 3` to obtain the current
-request. Author an answer with that exact `evidence_sha256`, `netlist_sha256`
+The Step3 request/answer writer below is newly added; existing D1/1/4/5
+receipt contracts are unchanged. Use
+`programs/ai_signed_judgement.py PROJECT --step 3` to obtain the current request. Author an answer with that exact `evidence_sha256`, `netlist_sha256`
 and `reset_roles[]`. Each role row includes the unchanged `candidate` object,
 `role` (`synchronous_reset`, `functional_update`, or `unresolved`), `rationale`,
 and exact `source_context` citations; resolved roles additionally require
