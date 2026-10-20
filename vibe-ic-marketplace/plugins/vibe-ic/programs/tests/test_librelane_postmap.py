@@ -73,11 +73,11 @@ def provenance_rows(p, parent, native, mapped):
     rows = [{"tool": "yosys", "produced_by": "LibreLane.Yosys.Synthesis",
              "exit_code": 0, "timestamp": "2026-01-01T00:00:00Z",
              "outputs": {alias: "sha256:" + LC.digest(parent)},
-             "measurement": {"measured": True}} for alias in aliases]
+             "measurement": {"schema": "mcp-eda/measurement/1", "measured": True}} for alias in aliases]
     rows.append({"tool": "openroad", "produced_by": M.STEP,
                  "exit_code": 0, "timestamp": "2026-01-01T00:00:01Z",
                  "outputs": {alias: "sha256:" + LC.digest(native) for alias in aliases},
-                 "measurement": {"measured": True}})
+                 "measurement": {"schema": "mcp-eda/measurement/1", "measured": True}})
     (p / "provenance.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
     return rows
 
@@ -115,7 +115,7 @@ def test_provenance_requires_each_actual_ledger_row(tmp_path, monkeypatch, side,
         if damage == "tool": row["tool"] = "python3"
         elif damage == "exit": row["exit_code"] = 1
         elif damage == "digest": row["outputs"] = {k: "sha256:" + "0" * 64 for k in row["outputs"]}
-        elif damage == "measurement": row["measurement"] = {"measured": False, "not_measured_class": "NOTHING_TO_MEASURE"}
+        elif damage == "measurement": row["measurement"] = {"schema": "mcp-eda/measurement/1", "measured": False, "not_measured_class": "NOTHING_TO_MEASURE"}
         elif damage == "unmeasured": row.pop("measurement")
         elif damage == "producer": row["produced_by"] = "Other.Writer"
         elif damage == "missing": rows.remove(row)
