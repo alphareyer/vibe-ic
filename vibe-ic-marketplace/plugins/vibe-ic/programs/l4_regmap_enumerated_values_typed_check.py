@@ -70,18 +70,19 @@ S3. HARDCODED CARDINALITY forced fabrication. The flat ">= 2 entries"
     codes at all and there is nothing to derive from.
 
 Usage:
-    python3 l4_regmap_enumerated_values_typed_check.py <project_dir>
+    python3 l4_regmap_enumerated_values_typed_check.py <project_dir> [--json <report>]
 
 Exit codes:
-    0 = PASS (no enum-eligible fields OR each has typed enum)
+    0 = PASS (each enum-eligible field has typed enum, or documented waiver)
     1 = FAIL (enum-eligible fields exist but lack enumerated_values)
-    2 = input-missing (skip)
+    2 = input-missing or structural absence (skip; see typed report)
 
 Honors waiver ``l4_regmap_enum_intentional_simplification`` (>=40
 chars).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -348,12 +349,7 @@ def denominator(examined: int, considered: int,
                        not_applicable_reason=not_applicable_reason)
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("usage: l4_regmap_enumerated_values_typed_check <project_dir>",
-              file=sys.stderr)
-        return 2
-    project = Path(sys.argv[1]).resolve()
+def _check(project: Path, summary: dict) -> int:
     if not project.is_dir():
         return 2
 
@@ -438,10 +434,10 @@ def main() -> int:
         #     and it STAYS one: an empty population establishes nothing, and
         #     this is exactly the case the ruling singles out.
         if pairs:
-            print(_sa.sentence(
-                _sa.absence("register field(s) L4 carries", len(pairs),
-                            detail="none of them is multi-bit and "
-                                   "enum-eligible"),
+            _sa.attach(summary, _sa.absence(
+                "register field(s) L4 carries", len(pairs),
+                detail="none of them is multi-bit and enum-eligible"))
+            print(_sa.sentence(summary[_sa.EVIDENCE_KEY],
                 "l4_regmap_enumerated_values_typed_check"))
             print(f"  {_d.line()}")
             return 2
@@ -484,6 +480,25 @@ def main() -> int:
           f"the register set is complete against the input is "
           f"l4_regmap_declared_register_coverage_check.")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="l4_regmap_enumerated_values_typed_check")
+    ap.add_argument("project_dir", type=Path)
+    ap.add_argument("--json", default=None)
+    args = ap.parse_args()
+
+    summary: dict = {}
+    rc = _check(args.project_dir.resolve(), summary)
+    if args.json:
+        report = Path(args.json)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({
+            "program": "l4_regmap_enumerated_values_typed_check",
+            "passed": rc == 0,
+            "summary": summary,
+        }, indent=2) + "\n", encoding="utf-8")
+    return rc
 
 
 if __name__ == "__main__":

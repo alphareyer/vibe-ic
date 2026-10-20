@@ -10472,6 +10472,7 @@ _P0_GATE_DECLARES_STRUCTURAL_ABSENCE: frozenset = frozenset({
     "arbiter_starvation_check", "bram_pdob_combinational_check",
     "cross_module_1cycle_handshake_check", "frame_end_detection_check",
     "tx_abort_during_transmission_check", "break_handler_safety_check",
+    "l4_regmap_enumerated_values_typed_check",
 })
 
 

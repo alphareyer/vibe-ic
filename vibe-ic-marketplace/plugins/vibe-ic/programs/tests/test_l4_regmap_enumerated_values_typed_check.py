@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROG = (Path(__file__).resolve().parent.parent / "l4_regmap_enumerated_values_typed_check.py")
 
 
@@ -296,3 +298,83 @@ def test_both_directions_on_one_edit(tmp_path):
     assert r_bad.returncode == 1, r_bad.stdout
     assert r_good.returncode == 0, r_good.stdout
     assert r_bad.returncode != r_good.returncode
+
+
+def test_json_report_carries_the_leafs_actual_nonenum_census(tmp_path):
+    proj = _make(tmp_path, {"registers": [{"name": "DATA", "fields": [
+        {"field_name": "payload", "bits": "[7:0]"},
+        {"field_name": "enabled", "bits": "0"},
+    ]}]})
+    normal = _run(proj)
+    report = tmp_path / "reports" / "enum.json"
+    result = subprocess.run(
+        [sys.executable, str(PROG), str(proj), "--json", str(report)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == normal.returncode == 2
+    assert result.stdout == normal.stdout
+    assert result.stdout.count("enumerated 2") == 1
+    summary = json.loads(report.read_text())["summary"]
+    assert summary["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
+    assert summary["structural_absence"] == {
+        "population": "register field(s) L4 carries", "scanned": 2, "found": 0,
+        "detail": "none of them is multi-bit and enum-eligible",
+    }
+
+
+@pytest.mark.parametrize("case,rc", [
+    ("missing", 2), ("empty", 2), ("malformed", 1),
+    ("bad_mode", 1), ("typed_mode", 0),
+])
+def test_json_report_does_not_claim_absence_without_a_census(tmp_path, case, rc):
+    field = {"field_name": "MODE", "bits": "[1:0]"}
+    if case == "typed_mode":
+        field["enumerated_values"] = [
+            {"code": "2'b00", "meaning": "idle"},
+            {"code": "2'b01", "meaning": "active"},
+        ]
+    proj = _make(tmp_path, {"registers": []} if case == "empty" else {
+        "registers": [{"name": "CONTROL", "fields": [field]}]})
+    l4 = proj / "phase1/generated_docs/L4_REGMAP.json"
+    if case == "missing":
+        l4.unlink()
+    elif case == "malformed":
+        l4.write_text("{not-json")
+    report = tmp_path / "enum.json"
+    result = subprocess.run(
+        [sys.executable, str(PROG), str(proj), "--json", str(report)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == rc, result.stdout + result.stderr
+    payload = json.loads(report.read_text())
+    assert payload["passed"] is (rc == 0)
+    assert "structural_absence" not in payload["summary"]
+    assert "NOT_APPLICABLE_BY_STRUCTURE" not in result.stdout
+
+
+def test_real_p0_dispatch_transports_the_nonempty_leaf_census(tmp_path, monkeypatch):
+    import flow_compliance_check as flow
+
+    proj = _make(tmp_path, {"registers": [{"name": "DATA", "fields": [
+        {"field_name": "payload", "bits": "[7:0]"},
+        {"field_name": "enabled", "bits": "0"},
+    ]}]})
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "neutral.v").write_text(
+        "module neutral(input clk,d,output reg q); "
+        "always @(posedge clk) q<=d; endmodule\n")
+    # Only narrow the roster: use the real argv, subprocess, report and guard.
+    monkeypatch.setattr(flow, "_STRUCTURAL_RTL_GATES", (PROG.stem,))
+    monkeypatch.setenv("VIBE_IC_COMPLIANCE_WORKERS", "1")
+    records = []
+    flow._run_structural_rtl_gates(proj, records_out=records)
+    assert len(records) == 1, records
+    record = records[0]
+    assert record["verdict"] == "SKIP", record
+    assert record["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE", record
+    assert record["evidence"]["exit_code"] == 2
+    assert record["evidence"]["structural_absence"] == {
+        "population": "register field(s) L4 carries", "scanned": 2, "found": 0,
+        "detail": "none of them is multi-bit and enum-eligible",
+    }
