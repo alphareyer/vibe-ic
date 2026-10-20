@@ -144,7 +144,10 @@ def _run_check(label: str, name: str, extra_args: List[str],
         spec = _pl.generated_docs_dir(project_dir) / "L9_INTEGRATION_SPEC.json"
         cmd += ["--rtl-dir", str(rtl_dir), "--spec", str(spec)]
     elif name == "rtl_hygiene_lint.py":
-        cmd += [str(path) for path in collect_rtl_files([], str(rtl_dir))]
+        # The lint owner selects the complete silicon closure and native top.
+        # Keep its findings/native attempts in the project, not the caller CWD.
+        report = _pl.reports_phase2_dir(project_dir) / "review" / "rtl_hygiene_lint.json"
+        cmd += ["--project", str(project_dir), "--json", str(report)]
     else:
         raise ValueError(f"no child CLI adapter for {name}")
     try:

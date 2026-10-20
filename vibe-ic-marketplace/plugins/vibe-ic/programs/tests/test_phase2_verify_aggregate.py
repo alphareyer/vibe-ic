@@ -144,3 +144,92 @@ def test_child_usage_failure_retains_actual_argv_and_stderr(tmp_path, monkeypatc
     assert row.exit_code == 2 and row.argv == observed[0]
     assert "required --spec" in row.stderr_tail
     assert row.reason_class == "INVOCATION_ERROR"
+
+
+def _package_project(tmp_path, case="clean"):
+    """Source-only neutral input; never fabricate aggregate netlist/TB proof."""
+    project = tmp_path / "package_project"
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "00_byte_ops.sv").write_text(
+        "`define BYTE_PROVIDER\npackage byte_ops;\n"
+        "function automatic logic [7:0] fold(input logic [7:0] value);\n"
+        "fold=value ^ 8'h5a;\nendfunction\nendpackage\n")
+    leaf = "module byte_leaf(input logic [7:0] data_i, output logic [7:0] data_o);\n"
+    leaf += ("assign data_o=;\n" if case == "bad_provider" else
+             "assign data_o=byte_ops::fold(data_i);\n")
+    if case == "driver_conflict":
+        leaf += "always_comb data_o=~data_i;\n"
+    if case != "missing_provider":
+        (rtl / "byte_leaf.sv").write_text(leaf + "endmodule\n")
+    ports = [{"name": "data_i", "direction": "input", "width": 8}]
+    if case == "warnings":
+        ports += [{"name": "clk", "direction": "input", "width": 1}]
+        ports += [{"name": f"q{i}", "direction": "output", "width": 8}
+                  for i in range(13)]
+        body = "module neutral_top(input wire clk, input wire [7:0] data_i,\n"
+        body += ",\n".join(f"output reg [7:0] q{i}" for i in range(13)) + ");\n"
+        body += "always @(posedge clk) begin\n"
+        body += "\n".join(f"q{i} <= byte_ops::fold(data_i);" for i in range(13))
+        body += "\nend\nendmodule\n"
+    else:
+        ports += [{"name": "data_o", "direction": "output", "width": 8}]
+        body = ("module neutral_top(input logic [7:0] data_i, output logic [7:0] data_o);\n"
+                "`ifdef BYTE_PROVIDER\nbyte_leaf u(.data_i(data_i),.data_o(data_o));\n"
+                "`else\nmissing_define_provider u();\n`endif\n"
+                "`ifdef SYNTHESIS\nimplicit_synthesis_provider forbidden();\n`endif\n"
+                "endmodule\n")
+    (rtl / "neutral_top.sv").write_text(body)
+    spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(json.dumps({"top_module": "neutral_top", "ports": ports}))
+    return project
+
+
+@pytest.mark.parametrize("case", ["clean", "warnings"])
+def test_aggregate_hygiene_preserves_project_native_context_and_default_policy(tmp_path, case):
+    project = _package_project(tmp_path, case)
+    report = mod.verify(project, target="ic")
+    row = next(c for c in report.checks if c.name == "rtl_hygiene_lint")
+    assert row.exit_code == (0 if case == "clean" else 1), row.as_dict()
+    assert row.argv[2:4] == ["--project", str(project)]
+    assert "--severity" not in row.argv
+    findings_path = Path(row.argv[row.argv.index("--json") + 1])
+    findings = json.loads(findings_path.read_text())
+    contexts = list(findings_path.parent.glob("native-elaboration-*/context.json"))
+    context, = [json.loads(p.read_text()) for p in contexts]
+    assert context["status"] == "MEASURED", context
+    assert context["native_returncode"] == context["transport_returncode"] == 0
+    assert context["top"] == "neutral_top"
+    assert {Path(p).name for p in context["files"]} == {
+        "00_byte_ops.sv", "byte_leaf.sv", "neutral_top.sv"}
+    assert all(p in context["input_sha256"] for p in context["files"])
+    script = contexts[0].with_name("elaborate.ys").read_text()
+    assert "read_slang --single-unit --no-synthesis-define --top neutral_top" in script
+    if case == "clean":
+        assert findings == []
+    else:
+        warnings = [f for f in findings if f["severity"] == "WARN"]
+        assert len(warnings) == 13, findings
+        assert {f["rule"] for f in warnings} == {"uninit-registered-output"}
+        assert row.reason_class == "CHECK_FAILED"
+        assert "[WARN]" in row.stdout_tail
+    # This source-only review has no synthesized netlist or reference TB.
+    assert report.verdict == "FAIL"
+    assert {a.name for a in report.artifacts if not a.present} == {"netlist", "tb"}
+
+
+@pytest.mark.parametrize("case", ["driver_conflict", "bad_provider", "missing_provider"])
+def test_aggregate_hygiene_rejects_true_selected_native_failures(tmp_path, case):
+    project = _package_project(tmp_path, case)
+    row = mod._run_check("rtl_hygiene_lint", "rtl_hygiene_lint.py", [], project)
+    assert row.exit_code == 1 and row.reason_class == "CHECK_FAILED", row.as_dict()
+    assert "hierarchy-port-resolution" not in row.stderr_tail
+    findings = json.loads(Path(row.argv[row.argv.index("--json") + 1]).read_text())
+    assert any(f["severity"] == "ERROR" and f["rule"] == "native-elaboration-unresolved"
+               for f in findings), findings
+    native, = Path(row.argv[row.argv.index("--json") + 1]).parent.glob(
+        "native-elaboration-*/context.json")
+    context = json.loads(native.read_text())
+    assert context["status"] == "NOT_MEASURED"
+    assert context["native_returncode"] != 0
