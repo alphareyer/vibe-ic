@@ -2449,8 +2449,22 @@ def _formal_names(fn, patterns, inherited=(), *, modules=(), sanitizers=()):
     # Rebinding a raw argument to its stripped value does not change its
     # origin. Only an explicit, unconditional recognized boundary before any
     # value use may replace that origin; aliases made earlier stay unknown.
-    prior_reads = set()
+    def returns_literal(body):
+        return bool(body) and all(isinstance(n, ast.Return) and (n.value is None
+               or isinstance(n.value, ast.Constant)
+               or (isinstance(n.value, ast.Dict) and not n.value.keys)) for n in body)
+
+    statements = []
     for statement in fn.body:
+        # Continued execution has completed this body when every handler
+        # returns. A failed lexer cannot reach the later declaration reads.
+        if isinstance(statement, ast.Try) and not statement.orelse and not statement.finalbody \
+                and statement.handlers and all(returns_literal(h.body) for h in statement.handlers):
+            statements.extend(statement.body)
+        else:
+            statements.append(statement)
+    prior_reads = set()
+    for statement in statements:
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1 \
                 and isinstance(statement.targets[0], ast.Name) \
                 and isinstance(statement.value, ast.Call):
@@ -2462,10 +2476,7 @@ def _formal_names(fn, patterns, inherited=(), *, modules=(), sanitizers=()):
         # An empty-input early return observes presence, not a declared value.
         guard = (isinstance(statement, ast.If) and not statement.orelse
                  and not any(isinstance(n, ast.Call) for n in ast.walk(statement.test))
-                 and all(isinstance(n, ast.Return) and (n.value is None
-                         or isinstance(n.value, ast.Constant)
-                         or (isinstance(n.value, ast.Dict) and not n.value.keys))
-                         for n in statement.body))
+                 and returns_literal(statement.body))
         if not guard:
             prior_reads.update(n.id for n in ast.walk(statement)
                                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
