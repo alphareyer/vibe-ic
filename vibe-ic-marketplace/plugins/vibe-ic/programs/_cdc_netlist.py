@@ -344,9 +344,22 @@ class Netlist:
             return port[bit]
         return self.names.get(bit, f"net#{bit}")
 
+    @property
+    def clock_port_labels(self) -> Dict[object, str]:
+        """Keep each vector port's native bit identity in clock domains.
+
+        A bus name describes several independent clocks. Native bit numbers
+        remain unambiguous across ascending/nonzero-based source ranges and
+        aliases, without changing the ordinary signal/port census labels.
+        """
+        return {bit: (name if len(bits) == 1 else f"{name}:net#{bit}")
+                for name, (_direction, bits) in self.ports.items()
+                for bit in bits}
+
     def domain(self, flop: Flop,
                port_labels: Optional[Dict[object, str]] = None) -> str:
-        return self.bit_label(self.root(flop.clk), port_labels)
+        return self.bit_label(self.root(flop.clk), self.clock_port_labels
+                              if port_labels is None else port_labels)
 
     def sample_edge(self, flop: Flop) -> int:
         """Clock edge at the root net, accounting for transparent inversions."""
@@ -526,14 +539,19 @@ class _LookupSnapshot:
 
     def __init__(self, nl: Netlist):
         self.nl = nl
-        self.port_labels = {
-            b: n for n, (_d, bits) in nl.ports.items() for b in bits}
+        self.port_labels = {}
+        clock_labels = {}
+        for name, (_direction, bits) in nl.ports.items():
+            for bit in bits:
+                self.port_labels[bit] = name
+                clock_labels[bit] = (name if len(bits) == 1 else
+                                     f"{name}:net#{bit}")
         self.port_bits = {
             b: n for n, (direction, bits) in nl.ports.items()
             if direction in ("input", "inout") for b in bits}
         self.q_of = {b: f for f in nl.flops for b in f.q}
         self.domains = {
-            id(f): nl.domain(f, self.port_labels) for f in nl.flops}
+            id(f): nl.domain(f, clock_labels) for f in nl.flops}
         self.sample_edges = {id(f): nl.sample_edge(f) for f in nl.flops}
         self.labels = {
             id(f): (nl.bit_label(f.q[0], self.port_labels).split("[")[0]

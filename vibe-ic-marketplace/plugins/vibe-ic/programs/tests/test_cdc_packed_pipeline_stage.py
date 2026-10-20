@@ -225,3 +225,61 @@ def test_native_async_input_second_stage_requires_same_edge(
     assert result.returncode == expected, (result.stdout, result.stderr, document)
     assert [f["rule"] for f in document["findings"]] == (
         [] if expected == 0 else ["ASYNC_INPUT_NO_SYNC"])
+
+
+@pytest.mark.parametrize("kind", ["register", "async"])
+@pytest.mark.parametrize("bus_range,first_bit,other_bit", [
+    ("[1:0]", 0, 1), ("[5:4]", 4, 5), ("[0:1]", 0, 1)],
+    ids=["zero-based", "nonzero-based", "ascending"])
+@pytest.mark.parametrize("connection,expected", [
+    ("different-bit", 1), ("same-bit", 0), ("same-bit-alias", 0),
+    ("same-bit-inverted-edge", 0)])
+def test_native_clock_bus_bits_keep_distinct_domains(
+        tmp_path, kind, bus_range, first_bit, other_bit, connection, expected):
+    """Actual clock bits, including aliases, own domain identity."""
+    second_clock = f"clk_b[{other_bit if connection == 'different-bit' else first_bit}]"
+    aliases = ""
+    second_edge = "posedge"
+    if connection in ("same-bit-alias", "same-bit-inverted-edge"):
+        inverse = "~" if connection == "same-bit-inverted-edge" else ""
+        aliases = f"wire receive_alias = {inverse}clk_b[{first_bit}];"
+        second_clock = "receive_alias"
+        if inverse:
+            second_edge = "negedge"
+    launch = ("logic launch; always_ff @(posedge clk_a) launch <= signal_raw;"
+              if kind == "register" else "")
+    source = "launch" if kind == "register" else "signal_raw"
+    rtl = tmp_path / "phase2/stage1/rtl/neutral.sv"
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text(f"""module neutral_clock_bus(
+        input logic clk_a, input logic {bus_range} clk_b,
+        input logic signal_raw, output logic out_o);
+      {launch}
+      {aliases}
+      logic first, second;
+      always_ff @(posedge clk_b[{first_bit}]) first <= {source};
+      always_ff @({second_edge} {second_clock}) second <= first;
+      assign out_o = second;
+    endmodule
+    """)
+    native = cdc.build(tmp_path, [rtl], "neutral_clock_bus")
+    model = cdc.load(native)
+    cdc.require_binding(tmp_path, native, model)
+    report = tmp_path / "ordinary.json"
+    program, rule = (("clock_domain_reg_crossing_check.py", "CDC_REG_NO_SYNC")
+                     if kind == "register" else
+                     ("cdc_async_input_check.py", "ASYNC_INPUT_NO_SYNC"))
+    result = subprocess.run([
+        sys.executable, str(PROG / program), str(tmp_path),
+        "--front-end", "netlist", "--json", str(report)],
+        capture_output=True, text=True)
+    document = json.loads(report.read_text())
+    assert document["summary"]["netlist_read"] is True
+    assert result.returncode == expected, (result.stdout, result.stderr, document)
+    assert bool(document["findings"]) is bool(expected)
+    assert all(f["rule"] == rule for f in document["findings"])
+    if expected:
+        first, = [f for f in model.flops if f.label == "first"]
+        second, = [f for f in model.flops if f.label == "out_o"]
+        assert model.root(first.clk) != model.root(second.clk)
+        assert model.domain(first) != model.domain(second)
