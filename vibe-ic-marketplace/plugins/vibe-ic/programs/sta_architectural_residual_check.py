@@ -162,11 +162,13 @@ _BUFFER_CELL_RE = re.compile(
     r"(?:^|_)(?:buf|bufinv|inv|clkbuf|clkinv|clkdlybuf|dlygate|dlymetal|"
     r"lpflow_clkbuf|lpflow_inv)", re.I)
 
-#: One arc row of an OpenSTA `report_checks` path. The leading Cap/Slew pair is
-#: present in the SPEF-based reports and absent in the estimate ones.
+#: OpenSTA leaves optional Fanout/Cap/Slew fields blank on some pin rows.
+#: Keep the numeric prefix's positions so the header, not its token count,
+#: identifies Delay. Headerless legacy 2/4-column reductions remain readable.
 _ARC_RE = re.compile(
-    r"^\s+(?:[\d.]+\s+[\d.]+\s+)?([\d.]+)\s+[\d.]+\s+[v^]\s+(\S+)\s+\((\S+)\)",
+    r"^(\s*.*?)\s+[v^]\s+(\S+)\s+\((\S+)\)\s*$",
     re.M)
+_NUMBER_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 _INSERTION_RE = re.compile(r"^\s+([\d.]+)\s+[\d.]+\s+clock network delay", re.M)
 _SLACK_RE = re.compile(r"(-?\d+\.\d+)\s+slack \(VIOLATED\)")
 _START_RE = re.compile(r"^Startpoint:\s*(\S+)", re.M)
@@ -185,21 +187,75 @@ def _is_buffer(cell: str) -> bool:
     return bool(_BUFFER_CELL_RE.search(cell.split("__")[-1] or cell))
 
 
+def parse_arcs(chunk: str) -> Dict[str, object]:
+    """Read arc Delays independently of slack, path type and report basis.
+
+    OpenSTA right-aligns numbers with their column labels. Missing optional
+    values therefore do not shift Delay. Unsupported layouts are disclosed;
+    an unreadable violating path must not look like a nonviolated path.
+    """
+    columns = None
+    arcs = []
+    for line in chunk.splitlines():
+        if line.rstrip().endswith("Description"):
+            labels = list(re.finditer(r"\S+", line))[:-1]
+            names = [m.group() for m in labels]
+            if (not names or len(set(names)) != len(names)
+                    or not {"Delay", "Time"}.issubset(names)
+                    or set(names) - {"Fanout", "Cap", "Slew", "Delay", "Time"}):
+                return {"status": "UNSUPPORTED", "arcs": [],
+                        "reason": "unsupported arc column header"}
+            columns = {m.end(): m.group() for m in labels}
+            continue
+        row = _ARC_RE.fullmatch(line)
+        if not row:
+            continue
+        fields = list(re.finditer(r"\S+", row.group(1)))
+        if not fields or any(not _NUMBER_RE.fullmatch(f.group()) for f in fields):
+            return {"status": "UNSUPPORTED", "arcs": [],
+                    "reason": "nonnumeric arc field"}
+        if columns is None:
+            if len(fields) not in (2, 4):
+                return {"status": "UNSUPPORTED", "arcs": [],
+                        "reason": "arc layout needs an explicit Delay header"}
+            delay = float(fields[-2].group())
+        else:
+            if any(f.end() not in columns for f in fields):
+                return {"status": "UNSUPPORTED", "arcs": [],
+                        "reason": "arc fields do not align with their header"}
+            values = {columns[f.end()]: float(f.group()) for f in fields}
+            if set(values) == {"Time"}:
+                continue  # A clock pin with no incremental arc Delay.
+            if not {"Delay", "Time"}.issubset(values):
+                return {"status": "UNSUPPORTED", "arcs": [],
+                        "reason": "arc lacks an explicit Delay or Time"}
+            delay = values["Delay"]
+        arcs.append((delay, row.group(2), row.group(3)))
+    return {"status": "PARSED" if arcs else "NO_ARCS", "arcs": arcs,
+            "reason": None if arcs else "no readable arc rows"}
+
+
 def classify_path(chunk: str) -> Optional[Dict[str, object]]:
     """One `Startpoint:`-headed path chunk -> its classification, or None when
-    the path is not a violating one."""
+    the path is not a violating setup path. Unreadable violations are named."""
     if not _SETUP_PATH_RE.search(chunk):
         return None
     m = _SLACK_RE.search(chunk)
     if not m:
         return None
     slack = float(m.group(1))
-    arcs = [(float(d), pin, cell) for d, pin, cell in _ARC_RE.findall(chunk)]
-    if not arcs:
-        return None
+    parsed = parse_arcs(chunk)
+    arcs = parsed["arcs"]
     total = sum(d for d, _, _ in arcs)
-    if total <= 0:
-        return None
+    start = _START_RE.search(chunk)
+    end = _END_RE.search(chunk)
+    if parsed["status"] != "PARSED" or total <= 0:
+        return {"startpoint": start.group(1) if start else None,
+                "endpoint": end.group(1) if end else None,
+                "slack_ns": round(slack, 3), "category": "not_classified",
+                "parse_status": parsed["status"] if total > 0 or not arcs
+                                else "NONPOSITIVE_DATA_DELAY",
+                "parse_reason": parsed["reason"] or "nonpositive data delay"}
     t_buf = sum(d for d, _, cell in arcs if _is_buffer(cell))
     ins = [float(v) for v in _INSERTION_RE.findall(chunk)]
     launch = ins[0] if ins else 0.0
@@ -217,8 +273,6 @@ def classify_path(chunk: str) -> Optional[Dict[str, object]]:
     else:
         category = "physical_reachable"
 
-    start = _START_RE.search(chunk)
-    end = _END_RE.search(chunk)
     return {
         "startpoint": start.group(1) if start else None,
         "endpoint": end.group(1) if end else None,
@@ -232,6 +286,7 @@ def classify_path(chunk: str) -> Optional[Dict[str, object]]:
         "residual_ns": round(residual, 3),
         "max_arc_fraction": round(max_arc_fraction, 4),
         "category": category,
+        "parse_status": "PARSED",
     }
 
 
@@ -580,6 +635,14 @@ def check(project: Path) -> Dict[str, object]:
 
     arch = [p for p in rep["paths"] if p["category"] == "architectural"]
     rep["architectural_paths"] = arch
+    unreadable = [p for p in rep["paths"] if p["category"] == "not_classified"]
+    if unreadable and not arch:
+        rep["reason"] = (
+            f"NOT CHECKED — {len(unreadable)} violated setup path(s) could not "
+            f"be classified: {unreadable[0]['parse_reason']}. "
+            "Unreadable arcs do not establish absence of an architectural residual.")
+        rep["reasons"] = [rep["reason"]]
+        return rep
     # DISCLOSURE, NOT A VERDICT. Attached to whichever verdict follows, and only
     # when this run actually read a violating path -- a clean design has no
     # shortfall to qualify, so it must read exactly as it did before.

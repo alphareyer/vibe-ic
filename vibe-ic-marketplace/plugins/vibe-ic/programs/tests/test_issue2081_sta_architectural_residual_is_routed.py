@@ -415,3 +415,111 @@ def test_d4_inline_report_wiring_requires_actual_consumption(monkeypatch, broken
         monkeypatch.setattr(runner._pr, "run", missing_output)
 
     assert probe.ground(23, "reports/phase3/sta/architectural_residual.json") is None
+
+
+# #3359: neutral synthetic controls using OpenSTA's native column layout.
+# The actual three-line PRE_LAYOUT snapshot is retained in the repair packet;
+# these controls do not relabel that snapshot as post-route evidence.
+def _column_path(columns=5, *, kind="max", violated=True, dominant=False,
+                 basis="POST_ROUTE_SPEF"):
+    labels = {2: ("Delay", "Time"), 3: ("Slew", "Delay", "Time"),
+              4: ("Cap", "Slew", "Delay", "Time"),
+              5: ("Fanout", "Cap", "Slew", "Delay", "Time")}[columns]
+    header = "".join(f"{name:>12}" for name in labels) + "   Description"
+    rows = []
+    # Include an input-pin row with blank Fanout/Cap and zero Delay, then
+    # enough logic arcs to exercise the depth guard without a dominant arc.
+    for i, delay in enumerate([0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]):
+        if dominant and i == 6:
+            delay = 20.0
+        values = {"Fanout": "2", "Cap": "0.009140", "Slew": "25.000000",
+                  "Delay": f"{delay:.6f}", "Time": f"{100 + i:.6f}"}
+        if i == 0:
+            values.update(Fanout="", Cap="")
+        row = "".join(f"{values[name]:>12}" for name in labels)
+        cell = "cell__buf_1" if i == 1 else "cell__logic_1"
+        rows.append(row + f" v stage{i}/X ({cell})")
+    slack = "-3.529765   slack (VIOLATED)" if violated else "1.200000   slack (MET)"
+    return (f"STA_BASIS: {basis}\nStartpoint: launch\nEndpoint: capture\n"
+            f"Path Type: {kind}\n{header}\n" + "\n".join(rows) + f"\n{slack}\n")
+
+
+@pytest.mark.parametrize("columns", [3, 5, 2, 4], ids=["3col", "5col", "2col", "4col"])
+def test_native_columns_read_each_delay(columns):
+    body = _column_path(columns)
+    parsed = mod.parse_arcs(body)
+    assert parsed["status"] == "PARSED"
+    assert [a[0] for a in parsed["arcs"]] == [0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    path = mod.classify_path(body)
+    assert path["data_delay_ns"] == 3.9
+    assert path["buffer_delay_ns"] == 0.4
+    assert path["residual_ns"] == 3.13
+    assert path["depth_arcs"] == 7
+
+
+def test_original_native_excerpt_is_parseable_but_stays_pre_layout(tmp_path):
+    # Actual three arc lines quoted in #3359. Only the surrounding endpoint
+    # names and slack wrapper are reductions; this is not a post-route run.
+    body = """STA_BASIS: PRE_LAYOUT_ESTIMATE
+Startpoint: snapshot_start
+Endpoint: snapshot_end
+Path Type: max
+Fanout         Cap        Slew       Delay        Time   Description
+     4    0.012020   25.000000    0.000000    2.000000 v tl_i[17] (in)
+                     25.000000    0.000000    2.000000 v _306964_/A (sky130_fd_sc_hd__xor2_1)
+     2    0.009140    3.573122    6.575068    8.575068 ^ _306964_/X (sky130_fd_sc_hd__xor2_1)
+ -3.529765 slack (VIOLATED)
+"""
+    parsed = mod.parse_arcs(body)
+    assert parsed["status"] == "PARSED"
+    assert [a[0] for a in parsed["arcs"]] == [0.0, 0.0, 6.575068]
+    assert mod.classify_path(body)["category"] == "drive_limited"
+    rc, rep = _run(_project(tmp_path, body), tmp_path)
+    assert rc == 2 and rep["verdict"] == "NOT_CHECKED"
+    assert rep["reports_skipped"][0]["declared_basis"] == "PRE_LAYOUT"
+
+
+def test_delay_is_selected_by_header_alignment():
+    body = _column_path(2).replace("       Delay        Time", "        Time       Delay")
+    # The numeric bytes stay fixed: the header now identifies the other column.
+    parsed = mod.parse_arcs(body)
+    assert [a[0] for a in parsed["arcs"]] == [100., 101., 102., 103., 104., 105., 106.]
+
+
+@pytest.mark.parametrize("columns", [3, 5, 2, 4], ids=["3col", "5col", "2col", "4col"])
+@pytest.mark.parametrize("control, expected_rc, category", [
+    ("violated", 1, "architectural"), ("hold", 0, None),
+    ("met", 0, None), ("dominant", 0, "drive_limited"),
+    ("pre-layout", 2, None), ("missing-basis", 2, None),
+])
+def test_native_columns_keep_verdict_guards(tmp_path, columns, control, expected_rc, category):
+    body = _column_path(columns, kind="min" if control == "hold" else "max",
+                        violated=control != "met", dominant=control == "dominant",
+                        basis="PRE_LAYOUT_ESTIMATE" if control == "pre-layout"
+                        else "POST_ROUTE_SPEF")
+    if control == "missing-basis":
+        body = body.replace("STA_BASIS: POST_ROUTE_SPEF\n", "")
+    rc, rep = _run(_project(tmp_path, body), tmp_path)
+    assert rc == expected_rc, rep["reason"]
+    assert [p["category"] for p in rep["paths"]] == ([category] if category else [])
+    if expected_rc == 2:
+        assert rep["verdict"] == "NOT_CHECKED"
+    elif category is None:
+        # Parseability is independent of hold/nonviolated classification.
+        assert mod.parse_arcs(body)["status"] == "PARSED"
+        assert mod.classify_path(body) is None
+
+
+@pytest.mark.parametrize("defect", ["missing-delay", "misaligned", "no-arcs"])
+def test_unreadable_violated_columns_are_incomplete(tmp_path, defect):
+    body = _column_path()
+    if defect == "missing-delay":
+        body = body.replace("       Delay", "       Other")
+    elif defect == "misaligned":
+        body = body.replace("    0.500000", "     0.500000")
+    else:
+        body = "\n".join(line for line in body.splitlines() if " v stage" not in line)
+    rc, rep = _run(_project(tmp_path, body), tmp_path)
+    assert rc == 2, rep["reason"]
+    assert rep["verdict"] == "NOT_CHECKED"
+    assert rep["paths"][0]["parse_status"] != "PARSED"
