@@ -372,5 +372,16 @@
     "version_observed": "Pinned composed source 5e844ab8d03624ada69fa6c924756ad4b345d01d, tree 37ceeec65b10a9373ad9a2acc8459c899483a0b4 (child of delivery source 9779a75a). The phase helper is a stacked source addition, not yet asserted present on official main.",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_reset_phase_prose/neutral_reset_phase_prose.md"
+  },
+  {
+    "issue": 3289,
+    "project": "neutral_io_analysis_prose",
+    "layer": "L1_DATASHEET",
+    "field": "pin_table",
+    "expected": "[] — this input declares no hardware port. `SDC` identifies an implementation constraint document and `ROOT` an authoring role. They must not become physical pin declarations merely because an I/O-related heading and the English word input coexist.",
+    "actual": "Two pin_table rows named SDC and ROOT, each mode=input, rtl_name=sdc/root, with source evidence pointing at this prose document.",
+    "version_observed": "1.30.25 official fixed checkout e67b74e3e9204aa37fd8eaaf8d66266bfa8c2812, native gen_l1_datasheet rc=0. Also seen on retained source d63906f6ae37bf0030059d9b6304ebcc5fe349b9 (manifest1.29.96).",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_io_analysis_prose/physical_io_analysis.md"
   }
 ]
