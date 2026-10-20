@@ -217,9 +217,15 @@ and `reset_roles[]`. Each role row includes the unchanged `candidate` object,
 `role` (`synchronous_reset`, `functional_update`, or `unresolved`), `rationale`,
 and exact `source_context` citations; resolved roles additionally require
 `intent` citations in the actual `input/` documents. Citations are
-`{file, line, quote}`. A supported role must have affirmative state-specific
-intent, not an inference from a constant arm, a signal name, existing ARST or
-missing L8 facts. Insufficient or conflicting intent stays `unresolved`.
+`{file, line, quote}`. Review every current input listed by the request, including potentially
+conflicting statements outside the chosen quote. A supported role may be an
+explicit statement or a reviewed inference from actual input and source context
+in any language. In the rationale, describe the exact state, branch and selector
+and explain how the cited intent supports that role. A constant arm, a signal
+name, existing ARST or missing L8 facts alone is not intent. Insufficient or
+conflicting intent stays `unresolved`; do not fabricate input to fit a role.
+The program validates identity and citation bytes, not natural-language truth or
+a dishonest review. Semantic support and contradiction review belong to ICExpert.
 
 Publish through the same program with `--step 3 --answer ANSWER.json
 --signed-by REVIEWER --judgement REASON`, then rerun the same ordinary RDC

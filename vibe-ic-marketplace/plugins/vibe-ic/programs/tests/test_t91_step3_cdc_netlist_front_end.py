@@ -426,7 +426,11 @@ def _official_role_answer(project, role='functional_update', expected_write_rc=0
               'quote': (project / 'input/docs/control.md').read_text().strip()}
     answer = {key: request[key] for key in ('evidence_sha256', 'netlist_sha256')}
     answer['reset_roles'] = [{'candidate': row, 'role': role, 'source_context': [source],
-                             'intent': [intent], 'rationale': 'Current stated control intent.'}
+                             'intent': [intent], 'rationale': (f"State {row['state']} Q {row['q']} "
+                             f"uses selector {row['selector']} at the cited constant-arm branch; "
+                             + ('the cited input cannot establish its architectural role.'
+                                if role == 'unresolved' else
+                                'the cited input describes the intended state update.'))}
                             for row in request['candidates']]
     answer_path = project.parent / (project.name + '-authored-answer.json')
     answer_path.write_text(json.dumps(answer))
@@ -491,12 +495,36 @@ def test_native_reset_role_authority_refusals(tmp_path, mutation):
     assert not expert.check(project, '3')[0]
 
 
-def test_native_reset_role_writer_needs_actual_supported_intent(tmp_path):
+@pytest.mark.parametrize('intent', ['sticky_english', 'sticky_chinese'])
+def test_native_reset_role_reviewed_inference_needs_no_magic_words(tmp_path, intent):
     project, rtl = _role_project(tmp_path)
-    (project / 'input/docs/control.md').write_text('The clock is 20 ns; state q exists.\n')
-    expert, request, answer = _official_role_answer(project, expected_write_rc=1)
-    assert not (project / 'reports/audit/ai_judgements/3.json').exists()
-    assert _run('reset_dependency_check', str(project), '--front-end', 'netlist')[0] == 1
+    words = {
+        'sticky_english': 'An event sets the pending flag; it stays set until reset.\n',
+        'sticky_chinese': '\u4e8b\u4ef6\u767c\u751f\u6642\u8a2d\u5b9a\u5f85\u8655\u7406\u65d7\u6a19\uff0c\u4e26\u4fdd\u6301\u5230\u91cd\u7f6e\u3002\n',
+    }
+    (project / 'input/docs/control.md').write_text(words[intent])
+    expert, request, _answer = _official_role_answer(project)
+    rc, report = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 0 and not _rules(report), report
+    assert expert.check(project, '3')[0]
+
+
+@pytest.mark.parametrize('intent', ['insufficient', 'contradictory'])
+def test_native_reset_role_expert_unresolved_remains_blocking(tmp_path, intent):
+    project, rtl = _role_project(tmp_path)
+    words = {
+        'insufficient': 'The clock is 20 ns; state q exists.\n',
+        'contradictory': ('The flag is only reset by the external reset.\n'
+                          'The flag is synchronously reset by its own value.\n'),
+    }
+    (project / 'input/docs/control.md').write_text(words[intent])
+    # The expert, rather than a language-specific keyword matcher, owns this
+    # semantic refusal. The canonical writer preserves its unresolved answer.
+    expert, request, _answer = _official_role_answer(project, role='unresolved')
+    receipt = json.loads((project / 'reports/audit/ai_judgements/3.json').read_text())
+    assert receipt['reset_roles'][0]['role'] == 'unresolved'
+    rc, report = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 1 and _rules(report) == ['RESET_ROLE_UNRESOLVED'], report
     assert not expert.check(project, '3')[0]
 
 

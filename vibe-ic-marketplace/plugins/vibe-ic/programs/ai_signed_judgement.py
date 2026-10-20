@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -323,9 +322,7 @@ def _admit_reset_roles(project: Path, receipt: dict, request: dict) -> dict:
     _path, _nl, binding = _reset_context(project)
     sources = {(project / p).resolve() for p in binding["input"]["rtl_files"]}
     result = {}
-    from _prose_polarity import is_denied, sentence_scope
-    patterns = {"synchronous_reset": r"\b(?:synchronous|sync)[ -]reset\b",
-                "functional_update": r"\b(?:functional|data)[ -](?:update|control|condition)\b"}
+    dispositions = {"synchronous_reset", "functional_update", "unresolved"}
     for row in records:
         if not isinstance(row, dict) or not isinstance(row.get("candidate"), dict):
             raise ValueError("role has no exact native candidate identity")
@@ -334,24 +331,15 @@ def _admit_reset_roles(project: Path, receipt: dict, request: dict) -> dict:
         role = row.get("role")
         if state in result or json.dumps(candidate, sort_keys=True) != json.dumps(candidates.get(state), sort_keys=True):
             raise ValueError("duplicate, conflicting or foreign state/Q/selector/source identity")
-        if role not in (*patterns, "unresolved"):
+        if role not in dispositions:
             raise ValueError("unknown reset-role disposition")
         if not isinstance(row.get("rationale"), str) or not row["rationale"].strip():
             raise ValueError("role needs an explicit evidence-based rationale")
         _role_citations(project, row.get("source_context"), sources)
         if role != "unresolved":
-            quotes = _role_citations(project, row.get("intent"), intent)
-            stated = set()
-            for quote in quotes:
-                if not re.search(r"(?<![\w$])" + re.escape(candidate["label"]) + r"(?![\w$])", quote):
-                    continue
-                for kind, pattern in patterns.items():
-                    for match in re.finditer(pattern, quote, re.I):
-                        lo, hi = sentence_scope(quote, match.start(), match.end(), extra_breaks=(";",))
-                        if is_denied(quote[lo:hi]) is None:
-                            stated.add(kind)
-            if stated != {role}:
-                raise ValueError("intent does not uniquely support this state's declared role")
+            _role_citations(project, row.get("intent"), intent)
+            # The trusted expert owns the semantic inference, in any language.
+            # This boundary proves current citations, not their interpretation.
         result[state] = role
     return result
 

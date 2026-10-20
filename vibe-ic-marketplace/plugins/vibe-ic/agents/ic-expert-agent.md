@@ -3980,7 +3980,11 @@ Follow `skills/rtl-review/SKILL.md` when ordinary RDC emits
 `RESET_ROLE_UNRESOLVED`. Use the canonical Step3 request/answer CLI in
 `programs/ai_signed_judgement.py`, cite the actual design input and exact current
 source context for every state/Q/selector candidate, and leave unsupported or
-conflicting roles unresolved. Do not manufacture facts in Phase1 documents.
+conflicting roles unresolved. Read all current input, not only the selected
+quote, and explain how each state/branch/selector follows from that input.
+Supported inference may use any input language; the program does not classify
+meaning with English keywords or detect a dishonest review. Do not manufacture
+facts in Phase1 documents.
 The signature attributes reviewed bytes; it does not prove intent, erase native
 reset cycles or replace the deterministic ordinary consumer. A valid current
 graph is reused: role adoption and consumer-only continuation must not rebuild
