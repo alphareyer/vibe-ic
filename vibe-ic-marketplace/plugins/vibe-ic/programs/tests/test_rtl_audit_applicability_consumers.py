@@ -323,3 +323,98 @@ def test_source_change_before_snapshot_is_unknown(tmp_path, monkeypatch):
     result = applicability.assess('phy_counter_audit', rtl)
     assert result['state'] == 'UNKNOWN'
     assert result['reason'] == 'source_changed_before_elaboration'
+
+
+# #3361: the original five public fixtures, plus bounded refusal controls.
+_INTERFACE_LITERAL = 'module top(input wire [3:0] a, output wire [3:0] y);\n  assign y = a;\nendmodule\n'
+_INTERFACE_CONSTANTS = {
+    'literal': _INTERFACE_LITERAL,
+    'ansi_unused_localparam': _INTERFACE_LITERAL.replace('\n', '\n  localparam INTERNAL_WIDTH = 4;\n', 1),
+    'fixed_localparam': 'module top(a, y);\n  localparam WIDTH = 4;\n  input wire [WIDTH-1:0] a;\n  output wire [WIDTH-1:0] y;\n  assign y = a;\nendmodule\n',
+    'external_parameter': 'module top #(parameter WIDTH = 4)(input wire [WIDTH-1:0] a, output wire [WIDTH-1:0] y);\n  assign y = a;\nendmodule\n',
+    'child_instance': 'module leaf(input wire [3:0] a, output wire [3:0] y);\n  assign y = a;\nendmodule\nmodule top(input wire [3:0] a, output wire [3:0] y);\n  leaf u_leaf(.a(a), .y(y));\nendmodule\n',
+}
+_INTERFACE_CONSTANTS.update({
+    'unresolved': _INTERFACE_CONSTANTS['ansi_unused_localparam'].replace('= 4;', '= MISSING;'),
+    'undefined': _INTERFACE_CONSTANTS['ansi_unused_localparam'].replace('= 4;', "= 4'bxxxx;"),
+    'generate': _INTERFACE_CONSTANTS['ansi_unused_localparam'].replace('  assign', '  generate if (INTERNAL_WIDTH == 4) begin\n  assign').replace('endmodule', '  end endgenerate\nendmodule'),
+    'implicit_generate': _INTERFACE_CONSTANTS['ansi_unused_localparam'].replace('  assign', '  if (INTERNAL_WIDTH == 4) begin\n  assign').replace('endmodule', '  end\nendmodule'),
+    'preprocessing': '`define INTERNAL_WIDTH 4\n' + _INTERFACE_LITERAL,
+    'native_failure': _INTERFACE_CONSTANTS['ansi_unused_localparam'].replace('assign y = a;', 'assign y = ;'),
+    'native_unavailable': _INTERFACE_CONSTANTS['ansi_unused_localparam'],
+})
+
+
+def _interface_constant_receipt(tmp_path, case, monkeypatch):
+    from dataclasses import asdict
+    sys.path.insert(0, str(PLUGIN / '_shared'))
+    import skill_compliance_check as checker
+    source, rtl = _source(tmp_path, _INTERFACE_CONSTANTS[case])
+    evidence = tmp_path / 'audit'
+    if case == 'native_unavailable':
+        monkeypatch.setenv('PATH', '/no-native-tools')
+    argv = [sys.executable, '-B', str(PRODUCERS / 'interface_encoding_audit.py'),
+            '--rtl-dir', str(source), '--top-module', 'top', '--out-dir', str(evidence)]
+    run = subprocess.run(argv, text=True, capture_output=True)
+    (tmp_path / 'producer.stdout').write_text(run.stdout)
+    (tmp_path / 'producer.stderr').write_text(run.stderr)
+    report = json.loads((evidence / FILENAMES[0]).read_text())
+    findings = checker._cc_audit_receipt_evidence(
+        {'id': 'P0_interface_encoding_audit', 'auditor': 'interface_encoding_audit'}, '',
+        checker.CheckContext(output_path=tmp_path / 'review.md', evidence_dirs=[evidence],
+                             rtl_source_root=source))
+    (tmp_path / 'consumer.json').write_text(json.dumps([asdict(f) for f in findings], indent=2))
+    return source, rtl, evidence, run, report, findings, checker
+
+
+@pytest.mark.parametrize('case', _INTERFACE_CONSTANTS)
+def test_fixed_internal_constant_public_interface_absence(tmp_path, monkeypatch, case):
+    source, rtl, evidence, run, report, findings, _ = _interface_constant_receipt(tmp_path, case, monkeypatch)
+    expected = 'NOT_APPLICABLE' if case in {'literal', 'ansi_unused_localparam', 'fixed_localparam'} else 'NOT_MEASURED'
+    # The literal and internal-constant positives close an absent subject;
+    # neither the producer nor the unchanged P0 consumer labels that PASS.
+    assert [f.state for f in findings] == [expected], (run.stdout, run.stderr, report, findings)
+    if case in {'literal', 'ansi_unused_localparam', 'fixed_localparam', 'external_parameter', 'child_instance'}:
+        native = subprocess.run(['yosys', '-Q', '-T', '-p',
+            f'read_verilog -sv "{rtl}"; hierarchy -check -top top; proc; write_json "{tmp_path / "graph.json"}"'],
+            text=True, capture_output=True)
+        (tmp_path / 'graph.stdout').write_text(native.stdout)
+        (tmp_path / 'graph.stderr').write_text(native.stderr)
+        assert native.returncode == 0, native.stdout + native.stderr
+        modules = json.loads((tmp_path / 'graph.json').read_text())['modules']
+        children = [c for m in modules.values() for c in m.get('cells', {}).values() if c['type'] in modules]
+        assert len(modules) == (2 if case == 'child_instance' else 1), modules
+        assert len(children) == (1 if case == 'child_instance' else 0), modules
+        assert {p: len(v['bits']) for p, v in modules['top']['ports'].items()} == {'a': 4, 'y': 4}
+    if expected == 'NOT_APPLICABLE':
+        assert run.returncode == 0 and report['summary']['verdict'] == expected, report
+        proof = report['applicability']
+        assert proof['facts']['modules'] == ['top'] and proof['facts']['child_instances'] == 0
+        assert proof['structural_absence']['scanned'] == 1
+        assert proof['source']['files'][0]['size_bytes'] == len(rtl.read_bytes())
+        if case != 'literal':
+            constants = proof['facts']['fixed_internal_constants']['top']
+            assert list(constants['values'].values()) == [4], constants
+            assert constants['ports'] == {'a': {'direction': 'input', 'width': 4},
+                                          'y': {'direction': 'output', 'width': 4}}
+    else:
+        assert report['summary']['verdict'] == 'INCONCLUSIVE', report
+        if case == 'child_instance':
+            assert report['discovery']['complete'] and report['discovery']['instances_discovered'] == 1
+            assert report['summary']['total_interfaces'] == report['summary']['unknowns'] == 2
+        else:
+            assert report['applicability']['state'] == 'UNKNOWN', report
+
+
+@pytest.mark.parametrize('mutation', ['source_bytes', 'added_source'])
+def test_fixed_internal_constant_receipt_requires_current_complete_source(tmp_path, monkeypatch, mutation):
+    source, rtl, evidence, _, _, findings, checker = _interface_constant_receipt(tmp_path, 'fixed_localparam', monkeypatch)
+    assert [f.state for f in findings] == ['NOT_APPLICABLE'], findings
+    if mutation == 'source_bytes':
+        rtl.write_text(rtl.read_text().replace('WIDTH = 4', 'WIDTH = 3'))
+    else:
+        (source / 'extra.v').write_text('module extra(); endmodule\n')
+    findings = checker._cc_audit_receipt_evidence(
+        {'id': 'P0_interface_encoding_audit', 'auditor': 'interface_encoding_audit'}, '',
+        checker.CheckContext(output_path=tmp_path / 'review.md', evidence_dirs=[evidence], rtl_source_root=source))
+    assert [f.state for f in findings] == ['NOT_MEASURED'], findings

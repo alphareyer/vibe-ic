@@ -2653,6 +2653,120 @@ def elaborations(rtl_files: List[Path], top: str, work_dir: Path,
              "raw_path": rpath, "raw_rc": rrc}]
 
 
+def _reset_memory_binding(source: dict, lowered: dict, top: str, clock: str) -> dict:
+    """Complete source/word/Q binding for the bounded reset-only lowering.
+
+    This is admission to the existing native next-state role proof, not reset
+    evidence itself. Keep every source word and scalar Q in both twins. A
+    missing, merged, ambiguous or unsupported identity refuses the whole route.
+    Clock observations and temporal HDL constructors do not use this route.
+    """
+    proof = {"inside": False, "failed_preconditions": [], "source_aliases": {}, "views": {}}
+    fails = proof["failed_preconditions"]
+    original = _top_module(source.get("raw"), top) if source.get("raw") else None
+    optimized = _top_module(source.get("netlist"), top) if source.get("netlist") else None
+    if original is None or optimized is None:
+        fails.append("missing original raw/optimized memory census")
+        return proof
+    original, optimized = original[1], optimized[1]
+    memories = original.get("memories") or {}
+    if not memories or memories != (optimized.get("memories") or {}):
+        fails.append("source raw/optimized memory declarations disagree")
+        return proof
+    aliases = proof["source_aliases"]
+    for name, memory in memories.items():
+        width, size, start = (memory.get(k) for k in ("width", "size", "start_offset"))
+        src = (memory.get("attributes") or {}).get("src")
+        if (_param_bit(memory.get("hide_name", 0)) or not src or
+                not all(type(v) is int for v in (width, size, start)) or width <= 0 or size <= 0):
+            fails.append(f"unsupported source reset memory: {name}")
+            continue
+        for word in range(start, start + size):
+            alias = f"{name}[{word}]"
+            if alias in aliases or alias in (original.get("netnames") or {}):
+                fails.append(f"ambiguous source reset word alias: {alias}")
+            aliases[alias] = {"memory": name, "word": word, "width": width, "src": src}
+    source_q = {q for _, c, k in _cells(original) if k == "ff" for q in _bits(c, "Q")}
+    covered = set()
+    for name, net in sorted((original.get("netnames") or {}).items()):
+        bits = net.get("bits") or []
+        if (not _param_bit(net.get("hide_name", 0)) and (net.get("attributes") or {}).get("src")
+                and bits and all(b in source_q for b in bits) and set(bits) - covered):
+            if name in aliases or covered.intersection(bits):
+                fails.append(f"ambiguous source scalar reset alias: {name}")
+                continue
+            aliases[name] = {"width": len(bits), "src": net["attributes"]["src"], "source_q": bits}
+            covered.update(bits)
+    if covered != source_q:
+        fails.append("source scalar Q identities are not completely named")
+    clocks = set()
+    written = set()
+    for name, cell, kind in _cells(original):
+        if kind in ("latch", "unclassified"):
+            fails.append(f"unsupported original reset state: {name}")
+        if kind != "memory":
+            continue
+        params = cell.get("parameters") or {}
+        memid = str(params.get("MEMID", "")).lstrip("\\")
+        if memid not in memories:
+            fails.append(f"unbound original memory port: {name}")
+        if cell["type"] == "$memwr_v2" and _param_bit(params.get("CLK_ENABLE")) == 1:
+            clk = _bits(cell, "CLK")
+            edge = _param_bit(params.get("CLK_POLARITY"))
+            if len(clk) != 1 or edge not in (0, 1):
+                fails.append(f"unknown source memory write clock: {name}")
+            else:
+                clocks.add((clk[0], edge))
+                written.add(memid)
+        elif cell["type"] != "$memrd" or _param_bit(params.get("CLK_ENABLE")) != 0:
+            fails.append(f"unsupported source reset memory port: {name}")
+    if written != set(memories) or len(clocks) != 1:
+        fails.append("source memories lack one complete synchronous write-clock population")
+    input_clocks = {b for p in original.get("ports", {}).values() if p.get("direction") == "input"
+                    and len(p.get("bits", [])) == 1 for b in p["bits"] if isinstance(b, int)}
+    if clocks and next(iter(clocks))[0] not in input_clocks:
+        fails.append("source memory clock is not a direct one-bit input")
+    if clock and (not clocks or _port_bit(original, clock)[0] != next(iter(clocks))[0]):
+        fails.append("source memory clock disagrees with declared clock")
+    for view, key, rc_key in (("raw", "raw", "raw_rc"), ("optimized", "netlist", "rc")):
+        netlist = lowered.get(key)
+        tm = _top_module(netlist, top) if netlist else None
+        if lowered.get(rc_key) != 0 or tm is None:
+            fails.append(f"missing native lowered {view} state")
+            continue
+        mod = tm[1]
+        census = _state_census(mod, netlist)
+        if census["memory"] or census["latch"] or census["unclassified"]:
+            fails.append(f"unsupported native lowered {view} state")
+        qbits = []
+        for name, cell, kind in _cells(mod):
+            if kind != "ff":
+                continue
+            q = (cell.get("connections") or {}).get("Q") or []
+            if not q or any(not isinstance(b, int) for b in q):
+                fails.append(f"undefined native {view} Q identity: {name}")
+            qbits.extend(q)
+            clk = _bits(cell, "CLK")
+            observed_clock = (clk[0], _param_bit((cell.get("parameters") or {}).get("CLK_POLARITY"))) if len(clk) == 1 else None
+            if observed_clock not in clocks:
+                fails.append(f"native {view} Q clock disagrees with source: {name}")
+        word_bits = {}
+        for name, alias in aliases.items():
+            net = (mod.get("netnames") or {}).get(name, {})
+            bits = net.get("bits") or []
+            if (_param_bit(net.get("hide_name", 0)) or len(bits) != alias["width"] or
+                    any(not isinstance(b, int) or b not in qbits for b in bits)):
+                fails.append(f"missing exact native {view} source alias: {name}")
+            word_bits[name] = bits
+        population = [b for bits in word_bits.values() for b in bits]
+        if (len(qbits) != len(set(qbits)) or len(population) != len(set(population)) or
+                set(population) != set(qbits) or len(population) != len(qbits)):
+            fails.append(f"incomplete or ambiguous native {view} source/word/Q population")
+        proof["views"][view] = {"q_bits": qbits, "q_count": len(qbits), "aliases": word_bits}
+    proof["inside"] = not fails
+    return proof
+
+
 def check(rtl_files: List[Path], top: str, claims: List[dict],
           work_dir: Path, container: Optional[str] = None,
           simdef: str = "",
@@ -2733,8 +2847,55 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
             "inside": not clock_fails,
             "failed_preconditions": clock_fails,
         }
+    reset_elabs = elabs
+    reset_fails = fails
+    reset_rules = {"reset_port", "reset_sync", "reset_polarity"}
+    raw_top = _top_module(elabs[0]["raw"], top) if elabs[0]["raw"] else None
+    if raw_top and raw_top[1].get("memories") and any(c.get("rule") in reset_rules for c in claims):
+        # Separate native twins: the original reads and the clock route remain
+        # intact. Only reset claims may consume this source-bound construction.
+        candidate_elabs = []
+        reset_fails = []
+        proofs = []
+        for e in elabs:
+            passes = YOSYS_PASSES.replace("flatten;", "flatten; memory_map;")
+            raw_passes = RAW_PASSES.replace("flatten;", "flatten; memory_map;")
+            rc, _, path = run_yosys(rtl_files, top, work_dir, container, simdef,
+                                    tag="_reset_memory", passes=passes)
+            rrc, _, rpath = run_yosys(rtl_files, top, work_dir, container, simdef,
+                                      tag="_reset_memory_raw", passes=raw_passes)
+            def load(code, p):
+                try:
+                    return json.loads(p.read_text()) if code == 0 else None
+                except (OSError, ValueError):
+                    return None
+            lowered = dict(e, rc=rc, path=path, raw_rc=rrc, raw_path=rpath,
+                           netlist=load(rc, path), raw=load(rrc, rpath))
+            proof = _reset_memory_binding(e, lowered, top, (klass or {}).get("clock", ""))
+            if record["rtl_sha256"] != {str(f): file_sha256(Path(f)) for f in rtl_files}:
+                proof["inside"] = False
+                proof["failed_preconditions"].append("source changed during reset memory elaboration")
+            if proof["inside"] and klass is not None:
+                proof["failed_preconditions"] += [f for f in applicability(
+                    lowered["netlist"], top, klass.get("clock", ""),
+                    list(klass.get("resets") or []), lowered["raw"])
+                    if not f.startswith(("C2 ", "C3 ", "C6 "))]
+                proof["inside"] = not proof["failed_preconditions"]
+            proof["source_binding"] = {"rtl_sha256": record["rtl_sha256"],
+                "original_raw_sha256": file_sha256(e["raw_path"]),
+                "original_optimized_sha256": file_sha256(e["path"]),
+                "raw_sha256": file_sha256(rpath), "optimized_sha256": file_sha256(path),
+                "raw_path": str(rpath), "optimized_path": str(path),
+                "raw_rc": rrc, "optimized_rc": rc,
+                "raw_passes": raw_passes, "optimized_passes": passes}
+            proofs.append(proof)
+            reset_fails += proof["failed_preconditions"]
+            candidate_elabs.append(lowered)
+        record["reset_memory_construction"] = proofs
+        if not reset_fails:
+            reset_elabs = candidate_elabs
     mappings = {}
-    for i, e in enumerate(elabs):
+    for i, e in enumerate(reset_elabs):
         if e["netlist"] is not None:
             for signal in sorted({c.get("signal", "") for c in claims if c.get("rule") in
                                   {"reset_port", "reset_sync", "reset_polarity"}}):
@@ -2754,11 +2915,14 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
             clock_claim = claim.get("rule") == "clock_edge"
             # Each exception is owned by a claim-specific complete-state
             # constructor.  No claim borrows another claim's exception.
-            blocked = (bool(clock_fails) if clock_claim else
-                       fails and (not reset_claim or any(
-                           not f.startswith(("C2 ", "C3 ", "C6 ")) for f in fails)))
+            if clock_claim:
+                blocked = bool(clock_fails)
+            elif reset_claim:
+                blocked = any(not f.startswith(("C2 ", "C3 ", "C6 ")) for f in reset_fails)
+            else:
+                blocked = bool(fails)
             if blocked:
-                blocked_fails = clock_fails if clock_claim else fails
+                blocked_fails = clock_fails if clock_claim else reset_fails if reset_claim else fails
                 answers.append(dict(claim, verdict=NOT_DISCHARGED, finding=(
                     "outside the claim's supported class: " + "; ".join(blocked_fails))))
                 continue
@@ -2767,7 +2931,8 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
                     f"yosys did not produce a netlist (rc={e['rc']}, defines "
                     f"{e['defines']!r}); nothing was measured")))
             else:
-                observed = clock_elabs[i]["netlist"] if clock_claim else e["netlist"]
+                observed = (clock_elabs[i]["netlist"] if clock_claim else
+                            reset_elabs[i]["netlist"] if reset_claim else e["netlist"])
                 answers.append(check_claim(observed, top, claim,
                     mappings.get((i, claim.get("signal", ""))) if reset_claim else None))
         verdicts = {a["verdict"] for a in answers}

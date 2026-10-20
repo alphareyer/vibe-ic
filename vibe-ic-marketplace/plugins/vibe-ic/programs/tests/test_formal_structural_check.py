@@ -991,3 +991,100 @@ def test_priority_load_retention_normal_cli_keeps_unrestricted_q_and_data(tmp_pa
             assert cert['post_reset_state_restriction'] is False, cert
     elif expected == fsc.NOT_DISCHARGED:
         assert not any(r.get('priority_load_certificate') for r in mapping['rows']), mapping
+
+
+# Frozen public source fixtures from #3360. The async array's unrelated clock
+# observation remains outside the supported alias grammar; only reset claims
+# gain this construction. No bit of its 16-bit state is replaced by a scalar.
+_RESET_ARRAY = '''module neutral(input clk,rst_n,we,input [1:0] addr,
+ input [3:0] d,output [3:0] y);
+reg [3:0] words [0:3];
+always @(posedge clk) begin
+ if (!rst_n) begin
+  words[0] <= 4'd0; words[1] <= 4'd0;
+  words[2] <= 4'd0; words[3] <= 4'd0;
+ end else if (we) words[addr] <= d;
+end
+assign y=words[addr];
+endmodule
+'''
+_RESET_SCALAR = '''module neutral(input clk,rst_n,we,input [1:0] addr,
+ input [3:0] d,output reg [3:0] y);
+always @(posedge clk) begin
+ if (!rst_n) y <= 4'd0;
+ else if (we) y <= d;
+end
+endmodule
+'''
+_RESET_ARRAY_ARMS = {
+    'array_sync_low': (_RESET_ARRAY, 'PASS', 'PASS'),
+    'scalar_sync_low': (_RESET_SCALAR, 'PASS', 'PASS'),
+    'array_sync_high': (_RESET_ARRAY.replace('if (!rst_n)', 'if (rst_n)'), 'REFUTED', 'PASS'),
+    'scalar_sync_high': (_RESET_SCALAR.replace('if (!rst_n)', 'if (rst_n)'), 'REFUTED', 'PASS'),
+    'array_async_low': (_RESET_ARRAY.replace('@(posedge clk)', '@(posedge clk or negedge rst_n)'), 'PASS', 'REFUTED'),
+    'scalar_async_low': (_RESET_SCALAR.replace('@(posedge clk)', '@(posedge clk or negedge rst_n)'), 'PASS', 'REFUTED'),
+}
+
+
+@pytest.mark.parametrize('arm', _RESET_ARRAY_ARMS)
+def test_source_bound_array_reset_public_constructor(tmp_path, arm):
+    _yosys()
+    text, polarity, timing = _RESET_ARRAY_ARMS[arm]
+    rtl = tmp_path / 'neutral.v'
+    rtl.write_text(text)
+    claims = [{'rule': 'clock_edge', 'signal': 'clk', 'value': 'posedge'},
+              {'rule': 'reset_polarity', 'signal': 'rst_n', 'value': 'active_low'},
+              {'rule': 'reset_sync', 'signal': 'rst_n', 'value': 'synchronous'}]
+    rec = fsc.check([rtl], 'neutral', claims, tmp_path / 'normal', None,
+                    klass={'clock': 'clk', 'resets': ['rst_n']})
+    (tmp_path / 'normal.json').write_text(json.dumps(rec, indent=2))
+    actual = {c['rule']: c['verdict'] for c in rec['claims']}
+    assert actual == {'clock_edge': 'NOT_DISCHARGED' if arm == 'array_async_low' else 'PASS',
+                      'reset_polarity': polarity, 'reset_sync': timing}, rec
+    mapping = rec['claims'][1]['reset_control_mapping']
+    count = 16 if arm.startswith('array') else 4
+    assert len(mapping['rows']) == len(mapping['raw_identities']) == count, mapping
+    assert mapping['complete'] and not mapping['unresolved'], mapping
+    assert all(len(i['current_q']) == 1 for i in mapping['raw_identities']), mapping
+    assert len({i['raw_q'] for i in mapping['raw_identities']}) == count
+    assert len({i['current_q'][0] for i in mapping['raw_identities']}) == count
+    assert all(r['classification'] == 'RESET_FORCE' and r['total_force'] for r in mapping['rows']), mapping
+    assert mapping['query_progress']['completed'] == mapping['query_progress']['planned']
+    assert mapping['native_run']['termination'] == 'COMPLETED'
+    if arm.startswith('array_sync'):
+        construction, = rec['reset_memory_construction']
+        assert construction['inside'] and not construction['failed_preconditions'], construction
+        for view in construction['views'].values():
+            words = view['aliases']
+            assert set(words) == {f'words[{i}]' for i in range(4)}
+            assert all(len(bits) == 4 for bits in words.values())
+            assert view['q_count'] == len(set(view['q_bits'])) == 16
+            assert {b for bits in words.values() for b in bits} == set(view['q_bits'])
+        # This constructor never changes the original/temporal applicability.
+        assert not rec['applicability']['inside']
+        assert rec['clock_edge_applicability']['inside']
+
+
+@pytest.mark.parametrize('case', ['reset_as_data', 'undefined_reset', 'unused_state', 'latch'])
+def test_source_bound_array_reset_preserves_unknowns(tmp_path, case):
+    _yosys()
+    if case == 'reset_as_data':
+        text = _RESET_ARRAY[:_RESET_ARRAY.index('always @')] + '''always @(posedge clk)
+ if (we) words[addr] <= d ^ {4{rst_n}};
+assign y=words[addr];
+endmodule
+'''
+    elif case == 'undefined_reset':
+        text = _RESET_ARRAY.replace("words[0] <= 4'd0", "words[0] <= 4'bxxxx")
+    elif case == 'unused_state':
+        text = _RESET_ARRAY.replace('assign y=words[addr];', "assign y=4'd0;")
+    else:
+        text = _RESET_ARRAY.replace('always @(posedge clk)', 'always @*')
+    rtl = tmp_path / 'neutral.v'
+    rtl.write_text(text)
+    claims = [{'rule': 'reset_polarity', 'signal': 'rst_n', 'value': 'active_low'},
+              {'rule': 'reset_sync', 'signal': 'rst_n', 'value': 'synchronous'}]
+    rec = fsc.check([rtl], 'neutral', claims, tmp_path / 'normal', None,
+                    klass={'clock': 'clk', 'resets': ['rst_n']})
+    (tmp_path / 'normal.json').write_text(json.dumps(rec, indent=2))
+    assert [c['verdict'] for c in rec['claims']] == ['NOT_DISCHARGED'] * 2, rec

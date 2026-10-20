@@ -185,6 +185,66 @@ def _module_facts(modules: dict[str, Any]) -> dict[str, Any]:
             "child_instances": child_count, "wide_data_nets_and_ports": wide}
 
 
+def _fixed_localparam_facts(texts: list[str], modules: dict[str, Any]) -> dict[str, Any]:
+    """Resolve bounded internal constants using the existing hierarchy owner.
+
+    Native elaboration alone can discard an unused unresolved localparam.
+    Require every declaration to resolve, and independently match all source
+    ports (including constant widths) to the complete native module census.
+    Scoped constants and implicit generate selection remain unsupported.
+    """
+    import module_port_audit as ports
+    import rtl_hierarchy_drivers as hierarchy
+
+    declared = {}
+    for text in texts:
+        issues = []
+        regions = list(ports.module_regions(text, issues))
+        if issues:
+            raise ValueError("incomplete_constant_module_census")
+        if sum(len(re.findall(r"\blocalparam\b", text[b:e]))
+               for _, _, b, e in regions) != len(re.findall(r"\blocalparam\b", text)):
+            raise ValueError("unsupported_localparam_scope")
+        for name, start, body_start, end in regions:
+            if name in declared:
+                raise ValueError("ambiguous_constant_module")
+            header, body = text[start:body_start], text[body_start:end]
+            if re.search(r"\b(?:if|for|case|casez|casex|function|task|begin)\b", body):
+                raise ValueError("unsupported_localparam_scope_or_generate")
+            groups = list(re.finditer(r"\blocalparam\b([^;]+);", body))
+            names = []
+            for group in groups:
+                for item in ports.split_top_level(group[1]):
+                    match = re.fullmatch(r".*?\b([A-Za-z_]\w*)\s*=\s*(.+)", item.strip(), re.S)
+                    if match is None:
+                        raise ValueError("unsupported_localparam_declaration")
+                    names.append(match[1])
+            if len(groups) != len(re.findall(r"\blocalparam\b", body)) or len(set(names)) != len(names):
+                raise ValueError("incomplete_localparam_declarations")
+            expressions = hierarchy.parameter_expressions(header, body)
+            values = hierarchy.resolve_parameters(expressions)
+            if set(expressions) != set(names) or set(values) != set(names) or any(
+                    not isinstance(v, int) for v in values.values()):
+                raise ValueError("unresolved_internal_constant")
+            source_ports = ports.parse_port_list_ansi(header, "", 1, issues)
+            if not source_ports or all(p.direction == "UNKNOWN" for p in source_ports.values()):
+                source_ports = ports.parse_non_ansi_ports(body, "", 1, issues)
+            native = modules.get(name)
+            if issues or native is None or native.get("parameter_default_values"):
+                raise ValueError("incomplete_constant_native_census")
+            actual = {p: {"direction": row["direction"], "width": len(row["bits"])}
+                      for p, row in native.get("ports", {}).items()}
+            expected = {p: {"direction": row.direction,
+                            "width": hierarchy.DriverContext.range_width(row.width_expr, values)}
+                        for p, row in source_ports.items()}
+            if expected != actual:
+                raise ValueError("constant_source_native_ports_disagree")
+            declared[name] = {"values": values, "ports": actual}
+    if set(declared) != set(modules):
+        raise ValueError("constant_source_native_modules_disagree")
+    return declared
+
+
 def _has_state_recurrence(module: dict[str, Any]) -> bool:
     """Non-identity state feedback, including mux selectors/case encodings.
 
@@ -280,8 +340,11 @@ def assess(auditor: str, root: Path, *, files: Iterable[Path] | None = None,
                             "sha256": hashlib.sha256(json.dumps(
                                 records, sort_keys=True).encode()).hexdigest()}
         # Never turn default-configuration elision into a universal absence.
-        if any(re.search(r"`|\\|\b(?:parameter|localparam|generate)\b", t)
+        if any(re.search(r"`|\\|\b(?:parameter|defparam|generate|genvar)\b", t)
                for t in texts):
+            raise ValueError("unsupported_configuration_or_preprocessing")
+        if auditor != "interface_encoding_audit" and any(
+                re.search(r"\blocalparam\b", t) for t in texts):
             raise ValueError("unsupported_configuration_or_preprocessing")
         # Frontends can drop an unused unpacked memory before writing JSON.
         # Its absence there is not a complete census of the source structure.
@@ -299,6 +362,8 @@ def assess(auditor: str, root: Path, *, files: Iterable[Path] | None = None,
         if after_sources != sources or after_records != records:
             raise ValueError("source_changed_during_elaboration")
         facts = _module_facts(modules)
+        if any(re.search(r"\blocalparam\b", t) for t in texts):
+            facts["fixed_internal_constants"] = _fixed_localparam_facts(texts, modules)
         if top_module is not None and top_module != facts["top_module"]:
             raise ValueError("declared_top_mismatch")
         result["facts"] = facts
