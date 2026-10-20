@@ -1269,8 +1269,23 @@ def _document_citations(doc: Path) -> set:
     """
     text = doc.read_text(errors="replace")
     if doc.suffix.lower() == ".sby":
-        from formal_proof_evidence_check import _sby_file_refs
-        return set(_sby_file_refs(text))
+        from formal_proof_evidence_check import _sby_file_refs, _SBY_SECTION_RE
+        sources, destinations = set(), set()
+        section = None
+        for line in text.splitlines():
+            header = _SBY_SECTION_RE.match(line.strip())
+            if header:
+                section = header.group(1).lower()
+                continue
+            parts = line.split("#", 1)[0].split()
+            if section == "files" and len(parts) in (1, 2):
+                sources.add(parts[-1])
+                if len(parts) == 2:
+                    destinations.add(parts[0])
+        # Explicit copy destinations exist in SBY's task, not in the source
+        # project. Retain every declared source, including genuinely missing
+        # sources and sources that also happen to be another copy's target.
+        return (set(_sby_file_refs(text)) - destinations) | sources
     found = set(_CITED_RE.findall(text)) | _gate_citations(doc)
     if doc.suffix.lower() != ".json":
         return found

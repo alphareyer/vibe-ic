@@ -880,6 +880,41 @@ def test_cited_text_public_sby_inputs_reach_native_consumer(tmp_path):
         assert entry["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("source_present", [True, False],
+                         ids=["source-present", "real-source-missing"])
+def test_cited_text_sby_copy_rename_preserves_declared_source(tmp_path, source_present):
+    from _hostpaths import require_repo
+    fixture = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                           "tests", "fixtures", "sby_prove_arms", "pass")
+    # The retained root-review counterexample: SBY creates formal_ctr.sv in
+    # its task directory from the actual project input renamed_formal.sv.
+    sby = ("[options]\nmode prove\ndepth 20\n\n[engines]\nabc pdr\n\n"
+           "[script]\nread_verilog -formal -sv formal_ctr.sv ctr.v\nprep -top formal_ctr\n\n"
+           "[files]\nctr.v\nformal_ctr.sv renamed_formal.sv\n")
+    payloads = {"proofs/check.sby": sby,
+                "proofs/ctr.v": (fixture / "ctr.v").read_bytes()}
+    if source_present:
+        payloads["proofs/renamed_formal.sv"] = (fixture / "formal_ctr.sv").read_bytes()
+    report = "reports/transport.json"
+    run, cell, summary = _cited_text_cell(tmp_path, payloads, {
+        report: json.dumps({"verdict": "PASS", "evidence": "proofs/check.sby"})})
+    data = json.loads((cell / report).read_text())
+    assert data["verdict"] == ("PASS" if source_present else "UNSUBSTANTIATED"), (data, summary)
+    assert not (run / "proofs/formal_ctr.sv").exists()
+    assert not (cell / "proofs/formal_ctr.sv").exists(), "task-local copy must not be fabricated"
+    if source_present:
+        assert (cell / "proofs/check.sby").read_bytes() == sby.encode()
+        staged = cell / "proofs/renamed_formal.sv"
+        assert staged.read_bytes() == (fixture / "formal_ctr.sv").read_bytes()
+        row = next(r for r in summary["records"] if r["path"] == "proofs/renamed_formal.sv")
+        assert row["sha256"] == hashlib.sha256(staged.read_bytes()).hexdigest()
+        assert not summary["absent"]
+    else:
+        assert data["evidence"] is None
+        assert any(r["cited"] == "renamed_formal.sv" and r["decision"] == "ABSENT_IN_RUN"
+                   for r in summary["records"])
+
+
 def test_cited_text_missing_sby_input_is_not_a_substantiated_pass(tmp_path):
     report = "reports/phase2/transport.json"
     _, cell, summary = _cited_text_cell(tmp_path, {
