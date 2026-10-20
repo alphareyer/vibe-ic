@@ -75,16 +75,31 @@ HALVES = {'drc': DRC_CHAIN, 'lvs': LVS_CHAIN}
 RECORD_REL = 'reports/phase3/librelane_pv_{half}.json'
 
 
-def mode_for_half(project: Path, half: str) -> str:
-    """LVS always publishes the full-GDS chain; direct wiring is triage only.
+def mode_for_half(project: Path, half: str, *, registry: dict | None = None) -> str:
+    """Use full-GDS LibreLane, preserving registry-owned device extraction.
 
     The existing Step31 switch still selects DRC independently. For LVS,
     ``dual`` retains the additional direct diagnostic, while ``direct`` no
-    longer authorizes a DEF/placeholder report as the canonical result.
+    longer authorizes a DEF/placeholder report as the canonical result. A
+    complete native device route keeps its existing direct producer and
+    current-evidence reader; it does not use the Magic/Netgen chain.
     """
     from librelane_contract import selected_mode
     mode = selected_mode(project, '31')
-    return 'librelane' if half == 'lvs' and mode == 'direct' else mode
+    if half != 'lvs' or mode != 'direct':
+        return mode
+    if registry is None:
+        # Read-only consumers have the project's declared/run PDK rather
+        # than the runner's resolved PdkConfig. Use the same registry facts.
+        from tapeout_precheck import resolve_pdk
+        name, _ = resolve_pdk(project)
+        registry = next((row for row in _load(
+            Path(__file__).with_name('pdk_registry.json')).get('pdks', [])
+            if row.get('name') == name), {})
+    if all(registry.get(key) for key in (
+            'device_lvs_program', 'cdl_netlist', 'klayout_lvs_tech')):
+        return 'direct'
+    return 'librelane'
 
 
 #: The flow's via-landing remediation record (`_stage_via_legalized_tech_lef`).

@@ -52919,8 +52919,9 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     For DRC, ``direct`` (the default, and every absent switch): bind the native body
     before auditing its current subject. ``current_direct`` may defer that
     audit; the original ``direct`` callback still owns the dual arm.
-    LVS defaults to the full-GDS LibreLane producer; its direct arm is only
-    retained triage in ``dual``. ``librelane``: the tool's verdict is the
+    LVS defaults to the full-GDS LibreLane producer, preserving the registry's
+    qualified native device route and its current binding. Ordinary direct
+    wiring is retained triage in ``dual``. ``librelane``: the tool's verdict is the
     step's.  ``dual``: the direct half (``direct()``) stays canonical, the tool
     half is measured beside it, and for verification "better" is not the lower
     count -- BOTH must be clean, so the row is the worse of the two and a
@@ -52929,7 +52930,9 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     from librelane_contract import Refusal
     from librelane_pv_signoff import mode_for_half
     try:
-        mode = mode_for_half(project, half)
+        registry = (_pdk_registry_entry(getattr(pdk, 'name', '')) or {}
+                    if half == 'lvs' else None)
+        mode = mode_for_half(project, half, registry=registry)
     except Refusal as exc:
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
