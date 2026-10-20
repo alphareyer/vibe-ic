@@ -2444,10 +2444,31 @@ def _formal_names(fn, patterns, inherited=(), *, modules=(), sanitizers=()):
     """
     nodes = list(_scope_nodes(fn))
     local = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
-    assigned = {t.id for n in nodes if isinstance(n, ast.Assign)
-                for t in n.targets if isinstance(t, ast.Name)}
     parameters = {a.arg for a in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)}
-    unknown = parameters - assigned
+    unknown = set(parameters)
+    # Rebinding a raw argument to its stripped value does not change its
+    # origin. Only an explicit, unconditional recognized boundary before any
+    # value use may replace that origin; aliases made earlier stay unknown.
+    prior_reads = set()
+    for statement in fn.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1 \
+                and isinstance(statement.targets[0], ast.Name) \
+                and isinstance(statement.value, ast.Call):
+            value, target = statement.value, statement.targets[0].id
+            pattern, _subject, method = _regex_parts(value, patterns)
+            if target not in prior_reads and (ast.unparse(value.func) in sanitizers
+                    or (method and _closed_record_pattern(pattern, method))):
+                unknown.discard(target)
+        # An empty-input early return observes presence, not a declared value.
+        guard = (isinstance(statement, ast.If) and not statement.orelse
+                 and not any(isinstance(n, ast.Call) for n in ast.walk(statement.test))
+                 and all(isinstance(n, ast.Return) and (n.value is None
+                         or isinstance(n.value, ast.Constant)
+                         or (isinstance(n.value, ast.Dict) and not n.value.keys))
+                         for n in statement.body))
+        if not guard:
+            prior_reads.update(n.id for n in ast.walk(statement)
+                               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
     inherited = set(inherited)
 
     def tainted(expr, bound=frozenset()):

@@ -931,3 +931,24 @@ def extract(text, rec):
 ], ids=["boolean-prose", "mixed-formal-and-prose", "untrusted-lexical-method"])
 def test_grammar_recognition_does_not_clear_real_prose(tmp_path, source):
     assert G.scan(_tree(tmp_path, source)) == ["some_extract::extract"]
+
+
+@pytest.mark.parametrize("method", ["strip", "lstrip", "rstrip"])
+def test_plain_prose_self_rebinding_keeps_raw_input_origin(tmp_path, method):
+    source = _BLIND.replace("    m = RE.search(text)",
+                            f"    text = text.{method}()\n    m = RE.search(text)")
+    assert source != _BLIND
+    assert G.scan(_tree(tmp_path, source)) == ["some_extract::extract"]
+
+
+def test_proven_lexical_self_rebinding_keeps_formal_input_origin(tmp_path):
+    source = r'''import re
+from module_port_audit import lexical_mask
+def extract(text, rec):
+    text = lexical_mask(text)
+    m = re.search(r"\bwire\s+(\w+)", text)
+    if m:
+        rec["signal"] = m.group(1)
+    return rec
+'''
+    assert G.scan(_tree(tmp_path, source)) == []
