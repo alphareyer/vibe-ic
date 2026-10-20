@@ -130,17 +130,17 @@ _DISTINCT_LIBS_RE = re.compile(
 #: because POST_ROUTE_SPEF and POST_ROUTE_NO_SPEF normalise to one basis and
 #: are two different measurement STAGES.
 _STA_BASIS_RE = re.compile(
-    r"^\s*#?\s*STA_BASIS\s*:\s*([A-Z_]+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_BASIS[ \t]*:[ \t]*([A-Z_]+)", re.MULTILINE)
 _SIGNOFF_CORNER_RE = re.compile(
-    r"^\s*#?\s*STA_SIGNOFF_CORNER\s*:\s*(\S+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_SIGNOFF_CORNER[ \t]*:[ \t]*(\S+)", re.MULTILINE)
 _BASIS_LIBERTY_RE = re.compile(
-    r"^\s*#?\s*STA_BASIS_LIBERTY\s*:\s*(\S+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_BASIS_LIBERTY[ \t]*:[ \t]*(\S+)", re.MULTILINE)
 #: The parasitic file the run READ. Dialect B names it on the section banner
 #: (`SPEF=…`) and `Section.spef` already carries it; the unbannered dialect can
 #: only state it whole-file, and until now nothing parsed it — so the RC axis of
 #: an unbannered report was unreadable even when the artefact spelled it out.
 _BASIS_SPEF_RE = re.compile(
-    r"^\s*#?\s*STA_BASIS_SPEF\s*:\s*(\S+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_BASIS_SPEF[ \t]*:[ \t]*(\S+)", re.MULTILINE)
 #: THE CONSTRAINTS the corner was timed under (R-0915-154). The declared-process
 #: multi-corner emitter stamps it per section; nothing read it, so two slacks
 #: timed under DIFFERENT SDCs could share one scope and be compared. Parsed here
@@ -148,12 +148,12 @@ _BASIS_SPEF_RE = re.compile(
 #: identity -- the file's content digest -- is `_ppa.timing`'s job, because a
 #: path says where a file was, not what it constrained.
 _BASIS_SDC_RE = re.compile(
-    r"^\s*#?\s*STA_BASIS_SDC\s*:\s*(\S+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_BASIS_SDC[ \t]*:[ \t]*(\S+)", re.MULTILINE)
 _BASIS_CORNER_RE = re.compile(
-    r"^[ \t]*#?[ \t]*STA_BASIS_CORNER[ \t]*:[ \t]*([^\r\n]*)$",
+    r"^[ \t]*(?:#[ \t]*)?STA_BASIS_CORNER[ \t]*:[ \t]*([^\r\n]*)$",
     re.MULTILINE)
 _SIGNOFF_CORNER_COUNT_RE = re.compile(
-    r"^\s*#?\s*STA_SIGNOFF_CORNER_COUNT\s*:\s*(\d+)", re.MULTILINE)
+    r"^[ \t]*(?:#[ \t]*)?STA_SIGNOFF_CORNER_COUNT[ \t]*:[ \t]*(\d+)", re.MULTILINE)
 #: THE DERATING STANCE, WHICH IS A CONDITION THE NUMBER IS TRUE UNDER.
 #: The emitter has stamped `OCV_DERATE_APPLIED early=… late=… <model>` since
 #: the multi-corner dialect existed and this module's own header shows the line
@@ -165,7 +165,7 @@ _SIGNOFF_CORNER_COUNT_RE = re.compile(
 #: based), same stage/mode/process/voltage/temperature, refused as
 #: CONFLICTING_RECORD.
 _OCV_DERATE_RE = re.compile(
-    r"^\s*#?\s*OCV_DERATE_APPLIED\s+early=(\S+)\s+late=(\S+)(?:\s+(\S+))?",
+    r"^[ \t]*(?:#[ \t]*)?OCV_DERATE_APPLIED[ \t]+early=(\S+)[ \t]+late=(\S+)(?:[ \t]+(\S+))?",
     re.MULTILINE)
 
 # ── the emitter's own attestations that a query RAN ────────────────────────
