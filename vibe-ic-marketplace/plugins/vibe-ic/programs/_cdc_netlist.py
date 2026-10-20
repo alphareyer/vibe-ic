@@ -475,6 +475,35 @@ def _outer_reset_mux(nl: Netlist, d_bits: List[object]) -> Optional[object]:
     return selects.pop() if len(selects) == 1 else None
 
 
+def _aload_binary_value(nl: Netlist, bits: List[object],
+                        ambiguous_drivers: Set[int]) -> Optional[List[str]]:
+    """Prove literal AD or Slang's scalar logical-not of a binary literal.
+
+    This is deliberately one native cell shape, with no traversal or general
+    expression evaluation. Dynamic/unknown operands, cycles, other logic and
+    multiply driven or externally driven nets cannot establish a reset value.
+    The raw connectivity and reset pin remain untouched.
+    """
+    value = []
+    for bit in bits:
+        if bit in ("0", "1"):
+            value.append(bit)
+            continue
+        driver = nl.drivers.get(bit)
+        if (type(bit) is not int or not driver or bit in ambiguous_drivers
+                or bit in nl.port_bits):
+            return None
+        cell = nl.cells[driver[0]]
+        conn = cell.get("connections", {})
+        if (cell["type"] != "$logic_not" or driver[1] != "Y"
+                or set(conn) != {"A", "Y"} or conn["Y"] != [bit]
+                or conn["A"] not in (["0"], ["1"])
+                or cell.get("port_directions") != {"A": "input", "Y": "output"}):
+            return None
+        value.append("1" if conn["A"] == ["0"] else "0")
+    return value
+
+
 def load(path: Path, top: Optional[str] = None) -> Netlist:
     """Read a Yosys JSON netlist (JsonHeader shape) into the CDC model."""
     try:
@@ -507,6 +536,7 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
                 names[b] = n if width == 1 else f"{n}[{i}]"
     nl = Netlist(top=top, ports=ports, cells=mod.get("cells", {}), names=names)
     port_labels = {b: n for n, (_d, bits) in ports.items() for b in bits}
+    ambiguous_drivers: Set[int] = set()
     for cname, cell in nl.cells.items():
         dirs = cell.get("port_directions") or {}
         for pin, conn in cell.get("connections", {}).items():
@@ -514,6 +544,8 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
             if out:
                 for b in conn:
                     if isinstance(b, int):
+                        if b in nl.drivers:
+                            ambiguous_drivers.add(b)
                         nl.drivers[b] = (cname, pin)
         if cell["type"] in _MEMORY:
             nl.memories += 1
@@ -539,6 +571,7 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
                 arst_pol = _int(params["ALOAD_POLARITY"])
             except (KeyError, TypeError, ValueError):
                 arst_pol = None
+            arst_value = _aload_binary_value(nl, c.get("AD", []), ambiguous_drivers)
             if (async_pins != {"ALOAD"} or len(c["ALOAD"]) != 1
                     or c["ALOAD"][0] not in ("0", "1")
                     and not isinstance(c["ALOAD"][0], int)
@@ -546,12 +579,11 @@ def load(path: Path, top: Optional[str] = None) -> Netlist:
                     or len(c.get("CLK", [])) != 1
                     or not c.get("Q") or len(c.get("D", [])) != len(c["Q"])
                     or len(c.get("AD", [])) != len(c["Q"])
-                    or any(bit not in ("0", "1") for bit in c.get("AD", []))):
+                    or arst_value is None):
                 raise Refusal("CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL",
                               f"{cname} ({cell['type']}): expected one ALOAD, "
                               "binary polarity and constant binary AD matching Q")
             arst_pin = "ALOAD"
-            arst_value = list(c["AD"])
         elif "ALOAD" in c or "AD" in c:
             raise Refusal("CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL",
                           f"{cname} ({cell['type']}): unexpected ALOAD/AD pins")

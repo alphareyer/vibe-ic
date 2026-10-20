@@ -156,10 +156,10 @@ def _reset_control_native(root, case, extension):
     return source, native, raw, refusal
 
 
-def _reset_control_consumers(root, native, unsupported=False):
+def _reset_control_consumers(root, native, unsupported=False, label=""):
     results = {}
     for program in ("reset_dependency_check", "clock_domain_reg_crossing_check", "cdc_async_input_check"):
-        report = root / (program + ".json")
+        report = root / (program + label + ".json")
         argv = [sys.executable, "-B", str(PROG / (program + ".py")), str(root),
                 "--front-end", "netlist", "--json", str(report)]
         if unsupported:
@@ -170,7 +170,7 @@ def _reset_control_consumers(root, native, unsupported=False):
         rules = sorted({row["rule"] for row in doc["findings"] if row["severity"] == "ERROR"})
         receipt = {"argv": argv, "pid": process.pid, "rc": process.returncode,
                    "stdout": stdout, "stderr": stderr, "report": doc}
-        (root / (program + ".receipt.json")).write_text(json.dumps(receipt, indent=2))
+        (root / (program + label + ".receipt.json")).write_text(json.dumps(receipt, indent=2))
         results[program] = (process.returncode, rules)
     return results
 
@@ -214,3 +214,104 @@ def test_native_unsupported_async_controls_refuse_in_all_ordinary_consumers(tmp_
         cdc.load(native, "neutral_reset_top")
     assert any(cell["type"] in {"$aldff", "$aldffe", "$dffsr", "$dffsre"}
                for cell in raw["cells"].values())
+
+
+@pytest.mark.parametrize("case,constant,expression,value", [
+    ("literal0", "1'b1", "1'b0", "0"),
+    ("literal1", "1'b1", "1'b1", "1"),
+    ("not_constant1", "1'b1", "!bit_true", "0"),
+    ("not_constant0", "1'b0", "!bit_true", "1"),
+    ("dynamic", "1'b1", "reset_data", None),
+    ("unknown", "1'b1", "1'bx", None),
+    ("dynamic_not", "1'b1", "!reset_data", None),
+    ("mixed_dynamic", "1'b1", "{reset_data, !bit_true}", None),
+    ("unknown_not", "1'bx", "!bit_true", None),
+    ("unsupported_logic", "1'b1", "bit_true ^ 1'b1", None),
+    ("constant_cycle", "!bit_true", "bit_true", None),
+], ids=lambda value: str(value))
+def test_native_aload_reset_expression(tmp_path, case, constant, expression, value):
+    """#3344 public input, canonical native producer and ordinary CDC/RDC."""
+    source = tmp_path / "phase2/stage1/rtl/neutral.sv"
+    source.parent.mkdir(parents=True)
+    width = "[1:0] " if case == "mixed_dynamic" else ""
+    source.write_text(
+        (f"module neutral(input clk,rst_n,input {width}d,input reset_data,output reg {width}q);\n"
+         if width else "module neutral(input clk,rst_n,d,reset_data,output reg q);\n") +
+        f"wire bit_true={constant};\n"
+        "always @(posedge clk or negedge rst_n)\n"
+        f"  if(!rst_n) q<={expression}; else q<=d;\n"
+        "endmodule\n")
+    before = source.read_bytes()
+    (tmp_path / "neutral.input.txt").write_bytes(before)
+    l9 = tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9.parent.mkdir(parents=True)
+    l9.write_text(json.dumps({"top_module": "neutral"}))
+    refusal = None
+    try:
+        native = cdc.build(tmp_path, [source], "neutral")
+    except cdc.Refusal as error:
+        refusal = error.code
+        native = (tmp_path / cdc.NETLIST_REL).with_suffix(".json.tmp")
+    raw_bytes = native.read_bytes()
+    raw = json.loads(raw_bytes)["modules"]["neutral"]
+    observed = _reset_control_consumers(tmp_path, native, unsupported=refusal is not None)
+    expected_code = "CDC_NETLIST_UNSUPPORTED_ASYNC_CONTROL"
+    expected = (1, [expected_code]) if value is None else (0, [])
+    assert observed == {name: expected for name in observed}, observed
+    assert source.read_bytes() == before
+    if value is None:
+        assert refusal == expected_code
+        assert not (tmp_path / cdc.NETLIST_MANIFEST_REL).exists()
+        with pytest.raises(cdc.Refusal, match=expected_code):
+            cdc.load(native)
+    else:
+        assert refusal is None
+        model = cdc.load(native)
+        cdc.require_binding(tmp_path, native, model)
+        assert len(model.flops) == 1
+        flop = model.flops[0]
+        assert (flop.arst_pin, flop.arst_pol, flop.arst_value) == ("ALOAD", 0, [value])
+        assert flop.arst == raw["ports"]["rst_n"]["bits"][0]
+        assert flop.d == raw["ports"]["d"]["bits"]
+        assert flop.q == raw["ports"]["q"]["bits"]
+        assert flop.srst is None
+        if case.startswith("not_constant"):
+            ad = raw["cells"][flop.name]["connections"]["AD"][0]
+            assert isinstance(ad, int), "exercise the retained native expression"
+            driver = raw["cells"][model.drivers[ad][0]]
+            assert driver["type"] == "$logic_not"
+            assert driver["connections"]["A"] == ["1" if value == "0" else "0"]
+        assert native.read_bytes() == raw_bytes
+        # An accepted expression must still be bound to the current source.
+        source.write_bytes(before + b"// changed source\n")
+        assert _reset_control_consumers(tmp_path, native, label=".stale") == {
+            name: (1, ["CDC_NETLIST_STALE"]) for name in observed}
+
+
+@pytest.mark.parametrize("case", ["ring4", "low4"])
+def test_native_constant_expression_keeps_reset_cycle(tmp_path, case):
+    source = tmp_path / "phase2/stage1/rtl/neutral_reset_top.sv"
+    source.parent.mkdir(parents=True)
+    source.write_text(_reset_control_source(case).replace(
+        ";\n", ";\nwire bit_true = 1'b1;\n", 1).replace("<= 1'b0", "<= !bit_true"))
+    l9 = tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9.parent.mkdir(parents=True)
+    l9.write_text(json.dumps({"top_module": "neutral_reset_top"}))
+    refusal = None
+    try:
+        native = cdc.build(tmp_path, [source], "neutral_reset_top")
+    except cdc.Refusal as error:
+        refusal = error.code
+        native = (tmp_path / cdc.NETLIST_REL).with_suffix(".json.tmp")
+    observed = _reset_control_consumers(tmp_path, native, unsupported=refusal is not None)
+    assert observed == {
+        "reset_dependency_check": (1, ["CIRCULAR_RESET_DEPENDENCY"]),
+        "clock_domain_reg_crossing_check": (0, []), "cdc_async_input_check": (0, [])}, observed
+    assert refusal is None
+    model = cdc.load(native)
+    cdc.require_binding(tmp_path, native, model)
+    assert len(model.flops) == 4
+    assert all((f.arst_pin, f.arst_pol, f.arst_value) ==
+               ("ALOAD", 0 if case == "low4" else 1, ["0"]) for f in model.flops)
+    findings = cdc.reset_dependency_findings(model)
+    assert any(f["rule"] == "CIRCULAR_RESET_DEPENDENCY" for f in findings)
