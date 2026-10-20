@@ -2437,6 +2437,52 @@ def _sha256_file(path: Path) -> Optional[str]:
         return None
 
 
+# These are the three programs that author or discharge the retained structural
+# obligation. A repository version, unrelated backend or flow YAML is not an
+# owner of this proof and must not invalidate it.
+_PROGRAM_OWNERS = ("formal_harness_gen.py", "formal_property_run.py",
+                   "formal_structural_check.py")
+
+
+def program_owner_identity() -> dict:
+    return {name: _sha256_file(Path(__file__).parent / name)
+            for name in _PROGRAM_OWNERS}
+
+
+def incomplete_program_refresh_reason(results: dict) -> Optional[str]:
+    """Retry only genuinely unfinished program work after its owners change.
+
+    Legacy records did not name their owning code. They get one successful
+    refresh, explicitly called identity-absent rather than falsely claiming a
+    known code change. A new native result records the current three hashes.
+    This never changes a verdict or adopts a new checker without running it.
+    """
+    if (results.get("verdict") != "INCOMPLETE"
+            or results.get("proof_verdict") == "FAIL"
+            or results.get("failed") or results.get("structural_refutations")
+            or any(p.get("status") == "FAIL" or p.get("bound") == "cex"
+                   for p in results.get("properties") or [] if isinstance(p, dict))):
+        return None
+    # The producer already records its routing and NOT_DISCHARGED outcome.
+    # A reset NAME is consumer-owned binding work even when this result still
+    # lists it as open; it must not turn an AI-only partial proof into a retry.
+    # Read the retained result rather than a live receipt that an unsuccessful
+    # refresh may have cleared before the engine became available again.
+    if not any(o.get("status") == "PROGRAM_NOT_DISCHARGED" and not o.get("binding")
+               for o in _program_routed(results)):
+        return None
+    current = program_owner_identity()
+    if not all(current.values()):
+        return None  # no claim that unreadable owning code has changed
+    retained = results.get("program_owner_sha256")
+    if retained is None:
+        return "program-owner-identity-absent"
+    if not isinstance(retained, dict):
+        return None
+    changed = [name for name in _PROGRAM_OWNERS if retained.get(name) != current[name]]
+    return "program-owner-changed:" + ",".join(changed) if changed else None
+
+
 def proof_inputs(sby_path: Path, formal_dir: Path) -> dict:
     """R-0924-2 r2 — THE SOURCES THIS PROOF READ, by content.
 
@@ -2490,7 +2536,8 @@ def run(project: Path, harness: Optional[Path] = None,
         engine_backend: str = "auto",
         mem_limit_kb: Optional[int] = None,
         emit_only: bool = False,
-        prove_engines: str = "auto") -> dict:
+        prove_engines: str = "auto",
+        continuation_refresh_reason: Optional[str] = None) -> dict:
     """Author the .sby, run the proof, and record an HONEST verdict.
 
     `prove_engines`: `direct` = `abc pdr` alone; `dual` = `abc pdr` AND
@@ -2884,6 +2931,9 @@ def run(project: Path, harness: Optional[Path] = None,
     results = build_results(top_name, cfg, lp, ev_rel, sby_rel)
     results["proof_inputs"] = proof_inputs(sby_path, formal_dir)
     if inv_h is None:
+        results["program_owner_sha256"] = program_owner_identity()
+        if continuation_refresh_reason:
+            results["continuation_refresh_reason"] = continuation_refresh_reason
         # R-0915-144 — the program answers the structural obligations the
         # contract routes to it, BEFORE the contract is attached, so the
         # read-back below sees this run's receipt and evidence.

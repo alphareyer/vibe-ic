@@ -454,3 +454,172 @@ def test_issue3145_normal_producer_refreshes_stale_source_and_retains_entire_pro
     assert current["chip_read"] == csr.current_chip_read(project, "ctr")
     assert current["all_proved"] is True
     assert _binding(_issue3145_cli(project))["status"] == gate.DISCHARGED_BY_BINDING
+
+
+# Issue #3304: a retained, genuinely unfinished program check must be eligible
+# for the current owners once, without invalidating completed/AI-only proofs.
+_ISSUE3304_OWNERS = ("formal_harness_gen.py", "formal_property_run.py",
+                     "formal_structural_check.py")
+
+
+def _issue3304_owner_hashes():
+    return {name: hashlib.sha256((PROGRAMS / name).read_bytes()).hexdigest()
+            for name in _ISSUE3304_OWNERS}
+
+
+@pytest.fixture(scope="module")
+def issue3304_native_seed(tmp_path_factory):
+    root = tmp_path_factory.mktemp("issue3304-seed")
+    project = _project(root / "native-structural-partial")
+    l8 = project / "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+    doc = json.loads(l8.read_text())
+    doc["clock_and_reset_waveform"]["resets"][0]["polarity"] = "active_high"
+    l8.write_text(json.dumps(doc))
+    # The visible counter's reset assertion really proves, while a second
+    # state bit has a defined, non-forcing reset dependency. The structural
+    # check honestly cannot close reset polarity for the complete state.
+    (project / "phase2/stage1/rtl/ctr.v").write_text("""module ctr(
+      input clk, input rst, input en, input d, input clear,
+      output reg [3:0] q, output wire y);
+      reg x;
+      always @(posedge clk) begin
+        if (rst) q <= 0; else if (en) q <= q + 1;
+        x <= rst ? d ^ clear : d;
+      end
+      assign y = x;
+    endmodule
+    """)
+    runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    formal = project / "phase2/stage1/formal"
+    results = json.loads((formal / "results.json").read_text())
+    assert results["verdict"] == "INCOMPLETE" and results["all_proved"] is True
+    assert gate.proof_source_staleness(project, formal, results) == []
+    _, refuted, opened = fpr._verified_program_closures(formal)
+    polarity = "L8.clock_and_reset_waveform.resets.0.polarity"
+    assert not refuted and polarity in opened, opened
+    assert any(isinstance(c.get("claim"), dict)
+               and c["verdict"] == "NOT_DISCHARGED"
+               for c in opened[polarity]["claims"])
+    return project
+
+
+@pytest.mark.parametrize("owner", [None, *_ISSUE3304_OWNERS],
+                         ids=["legacy-identity-absent", "harness-changed",
+                              "producer-changed", "checker-changed"])
+def test_issue3304_normal_producer_refreshes_only_unfinished_program_owners(
+        tmp_path, issue3304_native_seed, owner):
+    project = tmp_path / "public-component"
+    shutil.copytree(issue3304_native_seed, project)
+    formal = project / "phase2/stage1/formal"
+    record = formal / "results.json"
+    result = json.loads(record.read_text())
+    if owner is None:
+        result.pop("program_owner_sha256", None)
+    else:
+        # A controlled retained-owner record, never a fabricated proof: every
+        # native proof input, status, disposition and transcript is unchanged.
+        result["program_owner_sha256"] = _issue3304_owner_hashes()
+        result["program_owner_sha256"][owner] = "0" * 64
+    record.write_text(json.dumps(result, indent=2) + "\n")
+    before = _formal_bytes(project)
+    assert gate.proof_source_staleness(project, formal, result) == []
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 1, "unfinished current inputs need the owning formal producer"
+    histories = list((formal.parent / "formal_history").glob("*"))
+    assert len(histories) == 1
+    retained = {str(p.relative_to(histories[0])): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in histories[0].rglob("*") if p.is_file()}
+    assert retained == before
+    current = json.loads(record.read_text())
+    assert current["program_owner_sha256"] == _issue3304_owner_hashes()
+    expected = ("program-owner-identity-absent" if owner is None
+                else "program-owner-changed:" + owner)
+    assert current["continuation_refresh_reason"] == expected
+    assert current["verdict"] == "INCOMPLETE", "an owner retry is not a PASS waiver"
+    after = _formal_bytes(project)
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 0, "same owning code must reuse even unresolved output"
+    assert _formal_bytes(project) == after
+    assert len(list((formal.parent / "formal_history").glob("*"))) == 1
+
+
+@pytest.mark.parametrize("kind", ["same-owner", "unrelated-source", "ai-only", "counterexample"])
+def test_issue3304_normal_producer_preserves_current_and_nonprogram_evidence(
+        tmp_path, issue3304_native_seed, issue3145_native_seeds, kind):
+    seed = (issue3304_native_seed if kind in ("same-owner", "unrelated-source")
+            else issue3145_native_seeds[int(kind == "counterexample")])
+    project = tmp_path / "public-component"
+    shutil.copytree(seed, project)
+    formal = project / "phase2/stage1/formal"
+    record = formal / "results.json"
+    result = json.loads(record.read_text())
+    if kind in ("same-owner", "unrelated-source"):
+        result["program_owner_sha256"] = _issue3304_owner_hashes()
+    else:
+        # Legacy AI-only and true CEX records must remain reusable too.
+        result.pop("program_owner_sha256", None)
+    record.write_text(json.dumps(result, indent=2) + "\n")
+    if kind == "unrelated-source":
+        (project / "phase3").mkdir(exist_ok=True)
+        (project / "phase3/other-step.yaml").write_text("unrelated: changed\n")
+    before = _formal_bytes(project)
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 0
+    assert _formal_bytes(project) == before
+    assert not list((formal.parent / "formal_history").glob("*"))
+
+
+
+def test_issue3304_complete_native_proof_is_not_invalidated_by_legacy_identity(tmp_path):
+    project = _project(tmp_path / "complete-native")
+    runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    formal = project / "phase2/stage1/formal"
+    record = formal / "results.json"
+    result = json.loads(record.read_text())
+    result.pop("program_owner_sha256", None)
+    record.write_text(json.dumps(result, indent=2) + "\n")
+    assert gate.audit(project)["verdict"] == "PASS"
+    before = _formal_bytes(project)
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 0
+    assert _formal_bytes(project) == before
+
+
+def test_issue3304_environment_recovery_is_not_latched_by_failed_refresh(
+        tmp_path, issue3304_native_seed):
+    project = tmp_path / "public-component"
+    shutil.copytree(issue3304_native_seed, project)
+    formal = project / "phase2/stage1/formal"
+    record = formal / "results.json"
+    legacy = json.loads(record.read_text())
+    legacy.pop("program_owner_sha256", None)
+    record.write_text(json.dumps(legacy, indent=2) + "\n")
+    before = _formal_bytes(project)
+    # Force only the executor's real missing-tool branch. No successful proof
+    # or new owner identity may be manufactured when the engine is unavailable.
+    with patch.object(fpr, "_run_sby", return_value="sby: command not found\n"), \
+            patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 1, "the incomplete legacy obligation must reach its producer"
+    assert json.loads(record.read_text()) == legacy
+    assert json.loads((formal / "formal_env_unavailable.json").read_text())["verdict"] == "ENV_UNAVAILABLE"
+    histories = list((formal.parent / "formal_history").glob("*"))
+    assert len(histories) == 1
+    retained = {str(p.relative_to(histories[0])): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in histories[0].rglob("*") if p.is_file()}
+    assert retained == before
+    # Receipt clearing during the unsuccessful attempt is not a permanent
+    # blocker: the retained program-routed obligation still needs its owner.
+    assert not (formal / fpr.PROGRAM_RECEIPT).exists()
+    with patch.object(fpr, "run", wraps=fpr.run) as invoked:
+        runner.step_emit_phase2_manifests(project, [], top_name="ctr", container="")
+    assert invoked.call_count == 1
+    current = json.loads(record.read_text())
+    assert current["program_owner_sha256"] == _issue3304_owner_hashes()
+    assert current["continuation_refresh_reason"] == "program-owner-identity-absent"
+    assert current["verdict"] == "INCOMPLETE"
+    assert (formal / fpr.PROGRAM_RECEIPT).is_file()

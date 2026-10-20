@@ -24690,11 +24690,18 @@ def step_emit_phase2_manifests(project: Path,
     # the false-green defect, so this block never unlinks results.json.
     _formal_results = formal_dir / "results.json"
     _refresh_formal = not _formal_results.is_file()
+    _formal_refresh_reason = None
     if not _refresh_formal:
         try:
             import formal_proof_evidence_check as _formal_evidence
+            _retained_formal = json.loads(_formal_results.read_text())
             _refresh_formal = bool(_formal_evidence.proof_source_staleness(
-                project, formal_dir, json.loads(_formal_results.read_text())))
+                project, formal_dir, _retained_formal))
+            if not _refresh_formal:
+                import formal_property_run as _fpr
+                _formal_refresh_reason = _fpr.incomplete_program_refresh_reason(
+                    _retained_formal)
+                _refresh_formal = bool(_formal_refresh_reason)
         except (OSError, ValueError, TypeError):
             _refresh_formal = True
     if _refresh_formal:
@@ -24719,7 +24726,8 @@ def step_emit_phase2_manifests(project: Path,
                     rtl=[Path(p) for p in _gen["rtl_files"]],
                     top=_gen["harness_module"],
                     container=(container or None),
-                    timeout=300)
+                    timeout=300,
+                    continuation_refresh_reason=_formal_refresh_reason)
                 if (formal_dir / "results.json").is_file():
                     # PASS, INCOMPLETE, INCONCLUSIVE and a real counterexample
                     # all retain the same canonical evidence artifact. The gate
