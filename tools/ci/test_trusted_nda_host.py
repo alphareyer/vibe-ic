@@ -16,6 +16,8 @@ sys.path.insert(0, str(HERE))
 import trusted_nda_host as nda  # noqa: E402
 import landing_completion_record as completion  # noqa: E402
 import landing_push_preflight as preflight  # noqa: E402
+import hermetic_git_subject as git_subject  # noqa: E402
+import hermetic_candidate_runner as candidate_runner  # noqa: E402
 
 PROGRAMS = ROOT / "vibe-ic-marketplace/plugins/vibe-ic/programs"
 sys.path.insert(0, str(PROGRAMS / "tests"))
@@ -240,6 +242,39 @@ def test_one_way_separator_alias_with_distinct_roles_is_valid(subject, monkeypat
     assert [row["rc"] for row in clean["payload"]["guards"]] == [0, 0]
     assert all(value.encode() not in nda._canonical(clean)
                for value in aliases.values())
+
+
+@pytest.mark.parametrize("case", ["benign", "forbidden", "malformed", "source_binding"])
+def test_normal_host_boundary_on_materialized_shallow_subject(subject, tmp_path, monkeypatch, case):
+    repo, _, base = subject
+    (repo / "design.txt").write_text(
+        SYNTHETIC["sku_full"] + "\n" if case == "forbidden" else "ordinary third version\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "candidate update")
+    head = _git(repo, "rev-parse", "HEAD")
+    shallow = tmp_path / "shallow-source"
+    subprocess.run(["git", "clone", "-q", "--no-local", "--depth", "2", repo.as_uri(), str(shallow)],
+                   check=True, capture_output=True)
+    materialized = tmp_path / "materialized"
+    git_subject.materialize(shallow, head, materialized)
+    monkeypatch.setenv("VIBEIC_NDA_TOKENS", "{bad-json" if case == "malformed" else json.dumps(SYNTHETIC))
+    reviewed = {"GATEKEEPER_VERIFY_ARM": "B2", "GATEKEEPER_BASE": base}
+    command = ["/subject/tools/gatekeeper-land.sh"]
+    if case == "forbidden":
+        with pytest.raises(candidate_runner.NDARejection):
+            candidate_runner._prepare_host_nda(materialized, reviewed, command)
+    elif case == "malformed":
+        with pytest.raises(candidate_runner.Refusal):
+            candidate_runner._prepare_host_nda(materialized, reviewed, command)
+    else:
+        result = candidate_runner._prepare_host_nda(materialized, reviewed, command)
+        assert [g["rc"] for g in result["payload"]["guards"]] == [0, 0]
+        raw = nda._canonical(result).decode().strip()
+        nda.verify_unit(raw, materialized, base, nda.GUARDS[0])
+        if case == "source_binding":
+            result["payload"]["source_sha256"][nda.SOURCE[0]] = "0" * 64
+            with pytest.raises(nda.Refusal):
+                nda.verify_unit(nda._canonical(result).decode().strip(), materialized, base, nda.GUARDS[0])
 
 
 def test_config_rotation_before_guard_spawn_cannot_change_detector(

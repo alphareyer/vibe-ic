@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location(
@@ -90,3 +92,50 @@ def test_cli_writes_canonical_private_record(tmp_path: Path) -> None:
     assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
     assert json.loads(raw)["payload"]["commit"] == commit
     assert stat.S_IMODE(record.stat().st_mode) == 0o600
+
+
+def _shallow_source(tmp_path: Path):
+    source, root = _repo(tmp_path)
+    (source / "plain.txt").write_text("boundary version\n")
+    _run(source, "commit", "-qam", "boundary")
+    base = _run(source, "rev-parse", "HEAD")
+    (source / "plain.txt").write_text("candidate version\n")
+    _run(source, "commit", "-qam", "candidate")
+    head = _run(source, "rev-parse", "HEAD")
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "-q", "--no-local", "--depth", "2",
+                    source.as_uri(), str(shallow)], check=True, capture_output=True)
+    assert _run(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    return shallow, base, head, root
+
+
+def test_shallow_subject_retains_the_real_direct_parent_ancestry(tmp_path: Path) -> None:
+    source, base, head, _ = _shallow_source(tmp_path)
+    output = tmp_path / "materialized"
+    record = H.materialize(source, head, output)
+    actual = subprocess.run(["git", "-C", str(output), "merge-base", "--is-ancestor", base, head],
+                            capture_output=True)
+    assert actual.returncode == 0, actual.stderr
+    assert (output / ".git/shallow").read_bytes() == (source / ".git/shallow").read_bytes()
+    assert record["payload"]["population"]["shallow_commits"] == [base]
+    assert _run(output, "status", "--porcelain=v1") == ""
+
+
+@pytest.mark.parametrize("case", ["nonancestor", "missing_base"])
+def test_subject_metadata_does_not_invent_a_valid_ancestor(tmp_path: Path, case: str) -> None:
+    source, base = _repo(tmp_path)
+    (source / "plain.txt").write_text("candidate version\n")
+    _run(source, "commit", "-qam", "candidate")
+    head = _run(source, "rev-parse", "HEAD")
+    if case == "nonancestor":
+        base = _run(source, "commit-tree", _run(source, "rev-parse", "HEAD^{tree}"),
+                    "-m", "unrelated root")
+    else:
+        objects = source / ".git/objects"
+        (objects / base[:2] / base[2:]).unlink()
+    output = tmp_path / "materialized"
+    H.materialize(source, head, output)
+    result = subprocess.run(["git", "-C", str(output), "merge-base", "--is-ancestor", base, head],
+                            capture_output=True)
+    assert result.returncode != 0
+    assert not (output / ".git/shallow").exists()

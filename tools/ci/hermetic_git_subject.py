@@ -142,7 +142,7 @@ def _write_file(path: Path, raw: bytes, mode: int) -> None:
     os.replace(temporary, path)
 
 
-def _copy_object_store(source: Path, destination: Path) -> None:
+def _copy_object_store(source: Path, destination: Path) -> bytes | None:
     common_raw = _git(source, ["rev-parse", "--git-common-dir"])
     assert isinstance(common_raw, str)
     common = Path(common_raw)
@@ -195,9 +195,20 @@ def _copy_object_store(source: Path, destination: Path) -> None:
             before_paths.append(rel.as_posix())
     if not before_paths:
         raise Refusal("source object store is empty")
+    # Shallow boundaries are part of the source Git graph. Without them an
+    # otherwise exact object copy turns a valid truncated history into missing
+    # parents, so even a genuine direct-parent ancestry check can fail.
+    shallow = objects.parent / "shallow"
+    raw = None
+    if shallow.exists():
+        if shallow.is_symlink() or not stat.S_ISREG(shallow.stat().st_mode):
+            raise Refusal("source shallow metadata is not a regular file")
+        raw = shallow.read_bytes()
+        _write_file(destination.parent / "shallow", raw, 0o444)
+    return raw
 
 
-def _init_repository(output: Path, source: Path, commit: str) -> None:
+def _init_repository(output: Path, source: Path, commit: str) -> bytes | None:
     template = output.parent / f".{output.name}.empty-template"
     template.mkdir(mode=0o700)
     try:
@@ -230,12 +241,14 @@ def _init_repository(output: Path, source: Path, commit: str) -> None:
     )
     _write_file(git_dir / "config", config, 0o644)
     _write_file(git_dir / "HEAD", f"{commit}\n".encode("ascii"), 0o644)
-    _copy_object_store(source, git_dir / "objects")
+    shallow = _copy_object_store(source, git_dir / "objects")
     _git(output, ["read-tree", commit])
+    return shallow
 
 
 def _attest(repo: Path, commit: str,
-            rows: Sequence[tuple[str, str, PurePosixPath]]) -> dict[str, Any]:
+            rows: Sequence[tuple[str, str, PurePosixPath]],
+            shallow: bytes | None) -> dict[str, Any]:
     expected = {path.as_posix(): (mode, oid) for mode, oid, path in rows}
     actual_commit, _tree_oid, actual_rows = _tree(repo, commit)
     if actual_commit != commit or {
@@ -252,6 +265,10 @@ def _attest(repo: Path, commit: str,
         raise Refusal("hermetic repository configuration has external authority")
     if (repo / ".git" / "objects" / "info" / "alternates").exists():
         raise Refusal("hermetic repository has object alternates")
+    shallow_path = repo / ".git" / "shallow"
+    actual_shallow = shallow_path.read_bytes() if shallow_path.is_file() else None
+    if actual_shallow != shallow:
+        raise Refusal("materialized Git shallow boundaries differ")
     files = []
     total = 0
     for mode, oid, rel in rows:
@@ -269,7 +286,8 @@ def _attest(repo: Path, commit: str,
                       "sha256": hashlib.sha256(raw).hexdigest(),
                       "size": len(raw)})
         total += len(raw)
-    return {"commit": commit, "files": files, "total_bytes": total}
+    return {"commit": commit, "files": files, "total_bytes": total,
+            "shallow_commits": shallow.decode("ascii").splitlines() if shallow else []}
 
 
 def materialize(source: Path, commit: str, output: Path) -> dict[str, Any]:
@@ -280,13 +298,13 @@ def materialize(source: Path, commit: str, output: Path) -> dict[str, Any]:
         raise Refusal("hermetic subject output already exists")
     resolved, tree, rows = _tree(source, commit)
     output.mkdir(parents=True, mode=0o755)
-    _init_repository(output, source, resolved)
+    shallow = _init_repository(output, source, resolved)
     for mode, oid, rel in rows:
         raw = _git(source, ["cat-file", "blob", oid], binary=True)
         assert isinstance(raw, bytes)
         _write_file(output.joinpath(*rel.parts), raw,
                     0o755 if mode == "100755" else 0o644)
-    population = _attest(output, resolved, rows)
+    population = _attest(output, resolved, rows, shallow)
     payload = {"commit": resolved, "tree": tree, "population": population}
     return {"schema": SCHEMA, "kind": KIND, "complete": True,
             "payload": payload,
