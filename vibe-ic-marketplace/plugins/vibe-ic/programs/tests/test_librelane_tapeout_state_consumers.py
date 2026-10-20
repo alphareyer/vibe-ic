@@ -109,7 +109,15 @@ def test_direct_selected_ladder_keeps_its_existing_authority(tmp_path, obligatio
     _legacy_reports(tmp_path)
     check = (ladder.check_tier_1_drc if obligation == "drc"
              else ladder.check_tier_lvs_tapeout)
-    assert check(tmp_path).verdict == "PASS"
+    result = check(tmp_path)
+    if obligation == "lvs":
+        # A direct-mode text match is triage, not full-GDS extraction evidence.
+        # The default LVS authority must not release it without its producer.
+        assert result.verdict == "NOT_RUN", (result.verdict, result.details)
+        assert result.details["verdict"] == "NOT_MEASURED"
+        assert result.details["reason"] == "LL_FINISHED_GDS_MISSING"
+    else:
+        assert result.verdict == "PASS", (result.verdict, result.details)
 
 
 def test_tool_selected_checklist_does_not_credit_a_done_marker(tmp_path):
