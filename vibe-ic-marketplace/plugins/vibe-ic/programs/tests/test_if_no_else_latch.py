@@ -347,7 +347,7 @@ def test_issue3333_complete_prefix_if_else_is_latch_free():
     ("if (choose_i) begin if (adjust_i) data_o = left_i; end else data_o = right_i;", False),
     ("if (choose_i) data_o[3:0] = left_i[3:0]; else data_o[3:0] = right_i[3:0];", False),
     ("data_o[3:0] = left_i[3:0];", False),
-    ("case (choose_i) 1'b0: data_o = left_i; default: data_o = right_i; endcase", False),
+    ("case (choose_i) 1'b0: data_o = left_i; default: data_o = right_i; endcase", True),
     ("case (choose_i) 1'b0: data_o = left_i; endcase", False),
     ("if (data_o <= left_i) begin end", False),
     ("for (integer idx=0; idx<0; idx=idx+1) data_o = left_i;", False),

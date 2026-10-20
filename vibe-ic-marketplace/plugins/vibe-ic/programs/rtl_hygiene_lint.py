@@ -1417,8 +1417,9 @@ def _must_defined_prefix(text: str, stop: int, depth: int = 0) -> Set[str]:
 
     Sequential statements accumulate definitions; completed if/else branches
     contribute only their intersection. For a stop inside a branch, only that
-    branch's prefix applies. Cases, loops, slices and other unsupported forms
-    contribute no proof. This is deliberately narrower than collecting writes.
+    branch's prefix applies. A completed case needs a default and the intersection
+    of all its branches. Loops, slices and other unsupported forms contribute no
+    proof. This is deliberately narrower than collecting writes.
     """
     if depth > 64:
         return set()
@@ -1466,6 +1467,34 @@ def _must_defined_prefix(text: str, stop: int, depth: int = 0) -> Set[str]:
             return _must_defined_prefix(text[else_start:end], stop - else_start, depth + 1)
         return (_must_defined_prefix(text[close:then_end], then_end - close, depth + 1)
                 & _must_defined_prefix(text[else_start:end], end - else_start, depth + 1))
+    if keyword in {'case', 'casex', 'casez'} and end <= stop:
+        # The existing depth-matched case spans and statement bounds keep a
+        # nested case/default or compound branch inside its own arm.
+        case_end = next((hi for _sel, lo, hi in _case_spans(text)
+                         if lo == start), None)
+        cond = _skip_space(text, after)
+        if case_end is None or text[cond:cond + 1] != '(':
+            return set()
+        cursor = _matching_paren(text, cond)
+        if cursor < 0:
+            return set()
+        common: Optional[Set[str]] = None
+        defaults = 0
+        while _skip_space(text, cursor) < case_end:
+            label = re.match(r'\s*(default\b|[^:;]+)\s*:(?!:)',
+                             text[cursor:case_end])
+            if not label:
+                return set()
+            defaults += label.group(1).strip() == 'default'
+            branch_start = cursor + label.end()
+            branch_end = _procedural_statement_end(text, branch_start)
+            if branch_end <= branch_start or branch_end > case_end:
+                return set()
+            defined = _must_defined_prefix(
+                text[branch_start:branch_end], branch_end - branch_start, depth + 1)
+            common = defined if common is None else common & defined
+            cursor = branch_end
+        return common if defaults == 1 and common is not None else set()
     # Only a bare whole-signal blocking assignment establishes a prior value.
     # Declarations, attributes, comparisons, concatenations and slices do not.
     if end <= stop and re.match(r'[A-Za-z_]\w*\s*=(?!=)', text[start:end]):
