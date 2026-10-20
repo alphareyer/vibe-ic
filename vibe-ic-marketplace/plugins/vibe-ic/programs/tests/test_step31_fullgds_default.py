@@ -79,3 +79,29 @@ def test_current_lvs_gate_reads_the_producer_and_rejects_replaced_inputs(
         assert rc==1,result
         assert result['passed'] is False
         assert result['verdict']==('FAIL' if change=='measured_failure' else 'NOT_MEASURED')
+
+
+def test_previous_receipts_survive_unavailable_fullgds_producer(tmp_path,monkeypatch):
+    reports=tmp_path/'reports/phase3';reports.mkdir(parents=True)
+    previous={
+        'librelane_pv_lvs.json':b'{"verdict":"PASS","previous_round":17}\n',
+        'lvs_inputs.json':b'{"previous_reference":"round17.v"}\n',
+        'lvs_verdict.json':b'{"status":"PASS","previous_round":17}\n',
+    }
+    for name,data in previous.items():(reports/name).write_bytes(data)
+    monkeypatch.setattr(runner,'_vacuous_on_unrouted',lambda *a:None)
+    calls=[]
+    def unavailable(project,top,pdk,half,publish):
+        calls.append((half,publish))
+        # No canonical receipt from the previous round may stand for this run.
+        assert all(not (reports/name).exists() for name in previous)
+        return runner.StepResult('lvs','NOT_MEASURED',0,'fixture: producer unavailable',
+                                 reason_class=runner._V.ReasonClass.TOOL_ABSENT)
+    monkeypatch.setattr(runner,'_step31_librelane',unavailable)
+    result=runner.step_lvs(tmp_path,'unit',SimpleNamespace(),'unused-fixture-container')
+    retained={p.name:p.read_bytes() for p in (reports/'lvs_triage').glob('*/*')}
+    assert retained==previous
+    assert all(not (reports/name).exists() for name in previous)
+    assert calls==[('lvs',True)]
+    assert result.status=='NOT_MEASURED'
+    assert evidence.obligation(tmp_path,'lvs')['verdict']=='NOT_MEASURED'

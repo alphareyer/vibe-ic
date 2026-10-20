@@ -52684,6 +52684,22 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
                     "n_density_fill": n_den}})
 
 
+def _retain_lvs_reports(project: Path, names) -> List[str]:
+    """Retain this attempt's previous outputs before clearing their aliases."""
+    sources = [project / 'reports/phase3' / name for name in names
+               if (project / 'reports/phase3' / name).is_file()]
+    if not sources:
+        return []
+    triage = project / 'reports/phase3/lvs_triage' / str(time.time_ns())
+    triage.mkdir(parents=True, exist_ok=False)
+    retained = []
+    for source in sources:
+        destination = triage / source.name
+        source.replace(destination)
+        retained.append(str(destination))
+    return retained
+
+
 _STEP31_ORDER = ("PASS", "PASS_WITH_WAIVERS", "NOT_MEASURED", "FAIL")
 
 
@@ -52939,16 +52955,9 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
         # Preserve the diagnostic, but clear its canonical names before the
         # real GDS producer runs. A missing/failed producer cannot leave the
         # earlier wiring-only match for the release consumers to discover.
-        triage = project / 'reports/phase3/lvs_triage' / str(time.time_ns())
-        triage.mkdir(parents=True, exist_ok=True)
-        retained = []
-        for name in ('lvs.rpt', 'lvs.log', 'lvs_verdict.json', 'lvs_inputs.json',
-                     'lvs_power_aware.rpt'):
-            source = project / 'reports/phase3' / name
-            if source.is_file():
-                destination = triage / name
-                source.replace(destination)
-                retained.append(str(destination))
+        retained = _retain_lvs_reports(project, (
+            'lvs.rpt', 'lvs.log', 'lvs_verdict.json', 'lvs_inputs.json',
+            'lvs_power_aware.rpt'))
         direct_row.extras.update(scope='gate_level_triage', retained_reports=retained)
         direct_row.detail = 'Triage only; no tapeout LVS claim. ' + direct_row.detail
     tool_row = _step31_librelane(project, top, pdk, half, publish=half == 'lvs')
@@ -53891,8 +53900,10 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         # EVERY mode (the LibreLane half returns from the dispatch below and
         # writes no inputs record): an earlier run's inputs or verdict must
         # never stand for this compare.
-        for _rec in ("lvs_inputs.json", "lvs_verdict.json", "librelane_pv_lvs.json"):
-            (project / "reports/phase3" / _rec).unlink(missing_ok=True)
+        # The public step also owns retention when the producer is unavailable
+        # before a later physical-verification snapshot can be made.
+        _retain_lvs_reports(project, (
+            "lvs_inputs.json", "lvs_verdict.json", "librelane_pv_lvs.json"))
     if not _direct and not (
             upstream_pnr is not None and upstream_pnr.status != "PASS"
             and not (getattr(upstream_pnr, "extras", None) or {}).get(
