@@ -782,7 +782,7 @@ def test_ordinary_spacing_and_qualified_types_are_untouched():
     rtl = ("module chip_top(input wire [7:0] bus, input pkg::cfg_t c,\n"
            "  output wire done);\nendmodule\n")
     assert [(p["name"], p["width"]) for p in S.parse_top_ports(rtl, "chip_top")] \
-        == [("bus", 8), ("c", 1), ("done", 1)]
+        == [("bus", 8), ("c", None), ("done", 1)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1135,3 +1135,38 @@ def test_ansi_conditional_width_public_cli_refuses_false_six_pad_FITS(tmp_path, 
     assert (cp.returncode, rep["verdict"]) == ((2,"UNDECIDED") if ambiguous else (0,"FITS"))
     assert (rep["unresolved_width_ports"] if ambiguous else
             rep["interface"]["unresolved_width_ports"]) == (["c"] if ambiguous else [])
+
+
+@pytest.mark.parametrize("direction", ["input", "output", "inout"])
+@pytest.mark.parametrize("type_text,unpacked,expected", [
+    ("wire signed [1:0][3:0]", "", [8, 8]),
+    ("logic [1:0][3:0]", "[2]", [16, 8]),
+    ("logic [1:0][WIDTH-1:0]", "", [None, None]),
+    ("pkg::word_t", "", [None, None]),
+    ("pkg::word_t [3:0]", "", [None, None]),
+])
+def test_ansi_full_packed_type_belongs_to_each_continuation(direction, type_text, unpacked, expected):
+    ports = S.parse_top_ports(
+        f"module widget({direction} {type_text} a{unpacked}, b); endmodule", "widget")
+    assert [(p["dir"], p["name"], p["width"]) for p in ports] == [
+        (direction, "a", expected[0]), (direction, "b", expected[1])]
+    rep = S.evaluate({"slot": {"PAD_SOUTH": ["bidir[0].pad", "bidir[1].pad"]}}, ports)
+    assert (rep["rc"], rep["verdict"]) == ((2, "UNDECIDED") if None in expected
+                                            else (1, "DOES_NOT_FIT"))
+
+
+@pytest.mark.parametrize("type_text,width", [
+    ("byte", 8), ("shortint", 16), ("int", 32), ("integer", 32),
+    ("longint", 64), ("time", 64), ("bit", 1), ("logic signed", 1),
+])
+def test_ansi_integral_type_width_is_inherited_without_guessing(type_text, width):
+    ports = S.parse_top_ports(f"module widget(input {type_text} a, b); endmodule", "widget")
+    assert [(p["name"], p["width"]) for p in ports] == [("a", width), ("b", width)]
+
+
+def test_ansi_unknown_type_cannot_make_a_conditional_join_decidable():
+    ports = S.parse_top_ports(
+        "module widget(input a,\n`ifdef OPT\n input pkg::word_t b,\n`endif\n c); endmodule", "widget")
+    assert [(p["name"], p["width"]) for p in ports] == [("a", 1), ("b", None), ("c", None)]
+    rep = S.evaluate({"slot": {"PAD_SOUTH": ["bidir[0].pad"]}}, ports)
+    assert (rep["rc"], rep["verdict"]) == (2, "UNDECIDED")

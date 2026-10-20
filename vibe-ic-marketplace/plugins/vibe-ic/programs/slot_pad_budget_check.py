@@ -467,18 +467,35 @@ def _width(rest: str, params: Optional[Dict[str, int]] = None) -> Optional[int]:
     zero failure this file exists to prevent, one level further in, and it is
     the direction that matters: it produced a false PASS.
     """
-    m = _RANGE_RE.search(rest)
-    if not m:
-        return 1
-    lo, hi = m.group(1), m.group(2)
-
-    def _val(tok: str) -> Optional[int]:
-        return _token_value(tok, params)
-
-    a, b = _val(lo), _val(hi)
-    if a is None or b is None:
+    # The caller supplies the type BEFORE the declarator name. Every packed
+    # dimension belongs to that type and is inherited by comma continuations;
+    # a declarator's unpacked dimensions are multiplied separately below.
+    # A named/aggregate type cannot be sized from a range alone: its base
+    # element may itself contain many bits. Unknown types stay unresolved.
+    dims = _DIM_RE.findall(rest)
+    tokens = _DIM_RE.sub(" ", rest).split()
+    atoms = {"byte": 8, "shortint": 16, "int": 32, "integer": 32,
+             "longint": 64, "time": 64}
+    vectors = {"bit", "logic", "reg"}
+    qualifiers = {"signed", "unsigned", "var", "wire", "tri", "tri0",
+                  "tri1", "uwire", "wand", "wor", "triand", "trior",
+                  "trireg", "supply0", "supply1"}
+    bases = [t for t in tokens if t in atoms or t in vectors]
+    if len(bases) > 1 or any(t not in atoms and t not in vectors
+                             and t not in qualifiers for t in tokens):
         return None
-    return abs(a - b) + 1
+    if dims and bases and bases[0] in atoms:
+        return None  # integer atom types do not declare packed dimensions
+    width = atoms.get(bases[0], 1) if bases else 1
+    for dim in dims:
+        bounds = dim.split(":")
+        if len(bounds) != 2:
+            return None
+        a, b = (_token_value(bound, params) for bound in bounds)
+        if a is None or b is None:
+            return None
+        width *= abs(a - b) + 1
+    return width
 
 
 _PARAM_DEFAULT_RE = re.compile(
