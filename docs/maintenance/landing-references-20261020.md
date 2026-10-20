@@ -44,3 +44,9 @@ All original closure timestamps in the table are on 2026-10-20. Issue #3313 has 
 | v1.30.42 | `363d195431fc53d42652e7ca99cbfa61e4058289` | #3333 and integrated PR #3331; #3328 original current CDC component subsequently measured |
 
 PR #3326 was rejected as a regressing alternative; PR #3332 was closed as already covered. Their code is not falsely recorded as adopted. #3314 and #3318 are clarification/review closures rather than new product fixes.
+
+## Follow-up: ordinary PDK opening authority
+
+The v1.30.44 repair for #3313 and #3337 connects a normal provider profile to the project's selected PDK, the registry's opening purpose, and that technology's own current layer table. No custom opening-layer field or provider-profile PDK field is required on this path. Explicit overrides remain supported; missing, empty, ambiguous or conflicting authority remains unmeasured. Actual outside-frame geometry and declared distance violations still fail. Bare-die advisory status remains visible without inventing a packaging limit.
+
+PR #3338's shared-frontier alternative is already covered by the published v1.30.42 compact relations; PR #3336's SCC alternative is covered by published v1.30.43. Both were closed with source/release/evidence comments as covered alternatives, not represented as merged or adopted. Their actual parent is v1.30.41, and their older whole-file images were not copied over later repairs. This release records `Refs` for those two alternatives.
