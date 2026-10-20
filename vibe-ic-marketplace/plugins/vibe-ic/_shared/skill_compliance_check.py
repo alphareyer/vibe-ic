@@ -1105,6 +1105,11 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
                                         ('mismatches', 'MISMATCH'), ('unknowns', 'UNKNOWN'))))
             if not counts_ok or summary.get('verdict') not in ('PASS', STATE_NOT_APPLICABLE):
                 status_error = status_error or 'invalid_or_nonpassing_interface_population'
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'programs'))
+            import _interface_encoding_population as interface_population
+            if not interface_population.matches(
+                    payload.get('interface_population'), rows):
+                status_error = status_error or 'interface_population_binding_mismatch'
         elif auditor == 'crc_bitorder_check':
             if payload.get('summary_status') not in ('PASS', STATE_NOT_APPLICABLE):
                 status_error = status_error or 'nonpassing_crc_verdict'

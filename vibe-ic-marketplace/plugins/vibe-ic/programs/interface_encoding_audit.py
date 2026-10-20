@@ -44,6 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _rtl_audit_applicability as _applicability
+import _interface_encoding_population as _population
 import rtl_hierarchy_drivers as _hierarchy
 from module_port_audit import (
     extract_balanced, split_top_level, lexical_mask, module_regions,
@@ -1464,6 +1465,7 @@ def main():
     out_path = Path(args.out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     report_file = out_path / 'encoding_audit_report.json'
+    interface_rows = [asdict(r) for r in results]
     report = {
         'report_schema': 'vibeic.interface_encoding_audit.v2',
         'summary': {
@@ -1474,7 +1476,8 @@ def main():
             'top_module': args.top_module,
             'rtl_dir': args.rtl_dir,
         },
-        'interfaces': [asdict(r) for r in results],
+        'interfaces': interface_rows,
+        'interface_population': _population.binding(interface_rows),
         'discovery': {
             'complete': (not _DISCOVERY_ISSUES and not _NOTHING_EXAMINED and
                          source_error is None),

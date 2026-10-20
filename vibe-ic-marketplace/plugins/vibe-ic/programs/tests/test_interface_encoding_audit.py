@@ -1147,6 +1147,22 @@ def test_inactive_optional_child_has_complete_active_discovery(tmp_path):
         'X_interface_encoding_audit', 'FAIL', 'NOT_MEASURED')
 
 
+def test_receipt_consumer_refuses_unknown_rows_dropped_from_population(tmp_path):
+    res, report = run_cli(tmp_path, {'neutral.v': _OPTIONAL_SOURCE}, 'neutral')
+    assert res.returncode == 0, res.stderr
+    assert (report['summary']['total_interfaces'], report['summary']['unknowns']) == (3, 2)
+    retained = [row for row in report['interfaces'] if row['status'] == 'MATCH']
+    assert len(retained) == 1
+    report['interfaces'] = retained
+    report['summary'].update(total_interfaces=1, matches=1, mismatches=0,
+                             unknowns=0, verdict='PASS')
+    report['producer_returncode'] = 0
+    (tmp_path / 'out/encoding_audit_report.json').write_text(json.dumps(report))
+    finding = _consume_encoding_receipt(tmp_path)
+    assert finding.state == 'NOT_MEASURED'
+    assert 'interface_population_binding_mismatch' in finding.detail
+
+
 def test_inactive_conditional_port_and_connection_are_absent(tmp_path):
     source = _OPTIONAL_SOURCE.replace(
         'input [3:0] count, output hit',

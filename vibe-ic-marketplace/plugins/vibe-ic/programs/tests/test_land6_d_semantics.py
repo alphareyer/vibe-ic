@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared"))
 
 import _rtl_audit_applicability as applicability  # noqa: E402
+import _interface_encoding_population as encoding_population  # noqa: E402
 import interface_encoding_audit as interface_audit  # noqa: E402
 import rtl_hygiene_lint as hygiene  # noqa: E402
 import skill_compliance_check as compliance  # noqa: E402
@@ -33,6 +34,8 @@ def _interface_report(rtl: Path, *, status="MATCH", verdict="PASS",
                       "issues": [] if discovery_complete else ["incomplete"]},
         "source": source,
     }
+    payload['interface_population'] = encoding_population.binding(
+        payload['interfaces'])
     return payload
 
 
