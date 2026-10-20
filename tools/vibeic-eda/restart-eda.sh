@@ -161,6 +161,7 @@ echo "   image id     : ${TARGET_ID}"
 declare -a BINDS=() CMD=()
 declare -a MOUNT_SRC=() MOUNT_DST=() MOUNT_RO=() MOUNT_TYPE=()
 USER_SPEC="" WORKDIR="" HAVE_OLD=0
+SERVING_CACHE_FAMILY=""
 
 # add_mount SOURCE DESTINATION OPTS [TYPE] — first declaration of a destination
 # wins, so a legacy Bind and a structured Mount naming the same target produce
@@ -168,6 +169,19 @@ USER_SPEC="" WORKDIR="" HAVE_OLD=0
 add_mount() {
   local src="$1" dst="$2" opts="$3" type="${4:-bind}" i
   [[ -n "$dst" ]] || return 0
+  # Formal cache upgrades may remove an old whole-bundle source. This proves
+  # only the managed mount shape and the current bundle's install family, NOT
+  # the identity of an old manifest that no longer exists. Require the exact
+  # RO self-bind emitted here (allow Docker's default rprivate normalization),
+  # a distinct version slot in that family, and a missing, non-symlink source.
+  # Aliases, RW/custom mounts and every other missing path still preflight.
+  if [[ "$type" == bind && "$src" == "$dst" && ! -e "$src" && ! -L "$src" \
+        && -n "$SERVING_CACHE_FAMILY" && "${src%/*}" == "$SERVING_CACHE_FAMILY" \
+        && "$src" != "$PLUGIN_ROOT" && "${src##*/}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
+        && ( "$opts" == ro || "$opts" == ro,rprivate ) ]]; then
+    echo "== replacing obsolete serving-bundle mount '${src}' with '${PLUGIN_ROOT}'"
+    return 0
+  fi
   for ((i = 0; i < ${#MOUNT_DST[@]}; i++)); do
     [[ "${MOUNT_DST[i]}" == "$dst" ]] && return 0
   done
@@ -191,6 +205,23 @@ add_mount() {
 _MEMTOOL="$(find_plugin_program _docker_memory.py || true)"
 if [[ -n "$_MEMTOOL" && -f "$_MEMTOOL" ]]; then
   PLUGIN_ROOT="$(dirname "$(dirname "$_MEMTOOL")")"
+  # Recognize only canonical Codex/Claude marketplace installs of this tool.
+  # Source checkouts and unverified/custom layouts have no legacy-mount rule.
+  SERVING_CACHE_FAMILY="$(python3 - "$PLUGIN_ROOT" <<'PY'
+import json, re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+if (str(root.resolve()) == str(root) and re.fullmatch(
+        r"/.+/\.(?:codex|claude)/plugins/cache/vibe-ic-marketplace/vibe-ic/[0-9]+\.[0-9]+\.[0-9]+",
+        str(root))):
+    try:
+        manifest = json.loads((root / ".claude-plugin/plugin.json").read_text())
+        if manifest.get("name") == "vibe-ic" and manifest.get("version") == root.name:
+            print(root.parent)
+    except (OSError, ValueError, AttributeError):
+        pass  # No verified current install identity: preserve all old mounts.
+PY
+)"
   add_mount "$PLUGIN_ROOT" "$PLUGIN_ROOT" ro bind
 fi
 
