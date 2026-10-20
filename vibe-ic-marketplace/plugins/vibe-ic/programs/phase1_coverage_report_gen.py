@@ -315,45 +315,6 @@ def _is_auto_pin_alias(label: str) -> bool:
 # even on legitimate runs.
 _AUTODISCOVERY_PER_REGEX_CAP = 10000
 
-# A slash is punctuation, not evidence that the surrounding words name pins.
-# Keep the existing alias spelling family, but admit a match only when its
-# source line declares aliases explicitly or is a row under a pin-like table
-# header.  This leaves the 100% coverage threshold unchanged and keeps the
-# obligation attached to the source declaration rather than to a token
-# blacklist.
-_PIN_ALIAS_DECLARATION_PREFIX = re.compile(
-    r"(?:\b(?:pin|pad|port|signal)(?:\s+naming)?"
-    r"(?:\s+(?:name|alias(?:es)?))?|\balias(?:es)?)\s*[:=]?\s*$",
-    re.IGNORECASE,
-)
-_PIN_ALIAS_TABLE_HEADER = re.compile(
-    r"\b(?:pin|pad|port|signal|alias(?:es)?)\b", re.IGNORECASE)
-
-
-def _pin_alias_has_declaration_context(text: str, start: int) -> bool:
-    """Return whether a slash match is presented as a pin alias declaration."""
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", start)
-    if line_end < 0:
-        line_end = len(text)
-    line = text[line_start:line_end]
-    prefix = text[line_start:start]
-    if _PIN_ALIAS_DECLARATION_PREFIX.search(prefix):
-        return True
-
-    # Markdown and extracted PDF tables commonly put a separator line between
-    # their header and the data row.  Inspect the three preceding lines, but
-    # only for a structured row; prose merely mentioning a pin elsewhere must
-    # not classify every later slash phrase as an alias.
-    if "|" not in line and "\t" not in line:
-        return False
-    previous = text[:line_start].splitlines()[-3:]
-    return any(
-        ("|" in candidate or "\t" in candidate)
-        and _PIN_ALIAS_TABLE_HEADER.search(candidate)
-        for candidate in previous
-    )
-
 # Stop-list of common false-positive all-caps tokens. Chip-AGNOSTIC.
 _AUTODISCOVERY_STOPLIST = frozenset({
     "JSON", "TRUE", "FALSE", "NULL", "TODO", "FIXME", "NOTE",
