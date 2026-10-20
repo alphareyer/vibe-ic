@@ -135,7 +135,7 @@ import _input_corpus_scope as _ics
 import sdc_constraints as _sdc
 import floorplan_contract as _fpc
 from _analog_block_intent import is_physical_esd_check
-from l_doc_consumer_contract import project_relative_source
+from l_doc_consumer_contract import project_relative_source, REQUIREMENT_FRAMING_RE
 from _prose_polarity import is_denied as _prose_is_denied
 from _prose_polarity import sentence_scope as _prose_sentence_scope
 # ORGANIC #2055 — the two TIERS, which are not interchangeable: a bare
@@ -2073,6 +2073,7 @@ def _l1_bare_pin_declaration(line: str) -> Optional[Tuple[Set[str], str]]:
     lists with an explicit direction, optional packed width/type, and the
     ordinary parenthesis/colon/dash separators used in interface documents.
     """
+    line = re.sub(r"`([A-Za-z_][\w$]*)`", r"\1", line)
     identifier = r"[A-Za-z_][\w$]*"
     separator = r"\s*(?:[,/&]|\band\b)\s*"
     names = rf"{identifier}(?:{separator}{identifier})*"
@@ -3236,6 +3237,9 @@ def _l2_is_host_setup_section(title: str, content: str) -> bool:
     # Prefix installation words do not own an independent clause on the same
     # line. Unknown/mixed content remains available to the semantic consumer.
     if re.search(r"\b(?:but|while|whereas)\b", content, re.IGNORECASE):
+        return False
+    if any(REQUIREMENT_FRAMING_RE.search(clause) for clause in
+           re.split(r",\s+and\b", content, flags=re.IGNORECASE)[1:]):
         return False
     return bool(instructions) and all(
         re.match(r"(?:Run\s+)?(?:pip[23]?|npm|apt(?:-get)?)\s+install\b",
@@ -11348,6 +11352,15 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
                     if (not _is_pipe_row
                             and _v455_logical_declaration_token(line, _tm.start())):
                         continue
+                    if (not _is_pipe_row and re.match(
+                            r"\s+(?:input|output|inout)\b", line[_tm.end():], re.I)):
+                        # Quoting a noun does not complete its declaration.
+                        # Keep the same row grammar as an unquoted name;
+                        # parenthesized/colon prose and table rows retain their
+                        # existing independently parsed interface forms.
+                        declaration = _l1_bare_pin_declaration(line)
+                        if declaration is None or tok not in declaration[0]:
+                            continue
                     # A pipe-table row's direction lives in its own cell and is
                     # already row-scoped; only the PROSE bullet shape needs the
                     # per-clause resolution.

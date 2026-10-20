@@ -225,13 +225,14 @@ def test_grouped_bare_hardware_declarations_keep_both_ports(tmp_path, declaratio
 
 @pytest.mark.parametrize("body", [
     "SDC input authority takes precedence over defaults.\n",
+    "`SDC` input authority takes precedence over defaults.\n",
     "SDC input authority - implementation constraints remain tool-owned.\n",
     "```verilog\n// SDC input authority is managed by the flow.\n"
     "module neutral(); endmodule\n```\n",
     "```verilog\n/*\nSDC input\n*/\nmodule neutral(); endmodule\n```\n",
     "```verilog\n// `SDC` input authority is managed by the flow.\n"
     "module neutral(); endmodule\n```\n",
-], ids=["plain-authority", "authority-with-dash", "fenced-comment", "block-comment", "quoted-comment"])
+], ids=["plain-authority", "quoted-authority", "authority-with-dash", "fenced-comment", "block-comment", "quoted-comment"])
 def test_implementation_noun_cannot_borrow_a_declaration_shape(tmp_path, body):
     pins, consumer = _ordinary_l1_and_pin_consumer(
         tmp_path, "# Hardware I/O\n" + body)
@@ -244,6 +245,8 @@ def test_implementation_noun_cannot_borrow_a_declaration_shape(tmp_path, body):
     "SDC (4) input", "SDC — input", "1. SDC input", "SDC : input",
     "SDC input - four-bit constraint data", "SDC (input) - constraint data",
     "input SDC — constraint data",
+    "`SDC` input", "`SDC` input - four-bit constraint data",
+    "`SDC` (input)",
 ])
 def test_existing_bare_port_forms_keep_the_declared_pin(tmp_path, declaration):
     pins, consumer = _ordinary_l1_and_pin_consumer(

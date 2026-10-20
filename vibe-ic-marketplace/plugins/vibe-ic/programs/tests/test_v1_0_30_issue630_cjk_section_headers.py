@@ -230,6 +230,8 @@ def test_mixed_setup_retains_hardware_and_unrelated_output_section(tmp_path, tex
     "Install the host compiler, but the cipher shall never encrypt and decrypt simultaneously.",
     "Run pip install tools, while output_valid shall remain asserted until ready_i is observed.",
     "Install the host compiler, but the cipher can either encrypt or decrypt, never both simultaneously.",
+    "Install the host compiler, and the controller shall accept one request every cycle.",
+    "Run pip install tools, and output_valid shall remain asserted until ready_i is observed.",
 ])
 def test_host_install_prefix_cannot_discard_same_sentence_hardware_clause(tmp_path, sentence):
     text = ("## Setup\n" + sentence + "\n\n## Output transfer\n"
@@ -240,3 +242,14 @@ def test_host_install_prefix_cannot_discard_same_sentence_hardware_clause(tmp_pa
     assert "Output data remains stable while output_valid is asserted." in content
     assert sentence in content, actual["frs_sections"]
     assert all(row["evidence"] == "input/docs/spec.md" for row in actual["frs_sections"])
+
+
+def test_same_sentence_host_install_commands_remain_nonfunctional(tmp_path):
+    instruction = "Install the host compiler, and run pip install tools."
+    output = "Output data remains stable while output_valid is asserted."
+    R.gen_l2_frs(tmp_path, {"spec.md": "## Setup\n" + instruction
+                          + "\n\n## Output transfer\n" + output + "\n"})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    content = "\n".join(row.get("content", "") for row in actual["frs_sections"])
+    assert output in content
+    assert instruction not in content, actual["frs_sections"]
