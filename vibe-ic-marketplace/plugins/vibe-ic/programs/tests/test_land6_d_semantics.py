@@ -239,7 +239,7 @@ def test_reverse_mutations_make_each_property_control_red(tmp_path, monkeypatch,
                             'mask_attributes_only', lambda src: src)
         control = test_ansi_attribute_output_keeps_mismatch_population
     else:
-        def bare_named_driver_regex(src):
+        def bare_named_driver_regex(src, uncertain=None):
             return {match.group(2): match.group(1) for match in re.finditer(
                 r'\.(\w+)\s*\(\s*(\w+)\s*\)', src)}
         monkeypatch.setattr(hygiene, 'collect_instance_connections', bare_named_driver_regex)
