@@ -641,25 +641,27 @@ def test_native_provider_bond_measurement_uses_actual_final_output(bond_geometry
 
 
 @pytest.fixture
-def ordinary_bond_geometry(bond_geometry):
+def ordinary_bond_geometry(monkeypatch, request):
     """Ordinary target; native neutral GDS derives its layer/master from selected PDK."""
-    import os
-    import re
-    import xml.etree.ElementTree as ET
-    import klayout.db as k
+    k = pytest.importorskip('klayout.db', reason='native bond geometry requires KLayout')
     import _pdk_layer_authority as authority
     import _pad_ring as pads
-    project, path, gds = bond_geometry
-    selected = os.environ['PDK']
-    volume, _, _ = authority.resolve_volume(selected)
+    installed = []
+    for entry in authority._registry():
+        purpose = entry.get('bond_pad_opening')
+        if not purpose:
+            continue
+        volume, _, _ = authority.resolve_volume(entry['name'])
+        if volume is not None:
+            installed.append((entry, purpose, volume))
+    if not installed:
+        pytest.skip('no installed PDK declares a bond-pad-opening purpose')
+    entry, purpose, volume = installed[0]
+    selected = entry['name']
+    monkeypatch.setenv('PDK', selected)
+    project, path, gds = request.getfixturevalue('bond_geometry')
     pairs, properties, _ = authority.layer_table(volume)
-    candidates = set()
-    for node in ET.parse(properties).getroot().iter('properties'):
-        match = re.fullmatch(r'Pad (\d+)/(\d+)@1', (node.findtext('source') or '').strip())
-        if match:
-            candidates.add(tuple(map(int, match.groups())))
-    assert len(candidates) == 1
-    pair, = candidates
+    pair = tuple(purpose['gds'])
     assert pair in pairs
     lefs = pads.discover_io_lefs(str(volume.parent), volume.name)
     masters = {name for lef in lefs for name, cls in pads.parse_lef_macro_classes(
