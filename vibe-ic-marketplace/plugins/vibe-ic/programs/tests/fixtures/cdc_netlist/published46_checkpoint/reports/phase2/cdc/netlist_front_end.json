@@ -1,0 +1,59 @@
+{
+  "input": {
+    "fingerprint": "5c2941ac111d1a0288a62d505eb4deef0dc64b2a7c8dab3c18397f6c9dafbe80",
+    "options": {
+      "sv": true,
+      "frontend": "read_slang",
+      "passes": [
+        "hierarchy -check -top {top} -nokeep_prints -nokeep_asserts",
+        "rename -top {top}",
+        "proc",
+        "flatten",
+        "opt_clean -purge"
+      ],
+      "requested_top": "neutral",
+      "declared_top": "neutral"
+    },
+    "rtl_files": [
+      "phase2/stage1/rtl/neutral.sv"
+    ],
+    "files": [
+      {
+        "path": "phase1/generated_docs/L9_INTEGRATION_SPEC.json",
+        "sha256": "4d6f1c12f5823e6867623574c3da86d9dad27afb35cc6d672e0f99e8f82bb3f8"
+      },
+      {
+        "path": "phase2/stage1/rtl/constants.svh",
+        "sha256": "bd35d5c5975ce275b13d23ac8ad2b5a7be764d10c9629e549d887ea694bf0425"
+      },
+      {
+        "path": "phase2/stage1/rtl/neutral.sv",
+        "sha256": "e4b6e62c7accc9da095e83bd4c6d70cb95c522333fa1304d573d96d79474f886"
+      },
+      {
+        "path": "phase3/librelane_switch.json",
+        "sha256": "d4fc36b47a481e6d1fb060dd2f555d2aaf5e82b6603f196f4d944f2241b601ec"
+      }
+    ]
+  },
+  "top": "neutral",
+  "producer": {
+    "step": "Yosys.JsonHeader",
+    "argv": [
+      "yosys",
+      "-q",
+      "-p",
+      "read_slang --single-unit --top neutral /evidence/old_checkpoint/phase2/stage1/rtl/neutral.sv; hierarchy -check -top neutral -nokeep_prints -nokeep_asserts; rename -top neutral; proc; flatten; opt_clean -purge; json -o /evidence/old_checkpoint/reports/phase2/cdc/netlist.json.tmp"
+    ],
+    "exit_code": 0,
+    "image": null,
+    "source_root": "/evidence/old_checkpoint",
+    "read_order": [
+      "phase2/stage1/rtl/neutral.sv"
+    ]
+  },
+  "sha256": {
+    "netlist.json": "4538091b89939884d1943499e7fa32c1bbc643927a6e4423836d571a2f82416f",
+    "netlist.yosys.log": "506b86ddf613b69ca1a26a3d948720b3ddb12e7a5359c3a26270deeb64ccf4bb"
+  }
+}

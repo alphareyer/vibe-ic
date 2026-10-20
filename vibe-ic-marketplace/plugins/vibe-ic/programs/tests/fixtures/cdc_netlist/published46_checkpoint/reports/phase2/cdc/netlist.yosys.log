@@ -1,0 +1,1 @@
+$ yosys -q -p read_slang --single-unit --top neutral /evidence/old_checkpoint/phase2/stage1/rtl/neutral.sv; hierarchy -check -top neutral -nokeep_prints -nokeep_asserts; rename -top neutral; proc; flatten; opt_clean -purge; json -o /evidence/old_checkpoint/reports/phase2/cdc/netlist.json.tmp
