@@ -11,6 +11,12 @@ Pairs with provenance_logger.py. A flow gate asks:
 
 If yes → PASS. If no (no entry, wrong tool, hash mismatch, no file) → FAIL.
 
+Canonical native post-map synthesis binds a measured Yosys root and the
+measured OpenROAD child selected by the existing typed handoff. The tool
+filter still constrains the root; the report retains both actual writers.
+An invalid requested/published child blocks, including when an old alias
+would otherwise match a Yosys row. Other outputs retain terminal-tool filters.
+
 ``--require-measured`` adds the question this check could never ask
 -------------------------------------------------------------------
 Everything above binds an ARTEFACT to a RUN. It has never asked whether that
@@ -193,6 +199,88 @@ def _find_entry(entries: List[dict], out_rel: str,
     return matches[0][1], []
 
 
+def _postmap_provenance(project: Path, entries: List[dict], out_rel: str,
+                        allowed: set, disk_hash: str) -> dict | None:
+    """Bind the existing native handoff, never infer a generic transform edge.
+
+    Called only for canonical synthesis aliases. ``bound_handoff`` already
+    invokes ``librelane_postmap.selected`` and verifies the complete native
+    parent/child, receipts, current inputs and aliases; do not duplicate it.
+    """
+    import librelane_contract as LC
+    import librelane_postmap as postmap
+    import synth_handoff_netlist_check as handoff
+
+    result = {"status": "FAIL", "reasons": []}
+    try:
+        mode = postmap.mode(project)
+        sidecar = project / "phase2/stage2/synth/synth_inputs.json"
+        try:
+            doc = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        except (OSError, ValueError):
+            if mode == "off":
+                return None
+            raise
+        binding = doc.get("librelane_synthesis") if isinstance(doc, dict) else None
+        if mode == "off" and (not isinstance(binding, dict) or "post_map" not in binding):
+            return None
+        bound = handoff.bound_handoff(project)
+        result["native_handoff"] = bound
+        if bound is None or bound.get("verdict") != "PASS":
+            result["reasons"] = ((bound or {}).get("findings") or
+                                 ["requested native post-map handoff is absent"])
+            return result
+        if bound["native"] == bound["parent"]:
+            raise ValueError("requested/published native post-map child was not selected")
+        # A terminal-only filter (e.g. --tool openroad) keeps its meaning,
+        # after the requested native binding has been checked fail-closed.
+        roots = {"yosys", "yosys-abc"}
+        if allowed and not allowed.intersection(roots):
+            return None
+        roots = allowed.intersection(roots) if allowed else roots
+        result.update(tool="openroad", provenance_chain=[])
+        pending = []
+        for role, expected_tool, producer, digest in (
+                ("parent", roots, "LibreLane.Yosys.Synthesis", _sha256_file(Path(bound["parent"]))),
+                ("child", {"openroad"}, postmap.STEP, disk_hash)):
+            entry, reasons = _find_entry(entries, out_rel, expected_tool, digest, project)
+            if entry is None:
+                raise ValueError(f"native {role} ledger: {'; '.join(reasons)}")
+            outputs = entry.get("outputs", {})
+            logged = outputs.get(out_rel)
+            if logged is None:
+                logged = next((v for v in outputs.values()
+                               if _bare_digest(v) == _bare_digest(digest)), None)
+            if _bare_digest(logged) != _bare_digest(digest):
+                raise ValueError(f"native {role} ledger hash mismatch for {out_rel}")
+            if entry.get("produced_by", entry.get("producing_step")) != producer:
+                raise ValueError(f"native {role} ledger does not name producer {producer}")
+            component = {k: entry.get(k) for k in
+                         ("tool", "produced_by", "producing_step", "timestamp", "version", "outputs", "measurement")}
+            component.update(role=role, disk_hash=digest, logged_hash=logged)
+            result["provenance_chain"].append(component)
+            meas = _mcp_measurement.from_provenance_entry(entry)
+            # This typed exception requires positive measurement on BOTH
+            # actual writers, even if the terminal-only mode was not asking.
+            if meas.undeclared:
+                pending.append(("UNMEASURED", f"native {role} ledger declares no measurement"))
+            elif not meas.positive:
+                raise ValueError(f"native {role} ledger is not positively measured: {meas.describe()}")
+            if _tool_log_provenance.claims_witness(entry):
+                ok, why = _tool_log_provenance.verify_witness(entry, project)
+                if ok == _tool_log_provenance.UNCALIBRATED:
+                    pending.append(("NOT_MEASURED", f"native {role} witness is uncalibrated: {why}"))
+        result.update(root_tool=result["provenance_chain"][0]["tool"],
+                      timestamp=entry.get("timestamp"), version=entry.get("version"))
+        result["status"] = ("UNMEASURED" if any(s == "UNMEASURED" for s, _ in pending)
+                            else "NOT_MEASURED" if pending else "PASS")
+        result["reasons"] = [why for _, why in pending]
+        return result
+    except (LC.Refusal, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        result["reasons"].append(str(exc))
+        return result
+
+
 def main(argv: List[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     p.add_argument("project_dir")
@@ -339,6 +427,19 @@ def main(argv: List[str] | None = None) -> int:
                 continue
 
             disk_hash = _sha256_file(abs_out)
+
+            if out_rel == _generic or (_mapped is not None and abs_out == _mapped):
+                native = _postmap_provenance(project, entries, out_rel, allowed, disk_hash)
+                if native is not None:
+                    check.update(native)
+                    report["checks"].append(check)
+                    if check["status"] == "FAIL":
+                        overall_ok = False
+                    elif check["status"] == "UNMEASURED":
+                        unmeasured.append(out_rel)
+                    elif check["status"] == "NOT_MEASURED":
+                        uncalibrated.append(out_rel)
+                    continue
 
             # Find a matching entry
             entry, reasons = _find_entry(entries, out_rel, allowed, disk_hash,
