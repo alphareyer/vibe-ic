@@ -36,16 +36,76 @@
  * always invokes the bootstrap, never `index.js` directly.
  */
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, rmdirSync,
+         unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { missingPackages, clearNeedsAuthCacheEntry } from "./deps_complete.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_ROOT = resolve(__dirname, "..");
+const PKG_ROOT = realpathSync(resolve(__dirname, ".."));
 const PKG_JSON = join(PKG_ROOT, "package.json");
 const NODE_MODULES = join(PKG_ROOT, "node_modules");
+const INSTALL_LOCK = join(PKG_ROOT, ".bootstrap-install.lock");
+
+// #3357: npm's incremental repair and #1931's wipe must be one transaction
+// across clients of this package. Never evict a live owner based on lock age.
+function acquireInstallLock() {
+  const owner = `${process.pid}-${randomUUID()}`;
+  const deadline = performance.now() + 400_000; // two 180s npm attempts + margin
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  let announced = false;
+  while (performance.now() < deadline) {
+    try {
+      mkdirSync(INSTALL_LOCK, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      // A token-specific unlink elects exactly one stale-lock reaper. A
+      // second waiter must not unlink/rmdir a replacement owner's lock.
+      try {
+        const entries = readdirSync(INSTALL_LOCK);
+        if (entries.length === 1 && /^[1-9][0-9]*-.+$/.test(entries[0])) {
+          const pid = Number(entries[0].split("-", 1)[0]);
+          if (Number.isSafeInteger(pid)) {
+            try {
+              process.kill(pid, 0);
+            } catch (probe) {
+              if (probe.code === "ESRCH") {
+                unlinkSync(join(INSTALL_LOCK, entries[0]));
+                rmdirSync(INSTALL_LOCK);
+                continue;
+              }
+              if (probe.code !== "EPERM") throw probe;
+            }
+          }
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      // Empty/unrecognised owner records are not proof of process death.
+      // They wait/refuse within the same bound rather than authorise a wipe.
+      if (!announced) {
+        process.stderr.write(`[bootstrap] waiting for dependency repair in ${PKG_ROOT}\n`);
+        announced = true;
+      }
+      Atomics.wait(sleeper, 0, 0, 50);
+      continue;
+    }
+    try {
+      writeFileSync(join(INSTALL_LOCK, owner), "", { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      rmdirSync(INSTALL_LOCK);
+      throw error;
+    }
+    return () => {
+      unlinkSync(join(INSTALL_LOCK, owner));
+      rmdirSync(INSTALL_LOCK);
+    };
+  }
+  throw new Error(`dependency repair lock timed out at ${INSTALL_LOCK}; retry after its owner exits`);
+}
 
 function npmInstall(label) {
   process.stderr.write(`[bootstrap] ${label}: running 'npm install --production' in ${PKG_ROOT}\n`);
@@ -55,31 +115,39 @@ function npmInstall(label) {
     { cwd: PKG_ROOT, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8", timeout: 180_000 }
   );
   if (res.error) {
-    process.stderr.write(
+    throw new Error(
       `[bootstrap] FATAL: npm spawn failed: ${res.error.message}\n` +
       `[bootstrap] Manually run: cd ${PKG_ROOT} && npm install --production\n`
     );
-    process.exit(1);
   }
   if (res.status !== 0) {
-    process.stderr.write(
+    throw new Error(
       `[bootstrap] FATAL: npm install exit=${res.status}\n${res.stderr || ""}\n` +
       `[bootstrap] Manually run: cd ${PKG_ROOT} && npm install --production\n`
     );
-    process.exit(1);
   }
 }
 
 function ensureDeps() {
+  const missing = missingPackages(PKG_ROOT);
+  if (missing !== null && missing.length === 0 && !existsSync(INSTALL_LOCK)) return;
+  const release = acquireInstallLock();
+  try {
+    repairDeps(); // re-probe: another client may have completed the repair
+  } finally {
+    release(); // includes npm nonzero, missing npm and an unrepairable tree
+  }
+}
+
+function repairDeps() {
   let missing = missingPackages(PKG_ROOT);
   if (missing !== null && missing.length === 0) return; // hot path — tree matches the lockfile
   if (missing === null) {
     if (!existsSync(PKG_JSON)) {
-      process.stderr.write(
+      throw new Error(
         `[bootstrap] FATAL: package.json missing at ${PKG_JSON}; cannot self-install. ` +
         `Reinstall the plugin.\n`
       );
-      process.exit(1);
     }
     missing = []; // manifest unreadable but package.json exists — let npm decide
   }
@@ -103,12 +171,11 @@ function ensureDeps() {
     npmInstall("fresh install after wipe");
     missing = missingPackages(PKG_ROOT) || [];
     if (missing.length > 0) {
-      process.stderr.write(
+      throw new Error(
         `[bootstrap] FATAL: node_modules still incomplete after a FRESH install. ` +
         `Missing vs lockfile: ${missing.join(", ")}\n` +
         `[bootstrap] Manually run: cd ${PKG_ROOT} && rm -rf node_modules && npm install --production\n`
       );
-      process.exit(1);
     }
   }
   // A repair happened and the tree is now complete. The MCP client may have
@@ -120,5 +187,12 @@ function ensureDeps() {
   process.stderr.write(`[bootstrap] npm install OK — starting server\n`);
 }
 
-ensureDeps();
+try {
+  ensureDeps();
+} catch (error) {
+  const message = error.message;
+  process.stderr.write(message.startsWith("[bootstrap] FATAL:")
+    ? message : `[bootstrap] FATAL: ${message}\n`);
+  process.exit(1);
+}
 await import("./index.js");
