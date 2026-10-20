@@ -21,6 +21,48 @@ def put(path, value):
     return path
 
 
+def _prelayout_request_project(root, switch):
+    put(root / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json', {
+        'clock_domains': [{'role': 'primary', 'source_pin': 'neutral_clk', 'period_ns': 20}]})
+    put(root / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'neutral_core'})
+    put(root / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {})
+    put(root / 'input/submission_template/tapeout_declaration.json', {})
+    (root / 'phase3').mkdir(exist_ok=True)
+    if switch is not None:
+        put(root / 'phase3/librelane_switch.json', switch)
+    return root / 'phase3/prelayout.json'
+
+
+@pytest.mark.parametrize('switch', [None, {}, {'steps': {'8': 'librelane'}}],
+                         ids=['no_switch', 'empty_switch', 'other_switch'])
+def test_prelayout_io_absence_preserves_core_config(tmp_path, switch):
+    output = _prelayout_request_project(tmp_path, switch)
+    config = LP.emit_prelayout_config(tmp_path, 'neutral_pdk', 'neutral_core', None, [], output)
+    assert config == {'CLOCK_PERIOD': 20, 'CLOCK_PORT': 'neutral_clk',
+                      'DESIGN_NAME': 'neutral_core', 'PDK': 'neutral_pdk', 'VERILOG_FILES': []}
+    assert json.loads(output.read_text()) == config
+    assert not any(name.startswith('PAD_') for name in config)
+
+
+@pytest.mark.parametrize('section', [
+    {'PAD_LIBS': {'*_tt_025C_1v80': ['/pdk/neutral/io_tt.lib']}},
+    {'PAD_LIBS': 123}, {'UNSUPPORTED': True}, {}, None, [], False, 0, '',
+], ids=['typed_request', 'invalid_pad_type', 'unknown_key', 'empty_object',
+        'null', 'list', 'boolean', 'number', 'empty_string'])
+def test_prelayout_io_present_request_has_named_refusal(tmp_path, section):
+    output = _prelayout_request_project(tmp_path, {'prelayout_io': section})
+    try:
+        LP.emit_prelayout_config(tmp_path, 'neutral_pdk', 'neutral_core', None, [], output)
+    except LC.Refusal as exc:
+        observed = exc.code
+        assert 'prelayout_io' in str(exc) and 'core' in str(exc)
+    else:
+        observed = 'CONFIG_EMITTED_WITHOUT_REQUEST_DIAGNOSTIC'
+    assert observed == 'LL_PRELAYOUT_IO_UNSUPPORTED'
+    assert not output.exists()
+    assert not output.with_suffix('.provenance.json').exists()
+
+
 @pytest.mark.parametrize('mode', ['dual', 'librelane'])
 def test_tool_step8_defers_before_synth_without_frontend_dispatch(tmp_path, monkeypatch, mode):
     put(tmp_path / 'phase3/librelane_switch.json', {'steps': {'8': mode}})

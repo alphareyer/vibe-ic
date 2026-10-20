@@ -155,6 +155,12 @@ def emit_prelayout_config(project: Path, pdk: str, top: str, sdc: Optional[Path]
     `sdc=None` builds the base.sdc arm: no PNR_SDC_FILE, and the declared I/O
     delay is mapped onto IO_DELAY_CONSTRAINT so the tool renders it.
     """
+    switch = project / 'phase3/librelane_switch.json'
+    if switch.is_file() and 'prelayout_io' in _load(switch):
+        raise Refusal('LL_PRELAYOUT_IO_UNSUPPORTED',
+                      'prelayout_io is unsupported by this core-only pre-layout '
+                      'config; omit the section. Physical wrapper preparation '
+                      'belongs to Step 15.5ic.')
     config = emit_config(project, pdk, output)
     sources = _load(output.with_suffix(".provenance.json"))
     for key in [k for k in config if k.startswith("PAD_") or k in (
