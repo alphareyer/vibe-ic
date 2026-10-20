@@ -395,3 +395,138 @@ def test_legacy_measured_report_without_source_uses_consumer_default_d(tmp_path)
     report["asil"] = "A"
     assert not gate.check(report, None, None, tmp_path)["passed"]
     assert gate.check(report, "A", None, tmp_path)["passed"]
+
+
+def embedded_fixture(project, implementation="local"):
+    """The issue's real endpoint, not a substitute checker or encoder."""
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    function = """function automatic bit encode_tag(input logic [3:0] payload);
+      encode_tag=^payload;
+    endfunction"""
+    sources = []
+    if implementation == "package":
+        package = rtl / "integrity_pkg.sv"
+        package.write_text("package integrity_pkg;\n" + function + "\nendpackage\n")
+        sources.append(package)
+        function = "import integrity_pkg::*;"
+    source = rtl / "protocol_endpoint.sv"
+    source.write_text("""module protocol_endpoint(input logic clk_i, rst_n,
+      input logic [4:0] request_i, output logic [3:0] payload_o,
+      output logic fault_o);
+    """ + function + """
+      assign payload_o=request_i[3:0];
+      assign fault_o=(encode_tag(request_i[3:0])!=request_i[4]);
+    endmodule
+    """)
+    sources.append(source)
+    l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9.parent.mkdir(parents=True)
+    l9.write_text(json.dumps({"top_module": "protocol_endpoint"}))
+    row = {"id": "request_parity", "kind": "parity",
+           "checker": {"module": "protocol_endpoint", "instance": "protocol_endpoint",
+                       "input": "request_i", "detect": "fault_o", "corrected_output": None,
+                       "constant_inputs": {"clk_i": {"width": 1, "value": 0},
+                                           "rst_n": {"width": 1, "value": 1}}},
+           "data_width": 4, "code_width": 5,
+           "stimulus": {"encoding": "even_parity", "data_bits": [0, 1, 2, 3], "check_bit": 4}}
+    doc = {"schema": declared.SCHEMA, "authority": "AUTHOR_ENGINEERING_DECLARATION",
+           "top_module": "protocol_endpoint", "rtl_files": [
+               {"path": str(p.relative_to(project)), "sha256": declared.digest(p)} for p in sources],
+           "mechanisms": [row]}
+    write_doc(project, doc)
+    return doc, source
+
+
+@native
+@pytest.mark.parametrize("implementation", ["local", "package"])
+def test_embedded_real_endpoint_native_cli_and_consumer(tmp_path, implementation):
+    embedded_fixture(tmp_path, implementation)
+    report_path = tmp_path / "reports/phase2/safety/fmeda_coverage.json"
+    assert fi.main([str(tmp_path), "--asil", "D", "--json", str(report_path)]) == 0
+    report = json.loads(report_path.read_text())
+    assert report["measured"] and report["verdict"] == "PASS"
+    row, = report["mechanisms"]
+    assert (row["injected_faults"], row["detected_faults"]) == (80, 80)
+    assert len(row["baseline"]) == 16 and row["baseline_valid"]
+    assert row["mechanism"]["encoder"] is None
+    assert row["mechanism"]["decoder"] == "protocol_endpoint"
+    assert row["correction_applicable"] is False
+    assert all(fault["match"] is None for fault in row["fault_list"])
+    assert gate.main([str(tmp_path), "--require"]) == 0
+
+
+@native
+@pytest.mark.parametrize("mutation", ["tied_low", "false_alarm", "wrong_parity"])
+def test_embedded_actual_detector_and_valid_baseline_required(tmp_path, mutation):
+    doc, source = embedded_fixture(tmp_path)
+    if mutation == "wrong_parity":
+        doc["mechanisms"][0]["stimulus"]["encoding"] = "odd_parity"
+    else:
+        source.write_text(source.read_text().replace(
+            "(encode_tag(request_i[3:0])!=request_i[4])",
+            "1'b0" if mutation == "tied_low" else "1'b1"))
+        doc["rtl_files"][0]["sha256"] = declared.digest(source)
+    write_doc(tmp_path, doc)
+    rc, report = fi.run(tmp_path, args())
+    assert rc == 1 and report["measured"] is True, report
+    row, = report["mechanisms"]
+    assert row["injected_faults"] == 80 and row["dc_floor_pct"] == 99.0
+    if mutation == "tied_low":
+        assert row["baseline_valid"] and row["detected_faults"] == 0
+        assert row["diagnostic_coverage_pct"] == 0.0
+    else:
+        assert not row["baseline_valid"]
+    assert not gate.check(report, None, None, tmp_path)["passed"]
+
+
+@native
+@pytest.mark.parametrize("mutation", ["missing_type", "wrong_kind", "wrong_width", "duplicate_bit",
+    "outside_bit", "missing_bit", "bool_bit", "wrong_constant_width", "missing_constant", "stateful"])
+def test_embedded_unsupported_or_incomplete_binding_is_unmeasured(tmp_path, mutation):
+    doc, source = embedded_fixture(tmp_path)
+    row = doc["mechanisms"][0]
+    if mutation == "missing_type":
+        row["stimulus"].pop("encoding")
+    elif mutation == "wrong_kind":
+        row["kind"] = "ecc"
+    elif mutation == "wrong_width":
+        row["code_width"] = 6
+    elif mutation == "duplicate_bit":
+        row["stimulus"]["data_bits"] = [0, 0, 2, 3]
+    elif mutation == "outside_bit":
+        row["stimulus"]["check_bit"] = 5
+    elif mutation == "missing_bit":
+        row["stimulus"]["data_bits"].pop()
+    elif mutation == "bool_bit":
+        row["stimulus"]["data_bits"][0] = False
+    elif mutation == "wrong_constant_width":
+        row["checker"]["constant_inputs"]["clk_i"]["width"] = 2
+    elif mutation == "missing_constant":
+        row["checker"]["constant_inputs"].pop("rst_n")
+    else:
+        source.write_text(source.read_text().replace(
+            "assign fault_o=", "always_ff @(posedge clk_i) fault_o <="))
+        doc["rtl_files"][0]["sha256"] = declared.digest(source)
+    write_doc(tmp_path, doc)
+    rc, report = fi.run(tmp_path, args())
+    assert rc == 1 and report["applicable"] is True and report["measured"] is False, report
+    assert report.get("diagnostic_coverage_pct") is None
+    assert not gate.check(report, None, None, tmp_path)["passed"]
+
+
+@native
+def test_embedded_consumer_rejects_stale_source_or_stimulus(tmp_path):
+    doc, source = embedded_fixture(tmp_path, "package")
+    rc, report = fi.run(tmp_path, args())
+    assert rc == 0, report
+    assert gate.check(report, None, None, tmp_path)["passed"]
+    for target in (source, tmp_path / declared.MANIFEST):
+        original = target.read_bytes()
+        target.write_bytes(original + b"\n")
+        assert not gate.check(report, None, None, tmp_path)["passed"]
+        target.write_bytes(original)
+        assert gate.check(report, None, None, tmp_path)["passed"]
+    damaged = copy.deepcopy(report)
+    damaged["mechanisms"][0]["mechanism"]["stimulus"]["encoding"] = "odd_parity"
+    assert not gate.check(damaged, None, None, tmp_path)["passed"]

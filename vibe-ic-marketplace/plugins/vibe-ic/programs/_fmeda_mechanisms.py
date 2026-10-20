@@ -71,6 +71,37 @@ def _name(value):
     return value
 
 
+def _embedded(row):
+    return "stimulus" in row
+
+
+def _validate_stimulus(row):
+    """A typed reference encoding, never a claim inferred from RTL/prose."""
+    stimulus = row["stimulus"]
+    _keys(stimulus, "encoding data_bits check_bit")
+    k, n = row["data_width"], row["code_width"]
+    bits, check = stimulus["data_bits"], stimulus["check_bit"]
+    if (row["kind"] != "parity" or stimulus["encoding"] not in ("even_parity", "odd_parity") or
+            n != k + 1 or not isinstance(bits, list) or len(bits) != k or
+            any(type(bit) is not int for bit in bits) or type(check) is not int or
+            sorted([*bits, check]) != list(range(n))):
+        raise Refusal("unsupported parity stimulus or incomplete/duplicate codeword bits")
+    checker = row["checker"]
+    if checker["corrected_output"] is not None:
+        raise Refusal("embedded parity stimulus measures detection only, not correction")
+    constants = checker["constant_inputs"]
+    if not isinstance(constants, dict):
+        raise Refusal("expected typed constant input bindings")
+    for name, value in constants.items():
+        _name(name)
+        _keys(value, "width value")
+        width, number = value["width"], value["value"]
+        if (name in (checker["input"], checker["detect"]) or
+                type(width) is not int or not 1 <= width <= 4096 or
+                type(number) is not int or not 0 <= number < (1 << width)):
+            raise Refusal("invalid constant input width/value or conflicting role")
+
+
 def declaration(project: Path):
     """Validate author input against the existing current source/top readers."""
     from _specrtl_common import rtl_source_files, strip_comments
@@ -124,7 +155,9 @@ def declaration(project: Path):
         raise Refusal("empty mechanism population")
     ids, sites = set(), set()
     for row in mechanisms:
-        _keys(row, "id kind encoder checker data_width code_width")
+        embedded = isinstance(row, dict) and _embedded(row)
+        _keys(row, "id kind checker data_width code_width stimulus" if embedded
+              else "id kind encoder checker data_width code_width")
         _name(row["id"])
         if row["id"] in ids or row["kind"] not in ("ecc", "parity", "lockstep"):
             raise Refusal("duplicate mechanism ID or unsupported kind")
@@ -132,8 +165,10 @@ def declaration(project: Path):
         for width in (row["data_width"], row["code_width"]):
             if type(width) is not int or not 1 <= width <= 4096:
                 raise Refusal("unsupported/non-positive port width")
-        for key, keys in (("encoder", "module instance input output"),
-                          ("checker", "module instance input detect corrected_output")):
+        roles = [("checker", "module instance input detect corrected_output constant_inputs")] if embedded else [
+            ("encoder", "module instance input output"),
+            ("checker", "module instance input detect corrected_output")]
+        for key, keys in roles:
             part = row[key]
             _keys(part, keys)
             for field in ("module", "input"):
@@ -141,11 +176,14 @@ def declaration(project: Path):
             if not isinstance(part["instance"], str):
                 raise Refusal("missing instance path")
             parts = part["instance"].split(".")
-            if len(parts) < 2 or parts[0] != top:
+            if len(parts) < (1 if embedded else 2) or parts[0] != top:
                 raise Refusal("instance is outside current selected top")
             for p in parts:
                 _name(p)
-        _name(row["encoder"]["output"])
+        if embedded:
+            _validate_stimulus(row)
+        else:
+            _name(row["encoder"]["output"])
         _name(row["checker"]["detect"])
         if row["checker"]["corrected_output"] is not None:
             _name(row["checker"]["corrected_output"])
@@ -264,7 +302,7 @@ def validate_hierarchy(doc: dict, native: dict, project: Path):
         raise Refusal("native selected top is absent")
     for row in doc["mechanisms"]:
         k, n = row["data_width"], row["code_width"]
-        for role in ("encoder", "checker"):
+        for role in (("checker",) if _embedded(row) else ("encoder", "checker")):
             part = row[role]
             module_type = top
             for segment in part["instance"].split(".")[1:]:
@@ -312,7 +350,19 @@ def validate_hierarchy(doc: dict, native: dict, project: Path):
                     expected[part["corrected_output"]] = ("output", k)
             actual = {name: (p.get("direction"), len(p.get("bits", [])))
                       for name, p in module.get("ports", {}).items()}
-            if actual != expected:
+            if _embedded(row):
+                expected.update({name: ("input", value["width"])
+                                 for name, value in part["constant_inputs"].items()})
+                actual_inputs = {name: value for name, value in actual.items() if value[0] == "input"}
+                expected_inputs = {name: value for name, value in expected.items() if value[0] == "input"}
+                # Other DUT outputs are not correction evidence. All inputs
+                # must be bound; the detector must be the actual one-bit output.
+                valid = (actual_inputs == expected_inputs and
+                         actual.get(part["detect"]) == ("output", 1) and
+                         all(direction in ("input", "output") for direction, _ in actual.values()))
+            else:
+                valid = actual == expected
+            if not valid:
                 raise Refusal(f"native ports/widths differ at {part['instance']}: {actual} != {expected}")
 
 
@@ -373,11 +423,13 @@ def census(stdout: str, spec, max_vectors: int):
 
 def spec_for(row: dict, rtl_files: list):
     import fmeda_fault_injection_coverage as fi
-    enc, chk = row["encoder"], row["checker"]
-    return fi.MechanismSpec(row["kind"], enc["module"], enc["input"], enc["output"],
+    enc, chk = row.get("encoder", {}), row["checker"]
+    return fi.MechanismSpec(row["kind"], enc.get("module"), enc.get("input", ""), enc.get("output", ""),
                             chk["module"], chk["input"], chk["corrected_output"], chk["detect"],
                             row["data_width"], row["code_width"], rtl_files,
-                            source="project_engineering_declaration")
+                            source="project_engineering_declaration",
+                            stimulus=row.get("stimulus"),
+                            checker_constants=chk.get("constant_inputs", {}))
 
 
 def measure(project: Path, args):

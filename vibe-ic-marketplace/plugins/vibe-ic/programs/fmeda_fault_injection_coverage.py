@@ -284,6 +284,8 @@ class MechanismSpec:
     code_width: int
     rtl_files: List[str] = field(default_factory=list)
     source: str = "explicit"
+    stimulus: Optional[dict] = None  # typed parity encoding for a real embedded checker
+    checker_constants: dict = field(default_factory=dict)
 
 
 # Whether an OUTPUT port name DECLARES an error-detection safety mechanism.
@@ -736,11 +738,11 @@ def build_ecc_injection_tb(spec: MechanismSpec,
     mechanism RTL is instantiated as-is; the fault is injected on the codeword
     wire BETWEEN encoder and decoder (non-invasive). Pure string builder.
 
-    Requires an encoder to produce valid codewords; a decoder-only mechanism is
-    unsupported by this builder (the caller must supply codeword stimulus). The
+    Requires an encoder or an explicitly validated parity stimulus declaration
+    to produce valid codewords; it never invents a replacement checker. The
     detect flag is the decoder's declared detect port (tied 0 if absent, in which
     case coverage is correction-only via MATCH)."""
-    if not spec.enc_module:
+    if not spec.enc_module and spec.stimulus is None:
         raise ValueError("build_ecc_injection_tb needs an encoder module to "
                          "generate valid codewords")
     K, N = spec.data_width, spec.code_width
@@ -761,13 +763,21 @@ def build_ecc_injection_tb(spec: MechanismSpec,
         lines.append("    wire detect_w;")
     lines.append("    integer i, vi;")
     # encoder + decoder instances (named-port to be robust to port order)
-    lines.append(f"    {spec.enc_module} u_enc (.{spec.enc_in}(data), "
-                 f".{spec.enc_out}(code));")
+    if spec.stimulus is None:
+        lines.append(f"    {spec.enc_module} u_enc (.{spec.enc_in}(data), "
+                     f".{spec.enc_out}(code));")
+    else:
+        for data_bit, code_bit in enumerate(spec.stimulus["data_bits"]):
+            lines.append(f"    assign code[{code_bit}] = data[{data_bit}];")
+        parity = "~(^data)" if spec.stimulus["encoding"] == "odd_parity" else "^data"
+        lines.append(f"    assign code[{spec.stimulus['check_bit']}] = {parity};")
     dec_conns = [f".{spec.dec_in}(faulted)"]
     if dec_out:
         dec_conns.append(f".{dec_out}(dout)")
     if det:
         dec_conns.append(f".{det}(detect_w)")
+    for name, value in sorted(spec.checker_constants.items()):
+        dec_conns.append(f".{name}({value['width']}'d{value['value']})")
     lines.append(f"    {spec.dec_module} u_dec ({', '.join(dec_conns)});")
     # detect / match expressions
     detect_expr = "(|detect_w)" if det else "1'b0"
@@ -1126,6 +1136,9 @@ def build_report(spec: Optional[MechanismSpec],
     }
     if not (results and results.golden_ok) and tool_log:
         rep["tool_log_tail"] = tool_log[-1200:]
+    if spec.stimulus is not None:
+        rep["mechanism"]["stimulus"] = spec.stimulus
+        rep["mechanism"]["checker_constant_inputs"] = spec.checker_constants
     # per-fault list (bounded) for auditability
     if results:
         rep["fault_list"] = [
