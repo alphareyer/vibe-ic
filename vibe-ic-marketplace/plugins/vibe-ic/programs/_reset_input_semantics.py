@@ -95,6 +95,25 @@ def reset_domain_bindings(name, extracted):
         binding['basis'] = [{'file': source, 'line': row['line'], 'quote': row['quote']}
                             for source, row in rows]
         result.append(binding)
+    # A phase table is not allowed to overrule an independent declaration.
+    # Compare assertion and release separately, including any explicit target
+    # and depth. Unknown/conflicting values reach the existing admission refusal.
+    for text in extracted.values():
+        for line in _reset_prose_clauses(text, name):
+            for fact in _prose_phases(line):
+                targets = fact['clocks']
+                if targets - set(groups):
+                    for binding in result:
+                        binding['release_clock'] = 'unknown'
+                for binding in result:
+                    if targets and binding['clock'] not in targets:
+                        continue
+                    phase = fact['phase']
+                    if binding[phase] != fact['mode']:
+                        binding[phase] = 'unknown'
+                    if phase == 'release' and any(
+                            depth != binding['release_stages'] for depth in fact['stages']):
+                        binding['release_stages'] = 'unknown'
     return result
 
 
@@ -215,6 +234,82 @@ _HISTORY = re.compile(r'\b(?:previous(?:ly)?|prior|historical|legacy|formerly)\b
 _COMPARISON = re.compile(r'\b(?:unlike|in contrast to|compared (?:with|to))\b|[與与].{0,16}(?:先前|舊版|旧版|以前)', re.I)
 _SYNC = re.compile(r'\b(?:asynchronous|async(?:_reset)?|synchronous|sync_reset|synced reset)\b|非同步|異步|异步|同步', re.I)
 _POLARITY = re.compile(r'\bactive[- _]?(low|high)\b', re.I)
+_PROSE_PHASE = re.compile(
+    r'\b(?:(?P<mode>asynchronous|synchronous)\s+(?P<phase>assertion|release|deassertion)'
+    r'|(?P<phase_first>assertion|release|deassertion)\s+(?:is\s+)?'
+    r'(?P<mode_after>asynchronous|synchronous))\b', re.I)
+_STAGE_NUMBER = {word: i for i, word in enumerate(
+    ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'))}
+
+
+def _reset_prose_clauses(text, name):
+    port = re.compile(r'(?<![\w])' + re.escape(name) + r'(?![\w])', re.I)
+    table_lines = {number for number, _, _, _ in _phase_table_rows(text)}
+    for number, raw in enumerate(text.splitlines(), 1):
+        if number in table_lines:
+            continue
+        for clause in re.split(r'[;；。]|(?<=[a-zA-Z])\.\s+', raw):
+            line = current_clause(clause)
+            if line and port.search(line):
+                yield line
+
+
+def _prose_phases(line):
+    """Finite named phase clauses; unsupported qualifiers stay unknown.
+
+    The returned spans cover only phase-qualified synchrony tokens. Every
+    unqualified token still participates in the legacy ambiguity vote.
+    """
+    from _prose_polarity import is_denied
+    matches = list(_PROSE_PHASE.finditer(line))
+    for i, match in enumerate(matches):
+        phase = (match['phase'] or match['phase_first']).lower()
+        phase = 'release' if phase == 'deassertion' else phase
+        suffix = line[match.end():matches[i + 1].start() if i + 1 < len(matches) else len(line)]
+        prefix = line[matches[i - 1].end() if i else 0:match.start()]
+        # Validate complete target clauses, not a recognized prefix. Conjunctive
+        # lists admit every named clock; alternatives or unsupported remainder
+        # leave the phase unknown even when no stage qualifier is present.
+        targets = list(re.finditer(r'\b(?:to|on)\s+', suffix, re.I))
+        clocks = set()
+        invalid_targets = False
+        for j, target in enumerate(targets):
+            clause = suffix[target.end():targets[j + 1].start()
+                            if j + 1 < len(targets) else len(suffix)]
+            # Stage values are validated below. Remove only their finite
+            # qualifier grammar here; any other trailing text must still parse.
+            clause = re.sub(r'\s+(?:through|with|after)\s+[\w.+-]+[ -]stages?\b',
+                            '', clause, flags=re.I).strip().rstrip('.!?').strip()
+            if j + 1 < len(targets):
+                clause = re.sub(r'\s+and$', '', clause, flags=re.I)
+            for token in re.split(r'\s*,\s*(?:and\s+)?|\s+and\s+', clause, flags=re.I):
+                clock = re.fullmatch(r'`([A-Za-z_][\w$]*)`|([A-Za-z_][\w$]*)', token)
+                name = (clock[1] or clock[2]) if clock else None
+                if name is None or name.lower() in ('and', 'or'):
+                    invalid_targets = True
+                else:
+                    clocks.add(name)
+        stages = []
+        if phase == 'release':
+            before = re.search(r'(?<![\w.-])([\w.+-]+)[ -]stages?\s*$', prefix, re.I)
+            stage_text = (before[0] if before else '') + ' ' + suffix
+            for depth in re.finditer(r'(?<![\w.-])([\w.+-]+)[ -]stages?\b', stage_text, re.I):
+                value = depth[1].lower()
+                stages.append(int(value) if value.isdigit() else _STAGE_NUMBER.get(value, 'unknown'))
+            if re.search(r'\bstages?\b', stage_text, re.I) and not stages:
+                stages.append('unknown')
+            if stages and re.search(r'\bor\b|/|\bat\s+(?:least|most)\b', stage_text, re.I):
+                stages.append('unknown')
+        mixed = re.search(r'\b(?:asynchronous|synchronous)\s*(?:/|or|and)\s*$', prefix, re.I)
+        yield {'phase': phase, 'mode': 'unknown' if invalid_targets or mixed or is_denied(line, ignore_bracketed=False)
+               else (match['mode'] or match['mode_after']).lower(),
+               'clocks': clocks, 'stages': stages, 'span': match.span()}
+    # A synchrony word beside an unparsed phase is not permission to use the
+    # table's answer. Leave it unresolved at the same consumer boundary.
+    for phase in re.finditer(r'\b(assertion|release|deassertion)\b', line, re.I):
+        if _SYNC.search(line) and not any(m.start() <= phase.start() < m.end() for m in matches):
+            yield {'phase': 'assertion' if phase[1].lower() == 'assertion' else 'release',
+                   'mode': 'unknown', 'clocks': set(), 'stages': [], 'span': (0, 0)}
 
 
 def current_clause(line):
@@ -251,6 +346,7 @@ def declarations(text, name=None):
     """Yield source-line-bound reset declarations; never borrow another port."""
     port = re.compile(r'(?<![\w])' + re.escape(name) + r'(?![\w])', re.I) if name else None
     phases = {row['line']: row for row in phase_declarations(text)}
+    phased = any(name is None or row['reset'] == name for row in phases.values())
     phase_lines = {number for number, _, _, _ in _phase_table_rows(text)}
     for number, raw in enumerate(text.splitlines(), 1):
         phase = phases.get(number)
@@ -270,7 +366,11 @@ def declarations(text, name=None):
                 continue
             if not port and not re.search(r'reset|\brst\w*\b|重置|復位|复位', line, re.I):
                 continue
-            syncs = {'asynchronous' if m[0].lower().startswith(('async','非','異','异')) else 'synchronous' for m in _SYNC.finditer(line)}
+            facts = list(_prose_phases(line)) if phased else []
+            syncs = {'asynchronous' if m[0].lower().startswith(('async','非','異','异')) else 'synchronous'
+                     for m in _SYNC.finditer(line)
+                     if not any(f['span'][0] <= m.start() < f['span'][1] for f in facts)}
+            syncs.update(f['mode'] for f in facts if f['phase'] == 'assertion')
             polarities = {'active_' + m[1].lower() for m in _POLARITY.finditer(line)}
             if syncs or polarities:
                 yield {'line': number, 'evidence': raw.strip(),

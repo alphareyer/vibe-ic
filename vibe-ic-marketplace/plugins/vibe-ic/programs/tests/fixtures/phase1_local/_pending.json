@@ -361,5 +361,16 @@
     "version_observed": "1.29.96, retained execution source d63906f6ae37bf0030059d9b6304ebcc5fe349b9. Owning crypto_arch_extractor.py SHA256 fae61be2c6fc3e7340f5ae3a5ca76e623f3aca10a7e738ebf74cee08039dd272. Fixed official e67b74e3e9204aa37fd8eaaf8d66266bfa8c2812 is the separate repair/transport target, not yet claimed reproduced there.",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_round_vs_block_latency/timing_contract.md"
+  },
+  {
+    "issue": 3273,
+    "project": "neutral_reset_phase_prose",
+    "layer": "L9_INTEGRATION_SPEC",
+    "field": "reset_domains",
+    "expected": "Accept the compatible independent declaration. Preserve rst_n active-low, asynchronous assertion, and synchronous release separately to core_clock and entropy_clock, two stages each. A true incompatible assertion, release, polarity, or clock declaration must still refuse. Legacy unphased mixed synchronous/asynchronous ambiguity must remain unknown/refused rather than being silently resolved by the table.",
+    "actual": "Canonical Phase1 reports RESET_PHASE_SOURCE_CONFLICT: rst_n: independent declaration. The named sentence contains asynchronous assertion and synchronous release, but the independent-declaration check calls the legacy combined synchrony parser and obtains unknown. Initial report is from the canonical caller; the next step is an isolated neutral reproduction through the actual owner API and ordinary input consumer before editing code.",
+    "version_observed": "Pinned composed source 5e844ab8d03624ada69fa6c924756ad4b345d01d, tree 37ceeec65b10a9373ad9a2acc8459c899483a0b4 (child of delivery source 9779a75a). The phase helper is a stacked source addition, not yet asserted present on official main.",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_reset_phase_prose/neutral_reset_phase_prose.md"
   }
 ]
