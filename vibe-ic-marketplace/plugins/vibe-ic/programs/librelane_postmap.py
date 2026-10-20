@@ -84,7 +84,6 @@ def selected(project, binding, parent, parent_folder):
         raise ValueError("post-map native output escaped its producer")
     fp = receipt["input"]
     resolved = _inside(project, child["resolved_config"])
-    config = json.loads(resolved.read_text())
     parent_receipt = json.loads((parent_folder / "vibeic_receipt.json").read_text())
     if (fp.get("image") != parent_receipt["input"]["image"] or
             fp.get("config") != LC.digest(resolved) or
@@ -102,25 +101,10 @@ def selected(project, binding, parent, parent_folder):
         else:
             external.append(name)
     expected.update(LC.config_file_hashes({"files": external}, mounts))
-    # The resolved input file census is checked too: deleting a recorded PDK
-    # dependency cannot turn a stale receipt into a smaller valid population.
-    current = set()
-    outside = []
-    original_root = Path(state["nl"]).parent
-    for _ in folder.relative_to(project).parts:
-        original_root = original_root.parent
-    for path in LC._walk_paths(config):
-        target = project / path.relative_to(original_root) if path.is_relative_to(original_root) else path
-        if target.is_dir() and not target.is_symlink():
-            continue
-        source = resolver(str(path))
-        if source.is_relative_to(project):
-            if source.is_file():
-                current.add(str(path))
-        else:
-            outside.append(str(path))
-    current.update(LC.config_file_hashes({"files": outside}, mounts))
-    if fp["config_files"] != expected or current != set(fp["config_files"]):
+    # Like the parent native reader, rehash the producer's recorded population.
+    # A later namespace may expose additional image files. Missing or changed
+    # recorded SDC/PDK files still make this complete mapping differ.
+    if fp["config_files"] != expected:
         raise ValueError("post-map config/SDC/PDK input changed")
     state_in = _inside(project, child["state_in"])
     if fp.get("state") != LC.digest(state_in):

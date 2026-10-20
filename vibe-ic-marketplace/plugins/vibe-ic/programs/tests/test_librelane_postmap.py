@@ -21,7 +21,7 @@ def put(p, j):
     return p
 
 
-def fixture(tmp_path, monkeypatch):
+def fixture(tmp_path, monkeypatch, *, extra_image_input=False):
     p = tmp_path / "project"
     put(p / "phase1/generated_docs/L9_INTEGRATION_SPEC.json", {"top_module": "top"})
     put(p / "phase3/librelane_switch.json", {"steps": {"9": "librelane"}, "post_map_repair": "pre_placement"})
@@ -39,6 +39,8 @@ def fixture(tmp_path, monkeypatch):
     pdk = tmp_path / "pdk";pdk.mkdir();lib = pdk / "neutral.lib";lib.write_text("library(neutral){}\n")
     cfg = {"meta": {"step": M.STEP}, "DESIGN_NAME": "top", "PDK_ROOT": str(pdk),
            "PNR_SDC_FILE": str(source), "CELL_LIBS": {"c": [str(lib)]}}
+    if extra_image_input:
+        cfg["FALLBACK_SDC"] = str(tmp_path / "reader-image/base.sdc")
     resolved = put(p / "phase3/librelane/postmap-config/resolved.json", cfg)
     sin = put(resolved.parent / "state_in.json", {"nl": str(parent)})
     fp = {"step": M.STEP, "image": "tool", "config": LC.digest(resolved), "state": LC.digest(sin),
@@ -152,17 +154,38 @@ def test_same_product_reaches_native_copy_and_pnr(tmp_path, monkeypatch):
     assert parent.read_bytes() != mapped.read_bytes()
 
 
-@pytest.mark.parametrize("damage", ["native", "mapped", "canonical", "parent", "source", "library", "stat", "missing_child", "mode_removed", "bad_mode", "code", "receipt", "state", "resolved", "observation"])
+def test_newly_visible_image_file_retains_recorded_input_population(tmp_path, monkeypatch):
+    p, parent, native, mapped, folder, *_, sidecar = fixture(tmp_path, monkeypatch, extra_image_input=True)
+    provenance_rows(p, parent, native, mapped)
+    extra = tmp_path / "reader-image/base.sdc"
+    receipt = folder / "vibeic_receipt.json"
+    resolved = p / "phase3/librelane/postmap-config/resolved.json"
+    assert str(extra) not in json.loads(receipt.read_text())["input"]["config_files"]
+    assert H.bound_handoff(p)["verdict"] == "PASS"
+    retained = {path: path.read_bytes() for path in (receipt, resolved, sidecar, p / "provenance.jsonl")}
+    extra.parent.mkdir()
+    extra.write_text("set_max_fanout 10 [current_design]\n")
+    report = H.bound_handoff(p)
+    assert report["verdict"] == "PASS", report
+    assert report["native"] == str(native)
+    assert provenance_check(p)[0] == 0
+    assert all(path.read_bytes() == data for path, data in retained.items())
+
+
+@pytest.mark.parametrize("damage", ["native", "mapped", "canonical", "parent", "source", "library", "missing_source", "missing_library", "stat", "missing_child", "mode_removed", "bad_mode", "code", "receipt", "state", "resolved", "observation"])
 def test_stale_or_missing_child_refuses_and_restores(tmp_path, monkeypatch, damage):
     p, parent, native, mapped, folder, source, lib, stats, sidecar = fixture(tmp_path, monkeypatch)
     provenance_rows(p, parent, native, mapped)
     assert H.bound_handoff(p)["verdict"] == "PASS"
     target = {"native": native, "mapped": mapped, "canonical": mapped.parent / "netlist.v", "parent": parent,
-              "source": source, "library": lib, "stat": stats, "receipt": folder / "vibeic_receipt.json",
+              "source": source, "library": lib, "missing_source": source, "missing_library": lib,
+              "stat": stats, "receipt": folder / "vibeic_receipt.json",
               "state": p / "phase3/librelane/postmap-config/state_in.json",
               "resolved": p / "phase3/librelane/postmap-config/resolved.json", "observation": folder / "postmap.json"}.get(damage)
     if target:
-        original = target.read_bytes(); target.write_bytes(original + b" ")
+        original = target.read_bytes()
+        if damage.startswith("missing_"): target.unlink()
+        else: target.write_bytes(original + b" ")
     elif damage in ("missing_child",):
         target = sidecar;original = target.read_bytes();doc = json.loads(original);del doc["librelane_synthesis"]["post_map"];put(target, doc)
     elif damage in ("mode_removed", "bad_mode"):
