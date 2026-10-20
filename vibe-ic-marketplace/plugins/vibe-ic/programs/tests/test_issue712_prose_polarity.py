@@ -869,3 +869,65 @@ def test_a_denial_qualifying_a_DIFFERENT_clause_keeps_the_stated_bound():
         "The output valid is asserted exactly 3 cycles after the input frame "
         "is accepted. No DRC errors were found.") is not None
 
+
+
+@pytest.mark.parametrize("source", [
+    r"""import re
+def extract(text, rec):
+    match = re.fullmatch(r"(?:extract|power)_lef_\d+", text)
+    if match:
+        rec["role"] = match.group(0)
+    return rec
+""",
+    r"""import re
+RE = re.compile(r"^TOOL_CENSUS cells=(\d+) shapes=(\d+)$", re.M)
+def extract(text, rec):
+    match = RE.search(text)
+    if match:
+        rec["shapes"] = int(match.group(2))
+    return rec
+""",
+    r"""import re
+from module_port_audit import lexical_mask
+def extract(text, rec):
+    code = lexical_mask(text)
+    match = re.search(r"\bwire\s+(\w+)", code)
+    if match:
+        rec["signal"] = match.group(1)
+    return rec
+""",
+], ids=["whole-identifier", "tagged-numeric-record", "lexically-masked-hdl"])
+def test_formal_input_origins_are_measured_without_name_exemptions(tmp_path, source):
+    assert G.scan(_tree(tmp_path, source)) == []
+
+
+@pytest.mark.parametrize("source", [
+    r"""import re
+def extract(text, rec):
+    value = bool(re.search(r"optional", text))
+    rec["optional"] = value
+    return rec
+""",
+    r"""import re
+from module_port_audit import lexical_mask
+def extract(text, prose, rec):
+    code = lexical_mask(text)
+    formal = re.search(r"\bwire\s+(\w+)", code)
+    if formal:
+        rec["signal"] = formal.group(1)
+    declared = re.search(r"budget (\d+)", prose)
+    if declared:
+        rec["budget"] = declared.group(1)
+    return rec
+""",
+    r"""import re
+def extract(text, rec):
+    code = text.lexical_mask()
+    match = re.search(r"budget (\d+)", code)
+    if match:
+        rec["budget"] = match.group(1)
+    return rec
+""",
+], ids=["boolean-prose", "mixed-formal-and-prose", "untrusted-lexical-method"])
+def test_grammar_recognition_does_not_clear_real_prose(tmp_path, source):
+    assert G.scan(_tree(tmp_path, source)) == ["some_extract::extract"]

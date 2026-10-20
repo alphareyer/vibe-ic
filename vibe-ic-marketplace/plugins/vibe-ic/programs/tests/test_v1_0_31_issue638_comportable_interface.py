@@ -181,3 +181,16 @@ def test_no_leak_module_name_deny_only_fires_on_convention_sentence():
         "# SPI Controller\n| sclk | output | 1 |\n") is None
     assert p1._v638_comportable_module_name(
         "the module `bar` has the following hardware interface\n") == "bar"
+
+
+
+def test_denied_bullet_does_not_publish_a_clock_and_keeps_positive_clause():
+    doc = "- Other Clocks: not `retired_clk_i`; `current_clk_i`\n"
+    rows = list(p1._v638_comportable_interface_harvest(doc))
+    assert [row["name"] for row in rows] == ["current_clk_i"], rows
+
+
+def test_denial_in_another_bullet_cannot_cancel_current_bus():
+    doc = "- Other Clocks: no `retired_clk_i`\n- Bus Device Interfaces: `bus_link`\n"
+    rows = list(p1._v638_comportable_interface_harvest(doc))
+    assert [row["name"] for row in rows] == ["bus_link"], rows

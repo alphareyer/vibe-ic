@@ -2630,6 +2630,13 @@ def _tb_bound_port_roles(rtl_text: Optional[str], tb_code: str) -> Dict[str, str
     """
     if not rtl_text or not tb_code:
         return {}
+    # Comments and quoted diagnostics cannot instantiate a DUT or bind ports.
+    from module_port_audit import lexical_mask
+    try:
+        rtl_text = lexical_mask(rtl_text)
+        tb_code = lexical_mask(tb_code)
+    except ValueError:
+        return {}
     modules = set(re.findall(r"\bmodule\s+([A-Za-z_]\w*)\b", rtl_text))
     types = _tb_instantiated_module_types(tb_code, modules)
     if len(types) != 1:

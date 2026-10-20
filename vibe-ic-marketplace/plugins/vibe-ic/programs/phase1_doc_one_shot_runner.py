@@ -138,6 +138,7 @@ from _analog_block_intent import is_physical_esd_check
 from l_doc_consumer_contract import project_relative_source, REQUIREMENT_FRAMING_RE
 from _prose_polarity import is_denied as _prose_is_denied
 from _prose_polarity import sentence_scope as _prose_sentence_scope
+from _hdl_code_text import strip_hdl_comments_and_strings as _prose_hdl_code
 # ORGANIC #2055 — the two TIERS, which are not interchangeable: a bare
 # "no"/"not" DENIES the proposition, while "n/a"/"removed"/"superseded"
 # RETIRES a row the document still prints. `_harvest_test_cases_from_input_
@@ -5534,6 +5535,10 @@ def _v638_comportable_interface_harvest(text: str):
         is_clock = "clock" in label
         is_bus = label.startswith("bus ")
         for tm in _RE_V638_BACKTICK_TOKEN.finditer(value):
+            lo, hi = _prose_sentence_scope(
+                value, tm.start(), tm.end(), extra_breaks=("; ", " but "))
+            if _prose_is_denied(value[lo:hi]) is not None:
+                continue
             tok = tm.group("tok")
             if len(tok) < 2:
                 continue
@@ -43182,9 +43187,16 @@ def _l8_literal_parameter_rows(
         if not isinstance(original, str) or not original:
             continue
         for fence in _ISSUE3234_MD_SV_FENCE.finditer(original):
-            code = _strip_hdl_comments(fence.group("body") or "")
+            code = _prose_hdl_code(fence.group("body") or "")
             matches = list(_L8_LITERAL_PARAM_DECL.finditer(code))
-            if not _issue3234_position_is_current(original, fence.start()):
+            # A colon-ended lead-in governs the following code block. A
+            # denial in an earlier, completed sentence does not retract it.
+            prefix = original[:fence.start()].rstrip()
+            lead = re.split(r"\n[ \t]*\n", prefix)[-1] if prefix else ""
+            lo, hi = _prose_sentence_scope(
+                lead, len(lead), len(lead), extra_breaks=(".\n", "!\n", "?\n"))
+            denied = lead.endswith(":") and _prose_is_denied(lead[lo:hi]) is not None
+            if denied or not _issue3234_position_is_current(original, fence.start()):
                 declarations_here = len(matches)
                 if declarations_here:
                     noncurrent_literal_fences += 1

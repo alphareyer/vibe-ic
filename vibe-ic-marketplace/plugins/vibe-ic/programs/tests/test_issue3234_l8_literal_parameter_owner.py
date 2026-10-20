@@ -138,3 +138,24 @@ parameter integer EXAMPLE_BITS = 91;
 """
     doc = _emit_l8(tmp_path, "example.md", text)
     assert _pairs(doc) == []
+
+
+
+def test_quoted_hdl_parameter_is_not_an_active_declaration(tmp_path):
+    text = ('```systemverilog\nmodule neutral_top;\n'
+            'parameter integer ACTIVE_BITS = 20;\n'
+            'initial $display("not parameter integer PHANTOM_BITS = 91;");\n'
+            'endmodule\n```\n')
+    assert _pairs(_emit_l8(tmp_path, "quoted.md", text)) == [("ACTIVE_BITS", "20")]
+
+
+def test_denied_colon_leadin_cannot_authorize_literal_defaults(tmp_path):
+    text = ('Do not use the following defaults:\n```systemverilog\n'
+            'parameter integer RETIRED_BITS = 91;\n```\n')
+    assert _pairs(_emit_l8(tmp_path, "denied.md", text)) == []
+
+
+def test_completed_denial_sentence_does_not_cancel_current_literals(tmp_path):
+    text = ('The old defaults are not used.\nCurrent defaults:\n'
+            '```systemverilog\nparameter integer ACTIVE_BITS = 20;\n```\n')
+    assert _pairs(_emit_l8(tmp_path, "current.md", text)) == [("ACTIVE_BITS", "20")]

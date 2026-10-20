@@ -83,6 +83,12 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
+from functools import lru_cache
+try:
+    from re import _parser as _regex_parser
+except ImportError:  # Python 3.10 retains the same parser under this name.
+    import sre_parse as _regex_parser
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -2317,7 +2323,201 @@ def _is_compiled_pattern(value: ast.AST) -> bool:
             and value.func.value.id in _PATTERN_FACTORY_MODULES)
 
 
-def _match_derived_names(fn: ast.AST) -> Set[str]:
+def _scope_nodes(fn):
+    """A function owns its statements, not a nested function's statements."""
+    pending = [fn]
+    while pending:
+        node = pending.pop()
+        yield node
+        pending.extend(child for child in ast.iter_child_nodes(node)
+                       if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                 ast.ClassDef, ast.Lambda)))
+
+
+def _literal_patterns(tree):
+    """Resolve literal regex instruments; no execution/import of scanned code."""
+    patterns = {}
+    for node in _scope_nodes(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            value = node.value
+            if _is_compiled_pattern(value) and value.args:
+                value = value.args[0]
+            if isinstance(node.targets[0], ast.Name) and isinstance(value, ast.Constant) \
+                    and isinstance(value.value, str):
+                patterns[node.targets[0].id] = value.value
+    return patterns
+
+
+def _regex_parts(call, patterns):
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute) \
+            or call.func.attr not in _SEARCH_ATTRS:
+        return None, None, None
+    receiver = call.func.value
+    if isinstance(receiver, ast.Name) and receiver.id in _PATTERN_FACTORY_MODULES:
+        if len(call.args) < 2:
+            return None, None, None
+        value, subject = call.args[:2]
+        pattern = value.value if isinstance(value, ast.Constant) else patterns.get(
+            value.id) if isinstance(value, ast.Name) else None
+    else:
+        pattern = patterns.get(receiver.id) if isinstance(receiver, ast.Name) else None
+        subject = call.args[0] if call.args else None
+    return pattern, subject, call.func.attr
+
+
+@lru_cache(maxsize=512)
+def _closed_record_pattern(pattern, method):
+    """Prove a closed identifier or tagged numeric-record regex language.
+
+    An anchor alone is insufficient: natural-language sentences remain prose.
+    Tagged records require a fixed uppercase tag and at least two key=unsigned
+    captures, with no wildcard/comment/optional prose tail. Identifier matching
+    must cover the entire subject and admit identifier characters only.
+    """
+    if not isinstance(pattern, str):
+        return False
+    try:
+        tokens = list(_regex_parser.parse(pattern))
+    except (re.error, ValueError, OverflowError):
+        return False
+
+    def identifier(parts):
+        for op, value in parts:
+            kind = str(op)
+            if kind == 'LITERAL':
+                if not (chr(value).isascii() and (chr(value).isalnum() or value == 95)):
+                    return False
+            elif kind == 'IN':
+                for subop, subval in value:
+                    if str(subop) == 'RANGE':
+                        if not all(chr(v).isascii() and (chr(v).isalnum() or v == 95)
+                                   for v in range(subval[0], subval[1] + 1)):
+                            return False
+                    elif str(subop) == 'CATEGORY' and str(subval) in ('CATEGORY_WORD', 'CATEGORY_DIGIT'):
+                        continue
+                    elif str(subop) != 'LITERAL' or not identifier([(subop, subval)]):
+                        return False
+            elif kind in ('MAX_REPEAT', 'MIN_REPEAT'):
+                if not identifier(value[2]): return False
+            elif kind == 'SUBPATTERN':
+                if not identifier(value[3]): return False
+            elif kind == 'BRANCH':
+                if not all(identifier(branch) for branch in value[1]): return False
+            else:
+                return False
+        return True
+
+    if method == 'fullmatch' and identifier(tokens):
+        return True
+    if len(tokens) < 3 or str(tokens[0][0]) != 'AT' or str(tokens[-1][0]) != 'AT':
+        return False
+    if str(tokens[0][1]) not in ('AT_BEGINNING', 'AT_BEGINNING_STRING') \
+            or str(tokens[-1][1]) not in ('AT_END', 'AT_END_STRING'):
+        return False
+    middle = tokens[1:-1]
+    if identifier(middle):
+        return True
+    chunks, literal, captures = [], '', 0
+    for op, value in middle:
+        if str(op) == 'LITERAL':
+            literal += chr(value)
+        elif str(op) == 'SUBPATTERN':
+            parts = value[3]
+            if len(parts) != 1 or str(parts[0][0]) != 'MAX_REPEAT': return False
+            lo, _hi, repeated = parts[0][1]
+            if lo < 1 or len(repeated) != 1 or str(repeated[0][0]) != 'IN': return False
+            if [(str(a), str(b)) for a, b in repeated[0][1]] != [('CATEGORY', 'CATEGORY_DIGIT')]: return False
+            chunks.append(literal); literal = ''; captures += 1
+        else:
+            return False
+    return (captures >= 2 and not literal
+            and re.fullmatch(r'[A-Z][A-Z0-9_]* [a-z_][a-z0-9_]*=', chunks[0]) is not None
+            and all(re.fullmatch(r' [a-z_][a-z0-9_]*=', c) for c in chunks[1:]))
+
+
+def _formal_names(fn, patterns, inherited=(), *, modules=(), sanitizers=()):
+    """Conservative input-origin analysis after a real HDL lexical recognizer.
+
+    No function name is exempted. A separate prose source in the same function
+    remains unknown. Container writes propagate unknown input back to readers;
+    constants do not launder a later prose insertion into a formal collection.
+    """
+    nodes = list(_scope_nodes(fn))
+    local = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    assigned = {t.id for n in nodes if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    parameters = {a.arg for a in (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)}
+    unknown = parameters - assigned
+    inherited = set(inherited)
+
+    def tainted(expr, bound=frozenset()):
+        if expr is None or isinstance(expr, ast.Constant): return False
+        if isinstance(expr, ast.Name):
+            return expr.id in unknown or (expr.id not in local | inherited | set(bound)
+                                         and expr.id not in {'True', 'False', 'None'})
+        if isinstance(expr, ast.Call):
+            name = expr.func.attr if isinstance(expr.func, ast.Attribute) else \
+                expr.func.id if isinstance(expr.func, ast.Name) else ''
+            # These existing lexical recognizers remove comments AND strings.
+            if ast.unparse(expr.func) in sanitizers:
+                return False
+            if name in {'read_text', 'read_bytes', 'open', 'input'}: return True
+            pattern, subject, method = _regex_parts(expr, patterns)
+            if method:
+                return not _closed_record_pattern(pattern, method) and tainted(subject, bound)
+            if name == 'compile' and isinstance(expr.func, ast.Attribute) \
+                    and isinstance(expr.func.value, ast.Name) \
+                    and expr.func.value.id in _PATTERN_FACTORY_MODULES:
+                return False
+            inputs = list(expr.args) + [k.value for k in expr.keywords]
+            if (isinstance(expr.func, ast.Attribute)
+                    and not (isinstance(expr.func.value, ast.Name)
+                             and expr.func.value.id in modules)):
+                inputs.append(expr.func.value)
+            if not inputs:
+                return name not in {'set', 'list', 'dict', 'tuple'}
+            return any(tainted(x, bound) for x in inputs)
+        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            scope = set(bound)
+            for generator in expr.generators:
+                if tainted(generator.iter, scope): return True
+                scope.update(n.id for n in ast.walk(generator.target) if isinstance(n, ast.Name))
+                if any(tainted(x, scope) for x in generator.ifs): return True
+            values = [expr.key, expr.value] if isinstance(expr, ast.DictComp) else [expr.elt]
+            return any(tainted(x, scope) for x in values)
+        return any(tainted(child, bound) for child in ast.iter_child_nodes(expr)
+                   if not isinstance(child, (ast.operator, ast.cmpop, ast.expr_context)))
+
+    for _ in range(len(local) + 1):
+        previous = set(unknown)
+        for node in nodes:
+            targets, value = [], None
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+            elif isinstance(node, (ast.For, ast.comprehension)):
+                targets, value = [node.target], node.iter
+            if value is not None and tainted(value):
+                for target in targets:
+                    if isinstance(target, ast.Subscript):
+                        target = target.value
+                    unknown.update(n.id for n in ast.walk(target)
+                                   if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Load)))
+        if unknown == previous: break
+    return (local | inherited) - unknown
+
+
+def _formal_search(call, patterns, names):
+    pattern, subject, method = _regex_parts(call, patterns)
+    if method is None:
+        return False
+    if _closed_record_pattern(pattern, method):
+        return True
+    return subject is not None and all(n.id in names for n in ast.walk(subject)
+                                      if isinstance(n, ast.Name))
+
+
+def _match_derived_names(fn: ast.AST, *, formal_search=None, scoped=False) -> Set[str]:
     """Locals bound to a regex match or to text taken out of one.
 
     `m = RE.search(t)`, `hits = RE.findall(t)`, `val = m.group(1)`, and one hop
@@ -2327,7 +2527,7 @@ def _match_derived_names(fn: ast.AST) -> Set[str]:
     out: Set[str] = set()
     for _ in range(3):                       # transitive, cheaply bounded
         grew = False
-        for n in ast.walk(fn):
+        for n in (_scope_nodes(fn) if scoped else ast.walk(fn)):
             if not isinstance(n, ast.Assign) or len(n.targets) != 1:
                 continue
             t = n.targets[0]
@@ -2337,7 +2537,8 @@ def _match_derived_names(fn: ast.AST) -> Set[str]:
                 continue
             for sub in ast.walk(n.value):
                 hit = (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                       and sub.func.attr in (_SEARCH_ATTRS | {"group", "groups", "groupdict"})) \
+                       and sub.func.attr in (_SEARCH_ATTRS | {"group", "groups", "groupdict"})
+                       and not (formal_search and formal_search(sub))) \
                     or (isinstance(sub, ast.Name) and sub.id in out)
                 if hit and t.id not in out:
                     out.add(t.id); grew = True
@@ -2347,7 +2548,7 @@ def _match_derived_names(fn: ast.AST) -> Set[str]:
     return out
 
 
-def _writes_a_declared_value(fn: ast.AST) -> bool:
+def _writes_a_declared_value(fn: ast.AST, *, formal_search=None, scoped=False) -> bool:
     """Does it write THE MATCHED VALUE into a record?
 
     NARROWED, and the narrowing is the work. "Any subscript assignment" caught
@@ -2356,10 +2557,10 @@ def _writes_a_declared_value(fn: ast.AST) -> bool:
     defects have a tighter shape: the value taken OUT of the prose is the value
     written IN as the declaration. That is what is asked here.
     """
-    derived = _match_derived_names(fn)
+    derived = _match_derived_names(fn, formal_search=formal_search, scoped=scoped)
     if not derived:
         return False
-    for n in ast.walk(fn):
+    for n in (_scope_nodes(fn) if scoped else ast.walk(fn)):
         vals = []
         if isinstance(n, ast.Assign) and any(isinstance(t, ast.Subscript)
                                              for t in n.targets):
@@ -2371,8 +2572,9 @@ def _writes_a_declared_value(fn: ast.AST) -> bool:
             for sub in ast.walk(v):
                 if isinstance(sub, ast.Name) and sub.id in derived:
                     return True
-                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
-                        and sub.func.attr in ("group", "groups", "groupdict"):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr in ("group", "groups", "groupdict")
+                        and not (formal_search and formal_search(sub))):
                     return True
     return False
 
@@ -2419,11 +2621,15 @@ def _consults_polarity(fn: ast.AST, aliases: Set[str]) -> bool:
 _OFFENDER_REGISTER: Dict[str, str] = {}
 
 
-def scan(root: Path) -> List[str]:
-    """`module::function` for every polarity-blind prose extractor."""
-    _instrument_calibration.assert_calibrated(
-        "prose_polarity_consulted_check::scan")  # R-0915-86(3)
-    found: List[str] = []
+def _scan_populations(root: Path):
+    """Keep legacy exemption audit separate from automatic grammar evidence."""
+    _instrument_calibration.assert_calibrated("prose_polarity_consulted_check::scan")
+    raw, refined = [], []
+    # Existing debt and argued exemptions keep their original measurement.
+    # This classifier decides whether a NEW arrival really reads prose; it
+    # does not silently reclassify the previously reviewed population or make
+    # the live-exemption audit lose the functions it is meant to audit.
+    existing = set(_NOT_PROSE) | set(_load(root / "programs" / _BASELINE_NAME) or [])
     for p in sorted((root / "programs").glob("*.py")):
         if p.stem.startswith("test_") or p.stem == Path(__file__).stem:
             continue
@@ -2431,16 +2637,74 @@ def scan(root: Path) -> List[str]:
             tree = ast.parse(p.read_text(errors="replace"))
         except (OSError, SyntaxError):
             continue
-        al = _aliases(tree)
-        for n in ast.walk(tree):
-            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        aliases = _aliases(tree)
+        primitives = {'module_port_audit': 'lexical_mask',
+                      '_hdl_code_text': 'strip_hdl_comments_and_strings'}
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        contexts, instruments = {}, {}
+        instruments[None] = (_literal_patterns(tree), set(), set())
+
+        def instrument(scope, inherited):
+            patterns, modules, sanitizers = (dict(inherited[0]), set(inherited[1]), set(inherited[2]))
+            nodes = list(_scope_nodes(scope))
+            shadowed = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                shadowed.update(a.arg for a in (*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs))
+            patterns = {k: v for k, v in patterns.items() if k not in shadowed}
+            modules -= shadowed
+            sanitizers = {s for s in sanitizers if s.split('.', 1)[0] not in shadowed}
+            patterns.update(_literal_patterns(scope))
+            for imported in nodes:
+                if isinstance(imported, ast.Import):
+                    for alias in imported.names:
+                        name = alias.asname or alias.name
+                        modules.add(name)
+                        if alias.name in primitives:
+                            sanitizers.add(name + '.' + primitives[alias.name])
+                elif isinstance(imported, ast.ImportFrom) and imported.module in primitives:
+                    for alias in imported.names:
+                        if alias.name == primitives[imported.module]:
+                            sanitizers.add(alias.asname or alias.name)
+            return patterns, modules, sanitizers
+
+        instruments[None] = instrument(tree, instruments[None])
+        def context(fn):
+            if fn not in contexts:
+                parent = parents.get(fn)
+                while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    parent = parents.get(parent)
+                inherited = context(parent) if parent else ()
+                patterns, modules, sanitizers = instruments[fn] = instrument(fn, instruments[parent])
+                contexts[fn] = _formal_names(fn, patterns, inherited,
+                                             modules=modules, sanitizers=sanitizers)
+            return contexts[fn]
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not (_searches_prose(n) and _writes_a_declared_value(n)):
+            if not (_searches_prose(node) and _writes_a_declared_value(node)):
                 continue
-            if _consults_polarity(n, al):
+            if _consults_polarity(node, aliases):
                 continue
-            found.append(f"{p.stem}::{n.name}")
-    return sorted(set(found))
+            name = f"{p.stem}::{node.name}"
+            raw.append(name)
+            if name in existing:
+                refined.append(name)
+                continue
+            names = context(node)
+            patterns = instruments[node][0]
+            def formal(call):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
+                        and call.func.attr in {"group", "groups", "groupdict"}:
+                    return all(n.id in names for n in ast.walk(call.func.value) if isinstance(n, ast.Name))
+                return _formal_search(call, patterns, names)
+            if _writes_a_declared_value(node, formal_search=formal, scoped=True):
+                refined.append(name)
+    return sorted(set(raw)), sorted(set(refined))
+
+
+def scan(root: Path) -> List[str]:
+    """Polarity-blind prose publishers, excluding proven formal input origins."""
+    return _scan_populations(root)[1]
 
 
 def _defines_function(root: Path, name: str) -> bool:
@@ -2582,8 +2846,8 @@ def main(argv=None) -> int:
               f"{root}. NOT a pass.", file=sys.stderr)
         return 2
 
-    now_all = scan(root)
-    exempt_problems = exemption_audit(now_all, root)
+    raw_all, now_all = _scan_populations(root)
+    exempt_problems = exemption_audit(raw_all, root)
     exempted = exemptions_in_scope(root)
     now = [n for n in now_all if n not in set(exempted)]
     bpath = Path(a.baseline) if a.baseline else root / "programs" / _BASELINE_NAME

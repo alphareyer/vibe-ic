@@ -63,6 +63,16 @@ def _run(prompt: str, rtl: str, tb: str) -> dict:
     return SC.run({"user_prompt": prompt}, rtl, tb, None, True)
 
 
+def test_port_roles_come_from_hdl_not_quoted_or_commented_instances():
+    real = SC._tb_bound_port_roles(REG_RTL, REG_TB)
+    assert real["clock"] == "clk" and real["address"] == "address"
+    assert real["write_enable"] == "we" and real["read_data"] == "read_data"
+    decoy = 'dut fake(.clk(decoy_clk), .address(decoy_addr));'
+    assert SC._tb_bound_port_roles(REG_RTL, REG_TB + '// ' + decoy) == real
+    assert SC._tb_bound_port_roles(REG_RTL, REG_TB + '\ninitial $display("' + decoy + '");') == real
+    assert SC._tb_bound_port_roles(REG_RTL, 'module tb; initial $display("' + decoy + '"); endmodule') == {}
+
+
 def _kind(report: dict, kind: str) -> list[dict]:
     return [item for item in report["items"] if item["kind"] == kind]
 
