@@ -64,13 +64,15 @@ def _path(project: Path, value: Any) -> Path:
     return path if path.is_absolute() else project / path
 
 
-def tool_selected(project: Path, step: str = '31') -> bool:
+def tool_selected(project: Path, step: str = '31', *, kind: str | None = None) -> bool:
     """Unreadable selection is a refusal, never authority for direct fallback.
 
-    As in state_metric, dual retains the direct authority and its tool
-    cross-check. This reader does not change that producer selection policy.
+    DRC dual retains direct authority and its tool cross-check. LVS uses
+    the full-GDS chain in every mode, with a direct diagnostic in dual.
     """
     try:
+        if step == '31' and kind == 'lvs':
+            return pv.mode_for_half(project, 'lvs') in ('librelane', 'dual')
         return selected_mode(project, step) == 'librelane'
     except (Refusal, OSError, ValueError, TypeError):
         return True
@@ -357,7 +359,7 @@ def obligation(project: Path, kind: str, layout: Path | None = None, *, mixed_to
     """None means direct authority; NM never permits legacy fallback."""
     step = {'density': '34', 'antenna': '26'}.get(kind, '31')
     final_stream = not mixed_top and kind in ('drc', 'density') and tool_selected(project, '37')
-    if not final_stream and not tool_selected(project, step):
+    if not final_stream and not tool_selected(project, step, kind=kind):
         return None
     rows = {}
     try:

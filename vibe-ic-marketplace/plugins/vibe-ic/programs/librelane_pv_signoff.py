@@ -5,7 +5,7 @@ Physical verification, the finishing XOR and the sign-off metrics record,
 measured by LibreLane's own steps on the stream the run ships:
 
 * **31** ``Magic.DRC`` + ``KLayout.DRC`` (+ ``KLayout.Density``) on the GDS, and
-  ``Magic.SpiceExtraction`` -> ``Netgen.LVS`` on the routed DEF, all from ONE
+  ``Magic.SpiceExtraction`` -> ``Netgen.LVS`` on the final full GDS, all from ONE
   bridged State (``state_from_direct``, which writes the powered netlist from
   the DEF's own database as LibreLane's OpenROAD steps do).
 * **37.3** ``Vibeic.FinishingXOR`` (plugin step): finishing never removes,
@@ -73,6 +73,18 @@ HALVES = {'drc': DRC_CHAIN, 'lvs': LVS_CHAIN}
 
 #: Where each half's judgment is written (project-relative).
 RECORD_REL = 'reports/phase3/librelane_pv_{half}.json'
+
+
+def mode_for_half(project: Path, half: str) -> str:
+    """LVS always publishes the full-GDS chain; direct wiring is triage only.
+
+    The existing Step31 switch still selects DRC independently. For LVS,
+    ``dual`` retains the additional direct diagnostic, while ``direct`` no
+    longer authorizes a DEF/placeholder report as the canonical result.
+    """
+    from librelane_contract import selected_mode
+    mode = selected_mode(project, '31')
+    return 'librelane' if half == 'lvs' and mode == 'direct' else mode
 
 
 #: The flow's via-landing remediation record (`_stage_via_legalized_tech_lef`).
@@ -413,10 +425,11 @@ def state_metric(project: Path, key: str, *, current: bool = False) -> dict[str,
         return None
     step, rel = STATE_KEYS[key]
     try:
-        mode = selected_mode(project, step)
+        mode = (mode_for_half(project, 'lvs') if rel == RECORD_REL.format(half='lvs')
+                else selected_mode(project, step))
     except Refusal as exc:
         return {'value': NOT_MEASURED, 'reason': f'step {step}: {exc}'}
-    if mode != 'librelane':
+    if mode != 'librelane' and not (rel == RECORD_REL.format(half='lvs') and mode == 'dual'):
         return None
     if current:
         import librelane_signoff_evidence as native

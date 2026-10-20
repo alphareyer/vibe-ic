@@ -841,6 +841,78 @@ def read_current_verdict(project, report_path, layout):
             "subject_equivalence": equivalence}
 
 
+def _native_hierarchy_driver(top, audit):
+    """Normalize at the deck's align boundary, before pins or comparison.
+
+    Keep the PDK's extraction, device models and comparison policy. Only the
+    selected electrical hierarchy participates: unused library definitions
+    are recorded, while every reachable device is expanded by KLayout itself.
+    Never remove a measured NoMatch or trim an already-created top pin.
+    """
+    return r'''
+require 'json'
+vibeic_top = @TOP@
+vibeic_audit = @AUDIT@
+vibeic_original_align = method(:align)
+vibeic_inventory = nil
+vibeic_inventory = lambda do |circuit|
+  counts = Hash.new(0)
+  circuit.each_device { |d| counts[d.device_class.name] += 1 }
+  circuit.each_subcircuit do |s|
+    child = s.circuit_ref
+    if child.each_device.to_a.empty? && child.each_subcircuit.to_a.empty?
+      raise "NATIVE_LVS_REFERENCED_BLACKBOX: #{child.name}"
+    end
+    vibeic_inventory.call(child).each { |name, n| counts[name] += n }
+  end
+  counts
+end
+define_singleton_method(:align) do |*arguments|
+  audit = { 'operation' => 'flatten_selected_hierarchies', 'sides' => [] }
+  roots = []
+  [netlist, schematic].each do |nl|
+    candidates = nl.each_circuit.select { |c| c.name.casecmp(vibeic_top) == 0 }
+    raise 'NATIVE_LVS_TOP_AMBIGUOUS' unless candidates.size == 1
+    root = candidates.first
+    raise 'NATIVE_LVS_TOP_IS_REFERENCED' if root.has_refs?
+    before = vibeic_inventory.call(root)
+    pins = root.each_pin.map { |p| p.name }
+    # These are independent roots, not devices or leaves in this design.
+    unused = nl.top_circuits.reject { |c| c == root }
+    row = { 'top' => root.name, 'before_devices' => before, 'before_pins' => pins,
+            'unused_roots' => unused.map { |c| { 'name' => c.name,
+              'devices' => c.each_device.to_a.size, 'pins' => c.pin_count } } }
+    unused.each { |c| nl.purge_circuit(c) }
+    nl.flatten
+    after = vibeic_inventory.call(root)
+    raise 'NATIVE_LVS_FLATTEN_CHANGED_DEVICES' unless before == after
+    raise 'NATIVE_LVS_FLATTEN_CHANGED_PORTS' unless pins == root.each_pin.map { |p| p.name }
+    row['after_devices'] = after
+    audit['sides'] << row
+    roots << root
+  end
+  layout, reference = roots
+  audit['missing_layout_ports'] = []
+  # The structural source owns the external interface. Internal cell labels
+  # still name nets, but are not promoted to external ports by makeall.
+  reference.each_pin do |pin|
+    existing = layout.each_pin.select { |p| p.name.casecmp(pin.name) == 0 }
+    next unless existing.empty?
+    nets = layout.each_net.select { |n| n.name.casecmp(pin.name) == 0 }
+    if nets.size == 1
+      layout.connect_pin(layout.create_pin(pin.name), nets.first)
+    else
+      audit['missing_layout_ports'] << pin.name
+    end
+  end
+  audit['layout_ports'] = layout.each_pin.map { |p| p.name }
+  audit['reference_ports'] = reference.each_pin.map { |p| p.name }
+  File.write(vibeic_audit, JSON.pretty_generate(audit))
+  vibeic_original_align.call(*arguments)
+end
+'''.replace('@TOP@', json.dumps(top)).replace('@AUDIT@', json.dumps(str(audit)))
+
+
 def cmd_native(args, pya):
     """Run a PDK's own LVS deck on the actual final GDS, with explicit inputs."""
     import gate_verilog_to_spice as converter
@@ -906,8 +978,15 @@ def cmd_native(args, pya):
                       report=str(db), target_netlist=str(extracted), topcell=args.top)
     if args.threads < 1:
         raise ValueError("NATIVE_LVS_THREADS_INVALID")
+    # make_top_level_pins promotes every internal label in a flat extraction.
+    # The driver creates only the source-declared external pins, on actual
+    # extracted nets. The original runset and all its rules remain unchanged.
+    parameters['top_lvl_pins'] = 'false'
+    normalization = work / 'hierarchy.json'
     driver = work / "official-deck-driver.lvs"
-    driver.write_text(f"threads({args.threads})\n# %include {deck.relative_to(work)}\n")
+    driver.write_text(f"threads({args.threads})\n"
+                      + _native_hierarchy_driver(args.top, normalization)
+                      + f"\n# %include {deck.relative_to(work)}\n")
     argv = ["klayout", "-b", "-r", str(driver)]
     for name, value in parameters.items():
         argv.extend(["-rd", f"{name}={value}"])
@@ -940,6 +1019,9 @@ def cmd_native(args, pya):
     unchanged = all(_file_record(row["path"])["sha256"] == row["sha256"]
                     for row in manifest)
     status = _native_status(result, rc) if unchanged else "NOT_MEASURED"
+    normalized = json.loads(normalization.read_text()) if normalization.is_file() else None
+    if status == 'PASS' and (not normalized or normalized.get('missing_layout_ports')):
+        status = 'NOT_MEASURED'
     version = subprocess.run(["klayout", "-b", "-v"], capture_output=True,
                              text=True, timeout=30)
     payload = {"schema": "vibeic.native_gds_lvs/1", "status": status,
@@ -954,6 +1036,8 @@ def cmd_native(args, pya):
                "reference_source": _file_record(reference),
                "deck": {**_file_record(deck), "original_source": original_deck},
                "driver_source": _file_record(driver),
+               "hierarchy_normalization": ({**_file_record(normalization), **normalized}
+                                            if normalized else None),
                "native_result": ({**_file_record(db), **result} if db.is_file() else result),
                "extracted_netlist": _file_record(extracted) if extracted.is_file() else None,
                "source_netlist": _file_record(source), "log": _file_record(log),

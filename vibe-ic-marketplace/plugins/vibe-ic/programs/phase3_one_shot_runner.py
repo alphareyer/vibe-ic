@@ -52747,7 +52747,7 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                                 additional_lefs=additional_lefs)
         record = _pv.run_half(project, image, Path(root), pdk.name, half,
                               gds=views["gds"], routed_def=views["def"],
-                              netlist=views["netlist"], sdc=pnr / "constraint.sdc",
+                              netlist=views["netlist"], sdc=views.get("sdc", pnr / "constraint.sdc"),
                               powered_netlist=powered, physical_top=physical_top)
     except (OSError, ValueError) as exc:
         return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
@@ -52764,6 +52764,8 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
                               "librelane_verdict": record["verdict"]}
+    if half == 'lvs':
+        extras['lvs_scope'] = 'full_gds_transistor'
     outputs = [str(record_path)]
     if publish:
         folders = {row.get("step"): Path(row["folder"])
@@ -52898,18 +52900,20 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
                      ) -> Optional[StepResult]:
     """Step 31's producer switch (``phase3/librelane_switch.json`` "31").
 
-    ``direct`` (the default, and every absent switch): bind the native body
+    For DRC, ``direct`` (the default, and every absent switch): bind the native body
     before auditing its current subject. ``current_direct`` may defer that
     audit; the original ``direct`` callback still owns the dual arm.
-    ``librelane``: the tool's verdict is the
+    LVS defaults to the full-GDS LibreLane producer; its direct arm is only
+    retained triage in ``dual``. ``librelane``: the tool's verdict is the
     step's.  ``dual``: the direct half (``direct()``) stays canonical, the tool
     half is measured beside it, and for verification "better" is not the lower
     count -- BOTH must be clean, so the row is the worse of the two and a
     clean/dirty split is named ``LL_PV_ARMS_DISAGREE``.
     """
-    from librelane_contract import Refusal, selected_mode
+    from librelane_contract import Refusal
+    from librelane_pv_signoff import mode_for_half
     try:
-        mode = selected_mode(project, "31")
+        mode = mode_for_half(project, half)
     except Refusal as exc:
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
@@ -52931,7 +52935,23 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     if mode == "librelane":
         return _step31_librelane(project, top, pdk, half, publish=True)
     direct_row = direct()
-    tool_row = _step31_librelane(project, top, pdk, half, publish=False)
+    if half == 'lvs':
+        # Preserve the diagnostic, but clear its canonical names before the
+        # real GDS producer runs. A missing/failed producer cannot leave the
+        # earlier wiring-only match for the release consumers to discover.
+        triage = project / 'reports/phase3/lvs_triage' / str(time.time_ns())
+        triage.mkdir(parents=True, exist_ok=True)
+        retained = []
+        for name in ('lvs.rpt', 'lvs.log', 'lvs_verdict.json', 'lvs_inputs.json',
+                     'lvs_power_aware.rpt'):
+            source = project / 'reports/phase3' / name
+            if source.is_file():
+                destination = triage / name
+                source.replace(destination)
+                retained.append(str(destination))
+        direct_row.extras.update(scope='gate_level_triage', retained_reports=retained)
+        direct_row.detail = 'Triage only; no tapeout LVS claim. ' + direct_row.detail
+    tool_row = _step31_librelane(project, top, pdk, half, publish=half == 'lvs')
     rank = {word: index for index, word in enumerate(_STEP31_ORDER)}
     worse = max((direct_row, tool_row), key=lambda r: rank.get(r.status, len(rank)))
     clean = {r.status in ("PASS", "PASS_WITH_WAIVERS") for r in (direct_row, tool_row)
@@ -52939,7 +52959,10 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     note = (" LL_PV_ARMS_DISAGREE: the direct half is "
             f"{direct_row.status} and the LibreLane half is {tool_row.status}"
             if len(clean) > 1 else "")
-    extras = dict(direct_row.extras)
+    extras = dict(tool_row.extras if half == 'lvs' else direct_row.extras)
+    if half == 'lvs':
+        extras['triage'] = dict(direct_row.extras, status=direct_row.status,
+                               detail=direct_row.detail)
     extras.update({"dual_direct": direct_row.status, "dual_librelane": tool_row.status,
                    "dual_librelane_detail": tool_row.detail,
                    "librelane_pv": tool_row.extras.get("librelane_pv")})
@@ -52947,7 +52970,8 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
                       f"dual step 31 ({half}): direct {direct_row.status}, "
                       f"LibreLane {tool_row.status}.{note} [direct: "
                       f"{direct_row.detail}] [LibreLane: {tool_row.detail}]",
-                      list(direct_row.output_files) + list(tool_row.output_files),
+                      (list(tool_row.output_files) if half == 'lvs' else
+                       list(direct_row.output_files) + list(tool_row.output_files)),
                       extras, reason_class=worse.reason_class,
                       declared_by=worse.declared_by)
 
@@ -53867,7 +53891,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         # EVERY mode (the LibreLane half returns from the dispatch below and
         # writes no inputs record): an earlier run's inputs or verdict must
         # never stand for this compare.
-        for _rec in ("lvs_inputs.json", "lvs_verdict.json"):
+        for _rec in ("lvs_inputs.json", "lvs_verdict.json", "librelane_pv_lvs.json"):
             (project / "reports/phase3" / _rec).unlink(missing_ok=True)
     if not _direct and not (
             upstream_pnr is not None and upstream_pnr.status != "PASS"

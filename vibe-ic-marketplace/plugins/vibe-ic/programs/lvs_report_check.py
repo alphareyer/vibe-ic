@@ -202,7 +202,6 @@ def run(caller_argv, _audit=None) -> int:
         return RC_FAIL
 
     payload_text = buf.getvalue()
-    sys.stdout.write(payload_text)          # stdout stays pure audit JSON
 
     if target and not Path(target).is_file():
         if _write_json(target, payload_text.strip() + "\n"):
@@ -210,6 +209,7 @@ def run(caller_argv, _audit=None) -> int:
                   f"wrapper (eda_report_audit left it absent).",
                   file=sys.stderr)
         else:
+            sys.stdout.write(payload_text)
             print(f"lvs_report_check: NO AUDIT WRITTEN to {target} — the "
                   f"verdict below was produced but could not be persisted.",
                   file=sys.stderr)
@@ -222,21 +222,55 @@ def run(caller_argv, _audit=None) -> int:
             payload = None
         ok, files_found, verdict = denominator_of(payload)
         if not ok:
+            sys.stdout.write(payload_text)
             print(f"lvs_report_check: REFUSED a PASS that cannot name its "
                   f"denominator (summary.files_found={files_found!r}) — a "
                   f"hard sign-off must disclose how much it read.",
                   file=sys.stderr)
             return RC_FAIL
         import librelane_signoff_evidence as _native
-        if not _native.tool_selected(Path(project_dir), "31"):
+        def refuse_current(reason, verdict='NOT_MEASURED'):
+            # Persist the consumer's actual refusal too; the pre-binding
+            # text audit must not leave a saved passed=true certificate.
+            payload['passed'] = False
+            payload['verdict'] = verdict
+            payload['summary']['terminal_verdict'] = ('MISMATCH' if verdict == 'FAIL'
+                                                       else 'INCOMPLETE')
+            payload.setdefault('findings', []).append({
+                'rule': 'LVS_CURRENT_FULLGDS_UNBOUND', 'severity': 'ERROR',
+                'message': reason, 'file': 'reports/phase3/lvs.rpt'})
+            rendered = json.dumps(payload, indent=2) + '\n'
+            if target:
+                _write_json(target, rendered)
+            sys.stdout.write(rendered)
+            print(f'lvs_report_check: {verdict} {reason}', file=sys.stderr)
+            return RC_FAIL
+
+        if _native.tool_selected(Path(project_dir), "31", kind="lvs"):
+            current = _native.obligation(Path(project_dir), 'lvs')
+            if not current or current['verdict'] != 'PASS':
+                return refuse_current('current full-GDS chain: '
+                                      + (current or {}).get('reason', 'missing producer'),
+                                      'FAIL' if (current or {}).get('verdict') == 'FAIL'
+                                      else 'NOT_MEASURED')
+            # The current metrics cannot authorize a copied report. This is
+            # the report written by the same Netgen step whose State was read.
+            from librelane_contract import digest
+            state = Path(current['rows']['design__lvs_error__count']['source'])
+            native_report = state.parent / 'reports/lvs.netgen.rpt'
+            canonical = Path(project_dir) / 'reports/phase3/lvs.rpt'
+            if (not native_report.is_file() or not canonical.is_file()
+                    or digest(native_report) != digest(canonical)):
+                return refuse_current('LL_CANONICAL_REPORT_UNBOUND')
+        else:
             import _physical_current as _pc
             refusal = _pc.check_direct_half(Path(project_dir), "lvs")
             if refusal:
-                print(f"lvs_report_check: NOT_MEASURED {refusal}", file=sys.stderr)
-                return RC_FAIL
+                return refuse_current(refusal)
         print(f"lvs_report_check: PASS over files_found={files_found} "
               f"terminal_verdict={verdict} project={project_dir}",
               file=sys.stderr)
+    sys.stdout.write(payload_text)          # stdout stays pure audit JSON
     return rc
 
 
