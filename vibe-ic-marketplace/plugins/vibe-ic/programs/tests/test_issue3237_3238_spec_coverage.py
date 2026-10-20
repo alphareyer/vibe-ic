@@ -251,3 +251,65 @@ def test_issue3238_generic_loop_body_identifiers_do_not_claim_coverage():
     report = _run(REG_PROMPT, REG_RTL, tb)
     assert not any(item["covered"] for item in _registers(report).values())
 
+
+
+def _historical_frequency_layer(heading="Historical performance reference (informational only)", column="Measured historical performance"):
+    return {"doc_class": "datasheet", "ic_name": "neutral",
+            "extraction_evidence": {"input/docs/history.md": [{"literal": "240 MHz", "label": "frequency"}]},
+            "comparison_tables": [{"headers": ["Platform", column],
+              "rows": [{"Platform": "Previous unrelated prototype", column: "240 MHz"}],
+              "context_heading": heading}]}
+
+
+def _layer_frequency_report(doc, prompt="Current clock named clk has a required period of25ns."):
+    return SC.run({"user_prompt": prompt, "l_docs": json.dumps(doc)}, None, None, None, True)
+
+
+def test_ldoc_historical_frequency_does_not_become_a_current_requirement(tmp_path):
+    layer = tmp_path / "L1_DATASHEET.json"
+    layer.write_text(json.dumps(_historical_frequency_layer()))
+    prompt = tmp_path / "current.md"
+    prompt.write_text("Current clock named clk has a required period of25ns.\n")
+    output = tmp_path / "report.json"
+    cp = subprocess.run([sys.executable, str(PROG), "--prompt", str(prompt), "--ldocs", str(layer),
+                         "--strict", "--json", str(output)], capture_output=True, text=True)
+    report = json.loads(output.read_text())
+    rows = _kind(report, "clock_frequency")
+    # This table need not mint a clock item: its historical performance
+    # column contains no selected-clock qualifier. Any retained item is advisory.
+    assert all(not row["block_eligible"] for row in rows)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert not report["blocked"]
+
+
+def test_ldoc_table_heading_owns_frequency_scope_even_with_generic_column():
+    report = _layer_frequency_report(_historical_frequency_layer(column="Operating clock"))
+    rows = _kind(report, "clock_frequency")
+    assert rows and all(not row["block_eligible"] for row in rows)
+    assert not report["blocked"]
+
+
+def test_ldoc_extraction_evidence_is_not_an_independent_requirement():
+    report = _layer_frequency_report({"doc_class": "datasheet", "extraction_evidence": {
+        "source.md": [{"literal": "240 MHz", "label": "clock frequency"}]}})
+    assert not _kind(report, "clock_frequency")
+    assert not report["blocked"]
+
+
+def test_same_frequency_history_never_hides_a_current_ldoc_requirement():
+    doc = _historical_frequency_layer()
+    doc["required_clock"] = "The current design requires a clock frequency of 240 MHz."
+    report = _layer_frequency_report(doc)
+    rows = _kind(report, "clock_frequency")
+    assert any(row["block_eligible"] for row in rows)
+    assert any(not row["block_eligible"] for row in rows)
+    assert report["blocked"]
+
+
+def test_current_frequency_stays_blocking_beside_unrelated_history():
+    doc = _historical_frequency_layer()
+    doc["required_clock"] = "The current design requires a clock frequency of 125 MHz."
+    report = _layer_frequency_report(doc)
+    assert _clock(report, "125 MHz")["block_eligible"]
+    assert not _clock(report, "240 MHz")["block_eligible"]
+    assert report["blocked"]

@@ -333,9 +333,12 @@ def extract(prompt_text: str) -> List[dict]:
                 continue
             unit = m.group(2)
             disp = m.group(1).strip() + " " + unit
-            if disp in seen_freq:
+            # Equal rates in current, historical and physical clauses retain
+            # their own scope; the checklist merges equal-role obligations.
+            key = (disp, context)
+            if key in seen_freq:
                 continue
-            seen_freq.add(disp)
+            seen_freq.add(key)
             baud_note = " (stated as a baud rate)" if is_baud else ""
             items.append({
                 "kind": "clock_frequency",

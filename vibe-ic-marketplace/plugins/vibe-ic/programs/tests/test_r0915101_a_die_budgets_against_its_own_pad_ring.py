@@ -428,3 +428,83 @@ def test_the_fallback_reaches_the_SLOT_route_too_and_is_said_so():
     assert "largest_digital_signal_pad_count" in rep     # the slot arithmetic
     assert rep.get("budget_basis") != "37.5self:own_pad_ring"
     assert rep["verdict"] in ("FITS", "FITS_AFTER_FOLD", "DOES_NOT_FIT")
+
+
+def _geometry_operator_project(*, source_changes=None, l3=_L3_WITH_RING):
+    project = _project(operator_template={"path": "input/operator/geometry.json", "slot": "geometry"}, l3=l3)
+    source = project / "input/operator/geometry.json"
+    source.parent.mkdir()
+    raw = {"SLOT": "geometry", "DIE_AREA": "0 0 1000 1200", "SEAL_RING_WIDTH": 10,
+           "PAD_MASK": "neutral_mask.gds", "FORBIDDEN_LAYERS": [{"name": "neutral", "layer": 12, "datatype": 0}]}
+    raw.update(source_changes or {})
+    source.write_text(json.dumps(raw))
+    record = S._ST.slot_record(source, raw, source.parent)
+    slots = project / "input/submission_template/slots"
+    (slots / "geometry.json").write_text(json.dumps(record))
+    # An unselected catalog entry does not define the purchased geometry's pads.
+    (slots / "slot_1x1.json").write_text(json.dumps({"slot": "slot_1x1", "pads": {
+        "lists": [{"key": "PAD_LIST", "raw": ["bidir[0].pad"], "count": 1}]}}))
+    return project, source, record
+
+
+def test_geometry_only_operator_measures_design_ring_without_claiming_physical_fit():
+    project, source, record = _geometry_operator_project()
+    before = source.read_bytes()
+    rc, report = _run(project)
+    assert rc == 0 and report["verdict"] == "FITS"
+    assert report["budget_basis"] == "operator_geometry:design_pad_ring"
+    assert report["operator_template_contract"]["kind"] == "GEOMETRY_ONLY"
+    assert report["operator_template_contract"]["slots"][0]["source_sha256"] == record["source_sha256"]
+    assert report["own_ring_arithmetic"]["ring_geometric_capacity_pads"] is None
+    assert report["physical_fit_verdict"] == "NOT_MEASURED"
+    assert source.read_bytes() == before
+    answers = json.loads((project / "input/step_0_5ic_answers.json").read_text())
+    assert answers["operator_template"]["slot"] == "geometry"
+
+
+def test_geometry_operator_still_rejects_a_ring_with_unbonded_ports():
+    project, _, _ = _geometry_operator_project(l3=_L3_RING_TOO_SMALL)
+    rc, report = _run(project)
+    assert rc == 1 and report["verdict"] == "DOES_NOT_FIT"
+    if report.get("budget_basis") == "operator_geometry:design_pad_ring":
+        assert report["own_ring"]["unbonded_count"] > 0
+
+
+def test_geometry_operator_never_overrides_a_declared_fixed_pad_roster():
+    project, _, _ = _geometry_operator_project(source_changes={"PAD_LIST": ["bidir[0].pad"]})
+    rc, report = _run(project)
+    assert rc != 0 and report["verdict"] != "FITS"
+    assert report.get("operator_template_contract", {}).get("kind") != "GEOMETRY_ONLY"
+
+
+def test_geometry_operator_cannot_turn_malformed_pad_fields_into_no_roster():
+    project, _, _ = _geometry_operator_project(source_changes={"PAD_SOUTH": 123})
+    rc, report = _run(project)
+    assert rc != 0
+    assert report.get("operator_template_contract", {}).get("kind") != "GEOMETRY_ONLY"
+
+
+def test_geometry_operator_requires_real_positive_geometry():
+    project, _, _ = _geometry_operator_project(source_changes={"DIE_AREA": "0 0 0 1200"})
+    rc, report = _run(project)
+    assert rc != 0
+    assert report.get("operator_template_contract", {}).get("kind") != "GEOMETRY_ONLY"
+
+
+def test_geometry_operator_requires_readable_unchanged_source():
+    project, source, _ = _geometry_operator_project()
+    source.write_text(source.read_text() + " ")
+    rc, report = _run(project)
+    assert rc != 0
+    assert report.get("operator_template_contract", {}).get("kind") != "GEOMETRY_ONLY"
+    source.rename(source.with_suffix(".retained.json"))
+    assert _run(project)[0] != 0
+
+
+def test_geometry_operator_does_not_resolve_unknown_or_duplicate_ring_groups():
+    for l3 in (_L3_WITH_RING.replace("gpio pin", "unknown peripheral group"),
+               _L3_WITH_RING + "\n| W | `o_sensor_data` |\n"):
+        project, _, _ = _geometry_operator_project(l3=l3)
+        rc, report = _run(project)
+        # A duplicate side is ambiguous input (UNDECIDED), not measured clean.
+        assert rc != 0 and report["verdict"] in {"DOES_NOT_FIT", "UNDECIDED"}

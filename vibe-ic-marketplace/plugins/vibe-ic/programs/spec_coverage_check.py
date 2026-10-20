@@ -1702,21 +1702,28 @@ def _requirement_text(text: str) -> str:
     L-doc directories concatenate JSON documents, so consume the whole stream
     before using the typed view. Mixed prose is left unchanged.
     """
-    def requirements(value, path=()):
+    def requirements(value, path=(), table_context=""):
         if isinstance(value, dict):
-            return {key: requirements(item, path + (key,)) for key, item in value.items()
-                    if key != "provenance" and not key.endswith("_provenance")
+            heading = value.get("context_heading")
+            heading = heading if isinstance(heading, str) else ""
+            return {key: requirements(item, path + (key,),
+                                      heading if key == "rows" and heading else table_context)
+                    for key, item in value.items()
+                    if key not in {"provenance", "extraction_evidence"}
+                    and not key.endswith("_provenance")
                     and item is not None and item != [] and item != {}}
         if isinstance(value, list):
-            return [requirements(item, path) for item in value]
+            return [requirements(item, path, table_context) for item in value]
         if isinstance(value, str):
             context = " ".join(path).replace("_", " ").replace("-", " ")
+            if table_context:
+                context = table_context.replace(";", ",").replace(". ", ", ").replace("\n", " ") + " " + context
             qualified = re.search(
                 r"\b(?:alternat(?:e|ive)|reference|example|diagnostic\w*|baseline)\b",
                 context, re.I)
             metric_note = (path and path[-1] == "note" and
                            re.search(r"\b(?:area|power)\b", context, re.I))
-            if (qualified or metric_note) and not value.startswith(context + ": "):
+            if (table_context or qualified or metric_note) and not value.startswith(context + ": "):
                 return context + ": " + value
         return value
 
@@ -2008,7 +2015,8 @@ def _item_key(it: ChecklistItem) -> tuple:
         return (it.kind, it.pulse_input_signal.lower(),
                 it.pulse_accept_output.lower(), it.pulse_clock_signal.lower(),
                 it.pulse_max_width_cycles, it.source_sha256)
-    return (it.kind, it.requirement.strip().lower())
+    scope = (_clock_requirement_role(it.evidence),) if it.kind == "clock_frequency" else ()
+    return (it.kind, it.requirement.strip().lower()) + scope
 
 
 def extract_chain(stations: dict) -> List[ChecklistItem]:

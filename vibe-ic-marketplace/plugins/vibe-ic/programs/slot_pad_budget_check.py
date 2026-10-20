@@ -980,6 +980,53 @@ def _json_at(project: str, rel: str) -> Optional[Dict[str, Any]]:
     return doc if isinstance(doc, dict) else None
 
 
+def _geometry_only_operator(project: str, slots: Dict[str, Dict[str, Any]]) -> Optional[dict]:
+    """Classify the bound source contract, never infer a pad capacity from zero.
+
+    The ordinary ingester's source/hash and rectangle are reread. A declared
+    pad key, even malformed, remains a fixed-roster question. Unclaimed lists
+    and missing or stale source/geometry cannot establish geometry-only scope.
+    """
+    answers = _json_at(project, _ST.DESIGN_ANSWERS_REL) or {}
+    binding = answers.get("operator_template") or {}
+    if not isinstance(binding, dict):
+        return None
+    selected = binding.get("slot")
+    if selected is not None and not isinstance(selected, str):
+        return None
+    candidates = [(name, obj) for name, obj in slots.items()
+                  if not selected or name == selected or obj.get("slot") == selected]
+    if not candidates:
+        return None
+    records = []
+    for name, obj in candidates:
+        raw_path = obj.get("source_file")
+        source_hash = obj.get("source_sha256")
+        if not isinstance(raw_path, str) or not source_hash:
+            return None
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path(project) / path
+        if _ST.sha256_file(path) != source_hash:
+            return None
+        mapping, error = _ST._load_mapping(path)
+        if error or not isinstance(mapping, dict) or any(
+                _ST.PAD_LIST_KEY_RE.fullmatch(str(key).strip()) for key in mapping):
+            return None
+        actual = _ST.slot_record(path, mapping, path.parent)
+        rect = _ST.parse_rect((actual.get("die_area") or {}).get("rect"))
+        if (rect is None or not all(v.is_finite() for v in rect)
+                or any(v <= 0 for v in _ST.rect_wh(rect))
+                or obj.get("die_area") != actual.get("die_area")
+                or actual["pads"]["unmatched_list_keys"]):
+            return None
+        records.append({"slot": name, "source_sha256": source_hash,
+                        "die_area": actual["die_area"], "ring": actual["ring"],
+                        "non_pad_lists": actual["pads"]["non_pad_lists"]})
+    return {"kind": "GEOMETRY_ONLY", "slots": records,
+            "scope": "design-owned pad roster; bound operator geometry/mask limits retained"}
+
+
 def declared_own_ring(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The pad ring THE DESIGN DECLARED for itself, from its own declaration.
 
@@ -1434,7 +1481,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # to say the same of an owner-attested DIE that binds no operator, a die
     # was taking it too. A die is not exempt from a pad budget; it is its own
     # operator, and its budget is the ring below.
-    _die_is_its_own_operator = _declared_die and not _operator_bound
+    _geometry_operator = (_geometry_only_operator(str(a.project), slots)
+                          if _declared_die and _operator_bound else None)
+    _die_is_its_own_operator = _declared_die and (not _operator_bound or bool(_geometry_operator))
     _declared_ring = (declared_own_ring(_decl_doc) if _die_is_its_own_operator
                       else None)
     # TWO ANSWERS ABOUT ONE WIDTH FIRST, for every route. A contradiction in
@@ -1738,6 +1787,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     if derived_used:
         rep["params_from_top_module_exact_expressions"] = derived_used
 
+    if _geometry_operator:
+        rep["operator_template_contract"] = _geometry_operator
+        rep["budget_basis"] = "operator_geometry:design_pad_ring"
+        rep["physical_fit_verdict"] = "NOT_MEASURED"
+        # The existing ring arithmetic is a connectivity budget. Operator
+        # geometry, mask/layer restrictions and later native fit remain owed.
+        for label in ("reason", "basis"):
+            if isinstance(rep.get(label), str):
+                rep[label] = rep[label].replace(
+                    "binds no operator template", "binds geometry-only operator constraints").replace(
+                    "die is its own operator", "design supplies its own pad roster").replace(
+                    "No external slot exists to measure against; the operator catalogue on disk is information, not a purchase",
+                    "The operator geometry/mask restrictions remain binding; it declares no fixed pad roster")
+
     if a.out_json:
         # WHERE A RELATIVE --json LANDS (#712). It used to land wherever the
         # CALLER happened to be standing, because nothing resolved it against
@@ -1782,14 +1845,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"{_mark}slot_pad_budget_check: {rep['verdict']}")
     if rep["verdict"] in ("UNDECIDED", "NOT_APPLICABLE"):
         print(f"  {rep.get('reason', 'no reason recorded')}")
-    elif rep.get("budget_basis") == "37.5self:own_pad_ring":
+    elif rep.get("budget_basis") in {"37.5self:own_pad_ring", "operator_geometry:design_pad_ring"}:
         # The die's own ring is a different measurement from an operator
         # slot's inventory and says so in its own words, not in the slot
         # report's field names.
         _inv_p = rep.get("own_ring") or {}
         _ar = rep.get("own_ring_arithmetic") or {}
-        print(f"  basis                          : 37.5self — the die is its "
-              f"own operator")
+        print(f"  basis                          : {rep['budget_basis']}")
         print(f"  ring the design declares       : {rep.get('ring_source')} "
               f"({(rep.get('derived_ring') or {}).get('source') or _TD.DECLARATION_REL})")
         print(f"  declared signal bits           : "
