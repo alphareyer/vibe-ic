@@ -559,6 +559,50 @@ def test_selected_native_zero_edge_is_structural_not_applicable(
     assert report['configuration']['native']['status'] == 'MEASURED'
 
 
+def test_selected_native_capsule_does_not_require_second_host_yosys(tmp_path, monkeypatch):
+    """A Docker/in-image native graph is the selected proof, not host Yosys."""
+    import _eda_pin
+    monkeypatch.setenv('VIBEIC_EDA_IMAGE', _eda_pin.image_reference())
+    monkeypatch.delenv('VIBEIC_LIBRELANE_LOCAL_ATTESTATION', raising=False)
+    rtl, _, evidence, run, report, findings, checker = _interface_absence_case(
+        tmp_path, _DIRECTIVE_RTL)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert report['configuration']['native']['status'] == 'MEASURED'
+    assert [finding.state for finding in findings] == ['NOT_APPLICABLE']
+
+    import _rtl_audit_applicability as applicability
+    host_which = applicability.shutil.which
+    monkeypatch.setattr(
+        applicability.shutil, 'which',
+        lambda name: None if name == 'yosys' else host_which(name))
+    measured = applicability.assess(
+        'interface_encoding_audit', rtl, top_module='unit',
+        configuration=report['configuration'])
+    assert measured['state'] == 'NOT_APPLICABLE', measured
+    verified = checker._cc_audit_receipt_evidence(
+        {'id': 'P0_interface_encoding_audit', 'auditor': 'interface_encoding_audit'}, '',
+        checker.CheckContext(output_path=tmp_path / 'review.md', evidence_dirs=[evidence],
+                             rtl_source_root=rtl))
+    assert [finding.state for finding in verified] == ['NOT_APPLICABLE'], verified
+
+
+@pytest.mark.parametrize('mutation', ['graph_bytes', 'graph_missing'])
+def test_selected_native_graph_drift_remains_not_measured(tmp_path, mutation):
+    rtl, _, evidence, _, report, findings, checker = _interface_absence_case(
+        tmp_path, _DIRECTIVE_RTL)
+    assert [finding.state for finding in findings] == ['NOT_APPLICABLE']
+    graph = Path(report['configuration']['native_context']).parent / 'design.json'
+    if mutation == 'graph_bytes':
+        graph.write_text(graph.read_text() + '\n')
+    else:
+        graph.unlink()
+    checked = checker._cc_audit_receipt_evidence(
+        {'id': 'P0_interface_encoding_audit', 'auditor': 'interface_encoding_audit'}, '',
+        checker.CheckContext(output_path=tmp_path / 'review.md', evidence_dirs=[evidence],
+                             rtl_source_root=rtl))
+    assert [finding.state for finding in checked] == ['NOT_MEASURED']
+
+
 def test_selected_define_that_activates_a_child_never_becomes_absence(tmp_path):
     _, _, _, run, report, findings, _ = _interface_absence_case(
         tmp_path, _DEFINE_RTL, options=('-D', 'ENABLE_CHILD'))

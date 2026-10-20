@@ -916,46 +916,184 @@ _VERILOG_NUMBER = re.compile(
     r"(?:\b\d+\s*)?'[sS]?[bBoOdDhH][0-9a-fA-F_xXzZ?]+|\b\d+\b")
 
 
-def _producer_one_bit_source_domain(producer, producer_port):
+_DOMAIN_KEYWORDS = frozenset({
+    'always', 'always_comb', 'always_ff', 'always_latch', 'assign', 'begin',
+    'case', 'casex', 'casez', 'default', 'else', 'end', 'endcase', 'for',
+    'if', 'integer', 'logic', 'reg', 'signed', 'unsigned', 'wire',
+})
+
+
+def _domain_expression_names(expression):
+    """Return the identifiers in a bounded source expression, or ``None``.
+
+    Calls, hierarchy, concatenation and preprocessing require a typed contract;
+    accepting them from lexical width alone would recreate the false proof this
+    helper is meant to prevent.
+    """
+    expression = _VERILOG_NUMBER.sub(' ', expression)
+    if ('$' in expression or '{' in expression or '}' in expression
+            or '`' in expression or '::' in expression or '\\' in expression
+            or re.search(r'\b[A-Za-z_]\w*\s*\(', expression)):
+        return None
+    return {name for name in re.findall(
+        r'(?<![\w$])[A-Za-z_]\w*(?![\w$])', expression)
+            if name not in _DOMAIN_KEYWORDS}
+
+
+def _domain_control_ranges(body):
+    """Map each bounded ``if`` arm to the identifiers controlling that arm."""
+    import rtl_hygiene_lint as lint
+
+    ranges = []
+    for match in re.finditer(r'\bif\s*\(', body):
+        opening = body.find('(', match.start(), match.end())
+        balanced = extract_balanced(body, opening)
+        if balanced is None:
+            return None
+        condition, close = balanced
+        names = _domain_expression_names(condition)
+        arm_start = close + 1
+        arm_end = lint._procedural_statement_end(body, arm_start)
+        if arm_end <= arm_start:
+            return None
+        ranges.append((arm_start, arm_end, names))
+        cursor = arm_end
+        while cursor < len(body) and body[cursor].isspace():
+            cursor += 1
+        if body.startswith('else', cursor) and not re.match(r'\w', body[cursor + 4:cursor + 5]):
+            else_start = cursor + 4
+            else_end = lint._procedural_statement_end(body, else_start)
+            if else_end <= else_start:
+                return None
+            ranges.append((else_start, else_end, names))
+    return ranges
+
+
+def _domain_assignment_dependencies(module):
+    """Collect complete bounded data/control dependencies for scalar writes."""
+    body = module.body
+    controls = _domain_control_ranges(body)
+    if controls is None:
+        return None
+    assignments = {}
+    for match in re.finditer(
+            r'(?<![\w$])([A-Za-z_]\w*)\s*(?:<=|=(?!=))\s*([^;]+);',
+            body, re.MULTILINE | re.DOTALL):
+        target, expression = match.group(1), match.group(2)
+        names = _domain_expression_names(expression)
+        for start, end, guard_names in controls:
+            if start <= match.start() < end:
+                if names is None or guard_names is None:
+                    names = None
+                    break
+                names.update(guard_names)
+        assignments.setdefault(target, []).append(names)
+    return assignments
+
+
+def _domain_local_roots(module, *, target=None, expression=None):
+    """Resolve a scalar expression to its complete local input dependency set."""
+    if (target is None) == (expression is None):
+        return None
+    assignments = _domain_assignment_dependencies(module)
+    if assignments is None:
+        return None
+    inputs = {port.name for port in module.ports if port.direction == 'input'}
+    if expression is not None:
+        pending = _domain_expression_names(expression)
+        if pending is None:
+            return None
+    else:
+        if target not in assignments:
+            return None
+        pending = {target}
+    roots = set()
+    visiting = set()
+
+    def visit(name):
+        if module.native_widths.get(name) != 1 or name in visiting:
+            return False
+        if name in assignments:
+            visiting.add(name)
+            ok = all(row is not None and all(visit(dependency) for dependency in row)
+                     for row in assignments[name])
+            visiting.remove(name)
+            return ok
+        if name not in inputs:
+            return False
+        roots.add(name)
+        return True
+
+    if not all(visit(name) for name in pending):
+        return None
+    return roots
+
+
+def _domain_parent_expression(module, expression, modules, instances, trail):
+    """Trace a scalar actual through parent bindings to external one-bit roots."""
+    roots = _domain_local_roots(module, expression=expression)
+    if roots is None:
+        return None
+    parents = [instance for instance in instances if instance.module_type == module.name]
+    if not parents:
+        return {(module.name, root) for root in roots}
+    resolved = set()
+    for instance in parents:
+        parent = modules.get(instance.parent_module)
+        if parent is None:
+            return None
+        marker = (instance.parent_module, instance.inst_name, module.name)
+        if marker in trail:
+            return None
+        for root in roots:
+            actual = instance.connection_expressions.get(root)
+            if not actual:
+                return None
+            upstream = _domain_parent_expression(
+                parent, actual, modules, instances, trail | {marker})
+            if upstream is None:
+                return None
+            resolved.update(upstream)
+    return resolved
+
+
+def _producer_one_bit_source_domain(producer, producer_port, parent,
+                                    boundaries, modules, instances):
     """Return source-bound proof that every output value is one-bit sourced.
 
     A one-bit boundary width alone is insufficient: a producer can serialize a
     wider encoded word through that bit over time.  Admit the predicate lemma
-    only when each assignment to the output depends solely on native one-bit
-    nets (or literals).  Unknown functions, parameters and wider/select source
-    nets remain outside this deliberately closed proof.
+    only when the complete transitive data/control closure, including parent
+    bindings, reaches solely native one-bit inputs (or literals). Unknown
+    functions, parameters and wider/select source nets remain outside this
+    deliberately closed proof.
     """
     if (_CONFIGURATION.get('native', {}).get('status') != 'MEASURED'
             or producer.native_widths.get(producer_port) != 1):
         return None
-    target = re.escape(producer_port)
-    assignments = list(re.finditer(
-        r'(?<![\w.$])(?:assign\s+)?' + target
-        + r'\s*(?:<=|=(?!=))\s*([^;]+);', producer.body,
-        re.MULTILINE | re.DOTALL))
-    if not assignments:
+    roots = _domain_local_roots(producer, target=producer_port)
+    if roots is None:
         return None
-    dependencies = set()
-    for assignment in assignments:
-        expression = _VERILOG_NUMBER.sub(' ', assignment.group(1))
-        # Calls, hierarchical references and concatenations need their own
-        # typed producer contract; width inference here would be a guess.
-        if '$' in expression or '{' in expression or '}' in expression:
-            return None
-        names = set(re.findall(r'(?<![\w$])[A-Za-z_]\w*(?![\w$])', expression))
-        for name in names:
-            if producer.native_widths.get(name) != 1:
+    external = set()
+    for boundary in boundaries:
+        for root in roots:
+            actual = boundary.connection_expressions.get(root)
+            if not actual:
                 return None
-            dependencies.add(name)
-    lines = ','.join(str(producer.body.count('\n', 0, item.start()) + 1)
-                     for item in assignments)
-    named = ','.join(sorted(dependencies)) or 'literal-only'
-    return (f'native one-bit source domain at assignment line(s) {lines}; '
-            f'all source nets are one bit: {named}; no wider word projection inferred')
+            upstream = _domain_parent_expression(
+                parent, actual, modules, instances,
+                {(parent.name, boundary.inst_name, producer.name)})
+            if upstream is None:
+                return None
+            external.update(upstream)
+    named = ','.join(f'{module}.{name}' for module, name in sorted(external))
+    return ('native one-bit source domain with complete transitive data/control '
+            f'and parent-binding closure: {named or "literal-only"}; '
+            'no wider word projection inferred')
 
 
 def _whole_scalar_predicate(wire, producer, producer_port, consumer,
-                            consumer_port, parent, instances):
+                            consumer_port, parent, modules, instances):
     """Closed non-word grammar, not a scalar encoding default.
 
     Both declared boundary ports and the parent carrier must be native whole
@@ -969,8 +1107,7 @@ def _whole_scalar_predicate(wire, producer, producer_port, consumer,
     for either unknown condition (x/z). This proves only Gray/Binary branch
     invariance, never producer encoding, data functionality or control polarity.
     """
-    producer_domain = _producer_one_bit_source_domain(producer, producer_port)
-    if (_DISCOVERY_ISSUES or producer_domain is None
+    if (_DISCOVERY_ISSUES
             or not re.fullmatch(r'[A-Za-z_]\w*', wire)
             or producer.native_widths.get(producer_port) != 1
             or consumer.native_widths.get(consumer_port) != 1
@@ -980,6 +1117,7 @@ def _whole_scalar_predicate(wire, producer, producer_port, consumer,
             or not any(p.name == consumer_port and p.direction == 'input'
                        for p in consumer.ports)):
         return None
+    producer_boundaries = []
     for module, port in ((producer, producer_port), (consumer, consumer_port)):
         boundaries = [inst for inst in instances
                       if inst.parent_module == parent.name
@@ -988,6 +1126,12 @@ def _whole_scalar_predicate(wire, producer, producer_port, consumer,
         if not boundaries or any(inst.connection_expressions.get(port) != wire
                                  for inst in boundaries):
             return None
+        if module is producer:
+            producer_boundaries = boundaries
+    producer_domain = _producer_one_bit_source_domain(
+        producer, producer_port, parent, producer_boundaries, modules, instances)
+    if producer_domain is None:
+        return None
     name = re.escape(consumer_port)
     refs = list(re.finditer(r'(?<![\w$])' + name + r'(?![\w$])', consumer.body))
     guards = list(re.finditer(r'\bif\s*\(\s*!?\s*(' + name + r')\s*\)', consumer.body))
@@ -1406,7 +1550,7 @@ def run_audit(
             # proof; unsupported references remain in the same UNKNOWN population.
             predicate = _whole_scalar_predicate(
                 wire, prod_module, prod_port, cons_module, cons_port,
-                all_modules[parent_mod], all_instances)
+                all_modules[parent_mod], all_modules, all_instances)
 
         # Determine match status
         if predicate is not None and cons_class.encoding == 'UNKNOWN':

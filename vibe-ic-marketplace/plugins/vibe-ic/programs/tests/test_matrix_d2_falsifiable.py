@@ -851,19 +851,21 @@ def _f_sta_architectural_residual(p: Path) -> None:
     The neutral post-route report therefore carries a 1.50 ns architectural
     residual. No tool output or historical design evidence is being certified.
     """
+    labels = ("Delay", "Time")
+    header = "".join(f"{name:>12}" for name in labels) + "   Description"
     arcs = "\n".join(
-        f"  1.00  {i + 1:.2f} ^ logic{i}/Y (cell__and2_1)"
+        f"{1.00:>12.2f}{i + 1:>12.2f} ^ logic{i}/Y (cell__and2_1)"
         for i in range(8))
     _w(p, "phase3/stage3/sta/sta_mcorner_ocv.rpt",
        "=== SETUP corner: process=SS liberty=lib_ss ===\n"
        "STA_BASIS: POST_ROUTE_SPEF\n"
        "Startpoint: launch\nEndpoint: capture\n"
        "Path Group: clk\nPath Type: max\n\n"
-       "  Delay Time Description\n"
-       "  0.00  0.00 clock network delay (propagated)\n"
+       + header + "\n"
+       "        0.00        0.00 clock network delay (propagated)\n"
        + arcs + "\n"
-       "  0.50  8.50 ^ removable/Y (cell__buf_1)\n"
-       "  0.00 10.00 clock network delay (propagated)\n"
+       "        0.50        8.50 ^ removable/Y (cell__buf_1)\n"
+       "        0.00       10.00 clock network delay (propagated)\n"
        "       -2.00 slack (VIOLATED)\n")
 
 
@@ -1141,7 +1143,14 @@ def _f_fmeda_bad(p: Path) -> None:
             environment.delenv("VIBEIC_EDA_IMAGE", raising=False)
             environment.delenv("IIC_EDA_IMAGE", raising=False)
         rc = injection.main([str(p), "--rtl-dir", "phase2/stage1/rtl",
-                             "--asil", "D", "--json",
+                             "--asil", "D",
+                             "--enc-module", "ham_enc",
+                             "--enc-in", "data_in", "--enc-out", "code_out",
+                             "--dec-module", "ham_dec",
+                             "--dec-in", "code_in", "--dec-out", "data_out",
+                             "--detect-port", "syndrome_err",
+                             "--rtl-file", "phase2/stage1/rtl/enc.v",
+                             "--rtl-file", "phase2/stage1/rtl/dec.v", "--json",
                              str(p / "reports/phase2/safety/fmeda_coverage.json")])
     produced = json.loads((p / "reports/phase2/safety/fmeda_coverage.json").read_text())
     assert rc == 1 and produced["baseline_valid"] is True
@@ -2924,12 +2933,6 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # VACUOUS_PASS. See `_f_gds_no_labels`.
     ("37", "gds_port_label_check . --json reports/phase3/gds_port_labels.json"):
         "GDS_NO_LABELS",
-    # RE-KEYED 2026-09-23 (R-0915-141): step 38's gate writes its verdict to its
-    # OWN path now, and `reports/phase3/foundry_handoff_audit.json` is no longer
-    # one of the step's declared outputs. The fixture is unchanged -- a 0-byte
-    # deliverable still makes this gate FAIL -- only the clause spelling moved.
-    ("38", "foundry_handoff_package_check . --json "
-           "reports/phase3/foundry_handoff_check.json"): "GDS_BAD",
     ("M1", "mixed_signal_merge_check . --json "
            "reports/analog/mixed_signal/merge.json"): "MS_BAD",
     ("M2", "power_domain_crossing_check . --json "

@@ -6956,11 +6956,12 @@ def autofix_delayed_blocking_clock_toggle(path: Path) -> Tuple[int, List[str]]:
     return len(sites), [str(site['name']) for site in sites]
 
 
-def _native_driver_run(script, work, include_dirs, context):
+def _native_driver_run(script, work, include_dirs, context, selected_image=None):
     """Use this invocation's selected image, or the existing direct tool route."""
     import os
     import shutil
-    selected = ((os.environ.get('VIBEIC_EDA_IMAGE') or '').strip() or
+    selected = ((selected_image or '').strip() or
+                (os.environ.get('VIBEIC_EDA_IMAGE') or '').strip() or
                 (os.environ.get('IIC_EDA_IMAGE') or '').strip())
     command = ['yosys', '-Q', '-s', str(script)]
     context.update(backend='local', selected_image=selected or None, image=None,

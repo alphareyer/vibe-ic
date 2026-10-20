@@ -373,12 +373,12 @@ _IMPORTS_MATRIX = re.compile(rf"^[ \t]*(?:from|import)[ \t]+{_MATRIX_PKG}\b", re
 #: truth, and the first test file to consume a helper without also importing the
 #: package itself read as over-selection.
 #:
-#: ONE HOP, NOT A GRAPH WALK. The point of this oracle is that it shares no code
-#: with the selector's `ast` implementation, so the two can disagree; following
-#: the chain to its end would re-implement the selector and the disagreement
-#: would stop being possible. One hop is what the tree actually contains, and a
-#: second hop appearing should FAIL here and be widened deliberately rather than
-#: be absorbed silently.
+#: The tree now contains a real second hop:
+#: ``flow_matrix -> test_matrix_d3_outputs_produced ->
+#: test_benchmark_evidence_publish -> test_llv1_w20_publication_identity``.
+#: The oracle follows that import chain to a fixed point with line-anchored
+#: regexes. It remains independent of the selector's AST implementation, so a
+#: parser or package-resolution defect can still make the two disagree.
 #:
 #: A HELPER IS DEFINED BY BEHAVIOUR, NOT BY FILENAME. This used to skip every
 #: `test_*.py`, which is the same filename rule that made
@@ -391,17 +391,29 @@ _HELPER_GLOB = "*.py"
 
 
 def _matrix_helper_modules() -> set[str]:
-    """Module names under `tests/` whose own source imports the package.
+    """Module names under `tests/` that transitively import the package.
 
     Includes `test_*.py` modules: a test module another test imports is a
-    helper for that test, whatever its filename says. Still ONE hop — the
-    module has to import the package ITSELF to qualify.
+    helper for that test, whatever its filename says. Import discovery uses a
+    line-anchored regex and a bounded fixed point, not the selector's AST walk.
     """
-    out = set()
-    for hf in (PLUGIN_ROOT / TESTS_REL).glob(_HELPER_GLOB):
-        if _IMPORTS_MATRIX.search(hf.read_text(encoding="utf-8", errors="replace")):
-            out.add(hf.stem)
-    return out
+    sources = {
+        hf.stem: hf.read_text(encoding="utf-8", errors="replace")
+        for hf in (PLUGIN_ROOT / TESTS_REL).glob(_HELPER_GLOB)
+    }
+    reached = {name for name, src in sources.items()
+               if _IMPORTS_MATRIX.search(src)}
+    for _ in range(len(sources) + 1):
+        via_helper = (re.compile(
+            r"^[ \t]*(?:from|import)[ \t]+(?:" +
+            "|".join(sorted(map(re.escape, reached))) + r")\b", re.M)
+            if reached else None)
+        added = {name for name, src in sources.items()
+                 if name not in reached and via_helper and via_helper.search(src)}
+        if not added:
+            break
+        reached |= added
+    return reached
 
 
 def _matrix_consumers_by_independent_scan() -> set[str]:

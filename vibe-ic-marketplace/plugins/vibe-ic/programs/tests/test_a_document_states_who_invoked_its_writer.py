@@ -231,17 +231,21 @@ def test_the_audit_never_takes_authorship_of_the_runs_own_document(tmp_path):
 #: longer declares its nested clause's verdict target, so the flow-derived arm below no
 #: longer finds it. A producer-role document at that path is still left alone -- the
 #: single-path test above (SID "2") pins that and is untouched.
+#:
+#: DEPARTED 2026-10-16: ("37", "reports/phase3/gates/stage3_compliance.json"), by
+#: 52c818dbf. Step 37 no longer declares the compliance wrapper as a producer and no
+#: longer owns that report. The flow-derived arm below therefore must not keep claiming
+#: that the removed producer/report pair is part of the current contract.
 PRODUCER_IS_A_COMPLIANCE_PROGRAM = [
     ("14", "reports/analog/stage_analog_compliance.json"),
     ("15", "reports/phase2/gates/stage2_compliance.json"),
-    ("37", "reports/phase3/gates/stage3_compliance.json"),
 ]
 
 
 @pytest.mark.parametrize("sid,rel", PRODUCER_IS_A_COMPLIANCE_PROGRAM,
                          ids=[s for s, _ in PRODUCER_IS_A_COMPLIANCE_PROGRAM])
-def test_each_of_the_four_steps_keeps_its_producers_document(sid, rel, tmp_path):
-    """All four paths, and the population is derived from the flow by the arm below."""
+def test_each_current_compliance_producer_step_keeps_its_document(sid, rel, tmp_path):
+    """Every current path, with the population checked against the flow below."""
     project = tmp_path / "proj"
     f = project / rel
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -256,10 +260,10 @@ def test_each_of_the_four_steps_keeps_its_producers_document(sid, rel, tmp_path)
     assert not list(f.parent.glob("*superseded*")), sid
 
 
-def test_the_four_steps_are_the_ones_the_flow_declares(tmp_path):
+def test_the_compliance_producer_steps_are_the_ones_the_flow_declares(tmp_path):
     """The list above is not a guess: the flow is read and the two must agree.
 
-    A fifth step gaining a compliance program under `programs:` arrives red here instead of
+    A new step gaining a compliance program under `programs:` arrives red here instead of
     silently losing its evidence.
     """
     import yaml

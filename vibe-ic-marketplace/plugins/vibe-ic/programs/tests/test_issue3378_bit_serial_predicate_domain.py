@@ -90,3 +90,101 @@ endmodule
     assert "one-bit source domain" in row["producer_evidence"], row
     assert row["consumer_encoding"] == "PREDICATE", row
     assert row["status"] == "MATCH", row
+
+
+@pytest.mark.parametrize("producer_body", [
+    "wire sample; assign sample = gray[phase]; assign flag = sample;",
+    ("wire sample0, sample1; assign sample0 = gray[phase]; "
+     "assign sample1 = sample0; assign flag = sample1;"),
+    ("always @* begin if (gray[phase]) flag = 1'b1; "
+     "else flag = 1'b0; end"),
+])
+def test_transitive_data_and_control_dependencies_keep_serial_words_unknown(
+        tmp_path, producer_body):
+    output_decl = "output reg flag" if producer_body.startswith("always") else "output flag"
+    report = _run(tmp_path, f"""
+module producer(input [2:0] data, input [1:0] phase, {output_decl});
+  wire [2:0] gray = data ^ (data >> 1);
+  {producer_body}
+endmodule
+module consumer(input clk, rst, flag, input [1:0] phase,
+                output reg [2:0] value);
+  always @(posedge clk) begin
+    if (rst) value <= 3'b000;
+    else if (flag) value[phase] <= 1'b1;
+    else value[phase] <= 1'b0;
+  end
+endmodule
+module neutral(input clk, rst, input [2:0] data, input [1:0] phase,
+               output [2:0] value);
+  wire link;
+  producer source(.data(data), .phase(phase), .flag(link));
+  consumer sink(.clk(clk), .rst(rst), .flag(link), .phase(phase), .value(value));
+endmodule
+""")
+    assert len(report["interfaces"]) == 7, report
+    row = _edge(report)
+    assert row["producer_encoding"] == "UNKNOWN", row
+    assert row["consumer_encoding"] != "PREDICATE", row
+    assert row["status"] == "UNKNOWN", row
+
+
+@pytest.mark.parametrize("producer_body, output_decl", [
+    ("wire sample = seed; assign flag = sample;", "output flag"),
+    ("always @* begin if (seed) flag = 1'b1; else flag = 1'b0; end",
+     "output reg flag"),
+])
+def test_transitive_scalar_alias_and_guard_remain_proven(
+        tmp_path, producer_body, output_decl):
+    report = _run(tmp_path, f"""
+module producer(input [2:0] unused_data, input [1:0] unused_phase,
+                input seed, {output_decl});
+  {producer_body}
+endmodule
+module consumer(input clk, rst, flag, input [1:0] phase,
+                output reg [2:0] value);
+  always @(posedge clk) begin
+    if (rst) value <= 3'b000;
+    else if (flag) value[phase] <= 1'b1;
+    else value[phase] <= 1'b0;
+  end
+endmodule
+module neutral(input clk, rst, seed, input [2:0] data, input [1:0] phase,
+               output [2:0] value);
+  wire link;
+  producer source(.unused_data(data), .unused_phase(phase), .seed(seed), .flag(link));
+  consumer sink(.clk(clk), .rst(rst), .flag(link), .phase(phase), .value(value));
+endmodule
+""")
+    assert len(report["interfaces"]) == 8, report
+    row = _edge(report)
+    assert row["producer_encoding"] == "BIT_VALUE", row
+    assert row["consumer_encoding"] == "PREDICATE", row
+    assert row["status"] == "MATCH", row
+
+
+def test_parent_binding_dependency_keeps_serial_word_unknown(tmp_path):
+    report = _run(tmp_path, """
+module producer(input seed, output flag); assign flag = seed; endmodule
+module consumer(input clk, rst, flag, input [1:0] phase,
+                output reg [2:0] value);
+  always @(posedge clk) begin
+    if (rst) value <= 3'b000;
+    else if (flag) value[phase] <= 1'b1;
+    else value[phase] <= 1'b0;
+  end
+endmodule
+module neutral(input clk, rst, input [2:0] data, input [1:0] phase,
+               output [2:0] value);
+  wire link;
+  wire [2:0] gray = data ^ (data >> 1);
+  wire sample = gray[phase];
+  producer source(.seed(sample), .flag(link));
+  consumer sink(.clk(clk), .rst(rst), .flag(link), .phase(phase), .value(value));
+endmodule
+""")
+    assert len(report["interfaces"]) == 6, report
+    row = _edge(report)
+    assert row["producer_encoding"] == "UNKNOWN", row
+    assert row["consumer_encoding"] != "PREDICATE", row
+    assert row["status"] == "UNKNOWN", row

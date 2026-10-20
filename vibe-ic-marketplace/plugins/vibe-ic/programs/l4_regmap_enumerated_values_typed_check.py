@@ -95,6 +95,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # that a program loaded by PATH resolves its siblings, and `programs/` is
 # only on sys.path once that line has run.
 import _structural_absence as _sa  # R-0915-119
+from _atomic_artefact import write_json
 from ic_class_profile import detect_ic_class  # noqa: E402
 # v1.7.72 — for #499. The code-literal reader moved to a shared module
 # so the Phase-1 encoding LIFTER reads exactly the bytes this gate
@@ -493,11 +494,11 @@ def main() -> int:
     if args.json:
         report = Path(args.json)
         report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps({
+        write_json(report, {
             "program": "l4_regmap_enumerated_values_typed_check",
             "passed": rc == 0,
             "summary": summary,
-        }, indent=2) + "\n", encoding="utf-8")
+        })
     return rc
 
 

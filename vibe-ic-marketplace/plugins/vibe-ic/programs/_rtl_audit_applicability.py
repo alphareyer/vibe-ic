@@ -131,9 +131,13 @@ def _quoted(path: Path) -> str:
 
 def _elaborate(files: list[Path], *, root: Path | None = None,
                source_sha256: dict[str, str] | None = None,
-               selection: dict[str, Any] | None = None) -> dict[str, Any]:
+               selection: dict[str, Any] | None = None,
+               executor_configuration: Any = None) -> dict[str, Any]:
+    native = (executor_configuration.get("native")
+              if isinstance(executor_configuration, dict) else None)
+    selected_image = native.get("image") if isinstance(native, dict) else None
     executable = shutil.which("yosys")
-    if executable is None:
+    if executable is None and not selected_image:
         raise ValueError("elaborator_unavailable")
     with tempfile.TemporaryDirectory(prefix="rtl-audit-applicability-") as tmp:
         # Elaborate byte-bound immutable copies. Re-opening live source paths
@@ -185,8 +189,21 @@ def _elaborate(files: list[Path], *, root: Path | None = None,
             commands += [f"hierarchy -check -top {top}", "proc", "check -assert",
                          "write_json " + _quoted(output)]
             script = "; ".join(commands)
-        result = subprocess.run([executable, "-Q", "-T", "-p", script],
-                                capture_output=True, text=True, timeout=60)
+        if selected_image:
+            import rtl_hygiene_lint as lint
+            script_file = Path(tmp) / "elaborate.ys"
+            script_file.write_text(script + "\n")
+            context = {}
+            result = lint._native_driver_run(
+                script_file, Path(tmp), [snapshot_root], context,
+                selected_image=selected_image)
+            if (context.get("image") != selected_image or
+                    context.get("native_returncode") != 0 or
+                    context.get("transport_returncode") != 0):
+                raise ValueError("selected_native_remeasurement_mismatch")
+        else:
+            result = subprocess.run([executable, "-Q", "-T", "-p", script],
+                                    capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not output.is_file():
             raise ValueError("elaboration_failed")
         payload = json.loads(output.read_text())
@@ -387,6 +404,13 @@ def _selection_from_configuration(configuration: Any, root: Path,
             hashlib.sha256(script_raw).hexdigest() != script_row["sha256"] or
             script_raw.decode("utf-8", errors="strict") != script_row["text"]):
         raise ValueError("selected_native_capsule_stale")
+    graph = context_file.parent / "design.json"
+    try:
+        graph_raw = graph.read_bytes()
+    except OSError as exc:
+        raise ValueError("selected_native_graph_unreadable") from exc
+    if hashlib.sha256(graph_raw).hexdigest() != native["native_json_sha256"]:
+        raise ValueError("selected_native_graph_stale")
     return {"schema": _SELECTION_SCHEMA, "top_module": top,
             "defines": defines, "parameters": parameters,
             "declared_include_dirs": sorted(declared),
@@ -427,6 +451,32 @@ def _validate_selection(selection: Any, root: Path) -> dict[str, Any]:
                 path.is_symlink() or path.resolve() != path):
             raise ValueError("selected_include_directory_missing_or_symlinked")
     return selection
+
+
+def _selected_native_design(configuration: Any) -> dict[str, Any]:
+    """Read the exact native graph already bound by the selected capsule.
+
+    ``_selection_from_configuration`` validates the current source set, compile
+    context, context receipt and script before this helper is reached.  Reuse the
+    graph from that same invocation rather than requiring a second host Yosys:
+    Docker-only installs deliberately have no host EDA binary.  The graph bytes
+    remain fail-closed through the producer-recorded digest.
+    """
+    native = configuration.get("native") if isinstance(configuration, dict) else None
+    context_path = configuration.get("native_context") if isinstance(configuration, dict) else None
+    if not isinstance(native, dict) or not isinstance(context_path, str):
+        raise ValueError("selected_native_capsule_missing")
+    graph = Path(context_path).parent / "design.json"
+    try:
+        raw = graph.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        raise ValueError("selected_native_graph_unreadable") from exc
+    if hashlib.sha256(raw).hexdigest() != native.get("native_json_sha256"):
+        raise ValueError("selected_native_graph_stale")
+    if not isinstance(payload.get("modules"), dict) or not payload["modules"]:
+        raise ValueError("empty_elaborated_module_census")
+    return payload
 
 
 def receipt_configuration_matches(claim: Any, configuration: Any,
@@ -590,7 +640,8 @@ def _has_state_recurrence(module: dict[str, Any]) -> bool:
 
 def assess(auditor: str, root: Path, *, files: Iterable[Path] | None = None,
            top_module: str | None = None, configuration: Any = None,
-           selected_configuration: Any = None) -> dict[str, Any]:
+           selected_configuration: Any = None,
+           remeasure_selected: bool = False) -> dict[str, Any]:
     """Build a reproducible absence claim or an explicit blocking UNKNOWN."""
     result: dict[str, Any] = {"schema": SCHEMA, "auditor": auditor,
                              "state": UNKNOWN}
@@ -609,6 +660,11 @@ def assess(auditor: str, root: Path, *, files: Iterable[Path] | None = None,
         if selected_configuration is not None:
             selection = _validate_selection(selected_configuration, root)
             requires_selection = True
+            if configuration is not None:
+                measured_selection = _selection_from_configuration(
+                    configuration, root, sources, records, top_module, True)
+                if measured_selection != selection:
+                    raise ValueError("selected_configuration_or_capsule_drift")
         else:
             selection = _selection_from_configuration(
                 configuration, root, sources, records, top_module, requires_selection)
@@ -629,9 +685,13 @@ def assess(auditor: str, root: Path, *, files: Iterable[Path] | None = None,
             or re.search(r"\]\s*[A-Za-z_]\w*\s*\[", t) for t in texts)
         if auditor != "interface_encoding_audit" and source_memory:
             raise ValueError("unsupported_memory")
-        modules = _elaborate(sources, root=root, selection=selection, source_sha256={
-            str(path): record["sha256"] for path, record in zip(sources, records)
-        })["modules"]
+        if (selection is not None and configuration is not None
+                and not remeasure_selected):
+            modules = _selected_native_design(configuration)["modules"]
+        else:
+            modules = _elaborate(sources, root=root, selection=selection, source_sha256={
+                str(path): record["sha256"] for path, record in zip(sources, records)
+            }, executor_configuration=(configuration if selection is not None else None))["modules"]
         # The tool read immutable snapshots of the census bytes. Reject live
         # source or membership changes while it ran as well, so the resulting
         # claim also describes the directory the consumer will remeasure.
@@ -693,14 +753,17 @@ def from_files(auditor: str, files: Iterable[Path]) -> dict[str, Any]:
 
 
 def verify(claim: Any, auditor: str, root: Path | None,
-           *, top_module: str | None = None) -> tuple[bool, str]:
+           *, top_module: str | None = None,
+           configuration: Any = None) -> tuple[bool, str]:
     """Consumer-side remeasurement, never a trust of the receipt's counters."""
     if root is None:
         return False, "consumer_source_root_undeclared"
     if not isinstance(claim, dict) or claim.get("state") != NOT_APPLICABLE:
         return False, "no_structural_not_applicable_claim"
     measured = assess(auditor, root, top_module=top_module,
-                      selected_configuration=claim.get("selection"))
+                      configuration=configuration,
+                      selected_configuration=claim.get("selection"),
+                      remeasure_selected=True)
     if measured.get("state") != NOT_APPLICABLE:
         return False, "remeasurement_" + measured.get("reason", UNKNOWN)
     if claim != measured:

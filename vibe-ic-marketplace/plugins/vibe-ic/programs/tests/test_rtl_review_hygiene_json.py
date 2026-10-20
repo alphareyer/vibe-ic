@@ -91,7 +91,8 @@ def test_real_producer_empty_array_does_not_crash_cli(tmp_path):
         [sys.executable, str(Path(aggregate.__file__)), '--rtl-dir', str(rtl),
          '--out-json', str(report)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads((rtl / '.review/hygiene.json').read_text()) == []
+    hygiene = aggregate._default_review_dir(rtl) / 'hygiene.json'
+    assert json.loads(hygiene.read_text()) == []
     assert json.loads(report.read_text())['total_errors'] == 0
 
 

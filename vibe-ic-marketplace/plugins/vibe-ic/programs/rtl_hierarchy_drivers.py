@@ -3,7 +3,8 @@
 Structural, BLOCKING: only a declared child output/inout, with a valid binding,
 may drive a parent actual. Unsupported discovery/selection is reported instead
 of becoming an empty driver set or an inferred PASS. This is a bounded source
-reader, not an HDL elaborator; generate-for/case and unresolved conditions are
+reader, not an HDL elaborator; constant, finite generate-for and generate-if
+selection are supported while generate-case and unresolved conditions are
 refused. No external tools or design-specific names are used.
 """
 from __future__ import annotations
@@ -288,6 +289,55 @@ def resolve_parameters(expressions, overrides=None):
     return resolved
 
 
+def _generate_for_iterations(header, params):
+    """Return the bounded trip count for a canonical constant generate-for."""
+    parts = [part.strip() for part in header.split(';')]
+    if len(parts) != 3:
+        return None
+    init = re.fullmatch(r'(?:genvar\s+)?([A-Za-z_]\w*)\s*=\s*(.+)', parts[0], re.S)
+    if not init:
+        return None
+    name, initial_expr = init.groups()
+    initial = constant(initial_expr, params)
+    if not isinstance(initial, int):
+        return None
+    condition = parts[1]
+    step = parts[2]
+    value = int(initial)
+    for count in range(4097):
+        env = dict(params, **{name: value})
+        active = constant(condition, env)
+        if not isinstance(active, int):
+            return None
+        if not active:
+            return count
+        if count == 4096:
+            return None
+        direct = re.fullmatch(
+            rf'{re.escape(name)}\s*=\s*{re.escape(name)}\s*([+-])\s*(.+)',
+            step, re.S)
+        compound = re.fullmatch(
+            rf'{re.escape(name)}\s*([+-])=\s*(.+)', step, re.S)
+        incdec = re.fullmatch(
+            rf'(?:{re.escape(name)}\s*(\+\+|--)|(\+\+|--)\s*{re.escape(name)})',
+            step)
+        if direct or compound:
+            op, amount_expr = (direct or compound).groups()
+            amount = constant(amount_expr, env)
+            if not isinstance(amount, int):
+                return None
+            next_value = value + int(amount) if op == '+' else value - int(amount)
+        elif incdec:
+            op = incdec.group(1) or incdec.group(2)
+            next_value = value + (1 if op == '++' else -1)
+        else:
+            return None
+        if next_value == value or not -(1 << 31) <= next_value < (1 << 31):
+            return None
+        value = next_value
+    return None
+
+
 def active_body(body, params, statement_end):
     """Blank inactive generate arms, preserving source offsets and line counts."""
     mask = ports.lexical_mask(body, attributes=True)
@@ -316,6 +366,22 @@ def active_body(body, params, statement_end):
         if condition is None:
             raise ValueError('unresolved generate condition boundary')
         after = condition[1] + 1
+        if match.group(1) == 'for':
+            then_end = statement_end(mask, after)
+            if then_end <= after:
+                raise ValueError('unresolved generate arm')
+            iterations = _generate_for_iterations(
+                body[tail + 1:condition[1]], params)
+            if iterations is None:
+                raise ValueError('unresolved or unbounded generate-for selection')
+            if iterations == 0:
+                blank(off, then_end)
+            else:
+                # Keep one structural copy. Signal-level local writers remain
+                # visible; indexed child bindings still fail closed downstream
+                # when their symbolic select cannot be resolved.
+                blank(off, after)
+            continue
         if match.group(1) != 'if':
             raise ValueError('unsupported generate selection: ' + match.group(1))
         value = constant(body[tail + 1:condition[1]], params)

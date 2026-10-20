@@ -208,4 +208,19 @@ def test_the_stamp_is_the_only_difference_between_the_two_invocations(program,
     for volatile in ("run_at", "generated_at", "timestamp", "elapsed_s", "duration_s"):
         a.pop(volatile, None)
         b.pop(volatile, None)
+    if program == "tapeout_precheck":
+        # An audit intentionally isolates both child-arm reports beside its
+        # requested receipt; the producer writes the canonical project paths.
+        # Assert that exact role-specific placement, then compare every other
+        # byte of meaning. This is the only allowed non-stamp difference.
+        audit_root = tmp_path
+        producer_root = bare_project / "reports" / "phase3"
+        for index, name in enumerate(("general_precheck.json",
+                                      "shuttle_precheck.json")):
+            assert a["arms"][index]["report"] == str(audit_root / name)
+            assert b["arms"][index]["report"] == str(producer_root / name)
+            assert (audit_root / name).is_file()
+            assert (producer_root / name).is_file()
+            a["arms"][index]["report"] = name
+            b["arms"][index]["report"] = name
     assert a == b, f"{program} says something different depending on who invoked it"
