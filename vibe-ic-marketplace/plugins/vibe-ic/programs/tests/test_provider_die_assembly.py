@@ -409,7 +409,7 @@ def _bond_readiness(project, gds, runroot):
 
 
 @pytest.mark.parametrize('case,expected', [
-    ('missing_limit', 'NOT_DETERMINED'), ('declared_pass', 'PASS'),
+    ('missing_limit', 'PASS'), ('declared_pass', 'PASS'),
     ('declared_fail', 'FAIL'), ('missing_layer', 'NOT_DETERMINED'),
     ('missing_master', 'NOT_DETERMINED'), ('invalid_limit', 'NOT_DETERMINED'),
     ('missing_authority', 'NOT_DETERMINED')])
@@ -421,13 +421,15 @@ def test_bond_opening_geometry_reaches_provider_precheck(bond_geometry, case, ex
     elif case == 'declared_fail':
         rule['max_distance_um'] = 199
     elif case == 'missing_layer':
+        rule['max_distance_um'] = 200
         rule['opening_layer']['name'] = 'AbsentOpening'
     elif case == 'missing_master':
+        rule['max_distance_um'] = 200
         (project / 'input/pdk/io.lef').write_text('MACRO not_a_pad\n CLASS CORE ;\nEND not_a_pad\n')
     elif case == 'invalid_limit':
         rule['max_distance_um'] = True
     elif case == 'missing_authority':
-        del value['bond_pad_edge_distance']
+        value['bond_pad_edge_distance'] = {'max_distance_um': 200}
     path.write_text(json.dumps(value))
     before = gds.read_bytes()
     report = _bond_readiness(project, gds, project / 'operator')
@@ -443,6 +445,7 @@ def test_bond_opening_geometry_reaches_provider_precheck(bond_geometry, case, ex
         assert measured['input']['sha256'] == hashlib.sha256(before).hexdigest()
         assert measured['verdict'] == {'missing_limit': 'MANUAL_REVIEW', 'declared_pass': 'PASS',
                                        'declared_fail': 'FAIL', 'invalid_limit': 'NOT_MEASURED'}[case]
+        assert measured['required_for_readiness'] is (case != 'missing_limit')
     else:
         assert measured['verdict'] == 'NOT_MEASURED'
         assert measured['reason']
@@ -520,8 +523,9 @@ def test_provider_assembly_does_not_admit_unreviewed_bond_geometry(bond_assembly
         assert readback['basis']['platform_accepted'] is False
         assert readback['basis']['provider_precheck']['accepted'] is False
         final = _bond_readiness(project, gds, project / 'final-readiness')
-        assert final.verdict == ('NOT_DETERMINED' if expected == 'MANUAL_REVIEW' else 'PASS')
+        assert final.verdict == 'PASS'
         assert final.bond_pad_edge_distance['verdict'] == expected
+        assert final.bond_pad_edge_distance['required_for_readiness'] is (expected != 'MANUAL_REVIEW')
     else:
         assert not dest.exists()
         assert json.loads(edge_path.read_text())['verdict'] == 'FAIL'
@@ -550,8 +554,9 @@ def test_normal_native_precheck_retains_manual_bond_assembly(bond_assembly):
         (runroot / 'provider_precheck.json').write_text(json.dumps(receipt))
         return 0, 'neutral operator source transport, no native PV claim', ''
     final = readiness.evaluate(project, layout=gds, top='neutral_top', rundir=runroot, runner=transport)
-    assert final.verdict == 'NOT_DETERMINED'
+    assert final.verdict == 'PASS'
     assert final.bond_pad_edge_distance['verdict'] == 'MANUAL_REVIEW'
+    assert final.bond_pad_edge_distance['required_for_readiness'] is False
     admitted = finishing.read_admitted_release(project, Path('reports/phase3/provider_die_assembly.json'))
     edge_path = project / 'reports/phase3/bond_pad_edge_distance.json'
     assert admitted['basis']['bond_pad_edge_distance']['verdict'] == 'MANUAL_REVIEW'
@@ -559,6 +564,48 @@ def test_normal_native_precheck_retains_manual_bond_assembly(bond_assembly):
     assert admitted['basis']['files']['bond_pad_edge_distance'] == finishing._release_file(edge_path)
     assert admitted['basis']['platform_accepted'] is False
     assert admitted['basis']['provider_precheck']['accepted'] is False
+
+
+def test_bare_die_advisory_missing_measurement_retains_technical_record(bond_assembly):
+    project, path, gds, operator, seal, dest = bond_assembly
+    value = json.loads(path.read_text())
+    del value['bond_pad_edge_distance']
+    path.write_text(json.dumps(value))
+    admitted = finishing.publish_provider_release(project, dest, source_project=project,
+        instruction=path, precheck=operator, finishing=seal)
+    readback = finishing.read_admitted_release(project, dest)
+    assert readback['basis'] == admitted['basis']
+    edge = readback['basis']['bond_pad_edge_distance']
+    assert edge['verdict'] == 'NOT_MEASURED'
+    assert edge['required_for_readiness'] is False
+    assert readback['basis']['platform_accepted'] is False
+    final = _bond_readiness(project, gds, project / 'advisory-readiness')
+    assert final.verdict == 'PASS'
+    assert final.bond_pad_edge_distance['verdict'] == 'NOT_MEASURED'
+    assert final.bond_pad_edge_distance['required_for_readiness'] is False
+
+
+def test_explicit_unresolved_bond_limit_remains_required(bond_geometry):
+    project, path, gds = bond_geometry
+    value = json.loads(path.read_text())
+    value['bond_pad_edge_distance']['max_distance_um'] = None
+    path.write_text(json.dumps(value))
+    final = _bond_readiness(project, gds, project / 'required-readiness')
+    assert final.verdict == 'NOT_DETERMINED'
+    assert final.bond_pad_edge_distance['verdict'] == 'MANUAL_REVIEW'
+    assert final.bond_pad_edge_distance['required_for_readiness'] is True
+
+
+def test_bare_die_advisory_cannot_hide_outside_frame_failure(bond_geometry):
+    project, path, gds = bond_geometry
+    value = json.loads(path.read_text())
+    value['technical_target']['origin_um'] = [50, 0]
+    path.write_text(json.dumps(value))
+    final = _bond_readiness(project, gds, project / 'outside-readiness')
+    assert final.verdict == 'FAIL'
+    assert final.bond_pad_edge_distance['verdict'] == 'FAIL'
+    assert final.bond_pad_edge_distance['outside_frame_sides'] == ['left']
+    assert final.bond_pad_edge_distance['required_for_readiness'] is False
 
 
 @pytest.mark.parametrize('final_present', [True, False])

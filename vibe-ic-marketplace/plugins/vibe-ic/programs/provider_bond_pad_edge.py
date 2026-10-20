@@ -6,7 +6,9 @@ masters; otherwise use the selected PDK's existing discovery). max_distance_um
 is a provider/packaging declaration, never a tool default. technical_target
 supplies dimensions_um and optional origin_um (the operator slot starts at 0,0).
 Missing authority/geometry is NOT_MEASURED; measured distances without a limit
-are MANUAL_REVIEW. Both prevent final readiness PASS. No layout is changed.
+are MANUAL_REVIEW. Bare-die targets without a declared packaging limit retain
+these as advisory measurements. Selected packaging requirements remain blocking.
+No layout is changed.
 """
 from __future__ import annotations
 
@@ -17,13 +19,26 @@ import re
 import xml.etree.ElementTree as ET
 
 
+def required_for_target(profile, *, cob=False):
+    """Keep the explicit bare-die exception separate from packaging review.
+
+    Upstream gf180mcu-precheck selects its pad-mask check only with --cob.
+    An explicit limit key, even invalid, cannot opt out of its declared rule.
+    """
+    target = profile.get('technical_target') or {}
+    rule = profile.get('bond_pad_edge_distance', {})
+    return (bool(cob) or not isinstance(rule, dict)
+            or target.get('packaging') not in ('bare_die', 'non-CoB bare-die technical profile')
+            or 'max_distance_um' in rule)
+
+
 def measure(project, gds, *, top='', profile_path=None):
     from die_finishing_gen import PROVIDER_TARGET_REL, _release_file
     import _pad_ring as pads
 
     project, gds = Path(project), Path(gds)
     report = {'check': 'bond_pad_edge_distance', 'verdict': 'NOT_MEASURED',
-              'distances_um': None, 'assembly': {
+              'distances_um': None, 'required_for_readiness': True, 'assembly': {
                   'strategy': 'preserve_source_placement', 'applied_offset_um': [0, 0],
                   'basis': 'assembly keeps the source placement; no pad/core transform applied'},
               'scope': 'actual final-GDS opening to declared provider die frame; not packaging acceptance'}
@@ -42,6 +57,7 @@ def measure(project, gds, *, top='', profile_path=None):
         authority = local(profile_path or PROVIDER_TARGET_REL)
         report['profile'] = _release_file(authority)
         profile = json.loads(authority.read_text())
+        report['required_for_readiness'] = required_for_target(profile)
         if not profile.get('provider'):
             raise ValueError('no declared provider profile')
         target = profile['technical_target']

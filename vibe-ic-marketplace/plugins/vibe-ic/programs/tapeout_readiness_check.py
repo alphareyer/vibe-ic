@@ -1121,10 +1121,14 @@ def evaluate(
         # never falls back to the pre-operator layout and claims a measurement.
         final_gds = run_root / "processed.gds" if precheck_src else chosen
         rep.bond_pad_edge_distance = measure(project, final_gds, top=top)
+        from provider_bond_pad_edge import required_for_target
+        rep.bond_pad_edge_distance["required_for_readiness"] = required_for_target(profile, cob=cob)
         atomic_write_text(run_root / "bond_pad_edge_distance.json",
                           json.dumps(rep.bond_pad_edge_distance, indent=2))
         edge = rep.bond_pad_edge_distance
-        if precheck_src and rep.verdict == PASS and edge["verdict"] in (PASS, "MANUAL_REVIEW"):
+        if (precheck_src and rep.verdict == PASS and edge["verdict"] != FAIL
+                and (not edge["required_for_readiness"]
+                     or edge["verdict"] in (PASS, "MANUAL_REVIEW"))):
             try:
                 from die_finishing_gen import publish_provider_release, _REPORT_REL
                 fill_report = project / "reports/phase3/cmp_fill_emit.json"
@@ -1138,7 +1142,8 @@ def evaluate(
             except Exception as exc:
                 rep.verdict = NOT_DETERMINED
                 rep.reason = f"provider assembly was not admitted: {exc}"
-        if rep.verdict == PASS and edge["verdict"] != PASS:
+        if (rep.verdict == PASS and (edge["verdict"] == FAIL
+                or (edge["required_for_readiness"] and edge["verdict"] != PASS))):
             rep.verdict = FAIL if edge["verdict"] == FAIL else NOT_DETERMINED
             rep.reason = "bond_pad_edge_distance: " + edge["verdict"] + ": " + edge["reason"]
     return rep
