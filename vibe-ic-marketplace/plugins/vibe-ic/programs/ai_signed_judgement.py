@@ -21,6 +21,10 @@ SCHEMA = "vibeic.ai-judgement.v1"
 STEPS = frozenset(("D1", "1", "3", "4", "5", "A1", "A2", "A9", "36"))
 #: Step 5's one formal directory (`_path_layout.formal_dir`).
 FORMAL_DIR = "phase2/stage1/formal"
+#: Existing Phase1/D1 original-input population, shared with Step3 role review.
+DESIGN_INPUT_GLOBS = ("input/design_input.txt", "input/phase1_prompt.md",
+                      "input/phase1_structured.yaml", "input/docs/**/*",
+                      "phase1/input_doc/**/*")
 
 
 def _json(path: Path) -> dict:
@@ -48,9 +52,7 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                           + [project / row["path"] for row in binding["input"]["files"]]
                           + _intent_files(project)))
     if sid == "D1":
-        return _files(project, "input/design_input.txt",
-                      "input/phase1_prompt.md", "input/phase1_structured.yaml",
-                      "input/docs/**/*", "phase1/input_doc/**/*",
+        return _files(project, *DESIGN_INPUT_GLOBS,
                       "plugin_input/qualified-outputs.json",
                       "plugin_input/interface-bindings.json",
                       "plugin_input/interface_context/**/*",
@@ -259,8 +261,7 @@ def restore_runner_rows(rows: list[dict]) -> None:
 
 
 def _intent_files(project: Path) -> list[Path]:
-    return _files(project, "input/design_input.txt", "input/phase1_prompt.md",
-                  "input/docs/**/*", "phase1/generated_docs/L6*.json",
+    return _files(project, *DESIGN_INPUT_GLOBS, "phase1/generated_docs/L6*.json",
                   "phase1/generated_docs/L8*.json")
 
 
@@ -317,10 +318,14 @@ def _admit_reset_roles(project: Path, receipt: dict, request: dict) -> dict:
     candidates = {r["state"]: r for r in request["candidates"]}
     if not isinstance(records, list) or len(records) != len(candidates):
         raise ValueError("reset roles do not cover the intrinsic candidate population")
-    intent = {p.resolve() for p in _intent_files(project)
-              if p.resolve().is_relative_to(project / "input")}
+    intent = {p.resolve() for p in _files(project, *DESIGN_INPUT_GLOBS)}
     _path, _nl, binding = _reset_context(project)
-    sources = {(project / p).resolve() for p in binding["input"]["rtl_files"]}
+    from formal_property_run import resolve_include_headers
+    rtl = [(project / p).resolve() for p in binding["input"]["rtl_files"]]
+    source_paths = set(rtl) | {p.resolve() for p in resolve_include_headers(rtl, [project])}
+    sources = {(project / row["path"]).resolve()
+               for row in binding["input"]["files"]
+               if (project / row["path"]).resolve() in source_paths}
     result = {}
     dispositions = {"synchronous_reset", "functional_update", "unresolved"}
     for row in records:

@@ -378,7 +378,7 @@ def test_the_runner_writes_the_netlist_manifest_for_a_multi_clock_design(tmp_pat
     assert crossing["clocks_found"] == ["clk_a", "clk_b"]
 
 
-def _role_project(tmp_path, case='sticky'):
+def _role_project(tmp_path, case='sticky', *, header=False, intent_rel='input/docs/control.md'):
     import design_one_shot_runner as runner
     project = tmp_path / case
     rtl = project / 'phase2/stage1/rtl/neutral.sv'
@@ -394,9 +394,13 @@ def _role_project(tmp_path, case='sticky'):
     extra_ports = ',output reg a,b' if case == 'mixed' else ''
     extra = ("always @(posedge clk or negedge b) if(!b) a<=0; else a<=event_i;\n"
              "always @(posedge clk or negedge a) if(!a) b<=0; else b<=event_i;\n") if case == 'mixed' else ''
-    rtl.write_text('module neutral(input wire clk,rst_n,event_i,ready_i,output reg q'+extra_ports+');\n'
-                   "always @(posedge clk or negedge rst_n) if(!rst_n) q<=1'b0; "
-                   + bodies[case] + '\n'+extra+'endmodule\n')
+    body = ("always @(posedge clk or negedge rst_n) if(!rst_n) q<=1'b0; "
+            + bodies[case] + '\n' + extra)
+    if header:
+        (rtl.parent / 'state_body.svh').write_text(body)
+        body = '`include "state_body.svh"\n'
+    rtl.write_text('module neutral(input wire clk,rst_n,event_i,ready_i,output reg q'
+                   + extra_ports + ');\n' + body + 'endmodule\n')
     l9 = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
     l9.parent.mkdir(parents=True)
     l9.write_text(json.dumps({'top_module': 'neutral'}))
@@ -406,27 +410,34 @@ def _role_project(tmp_path, case='sticky'):
     docs = project / 'input/docs'
     docs.mkdir(parents=True)
     role = 'synchronous reset' if case == 'sync' else 'functional update'
-    (docs / 'control.md').write_text(f'State q uses its constant data branch as a {role}.\n')
+    intent_path = project / intent_rel
+    intent_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = 'control_intent: ' if intent_path.suffix == '.yaml' else ''
+    intent_path.write_text(prefix + f'State q uses its constant data branch as a {role}.\n')
     # This is the runner's normal producer, not a mocked native build helper.
     result = runner.step_emit_phase2_manifests(project, [], 'neutral')
     assert result.status == 'PASS'
     return project, rtl
 
 
-def _official_role_answer(project, role='functional_update', expected_write_rc=0):
+def _official_role_answer(project, role='functional_update', expected_write_rc=0, *,
+                          source_rel='phase2/stage1/rtl/neutral.sv', source_line=2,
+                          intent_rel='input/docs/control.md'):
     import ai_signed_judgement as expert
     command = [sys.executable, str(PROG / 'ai_signed_judgement.py'), str(project), '--step', '3']
     request_run = subprocess.run(command, capture_output=True, text=True)
     assert request_run.returncode == 0, request_run.stdout + request_run.stderr
     request = json.loads(request_run.stdout)
-    rtl = project / 'phase2/stage1/rtl/neutral.sv'
-    source = {'file': rtl.relative_to(project).as_posix(), 'line': 2,
-              'quote': rtl.read_text().splitlines()[1]}
-    intent = {'file': 'input/docs/control.md', 'line': 1,
-              'quote': (project / 'input/docs/control.md').read_text().strip()}
+    rtl = project / source_rel
+    source = {'file': source_rel, 'line': source_line,
+              'quote': rtl.read_text().splitlines()[source_line - 1]}
+    intent_path = project / intent_rel
+    intent = ([{'file': intent_rel, 'line': 1,
+                'quote': intent_path.read_text().splitlines()[0]}]
+              if intent_path.is_file() else [])
     answer = {key: request[key] for key in ('evidence_sha256', 'netlist_sha256')}
     answer['reset_roles'] = [{'candidate': row, 'role': role, 'source_context': [source],
-                             'intent': [intent], 'rationale': (f"State {row['state']} Q {row['q']} "
+                             'intent': intent, 'rationale': (f"State {row['state']} Q {row['q']} "
                              f"uses selector {row['selector']} at the cited constant-arm branch; "
                              + ('the cited input cannot establish its architectural role.'
                                 if role == 'unresolved' else
@@ -560,3 +571,30 @@ def test_step3_authoring_preserves_existing_signed_subject_bytes(tmp_path):
     _official_role_answer(project)
     assert before == {sid: expert.evidence_sha256(project, sid) for sid in before}
     assert all(expert.check(project, sid)[0] for sid in before)
+
+
+@pytest.mark.parametrize('source_form', ['header', 'structured', 'legacy'])
+def test_native_reset_role_existing_canonical_sources(tmp_path, source_form):
+    intent_rel = {'header': 'input/docs/control.md',
+                  'structured': 'input/phase1_structured.yaml',
+                  'legacy': 'phase1/input_doc/control.txt'}[source_form]
+    project, rtl = _role_project(tmp_path, header=source_form == 'header', intent_rel=intent_rel)
+    source_rel = ('phase2/stage1/rtl/state_body.svh' if source_form == 'header'
+                  else 'phase2/stage1/rtl/neutral.sv')
+    expert, request, _answer = _official_role_answer(
+        project, source_rel=source_rel, source_line=1 if source_form == 'header' else 2,
+        intent_rel=intent_rel)
+    assert intent_rel in request['intent_files']
+    rc, report = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 0 and not _rules(report), report
+    assert expert.check(project, '3')[0]
+
+
+def test_native_reset_role_missing_original_input_remains_blocking(tmp_path):
+    project, rtl = _role_project(tmp_path)
+    (project / 'input/docs/control.md').unlink()
+    expert, request, _answer = _official_role_answer(project, role='unresolved')
+    assert request['intent_files'] == []
+    rc, report = _run('reset_dependency_check', str(project), '--front-end', 'netlist')
+    assert rc == 1 and _rules(report) == ['RESET_ROLE_UNRESOLVED'], report
+    assert not expert.check(project, '3')[0]
