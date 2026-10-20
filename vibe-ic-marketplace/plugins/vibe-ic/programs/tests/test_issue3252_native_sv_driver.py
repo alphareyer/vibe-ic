@@ -31,7 +31,9 @@ def test_unparenthesized_comparison_initializer_is_read_not_second_driver():
 
 
 def test_real_procedural_and_continuous_drivers_remain_error():
-    rtl = COMPARISON.replace('q <= d;', 'q <= d; phase <= d;')
+    # Both writes must belong to the process, including with exact statement
+    # bounds. A second bare statement after always's single body is module RTL.
+    rtl = COMPARISON.replace('q <= d;', 'begin q <= d; phase <= d; end')
     findings = lint.rule_continuous_vs_procedural_driver(rtl, 'sample.sv')
     assert any(f.rule == 'multidriven-continuous-procedural' and f.symbol == 'phase'
                for f in findings), findings

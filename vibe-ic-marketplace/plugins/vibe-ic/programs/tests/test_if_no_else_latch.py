@@ -329,3 +329,63 @@ endmodule""")
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# Public issue 3333: only complete, whole-value paths establish a prefix.
+ISSUE3333_LATCH = "module neutral(input logic choose_i, adjust_i,\n               input logic [7:0] left_i, right_i,\n               output logic [7:0] data_o);\n  always_comb begin\n    if (choose_i) begin data_o = left_i; end\n    else begin data_o = right_i; end\n    if (adjust_i) begin data_o = data_o ^ 8'h3c; end\n  end\nendmodule\n"
+
+def test_issue3333_complete_prefix_if_else_is_latch_free():
+    assert _findings(ISSUE3333_LATCH) == []
+
+
+@pytest.mark.parametrize("prefix,defined", [
+    ("data_o = left_i;", True),
+    ("if (choose_i) data_o = left_i; else data_o = right_i;", True),
+    ("if (choose_i) begin if (adjust_i) data_o = left_i; else data_o = right_i; end else data_o = left_i;", True),
+    ("if (choose_i) data_o = left_i; else if (adjust_i) data_o = right_i; else data_o = left_i;", True),
+    ("if (choose_i) data_o = left_i;", False),
+    ("if (choose_i) begin if (adjust_i) data_o = left_i; end else data_o = right_i;", False),
+    ("if (choose_i) data_o[3:0] = left_i[3:0]; else data_o[3:0] = right_i[3:0];", False),
+    ("data_o[3:0] = left_i[3:0];", False),
+    ("case (choose_i) 1'b0: data_o = left_i; default: data_o = right_i; endcase", False),
+    ("case (choose_i) 1'b0: data_o = left_i; endcase", False),
+    ("if (data_o <= left_i) begin end", False),
+    ("for (integer idx=0; idx<0; idx=idx+1) data_o = left_i;", False),
+])
+def test_issue3333_prefix_must_define_whole_value_on_every_path(prefix, defined):
+    src = """module neutral(input choose_i, adjust_i, input [7:0] left_i, right_i,
+                            output reg [7:0] data_o);
+      always @* begin
+        PREFIX
+        if (adjust_i) data_o = data_o ^ 8'h3c;
+      end
+    endmodule""".replace("PREFIX", prefix)
+    final_line = src[:src.index("if (adjust_i) data_o = data_o ^")].count('\n') + 1
+    final = [f for f in _findings(src) if f.line == final_line]
+    assert bool(final) == (not defined), final
+
+
+@pytest.mark.parametrize("foreign", [
+    "always @* begin data_o = left_i; end",
+    "always @* begin if (choose_i) data_o = left_i; else data_o = right_i; end",
+    "initial data_o = 0;",
+    "endmodule module other(input [7:0] left_i, output reg [7:0] data_o); always @* data_o = left_i; endmodule module tail(input adjust_i, input [7:0] left_i, output reg [7:0] data_o);",
+])
+def test_issue3333_foreign_statement_cannot_default_current_block(foreign):
+    src = """module neutral(input choose_i, adjust_i, input [7:0] left_i, right_i,
+                            output reg [7:0] data_o);
+      FOREIGN
+      always_comb begin if (adjust_i) data_o = left_i; end
+    endmodule""".replace("FOREIGN", foreign)
+    assert any(f.symbol == "data_o" for f in _findings(src))
+
+
+def test_issue3333_nested_branch_prefix_cannot_escape_its_path():
+    src = """module neutral(input choose_i, adjust_i, input [7:0] left_i,
+                            output reg [7:0] data_o);
+      always_comb begin
+        if (choose_i) begin data_o = left_i; end
+        if (adjust_i) data_o = left_i;
+      end
+    endmodule"""
+    assert len(_findings(src)) == 2

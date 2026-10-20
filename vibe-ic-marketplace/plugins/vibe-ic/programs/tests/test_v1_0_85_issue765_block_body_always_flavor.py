@@ -239,3 +239,46 @@ def test_end_state_genuine_hazard_returncode_one(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# Public issue 3333: declaration attributes are outside the preceding process.
+ISSUE3333_ATTRS = 'module neutral(input logic clock_a, clock_b, data_a, data_b,\n               output wire [2:0] data_o);\n  (* keep = 1, dont_touch = 1 *) logic first_q;\n  always @(posedge clock_a) begin first_q <= data_a; end\n  (* keep = 1, dont_touch = 1 *) logic second_q;\n  always @(posedge clock_b) begin second_q <= data_b; end\n  (* keep = 1, dont_touch = 1 *) logic third_q;\n  always @(posedge clock_a) begin third_q <= first_q ^ second_q; end\n  assign data_o = {first_q, second_q, third_q};\nendmodule\n'
+
+@pytest.mark.parametrize("body", [
+    "begin {name} <= {data}; end",
+    "{name} <= {data};",
+    "if ({data}) {name} <= 1'b1; else {name} <= 1'b0;",
+    "case ({data}) 1'b0: {name} <= 1'b0; default: {name} <= 1'b1; endcase",
+    "for (integer idx=0; idx<1; idx=idx+1) {name} <= {data};",
+])
+def test_issue3333_declarations_after_owned_statement_are_not_writers(body):
+    src = ISSUE3333_ATTRS
+    for name, data in (("first_q", "data_a"), ("second_q", "data_b"),
+                       ("third_q", "first_q ^ second_q")):
+        src = src.replace("begin " + name + " <= " + data + "; end",
+                          body.format(name=name, data=data))
+    assert _multidriven(src) == []
+
+
+def test_issue3333_real_state_named_like_attributes_still_has_two_writers():
+    src = """module neutral(input clock_a, clock_b, data_a, data_b,
+                            output reg keep, dont_touch);
+      always @(posedge clock_a) begin keep <= data_a; dont_touch <= data_a; end
+      always @(posedge clock_b) begin keep <= data_b; dont_touch <= data_b; end
+    endmodule"""
+    assert {f.symbol for f in _multidriven(src)} == {"keep", "dont_touch"}
+
+
+def test_issue3333_attributes_project_default_cli(tmp_path):
+    import json
+    rtl = tmp_path / "phase2/stage1/rtl/neutral.sv"
+    rtl.parent.mkdir(parents=True)
+    rtl.write_text(ISSUE3333_ATTRS)
+    l9 = tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9.parent.mkdir(parents=True)
+    l9.write_text('{"top_module":"neutral"}')
+    report = tmp_path / "hygiene.json"
+    result = subprocess.run([sys.executable, str(PROG), "--project", str(tmp_path),
+                             "--json", str(report)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(report.read_text()) == []

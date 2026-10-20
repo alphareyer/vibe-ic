@@ -1061,25 +1061,12 @@ def _enclosing_always_body(src: str, case_off: int) -> Optional[Tuple[int, int]]
     block textually containing `case_off`, where body_start_off is the char
     offset just AFTER the `always [@(...)]` header. Handles `always`,
     `always_comb`, `always_latch`, `always_ff` with or without a sensitivity
-    list. chip-AGNOSTIC: pure begin/end depth tracking."""
+    list. Bounds are those of one complete procedural statement."""
     best: Optional[Tuple[int, int]] = None
+    scan = _mask_comments_and_strings(src)
     for bm in re.finditer(
-            r'\balways(?:_ff|_comb|_latch)?\s*(?:@\s*\([^)]*\))?', src):
-        i = bm.end()
-        n = len(src)
-        while i < n and src[i].isspace():
-            i += 1
-        if i < n and re.match(r'\bbegin\b', src[i:]):
-            depth = 0
-            blk_end = n
-            for km in re.finditer(r'\b(begin|end)\b', src[i:]):
-                depth += 1 if km.group(1) == 'begin' else -1
-                if depth == 0:
-                    blk_end = i + km.end()
-                    break
-        else:
-            semi = src.find(';', i)
-            blk_end = (semi + 1) if semi != -1 else n
+            r'\balways(?:_ff|_comb|_latch)?\s*(?:@\s*(?:\([^)]*\)|\*))?', scan):
+        blk_end = _procedural_statement_end(scan, bm.end())
         if bm.end() <= case_off < blk_end:
             if best is None or bm.end() > best[0]:
                 best = (bm.end(), blk_end)
@@ -1424,6 +1411,68 @@ def _strip_conditional_bodies(text: str) -> str:
         out = out[:m.start()] + " " + out[end:]
     return out
 
+
+def _must_defined_prefix(text: str, stop: int, depth: int = 0) -> Set[str]:
+    """Whole values established before ``stop`` in one masked statement.
+
+    Sequential statements accumulate definitions; completed if/else branches
+    contribute only their intersection. For a stop inside a branch, only that
+    branch's prefix applies. Cases, loops, slices and other unsupported forms
+    contribute no proof. This is deliberately narrower than collecting writes.
+    """
+    if depth > 64:
+        return set()
+    start = _skip_space(text, 0)
+    end = _procedural_statement_end(text, start)
+    if start >= stop or end <= start:
+        return set()
+    # Nonlocal control flow can bypass later statements in the prefix.
+    if re.search(r'\b(?:return|break|continue|disable)\b', text[:stop]):
+        return set()
+    word = re.match(r'[A-Za-z_]\w*', text[start:])
+    keyword = word.group(0) if word else ''
+    after = start + word.end() if word else start
+    if keyword == 'begin':
+        label = re.match(r'\s*:\s*[A-Za-z_]\w*', text[after:])
+        cursor = after + (label.end() if label else 0)
+        defined: Set[str] = set()
+        while cursor < min(stop, end):
+            cursor = _skip_space(text, cursor)
+            if re.match(r'end\b', text[cursor:]):
+                break
+            child_end = _procedural_statement_end(text, cursor)
+            if child_end <= cursor:
+                break
+            defined |= _must_defined_prefix(
+                text[cursor:child_end], min(stop, child_end) - cursor, depth + 1)
+            cursor = child_end
+        return defined
+    if keyword == 'if':
+        cond = _skip_space(text, after)
+        if text[cond:cond + 1] != '(':
+            return set()
+        close = _matching_paren(text, cond)
+        if close < 0 or stop <= close:
+            return set()
+        then_end = _procedural_statement_end(text, close)
+        if stop < then_end:
+            return _must_defined_prefix(text[close:then_end], stop - close, depth + 1)
+        tail = _skip_space(text, then_end)
+        em = re.match(r'else\b', text[tail:])
+        if not em:
+            return set()
+        else_start = tail + em.end()
+        if stop < end:
+            return _must_defined_prefix(text[else_start:end], stop - else_start, depth + 1)
+        return (_must_defined_prefix(text[close:then_end], then_end - close, depth + 1)
+                & _must_defined_prefix(text[else_start:end], end - else_start, depth + 1))
+    # Only a bare whole-signal blocking assignment establishes a prior value.
+    # Declarations, attributes, comparisons, concatenations and slices do not.
+    if end <= stop and re.match(r'[A-Za-z_]\w*\s*=(?!=)', text[start:end]):
+        return {name for name, _rhs, _off in _ctx_assignments(text[start:end])}
+    return set()
+
+
 def _is_edge_triggered_block(src: str, blk_start: int, off: int) -> bool:
     """True when the `always` at `blk_start` is sequential, not combinational.
 
@@ -1566,9 +1615,8 @@ def rule_if_no_else_latch(src: str, path: str) -> List[Finding]:
         # A base-name assigned set cannot prove coverage of a sliced write.
         if _lhs_has_subscript(then_body) or _lhs_has_subscript(else_body):
             continue
-        # An unconditional pre-assignment before the `if`, inside the same block,
-        # is a default that holds — latch-free fallthrough, the same reasoning
-        # `_case_body_defaulted` applies to `case`.
+        # Only prior definitions in the same procedural statement can hold on
+        # this if's untaken path.
         blk_start = max((lo for lo, _ in
                          [(mm.start(), 0) for mm in
                           re.finditer(r'(?<![\w$])always(?:_ff|_comb|_latch)?(?![\w$])', src)]
@@ -1588,20 +1636,11 @@ def rule_if_no_else_latch(src: str, path: str) -> List[Finding]:
         # so neither is news either.
         if blk_start is not None and _is_edge_triggered_block(src, blk_start, off):
             continue
-        if blk_start is not None:
-            # Everything in this block BEFORE the `if`, with each earlier
-            # conditional construct's own body removed. What survives is the
-            # statement-level, unconditional assignments — the defaults that hold
-            # on the untaken path.
-            #
-            # The earlier version bailed out whenever the prefix contained ANY
-            # `if`/`case`, which discards the single most common latch-free
-            # idiom: a default followed by a chain of conditional updates.
-            # MEASURED on Ibex's bit-manipulation unit (chip_top_sv2v.v:566-616),
-            # where `rev_result = operand_a_i;` precedes five `if
-            # (zbp_shift_amt[n])` updates — 14 false findings from one block.
-            prefix = _strip_conditional_bodies(src[blk_start:off])
-            if uncovered <= _procedural_assigned_lhs(prefix):
+        enclosing = _enclosing_always_body(src, off)
+        if enclosing is not None:
+            start, end = enclosing
+            statement = _mask_comments_and_strings(src[start:end])
+            if uncovered <= _must_defined_prefix(statement, off - start):
                 continue
         cond_txt = src[m.end():cond_end - 1]
         uncovered = {s for s in uncovered
@@ -1708,24 +1747,14 @@ _RESET_NAME_RE = re.compile(
 
 
 def _block_body_after(src: str, body_start: int) -> str:
-    """Return the body text of an always block that starts at `body_start`,
-    bounded at the next top-level `always` / `endmodule`. Mirrors the bounding
-    used by rule_reset_boundary_residual_enable so both rules agree on scope.
+    """Return exactly the procedural statement after an always header.
 
-    ORGANIC #765 (R6C8) — the boundary MUST match the SAME flavors of `always`
-    that the block discovery does (`_iter_always_blocks` finds
-    `always(?:_ff|_comb|_latch)?`). The old `\\balways\\b` could NOT match
-    `always_ff`/`always_comb`/`always_latch` (the trailing `_` is a word char,
-    so there is no `\\b` between `always` and `_ff`). On any modern-SV design
-    written purely with `always_ff`/`always_comb` (every CDC FIFO/FILO, every
-    APB block), the FIRST block's body then overran to `endmodule`, swallowing
-    EVERY later block — so each register looked written by many blocks across
-    many clock domains and rule_multidriven_register false-WARNed. Widening the
-    boundary to the same flavors keeps every block body scoped to its own block.
-    chip-AGNOSTIC, purely structural."""
-    tail = src[body_start:]
-    nxt = re.search(r'\balways(?:_ff|_comb|_latch)?\b|\bendmodule\b', tail)
-    return tail[:nxt.start()] if nxt else tail
+    Module declarations/attributes between processes belong to neither process.
+    Reuse the complete statement boundary finder, including begin-less bodies;
+    a malformed statement contributes no body rather than swallowing module RTL.
+    """
+    end = _procedural_statement_end(_mask_comments_and_strings(src), body_start)
+    return src[body_start:end] if end > body_start else ''
 
 
 def _reset_covered_signals(src: str) -> Set[str]:
@@ -3372,16 +3401,14 @@ def _module_regions(src: str) -> List[Tuple[str, int, int]]:
 
 def _iter_always_blocks(src: str, region: Optional[Tuple[int, int]] = None):
     """Yield (sens_list_text, body_text, abs_start_offset) for every
-    `always`/`always_ff`/`always_comb`/`always_latch` block. The body is bounded
-    at the next top-level `always`/`endmodule` (the same head-of-block bounding
-    the other rules use).
+    `always`/`always_ff`/`always_comb`/`always_latch` block with an explicit
+    parenthesized event control. The body is exactly one procedural statement.
 
     ORGANIC R8C3 (#782) — when `region`=(lo,hi) is given, only blocks whose
     header starts inside [lo,hi) are yielded (used by rule_multidriven_register
     to confine multi-driven candidacy to a SINGLE module scope). The returned
     `abs_start_offset` is always relative to the FULL `src` so line numbers stay
-    correct, and the bounded body still stops at the next always/endmodule —
-    which, for the last block of a region, is that region's own `endmodule`."""
+    correct; the body ends before any following module items."""
     for bm in re.finditer(r'\balways(?:_ff|_comb|_latch)?\s*@\s*\(([^)]*)\)', src):
         if region is not None and not (region[0] <= bm.start() < region[1]):
             continue
